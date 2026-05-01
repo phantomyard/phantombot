@@ -22,6 +22,7 @@ import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
 import runCmd from "./run.ts";
 import memoryCmd from "./memory.ts";
+import embeddingCmd from "./embedding.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -35,6 +36,7 @@ export const mainCommand = defineCommand({
     "create-persona": createPersonaCmd,
     telegram: telegramCmd,
     harness: harnessCmd,
+    embedding: embeddingCmd,
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,

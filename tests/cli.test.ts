@@ -21,6 +21,7 @@ describe("phantombot CLI dispatcher", () => {
     const names = Object.keys(subs).sort();
     expect(names).toEqual([
       "create-persona",
+      "embedding",
       "harness",
       "import-persona",
       "install",

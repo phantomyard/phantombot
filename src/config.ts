@@ -46,6 +46,16 @@ export interface Config {
       allowedUserIds: number[];
     };
   };
+
+  embeddings: {
+    /** "gemini" | "none". "none" = FTS5-only search. */
+    provider: "gemini" | "none";
+    gemini?: {
+      apiKey: string;
+      model: string;
+      dims: number;
+    };
+  };
 }
 
 export function xdgConfigHome(): string {
@@ -72,6 +82,8 @@ export async function loadConfig(): Promise<Config> {
   const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
+  const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
+  const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
 
   return {
     defaultPersona:
@@ -137,6 +149,32 @@ export async function loadConfig(): Promise<Config> {
 
     channels: {
       telegram: buildTelegramConfig(tomlTelegram),
+    },
+
+    embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
+  };
+}
+
+function buildEmbeddingsConfig(
+  tomlEmbeddings: Record<string, unknown>,
+  tomlGemini: Record<string, unknown>,
+): Config["embeddings"] {
+  const envApiKey = process.env.PHANTOMBOT_GEMINI_API_KEY;
+  const tomlApiKey = asString(tomlGemini.api_key);
+  const apiKey = envApiKey ?? tomlApiKey;
+
+  const provider =
+    (asString(tomlEmbeddings.provider) as "gemini" | "none" | undefined) ??
+    (apiKey ? "gemini" : "none");
+
+  if (provider !== "gemini") return { provider };
+
+  return {
+    provider: "gemini",
+    gemini: {
+      apiKey: apiKey ?? "",
+      model: asString(tomlGemini.model) ?? "gemini-embedding-001",
+      dims: asInt(tomlGemini.dims) ?? 1536,
     },
   };
 }

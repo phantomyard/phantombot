@@ -185,6 +185,7 @@ const baseConfig = (
       ...overrides,
     },
   },
+  embeddings: { provider: "none" },
 });
 
 describe("runTelegramServer dispatch", () => {
