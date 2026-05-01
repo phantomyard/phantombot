@@ -7,8 +7,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runImportPersona } from "../src/cli/import-persona.ts";
+import { applyRestore, runImportPersona } from "../src/cli/import-persona.ts";
 import type { Config } from "../src/config.ts";
+import {
+  archivePersona,
+  listArchives,
+} from "../src/lib/personaArchive.ts";
 import type { ServiceControl } from "../src/lib/systemd.ts";
 
 const svcInactive: ServiceControl = {
@@ -58,6 +62,46 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
+});
+
+describe("applyRestore", () => {
+  test("restores an archive into personasDir/<asName>/", async () => {
+    // Set up: import a persona first, then archive it
+    const { mkdir, writeFile, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const personaPath = join(config.personasDir, "kai");
+    await mkdir(personaPath, { recursive: true });
+    await writeFile(join(personaPath, "BOOT.md"), "# kai original");
+    const archive = await archivePersona(config.personasDir, "kai");
+
+    const r = await applyRestore(config, archive, "kai");
+    expect(r.name).toBe("kai");
+    expect(r.alsoArchived).toBeUndefined();
+    const boot = await readFile(join(personaPath, "BOOT.md"), "utf8");
+    expect(boot).toBe("# kai original");
+  });
+
+  test("auto-archives a persona at the target before restoring", async () => {
+    const { mkdir, writeFile, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const personaPath = join(config.personasDir, "kai");
+    await mkdir(personaPath, { recursive: true });
+    await writeFile(join(personaPath, "BOOT.md"), "# original");
+    const archive = await archivePersona(config.personasDir, "kai");
+    // Now create a "newer" kai
+    await mkdir(personaPath, { recursive: true });
+    await writeFile(join(personaPath, "BOOT.md"), "# newer");
+
+    const r = await applyRestore(config, archive, "kai");
+    expect(r.alsoArchived).toBeDefined();
+    expect(r.alsoArchived?.name).toBe("kai");
+    // Now there should be 2 archives in total
+    const archives = await listArchives(config.personasDir);
+    expect(archives).toHaveLength(2);
+    // And the restored content matches the original
+    const boot = await readFile(join(personaPath, "BOOT.md"), "utf8");
+    expect(boot).toBe("# original");
+  });
 });
 
 describe("runImportPersona — restart hint", () => {

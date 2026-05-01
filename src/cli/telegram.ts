@@ -71,12 +71,31 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
 
   p.intro("Configure the Telegram channel");
 
-  const currentToken = config.channels.telegram?.token;
-  if (currentToken) {
+  const existing = config.channels.telegram;
+  if (existing?.token) {
     p.note(
-      `Current token: ${maskToken(currentToken)}`,
-      "Existing config detected",
+      `Token: ${maskToken(existing.token)}\n` +
+        `Allowed users: ${existing.allowedUserIds.length === 0 ? "(any)" : existing.allowedUserIds.join(", ")}\n` +
+        `Long-poll timeout: ${existing.pollTimeoutS}s`,
+      "Existing config",
     );
+
+    const action = await p.select<"replace" | "users" | "cancel">({
+      message: "What do you want to do?",
+      options: [
+        { value: "replace", label: "Replace token + allowed users" },
+        { value: "users", label: "Update allowed users only (keep token)" },
+        { value: "cancel", label: "Cancel — leave config unchanged" },
+      ],
+    });
+    if (p.isCancel(action) || action === "cancel") {
+      p.cancel("cancelled");
+      return 0;
+    }
+    if (action === "users") {
+      return updateAllowedUsersOnly(config, existing.token, svc);
+    }
+    // fallthrough to replace flow
   }
 
   const token = await p.password({
@@ -144,6 +163,50 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
 
   await maybePromptRestart(svc);
 
+  p.outro("done");
+  return 0;
+}
+
+async function updateAllowedUsersOnly(
+  config: Config,
+  existingToken: string,
+  svc: ServiceControl,
+): Promise<number> {
+  const currentAllowed =
+    config.channels.telegram?.allowedUserIds.join(", ") ?? "";
+  const allowedRaw = await p.text({
+    message:
+      "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning)",
+    placeholder: "7995070089",
+    defaultValue: currentAllowed,
+  });
+  if (p.isCancel(allowedRaw)) {
+    p.cancel("cancelled");
+    return 0;
+  }
+  const allowedUserIds = parseAllowedUserIds(allowedRaw as string);
+  if (allowedUserIds.length === 0) {
+    const proceed = await p.confirm({
+      message:
+        "No allowlist set — anyone who DMs the bot will be answered. Proceed?",
+      initialValue: false,
+    });
+    if (p.isCancel(proceed) || !proceed) {
+      p.cancel("cancelled");
+      return 0;
+    }
+  }
+  await applyTelegramConfig(config.configPath, {
+    token: existingToken,
+    pollTimeoutS: 30,
+    allowedUserIds,
+  });
+  p.note(
+    `allowed users: ${allowedUserIds.length === 0 ? "(any)" : allowedUserIds.join(", ")}\n` +
+      `saved to ${config.configPath}`,
+    "Saved",
+  );
+  await maybePromptRestart(svc);
   p.outro("done");
   return 0;
 }

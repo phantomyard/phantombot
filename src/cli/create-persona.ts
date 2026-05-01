@@ -22,6 +22,10 @@ import {
   type PersonaTemplateInput,
   type PersonaTone,
 } from "../lib/personaTemplate.ts";
+import {
+  archivePersona,
+  type ArchivedPersona,
+} from "../lib/personaArchive.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { loadState, saveState } from "../state.ts";
 
@@ -55,6 +59,8 @@ export interface CreatePersonaResult {
   name: string;
   dir: string;
   setDefault: boolean;
+  /** If an existing persona was archived to make room. */
+  archived?: ArchivedPersona;
 }
 
 export async function applyPersona(
@@ -62,6 +68,10 @@ export async function applyPersona(
   inputs: PersonaTemplateInput & { setDefault: boolean },
 ): Promise<CreatePersonaResult> {
   const dir = personaDir(config, inputs.name);
+  let archived: ArchivedPersona | undefined;
+  if (existsSync(dir)) {
+    archived = await archivePersona(config.personasDir, inputs.name);
+  }
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "BOOT.md"), generateBootMd(inputs), "utf8");
   await writeFile(
@@ -76,7 +86,7 @@ export async function applyPersona(
     await saveState(state);
   }
 
-  return { name: inputs.name, dir, setDefault: inputs.setDefault };
+  return { name: inputs.name, dir, setDefault: inputs.setDefault, archived };
 }
 
 interface RunInput {
@@ -89,6 +99,15 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
 
   p.intro("Create a new persona");
+
+  const currentDefault = config.defaultPersona;
+  if (existsSync(personaDir(config, currentDefault))) {
+    p.note(
+      `Current default: ${currentDefault}\n` +
+        `(${personaDir(config, currentDefault)})`,
+      "Status",
+    );
+  }
 
   const name = await p.text({
     message: "Persona name (lowercase letters, digits, '-', '_')",
@@ -105,9 +124,13 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
     return 1;
   }
 
-  if (existsSync(personaDir(config, name as string))) {
+  const targetDir = personaDir(config, name as string);
+  if (existsSync(targetDir)) {
     const overwrite = await p.confirm({
-      message: `Persona '${name}' already exists. Overwrite?`,
+      message:
+        `Persona '${name}' already exists.\n` +
+        `It will be ARCHIVED to <personas-archive>/${name}-<timestamp>/\n` +
+        `(restore later with phantombot import-persona). Continue?`,
       initialValue: false,
     });
     if (p.isCancel(overwrite) || !overwrite) {
@@ -184,6 +207,14 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
     greeting: greeting as string,
     setDefault: setDefault as boolean,
   });
+
+  if (result.archived) {
+    p.note(
+      `Old '${result.archived.name}' archived to:\n  ${result.archived.dir}\n\n` +
+        `Restore later via: phantombot import-persona`,
+      "Archived",
+    );
+  }
 
   p.outro(
     `Persona '${result.name}' created at ${result.dir}` +
