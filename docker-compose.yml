@@ -1,0 +1,49 @@
+# Phantombot dev/build/test in containers.
+#
+# Usage:
+#   docker compose run --rm test         # run unit tests (bun test)
+#   docker compose run --rm typecheck    # tsc --noEmit
+#   docker compose run --rm build        # produce ./dist/phantombot on the host
+#   docker compose run --rm dev          # interactive shell with bun + watch
+#
+# All services share a single base image (target=source). The named volume
+# bun_modules keeps node_modules from being shadowed by the host bind mount.
+
+x-base: &base
+  build:
+    context: .
+    target: source
+  image: phantombot:source
+  working_dir: /app
+  # Run as the host user so dist/ and any other written files end up owned
+  # by you, not root. ${UID}/${GID} fall through to 1000 if unset.
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/app
+    - bun_modules:/app/node_modules
+
+services:
+  test:
+    <<: *base
+    container_name: phantombot-test
+    command: bun test
+
+  typecheck:
+    <<: *base
+    container_name: phantombot-typecheck
+    command: bun tsc --noEmit
+
+  build:
+    <<: *base
+    container_name: phantombot-build
+    command: sh -c "mkdir -p dist && bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile dist/phantombot && ls -lah dist/phantombot"
+
+  dev:
+    <<: *base
+    container_name: phantombot-dev
+    command: bun --watch src/index.ts
+    tty: true
+    stdin_open: true
+
+volumes:
+  bun_modules:
