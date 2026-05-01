@@ -123,6 +123,24 @@ describe("installPhantombotUnit", () => {
   });
 });
 
+describe("BunSystemctlRunner constructor env", () => {
+  test("defaults to a spread of process.env", () => {
+    // Smoke-test only: we just want to verify the constructor accepts
+    // no argument and doesn't throw. The actual spawn behavior is verified
+    // indirectly by the install/uninstall integration tests with a fake
+    // SystemctlRunner.
+    const { BunSystemctlRunner } = require("../src/lib/systemd.ts");
+    const r = new BunSystemctlRunner();
+    expect(r).toBeDefined();
+  });
+
+  test("accepts an explicit env object", () => {
+    const { BunSystemctlRunner } = require("../src/lib/systemd.ts");
+    const r = new BunSystemctlRunner({ XDG_RUNTIME_DIR: "/run/user/1003" });
+    expect(r).toBeDefined();
+  });
+});
+
 describe("ensureUserSystemdEnv", () => {
   test("returns ready+autoSet=false when XDG_RUNTIME_DIR is already set", () => {
     const env = { XDG_RUNTIME_DIR: "/run/user/1000" } as NodeJS.ProcessEnv;
