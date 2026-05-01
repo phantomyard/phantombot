@@ -8,17 +8,19 @@ import { defineCommand } from "citty";
 import {
   BunSystemctlRunner,
   defaultUnitPath,
+  ensureUserSystemdEnv,
   uninstallPhantombotUnit,
-  userSystemdAvailable,
+  type SystemctlRunner,
+  type UserSystemdEnv,
 } from "../lib/systemd.ts";
 import type { WriteSink } from "../lib/io.ts";
-import type { SystemctlRunner } from "../lib/systemd.ts";
 
 export interface RunUninstallInput {
   unitPath?: string;
   systemctl?: SystemctlRunner;
   out?: WriteSink;
   err?: WriteSink;
+  ensureSystemdEnv?: () => UserSystemdEnv;
 }
 
 export async function runUninstall(
@@ -27,9 +29,17 @@ export async function runUninstall(
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
 
-  if (!userSystemdAvailable()) {
+  const sysEnv = input.ensureSystemdEnv
+    ? input.ensureSystemdEnv()
+    : ensureUserSystemdEnv();
+  if (!sysEnv.ready) {
     err.write(
-      "no user-level systemd bus available; skipping systemctl calls.\n",
+      `no user-level systemd bus available: ${sysEnv.reason}\n` +
+        "skipping systemctl calls and just removing the unit file (if any).\n",
+    );
+  } else if (sysEnv.autoSet) {
+    out.write(
+      `auto-detected XDG_RUNTIME_DIR=${sysEnv.runtimeDir}\n`,
     );
   }
 
