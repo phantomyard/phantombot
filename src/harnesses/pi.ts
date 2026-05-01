@@ -177,33 +177,52 @@ export function renderPayload(req: HarnessRequest): string {
 }
 
 /**
- * Translate one pi stream-json line into a HarnessChunk. Handles both
- * `{"type":"X", "data":{...}}` and `{"type":"X", ...flat}` shapes since
- * the schema isn't tightly documented and may vary by Pi version.
+ * Translate one pi stream-json line into a HarnessChunk.
+ *
+ * Schema (verified against pi v0.67.x with `--mode json`):
+ *
+ *   {"type":"message_update",
+ *    "assistantMessageEvent":{
+ *       "type":"text_delta"|"thinking_delta"|"tool_use_*"|...,
+ *       "contentIndex": N,
+ *       "delta": "...",     // for *_delta events
+ *       "partial": {...},
+ *    },
+ *    "message": {...}}
+ *
+ *   {"type":"turn_end", ...}
+ *   {"type":"agent_end", ...}
+ *   {"type":"session", ...}    // emitted at startup
+ *   {"type":"message_start"|"message_end", ...}
+ *
+ * Only `assistantMessageEvent.type === "text_delta"` events contribute
+ * to the assistant's reply. `thinking_delta` events are the model's
+ * chain-of-thought and must be excluded — they'd otherwise leak the
+ * model's reasoning into the user-facing reply.
+ *
+ * Tool execution events (when they appear in the schema for tool-using
+ * runs) would map to progress chunks here. Not yet observed in the
+ * --print --mode json output for plain conversational turns.
  *
  * Exported for testing.
  */
 export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
-  const type = obj.type;
-  if (typeof type !== "string") return undefined;
-  const data = isObject(obj.data) ? obj.data : obj;
+  if (obj.type !== "message_update") return undefined;
 
-  if (type === "message_update") {
-    const td = data.text_delta;
-    if (typeof td === "string" && td.length > 0) {
-      return { type: "text", text: td };
+  const ame = obj.assistantMessageEvent;
+  if (!isObject(ame)) return undefined;
+
+  if (ame.type === "text_delta") {
+    const delta = ame.delta;
+    if (typeof delta === "string" && delta.length > 0) {
+      return { type: "text", text: delta };
     }
   }
 
-  if (type === "tool_execution_start") {
-    const name =
-      (typeof data.tool_name === "string" && data.tool_name) ||
-      (typeof data.name === "string" && data.name) ||
-      "tool";
-    return { type: "progress", note: `running ${name}` };
-  }
+  // tool_use_start (or whatever pi names it for this version) would map to
+  // a progress chunk here when we observe it in the wild.
 
   return undefined;
 }

@@ -1,11 +1,12 @@
 #!/bin/bash
 # Fake pi CLI used by tests/harnesses-pi.test.ts.
 #
-# Selects behavior via FAKE_PI_MODE. Pi takes the payload as its last
-# positional arg; we don't validate it here.
+# Schema mirrors what `pi --print --mode json` actually emits as of
+# pi v0.67.x: text_delta lives in assistantMessageEvent.delta, not
+# data.text_delta.
 #
 # Modes:
-#   normal   — emit text deltas + tool_execution events + turn_end, exit 0
+#   normal   — emit thinking + text deltas + turn_end, exit 0
 #   error    — exit 1
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
@@ -14,12 +15,21 @@ mode="${FAKE_PI_MODE:-normal}"
 
 case "$mode" in
   normal)
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
     printf '%s\n' '{"type":"agent_start"}'
-    printf '%s\n' '{"type":"message_update","data":{"text_delta":"hello "}}'
-    printf '%s\n' '{"type":"message_update","data":{"text_delta":"world"}}'
-    printf '%s\n' '{"type":"tool_execution_start","data":{"tool_name":"bash"}}'
-    printf '%s\n' '{"type":"tool_execution_end"}'
-    printf '%s\n' '{"type":"turn_end"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    # Thinking deltas — must be IGNORED by the parser.
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0,"partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"think","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"think","partial":{}},"message":{}}'
+    # Real text deltas — the parser should emit these as text chunks.
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1,"partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"hello ","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"world","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"hello world","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"message_end","message":{}}'
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    printf '%s\n' '{"type":"agent_end","messages":[]}'
     exit 0
     ;;
   error)
