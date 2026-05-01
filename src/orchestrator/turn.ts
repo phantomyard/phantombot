@@ -46,6 +46,8 @@ export interface TurnInput {
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
   noHistory?: boolean;
+  /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
+  systemPromptSuffix?: string;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -59,7 +61,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         input.historyLimit ?? 20,
       );
 
-  const systemPrompt = buildSystemPrompt(
+  const baseSystemPrompt = buildSystemPrompt(
     persona,
     {
       channel: "cli",
@@ -68,6 +70,9 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     },
     undefined, // vector-search retrieval reserved for a later phase
   );
+  const systemPrompt = input.systemPromptSuffix
+    ? baseSystemPrompt + "\n\n" + input.systemPromptSuffix
+    : baseSystemPrompt;
 
   let finalText = "";
   let succeeded = false;

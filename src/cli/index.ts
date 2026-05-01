@@ -24,6 +24,7 @@ import runCmd from "./run.ts";
 import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
 import heartbeatCmd from "./heartbeat.ts";
+import nightlyCmd from "./nightly.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -43,5 +44,6 @@ export const mainCommand = defineCommand({
     run: runCmd,
     memory: memoryCmd,
     heartbeat: heartbeatCmd,
+    nightly: nightlyCmd,
   },
 });
