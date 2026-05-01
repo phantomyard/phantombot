@@ -23,6 +23,7 @@ describe("phantombot CLI dispatcher", () => {
       "create-persona",
       "embedding",
       "harness",
+      "heartbeat",
       "import-persona",
       "install",
       "memory",

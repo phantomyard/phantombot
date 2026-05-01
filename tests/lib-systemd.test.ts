@@ -98,6 +98,8 @@ describe("installPhantombotUnit", () => {
       ["--user", "daemon-reload"],
       ["--user", "enable", "phantombot.service"],
       ["--user", "start", "phantombot.service"],
+      ["--user", "enable", "phantombot-heartbeat.timer"],
+      ["--user", "start", "phantombot-heartbeat.timer"],
     ]);
     expect(out.text).toContain("wrote unit file");
     expect(out.text).toContain("enabled and started");
@@ -281,6 +283,8 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(sys.calls).toEqual([
+      ["--user", "stop", "phantombot-heartbeat.timer"],
+      ["--user", "disable", "phantombot-heartbeat.timer"],
       ["--user", "stop", "phantombot.service"],
       ["--user", "disable", "phantombot.service"],
       ["--user", "daemon-reload"],
