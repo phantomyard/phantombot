@@ -172,6 +172,13 @@ export interface RunTelegramServerInput {
   oneShot?: boolean;
   /** Signal to stop the loop cleanly. */
   signal?: AbortSignal;
+  /**
+   * How often to refresh the "typing…" indicator while a turn is in
+   * flight. Telegram's chat-action lasts only ~5s, so without refresh
+   * the indicator disappears after ~5s and the user thinks the bot
+   * stopped responding. Default 4000 ms. Tests use a smaller value.
+   */
+  typingRefreshMs?: number;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -217,17 +224,28 @@ export async function runTelegramServer(
         continue;
       }
 
+      const startedAt = Date.now();
       log.info("telegram: incoming", {
         chatId: msg.chatId,
         fromUserId: msg.fromUserId,
         fromUsername: msg.fromUsername,
         textLength: msg.text.length,
+        persona: input.persona,
       });
 
+      // Send typing immediately, then refresh every typingRefreshMs while
+      // the harness works. Telegram's typing indicator lasts ~5s; without
+      // this the user sees "typing…" disappear and assumes the bot died.
       void input.transport.sendTyping(msg.chatId);
+      const refreshMs = input.typingRefreshMs ?? 4000;
+      const typingTimer = setInterval(() => {
+        void input.transport.sendTyping(msg.chatId);
+      }, refreshMs);
 
       let reply = "";
       let errored: string | undefined;
+      let progressCount = 0;
+      let chosenHarness: string | undefined;
       try {
         for await (const chunk of runTurn({
           persona: input.persona,
@@ -239,12 +257,29 @@ export async function runTelegramServer(
           timeoutMs: input.config.turnTimeoutMs,
         })) {
           if (chunk.type === "text") reply += chunk.text;
-          if (chunk.type === "done") reply = chunk.finalText;
+          if (chunk.type === "progress") {
+            progressCount++;
+            log.debug("telegram: progress", {
+              chatId: msg.chatId,
+              note: chunk.note.slice(0, 200),
+            });
+          }
+          if (chunk.type === "done") {
+            reply = chunk.finalText;
+            const meta = chunk.meta as
+              | { harnessId?: unknown }
+              | undefined;
+            if (typeof meta?.harnessId === "string") {
+              chosenHarness = meta.harnessId;
+            }
+          }
           if (chunk.type === "error") errored = chunk.error;
         }
       } catch (e) {
         errored = (e as Error).message;
         log.error("telegram: turn threw", { error: errored });
+      } finally {
+        clearInterval(typingTimer);
       }
 
       const outText = errored
@@ -260,6 +295,15 @@ export async function runTelegramServer(
           chatId: msg.chatId,
         });
       }
+
+      log.info("telegram: complete", {
+        chatId: msg.chatId,
+        durationMs: Date.now() - startedAt,
+        replyChars: outText.length,
+        progressEvents: progressCount,
+        harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
+        ok: !errored,
+      });
     }
   } while (!input.oneShot);
 }
