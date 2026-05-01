@@ -16,12 +16,9 @@ import { existsSync } from "node:fs";
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { ClaudeHarness } from "../harnesses/claude.ts";
 import type { Harness } from "../harnesses/types.ts";
+import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
-
-export interface WriteSink {
-  write(chunk: string | Uint8Array): boolean | void;
-}
 
 export interface RunAskInput {
   message: string;
