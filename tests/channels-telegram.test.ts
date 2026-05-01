@@ -186,6 +186,7 @@ const baseConfig = (
     },
   },
   embeddings: { provider: "none" },
+  voice: { provider: "none" },
 });
 
 describe("runTelegramServer dispatch", () => {

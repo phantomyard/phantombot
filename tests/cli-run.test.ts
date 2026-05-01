@@ -45,6 +45,7 @@ beforeEach(async () => {
     },
     channels: {},
     embeddings: { provider: "none" },
+    voice: { provider: "none" },
   };
 });
 

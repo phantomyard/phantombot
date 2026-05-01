@@ -49,10 +49,12 @@ export interface SystemdUnitParams {
  * Generate the [Unit]/[Service]/[Install] body for the phantombot
  * systemd --user unit. Pure function.
  *
- * The Environment=PATH line ensures the harness's Bash tool can find
- * `phantombot` (installed at ~/.local/bin/phantombot) when it tries to
- * call `phantombot memory search ...`. Default systemd-user PATH does
- * NOT include ~/.local/bin.
+ * - Environment=PATH ensures the harness's Bash tool can find
+ *   `phantombot` (installed at ~/.local/bin/phantombot) when it tries
+ *   to call `phantombot memory search ...`.
+ * - EnvironmentFile=-%h/.config/phantombot/.env sources the secrets
+ *   file (TTS keys, etc.). The leading `-` makes it OK if the file
+ *   doesn't exist — phantombot voice writes it when first configured.
  */
 export function generateSystemdUnit(params: SystemdUnitParams): string {
   const exec = [params.binPath, ...params.args].map(quoteArg).join(" ");
@@ -69,6 +71,7 @@ ExecStart=${exec}
 Restart=on-failure
 RestartSec=5
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-%h/.config/phantombot/.env
 StandardOutput=journal
 StandardError=journal
 
@@ -92,6 +95,7 @@ Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 Type=oneshot
 ExecStart=${exec}
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-%h/.config/phantombot/.env
 StandardOutput=journal
 StandardError=journal
 `;
@@ -126,6 +130,7 @@ Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=2700
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-%h/.config/phantombot/.env
 StandardOutput=journal
 StandardError=journal
 `;
