@@ -13,6 +13,7 @@ import { basename } from "node:path";
 
 import {
   BunSystemctlRunner,
+  buildSystemctlEnv,
   defaultUnitPath,
   ensureUserSystemdEnv,
   installPhantombotUnit,
@@ -21,18 +22,6 @@ import {
 } from "../lib/systemd.ts";
 import type { WriteSink } from "../lib/io.ts";
 
-function buildSubEnv(sysEnv: UserSystemdEnv): NodeJS.ProcessEnv {
-  // Spread process.env — but Bun.spawn may not see runtime mutations,
-  // so explicitly re-stamp the values we know systemctl needs.
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (sysEnv.runtimeDir) {
-    env.XDG_RUNTIME_DIR = sysEnv.runtimeDir;
-    if (!env.DBUS_SESSION_BUS_ADDRESS) {
-      env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${sysEnv.runtimeDir}/bus`;
-    }
-  }
-  return env;
-}
 
 export interface RunInstallInput {
   binPath?: string;
@@ -72,7 +61,8 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   }
 
   const unitPath = input.unitPath ?? defaultUnitPath();
-  const systemctl = input.systemctl ?? new BunSystemctlRunner(buildSubEnv(sysEnv));
+  const systemctl =
+    input.systemctl ?? new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
 
   const result = await installPhantombotUnit({
     binPath,

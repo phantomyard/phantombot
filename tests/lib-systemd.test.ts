@@ -10,6 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildSystemctlEnv,
   ensureUserSystemdEnv,
   generateSystemdUnit,
   installPhantombotUnit,
@@ -138,6 +139,58 @@ describe("BunSystemctlRunner constructor env", () => {
     const { BunSystemctlRunner } = require("../src/lib/systemd.ts");
     const r = new BunSystemctlRunner({ XDG_RUNTIME_DIR: "/run/user/1003" });
     expect(r).toBeDefined();
+  });
+});
+
+describe("buildSystemctlEnv", () => {
+  test("spreads process.env and overlays XDG/DBUS from sysEnv.runtimeDir", () => {
+    // Clear any inherited DBUS so we can verify the auto-set path.
+    const savedDbus = process.env.DBUS_SESSION_BUS_ADDRESS;
+    delete process.env.DBUS_SESSION_BUS_ADDRESS;
+    try {
+      const env = buildSystemctlEnv({
+        ready: true,
+        autoSet: true,
+        runtimeDir: "/run/user/1003",
+      });
+      expect(env.XDG_RUNTIME_DIR).toBe("/run/user/1003");
+      expect(env.DBUS_SESSION_BUS_ADDRESS).toBe(
+        "unix:path=/run/user/1003/bus",
+      );
+      // Sanity: non-XDG keys from process.env are preserved.
+      expect(typeof env.PATH).toBe("string");
+    } finally {
+      if (savedDbus === undefined)
+        delete process.env.DBUS_SESSION_BUS_ADDRESS;
+      else process.env.DBUS_SESSION_BUS_ADDRESS = savedDbus;
+    }
+  });
+
+  test("does not overwrite an inherited DBUS_SESSION_BUS_ADDRESS", () => {
+    const saved = process.env.DBUS_SESSION_BUS_ADDRESS;
+    process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/custom/bus";
+    try {
+      const env = buildSystemctlEnv({
+        ready: true,
+        autoSet: true,
+        runtimeDir: "/run/user/1003",
+      });
+      expect(env.DBUS_SESSION_BUS_ADDRESS).toBe("unix:path=/custom/bus");
+    } finally {
+      if (saved === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS;
+      else process.env.DBUS_SESSION_BUS_ADDRESS = saved;
+    }
+  });
+
+  test("leaves XDG/DBUS unset when sysEnv has no runtimeDir", () => {
+    const saved = process.env.XDG_RUNTIME_DIR;
+    delete process.env.XDG_RUNTIME_DIR;
+    try {
+      const env = buildSystemctlEnv({ ready: false, autoSet: false });
+      expect(env.XDG_RUNTIME_DIR).toBeUndefined();
+    } finally {
+      if (saved !== undefined) process.env.XDG_RUNTIME_DIR = saved;
+    }
   });
 });
 

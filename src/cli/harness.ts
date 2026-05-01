@@ -11,6 +11,7 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 
 export type HarnessId = "claude" | "pi";
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = ["claude", "pi"];
@@ -58,11 +59,13 @@ export async function applyHarnessChain(
 
 interface RunInput {
   config?: Config;
+  serviceControl?: ServiceControl;
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const availability = await detectAvailability(config);
+  const svc = input.serviceControl ?? defaultServiceControl();
 
   p.intro("Configure the harness chain");
 
@@ -115,9 +118,42 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
 
   await applyHarnessChain(config.configPath, chain);
+  p.note(
+    `harness chain: ${chain.join(" → ")}\nsaved to ${config.configPath}`,
+    "Saved",
+  );
 
-  p.outro(`harness chain: ${chain.join(" → ")} (saved to ${config.configPath})`);
+  await maybePromptRestart(svc);
+
+  p.outro("done");
   return 0;
+}
+
+/**
+ * Shared post-apply hook for the config-mutating TUIs. If phantombot is
+ * currently running under systemd, offer to restart it inline so the
+ * change takes effect.
+ */
+export async function maybePromptRestart(
+  svc: ServiceControl,
+): Promise<void> {
+  if (!(await svc.isActive())) return;
+  const restart = await p.confirm({
+    message: "phantombot is currently running. Restart to apply changes?",
+    initialValue: true,
+  });
+  if (p.isCancel(restart) || !restart) {
+    p.note(
+      "skipped — restart later with: systemctl --user restart phantombot",
+      "Restart",
+    );
+    return;
+  }
+  const r = await svc.restart();
+  p.note(
+    r.ok ? "restarted" : `restart failed: ${r.stderr ?? "unknown"}`,
+    "Restart",
+  );
 }
 
 export default defineCommand({

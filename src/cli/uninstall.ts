@@ -7,6 +7,7 @@ import { defineCommand } from "citty";
 
 import {
   BunSystemctlRunner,
+  buildSystemctlEnv,
   defaultUnitPath,
   ensureUserSystemdEnv,
   uninstallPhantombotUnit,
@@ -14,17 +15,6 @@ import {
   type UserSystemdEnv,
 } from "../lib/systemd.ts";
 import type { WriteSink } from "../lib/io.ts";
-
-function buildSubEnv(sysEnv: UserSystemdEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (sysEnv.runtimeDir) {
-    env.XDG_RUNTIME_DIR = sysEnv.runtimeDir;
-    if (!env.DBUS_SESSION_BUS_ADDRESS) {
-      env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${sysEnv.runtimeDir}/bus`;
-    }
-  }
-  return env;
-}
 
 export interface RunUninstallInput {
   unitPath?: string;
@@ -56,7 +46,7 @@ export async function runUninstall(
 
   const unitPath = input.unitPath ?? defaultUnitPath();
   const systemctl =
-    input.systemctl ?? new BunSystemctlRunner(buildSubEnv(sysEnv));
+    input.systemctl ?? new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
 
   await uninstallPhantombotUnit({ unitPath, systemctl, out, err });
   out.write("uninstall complete\n");

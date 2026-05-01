@@ -9,6 +9,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImportPersona } from "../src/cli/import-persona.ts";
 import type { Config } from "../src/config.ts";
+import type { ServiceControl } from "../src/lib/systemd.ts";
+
+const svcInactive: ServiceControl = {
+  isActive: async () => false,
+  restart: async () => ({ ok: true }),
+};
+const svcActive: ServiceControl = {
+  isActive: async () => true,
+  restart: async () => ({ ok: true }),
+};
 
 class CaptureStream {
   chunks: string[] = [];
@@ -50,6 +60,43 @@ afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
 });
 
+describe("runImportPersona — restart hint", () => {
+  test("prints restart hint when phantombot.service is active", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await runImportPersona({
+      source,
+      as: "robbie",
+      config,
+      openclawConfigPath: join(workdir, "missing.json"),
+      noTelegram: true,
+      serviceControl: svcActive,
+      out,
+      err,
+    });
+    expect(out.text).toContain(
+      "phantombot is currently running",
+    );
+    expect(out.text).toContain("systemctl --user restart phantombot");
+  });
+
+  test("does NOT print restart hint when phantombot.service is inactive", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await runImportPersona({
+      source,
+      as: "robbie",
+      config,
+      openclawConfigPath: join(workdir, "missing.json"),
+      noTelegram: true,
+      serviceControl: svcInactive,
+      out,
+      err,
+    });
+    expect(out.text).not.toContain("phantombot is currently running");
+  });
+});
+
 describe("runImportPersona — telegram sniff", () => {
   test("imports telegram block from openclaw.json when present", async () => {
     const openclawPath = join(workdir, "openclaw.json");
@@ -75,6 +122,7 @@ describe("runImportPersona — telegram sniff", () => {
       as: "robbie",
       config,
       openclawConfigPath: openclawPath,
+      serviceControl: svcInactive,
       out,
       err,
     });
@@ -94,6 +142,7 @@ describe("runImportPersona — telegram sniff", () => {
       as: "robbie",
       config,
       openclawConfigPath: join(workdir, "missing.json"),
+      serviceControl: svcInactive,
       out,
       err,
     });
@@ -122,6 +171,7 @@ describe("runImportPersona — telegram sniff", () => {
       config,
       openclawConfigPath: openclawPath,
       noTelegram: true,
+      serviceControl: svcInactive,
       out,
       err,
     });
