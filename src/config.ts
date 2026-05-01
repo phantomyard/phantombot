@@ -16,6 +16,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { loadState } from "./state.ts";
 
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
@@ -52,6 +53,7 @@ export async function loadConfig(): Promise<Config> {
     join(xdgConfigHome(), "phantombot", "config.toml");
 
   const toml = await tryReadToml(configPath);
+  const state = await loadState();
 
   const dataDir = join(xdgDataHome(), "phantombot");
 
@@ -62,6 +64,7 @@ export async function loadConfig(): Promise<Config> {
   return {
     defaultPersona:
       process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+      state.default_persona ??
       asString(toml.default_persona) ??
       "phantom",
 
