@@ -1,35 +1,41 @@
 /**
- * Citty dispatcher. Wires every subcommand into the top-level `phantombot`
- * command and exposes it for testing without invoking it.
+ * Citty dispatcher. The phantombot command surface is intentionally small:
+ *
+ *   import-persona  - copy an OpenClaw agent dir + telegram config in
+ *   create-persona  - TUI to make a new persona from scratch
+ *   telegram        - TUI to configure the Telegram channel
+ *   harness         - TUI to choose primary + fallback harnesses
+ *   install         - install systemd --user unit so phantombot survives logout
+ *   uninstall       - remove the systemd unit
+ *   run             - run the bot in the foreground (Ctrl-C to stop)
+ *
+ * Dev/debug commands (ask, chat, doctor, history, list-personas, etc.)
+ * have been removed as part of the v0.1 surface lock.
  */
 
 import { defineCommand } from "citty";
-import askCmd from "./ask.ts";
-import chatCmd from "./chat.ts";
 import importPersonaCmd from "./import-persona.ts";
-import listPersonasCmd from "./list-personas.ts";
-import setDefaultPersonaCmd from "./set-default-persona.ts";
-import historyCmd from "./history.ts";
-import configCmd from "./config.ts";
-import doctorCmd from "./doctor.ts";
-import serveCmd from "./serve.ts";
+import createPersonaCmd from "./create-persona.ts";
+import telegramCmd from "./telegram.ts";
+import harnessCmd from "./harness.ts";
+import installCmd from "./install.ts";
+import uninstallCmd from "./uninstall.ts";
+import runCmd from "./run.ts";
 
 export const mainCommand = defineCommand({
   meta: {
     name: "phantombot",
-    version: "0.0.2",
+    version: "0.1.0",
     description:
-      "Personality-first chat agent CLI. Wraps Claude Code and Pi CLIs with persona, memory, and OpenClaw persona import.",
+      "Personality-first chat agent CLI. Wraps Claude Code and Pi CLIs with persona, memory, and a Telegram bot front-end.",
   },
   subCommands: {
-    ask: askCmd,
-    chat: chatCmd,
     "import-persona": importPersonaCmd,
-    "list-personas": listPersonasCmd,
-    "set-default-persona": setDefaultPersonaCmd,
-    history: historyCmd,
-    config: configCmd,
-    doctor: doctorCmd,
-    serve: serveCmd,
+    "create-persona": createPersonaCmd,
+    telegram: telegramCmd,
+    harness: harnessCmd,
+    install: installCmd,
+    uninstall: uninstallCmd,
+    run: runCmd,
   },
 });
