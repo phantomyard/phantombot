@@ -31,10 +31,16 @@ export interface TelegramMessage {
 }
 
 export interface TelegramTransport {
-  /** Long-poll Telegram for updates from `offset`. Returns parsed updates and the new offset. */
+  /**
+   * Long-poll Telegram for updates from `offset`. Returns parsed updates
+   * and the new offset. The optional `signal` cancels the in-flight HTTP
+   * call so SIGINT during a 30-second long-poll exits in milliseconds
+   * instead of waiting out the full timeout.
+   */
   getUpdates(
     offset: number,
     timeoutS: number,
+    signal?: AbortSignal,
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
   sendMessage(chatId: number, text: string): Promise<void>;
   sendTyping(chatId: number): Promise<void>;
@@ -49,13 +55,23 @@ export class HttpTelegramTransport implements TelegramTransport {
   async getUpdates(
     offset: number,
     timeoutS: number,
+    signal?: AbortSignal,
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }> {
     const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=${timeoutS}&allowed_updates=%5B%22message%22%5D`;
-    const res = await fetch(url, {
-      // The fetch timeout should be slightly longer than the long-poll timeout
-      // so the server has a chance to actually return; Bun fetch has no built-in
-      // timeout — the long-poll naturally bounds it.
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, { signal });
+    } catch (e) {
+      // AbortError is the expected path on Ctrl-C; just return empty so the
+      // caller's next signal check exits the loop.
+      if ((e as Error).name === "AbortError") {
+        return { updates: [], nextOffset: offset };
+      }
+      log.warn("telegram: getUpdates fetch failed", {
+        error: (e as Error).message,
+      });
+      return { updates: [], nextOffset: offset };
+    }
     if (!res.ok) {
       log.warn("telegram: getUpdates non-OK", { status: res.status });
       return { updates: [], nextOffset: offset };
@@ -186,6 +202,7 @@ export async function runTelegramServer(
     const { updates, nextOffset } = await input.transport.getUpdates(
       offset,
       tg.pollTimeoutS,
+      input.signal,
     );
     offset = nextOffset;
 
