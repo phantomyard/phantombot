@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { ClaudeHarness } from "../harnesses/claude.ts";
+import { PiHarness } from "../harnesses/pi.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore } from "../memory/store.ts";
@@ -102,11 +103,7 @@ function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
     if (id === "claude") {
       harnesses.push(new ClaudeHarness(config.harnesses.claude));
     } else if (id === "pi") {
-      // Pi harness lands in phase 9. Skip with a warning so users running
-      // ahead of that phase aren't blocked from using claude.
-      err.write(
-        "warning: pi harness not yet implemented (phase 9), skipping\n",
-      );
+      harnesses.push(new PiHarness(config.harnesses.pi));
     } else {
       err.write(`warning: unknown harness '${id}', skipping\n`);
     }
