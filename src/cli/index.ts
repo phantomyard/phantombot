@@ -21,6 +21,7 @@ import harnessCmd from "./harness.ts";
 import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
 import runCmd from "./run.ts";
+import memoryCmd from "./memory.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -37,5 +38,6 @@ export const mainCommand = defineCommand({
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,
+    memory: memoryCmd,
   },
 });
