@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPersona } from "../src/cli/create-persona.ts";
 import type { Config } from "../src/config.ts";
+import { listArchives } from "../src/lib/personaArchive.ts";
 import { loadState } from "../src/state.ts";
 
 const SAVED_STATE = process.env.PHANTOMBOT_STATE;
@@ -73,6 +74,34 @@ describe("applyPersona", () => {
     });
     const state = await loadState();
     expect(state.default_persona).toBe("robbie");
+  });
+
+  test("archives an existing persona before overwriting", async () => {
+    // First create
+    await applyPersona(config, {
+      name: "robbie",
+      identity: "v1",
+      tone: "blunt",
+      expertise: [],
+      hardRules: "",
+      greeting: "",
+      setDefault: false,
+    });
+    // Second create with same name — should archive the first
+    const r = await applyPersona(config, {
+      name: "robbie",
+      identity: "v2",
+      tone: "casual",
+      expertise: [],
+      hardRules: "",
+      greeting: "",
+      setDefault: false,
+    });
+    expect(r.archived).toBeDefined();
+    expect(r.archived?.name).toBe("robbie");
+    const archives = await listArchives(config.personasDir);
+    expect(archives).toHaveLength(1);
+    expect(archives[0]?.name).toBe("robbie");
   });
 
   test("setDefault=false leaves state.json untouched", async () => {

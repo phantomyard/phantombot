@@ -18,12 +18,19 @@ import { ClaudeHarness } from "../harnesses/claude.ts";
 import { PiHarness } from "../harnesses/pi.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
+import {
+  acquireRunLock,
+  defaultLockPath,
+  isLockHandle,
+} from "../lib/runLock.ts";
 import { openMemoryStore } from "../memory/store.ts";
 
 export interface RunInput {
   config?: Config;
   out?: WriteSink;
   err?: WriteSink;
+  /** Override the lock file path (for testing). */
+  lockPath?: string;
 }
 
 export async function runRun(input: RunInput = {}): Promise<number> {
@@ -56,6 +63,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       "no harnesses configured. Run `phantombot harness` to pick at least one.\n",
     );
     return 2;
+  }
+
+  const lockPath = input.lockPath ?? defaultLockPath();
+  const lock = acquireRunLock(lockPath);
+  if (!isLockHandle(lock)) {
+    err.write(
+      `phantombot is already running (pid ${Number.isFinite(lock.pid) ? lock.pid : "unknown"}; lock at ${lock.path})\n` +
+        "view logs:    journalctl --user -u phantombot -f\n" +
+        "status:       systemctl --user status phantombot\n" +
+        "stop the other instance first, or remove the lock if it's stale.\n",
+    );
+    return 1;
   }
 
   const memory = await openMemoryStore(config.memoryDbPath);
@@ -92,6 +111,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);
     await memory.close();
+    lock.release();
   }
   return 0;
 }
