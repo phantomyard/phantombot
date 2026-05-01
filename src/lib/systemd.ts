@@ -67,8 +67,19 @@ export interface SystemctlRunner {
 }
 
 export class BunSystemctlRunner implements SystemctlRunner {
+  /**
+   * Pass an explicit env. Bun.spawn does NOT pick up later
+   * `process.env.X = …` mutations when env is omitted (the OS-level env
+   * is captured at process startup), so callers that auto-set
+   * XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS at runtime must hand the
+   * runner a fresh env snapshot containing those values. Default is a
+   * spread of process.env at construction time.
+   */
+  constructor(private readonly env: NodeJS.ProcessEnv = { ...process.env }) {}
+
   async run(args: readonly string[]): Promise<SystemctlResult> {
     const proc = Bun.spawn(["systemctl", ...args], {
+      env: this.env,
       stdout: "pipe",
       stderr: "pipe",
     });
