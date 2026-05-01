@@ -135,6 +135,8 @@ describe("runInstall", () => {
       "--user start phantombot.service",
       "--user enable phantombot-heartbeat.timer",
       "--user start phantombot-heartbeat.timer",
+      "--user enable phantombot-nightly.timer",
+      "--user start phantombot-nightly.timer",
     ]);
     expect(out.text).toContain("journalctl --user -u phantombot");
     // No auto-set message when env was already set.
@@ -156,6 +158,8 @@ describe("runUninstall", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
+      "--user stop phantombot-nightly.timer",
+      "--user disable phantombot-nightly.timer",
       "--user stop phantombot-heartbeat.timer",
       "--user disable phantombot-heartbeat.timer",
       "--user stop phantombot.service",

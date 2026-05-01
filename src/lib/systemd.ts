@@ -14,6 +14,8 @@ import type { WriteSink } from "./io.ts";
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
 export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
 export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
+export const NIGHTLY_SERVICE_NAME = "phantombot-nightly.service";
+export const NIGHTLY_TIMER_NAME = "phantombot-nightly.timer";
 
 export function defaultUnitPath(): string {
   return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
@@ -25,6 +27,14 @@ export function heartbeatServicePath(): string {
 
 export function heartbeatTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", HEARTBEAT_TIMER_NAME);
+}
+
+export function nightlyServicePath(): string {
+  return join(homedir(), ".config", "systemd", "user", NIGHTLY_SERVICE_NAME);
+}
+
+export function nightlyTimerPath(): string {
+  return join(homedir(), ".config", "systemd", "user", NIGHTLY_TIMER_NAME);
 }
 
 export interface SystemdUnitParams {
@@ -88,6 +98,38 @@ Description=Phantombot heartbeat timer (every 30 min)
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
+/** Generate the nightly oneshot service body. */
+export function generateNightlyService(binPath: string): string {
+  const exec = [binPath, "nightly"].map(quoteArg).join(" ");
+  return `[Unit]
+Description=Phantombot nightly — cognitive distillation pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${exec}
+TimeoutStartSec=2700
+StandardOutput=journal
+StandardError=journal
+`;
+}
+
+/** Generate the nightly timer body — fires daily at 02:00 local. */
+export function generateNightlyTimer(): string {
+  return `[Unit]
+Description=Phantombot nightly timer (daily 02:00)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
 AccuracySec=1min
 Persistent=true
 
@@ -205,12 +247,19 @@ export async function installPhantombotUnit(
   await writeFile(opts.unitPath, unit, "utf8");
   opts.out.write(`wrote unit file: ${opts.unitPath}\n`);
 
-  // Also write the heartbeat service + timer alongside.
+  // Heartbeat service + timer
   const hbService = heartbeatServicePath();
   const hbTimer = heartbeatTimerPath();
   await writeFile(hbService, generateHeartbeatService(opts.binPath), "utf8");
   await writeFile(hbTimer, generateHeartbeatTimer(), "utf8");
   opts.out.write(`wrote heartbeat units: ${hbService} + ${hbTimer}\n`);
+
+  // Nightly service + timer
+  const ngService = nightlyServicePath();
+  const ngTimer = nightlyTimerPath();
+  await writeFile(ngService, generateNightlyService(opts.binPath), "utf8");
+  await writeFile(ngTimer, generateNightlyTimer(), "utf8");
+  opts.out.write(`wrote nightly units: ${ngService} + ${ngTimer}\n`);
 
   for (const args of [
     ["--user", "daemon-reload"],
@@ -218,6 +267,8 @@ export async function installPhantombotUnit(
     ["--user", "start", PHANTOMBOT_UNIT_NAME],
     ["--user", "enable", HEARTBEAT_TIMER_NAME],
     ["--user", "start", HEARTBEAT_TIMER_NAME],
+    ["--user", "enable", NIGHTLY_TIMER_NAME],
+    ["--user", "start", NIGHTLY_TIMER_NAME],
   ]) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
@@ -228,7 +279,7 @@ export async function installPhantombotUnit(
     }
   }
   opts.out.write(
-    "enabled and started phantombot.service + phantombot-heartbeat.timer\n",
+    "enabled and started phantombot.service + heartbeat.timer + nightly.timer\n",
   );
   return { installed: true };
 }
@@ -245,6 +296,8 @@ export async function uninstallPhantombotUnit(
 ): Promise<{ removed: boolean }> {
   // stop + disable are best-effort: a half-installed unit is fine to remove.
   for (const args of [
+    ["--user", "stop", NIGHTLY_TIMER_NAME],
+    ["--user", "disable", NIGHTLY_TIMER_NAME],
     ["--user", "stop", HEARTBEAT_TIMER_NAME],
     ["--user", "disable", HEARTBEAT_TIMER_NAME],
     ["--user", "stop", PHANTOMBOT_UNIT_NAME],
@@ -267,7 +320,12 @@ export async function uninstallPhantombotUnit(
   } else {
     opts.out.write(`(no unit file at ${opts.unitPath})\n`);
   }
-  for (const path of [heartbeatServicePath(), heartbeatTimerPath()]) {
+  for (const path of [
+    heartbeatServicePath(),
+    heartbeatTimerPath(),
+    nightlyServicePath(),
+    nightlyTimerPath(),
+  ]) {
     if (existsSync(path)) {
       await unlink(path);
       opts.out.write(`removed ${path}\n`);
