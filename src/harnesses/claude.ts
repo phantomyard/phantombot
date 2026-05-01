@@ -38,12 +38,17 @@
  *      CLAUDE.md auto-load) but requires ANTHROPIC_API_KEY and refuses
  *      OAuth/keychain credentials. Incompatible with the Claude Max
  *      subscription path. Don't add it back unless that changes upstream.
+ *
+ * Auth model under phantombot:
+ *   ANTHROPIC_API_KEY is filtered out of the subprocess env so claude
+ *   resolves credentials from ~/.claude/.credentials.json (the OAuth
+ *   path that backs Claude Max). Phantombot does not hold or pass any
+ *   API keys.
  */
 
-import { spawn } from "node:child_process";
 import { access, constants } from "node:fs/promises";
-import type { Harness, HarnessChunk, HarnessRequest } from "./types.js";
-import { log } from "../lib/logger.js";
+import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { log } from "../lib/logger.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -53,6 +58,8 @@ export interface ClaudeHarnessConfig {
   /** Model alias passed to --fallback-model. Empty string disables. */
   fallbackModel: string;
 }
+
+type ProcState = "running" | "timed_out" | "exited";
 
 export class ClaudeHarness implements Harness {
   readonly id = "claude";
@@ -72,116 +79,109 @@ export class ClaudeHarness implements Harness {
     }
   }
 
-  async *invoke(req: HarnessRequest): AsyncIterable<HarnessChunk> {
-    const args = this.buildArgs();
-    log.debug("claude.invoke spawning", { bin: this.config.bin, args });
-
-    const proc = spawn(this.config.bin, args, {
-      cwd: req.workingDir,
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
+  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    const args = this.buildArgs(req.systemPrompt);
+    log.debug("claude.invoke spawning", {
+      bin: this.config.bin,
+      argCount: args.length,
     });
 
-    // Send the conversation body (history + new user message) via stdin.
-    // System prompt does NOT go here — it's installed via --system-prompt
-    // in buildArgs.
-    const stdinPayload = renderStdinPayload(req);
-    proc.stdin.write(stdinPayload);
+    // OAuth-on-host: don't leak ANTHROPIC_API_KEY into the subprocess env,
+    // so claude resolves credentials from ~/.claude/.credentials.json.
+    const env = filterAuthEnv(process.env);
+
+    const proc = Bun.spawn([this.config.bin, ...args], {
+      cwd: req.workingDir,
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    proc.stdin.write(renderStdinPayload(req));
     proc.stdin.end();
 
-    let buffer = "";
-    let finalText = "";
-    let resolved = false;
-
+    let state: ProcState = "running";
     const timeout = setTimeout(() => {
-      if (!resolved) {
+      if (state === "running") {
+        state = "timed_out";
         log.warn("claude.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
     }, req.timeoutMs);
 
-    type Pending =
-      | { kind: "chunk"; chunk: HarnessChunk }
-      | { kind: "close" };
+    // Drain stderr in the background; surface as debug logs only.
+    void consumeStderr(proc.stderr);
 
-    const queue: Pending[] = [];
-    let queueResolver: (() => void) | undefined;
-    const push = (item: Pending) => {
-      queue.push(item);
-      queueResolver?.();
-      queueResolver = undefined;
-    };
-    const next = () =>
-      new Promise<void>((r) => {
-        if (queue.length > 0) r();
-        else queueResolver = r;
-      });
+    let buffer = "";
+    let finalText = "";
+    const decoder = new TextDecoder();
 
-    proc.stdout.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      // Stream-json emits one JSON object per line. Process complete lines;
-      // keep the incomplete tail in `buffer`.
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          const chunk = parseStreamJson(parsed);
-          if (chunk) {
-            if (chunk.type === "text") finalText += chunk.text;
-            push({ kind: "chunk", chunk });
+    try {
+      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(trimmed);
+          } catch {
+            // Not stream-json — surface as out-of-band progress note.
+            yield { type: "progress", note: trimmed };
+            continue;
           }
-        } catch {
-          // Not JSON — treat as raw progress. Keep noise out of replies.
-          push({ kind: "chunk", chunk: { type: "progress", note: trimmed } });
+          const c = parseStreamJson(parsed);
+          if (c) {
+            if (c.type === "text") finalText += c.text;
+            yield c;
+          }
         }
       }
-    });
-
-    proc.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim();
-      if (text) log.debug("claude stderr", { text: text.slice(0, 500) });
-    });
-
-    proc.on("close", (code) => {
+    } finally {
       clearTimeout(timeout);
-      resolved = true;
-      if (code === 0 || code === null) {
-        push({ kind: "chunk", chunk: { type: "done", finalText } });
-      } else {
-        push({
-          kind: "chunk",
-          chunk: {
-            type: "error",
-            error: `claude exited with code ${code}`,
-            recoverable: code !== 127, // 127 = command not found, terminal
-          },
-        });
-      }
-      push({ kind: "close" });
-    });
+    }
 
-    proc.on("error", (err) => {
-      clearTimeout(timeout);
-      resolved = true;
-      push({
-        kind: "chunk",
-        chunk: { type: "error", error: err.message, recoverable: false },
-      });
-      push({ kind: "close" });
-    });
+    // STATE-MACHINE FIX (was the timeout-vs-close bug in the Node skeleton):
+    // distinguish a SIGTERM-by-timeout kill from a normal exit. The pre-Bun
+    // version emitted `done` with whatever partial text it had collected,
+    // which masked timeouts as successful short replies.
+    if (state === "timed_out") {
+      yield {
+        type: "error",
+        error: `claude timed out after ${req.timeoutMs}ms`,
+        recoverable: true,
+      };
+      return;
+    }
 
-    while (true) {
-      if (queue.length === 0) await next();
-      const item = queue.shift()!;
-      if (item.kind === "close") return;
-      yield item.chunk;
+    state = "exited";
+    const code = await proc.exited;
+
+    if (code === 0) {
+      yield {
+        type: "done",
+        finalText,
+        meta: {
+          harnessId: this.id,
+          model: this.config.model,
+        },
+      };
+    } else {
+      yield {
+        type: "error",
+        error: `claude exited with code ${code}`,
+        // 127 = command not found — terminal, no point falling through. Anything
+        // else (rate limits, network blips, transient model errors) should let
+        // the orchestrator try the next harness.
+        recoverable: code !== 127,
+      };
     }
   }
 
-  private buildArgs(): string[] {
+  private buildArgs(systemPrompt: string): string[] {
     const args = [
       "--print",
       "--output-format", "stream-json",
@@ -194,18 +194,34 @@ export class ClaudeHarness implements Harness {
     if (this.config.fallbackModel) {
       args.push("--fallback-model", this.config.fallbackModel);
     }
-    // System prompt is appended by invoke() so we can keep it close to the
-    // request data and avoid stuffing the full persona through args twice.
+    args.push("--system-prompt", systemPrompt);
     return args;
   }
+}
+
+/**
+ * Strip ANTHROPIC_API_KEY from the inherited env so the subprocess uses
+ * OAuth credentials at ~/.claude/.credentials.json. Exported for testing.
+ */
+export function filterAuthEnv(
+  source: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(source)) {
+    if (k === "ANTHROPIC_API_KEY") continue;
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
 /**
  * Build the stdin payload. Format: history rendered as alternating
  * blocks, then the new user message at the end. Claude Code reads this
  * as the (single) user-side input in --print mode.
+ *
+ * Exported for testing.
  */
-function renderStdinPayload(req: HarnessRequest): string {
+export function renderStdinPayload(req: HarnessRequest): string {
   const parts: string[] = [];
   for (const turn of req.history) {
     if (turn.role === "user") {
@@ -226,8 +242,10 @@ function renderStdinPayload(req: HarnessRequest): string {
  * Claude's stream-json schema is documented in the Claude Code docs but
  * informally: each line has a `type` (system / user / assistant / result)
  * and a `message` payload. We only need the assistant text content.
+ *
+ * Exported for testing.
  */
-function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
+export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
   if (obj.type !== "assistant") return undefined;
@@ -237,7 +255,6 @@ function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   const content = message.content;
   if (!Array.isArray(content)) return undefined;
 
-  // Sum any "text" parts in this assistant message.
   let text = "";
   for (const part of content) {
     if (typeof part === "object" && part !== null) {
@@ -249,6 +266,27 @@ function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   }
   if (!text) return undefined;
   return { type: "text", text };
+}
+
+async function consumeStderr(
+  stream: ReadableStream<Uint8Array>,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for await (const chunk of stream) {
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim()) {
+          log.debug("claude stderr", { text: line.slice(0, 500) });
+        }
+      }
+    }
+  } catch {
+    /* swallow — stderr drain shouldn't take down the harness */
+  }
 }
 
 // ---- Note for the next maintainer ----
