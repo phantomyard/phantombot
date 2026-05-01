@@ -90,6 +90,65 @@ export class BunSystemctlRunner implements SystemctlRunner {
   }
 }
 
+/**
+ * Build the env we hand to BunSystemctlRunner. Spread process.env, then
+ * overlay XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS from the
+ * UserSystemdEnv result. Bun.spawn doesn't pick up runtime mutations to
+ * process.env, so we have to construct the env explicitly here.
+ */
+export function buildSystemctlEnv(
+  sysEnv: UserSystemdEnv,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (sysEnv.runtimeDir) {
+    env.XDG_RUNTIME_DIR = sysEnv.runtimeDir;
+    if (!env.DBUS_SESSION_BUS_ADDRESS) {
+      env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${sysEnv.runtimeDir}/bus`;
+    }
+  }
+  return env;
+}
+
+export interface ServiceControl {
+  /** True iff `systemctl --user is-active phantombot.service` returns "active". */
+  isActive(): Promise<boolean>;
+  /** Restart the phantombot service. Returns ok=false on failure. */
+  restart(): Promise<{ ok: boolean; stderr?: string }>;
+}
+
+/**
+ * Default ServiceControl backed by real systemctl + ensureUserSystemdEnv.
+ * Returns `isActive: false` when systemd isn't reachable (no linger / no
+ * runtime dir) so callers can treat "service unknown" the same as
+ * "service not running" — they don't need to print a restart hint.
+ */
+export function defaultServiceControl(): ServiceControl {
+  return {
+    async isActive() {
+      const sysEnv = ensureUserSystemdEnv();
+      if (!sysEnv.ready) return false;
+      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
+        "--user",
+        "is-active",
+        PHANTOMBOT_UNIT_NAME,
+      ]);
+      return r.exitCode === 0 && r.stdout.trim() === "active";
+    },
+    async restart() {
+      const sysEnv = ensureUserSystemdEnv();
+      if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
+      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
+        "--user",
+        "restart",
+        PHANTOMBOT_UNIT_NAME,
+      ]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+    },
+  };
+}
+
 export interface InstallOptions {
   binPath: string;
   unitPath: string;

@@ -21,6 +21,7 @@ import {
 } from "../importer/openclaw.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 import { parseOpenClawTelegram } from "./telegram.ts";
 
 export interface RunImportPersonaInput {
@@ -35,6 +36,8 @@ export interface RunImportPersonaInput {
   config?: Config;
   /** Override the openclaw.json path the sniff looks at. */
   openclawConfigPath?: string;
+  /** Override service-control for testing. */
+  serviceControl?: ServiceControl;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -98,6 +101,14 @@ export async function runImportPersona(
         `\n(no openclaw telegram config at ${openclawJsonPath}; skipping)\n`,
       );
     }
+  }
+
+  const svc = input.serviceControl ?? defaultServiceControl();
+  if (await svc.isActive()) {
+    out.write(
+      "\nphantombot is currently running. Restart to pick up the imported persona/config:\n" +
+        "  systemctl --user restart phantombot\n",
+    );
   }
 
   return 0;

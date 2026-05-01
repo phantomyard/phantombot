@@ -13,8 +13,10 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 import { telegramGetMe, type GetMeResult } from "../lib/telegramApi.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { maybePromptRestart } from "./harness.ts";
 
 export interface TelegramTuiInputs {
   token: string;
@@ -58,12 +60,14 @@ interface RunInput {
   config?: Config;
   /** Override the validator for testing. */
   validateToken?: (token: string) => Promise<GetMeResult>;
+  serviceControl?: ServiceControl;
   out?: WriteSink;
 }
 
 export async function runTelegram(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const validate = input.validateToken ?? telegramGetMe;
+  const svc = input.serviceControl ?? defaultServiceControl();
 
   p.intro("Configure the Telegram channel");
 
@@ -129,14 +133,18 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
     pollTimeoutS: 30,
     allowedUserIds,
   });
-
-  p.outro(
-    `wrote [channels.telegram] to ${config.configPath}\n` +
-      `bot: @${me.username}\n` +
+  p.note(
+    `bot: @${me.username}\n` +
       `allowed users: ${
         allowedUserIds.length === 0 ? "(any)" : allowedUserIds.join(", ")
-      }`,
+      }\n` +
+      `saved to ${config.configPath}`,
+    "Saved",
   );
+
+  await maybePromptRestart(svc);
+
+  p.outro("done");
   return 0;
 }
 
