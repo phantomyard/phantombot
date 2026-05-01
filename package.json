@@ -1,26 +1,26 @@
 {
   "name": "phantombot",
-  "version": "0.0.1",
-  "description": "Personality-first chat agent. Channels (Telegram/Signal/Google Chat) -> orchestrator -> CLI harness (Claude Code / Codex / Gemini / Pi). The harness runs its own tool loop; phantombot only does identity, memory, channel I/O, and harness fallback.",
+  "version": "0.0.2",
+  "description": "Personality-first chat agent CLI on Bun. Wraps Claude Code and Pi CLIs with persona, memory, and an OpenClaw persona import path.",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "module": "src/index.ts",
   "bin": {
-    "phantombot": "dist/index.js"
+    "phantombot": "src/index.ts"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "lint": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "typecheck": "bun tsc --noEmit",
+    "build": "mkdir -p dist && bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile dist/phantombot"
   },
-  "engines": {
-    "node": ">=20"
+  "dependencies": {
+    "citty": "^0.1.6",
+    "smol-toml": "^1.3.0"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/bun": "latest",
     "typescript": "^5.7.0"
   }
 }

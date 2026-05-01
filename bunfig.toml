@@ -1,0 +1,10 @@
+# Bun runtime + tooling configuration.
+# https://bun.com/docs/runtime/bunfig
+
+[install]
+# Frozen lockfile is enforced via the --frozen-lockfile flag in CI/Docker;
+# leave loose locally so `bun add <pkg>` works without ceremony.
+
+[test]
+# bun test discovery defaults to **/*.{test,spec}.{js,jsx,ts,tsx}
+# Tests live in /tests; nothing to override here.
