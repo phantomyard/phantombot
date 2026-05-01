@@ -47,6 +47,7 @@ beforeEach(async () => {
       claude: { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
       pi: { bin: "pi", maxPayloadBytes: 1_000_000 },
     },
+    channels: {},
   };
 
   savedFakeMode = process.env.FAKE_CLAUDE_MODE;

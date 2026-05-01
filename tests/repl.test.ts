@@ -56,6 +56,7 @@ beforeEach(async () => {
       claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
       pi: { bin: "pi", maxPayloadBytes: 1_000_000 },
     },
+    channels: {},
   };
 });
 

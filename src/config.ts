@@ -36,6 +36,16 @@ export interface Config {
     claude: { bin: string; model: string; fallbackModel: string };
     pi: { bin: string; maxPayloadBytes: number };
   };
+
+  channels: {
+    telegram?: {
+      token: string;
+      /** Long-poll timeout in seconds (1..50). Default 30. */
+      pollTimeoutS: number;
+      /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
+      allowedUserIds: number[];
+    };
+  };
 }
 
 export function xdgConfigHome(): string {
@@ -60,6 +70,8 @@ export async function loadConfig(): Promise<Config> {
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
   const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
+  const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
+  const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
 
   return {
     defaultPersona:
@@ -122,7 +134,49 @@ export async function loadConfig(): Promise<Config> {
           1_500_000,
       },
     },
+
+    channels: {
+      telegram: buildTelegramConfig(tomlTelegram),
+    },
   };
+}
+
+function buildTelegramConfig(
+  tomlTelegram: Record<string, unknown>,
+): Config["channels"]["telegram"] {
+  const token =
+    process.env.TELEGRAM_BOT_TOKEN ?? asString(tomlTelegram.token);
+  if (!token) return undefined;
+
+  const pollTimeoutS = clampPollTimeout(
+    asInt(process.env.PHANTOMBOT_TELEGRAM_POLL_S) ??
+      asInt(tomlTelegram.poll_timeout_s) ??
+      30,
+  );
+
+  const allowedFromEnv = process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS
+    ?.split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n));
+  const allowedFromToml = asIntArray(tomlTelegram.allowed_user_ids);
+  const allowedUserIds = allowedFromEnv ?? allowedFromToml ?? [];
+
+  return { token, pollTimeoutS, allowedUserIds };
+}
+
+function clampPollTimeout(s: number): number {
+  if (!Number.isFinite(s)) return 30;
+  return Math.max(1, Math.min(50, Math.floor(s)));
+}
+
+function asIntArray(v: unknown): number[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: number[] = [];
+  for (const x of v) {
+    const n = asInt(x);
+    if (n !== undefined) out.push(n);
+  }
+  return out;
 }
 
 /** Resolve the on-disk directory for a named persona. */
