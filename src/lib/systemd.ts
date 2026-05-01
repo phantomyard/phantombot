@@ -151,11 +151,77 @@ export async function uninstallPhantombotUnit(
   return { removed: true };
 }
 
+export interface UserSystemdEnv {
+  /** True if we have (or set) XDG_RUNTIME_DIR pointing at a valid runtime dir. */
+  ready: boolean;
+  /** True if phantombot set the env vars itself rather than inheriting them. */
+  autoSet: boolean;
+  /** Resolved value of XDG_RUNTIME_DIR (the directory). */
+  runtimeDir?: string;
+  /** Populated when ready=false. */
+  reason?: string;
+}
+
+export interface EnsureUserSystemdEnvOptions {
+  /** Override the current uid (for testing). */
+  uid?: number;
+  /**
+   * Override the runtime dir to check. Defaults to `/run/user/<uid>`.
+   * Useful in tests so we don't depend on the host's actual /run/user.
+   */
+  runtimeDir?: string;
+  /** existsSync override (for testing). */
+  exists?: (path: string) => boolean;
+  /** mutable env to read/write (for testing). Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
+}
+
 /**
- * Returns true if the user-level systemd bus is reachable. Returns false
- * when there's no user session and linger isn't enabled — typical for
- * headless service accounts.
+ * Make the user-level systemd bus reachable for subprocesses we spawn.
+ *
+ * If XDG_RUNTIME_DIR is already set in env (e.g. real ssh / machinectl
+ * shell session), do nothing.
+ *
+ * Otherwise — typical when reaching kai via `sudo su -`, where PAM does
+ * not propagate XDG_RUNTIME_DIR to the target user — derive it from
+ * `/run/user/<uid>`. If that directory exists (it will when linger is
+ * enabled), set both XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS so
+ * `systemctl --user` can find the bus. Subprocesses inherit the env.
+ *
+ * If the directory doesn't exist, linger isn't on (or the user manager
+ * isn't running) — return ready=false with a helpful reason.
  */
-export function userSystemdAvailable(): boolean {
-  return Boolean(process.env.XDG_RUNTIME_DIR);
+export function ensureUserSystemdEnv(
+  opts: EnsureUserSystemdEnvOptions = {},
+): UserSystemdEnv {
+  const env = opts.env ?? process.env;
+  const exists = opts.exists ?? existsSync;
+
+  if (env.XDG_RUNTIME_DIR) {
+    return { ready: true, autoSet: false, runtimeDir: env.XDG_RUNTIME_DIR };
+  }
+
+  const uid = opts.uid ?? process.getuid?.();
+  if (uid === undefined) {
+    return {
+      ready: false,
+      autoSet: false,
+      reason: "cannot determine current uid (process.getuid() unavailable)",
+    };
+  }
+
+  const runtimeDir = opts.runtimeDir ?? `/run/user/${uid}`;
+  if (!exists(runtimeDir)) {
+    return {
+      ready: false,
+      autoSet: false,
+      reason: `${runtimeDir} does not exist — enable linger first: sudo loginctl enable-linger ${env.USER ?? "$USER"}`,
+    };
+  }
+
+  env.XDG_RUNTIME_DIR = runtimeDir;
+  if (!env.DBUS_SESSION_BUS_ADDRESS) {
+    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${runtimeDir}/bus`;
+  }
+  return { ready: true, autoSet: true, runtimeDir };
 }

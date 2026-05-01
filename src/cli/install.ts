@@ -14,8 +14,10 @@ import { basename } from "node:path";
 import {
   BunSystemctlRunner,
   defaultUnitPath,
+  ensureUserSystemdEnv,
   installPhantombotUnit,
-  userSystemdAvailable,
+  type SystemctlRunner,
+  type UserSystemdEnv,
 } from "../lib/systemd.ts";
 import type { WriteSink } from "../lib/io.ts";
 
@@ -25,9 +27,9 @@ export interface RunInstallInput {
   out?: WriteSink;
   err?: WriteSink;
   /** Override systemctl runner for testing. */
-  systemctl?: ConstructorParameters<typeof BunSystemctlRunner> extends []
-    ? import("../lib/systemd.ts").SystemctlRunner
-    : never;
+  systemctl?: SystemctlRunner;
+  /** Override systemd-env detection for testing. */
+  ensureSystemdEnv?: () => UserSystemdEnv;
 }
 
 export async function runInstall(input: RunInstallInput = {}): Promise<number> {
@@ -43,14 +45,17 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
     return 2;
   }
 
-  if (!userSystemdAvailable()) {
-    err.write(
-      "no user-level systemd bus available (XDG_RUNTIME_DIR not set).\n" +
-        "If this is a headless service account (no login session), enable linger first:\n" +
-        `  sudo loginctl enable-linger ${process.env.USER ?? "$USER"}\n` +
-        "then re-run `phantombot install`.\n",
-    );
+  const sysEnv = input.ensureSystemdEnv
+    ? input.ensureSystemdEnv()
+    : ensureUserSystemdEnv();
+  if (!sysEnv.ready) {
+    err.write(`no user-level systemd bus available: ${sysEnv.reason}\n`);
     return 2;
+  }
+  if (sysEnv.autoSet) {
+    out.write(
+      `auto-detected XDG_RUNTIME_DIR=${sysEnv.runtimeDir} (linger is enabled)\n`,
+    );
   }
 
   const unitPath = input.unitPath ?? defaultUnitPath();

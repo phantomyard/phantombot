@@ -13,6 +13,7 @@ import { runUninstall } from "../src/cli/uninstall.ts";
 import type {
   SystemctlResult,
   SystemctlRunner,
+  UserSystemdEnv,
 } from "../src/lib/systemd.ts";
 
 class FakeSystemctl implements SystemctlRunner {
@@ -36,19 +37,30 @@ class CaptureStream {
 
 let workdir: string;
 let unitPath: string;
-let savedXdg: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
   unitPath = join(workdir, "phantombot.service");
-  savedXdg = process.env.XDG_RUNTIME_DIR;
-  process.env.XDG_RUNTIME_DIR = "/run/user/1000";
 });
 
 afterEach(async () => {
-  if (savedXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
-  else process.env.XDG_RUNTIME_DIR = savedXdg;
   await rm(workdir, { recursive: true, force: true });
+});
+
+const sysEnvReady = (): UserSystemdEnv => ({
+  ready: true,
+  autoSet: false,
+  runtimeDir: "/run/user/1000",
+});
+const sysEnvAutoSet = (): UserSystemdEnv => ({
+  ready: true,
+  autoSet: true,
+  runtimeDir: "/run/user/1003",
+});
+const sysEnvMissing = (): UserSystemdEnv => ({
+  ready: false,
+  autoSet: false,
+  reason: "/run/user/1003 does not exist — enable linger first: sudo loginctl enable-linger kai",
 });
 
 describe("runInstall", () => {
@@ -62,14 +74,14 @@ describe("runInstall", () => {
       systemctl: sys,
       out,
       err,
+      ensureSystemdEnv: sysEnvReady,
     });
     expect(code).toBe(2);
     expect(err.text).toContain("compiled binary");
     expect(sys.calls).toEqual([]);
   });
 
-  test("rejects when XDG_RUNTIME_DIR is unset (no user systemd bus)", async () => {
-    delete process.env.XDG_RUNTIME_DIR;
+  test("rejects when systemd env detection fails (linger disabled)", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const sys = new FakeSystemctl();
@@ -79,9 +91,29 @@ describe("runInstall", () => {
       systemctl: sys,
       out,
       err,
+      ensureSystemdEnv: sysEnvMissing,
     });
     expect(code).toBe(2);
+    expect(err.text).toContain("no user-level systemd bus available");
     expect(err.text).toContain("loginctl enable-linger");
+  });
+
+  test("auto-set message printed when systemd env is auto-detected", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const sys = new FakeSystemctl();
+    const code = await runInstall({
+      binPath: "/usr/local/bin/phantombot",
+      unitPath,
+      systemctl: sys,
+      out,
+      err,
+      ensureSystemdEnv: sysEnvAutoSet,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain(
+      "auto-detected XDG_RUNTIME_DIR=/run/user/1003",
+    );
   });
 
   test("happy path writes unit + runs reload/enable/start, returns 0", async () => {
@@ -94,6 +126,7 @@ describe("runInstall", () => {
       systemctl: sys,
       out,
       err,
+      ensureSystemdEnv: sysEnvReady,
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
@@ -102,6 +135,8 @@ describe("runInstall", () => {
       "--user start phantombot.service",
     ]);
     expect(out.text).toContain("journalctl --user -u phantombot");
+    // No auto-set message when env was already set.
+    expect(out.text).not.toContain("auto-detected");
   });
 });
 
@@ -115,6 +150,7 @@ describe("runUninstall", () => {
       systemctl: sys,
       out,
       err,
+      ensureSystemdEnv: sysEnvReady,
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
@@ -123,5 +159,20 @@ describe("runUninstall", () => {
       "--user daemon-reload",
     ]);
     expect(out.text).toContain("uninstall complete");
+  });
+
+  test("warns and continues with file removal when systemd env is missing", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const sys = new FakeSystemctl();
+    const code = await runUninstall({
+      unitPath,
+      systemctl: sys,
+      out,
+      err,
+      ensureSystemdEnv: sysEnvMissing,
+    });
+    expect(code).toBe(0);
+    expect(err.text).toContain("no user-level systemd bus available");
   });
 });
