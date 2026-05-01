@@ -1,88 +1,156 @@
 /**
- * Config loading. Single source of truth for env-var names and defaults.
+ * Config loader. Single source of truth for paths, harness binaries, and
+ * the harness chain order.
  *
- * Keep this thin: every option has a default or fails loudly on startup.
- * Don't read process.env from anywhere else in the codebase.
+ * Resolution priority (highest wins):
+ *   1. Env vars (PHANTOMBOT_*)
+ *   2. TOML config at $XDG_CONFIG_HOME/phantombot/config.toml
+ *      (override path with PHANTOMBOT_CONFIG)
+ *   3. Built-in defaults
+ *
+ * The config file is optional — phantombot runs with built-in defaults if
+ * it doesn't exist.
  */
 
-import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 
 export interface Config {
-  agentDir: string;
-  memoryDb: string;
-
-  channels: {
-    telegram?: { token: string };
-    signal?: { url: string; number: string };
-    googlechat?: { serviceAccountPath: string; projectId: string };
-  };
+  /** Persona used by `ask`/`chat` when --persona is omitted. */
+  defaultPersona: string;
+  /** Per-harness wall-clock timeout in milliseconds. */
+  turnTimeoutMs: number;
+  /** Directory holding `<persona>/` subdirs. */
+  personasDir: string;
+  /** Path to the SQLite memory store file. */
+  memoryDbPath: string;
+  /** Path to the config file we loaded (whether it existed or not). */
+  configPath: string;
 
   harnesses: {
-    chain: string[]; // order = primary -> last fallback
+    /** Order = primary → fallback. Recognized ids: "claude", "pi". */
+    chain: string[];
     claude: { bin: string; model: string; fallbackModel: string };
-    codex: { bin: string; model: string };
-    gemini: { bin: string; model: string };
-    pi: { bin: string; model: string };
+    pi: { bin: string; maxPayloadBytes: number };
   };
-
-  turnTimeoutMs: number;
-  logLevel: string;
 }
 
-function env(name: string, fallback: string): string;
-function env(name: string, fallback?: undefined): string | undefined;
-function env(name: string, fallback?: string): string | undefined {
-  const v = process.env[name];
-  if (v === undefined || v === "") return fallback;
-  return v;
+export function xdgConfigHome(): string {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+}
+export function xdgDataHome(): string {
+  return process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
 }
 
-export function loadConfig(): Config {
-  const agentDir = resolve(env("PHANTOMBOT_AGENT_DIR", "./agents/phantom"));
-  const memoryDb = resolve(env("PHANTOMBOT_MEMORY_DB", "./data/memory.sqlite"));
+const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 
-  const channels: Config["channels"] = {};
-  const tg = env("TELEGRAM_BOT_TOKEN");
-  if (tg) channels.telegram = { token: tg };
+export async function loadConfig(): Promise<Config> {
+  const configPath =
+    process.env.PHANTOMBOT_CONFIG ??
+    join(xdgConfigHome(), "phantombot", "config.toml");
 
-  const sigUrl = env("SIGNAL_CLI_URL");
-  const sigNumber = env("SIGNAL_CLI_NUMBER");
-  if (sigUrl && sigNumber) channels.signal = { url: sigUrl, number: sigNumber };
+  const toml = await tryReadToml(configPath);
 
-  const gcSa = env("GOOGLE_CHAT_SERVICE_ACCOUNT");
-  const gcProj = env("GOOGLE_CHAT_PROJECT_ID");
-  if (gcSa && gcProj) channels.googlechat = { serviceAccountPath: gcSa, projectId: gcProj };
+  const dataDir = join(xdgDataHome(), "phantombot");
 
-  const chain = env("PHANTOMBOT_HARNESS_CHAIN", "claude,codex,gemini,pi")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
+  const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
+  const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
 
   return {
-    agentDir,
-    memoryDb,
-    channels,
+    defaultPersona:
+      process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+      asString(toml.default_persona) ??
+      "phantom",
+
+    turnTimeoutMs:
+      asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS) ??
+      (asInt(toml.turn_timeout_s) !== undefined
+        ? asInt(toml.turn_timeout_s)! * 1000
+        : undefined) ??
+      600_000,
+
+    personasDir:
+      process.env.PHANTOMBOT_PERSONAS_DIR ??
+      asString(toml.personas_dir) ??
+      join(dataDir, "personas"),
+
+    memoryDbPath:
+      process.env.PHANTOMBOT_MEMORY_DB ??
+      asString(toml.memory_db) ??
+      join(dataDir, "memory.sqlite"),
+
+    configPath,
+
     harnesses: {
-      chain,
+      chain:
+        process.env.PHANTOMBOT_HARNESS_CHAIN
+          ?.split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0) ??
+        asStringArray(tomlHarnesses.chain) ??
+        [...DEFAULT_HARNESS_CHAIN],
+
       claude: {
-        bin: env("PHANTOMBOT_CLAUDE_BIN", "claude"),
-        model: env("PHANTOMBOT_CLAUDE_MODEL", "opus"),
-        fallbackModel: env("PHANTOMBOT_CLAUDE_FALLBACK_MODEL", "sonnet"),
+        bin:
+          process.env.PHANTOMBOT_CLAUDE_BIN ??
+          asString(tomlClaude.bin) ??
+          "claude",
+        model:
+          process.env.PHANTOMBOT_CLAUDE_MODEL ??
+          asString(tomlClaude.model) ??
+          "opus",
+        fallbackModel:
+          process.env.PHANTOMBOT_CLAUDE_FALLBACK_MODEL ??
+          asString(tomlClaude.fallback_model) ??
+          "sonnet",
       },
-      codex: {
-        bin: env("PHANTOMBOT_CODEX_BIN", "codex"),
-        model: env("PHANTOMBOT_CODEX_MODEL", ""),
-      },
-      gemini: {
-        bin: env("PHANTOMBOT_GEMINI_BIN", "gemini"),
-        model: env("PHANTOMBOT_GEMINI_MODEL", ""),
-      },
+
       pi: {
-        bin: env("PHANTOMBOT_PI_BIN", "pi"),
-        model: env("PHANTOMBOT_PI_MODEL", ""),
+        bin:
+          process.env.PHANTOMBOT_PI_BIN ??
+          asString(tomlPi.bin) ??
+          "pi",
+        maxPayloadBytes:
+          asInt(process.env.PHANTOMBOT_PI_MAX_PAYLOAD) ??
+          asInt(tomlPi.max_payload_bytes) ??
+          1_500_000,
       },
     },
-    turnTimeoutMs: Number(env("PHANTOMBOT_TURN_TIMEOUT_MS", "600000")),
-    logLevel: env("PHANTOMBOT_LOG_LEVEL", "info"),
   };
+}
+
+/** Resolve the on-disk directory for a named persona. */
+export function personaDir(config: Config, name: string): string {
+  return join(config.personasDir, name);
+}
+
+async function tryReadToml(path: string): Promise<Record<string, unknown>> {
+  try {
+    const content = await readFile(path, "utf8");
+    return parseToml(content) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw err;
+  }
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+function asInt(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.floor(n) : undefined;
+  }
+  return undefined;
+}
+
+function asStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.every((x) => typeof x === "string") ? (v as string[]) : undefined;
 }
