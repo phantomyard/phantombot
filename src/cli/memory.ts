@@ -24,6 +24,8 @@ import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
+import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
+import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
 
@@ -90,10 +92,36 @@ export async function runMemorySearch(
   const ix = await MemoryIndex.open(input.indexPath ?? indexPath(config, persona));
   try {
     await ix.refreshStale(dir);
-    const hits = ix.search(input.query, {
-      scope: input.scope,
-      limit: input.limit,
-    });
+
+    // If embeddings are configured AND there are stored vectors, do a
+    // hybrid search. Otherwise fall back to FTS-only.
+    let queryVec: Float32Array | undefined;
+    if (
+      config.embeddings.provider === "gemini" &&
+      config.embeddings.gemini?.apiKey &&
+      ix.embeddingCount() > 0
+    ) {
+      const r = await geminiEmbed(
+        config.embeddings.gemini.apiKey,
+        input.query,
+        {
+          model: config.embeddings.gemini.model,
+          dims: config.embeddings.gemini.dims,
+        },
+      );
+      if (r.ok) queryVec = r.values;
+      else err.write(`(query embed failed: ${r.error}; falling back to FTS-only)\n`);
+    }
+
+    const hits = queryVec
+      ? ix.hybridSearch(input.query, queryVec, {
+          scope: input.scope,
+          limit: input.limit,
+        })
+      : ix.search(input.query, {
+          scope: input.scope,
+          limit: input.limit,
+        });
     out.write(JSON.stringify({ persona, query: input.query, results: hits }, null, 2));
     out.write("\n");
   } finally {
@@ -190,8 +218,13 @@ export interface RunIndexInput extends RunMemoryInput {
   indexPath?: string;
 }
 
+export interface RunIndexInputV2 extends RunIndexInput {
+  /** Skip the embedding pass even when a provider is configured. */
+  noEmbed?: boolean;
+}
+
 export async function runMemoryIndex(
-  input: RunIndexInput,
+  input: RunIndexInputV2,
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -205,15 +238,48 @@ export async function runMemoryIndex(
 
   const ix = await MemoryIndex.open(input.indexPath ?? indexPath(config, persona));
   try {
-    const r = input.rebuild
+    const ftsResult = input.rebuild
       ? { ...(await ix.rebuild(dir)), removed: 0 }
       : await ix.refreshStale(dir);
     out.write(
-      `${input.rebuild ? "rebuilt" : "refreshed"} index for '${persona}': ` +
-        `${r.indexed} file(s) (re)indexed` +
-        (r.removed > 0 ? `, ${r.removed} removed` : "") +
+      `${input.rebuild ? "rebuilt" : "refreshed"} FTS index for '${persona}': ` +
+        `${ftsResult.indexed} file(s) (re)indexed` +
+        (ftsResult.removed > 0 ? `, ${ftsResult.removed} removed` : "") +
         `\n`,
     );
+
+    if (input.noEmbed) {
+      out.write(`(skipping embedding pass; --no-embed)\n`);
+      return 0;
+    }
+    const embedder = defaultEmbedder(config);
+    if (!embedder) {
+      out.write(
+        `(embeddings provider is "${config.embeddings.provider}"; ` +
+          `run \`phantombot embedding\` to set up Gemini)\n`,
+      );
+      return 0;
+    }
+
+    out.write(`embedding…\n`);
+    const r = await runEmbedJob({
+      personaDir: dir,
+      index: ix,
+      embedder,
+      force: input.rebuild,
+    });
+    out.write(
+      `embedded ${r.embedded}, skipped ${r.skipped} (sha match), ` +
+        `failed ${r.failed} of ${r.totalNotes} notes\n`,
+    );
+    if (r.failed > 0) {
+      for (const e of r.errors.slice(0, 5)) {
+        err.write(`  ${e.path}#${e.chunkIdx}: ${e.error}\n`);
+      }
+      if (r.errors.length > 5) {
+        err.write(`  ...and ${r.errors.length - 5} more\n`);
+      }
+    }
   } finally {
     ix.close();
   }
@@ -292,15 +358,17 @@ const todayCmd = defineCommand({
 });
 
 const indexCmd = defineCommand({
-  meta: { name: "index", description: "Refresh the FTS5 index (incremental by default; --rebuild for from-scratch)." },
+  meta: { name: "index", description: "Refresh FTS5 + embeddings (incremental by default; --rebuild for from-scratch; --no-embed to skip the vector pass)." },
   args: {
     persona: { type: "string", description: "Persona name." },
     rebuild: { type: "boolean", description: "Drop and re-index from scratch.", default: false },
+    "no-embed": { type: "boolean", description: "Skip embedding pass (FTS only).", default: false },
   },
   async run({ args }) {
     process.exitCode = await runMemoryIndex({
       persona: args.persona ? String(args.persona) : undefined,
       rebuild: Boolean(args.rebuild),
+      noEmbed: Boolean(args["no-embed"]),
     });
   },
 });

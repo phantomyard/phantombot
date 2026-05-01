@@ -218,7 +218,7 @@ describe("runMemoryIndex", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    expect(out.text).toContain("rebuilt index for 'phantom': 2 file(s)");
+    expect(out.text).toContain("rebuilt FTS index for 'phantom': 2 file(s)");
   });
 
   test("incremental refresh reports 0 on a fresh index that's been refreshed once", async () => {
