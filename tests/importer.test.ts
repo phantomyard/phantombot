@@ -135,7 +135,7 @@ describe("importPersona — what gets skipped", () => {
     expect(r.skipped.length).toBe(2);
   });
 
-  test("skips subdirectories (and notes node_modules / .git as non-portable)", async () => {
+  test("skips top-level subdirectories that aren't memory/ or kb/", async () => {
     await writeFile(join(source, "BOOT.md"), "id");
     await mkdir(join(source, "node_modules"));
     await mkdir(join(source, ".git"));
@@ -144,6 +144,60 @@ describe("importPersona — what gets skipped", () => {
     expect(r.copied).toEqual(["BOOT.md"]);
     expect(r.skipped.some((s) => s.includes("node_modules/"))).toBe(true);
     expect(r.skipped.some((s) => s.includes("subdir/"))).toBe(true);
+  });
+});
+
+describe("importPersona — recursive memory/ and kb/ subdirs", () => {
+  test("copies .md files from memory/ and kb/ recursively", async () => {
+    await writeFile(join(source, "BOOT.md"), "id");
+    await mkdir(join(source, "memory"));
+    await writeFile(join(source, "memory", "decisions.md"), "we chose X");
+    await writeFile(join(source, "memory", "2026-05-02.md"), "today");
+    await mkdir(join(source, "kb", "concepts"), { recursive: true });
+    await writeFile(
+      join(source, "kb", "concepts", "DeyeInverter.md"),
+      "deye specs",
+    );
+    await writeFile(join(source, "kb", "Home.md"), "# Home");
+    const r = await importPersona({ source, personasDir, as: "x" });
+    expect(r.copied).toContain("BOOT.md");
+    expect(r.copied).toContain("decisions.md");
+    expect(r.copied).toContain("2026-05-02.md");
+    expect(r.copied).toContain("Home.md");
+    // Nested entry — relative to its containing top-level subdir
+    expect(r.copied.some((c) => c.includes("DeyeInverter"))).toBe(true);
+    const { join: j } = await import("node:path");
+    const { readFile } = await import("node:fs/promises");
+    const dec = await readFile(
+      j(personasDir, "x", "memory", "decisions.md"),
+      "utf8",
+    );
+    expect(dec).toBe("we chose X");
+    const inv = await readFile(
+      j(
+        personasDir,
+        "x",
+        "kb",
+        "concepts",
+        "DeyeInverter.md",
+      ),
+      "utf8",
+    );
+    expect(inv).toBe("deye specs");
+  });
+
+  test("skips non-md files and dotfiles inside memory/ and kb/", async () => {
+    await writeFile(join(source, "BOOT.md"), "id");
+    await mkdir(join(source, "kb"));
+    await writeFile(join(source, "kb", "data.json"), "{}");
+    await writeFile(join(source, "kb", ".secret"), "shh");
+    await writeFile(join(source, "kb", "Note.md"), "note");
+    const r = await importPersona({ source, personasDir, as: "x" });
+    expect(r.copied).toContain("Note.md");
+    expect(r.copied).not.toContain("data.json");
+    expect(r.copied).not.toContain(".secret");
+    expect(r.skipped.some((s) => s.includes("data.json"))).toBe(true);
+    expect(r.skipped.some((s) => s.includes(".secret"))).toBe(true);
   });
 });
 
