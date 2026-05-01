@@ -1,24 +1,27 @@
 /**
  * OpenClaw → phantombot persona importer.
  *
- * Walks an OpenClaw agent directory and copies the markdown files
- * phantombot's persona loader knows about (BOOT.md / SOUL.md /
- * IDENTITY.md / MEMORY.md / tools.md / AGENTS.md), plus any other
- * top-level .md files (free agent context the harness can `Read`).
+ * Walks an OpenClaw agent directory and copies:
+ *   - All top-level markdown files (the persona loader knows BOOT.md /
+ *     SOUL.md / IDENTITY.md / MEMORY.md / tools.md / AGENTS.md by name;
+ *     other .md files come along as free agent context).
+ *   - The contents of `memory/` and `kb/` subdirs (recursively, .md only)
+ *     — these are the structured drawers and KB vault the memory system
+ *     reads/writes. Phantombot's persona scaffold ensures the directories
+ *     exist after import even if the source had none.
  *
  * Skipped explicitly:
  *   - SQLite files (*.sqlite, *.sqlite-*, *.db)
  *   - JSONL transcripts (conversation history; not portable in v1)
  *   - dotfiles (.env, .git, etc.)
- *   - subdirectories (node_modules, .git, anything else)
+ *   - other subdirectories (node_modules, .git, etc.)
  *
  * Conversation history is intentionally NOT imported in v1 — phantombot
- * has no transcript-import path yet. A future `phantombot import-history`
- * command can land once the OpenClaw transcript format is documented.
+ * has no transcript-import path yet.
  */
 
 import { copyFile, mkdir, readdir, stat } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, relative } from "node:path";
 
 const RECOGNIZED_FILES: ReadonlySet<string> = new Set([
   "BOOT.md",
@@ -30,6 +33,9 @@ const RECOGNIZED_FILES: ReadonlySet<string> = new Set([
 ]);
 
 const IDENTITY_FILES: readonly string[] = ["BOOT.md", "SOUL.md", "IDENTITY.md"];
+
+/** Subdirectories that are walked recursively (markdown-only). */
+const RECURSE_DIRS: ReadonlySet<string> = new Set(["memory", "kb"]);
 
 const SKIP_DIRS: ReadonlySet<string> = new Set([
   "node_modules",
@@ -119,10 +125,19 @@ export async function importPersona(
 
   for (const e of entries) {
     if (e.isDirectory()) {
-      const reason = SKIP_DIRS.has(e.name)
-        ? "(non-portable directory)"
-        : "(phantombot only imports top-level files)";
-      skipped.push(`${e.name}/ ${reason}`);
+      if (RECURSE_DIRS.has(e.name)) {
+        await copyMarkdownTree(
+          join(input.source, e.name),
+          join(targetDir, e.name),
+          copied,
+          skipped,
+        );
+      } else {
+        const reason = SKIP_DIRS.has(e.name)
+          ? "(non-portable directory)"
+          : "(phantombot only imports top-level files + memory/ + kb/)";
+        skipped.push(`${e.name}/ ${reason}`);
+      }
       continue;
     }
     if (!e.isFile()) {
@@ -147,6 +162,73 @@ export async function importPersona(
   }
 
   return { name, targetDir, copied, skipped };
+}
+
+/**
+ * Recursively copy `.md` files from src to dst, mirroring the directory
+ * structure. Skips dotfiles, dist/.git/etc, and non-markdown files.
+ * Logs entries in `copied` / `skipped` with paths relative to the
+ * top of `dst` (so the import summary is readable).
+ */
+async function copyMarkdownTree(
+  src: string,
+  dst: string,
+  copied: string[],
+  skipped: string[],
+  baseDst: string = dst,
+): Promise<void> {
+  await mkdir(dst, { recursive: true });
+  let entries;
+  try {
+    entries = await readdir(src, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".")) {
+      skipped.push(`${relative(baseDst, join(dst, e.name))} (dotfile)`);
+      continue;
+    }
+    if (e.isDirectory()) {
+      if (SKIP_DIRS.has(e.name)) {
+        skipped.push(
+          `${relative(baseDst, join(dst, e.name))}/ (non-portable directory)`,
+        );
+        continue;
+      }
+      await copyMarkdownTree(
+        join(src, e.name),
+        join(dst, e.name),
+        copied,
+        skipped,
+        baseDst,
+      );
+      continue;
+    }
+    if (!e.isFile()) continue;
+    const ext = extname(e.name).toLowerCase();
+    if (SKIP_EXTENSIONS.has(ext)) {
+      skipped.push(
+        `${relative(baseDst, join(dst, e.name))} (non-portable: ${ext})`,
+      );
+      continue;
+    }
+    if (ext !== ".md") {
+      skipped.push(
+        `${relative(baseDst, join(dst, e.name))} (not markdown)`,
+      );
+      continue;
+    }
+    const target = join(dst, e.name);
+    await copyFile(join(src, e.name), target);
+    // Use a slash-prefixed path relative to the persona dir so the
+    // summary is unambiguous about it being inside memory/ or kb/.
+    copied.push(
+      relative(baseDst, target) === e.name
+        ? e.name
+        : relative(baseDst, target),
+    );
+  }
 }
 
 async function dirExists(path: string): Promise<boolean> {

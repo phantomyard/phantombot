@@ -28,6 +28,7 @@ import {
   listArchives,
   restoreArchive,
 } from "../lib/personaArchive.ts";
+import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 import { parseOpenClawTelegram } from "./telegram.ts";
 
@@ -101,12 +102,20 @@ export async function runImportPersona(
     return 1;
   }
 
+  // Ensure memory/ and kb/ scaffolding exists even if the source had none.
+  // Idempotent — won't overwrite anything the importer just copied.
+  const scaffold = await ensurePersonaScaffold(result.targetDir);
+
   out.write(`imported persona '${result.name}' to ${result.targetDir}\n`);
   out.write(`copied (${result.copied.length}):\n`);
   for (const f of result.copied) out.write(`  ${f}\n`);
   if (result.skipped.length > 0) {
     out.write(`skipped (${result.skipped.length}):\n`);
     for (const f of result.skipped) out.write(`  ${f}\n`);
+  }
+  if (scaffold.created.length > 0) {
+    out.write(`scaffolded (${scaffold.created.length}):\n`);
+    for (const f of scaffold.created) out.write(`  ${f}\n`);
   }
   out.write(
     "\nNote: conversation history was NOT imported (phantombot v1 has no transcript importer).\n",
@@ -231,10 +240,12 @@ async function runImportFromPath(
     p.cancel(`error: ${(e as Error).message}`);
     return 1;
   }
+  const scaffold = await ensurePersonaScaffold(result.targetDir);
   p.note(
     `imported '${result.name}' to ${result.targetDir}\n` +
       `copied: ${result.copied.length} file(s)\n` +
-      `skipped: ${result.skipped.length} file(s)`,
+      `skipped: ${result.skipped.length} file(s)\n` +
+      `scaffolded: ${scaffold.created.length} new file(s)`,
     "Imported",
   );
 
@@ -305,6 +316,7 @@ async function runRestoreArchive(
   }
 
   const r = await applyRestore(input.config, chosen, targetName);
+  await ensurePersonaScaffold(r.dir);
   p.note(
     `restored to ${r.dir}` +
       (r.alsoArchived ? `\nprevious '${targetName}' archived to ${r.alsoArchived.dir}` : ""),

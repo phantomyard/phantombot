@@ -27,6 +27,7 @@ import {
   type ArchivedPersona,
 } from "../lib/personaArchive.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { loadState, saveState } from "../state.ts";
 
 const TONE_OPTIONS: ReadonlyArray<{
@@ -79,6 +80,7 @@ export async function applyPersona(
     generateMemoryMdPlaceholder(inputs.name),
     "utf8",
   );
+  await ensurePersonaScaffold(dir);
 
   if (inputs.setDefault) {
     const state = await loadState();
