@@ -12,9 +12,19 @@ import { dirname, join } from "node:path";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
+export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
+export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
 
 export function defaultUnitPath(): string {
   return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
+}
+
+export function heartbeatServicePath(): string {
+  return join(homedir(), ".config", "systemd", "user", HEARTBEAT_SERVICE_NAME);
+}
+
+export function heartbeatTimerPath(): string {
+  return join(homedir(), ".config", "systemd", "user", HEARTBEAT_TIMER_NAME);
 }
 
 export interface SystemdUnitParams {
@@ -54,6 +64,36 @@ WantedBy=default.target
 function quoteArg(s: string): string {
   if (/^[A-Za-z0-9_/.\-]+$/.test(s)) return s;
   return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+/** Generate the heartbeat oneshot service body. */
+export function generateHeartbeatService(binPath: string): string {
+  const exec = [binPath, "heartbeat"].map(quoteArg).join(" ");
+  return `[Unit]
+Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
+
+[Service]
+Type=oneshot
+ExecStart=${exec}
+StandardOutput=journal
+StandardError=journal
+`;
+}
+
+/** Generate the heartbeat timer body — fires every 30 minutes. */
+export function generateHeartbeatTimer(): string {
+  return `[Unit]
+Description=Phantombot heartbeat timer (every 30 min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`;
 }
 
 export interface SystemctlResult {
@@ -165,10 +205,19 @@ export async function installPhantombotUnit(
   await writeFile(opts.unitPath, unit, "utf8");
   opts.out.write(`wrote unit file: ${opts.unitPath}\n`);
 
+  // Also write the heartbeat service + timer alongside.
+  const hbService = heartbeatServicePath();
+  const hbTimer = heartbeatTimerPath();
+  await writeFile(hbService, generateHeartbeatService(opts.binPath), "utf8");
+  await writeFile(hbTimer, generateHeartbeatTimer(), "utf8");
+  opts.out.write(`wrote heartbeat units: ${hbService} + ${hbTimer}\n`);
+
   for (const args of [
     ["--user", "daemon-reload"],
     ["--user", "enable", PHANTOMBOT_UNIT_NAME],
     ["--user", "start", PHANTOMBOT_UNIT_NAME],
+    ["--user", "enable", HEARTBEAT_TIMER_NAME],
+    ["--user", "start", HEARTBEAT_TIMER_NAME],
   ]) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
@@ -178,7 +227,9 @@ export async function installPhantombotUnit(
       return { installed: false };
     }
   }
-  opts.out.write("enabled and started phantombot.service\n");
+  opts.out.write(
+    "enabled and started phantombot.service + phantombot-heartbeat.timer\n",
+  );
   return { installed: true };
 }
 
@@ -194,6 +245,8 @@ export async function uninstallPhantombotUnit(
 ): Promise<{ removed: boolean }> {
   // stop + disable are best-effort: a half-installed unit is fine to remove.
   for (const args of [
+    ["--user", "stop", HEARTBEAT_TIMER_NAME],
+    ["--user", "disable", HEARTBEAT_TIMER_NAME],
     ["--user", "stop", PHANTOMBOT_UNIT_NAME],
     ["--user", "disable", PHANTOMBOT_UNIT_NAME],
   ]) {
@@ -205,11 +258,20 @@ export async function uninstallPhantombotUnit(
     }
   }
 
+  // Main unit gets a "(no unit file at …)" log if absent so the user can
+  // tell whether they ever installed. Heartbeat units are silent if absent
+  // (don't add noise for users on pre-phase-26 installs).
   if (existsSync(opts.unitPath)) {
     await unlink(opts.unitPath);
     opts.out.write(`removed ${opts.unitPath}\n`);
   } else {
     opts.out.write(`(no unit file at ${opts.unitPath})\n`);
+  }
+  for (const path of [heartbeatServicePath(), heartbeatTimerPath()]) {
+    if (existsSync(path)) {
+      await unlink(path);
+      opts.out.write(`removed ${path}\n`);
+    }
   }
 
   const r = await opts.systemctl.run(["--user", "daemon-reload"]);

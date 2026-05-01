@@ -23,6 +23,7 @@ import uninstallCmd from "./uninstall.ts";
 import runCmd from "./run.ts";
 import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
+import heartbeatCmd from "./heartbeat.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -41,5 +42,6 @@ export const mainCommand = defineCommand({
     uninstall: uninstallCmd,
     run: runCmd,
     memory: memoryCmd,
+    heartbeat: heartbeatCmd,
   },
 });
