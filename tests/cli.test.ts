@@ -24,6 +24,7 @@ describe("phantombot CLI dispatcher", () => {
       "harness",
       "import-persona",
       "install",
+      "memory",
       "run",
       "telegram",
       "uninstall",
