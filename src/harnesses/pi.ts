@@ -33,8 +33,6 @@ export interface PiHarnessConfig {
   maxPayloadBytes: number;
 }
 
-type ProcState = "running" | "timed_out" | "exited";
-
 export class PiHarness implements Harness {
   readonly id = "pi";
 
@@ -88,10 +86,12 @@ export class PiHarness implements Harness {
       stderr: "pipe",
     });
 
-    let state: ProcState = "running";
+    // Same state-machine fix as the Claude harness — boolean instead of
+    // a 3-state enum so TS narrowing doesn't fight us.
+    let timedOut = false;
     const timeout = setTimeout(() => {
-      if (state === "running") {
-        state = "timed_out";
+      if (!timedOut) {
+        timedOut = true;
         log.warn("pi.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
@@ -129,7 +129,7 @@ export class PiHarness implements Harness {
       clearTimeout(timeout);
     }
 
-    if (state === "timed_out") {
+    if (timedOut) {
       yield {
         type: "error",
         error: `pi timed out after ${req.timeoutMs}ms`,
@@ -138,7 +138,6 @@ export class PiHarness implements Harness {
       return;
     }
 
-    state = "exited";
     const code = await proc.exited;
 
     if (code === 0) {

@@ -59,8 +59,6 @@ export interface ClaudeHarnessConfig {
   fallbackModel: string;
 }
 
-type ProcState = "running" | "timed_out" | "exited";
-
 export class ClaudeHarness implements Harness {
   readonly id = "claude";
 
@@ -101,10 +99,16 @@ export class ClaudeHarness implements Harness {
     proc.stdin.write(renderStdinPayload(req));
     proc.stdin.end();
 
-    let state: ProcState = "running";
+    // STATE-MACHINE FIX (was the timeout-vs-close bug in the Node skeleton):
+    // a SIGTERM-by-timeout kill must be distinguishable from a normal exit.
+    // The pre-Bun version emitted `done` with whatever partial text it had
+    // collected, which masked timeouts as successful short replies. We track
+    // the timeout via a closure-captured boolean so the post-loop branch
+    // surfaces the timeout as a recoverable error instead.
+    let timedOut = false;
     const timeout = setTimeout(() => {
-      if (state === "running") {
-        state = "timed_out";
+      if (!timedOut) {
+        timedOut = true;
         log.warn("claude.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
@@ -144,11 +148,7 @@ export class ClaudeHarness implements Harness {
       clearTimeout(timeout);
     }
 
-    // STATE-MACHINE FIX (was the timeout-vs-close bug in the Node skeleton):
-    // distinguish a SIGTERM-by-timeout kill from a normal exit. The pre-Bun
-    // version emitted `done` with whatever partial text it had collected,
-    // which masked timeouts as successful short replies.
-    if (state === "timed_out") {
+    if (timedOut) {
       yield {
         type: "error",
         error: `claude timed out after ${req.timeoutMs}ms`,
@@ -157,7 +157,6 @@ export class ClaudeHarness implements Harness {
       return;
     }
 
-    state = "exited";
     const code = await proc.exited;
 
     if (code === 0) {
