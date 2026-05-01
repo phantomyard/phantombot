@@ -76,6 +76,28 @@ class ScriptedHarness implements Harness {
   }
 }
 
+/**
+ * A harness that pauses for `holdMs` between yielding the first text chunk
+ * and the done chunk — used to verify typing-indicator refresh behavior.
+ */
+class SlowHarness implements Harness {
+  invocations = 0;
+  constructor(
+    public readonly id: string,
+    private readonly holdMs: number,
+  ) {}
+  async available(): Promise<boolean> {
+    return true;
+  }
+  async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    this.invocations++;
+    yield { type: "text", text: "thinking…" };
+    await new Promise((r) => setTimeout(r, this.holdMs));
+    yield { type: "text", text: "done" };
+    yield { type: "done", finalText: "thinking…done", meta: { harnessId: this.id } };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // parseGetUpdatesResult
 // ---------------------------------------------------------------------------
@@ -294,6 +316,66 @@ describe("runTelegramServer AbortSignal", () => {
     });
     expect(transport.receivedSignals.length).toBeGreaterThan(0);
     expect(transport.receivedSignals[0]).toBe(ac.signal);
+  });
+});
+
+describe("runTelegramServer typing refresh", () => {
+  test("refreshes the typing indicator while a slow harness is working", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hi",
+    });
+    // Hold the harness for 250ms so we get >1 typing refresh at 50ms cadence.
+    const harness = new SlowHarness("slow", 250);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      typingRefreshMs: 50,
+      oneShot: true,
+    });
+    // 1 initial sendTyping + at least 2 refresh ticks during the 250ms hold.
+    // We don't assert an exact count to stay scheduling-tolerant; > 2 is the contract.
+    expect(transport.typing.length).toBeGreaterThan(2);
+    // All typing calls were for the right chat
+    expect(transport.typing.every((c) => c === 1001)).toBe(true);
+    // The reply was sent.
+    expect(transport.sent).toEqual([
+      { chatId: 1001, text: "thinking…done" },
+    ]);
+  });
+
+  test("clears the typing interval when the turn completes (no stray refreshes after)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hi",
+    });
+    const harness = new ScriptedHarness("fast", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      typingRefreshMs: 50,
+      oneShot: true,
+    });
+    const baseline = transport.typing.length;
+    // Wait longer than the refresh interval — no further typing should appear.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(transport.typing.length).toBe(baseline);
   });
 });
 
