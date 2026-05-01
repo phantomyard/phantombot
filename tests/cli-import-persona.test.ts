@@ -1,0 +1,133 @@
+/**
+ * Tests for `phantombot import-persona` — including the OpenClaw
+ * Telegram-config sniff added in phase 14.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runImportPersona } from "../src/cli/import-persona.ts";
+import type { Config } from "../src/config.ts";
+
+class CaptureStream {
+  chunks: string[] = [];
+  write(s: string | Uint8Array): boolean {
+    this.chunks.push(typeof s === "string" ? s : new TextDecoder().decode(s));
+    return true;
+  }
+  get text(): string {
+    return this.chunks.join("");
+  }
+}
+
+let workdir: string;
+let source: string;
+let config: Config;
+
+beforeEach(async () => {
+  workdir = await mkdtemp(join(tmpdir(), "phantombot-imp-"));
+  source = join(workdir, "openclaw-agent");
+  await mkdir(source, { recursive: true });
+  await writeFile(join(source, "BOOT.md"), "# id");
+  await mkdir(join(workdir, "personas"), { recursive: true });
+  config = {
+    defaultPersona: "phantom",
+    turnTimeoutMs: 600_000,
+    personasDir: join(workdir, "personas"),
+    memoryDbPath: join(workdir, "memory.sqlite"),
+    configPath: join(workdir, "config.toml"),
+    harnesses: {
+      chain: ["claude"],
+      claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+      pi: { bin: "pi", maxPayloadBytes: 1_500_000 },
+    },
+    channels: {},
+  };
+});
+
+afterEach(async () => {
+  await rm(workdir, { recursive: true, force: true });
+});
+
+describe("runImportPersona — telegram sniff", () => {
+  test("imports telegram block from openclaw.json when present", async () => {
+    const openclawPath = join(workdir, "openclaw.json");
+    await writeFile(
+      openclawPath,
+      JSON.stringify({
+        channels: {
+          telegram: {
+            accounts: {
+              default: {
+                botToken: "111:secret",
+                execApprovals: { approvers: ["42"] },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "robbie",
+      config,
+      openclawConfigPath: openclawPath,
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("imported telegram config from");
+    const cfg = await readFile(config.configPath, "utf8");
+    expect(cfg).toContain("[channels.telegram]");
+    expect(cfg).toContain('token = "111:secret"');
+    expect(cfg).toContain("allowed_user_ids = [ 42 ]");
+  });
+
+  test("does NOT touch config when openclaw.json is missing", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "robbie",
+      config,
+      openclawConfigPath: join(workdir, "missing.json"),
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("(no openclaw telegram config");
+    await expect(readFile(config.configPath, "utf8")).rejects.toThrow();
+  });
+
+  test("--no-telegram skips the sniff entirely", async () => {
+    const openclawPath = join(workdir, "openclaw.json");
+    await writeFile(
+      openclawPath,
+      JSON.stringify({
+        channels: {
+          telegram: {
+            accounts: { default: { botToken: "111:secret" } },
+          },
+        },
+      }),
+    );
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "robbie",
+      config,
+      openclawConfigPath: openclawPath,
+      noTelegram: true,
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("imported telegram config");
+    expect(out.text).not.toContain("(no openclaw telegram config");
+    await expect(readFile(config.configPath, "utf8")).rejects.toThrow();
+  });
+});

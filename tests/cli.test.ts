@@ -20,15 +20,13 @@ describe("phantombot CLI dispatcher", () => {
     const subs = mainCommand.subCommands ?? {};
     const names = Object.keys(subs).sort();
     expect(names).toEqual([
-      "ask",
-      "chat",
-      "config",
-      "doctor",
-      "history",
+      "create-persona",
+      "harness",
       "import-persona",
-      "list-personas",
-      "serve",
-      "set-default-persona",
+      "install",
+      "run",
+      "telegram",
+      "uninstall",
     ]);
   });
 });
