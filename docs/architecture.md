@@ -2,86 +2,93 @@
 
 ## Goal
 
-Run a chat agent (named "Phantom") on Telegram / Signal / Google Chat that delegates all model + tool work to a CLI harness (Claude Code being the default).
+Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. All model + tool work delegates to a CLI harness (Claude Code primary, Inflection Pi fallback). Phantombot's job is identity + memory + harness fallback.
 
 ## What phantombot does
 
-1. **Hosts persona files.** `agents/phantom/BOOT.md`, `MEMORY.md`, etc. live on disk. Phantombot reads them at boot and on a watch.
-2. **Receives messages** from one or more channel adapters.
-3. **Builds a turn context** for the configured agent: persona + retrieved memory + recent conversation + the new user message.
-4. **Hands the turn to a harness.** The harness's CLI is invoked as a subprocess. Persona goes via `--system-prompt`. The user-side payload (history + new message) goes via stdin.
-5. **Streams the harness's stdout** back to the user via the channel adapter. Partial messages from the harness become live channel updates if the adapter supports it; otherwise they're buffered and sent as one reply.
-6. **Falls back** to the next harness in the configured chain on timeout, rate-limit, or non-recoverable error.
-7. **Persists the turn** (user message + harness reply, plus minimal metadata) into SQLite for future memory retrieval.
+1. **Hosts persona files.** Reads `BOOT.md` / `SOUL.md` / `IDENTITY.md`, optional `MEMORY.md`, optional `tools.md` / `AGENTS.md` from `$XDG_DATA_HOME/phantombot/personas/<name>/`.
+2. **Receives one user message** via `phantombot ask "msg"` or via the REPL line loop in `phantombot chat`.
+3. **Builds a turn context** for the configured agent: persona + recent memory + the new user message. (Vector retrieval slot is reserved but unused in v1.)
+4. **Hands the turn to a harness.** Spawns `claude --print --output-format stream-json` (or `pi --print --mode json`) as a subprocess. Persona goes via `--system-prompt`. The user-side payload (history + new message) goes via stdin (claude) or argv (pi).
+5. **Streams the harness's stdout** back to the user. Text chunks land on stdout as they arrive; the trailing newline marks end-of-reply.
+6. **Falls back** to the next harness in the chain on recoverable error (rate limit, transient network, oversize payload pre-skip).
+7. **Persists the turn** (user message + assistant reply) to SQLite for future memory retrieval. **On success only** — failed turns leave no trace, so the user can retry without orphan half-turns in history.
 
 ## What phantombot does NOT do
 
 - Translate `tools[]` arrays into anything. Each harness brings its own tools.
-- Enforce permission gates on tool calls. The harness handles that (or doesn't — Claude Code can be run with `--permission-mode bypassPermissions`).
-- Implement memory plugins, RAG-on-RAG, or vector DBs beyond a simple SQLite + sqlite-vec local store. If you need more, the harness can read/write external sources directly.
-- Run a web UI, dashboard, status page, or admin panel. Logs go to stdout / journald. Health is checked with HTTP `GET /health` and `curl` (when the optional health server is on).
+- Enforce permission gates on tool calls. The harness handles that — Claude is run with `--permission-mode bypassPermissions`.
+- Implement vector retrieval, embeddings, RAG. The slot in the system prompt is empty in v1; if needed later, prefer SQLite FTS5 before reaching for sqlite-vec or embeddings.
+- Run a web UI, dashboard, status page, or admin panel.
+- Listen on chat channels (Telegram / Signal / Google Chat). The original skeleton was built for that; the current shape is CLI only. Channels can be added later without rearchitecting.
+- Hold API keys. OAuth-on-host: claude / pi are configured separately on the operator's machine and read their own credentials at spawn time.
 
 ## Module map
 
 | Module | Responsibility | Talks to |
-|--------|----------------|----------|
-| `src/index.ts` | Entry point. Loads config, instantiates adapters, registers harnesses, starts channels, optional health server. | `config`, `channels/*`, `harnesses/*`, `orchestrator/*` |
-| `src/config.ts` | Reads env, validates required vars, resolves agent directory. | filesystem, env |
-| `src/persona/loader.ts` | Reads `BOOT.md` / `MEMORY.md` / `tools.md` from the agent dir. | filesystem |
-| `src/persona/builder.ts` | Concatenates persona pieces + retrieved memory + channel context into a system prompt string. | `persona/loader`, `memory/retriever` |
-| `src/memory/store.ts` | SQLite + sqlite-vec wrapper. Stores turns. | `better-sqlite3` (TBD) |
-| `src/memory/retriever.ts` | Given a query, returns the top-N relevant turns / notes. | `memory/store` |
-| `src/channels/types.ts` | `ChannelAdapter` interface. | — |
-| `src/channels/telegram.ts` | Telegram adapter. Long-poll or webhook. | `node:https` or `telegraf`/`grammy` (TBD) |
-| `src/channels/signal.ts` | Signal adapter via signal-cli HTTP/JSON-RPC. | `signal-cli` HTTP wrapper |
-| `src/channels/googlechat.ts` | Google Chat adapter via service account + Pub/Sub or webhook. | Google Chat API |
-| `src/harnesses/types.ts` | `Harness` interface. | — |
-| `src/harnesses/claude.ts` | `claude --print` wrapper. Reference implementation. | `claude` CLI |
-| `src/harnesses/codex.ts` | `codex` (OpenAI Codex CLI) wrapper. Stub. | `codex` CLI |
-| `src/harnesses/gemini.ts` | `gemini` CLI wrapper. Stub. | `gemini` CLI |
-| `src/harnesses/pi.ts` | Pi Coding Agent wrapper. Stub. | `pi` CLI |
-| `src/orchestrator/router.ts` | Decides which agent + which harness chain handles an incoming message. | persona, harness chain |
-| `src/orchestrator/fallback.ts` | Runs a request through a harness chain until one succeeds. | harnesses |
-| `src/heartbeat/scheduler.ts` | Optional. Schedules periodic "heartbeat" turns (self-checks, summaries). | orchestrator |
-| `src/lib/logger.ts` | Structured logging. | stdout |
+|---|---|---|
+| `src/index.ts` | Entry point. Calls `runMain(mainCommand)`. | `cli/` |
+| `src/cli/index.ts` | Citty dispatcher. Wires every subcommand. | `cli/*.ts` |
+| `src/cli/{ask,chat,import-persona,list-personas,set-default-persona,history,config,doctor}.ts` | One subcommand each. Each exports a `run*` function for testing. | `orchestrator`, `importer`, `state`, `repl` |
+| `src/config.ts` | TOML + XDG + env-var loader. Single source of truth for paths and harness chain. | filesystem, env, `state.ts` |
+| `src/state.ts` | Phantombot-managed runtime state (currently just `default_persona`). Lives at `$XDG_DATA_HOME/phantombot/state.json`. | filesystem |
+| `src/persona/loader.ts` | Reads BOOT.md / SOUL.md / IDENTITY.md (required) + MEMORY.md / tools.md / AGENTS.md (optional). | filesystem |
+| `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |
+| `src/memory/store.ts` | bun:sqlite wrapper. `appendTurn`, `recentTurns`, `recentTurnsForDisplay`, `close`. | `bun:sqlite` |
+| `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
+| `src/orchestrator/turn.ts` | `runTurn`: persona → memory → harness chain → persist. The one function every entry point calls. | `loader`, `builder`, `memory`, `fallback` |
+| `src/orchestrator/fallback.ts` | `runWithFallback`: tries each harness in order, advances on recoverable error, terminates on success or terminal error. Pre-spawn skip when `maxPayloadBytes` is too small. | `harnesses/*` |
+| `src/repl/index.ts` | `runChat` (node:readline loop) + `handleSlash` (command dispatch). | `orchestrator/turn`, `memory` |
+| `src/harnesses/types.ts` | `Harness`, `HarnessRequest`, `HarnessChunk` (discriminated union). | — |
+| `src/harnesses/claude.ts` | `Bun.spawn claude --print --output-format stream-json …`. Stdin payload, ANTHROPIC_API_KEY filtered out. | `claude` CLI |
+| `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. | `pi` CLI |
+| `src/lib/logger.ts` | Structured logs to stdout. | stdout |
+| `src/lib/io.ts` | Shared `WriteSink` interface. | — |
 
 ## End-to-end flow
 
 ```
-Telegram message arrives
-  → TelegramAdapter parses it into IncomingMessage
-  → Orchestrator.handleIncoming(msg)
-       → Router.resolve(msg) → { agent: 'phantom', harnesses: [claude, codex, gemini, pi] }
-       → Persona.build({ agent, history, retrievedMemory, channelContext }) → systemPrompt
-       → Fallback.run(harnesses, { systemPrompt, userMessage, history })
+phantombot ask "what's on my calendar?"
+  → ask.ts: load config, resolve persona, open memory, build harness chain
+  → orchestrator.turn.runTurn(...)
+       → loadPersona(agentDir) → { boot, memory, tools, identitySource, ... }
+       → memory.recentTurns(persona, "cli:default", 20) → [{role,text}, ...]
+       → buildSystemPrompt(persona, channelCtx) → systemPrompt
+       → orchestrator.fallback.runWithFallback([claude, pi], req)
+            → estimatePayloadBytes(req) → bytes
+            → if bytes > pi.maxPayloadBytes && pi is in chain → log "skipping pi"
             → claude.invoke(req)
-                 → spawn `claude --print --system-prompt <sys> --model opus --fallback-model sonnet --permission-mode bypassPermissions`
-                 → write payload to stdin
-                 → stream stdout chunks
-                 → emit { type: 'text', text } / { type: 'progress' } / { type: 'done', finalText }
-                 → on error/timeout: emit { type: 'error', recoverable: true|false }
-            → if recoverable error: try codex.invoke(req), etc.
-       → Memory.store(msg, finalReply)
-       → TelegramAdapter.send({ conversationId, text: finalReply })
+                 → Bun.spawn(["claude", "--print", "--output-format", "stream-json", ...,
+                              "--system-prompt", systemPrompt],
+                              { stdin: "pipe", env: filtered (no ANTHROPIC_API_KEY) })
+                 → write history + new message to proc.stdin, close it
+                 → for await chunk of proc.stdout: parse stream-json,
+                       yield {type:"text"|"progress"|"done"|"error"}
+                 → on timeout: state="timed_out", kill SIGTERM, yield error/recoverable
+                 → on exit 0: yield {type:"done", finalText, meta:{harnessId,model}}
+                 → on exit !=0: yield error/recoverable: code !== 127
+            → if recoverable error and chain has more: try pi.invoke(req)
+       → on done chunk: memory.appendTurn(user) + memory.appendTurn(assistant)
+  → ask.ts: write text chunks to stdout as they arrive, "\n" on done
+  → exit 0 / 1 / 2
 ```
 
 ## Open design questions
 
-These are deliberately not resolved in the skeleton; the first implementer should pick:
+1. **Streaming display in the REPL.** Text chunks are written to stdout as they arrive. Looks responsive, but if the harness reformats the final reply (claude sometimes does), the user sees draft text replaced by the canonical version when `done` arrives — currently we just persist the canonical version, which may differ from what was on screen. Acceptable trade-off for v1.
 
-1. **Streaming vs buffered replies on Telegram.** Telegram supports message editing (Bot API `editMessageText`). Should phantombot edit a "🤔 thinking..." message live as the harness streams, or just send one final reply? Pro for live edits: feels more responsive on long turns. Con: Telegram has rate limits on edits (~1/sec).
+2. **History scope.** Both `ask` and `chat` use conversation key `cli:default` so they share memory per persona. If a future channels phase lands, channel adapters would use distinct keys (`telegram:42`, `signal:abc`).
 
-2. **Harness session continuity.** The Claude harness can use `--session-id` + `--resume` for context persistence, but only if phantombot doesn't also re-send the full history. Decide whether OpenClaw-style "send everything every turn" or Claude-Code-native "resume sessions" wins. The skeleton goes with the former because it's simpler and the Anthropic prompt cache (5min TTL) limits the win from session-id when turns are spaced out.
+3. **Multi-line REPL input.** Currently line-by-line via node:readline. Long pasted content works (terminal sends it as one line); explicit multi-line mode (Esc-Enter) is not implemented. Add if it bites.
 
-3. **Memory store backend.** SQLite + `sqlite-vec` is the plan in this README. If `sqlite-vec` is too rough or licensing is awkward, fall back to a flat JSONL with grep-style retrieval — phantom's memory volume is low enough that a literal full-table scan over a year of conversations is fine. Don't over-engineer.
+4. **Conversation history import from OpenClaw.** Skipped in v1 because OpenClaw's transcript format isn't formally documented. Add `phantombot import-history <path>` once we have the schema.
 
-4. **Tool exposure to the harness.** Should phantombot constrain Claude Code via `--allowedTools` or let it have everything? Default in the skeleton: everything (`bypassPermissions`). Single-user system, trusted operator, the simplicity wins. Re-evaluate if multi-user.
-
-5. **Heartbeat.** OpenClaw has scheduled "heartbeat" turns (every 30m for the assistant, every 1h for some agents). Worth porting? Maybe — but a systemd timer that calls `phantombot heartbeat` on a cron is simpler than building a scheduler inside the process. Defer until the basics work.
+5. **Per-persona harness chains.** Today the chain is global. If different personas should use different defaults (Robbie via claude, alt-persona via pi-only), add `[personas.<name>]` overrides in config.toml.
 
 ## Non-goals
 
 - Multi-tenant. Phantombot is single-operator.
-- Web UI. Use the chat itself.
-- High availability. One process per host. If it dies, systemd restarts it. If the host dies, you have bigger problems.
+- Web UI / dashboard. Use the chat itself.
+- High availability. One process per host. If it dies, you re-run it.
 - Plugins. The codebase is small enough that "fork it and edit" is the supported customization story.
+- Tool-call passthrough. The architectural premise is that the harness owns its tools. See the warning at the bottom of `src/harnesses/claude.ts`.
