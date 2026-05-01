@@ -42,6 +42,14 @@ export interface Harness {
   /** Stable identifier — matches the wrapper file name. */
   readonly id: string;
 
+  /**
+   * Largest allowable rendered payload (system prompt + history + new
+   * message) in bytes. The orchestrator should skip this harness when
+   * the turn would exceed the budget (Pi takes its payload via argv,
+   * so it's bounded by Linux ARG_MAX). undefined = unbounded.
+   */
+  readonly maxPayloadBytes?: number;
+
   /** Quick check: is the binary present and minimally callable? */
   available(): Promise<boolean>;
 
