@@ -44,6 +44,7 @@ beforeEach(async () => {
       pi: { bin: "pi", maxPayloadBytes: 1_000_000 },
     },
     channels: {},
+    embeddings: { provider: "none" },
   };
 });
 
