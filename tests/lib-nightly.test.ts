@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildNightlyPrompt,
+  buildNightlyPromptForPersona,
   loadNightlyState,
   nightlyConversationKey,
   nightlyStatePath,
@@ -106,5 +107,31 @@ describe("buildNightlyPrompt", () => {
     expect(p).toContain("phantombot memory search");
     expect(p).toContain("phantombot memory get");
     expect(p).toContain("phantombot memory index --rebuild");
+  });
+});
+
+describe("buildNightlyPromptForPersona — override", () => {
+  test("returns the built-in prompt when no override file exists", async () => {
+    const built = await buildNightlyPromptForPersona(
+      workdir,
+      "kai",
+      "2026-05-02",
+    );
+    expect(built).toContain("PHASE 5");
+    expect(built).toContain("persona 'kai'");
+  });
+
+  test("uses the override file with {{persona}} / {{today}} substitution", async () => {
+    await writeFile(
+      join(workdir, "nightly-prompt.md"),
+      "Hey {{persona}}, today is {{today}}. Do the thing.",
+      "utf8",
+    );
+    const built = await buildNightlyPromptForPersona(
+      workdir,
+      "robbie",
+      "2026-05-02",
+    );
+    expect(built).toBe("Hey robbie, today is 2026-05-02. Do the thing.");
   });
 });

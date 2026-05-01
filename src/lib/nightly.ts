@@ -30,6 +30,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { log } from "./logger.ts";
 
+const NIGHTLY_PROMPT_OVERRIDE = "nightly-prompt.md";
+
 export interface NightlyState {
   last_run?: string;
   last_status?: "ok" | "error" | "partial";
@@ -75,6 +77,35 @@ export async function saveNightlyState(
     JSON.stringify(next, null, 2) + "\n",
     "utf8",
   );
+}
+
+/**
+ * If a persona dir contains a `nightly-prompt.md` file, use it as the
+ * template (with `{{persona}}` and `{{today}}` substitutions); otherwise
+ * fall back to the built-in `buildNightlyPrompt`. Lets users customize
+ * the nightly directive per-persona (e.g. add a "summarize calendar
+ * before phase 3" step) without forking phantombot.
+ */
+export async function buildNightlyPromptForPersona(
+  personaDir: string,
+  personaName: string,
+  today: string,
+): Promise<string> {
+  const overridePath = join(personaDir, NIGHTLY_PROMPT_OVERRIDE);
+  if (existsSync(overridePath)) {
+    try {
+      const tpl = await readFile(overridePath, "utf8");
+      return tpl
+        .replace(/\{\{persona\}\}/g, personaName)
+        .replace(/\{\{today\}\}/g, today);
+    } catch (e) {
+      log.warn("nightly: override unreadable, falling back to default", {
+        path: overridePath,
+        error: (e as Error).message,
+      });
+    }
+  }
+  return buildNightlyPrompt(personaName, today);
 }
 
 /**
