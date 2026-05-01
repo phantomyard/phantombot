@@ -263,6 +263,7 @@ describe("defaultEmbedder", () => {
       },
       channels: {},
       embeddings: { provider: "none" },
+      voice: { provider: "none" },
     });
     expect(e).toBeUndefined();
   });
@@ -280,6 +281,7 @@ describe("defaultEmbedder", () => {
         pi: { bin: "x", maxPayloadBytes: 1 },
       },
       channels: {},
+      voice: { provider: "none" },
       embeddings: {
         provider: "gemini",
         gemini: { apiKey: "", model: "g", dims: 1536 },

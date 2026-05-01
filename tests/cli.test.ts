@@ -31,6 +31,7 @@ describe("phantombot CLI dispatcher", () => {
       "run",
       "telegram",
       "uninstall",
+      "voice",
     ]);
   });
 });

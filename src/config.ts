@@ -56,6 +56,8 @@ export interface Config {
       dims: number;
     };
   };
+
+  voice: import("./lib/voice.ts").VoiceConfig;
 }
 
 export function xdgConfigHome(): string {
@@ -84,6 +86,7 @@ export async function loadConfig(): Promise<Config> {
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
+  const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
 
   return {
     defaultPersona:
@@ -152,7 +155,67 @@ export async function loadConfig(): Promise<Config> {
     },
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
+
+    voice: buildVoiceConfig(tomlVoice),
   };
+}
+
+function buildVoiceConfig(
+  tomlVoice: Record<string, unknown>,
+): import("./lib/voice.ts").VoiceConfig {
+  const provider =
+    (asString(tomlVoice.provider) as
+      | "elevenlabs"
+      | "openai"
+      | "azure_edge"
+      | "none"
+      | undefined) ?? "none";
+
+  if (provider === "elevenlabs") {
+    const e = (tomlVoice.elevenlabs ?? {}) as Record<string, unknown>;
+    return {
+      provider: "elevenlabs",
+      elevenlabs: {
+        voiceId: asString(e.voice_id) ?? "",
+        modelId: asString(e.model_id) ?? "eleven_turbo_v2_5",
+        stability: asNumber(e.stability) ?? 1,
+        similarityBoost: asNumber(e.similarity_boost) ?? 0.7,
+        style: asNumber(e.style) ?? 0.8,
+      },
+    };
+  }
+  if (provider === "openai") {
+    const o = (tomlVoice.openai ?? {}) as Record<string, unknown>;
+    return {
+      provider: "openai",
+      openai: {
+        model: asString(o.model) ?? "tts-1",
+        voice: asString(o.voice) ?? "nova",
+        speed: asNumber(o.speed) ?? 1.0,
+      },
+    };
+  }
+  if (provider === "azure_edge") {
+    const a = (tomlVoice.azure_edge ?? {}) as Record<string, unknown>;
+    return {
+      provider: "azure_edge",
+      azure_edge: {
+        voice: asString(a.voice) ?? "en-US-JennyNeural",
+        rate: asString(a.rate) ?? "+0%",
+        pitch: asString(a.pitch) ?? "+0Hz",
+      },
+    };
+  }
+  return { provider: "none" };
+}
+
+function asNumber(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
 }
 
 function buildEmbeddingsConfig(

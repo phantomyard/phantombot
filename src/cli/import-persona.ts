@@ -30,6 +30,9 @@ import {
 } from "../lib/personaArchive.ts";
 import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import { defaultEnvFilePath, updateEnvFile } from "../lib/envFile.ts";
+import { parseOpenClawVoice } from "../lib/voice.ts";
+import { applyVoiceConfig } from "./voice.ts";
 import { parseOpenClawTelegram } from "./telegram.ts";
 
 export interface RunImportPersonaInput {
@@ -128,6 +131,12 @@ export async function runImportPersona(
       out,
     });
   }
+
+  await maybeImportOpenclawVoice({
+    config,
+    openclawConfigPath: input.openclawConfigPath,
+    out,
+  });
 
   await maybeRestartHint(input.serviceControl, out);
   return 0;
@@ -355,6 +364,60 @@ async function maybeImportOpenclawTelegram(args: {
   } else {
     args.out.write(
       `\n(no openclaw telegram config at ${openclawJsonPath}; skipping)\n`,
+    );
+  }
+}
+
+async function maybeImportOpenclawVoice(args: {
+  config: Config;
+  openclawConfigPath?: string;
+  out: WriteSink;
+}): Promise<void> {
+  const openclawJsonPath =
+    args.openclawConfigPath ?? join(homedir(), ".openclaw", "openclaw.json");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(openclawJsonPath, "utf8"));
+  } catch {
+    return;
+  }
+  const v = parseOpenClawVoice(parsed);
+  if (!v) return;
+  await applyVoiceConfig({
+    configPath: args.config.configPath,
+    envPath: defaultEnvFilePath(),
+    voice: v.config,
+    // Don't overwrite an existing key in the .env from openclaw.json.
+    // If the user wants to import the key too, they can re-run
+    // `phantombot voice` and paste it.
+  });
+  if (v.importedKey) {
+    // Conservatively SET if missing; never overwrite a key the user's
+    // already configured.
+    const envPath = defaultEnvFilePath();
+    const { loadEnvFile } = await import("../lib/envFile.ts");
+    const cur = await loadEnvFile(envPath);
+    if (!cur[v.importedKey.var]) {
+      await updateEnvFile(envPath, {
+        [v.importedKey.var]: v.importedKey.value,
+      });
+      args.out.write(
+        `\nimported voice config from ${openclawJsonPath}:\n` +
+          `  provider: ${v.config.provider}\n` +
+          `  api key:  ${v.importedKey.var} (saved to .env — was empty before)\n`,
+      );
+    } else {
+      args.out.write(
+        `\nimported voice metadata from ${openclawJsonPath}:\n` +
+          `  provider: ${v.config.provider}\n` +
+          `  api key:  ${v.importedKey.var} already set in .env (left unchanged)\n`,
+      );
+    }
+  } else {
+    args.out.write(
+      `\nimported voice metadata from ${openclawJsonPath}:\n` +
+        `  provider: ${v.config.provider}\n` +
+        `  (no API key in source; run \`phantombot voice\` to set one)\n`,
     );
   }
 }
