@@ -62,50 +62,76 @@ describe("renderPayload (Pi)", () => {
 });
 
 describe("parsePiEvent", () => {
-  test("extracts text_delta from message_update via data.text_delta", () => {
+  test("extracts text_delta from message_update.assistantMessageEvent.delta", () => {
     const c = parsePiEvent({
       type: "message_update",
-      data: { text_delta: "hi" },
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 1,
+        delta: "hi",
+        partial: {},
+      },
+      message: {},
     });
     expect(c).toEqual({ type: "text", text: "hi" });
   });
 
-  test("also handles message_update with text_delta at the top level", () => {
+  test("ignores thinking_delta — those are the model's chain-of-thought, not the reply", () => {
     const c = parsePiEvent({
       type: "message_update",
-      text_delta: "hi",
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        contentIndex: 0,
+        delta: "internal reasoning",
+        partial: {},
+      },
+      message: {},
     });
-    expect(c).toEqual({ type: "text", text: "hi" });
+    expect(c).toBeUndefined();
   });
 
-  test("turns tool_execution_start into a progress chunk naming the tool", () => {
-    const c = parsePiEvent({
-      type: "tool_execution_start",
-      data: { tool_name: "bash" },
-    });
-    expect(c).toEqual({ type: "progress", note: "running bash" });
+  test("ignores text_start / text_end / thinking_start / thinking_end markers", () => {
+    for (const ameType of [
+      "text_start",
+      "text_end",
+      "thinking_start",
+      "thinking_end",
+    ]) {
+      expect(
+        parsePiEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: ameType, contentIndex: 0 },
+          message: {},
+        }),
+      ).toBeUndefined();
+    }
   });
 
-  test("falls back to data.name for tool_execution_start when tool_name is missing", () => {
-    const c = parsePiEvent({
-      type: "tool_execution_start",
-      data: { name: "edit" },
-    });
-    expect(c).toEqual({ type: "progress", note: "running edit" });
-  });
-
-  test("ignores agent_start, tool_execution_end, turn_end, and unknown types", () => {
-    expect(parsePiEvent({ type: "agent_start" })).toBeUndefined();
-    expect(parsePiEvent({ type: "tool_execution_end" })).toBeUndefined();
-    expect(parsePiEvent({ type: "turn_end" })).toBeUndefined();
-    expect(parsePiEvent({ type: "unknown" })).toBeUndefined();
+  test("ignores session / agent_start / turn_start / turn_end / agent_end / message_start / message_end", () => {
+    for (const t of [
+      "session",
+      "agent_start",
+      "turn_start",
+      "turn_end",
+      "agent_end",
+      "message_start",
+      "message_end",
+    ]) {
+      expect(parsePiEvent({ type: t })).toBeUndefined();
+    }
   });
 
   test("ignores empty text_delta", () => {
     expect(
       parsePiEvent({
         type: "message_update",
-        data: { text_delta: "" },
+        assistantMessageEvent: {
+          type: "text_delta",
+          contentIndex: 1,
+          delta: "",
+          partial: {},
+        },
+        message: {},
       }),
     ).toBeUndefined();
   });
@@ -115,6 +141,8 @@ describe("parsePiEvent", () => {
     expect(parsePiEvent("string")).toBeUndefined();
     expect(parsePiEvent({})).toBeUndefined();
     expect(parsePiEvent({ type: 42 })).toBeUndefined();
+    // message_update with no assistantMessageEvent
+    expect(parsePiEvent({ type: "message_update" })).toBeUndefined();
   });
 });
 
@@ -140,21 +168,15 @@ const mkHarness = (overrides: Partial<{ maxPayloadBytes: number }> = {}) =>
   });
 
 describe("PiHarness.invoke (subprocess)", () => {
-  test("normal exit: text chunks + progress chunk + done with finalText", async () => {
+  test("normal exit: text chunks (thinking ignored) + done with finalText", async () => {
     process.env.FAKE_PI_MODE = "normal";
     const chunks = await collect(mkHarness().invoke(newRequest()));
     const texts = chunks.filter((c) => c.type === "text");
-    const progress = chunks.filter((c) => c.type === "progress");
     const dones = chunks.filter((c) => c.type === "done");
     expect(texts.map((c) => (c as { text: string }).text)).toEqual([
       "hello ",
       "world",
     ]);
-    expect(progress).toHaveLength(1);
-    expect(progress[0]).toMatchObject({
-      type: "progress",
-      note: "running bash",
-    });
     expect(dones).toHaveLength(1);
     expect(dones[0]).toMatchObject({
       type: "done",
