@@ -48,6 +48,11 @@ export interface SystemdUnitParams {
 /**
  * Generate the [Unit]/[Service]/[Install] body for the phantombot
  * systemd --user unit. Pure function.
+ *
+ * The Environment=PATH line ensures the harness's Bash tool can find
+ * `phantombot` (installed at ~/.local/bin/phantombot) when it tries to
+ * call `phantombot memory search ...`. Default systemd-user PATH does
+ * NOT include ~/.local/bin.
  */
 export function generateSystemdUnit(params: SystemdUnitParams): string {
   const exec = [params.binPath, ...params.args].map(quoteArg).join(" ");
@@ -63,6 +68,7 @@ Type=simple
 ExecStart=${exec}
 Restart=on-failure
 RestartSec=5
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 StandardOutput=journal
 StandardError=journal
 
@@ -85,6 +91,7 @@ Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 [Service]
 Type=oneshot
 ExecStart=${exec}
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 StandardOutput=journal
 StandardError=journal
 `;
@@ -118,6 +125,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=2700
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 StandardOutput=journal
 StandardError=journal
 `;

@@ -20,7 +20,7 @@ import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
-  buildNightlyPrompt,
+  buildNightlyPromptForPersona,
   nightlyConversationKey,
   saveNightlyState,
 } from "../lib/nightly.ts";
@@ -56,7 +56,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
 
   const today = input.today ?? new Date().toISOString().slice(0, 10);
   const conversation = nightlyConversationKey(today);
-  const prompt = buildNightlyPrompt(persona, today);
+  const prompt = await buildNightlyPromptForPersona(dir, persona, today);
 
   out.write(
     `nightly: persona='${persona}' date=${today} conversation=${conversation}\n`,
