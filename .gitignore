@@ -1,0 +1,27 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs / runtime
+logs/
+*.log
+*.pid
+data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local SQLite (memory store; data is local to the host)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

@@ -1,0 +1,28 @@
+[Unit]
+Description=Phantombot — chat agent orchestrator
+Documentation=file:///opt/phantombot/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/phantombot
+ExecStart=/usr/bin/node /opt/phantombot/dist/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+TimeoutStartSec=30
+SuccessExitStatus=0 143
+KillMode=control-group
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/phantombot/.env
+
+# Hardening — uncomment once you've verified phantombot runs.
+#NoNewPrivileges=true
+#PrivateTmp=true
+#ProtectSystem=strict
+#ProtectHome=read-only
+#ReadWritePaths=/opt/phantombot/data /opt/phantombot/logs
+
+[Install]
+WantedBy=default.target

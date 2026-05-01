@@ -1,0 +1,26 @@
+{
+  "name": "phantombot",
+  "version": "0.0.1",
+  "description": "Personality-first chat agent. Channels (Telegram/Signal/Google Chat) -> orchestrator -> CLI harness (Claude Code / Codex / Gemini / Pi). The harness runs its own tool loop; phantombot only does identity, memory, channel I/O, and harness fallback.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "phantombot": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
