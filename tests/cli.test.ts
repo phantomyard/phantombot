@@ -27,6 +27,7 @@ describe("phantombot CLI dispatcher", () => {
       "history",
       "import-persona",
       "list-personas",
+      "serve",
       "set-default-persona",
     ]);
   });

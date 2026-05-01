@@ -12,6 +12,7 @@ import setDefaultPersonaCmd from "./set-default-persona.ts";
 import historyCmd from "./history.ts";
 import configCmd from "./config.ts";
 import doctorCmd from "./doctor.ts";
+import serveCmd from "./serve.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -29,5 +30,6 @@ export const mainCommand = defineCommand({
     history: historyCmd,
     config: configCmd,
     doctor: doctorCmd,
+    serve: serveCmd,
   },
 });
