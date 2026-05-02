@@ -40,14 +40,18 @@ export interface TurnInput {
   harnesses: Harness[];
   /** Open memory store; runTurn appends to it on success. */
   memory: MemoryStore;
-  /** Per-harness timeout. */
-  timeoutMs: number;
+  /** Kill subprocess after this long with no chunk on stdout. Resets per chunk. */
+  idleTimeoutMs: number;
+  /** Hard wall-clock ceiling regardless of activity. */
+  hardTimeoutMs: number;
   /** Number of prior turns to load. Default 20. */
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
   noHistory?: boolean;
   /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
   systemPromptSuffix?: string;
+  /** External abort signal from channel layer (e.g. /stop command). Propagated to harnesses. */
+  signal?: AbortSignal;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -82,7 +86,9 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     userMessage: input.userMessage,
     history,
     workingDir: input.agentDir,
-    timeoutMs: input.timeoutMs,
+    idleTimeoutMs: input.idleTimeoutMs,
+    hardTimeoutMs: input.hardTimeoutMs,
+    signal: input.signal,
   })) {
     if (chunk.type === "text") finalText += chunk.text;
     if (chunk.type === "done") {

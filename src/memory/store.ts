@@ -47,6 +47,8 @@ export interface MemoryStore {
   ): Promise<Array<{ role: Role; text: string }>>;
   /** Most recent N turns across all conversations for one persona, full rows, oldest first. */
   recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]>;
+  /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
+  deleteConversation(persona: string, conversation: string): Promise<number>;
   /** Close the underlying SQLite connection. Safe to call once; idempotent thereafter. */
   close(): Promise<void>;
 }
@@ -79,6 +81,7 @@ class SqliteMemoryStore implements MemoryStore {
   private appendStmt;
   private recentStmt;
   private recentDisplayStmt;
+  private deleteStmt;
   private closed = false;
 
   constructor(private db: Database) {
@@ -104,6 +107,9 @@ class SqliteMemoryStore implements MemoryStore {
          ORDER BY created_at DESC, id DESC
          LIMIT ?
        ) ORDER BY created_at ASC, id ASC`,
+    );
+    this.deleteStmt = db.prepare(
+      "DELETE FROM turns WHERE persona = ? AND conversation = ?",
     );
   }
 
@@ -144,6 +150,14 @@ class SqliteMemoryStore implements MemoryStore {
     if (this.closed) return;
     this.closed = true;
     this.db.close();
+  }
+
+  async deleteConversation(
+    persona: string,
+    conversation: string,
+  ): Promise<number> {
+    const result = this.deleteStmt.run(persona, conversation);
+    return result.changes;
   }
 }
 

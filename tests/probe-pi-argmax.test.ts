@@ -34,7 +34,7 @@ describe.skipIf(!RUN)("Pi ARG_MAX probe", () => {
         userMessage: padding,
         history: [],
         workingDir: process.cwd(),
-        timeoutMs: 30_000,
+        idleTimeoutMs: 30_000, hardTimeoutMs: 30_000,
       };
 
       let result: "ok" | "error" = "ok";

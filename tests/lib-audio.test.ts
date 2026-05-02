@@ -34,7 +34,7 @@ afterEach(() => {
 function makeConfig(provider: Config["voice"]["provider"]): Config {
   const base: Omit<Config, "voice"> = {
     defaultPersona: "x",
-    turnTimeoutMs: 1,
+    harnessIdleTimeoutMs: 1, harnessHardTimeoutMs: 1,
     personasDir: "/tmp",
     memoryDbPath: "/tmp/m.sqlite",
     configPath: "/tmp/c.toml",

@@ -55,8 +55,13 @@ class FakeTransport implements TelegramTransport {
         : offset;
     return { updates, nextOffset };
   }
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  edited: Array<{ chatId: number; messageId: number; text: string }> = [];
+  deleted: Array<{ chatId: number; messageId: number }> = [];
+  private nextMessageId = 1;
+  async sendMessage(chatId: number, text: string): Promise<number> {
+    const id = this.nextMessageId++;
     this.sent.push({ chatId, text });
+    return id;
   }
   async sendTyping(chatId: number): Promise<void> {
     this.typing.push(chatId);
@@ -76,6 +81,16 @@ class FakeTransport implements TelegramTransport {
   ): Promise<{ data: Buffer; mime: string }> {
     this.downloadedFileIds.push(fileId);
     return { data: this.fakeFileBytes, mime: "audio/ogg" };
+  }
+  async editMessage(
+    chatId: number,
+    messageId: number,
+    text: string,
+  ): Promise<void> {
+    this.edited.push({ chatId, messageId, text });
+  }
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    this.deleted.push({ chatId, messageId });
   }
 }
 
@@ -188,7 +203,7 @@ const baseConfig = (
   overrides: Partial<NonNullable<Config["channels"]["telegram"]>> = {},
 ): Config => ({
   defaultPersona: "phantom",
-  turnTimeoutMs: 5_000,
+  harnessIdleTimeoutMs: 5_000, harnessHardTimeoutMs: 5_000,
   personasDir: join(workdir, "personas"),
   memoryDbPath: join(workdir, "memory.sqlite"),
   configPath: join(workdir, "config.toml"),
@@ -740,6 +755,234 @@ describe("runTelegramServer typing refresh", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Slash commands via the polling loop
+// ---------------------------------------------------------------------------
+
+describe("runTelegramServer slash commands", () => {
+  test("/help is handled by the channel layer (no harness call)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/help",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toContain("/stop");
+    expect(transport.sent[0]!.text).toContain("/status");
+  });
+
+  test("/reset clears prior history for this chat (and only this chat)", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "old",
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:9999",
+      role: "user",
+      text: "untouched",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/reset",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(
+      await memory.recentTurns("phantom", "telegram:1001", 10),
+    ).toEqual([]);
+    expect(
+      await memory.recentTurns("phantom", "telegram:9999", 10),
+    ).toEqual([{ role: "user", text: "untouched" }]);
+    expect(transport.sent[0]!.text).toContain("cleared 1 turn");
+  });
+
+  test("/stop aborts an in-flight turn and suppresses the would-be reply", async () => {
+    // A harness that yields one text chunk then waits 5s (long enough that
+    // the test-level abort is the only way it ever finishes within the
+    // bun-test default timeout).
+    class AbortableHarness implements Harness {
+      readonly id = "abortable";
+      lastSignalAborted: boolean | undefined;
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "text", text: "thinking…" };
+        await new Promise<void>((resolve) => {
+          if (req.signal?.aborted) return resolve();
+          const onAbort = () => {
+            this.lastSignalAborted = true;
+            resolve();
+          };
+          req.signal?.addEventListener("abort", onAbort, { once: true });
+          setTimeout(resolve, 5000);
+        });
+        yield {
+          type: "error",
+          error: "stopped",
+          recoverable: false,
+        };
+      }
+    }
+
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "kick off something slow",
+    });
+    // /stop arrives ~30ms later, after the harness is already in-flight.
+    setTimeout(() => {
+      transport.pendingUpdates.push({
+        updateId: 2,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "/stop",
+      });
+    }, 30);
+
+    const harness = new AbortableHarness();
+    const ac = new AbortController();
+    // Stop the polling loop after a moment; the turn worker drain in the
+    // server's `finally` will wait for the aborted turn to resolve.
+    setTimeout(() => ac.abort(), 200);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      signal: ac.signal,
+    });
+
+    // The /stop reply lands. The aborted turn does NOT send a follow-up
+    // (no "(error: stopped)" leak).
+    const stopReplies = transport.sent.filter((s) =>
+      s.text.startsWith("stopped"),
+    );
+    expect(stopReplies.length).toBe(1);
+    const errorReplies = transport.sent.filter((s) =>
+      s.text.includes("(error:"),
+    );
+    expect(errorReplies).toEqual([]);
+    expect(harness.lastSignalAborted).toBe(true);
+    // No turn was persisted (failed turn → no history).
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored).toEqual([]);
+  });
+
+  test("/status reports the current primary harness", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/status",
+    });
+    const claude = new ScriptedHarness("claude", []);
+    const pi = new ScriptedHarness("pi", []);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [claude, pi],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toContain("harness: claude");
+    expect(transport.sent[0]!.text).toContain("claude → pi");
+  });
+
+  test("/harness <id> switches the primary so the next turn uses it", async () => {
+    const claude = new ScriptedHarness("claude", [
+      { type: "done", finalText: "from claude" },
+    ]);
+    const pi = new ScriptedHarness("pi", [
+      { type: "done", finalText: "from pi" },
+    ]);
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push(
+      { updateId: 1, chatId: 1001, fromUserId: 42, text: "/harness pi" },
+      { updateId: 2, chatId: 1001, fromUserId: 42, text: "hi" },
+    );
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [claude, pi],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    // After the switch, the second message hits pi, not claude.
+    expect(pi.invocations).toBe(1);
+    expect(claude.invocations).toBe(0);
+    const userReply = transport.sent.find((s) => s.text === "from pi");
+    expect(userReply).toBeDefined();
+  });
+
+  test("unknown /commands fall through to the LLM (so personas can own /remember etc.)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/remember the milk",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "noted" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.userMessage).toBe("/remember the milk");
+    expect(transport.sent).toEqual([{ chatId: 1001, text: "noted" }]);
+  });
+});
+
 describe("HttpTelegramTransport AbortSignal", () => {
   test("aborted fetch returns empty result without throwing", async () => {
     // Replace globalThis.fetch with one that throws AbortError immediately
@@ -777,5 +1020,297 @@ describe("HttpTelegramTransport AbortSignal", () => {
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Long-turn placeholder lifecycle (Option B from the design discussion)
+//
+// A turn that goes silent for placeholderThresholdMs gets a "⏳ working…"
+// message posted; that message is edited every placeholderEditMs; on
+// completion it is deleted and the real reply is sent as a NEW message
+// (so Telegram pushes a notification — the load-bearing reason we picked
+// delete-then-send over edit-into-reply).
+// ---------------------------------------------------------------------------
+
+describe("placeholder lifecycle", () => {
+  test("fast turn: no placeholder ever posted, no edits, no deletes", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "ping",
+    });
+    const harness = new ScriptedHarness("fast", [
+      { type: "done", finalText: "pong" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      // Long threshold relative to the turn — won't fire.
+      placeholderThresholdMs: 5_000,
+      placeholderEditMs: 60_000,
+    });
+
+    expect(transport.sent).toEqual([{ chatId: 1001, text: "pong" }]);
+    expect(transport.edited).toEqual([]);
+    expect(transport.deleted).toEqual([]);
+  });
+
+  test("slow turn: placeholder posted + edited + deleted; final reply sent fresh", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 2002,
+      fromUserId: 42,
+      text: "build the thing",
+    });
+    // Slow harness: emits a progress note partway through, then sleeps
+    // long enough that the placeholder fires AND gets edited at least once.
+    class SlowProgressHarness implements Harness {
+      readonly id = "slow";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "progress", note: "tool_execution_start: BashTool" };
+        await new Promise((r) => setTimeout(r, 250));
+        yield {
+          type: "done",
+          finalText: "built it",
+          meta: { harnessId: this.id },
+        };
+      }
+    }
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new SlowProgressHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      placeholderThresholdMs: 50, // post quickly
+      placeholderEditMs: 80, // edit at least once before the 250ms hold ends
+    });
+
+    // The placeholder was posted (first sendMessage), then deleted, then
+    // the real reply was sent as a NEW message.
+    expect(transport.sent.length).toBe(2);
+    expect(transport.sent[0]!.text).toContain("⏳ working");
+    expect(transport.sent[1]!.text).toBe("built it");
+    // At least one edit happened.
+    expect(transport.edited.length).toBeGreaterThanOrEqual(1);
+    expect(transport.edited[0]!.text).toContain("⏳ working");
+    // The placeholder message was deleted before the final reply went out.
+    expect(transport.deleted.length).toBe(1);
+    const placeholderId = transport.sent[0]!.chatId === 2002 ? 1 : 0;
+    expect(transport.deleted[0]).toEqual({
+      chatId: 2002,
+      messageId: placeholderId === 0 ? 0 : 1, // FakeTransport assigns id=1 first
+    });
+  });
+
+  test("placeholder edits include the most recent progress note", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 3003,
+      fromUserId: 42,
+      text: "do work",
+    });
+    class ProgressHarness implements Harness {
+      readonly id = "progressive";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "progress", note: "step 1: cloning" };
+        await new Promise((r) => setTimeout(r, 100));
+        yield { type: "progress", note: "step 2: building" };
+        await new Promise((r) => setTimeout(r, 100));
+        yield { type: "done", finalText: "ok", meta: { harnessId: this.id } };
+      }
+    }
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new ProgressHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      placeholderThresholdMs: 30,
+      placeholderEditMs: 60,
+    });
+
+    // Some edit must mention the latest progress note.
+    const allEditedText = transport.edited.map((e) => e.text).join("\n");
+    // Either step 1 or step 2 will appear, depending on edit timing.
+    expect(allEditedText).toMatch(/step [12]:/);
+  });
+
+  test("placeholder race: sendMessage that resolves AFTER the turn ends doesn't leak the interval or orphan the message", async () => {
+    // Reproduces the race the PR-#56 review flagged: the post timer
+    // fires near the end of the turn, the IIFE awaits sendMessage, the
+    // turn finishes (clearing the post timer no-op'ed because it had
+    // already fired), and the IIFE THEN tries to arm a setInterval and
+    // store a messageId that nobody will ever clean up.
+    //
+    // SlowSendTransport extends FakeTransport with a deliberate ~150ms
+    // sendMessage latency. Combined with placeholderThresholdMs = 50
+    // and a turn that finishes in ~80ms, the IIFE is guaranteed to
+    // outlive the turn.
+    class SlowSendTransport extends FakeTransport {
+      override async sendMessage(chatId: number, text: string): Promise<number> {
+        if (text.includes("⏳ working")) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return super.sendMessage(chatId, text);
+      }
+    }
+    const transport = new SlowSendTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 5005,
+      fromUserId: 42,
+      text: "do brief work",
+    });
+    class BriefHarness implements Harness {
+      readonly id = "brief";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        // Just over the placeholder threshold — long enough to trigger
+        // the post timer, short enough to finish before sendMessage
+        // resolves.
+        await new Promise((r) => setTimeout(r, 80));
+        yield { type: "done", finalText: "done", meta: { harnessId: this.id } };
+      }
+    }
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new BriefHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      placeholderThresholdMs: 50,
+      placeholderEditMs: 200,
+    });
+
+    // Give any leaked setInterval a window to tick — if the race fix is
+    // wrong, we'd see editMessage calls landing here.
+    const editsAfterCleanup = transport.edited.length;
+    await new Promise((r) => setTimeout(r, 350));
+
+    // No edit should have fired after the turn cleanup completed —
+    // proves the interval is NOT armed.
+    expect(transport.edited.length).toBe(editsAfterCleanup);
+    // The placeholder did get posted (slow sendMessage), and then it
+    // got deleted by the IIFE's disposed-branch self-cleanup.
+    const placeholderSends = transport.sent.filter((s) => s.text.includes("⏳ working"));
+    expect(placeholderSends.length).toBe(1);
+    expect(transport.deleted.length).toBeGreaterThanOrEqual(1);
+    // Final reply landed.
+    const finalReplies = transport.sent.filter((s) => s.text === "done");
+    expect(finalReplies.length).toBe(1);
+  });
+
+  test("/stop during long turn: placeholder is cleaned up, no duplicate result message", async () => {
+    const transport = new FakeTransport();
+    // Use AbortableHarness pattern from the slow-turn tests: blocks on
+    // signal, yields a stopped error when aborted.
+    class AbortableHarness implements Harness {
+      readonly id = "abortable";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 5_000);
+          req.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(t);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        if (req.signal?.aborted) {
+          yield { type: "error", error: "stopped", recoverable: false };
+        } else {
+          yield { type: "done", finalText: "shouldn't get here" };
+        }
+      }
+    }
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 4004,
+      fromUserId: 42,
+      text: "do something long",
+    });
+    // Inject a /stop after the placeholder has had time to fire.
+    setTimeout(() => {
+      transport.pendingUpdates.push({
+        updateId: 2,
+        chatId: 4004,
+        fromUserId: 42,
+        text: "/stop",
+      });
+    }, 200);
+    // Stop the polling loop after a moment; the worker drain in the
+    // server's `finally` waits for the aborted turn to resolve.
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 400);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new AbortableHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      signal: ac.signal,
+      placeholderThresholdMs: 50,
+      placeholderEditMs: 60,
+    });
+
+    // Three categories of message in `sent`: the placeholder (⏳…), the
+    // /stop ack (stopped …), and ideally NO duplicate "(error: stopped)".
+    const replyTexts = transport.sent.map((s) => s.text);
+    expect(replyTexts.some((t) => /^stopped \(/.test(t))).toBe(true);
+    expect(replyTexts.some((t) => t.includes("(error: stopped)"))).toBe(false);
+    // Placeholder posted then deleted.
+    const placeholderTexts = replyTexts.filter((t) => t.includes("⏳ working"));
+    expect(placeholderTexts.length).toBeGreaterThanOrEqual(1);
+    expect(transport.deleted.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("formatElapsedMs", () => {
+  test("formats sub-minute as plain seconds", async () => {
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(0)).toBe("0s");
+    expect(formatElapsedMs(45_000)).toBe("45s");
+  });
+
+  test("formats minutes + seconds", async () => {
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(65_000)).toBe("1m 5s");
+    expect(formatElapsedMs(7 * 60_000 + 12_000)).toBe("7m 12s");
+  });
+
+  test("formats hours + minutes for very long turns", async () => {
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(2 * 3_600_000 + 15 * 60_000 + 4_000)).toBe("2h 15m");
   });
 });

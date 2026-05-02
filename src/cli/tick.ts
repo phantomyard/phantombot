@@ -123,7 +123,8 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           agentDir,
           harnesses,
           memory,
-          timeoutMs: config.turnTimeoutMs,
+          idleTimeoutMs: config.harnessIdleTimeoutMs,
+          hardTimeoutMs: config.harnessHardTimeoutMs,
         })) {
           if (chunk.type === "text") finalText += chunk.text;
           if (chunk.type === "done") finalText = chunk.finalText;

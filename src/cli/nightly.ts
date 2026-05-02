@@ -75,7 +75,11 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
       agentDir: dir,
       harnesses,
       memory,
-      timeoutMs: 30 * 60_000, // 30-minute hard cap on the cognitive pass
+      // Nightly tasks chew on long thinking — accept up to 5 minutes of
+      // silence between tool calls before assuming wedged. Hard cap stays
+      // at 30 minutes (matches the original behavior).
+      idleTimeoutMs: 5 * 60_000,
+      hardTimeoutMs: 30 * 60_000,
       systemPromptSuffix:
         "You are operating in NIGHTLY MAINTENANCE MODE. " +
         "Skip pleasantries. Do work, write files, report briefly.",

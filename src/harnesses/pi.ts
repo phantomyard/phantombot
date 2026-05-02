@@ -24,7 +24,12 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import {
+  createKillCoordinator,
+  killCauseToErrorChunk,
+} from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
+import { spawnInNewSession } from "../lib/processGroup.ts";
 
 export interface PiHarnessConfig {
   /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
@@ -78,7 +83,7 @@ export class PiHarness implements Harness {
       payloadBytes: totalBytes,
     });
 
-    const proc = Bun.spawn([this.config.bin, ...args], {
+    const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
       env: process.env,
       stdin: "ignore",
@@ -86,16 +91,16 @@ export class PiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same state-machine fix as the Claude harness — boolean instead of
-    // a 3-state enum so TS narrowing doesn't fight us.
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      if (!timedOut) {
-        timedOut = true;
-        log.warn("pi.invoke timeout", { timeoutMs: req.timeoutMs });
-        proc.kill("SIGTERM");
-      }
-    }, req.timeoutMs);
+    // Idle + hard timer + abort listener; SIGTERM-then-SIGKILL the whole
+    // process group on any of those firing. See harnessRunner.ts for the
+    // state machine.
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: req.idleTimeoutMs,
+      hardTimeoutMs: req.hardTimeoutMs,
+      signal: req.signal,
+      harnessId: this.id,
+    });
 
     void consumeStderr(proc.stderr);
 
@@ -105,6 +110,7 @@ export class PiHarness implements Harness {
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        killer.touch();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -126,15 +132,17 @@ export class PiHarness implements Harness {
         }
       }
     } finally {
-      clearTimeout(timeout);
+      await killer.dispose();
     }
 
-    if (timedOut) {
-      yield {
-        type: "error",
-        error: `pi timed out after ${req.timeoutMs}ms`,
-        recoverable: true,
-      };
+    const errChunk = killCauseToErrorChunk(
+      killer.killCause(),
+      this.id,
+      req.hardTimeoutMs,
+      req.idleTimeoutMs,
+    );
+    if (errChunk) {
+      yield errChunk;
       return;
     }
 

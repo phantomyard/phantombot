@@ -54,7 +54,8 @@ describe("loadConfig — defaults (no file)", () => {
   test("returns built-in defaults when no config file exists", async () => {
     const c = await loadConfig();
     expect(c.defaultPersona).toBe("phantom");
-    expect(c.turnTimeoutMs).toBe(600_000);
+    expect(c.harnessIdleTimeoutMs).toBe(120_000);
+    expect(c.harnessHardTimeoutMs).toBe(3_600_000);
     expect(c.harnesses.chain).toEqual(["claude"]);
     expect(c.harnesses.claude).toEqual({
       bin: "claude",
@@ -99,7 +100,12 @@ max_payload_bytes = 500000
     );
     const c = await loadConfig();
     expect(c.defaultPersona).toBe("robbie");
-    expect(c.turnTimeoutMs).toBe(120_000);
+    // Legacy turn_timeout_s preserves pre-PR-#56 semantics: a single
+    // wall-clock cap with no separate idle ceiling. Aliases to BOTH
+    // idle and hard so an unmodified legacy config doesn't get the
+    // stricter 120s idle default applied silently.
+    expect(c.harnessHardTimeoutMs).toBe(120_000);
+    expect(c.harnessIdleTimeoutMs).toBe(120_000);
     expect(c.harnesses.chain).toEqual(["pi", "claude"]);
     expect(c.harnesses.claude.model).toBe("sonnet");
     expect(c.harnesses.claude.fallbackModel).toBe("");

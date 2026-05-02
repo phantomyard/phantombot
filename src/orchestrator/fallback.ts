@@ -32,6 +32,15 @@ export async function* runWithFallback(
   const estimatedBytes = estimatePayloadBytes(req);
 
   for (let i = 0; i < chain.length; i++) {
+    // Short-circuit if the channel layer has already aborted — otherwise
+    // every harness in the chain spawns a subprocess just to discover the
+    // signal and kill itself, which is wasteful when the user just typed
+    // /stop and meant it.
+    if (req.signal?.aborted) {
+      yield { type: "error", error: "stopped", recoverable: false };
+      return;
+    }
+
     const harness = chain[i]!;
     const isLast = i === chain.length - 1;
 
