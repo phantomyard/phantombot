@@ -406,6 +406,13 @@ export async function runTelegramServer(
           harnesses: input.harnesses,
           memory: input.memory,
           timeoutMs: input.config.turnTimeoutMs,
+          // Voice-in + voice-out: append a brevity directive for this turn
+          // only. Keeps voice notes short + spoken-friendly without putting
+          // brevity rules in persona files (which would also throttle text
+          // replies, where verbosity is fine).
+          systemPromptSuffix: willReplyWithVoice
+            ? VOICE_REPLY_INSTRUCTION
+            : undefined,
         })) {
           if (chunk.type === "text") reply += chunk.text;
           if (chunk.type === "progress") {
@@ -481,6 +488,35 @@ export async function runTelegramServer(
     }
   } while (!input.oneShot);
 }
+
+/**
+ * System-prompt suffix appended for voice-in / voice-out turns only.
+ *
+ * Why this exists: a chat reply that's fine as a Telegram text message
+ * — say 4-6 sentences, with some narration of what the agent did —
+ * becomes a 90-second voice note when synthesized via TTS. Users
+ * report it sounds like a YouTuber explaining their workflow.
+ *
+ * Target: ~100 tokens (~60 words / ~30 seconds of speech). Concrete
+ * numbers in the instruction so the model has something to anchor on,
+ * but the real win is killing narration ("Let me check…", "Right,
+ * here's what I found…") and markdown formatting that TTS reads
+ * awkwardly.
+ *
+ * Lives at the channel layer (not in persona files) so brevity is
+ * triggered ONLY when the input arrived as voice AND the reply will be
+ * synthesized — text replies stay as detailed as the persona wants.
+ */
+export const VOICE_REPLY_INSTRUCTION =
+  `# Reply length (this turn only)
+
+This message arrived as a voice note and your reply will be spoken
+aloud via text-to-speech. Reply briefly and conversationally — 1-3
+sentences, under ~30 seconds of speech (≈60 words / ≈100 tokens).
+Output only the final answer — no narration of your work
+("Let me check…"), no markdown headers/bullets/code blocks (TTS
+reads them awkwardly), no "according to my analysis" preamble.
+Just the human reply.`;
 
 /**
  * Render an honest, actionable explanation when sttSupport() rules a
