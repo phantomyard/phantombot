@@ -154,9 +154,22 @@ export type ApplyResult =
 
 /**
  * Atomic swap. Steps:
- *   1. Copy targetPath → ${targetPath}.bak (so a botched rename is recoverable).
- *   2. rename(tempPath, targetPath) — atomic on Linux even when targetPath
+ *   1. Remove a stale ${targetPath}.bak if one exists (best-effort) — see
+ *      below for why this isn't redundant with copyFile's overwrite.
+ *   2. Copy targetPath → ${targetPath}.bak (so a botched rename is
+ *      recoverable).
+ *   3. rename(tempPath, targetPath) — atomic on Linux even when targetPath
  *      is the running process's binary; the kernel uses inode, not path.
+ *
+ * Why we explicitly unlink the .bak first: copyFile opens the destination
+ * with O_TRUNC. Linux requires write permission on an existing file to
+ * truncate it, even if the parent dir is writable. So if a previous .bak
+ * was written by a different user (e.g. an earlier `sudo cp` during
+ * initial deploy left a root-owned .bak), running `phantombot update` as
+ * the unprivileged service user fails with EACCES — even though kai owns
+ * the dir and the live binary. unlink only needs write+execute on the
+ * parent dir, which we've already verified via checkWritable, so an old
+ * foreign-owned .bak can be cleared without elevated privileges.
  *
  * Returns the .bak path on success so the caller can tell the user where
  * to find the rollback if something downstream (e.g. service restart)
@@ -169,6 +182,11 @@ export async function applyUpdate(opts: ApplyUpdateOpts): Promise<ApplyResult> {
   const backupPath = `${opts.targetPath}.bak`;
   try {
     if (existsSync(opts.targetPath)) {
+      // Defensive unlink of any stale backup from a prior install (see
+      // doc above). Best-effort: rm errors are swallowed because the
+      // copyFile that follows surfaces the real one if the dir itself
+      // isn't writable.
+      await rm(backupPath, { force: true });
       // copyFile (not rename) so we keep targetPath intact in case the
       // rename in step 2 fails — we always have a working binary on disk.
       await copyFile(opts.targetPath, backupPath);
