@@ -24,8 +24,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
-import { ClaudeHarness } from "../harnesses/claude.ts";
-import { PiHarness } from "../harnesses/pi.ts";
+import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -199,16 +198,6 @@ function parseReviewDecision(reply: string): "keep" | "stop" {
   const trimmed = reply.trimStart().toUpperCase();
   if (trimmed.startsWith("STOP")) return "stop";
   return "keep";
-}
-
-function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
-  const out: Harness[] = [];
-  for (const id of config.harnesses.chain) {
-    if (id === "claude") out.push(new ClaudeHarness(config.harnesses.claude));
-    else if (id === "pi") out.push(new PiHarness(config.harnesses.pi));
-    else err.write(`tick: warning: unknown harness '${id}', skipping\n`);
-  }
-  return out;
 }
 
 export default defineCommand({

@@ -88,8 +88,10 @@ phantombot/
 │   │   ├── create-persona.ts import-persona.ts  # implementation files; no top-level subcommand
 │   ├── harnesses/
 │   │   ├── types.ts          # HarnessRequest / HarnessChunk discriminated union
-│   │   ├── claude.ts         # Bun.spawn `claude --print --output-format stream-json …`
-│   │   └── pi.ts             # Bun.spawn `pi --print --mode json …`
+│   │   ├── buildChain.ts     # build Harness[] from config — single source of truth (was duplicated in run.ts + tick.ts)
+│   │   ├── claude.ts         # Bun.spawn `claude --print --output-format stream-json …` (OAuth-only; ANTHROPIC_API_KEY filtered)
+│   │   ├── pi.ts             # Bun.spawn `pi --print --mode json …` (OAuth on host; ARG_MAX guard)
+│   │   └── gemini.ts         # Bun.spawn `gemini -p <user_msg> -o text -y` (stdin = system + history; v1 text mode)
 │   └── lib/
 │       ├── logger.ts io.ts configWriter.ts envFile.ts
 │       ├── systemd.ts        # unit generators + install/uninstall + ensureUnitCurrent
@@ -192,6 +194,7 @@ Every merged PR auto-releases `v1.0.<PR_NUMBER>`. The workflow at `.github/workf
 6. **Forgetting `tests/cli.test.ts` subcommand list** — every new subcommand needs to be added there or that test fails on PR merge.
 7. **Importing a persona on a fresh box without setting it as default** — the built-in fallback `default_persona = "phantom"` doesn't have a directory; `phantombot run` would fail with "persona 'phantom' not found." `runImportPersona` now adopts the imported persona as default if the current default's dir doesn't exist. If you add another path that creates a persona, do the same — see `maybeAdoptAsDefault` in `src/cli/import-persona.ts`.
 8. **`install.sh` piped to `sh` runs without a TTY** — interactive @clack TUIs would misbehave. The script detects this with `[ -t 0 ] && [ -t 1 ]` before launching the persona TUI, and prints the next-step hint instead. If you add interactive setup steps to the install flow, repeat the check.
+9. **Adding a new harness — three places that must be touched, not one.** `src/harnesses/buildChain.ts` (factory: instantiate the wrapper class), `src/cli/harness.ts` (`SUPPORTED_HARNESSES` for the TUI + `detectAvailability` for the binary-on-PATH check), and `src/config.ts` (Config type slot + loader for `[harnesses.<id>]`). Plus inline test fixtures across ~12 files that have a literal Config object. If you forget any, typecheck + tests catch it — but it's tedious; the buildChain.ts extraction was specifically to retire the *fourth* duplicate that was about to land with each new harness.
 
 ## Process for updating this file
 

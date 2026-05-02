@@ -1,6 +1,6 @@
 # phantombot
 
-A personality-first chat agent. Phantombot wraps Claude Code and Inflection Pi with persona, memory, scheduled tasks, and a Telegram bot — and otherwise stays out of their way. The harness runs its own tool loop. Phantombot does:
+A personality-first chat agent. Phantombot wraps Claude Code, Inflection Pi, and Google Gemini CLI with persona, memory, scheduled tasks, and a Telegram bot — and otherwise stays out of their way. The harness runs its own tool loop. Phantombot does:
 
 1. **Identity** — load the agent's persona files (`BOOT.md` / `SOUL.md` / `IDENTITY.md`, plus `MEMORY.md`, `tools.md` / `AGENTS.md`) and inject them as the harness's system prompt.
 2. **Memory** — persist conversation turns to local SQLite, retrieve recent history per turn.
@@ -58,7 +58,7 @@ Configuration lives in `~/.config/phantombot/config.toml` (TUIs write here) and 
 
 ## Why this exists
 
-The author's daily-driver assistant ("Robbie") used to run on [OpenClaw](https://github.com/openclaw/openclaw). OpenClaw provides personality + channels + memory **and** its own model abstraction **and** its own tool layer. The model abstraction is fine. The tool layer fights with how Claude Code and Pi already do tools — better than OpenClaw could. Phantombot keeps the personality + memory + Telegram channel and lets the harness be the brain *and* the hands.
+The author's daily-driver assistant ("Robbie") used to run on [OpenClaw](https://github.com/openclaw/openclaw). OpenClaw provides personality + channels + memory **and** its own model abstraction **and** its own tool layer. The model abstraction is fine. The tool layer fights with how Claude Code, Pi, and Gemini CLI already do tools — better than OpenClaw could. Phantombot keeps the personality + memory + Telegram channel and lets the harness be the brain *and* the hands.
 
 When Phantom is asked to "SSH to the home lab and write a note to the Obsidian vault," the request goes to `claude --print` with Phantom's system prompt installed. Claude Code uses *its* Bash / Write / SSH tools to do the work and returns the final text. Phantombot relays it to Telegram. No tool-call translation layer, no permission gates, no `tools[]` array conversion.
 
@@ -93,7 +93,10 @@ If you literally need two personas answering simultaneously (different bots, dif
 ### Prerequisites
 
 - **Bun** ≥ 1.1: `curl -fsSL https://bun.sh/install | bash` (only if you build from source — the released binary has no runtime dep)
-- **Claude Code** installed and authenticated as the user that will run phantombot: `claude /login`
+- **At least one harness** installed and authenticated as the user that will run phantombot:
+  - **Claude Code** — `claude /login` (OAuth on host; phantombot filters `ANTHROPIC_API_KEY` so OAuth is the path)
+  - **Inflection Pi** — `pi` configured per its own setup
+  - **Google Gemini CLI** — `gemini` then OAuth via the in-app `/auth`, OR set `GEMINI_API_KEY` in `~/.env`
 - **(Optional)** Inflection Pi installed and configured if you want it in the fallback chain
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
@@ -151,7 +154,7 @@ phantombot persona                           # TUI: create / import / restore / 
 # OR non-interactively:
 phantombot persona --import ~/clawd --as robbie
 
-phantombot harness                           # claude / pi / both
+phantombot harness                           # pick primary + fallback (claude / pi / gemini)
 phantombot telegram                          # bot token + allowed user IDs
 phantombot voice                             # optional: TTS/STT provider for voice messages
 
