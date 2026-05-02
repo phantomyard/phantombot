@@ -149,31 +149,37 @@ export interface ApplyUpdateOpts {
 }
 
 export type ApplyResult =
-  | { ok: true; backupPath: string }
+  | { ok: true }
   | { ok: false; error: string };
 
 /**
  * Atomic swap. Steps:
- *   1. Remove a stale ${targetPath}.bak if one exists (best-effort) — see
- *      below for why this isn't redundant with copyFile's overwrite.
- *   2. Copy targetPath → ${targetPath}.bak (so a botched rename is
- *      recoverable).
- *   3. rename(tempPath, targetPath) — atomic on Linux even when targetPath
- *      is the running process's binary; the kernel uses inode, not path.
+ *   1. Remove any stale ${targetPath}.bak (defensive — see below).
+ *   2. Copy targetPath → ${targetPath}.bak (transactional safety net
+ *      in case the rename in step 3 fails).
+ *   3. rename(tempPath, targetPath) — atomic on Linux even when
+ *      targetPath is the running process's binary; the kernel uses
+ *      inode, not path.
+ *   4. On success, remove ${targetPath}.bak. The .bak only existed
+ *      to make the rename recoverable; once the rename committed,
+ *      it's garbage. Cleaning it keeps ~/.local/bin/ tidy (no .bak
+ *      polluting tab-completion next to the live binary).
  *
- * Why we explicitly unlink the .bak first: copyFile opens the destination
- * with O_TRUNC. Linux requires write permission on an existing file to
- * truncate it, even if the parent dir is writable. So if a previous .bak
- * was written by a different user (e.g. an earlier `sudo cp` during
- * initial deploy left a root-owned .bak), running `phantombot update` as
- * the unprivileged service user fails with EACCES — even though that user
- * owns the dir and the live binary. unlink only needs write+execute on
- * the parent dir, which we've already verified via checkWritable, so an
- * old foreign-owned .bak can be cleared without elevated privileges.
+ * Why we explicitly unlink the .bak before copying in step 1:
+ * copyFile opens the destination with O_TRUNC. Linux requires write
+ * permission on an existing file to truncate it, even if the parent
+ * dir is writable. So if a previous .bak was written by a different
+ * user (e.g. an earlier `sudo cp` during initial deploy left a
+ * root-owned .bak — see PR #47's repro), running `phantombot update`
+ * as the unprivileged service user would fail with EACCES — even
+ * though that user owns the dir and the live binary. unlink only
+ * needs write+execute on the parent dir, which we've already
+ * verified via checkWritable, so an old foreign-owned .bak can be
+ * cleared without elevated privileges.
  *
- * Returns the .bak path on success so the caller can tell the user where
- * to find the rollback if something downstream (e.g. service restart)
- * blows up.
+ * Returns just `{ ok: true }` on success — no backupPath, because
+ * the .bak no longer exists. Callers that previously surfaced the
+ * .bak path to the user should drop that line.
  */
 export async function applyUpdate(opts: ApplyUpdateOpts): Promise<ApplyResult> {
   if (!existsSync(opts.tempPath)) {
@@ -213,7 +219,16 @@ export async function applyUpdate(opts: ApplyUpdateOpts): Promise<ApplyResult> {
       error: `failed to swap ${opts.tempPath} → ${opts.targetPath}: ${(e as Error).message}`,
     };
   }
-  return { ok: true, backupPath };
+  // Step 4: rename committed; the .bak is no longer needed. Remove
+  // it so it doesn't pollute the install dir's tab-completion. If
+  // the unlink fails (rare — would need a filesystem error), the
+  // .bak just sits there until the next update cleans it via step 1.
+  try {
+    await rm(backupPath, { force: true });
+  } catch {
+    /* best-effort cleanup; the next update will retry */
+  }
+  return { ok: true };
 }
 
 /**

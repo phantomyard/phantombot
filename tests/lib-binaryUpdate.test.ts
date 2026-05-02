@@ -155,19 +155,19 @@ describe("downloadAndVerify", () => {
 });
 
 describe("applyUpdate", () => {
-  test("backs up the old binary, swaps in the new one", async () => {
+  test("swaps in the new binary AND cleans up the .bak on success", async () => {
     const target = join(workdir, "phantombot");
     const tmp = join(workdir, "phantombot.update.tmp");
     await writeFile(target, "OLD", { mode: 0o755 });
     await writeFile(tmp, "NEW", { mode: 0o755 });
     const r = await applyUpdate({ tempPath: tmp, targetPath: target });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.backupPath).toBe(`${target}.bak`);
     expect((await readFile(target, "utf8"))).toBe("NEW");
-    expect((await readFile(r.backupPath, "utf8"))).toBe("OLD");
     // Tmp should be consumed by rename.
     expect(existsSync(tmp)).toBe(false);
+    // .bak existed transiently during the swap but is cleaned afterward
+    // (avoids polluting tab-completion in the install dir).
+    expect(existsSync(`${target}.bak`)).toBe(false);
   });
 
   test("missing tmp file → clear error", async () => {
@@ -197,9 +197,9 @@ describe("applyUpdate", () => {
     await writeFile(backup, "STALE_BAK", { mode: 0o444 });
     const r = await applyUpdate({ tempPath: tmp, targetPath: target });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
     expect(await readFile(target, "utf8")).toBe("NEW");
-    expect(await readFile(backup, "utf8")).toBe("OLD");
+    // .bak is cleaned post-swap — no rollback file lingers in the install dir.
+    expect(existsSync(backup)).toBe(false);
   });
 });
 
