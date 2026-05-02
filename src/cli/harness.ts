@@ -13,8 +13,12 @@ import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 
-export type HarnessId = "claude" | "pi";
-export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = ["claude", "pi"];
+export type HarnessId = "claude" | "pi" | "gemini";
+export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
+  "claude",
+  "pi",
+  "gemini",
+];
 
 export async function whichBinary(bin: string): Promise<string | undefined> {
   if (bin.startsWith("/")) {
@@ -45,6 +49,7 @@ export async function detectAvailability(
   return {
     claude: await whichBinary(config.harnesses.claude.bin),
     pi: await whichBinary(config.harnesses.pi.bin),
+    gemini: await whichBinary(config.harnesses.gemini.bin),
   };
 }
 

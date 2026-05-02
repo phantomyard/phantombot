@@ -31,10 +31,11 @@ export interface Config {
   configPath: string;
 
   harnesses: {
-    /** Order = primary → fallback. Recognized ids: "claude", "pi". */
+    /** Order = primary → fallback. Recognized ids: "claude", "pi", "gemini". */
     chain: string[];
     claude: { bin: string; model: string; fallbackModel: string };
     pi: { bin: string; maxPayloadBytes: number };
+    gemini: { bin: string; model: string };
   };
 
   channels: {
@@ -85,6 +86,7 @@ export async function loadConfig(): Promise<Config> {
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
   const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
+  const tomlGeminiHarness = (tomlHarnesses.gemini ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
@@ -150,6 +152,19 @@ export async function loadConfig(): Promise<Config> {
           asInt(process.env.PHANTOMBOT_PI_MAX_PAYLOAD) ??
           asInt(tomlPi.max_payload_bytes) ??
           1_500_000,
+      },
+
+      gemini: {
+        bin:
+          process.env.PHANTOMBOT_GEMINI_BIN ??
+          asString(tomlGeminiHarness.bin) ??
+          "gemini",
+        // Empty string = "let gemini-cli pick its own default" — see
+        // GeminiHarness for why we don't pass -m in that case.
+        model:
+          process.env.PHANTOMBOT_GEMINI_MODEL ??
+          asString(tomlGeminiHarness.model) ??
+          "",
       },
     },
 

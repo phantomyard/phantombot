@@ -14,9 +14,7 @@ import {
   runTelegramServer,
 } from "../channels/telegram.ts";
 import { type Config, loadConfig, personaDir } from "../config.ts";
-import { ClaudeHarness } from "../harnesses/claude.ts";
-import { PiHarness } from "../harnesses/pi.ts";
-import type { Harness } from "../harnesses/types.ts";
+import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
 import {
   acquireRunLock,
@@ -114,16 +112,6 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     lock.release();
   }
   return 0;
-}
-
-function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
-  const out: Harness[] = [];
-  for (const id of config.harnesses.chain) {
-    if (id === "claude") out.push(new ClaudeHarness(config.harnesses.claude));
-    else if (id === "pi") out.push(new PiHarness(config.harnesses.pi));
-    else err.write(`warning: unknown harness '${id}', skipping\n`);
-  }
-  return out;
 }
 
 export default defineCommand({
