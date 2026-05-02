@@ -198,6 +198,12 @@ phantombot task add \
 
 Manage from anywhere: ask Phantom on Telegram *"list my scheduled tasks"* and the agent runs `phantombot task list`. Cancel one: *"cancel the email check"* → `phantombot task cancel <id>`. CLI is the same — `phantombot task list / show / cancel`.
 
+## Voice replies in Telegram
+
+When a Telegram voice message comes in (and the configured provider can do TTS), phantombot transcribes via STT, runs the harness, and synthesizes the reply as a voice note. **For these voice-in/voice-out turns only**, phantombot appends a one-paragraph brevity directive to the system prompt — telling the model to keep the reply to 1-3 sentences (~30 seconds of speech, ≈100 tokens), drop work narration ("Let me check…"), and skip markdown the TTS would read awkwardly.
+
+The directive lives at the channel layer (`VOICE_REPLY_INSTRUCTION` in `src/channels/telegram.ts`), not in persona files — so text replies stay as detailed as the persona wants. If your voice notes still feel too long after this, the next lever is the persona's own tone in BOOT.md/SOUL.md, not a config knob.
+
 ## `phantombot notify` (agent's voice to you)
 
 ```
