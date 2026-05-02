@@ -17,7 +17,7 @@ The script:
 - Downloads the matching binary + `SHA256SUMS`, **verifies the checksum**, refuses on mismatch.
 - Creates `~/.local/bin/` if needed and installs `phantombot` at mode 0755.
 - Warns if `~/.local/bin` isn't on your `PATH`.
-- Launches `phantombot persona` so you can set up your first persona.
+- Launches `phantombot persona` so you can set up your first persona — unless stdin/stdout aren't a TTY (e.g. running headless or piped from `curl … | sh` in a non-interactive context), in which case it prints a "run this next" hint and exits cleanly.
 
 Environment overrides:
 
