@@ -31,7 +31,11 @@ import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 class FakeTransport implements TelegramTransport {
   pendingUpdates: TelegramMessage[] = [];
   sent: Array<{ chatId: number; text: string }> = [];
+  voiceSent: Array<{ chatId: number; mime: string; bytes: number }> = [];
   typing: number[] = [];
+  recording: number[] = [];
+  downloadedFileIds: string[] = [];
+  fakeFileBytes = Buffer.from([0x4f, 0x67, 0x67, 0x53]); // "OggS" magic
   receivedSignals: Array<AbortSignal | undefined> = [];
   async getUpdates(
     offset: number,
@@ -56,6 +60,22 @@ class FakeTransport implements TelegramTransport {
   }
   async sendTyping(chatId: number): Promise<void> {
     this.typing.push(chatId);
+  }
+  async sendRecording(chatId: number): Promise<void> {
+    this.recording.push(chatId);
+  }
+  async sendVoice(
+    chatId: number,
+    audio: Buffer,
+    mime: string,
+  ): Promise<void> {
+    this.voiceSent.push({ chatId, mime, bytes: audio.byteLength });
+  }
+  async downloadFile(
+    fileId: string,
+  ): Promise<{ data: Buffer; mime: string }> {
+    this.downloadedFileIds.push(fileId);
+    return { data: this.fakeFileBytes, mime: "audio/ogg" };
   }
 }
 
@@ -292,6 +312,157 @@ describe("runTelegramServer dispatch", () => {
     });
     expect(transport.sent).toEqual([{ chatId: 1001, text: "(error: boom)" }]);
     expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Voice round-trip
+// ---------------------------------------------------------------------------
+
+describe("runTelegramServer voice round-trip", () => {
+  const SAVED_KEY = process.env.PHANTOMBOT_OPENAI_API_KEY;
+  beforeEach(() => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "test-key";
+  });
+  afterEach(() => {
+    if (SAVED_KEY === undefined) delete process.env.PHANTOMBOT_OPENAI_API_KEY;
+    else process.env.PHANTOMBOT_OPENAI_API_KEY = SAVED_KEY;
+  });
+
+  function withVoiceConfig(): Config {
+    const c = baseConfig();
+    return {
+      ...c,
+      voice: {
+        provider: "openai",
+        openai: { model: "tts-1", voice: "nova", speed: 1 },
+      },
+    };
+  }
+
+  test("voice in: STT runs, file is downloaded, transcript drives the harness, reply goes back as voice", async () => {
+    const originalFetch = globalThis.fetch;
+    let whisperCalled = 0;
+    let ttsCalled = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        whisperCalled++;
+        return new Response(JSON.stringify({ text: "hello from voice" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("audio/speech")) {
+        ttsCalled++;
+        return new Response(Buffer.from([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "",
+        voice: { fileId: "abc-file", mimeType: "audio/ogg", durationS: 3 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "hi from kai" },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(transport.downloadedFileIds).toEqual(["abc-file"]);
+      expect(whisperCalled).toBe(1);
+      expect(harness.invocations).toBe(1);
+      expect(harness.lastRequest?.userMessage).toBe("hello from voice");
+      expect(transport.voiceSent).toHaveLength(1);
+      expect(transport.voiceSent[0]?.chatId).toBe(1001);
+      expect(transport.sent).toEqual([]);
+      expect(ttsCalled).toBe(1);
+      expect(transport.recording.length).toBeGreaterThan(0);
+      expect(transport.typing).toEqual([]);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("text in: still sends as text even when voice provider is configured", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hi via text",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hello back" },
+    ]);
+    await runTelegramServer({
+      config: withVoiceConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.sent).toEqual([
+      { chatId: 1001, text: "hello back" },
+    ]);
+    expect(transport.voiceSent).toEqual([]);
+    expect(transport.downloadedFileIds).toEqual([]);
+    expect(transport.typing.length).toBeGreaterThan(0);
+    expect(transport.recording).toEqual([]);
+  });
+
+  test("voice in but azure_edge (no STT) → text reply explaining why, no harness call", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      voice: { fileId: "xyz", mimeType: "audio/ogg", durationS: 5 },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const cfg = baseConfig();
+    cfg.voice = {
+      provider: "azure_edge",
+      azure_edge: {
+        voice: "en-US-JennyNeural",
+        rate: "+0%",
+        pitch: "+0Hz",
+      },
+    };
+    await runTelegramServer({
+      config: cfg,
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]?.text).toContain("voice messages need");
   });
 });
 
