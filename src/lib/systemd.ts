@@ -16,6 +16,25 @@ export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
 export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
 export const NIGHTLY_SERVICE_NAME = "phantombot-nightly.service";
 export const NIGHTLY_TIMER_NAME = "phantombot-nightly.timer";
+export const TICK_SERVICE_NAME = "phantombot-tick.service";
+export const TICK_TIMER_NAME = "phantombot-tick.timer";
+
+/**
+ * Both .env files we source into every phantombot unit:
+ *   ~/.config/phantombot/.env  — phantombot's own runtime secrets
+ *                                 (TTS keys; written by `phantombot voice`).
+ *   ~/.env                     — the agent's general-purpose credentials
+ *                                 (GITHUB_TOKEN, ssh passphrases, etc.;
+ *                                 written via `phantombot env set`).
+ *
+ * Leading `-` makes both optional — a fresh install with neither file
+ * present still starts cleanly. The merged process.env is what spawned
+ * harnesses inherit, so the agent finds credentials without re-reading
+ * the file.
+ */
+const ENVIRONMENT_FILE_LINES =
+  "EnvironmentFile=-%h/.config/phantombot/.env\n" +
+  "EnvironmentFile=-%h/.env";
 
 export function defaultUnitPath(): string {
   return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
@@ -37,6 +56,14 @@ export function nightlyTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", NIGHTLY_TIMER_NAME);
 }
 
+export function tickServicePath(): string {
+  return join(homedir(), ".config", "systemd", "user", TICK_SERVICE_NAME);
+}
+
+export function tickTimerPath(): string {
+  return join(homedir(), ".config", "systemd", "user", TICK_TIMER_NAME);
+}
+
 export interface SystemdUnitParams {
   /** Absolute path to the phantombot binary. */
   binPath: string;
@@ -52,9 +79,9 @@ export interface SystemdUnitParams {
  * - Environment=PATH ensures the harness's Bash tool can find
  *   `phantombot` (installed at ~/.local/bin/phantombot) when it tries
  *   to call `phantombot memory search ...`.
- * - EnvironmentFile=-%h/.config/phantombot/.env sources the secrets
- *   file (TTS keys, etc.). The leading `-` makes it OK if the file
- *   doesn't exist — phantombot voice writes it when first configured.
+ * - Two EnvironmentFile= lines: phantombot's own .env plus the user's
+ *   general-purpose ~/.env. The agent finds credentials in process.env
+ *   without re-reading either file. See ENVIRONMENT_FILE_LINES.
  */
 export function generateSystemdUnit(params: SystemdUnitParams): string {
   const exec = [params.binPath, ...params.args].map(quoteArg).join(" ");
@@ -71,7 +98,7 @@ ExecStart=${exec}
 Restart=on-failure
 RestartSec=5
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EnvironmentFile=-%h/.config/phantombot/.env
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 
@@ -95,7 +122,7 @@ Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 Type=oneshot
 ExecStart=${exec}
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EnvironmentFile=-%h/.config/phantombot/.env
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 `;
@@ -130,7 +157,7 @@ Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=2700
 Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EnvironmentFile=-%h/.config/phantombot/.env
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 `;
@@ -145,6 +172,47 @@ Description=Phantombot nightly timer (daily 02:00)
 OnCalendar=*-*-* 02:00:00
 AccuracySec=1min
 Persistent=true
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
+/** Generate the tick oneshot service body — runs due scheduled tasks. */
+export function generateTickService(binPath: string): string {
+  const exec = [binPath, "tick"].map(quoteArg).join(" ");
+  return `[Unit]
+Description=Phantombot tick — fire any scheduled tasks that are due
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${exec}
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+${ENVIRONMENT_FILE_LINES}
+StandardOutput=journal
+StandardError=journal
+`;
+}
+
+/**
+ * Generate the tick timer body — fires every minute.
+ *
+ * AccuracySec=1s keeps the tick close to the schedule edge instead of
+ * the default 1min slop, so an `0 * * * *` task fires near :00 instead
+ * of any-time-in-the-first-minute. Cheap because the tick itself is
+ * almost always a no-op (no due tasks).
+ */
+export function generateTickTimer(): string {
+  return `[Unit]
+Description=Phantombot tick timer (every minute)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=1s
+Persistent=false
 
 [Install]
 WantedBy=timers.target
@@ -333,6 +401,8 @@ export interface InstallOptions {
   heartbeatTimerPath?: string;
   nightlyServicePath?: string;
   nightlyTimerPath?: string;
+  tickServicePath?: string;
+  tickTimerPath?: string;
   systemctl: SystemctlRunner;
   out: WriteSink;
   err: WriteSink;
@@ -364,6 +434,15 @@ export async function installPhantombotUnit(
   await writeFile(ngTimer, generateNightlyTimer(), "utf8");
   opts.out.write(`wrote nightly units: ${ngService} + ${ngTimer}\n`);
 
+  // Tick service + timer
+  const tkService = opts.tickServicePath ?? tickServicePath();
+  const tkTimer = opts.tickTimerPath ?? tickTimerPath();
+  await mkdir(dirname(tkService), { recursive: true });
+  await mkdir(dirname(tkTimer), { recursive: true });
+  await writeFile(tkService, generateTickService(opts.binPath), "utf8");
+  await writeFile(tkTimer, generateTickTimer(), "utf8");
+  opts.out.write(`wrote tick units: ${tkService} + ${tkTimer}\n`);
+
   for (const args of [
     ["--user", "daemon-reload"],
     ["--user", "enable", PHANTOMBOT_UNIT_NAME],
@@ -372,6 +451,8 @@ export async function installPhantombotUnit(
     ["--user", "start", HEARTBEAT_TIMER_NAME],
     ["--user", "enable", NIGHTLY_TIMER_NAME],
     ["--user", "start", NIGHTLY_TIMER_NAME],
+    ["--user", "enable", TICK_TIMER_NAME],
+    ["--user", "start", TICK_TIMER_NAME],
   ]) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
@@ -382,7 +463,7 @@ export async function installPhantombotUnit(
     }
   }
   opts.out.write(
-    "enabled and started phantombot.service + heartbeat.timer + nightly.timer\n",
+    "enabled and started phantombot.service + heartbeat.timer + nightly.timer + tick.timer\n",
   );
   return { installed: true };
 }
@@ -399,6 +480,8 @@ export async function uninstallPhantombotUnit(
 ): Promise<{ removed: boolean }> {
   // stop + disable are best-effort: a half-installed unit is fine to remove.
   for (const args of [
+    ["--user", "stop", TICK_TIMER_NAME],
+    ["--user", "disable", TICK_TIMER_NAME],
     ["--user", "stop", NIGHTLY_TIMER_NAME],
     ["--user", "disable", NIGHTLY_TIMER_NAME],
     ["--user", "stop", HEARTBEAT_TIMER_NAME],
@@ -428,6 +511,8 @@ export async function uninstallPhantombotUnit(
     heartbeatTimerPath(),
     nightlyServicePath(),
     nightlyTimerPath(),
+    tickServicePath(),
+    tickTimerPath(),
   ]) {
     if (existsSync(path)) {
       await unlink(path);
@@ -475,7 +560,7 @@ export interface EnsureUserSystemdEnvOptions {
  * If XDG_RUNTIME_DIR is already set in env (e.g. real ssh / machinectl
  * shell session), do nothing.
  *
- * Otherwise — typical when reaching kai via `sudo su -`, where PAM does
+ * Otherwise — typical when reaching a service user via `sudo su -`, where PAM does
  * not propagate XDG_RUNTIME_DIR to the target user — derive it from
  * `/run/user/<uid>`. If that directory exists (it will when linger is
  * enabled), set both XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS so

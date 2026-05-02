@@ -66,6 +66,9 @@ export function xdgConfigHome(): string {
 export function xdgDataHome(): string {
   return process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
 }
+export function xdgStateHome(): string {
+  return process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
+}
 
 const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 

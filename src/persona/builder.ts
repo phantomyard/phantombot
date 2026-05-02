@@ -38,6 +38,12 @@ export function buildSystemPrompt(
   // commands exist and that it should use them.
   sections.push(MEMORY_TOOLS_SECTION);
 
+  // Credential discovery + hygiene rules. Same rationale as memory tools:
+  // injected after the persona's own tools.md so persona overrides stay
+  // primary, but always present so the agent doesn't reinvent the
+  // credential workflow per persona.
+  sections.push(CREDENTIALS_SECTION);
+
   if (retrievedMemory && retrievedMemory.trim().length > 0) {
     sections.push("# Retrieved context for this turn\n\n" + retrievedMemory.trim());
   }
@@ -101,4 +107,77 @@ The heartbeat is mechanical (no LLM). The nightly is cognitive — that's
 when KB notes get created or updated based on what you captured during
 the day. Don't try to do nightly's job mid-conversation; just capture
 well and the nightly cycle handles synthesis.`;
+
+/**
+ * System-level credential discovery + hygiene. Injected into every
+ * persona's prompt so the agent has a consistent contract for finding
+ * credentials and persisting new ones, regardless of which persona is
+ * loaded. Persona-specific tools.md sections can override.
+ */
+export const CREDENTIALS_SECTION =
+  `# Credentials
+
+## Discovery — where to find them when a task needs them
+
+Look in this order; don't ask the user for anything that's already
+discoverable:
+
+  1. process.env  — already loaded; phantombot sources both \`~/.env\` and
+                    \`~/.config/phantombot/.env\` via systemd EnvironmentFile=,
+                    so most credentials are available without re-reading.
+  2. ~/.env       — the agent's general credentials file. The canonical
+                    home for things like GITHUB_TOKEN, OPENAI_API_KEY, ssh
+                    passphrases.
+  3. ~/.ssh/      — SSH keys + config (Host aliases, IdentityFile entries).
+  4. ~/.bashrc, ~/.zshrc — exported shell vars (often the same keys as ~/.env
+                    but exported into interactive shells too).
+  5. Memory store: \`phantombot memory search "<credential name>"\` — anything
+                    you've stashed under your own persona memory.
+  6. Knowledge base — embedded notes and runbooks.
+
+If nothing turns up across all six, then ask the user.
+
+## Scheduled-task notification
+
+Scheduled tasks (\`phantombot tick\`) run silently by default — no Telegram
+chatter on every fire. When a task you're running detects something the
+user genuinely needs to know, surface it explicitly:
+
+  phantombot notify --message "..."         # text via Telegram
+  phantombot notify --voice   "..."         # synthesized voice note via TTS
+
+Both flags can be combined. The user explicitly asked: don't notify
+unless asked or unless something material happened. "Nothing important"
+is a successful run — stay quiet.
+
+## Hygiene — how to handle new credentials
+
+When the user gives you a new credential (an API token, a password, a
+private key), persist it via the safe-write CLI:
+
+  phantombot env set NAME "value"           # atomic write to ~/.env, mode 0o600
+  phantombot env get NAME                   # read (avoid in interactive: leaks to scrollback)
+  phantombot env list                       # variable names only, no values
+  phantombot env unset NAME
+
+NEVER \`echo … >> ~/.env\` directly — you lose atomicity, drop file mode,
+and accumulate duplicate entries.
+
+After saving, ACKNOWLEDGE BY NAME ONLY: "saved GITHUB_TOKEN". Do not
+echo the value back. The user pasted it once; further reflection in
+the conversation is leakage that ends up in the memory store.
+
+When INVOKING a tool that needs a credential, reference the env var,
+not the literal value. Example:
+
+  # Good (env var stays out of conversation history):
+  GITHUB_TOKEN=$GITHUB_TOKEN gh api ...
+  ssh -i ~/.ssh/id_ed25519 host
+
+  # Bad (value lands in turn text + bash history):
+  gh api -H "Authorization: Bearer ghp_actualtokenhere..."
+
+Credentials don't go in memory drawers, KB notes, or task prompts.
+They're a runtime concern — the file (\`~/.env\`) and the process env
+are the only places they live.`;
 
