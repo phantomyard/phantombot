@@ -31,6 +31,7 @@ import {
   personaDir,
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 import { loadState, saveState } from "../state.ts";
@@ -260,6 +261,10 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
  * Read the personas directory and return the names of subdirectories
  * (each subdir = one persona). Returns [] if the personas dir doesn't
  * exist yet — fresh installs have no personas.
+ *
+ * Non-ENOENT read failures (EACCES, EIO, etc.) still return [] so the
+ * caller's UI keeps working, but they're logged to stderr first so the
+ * user has a hint that the empty list isn't the same as "no personas."
  */
 export function listExistingPersonas(config: Config): string[] {
   if (!existsSync(config.personasDir)) return [];
@@ -268,7 +273,11 @@ export function listExistingPersonas(config: Config): string[] {
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
       .sort();
-  } catch {
+  } catch (e) {
+    log.warn("persona: failed to read personas dir", {
+      personasDir: config.personasDir,
+      error: (e as Error).message,
+    });
     return [];
   }
 }
