@@ -17,6 +17,12 @@
 
 import type { Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
+import {
+  synthesize,
+  sttSupported,
+  transcribe,
+  ttsSupported,
+} from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import type { MemoryStore } from "../memory/store.ts";
@@ -27,7 +33,14 @@ export interface TelegramMessage {
   chatId: number;
   fromUserId: number;
   fromUsername?: string;
+  /** For text messages — the text. For voice messages — empty string until STT runs. */
   text: string;
+  /** Set when the incoming message was a voice note. */
+  voice?: {
+    fileId: string;
+    mimeType: string;
+    durationS: number;
+  };
 }
 
 export interface TelegramTransport {
@@ -44,6 +57,12 @@ export interface TelegramTransport {
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
   sendMessage(chatId: number, text: string): Promise<void>;
   sendTyping(chatId: number): Promise<void>;
+  /** Send an OGG-Opus voice note. */
+  sendVoice(chatId: number, audio: Buffer, mime: string): Promise<void>;
+  /** Send the "recording voice" status indicator. */
+  sendRecording(chatId: number): Promise<void>;
+  /** Download a file by Telegram file_id; returns audio bytes + content-type. */
+  downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
 }
 
 /**
@@ -115,6 +134,69 @@ export class HttpTelegramTransport implements TelegramTransport {
       /* typing indicator is best-effort */
     });
   }
+
+  async sendRecording(chatId: number): Promise<void> {
+    const url = `https://api.telegram.org/bot${this.token}/sendChatAction`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "record_voice" }),
+    }).catch(() => {});
+  }
+
+  async sendVoice(
+    chatId: number,
+    audio: Buffer,
+    mime: string,
+  ): Promise<void> {
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set(
+      "voice",
+      new Blob([audio], { type: mime || "audio/ogg" }),
+      "voice.ogg",
+    );
+    const res = await fetch(
+      `https://api.telegram.org/bot${this.token}/sendVoice`,
+      { method: "POST", body: form },
+    );
+    if (!res.ok) {
+      log.warn("telegram: sendVoice non-OK", {
+        chatId,
+        status: res.status,
+      });
+    }
+  }
+
+  async downloadFile(
+    fileId: string,
+  ): Promise<{ data: Buffer; mime: string }> {
+    // Two-step: getFile to get file_path, then GET the file URL.
+    const meta = await fetch(
+      `https://api.telegram.org/bot${this.token}/getFile?file_id=${encodeURIComponent(fileId)}`,
+    );
+    const metaBody = (await meta.json()) as {
+      ok?: boolean;
+      result?: { file_path?: string };
+    };
+    if (!metaBody.ok || !metaBody.result?.file_path) {
+      throw new Error(`getFile failed for ${fileId}`);
+    }
+    const file = await fetch(
+      `https://api.telegram.org/file/bot${this.token}/${metaBody.result.file_path}`,
+    );
+    const data = Buffer.from(await file.arrayBuffer());
+    const mime =
+      file.headers.get("content-type") ?? guessMimeFromPath(metaBody.result.file_path);
+    return { data, mime };
+  }
+}
+
+function guessMimeFromPath(path: string): string {
+  if (path.endsWith(".oga") || path.endsWith(".ogg")) return "audio/ogg";
+  if (path.endsWith(".mp3")) return "audio/mpeg";
+  if (path.endsWith(".m4a")) return "audio/mp4";
+  return "audio/ogg";
 }
 
 interface TelegramRawUpdate {
@@ -123,12 +205,17 @@ interface TelegramRawUpdate {
     chat?: { id?: number };
     from?: { id?: number; username?: string };
     text?: string;
+    voice?: {
+      duration?: number;
+      mime_type?: string;
+      file_id?: string;
+    };
   };
 }
 
 /**
  * Pure parser exposed for testing. Consumes Telegram getUpdates result
- * objects and returns only the message-with-text updates we care about.
+ * objects and returns the messages we care about — text or voice.
  */
 export function parseGetUpdatesResult(
   raw: TelegramRawUpdate[],
@@ -142,19 +229,36 @@ export function parseGetUpdatesResult(
     }
     const msg = u.message;
     if (
-      typeof u.update_id === "number" &&
-      msg &&
-      typeof msg.chat?.id === "number" &&
-      typeof msg.from?.id === "number" &&
-      typeof msg.text === "string" &&
-      msg.text.length > 0
+      typeof u.update_id !== "number" ||
+      !msg ||
+      typeof msg.chat?.id !== "number" ||
+      typeof msg.from?.id !== "number"
     ) {
+      continue;
+    }
+
+    if (typeof msg.text === "string" && msg.text.length > 0) {
       updates.push({
         updateId: u.update_id,
         chatId: msg.chat.id,
         fromUserId: msg.from.id,
         fromUsername: msg.from.username,
         text: msg.text,
+      });
+      continue;
+    }
+    if (msg.voice && typeof msg.voice.file_id === "string") {
+      updates.push({
+        updateId: u.update_id,
+        chatId: msg.chat.id,
+        fromUserId: msg.from.id,
+        fromUsername: msg.from.username,
+        text: "", // filled by STT before harness dispatch
+        voice: {
+          fileId: msg.voice.file_id,
+          mimeType: msg.voice.mime_type ?? "audio/ogg",
+          durationS: msg.voice.duration ?? 0,
+        },
       });
     }
   }
@@ -225,21 +329,66 @@ export async function runTelegramServer(
       }
 
       const startedAt = Date.now();
+      const isVoice = Boolean(msg.voice);
       log.info("telegram: incoming", {
         chatId: msg.chatId,
         fromUserId: msg.fromUserId,
         fromUsername: msg.fromUsername,
         textLength: msg.text.length,
         persona: input.persona,
+        voice: isVoice,
+        voiceDurationS: msg.voice?.durationS,
       });
 
-      // Send typing immediately, then refresh every typingRefreshMs while
-      // the harness works. Telegram's typing indicator lasts ~5s; without
-      // this the user sees "typing…" disappear and assumes the bot died.
-      void input.transport.sendTyping(msg.chatId);
+      // For voice messages: download → transcribe → use the transcript
+      // as the user message before invoking the harness.
+      if (isVoice && msg.voice) {
+        if (!sttSupported(input.config)) {
+          await input.transport.sendMessage(
+            msg.chatId,
+            `(voice messages need OpenAI or ElevenLabs configured — current provider is '${input.config.voice.provider}')`,
+          );
+          continue;
+        }
+        try {
+          const file = await input.transport.downloadFile(msg.voice.fileId);
+          const r = await transcribe(input.config, file.data, file.mime);
+          if (!r.ok) {
+            log.error("telegram: STT failed", { error: r.error });
+            await input.transport.sendMessage(
+              msg.chatId,
+              `(voice transcription failed: ${r.error})`,
+            );
+            continue;
+          }
+          msg.text = r.text;
+          log.info("telegram: STT ok", {
+            chatId: msg.chatId,
+            transcriptChars: r.text.length,
+          });
+        } catch (e) {
+          log.error("telegram: voice download failed", {
+            error: (e as Error).message,
+          });
+          await input.transport.sendMessage(
+            msg.chatId,
+            `(couldn't download your voice message: ${(e as Error).message})`,
+          );
+          continue;
+        }
+      }
+
+      // Send the right indicator depending on which way we'll reply.
+      // Refresh both kinds every typingRefreshMs while the harness works.
+      const willReplyWithVoice = isVoice && ttsSupported(input.config);
+      const sendStatus = () =>
+        willReplyWithVoice
+          ? input.transport.sendRecording(msg.chatId)
+          : input.transport.sendTyping(msg.chatId);
+      void sendStatus();
       const refreshMs = input.typingRefreshMs ?? 4000;
       const typingTimer = setInterval(() => {
-        void input.transport.sendTyping(msg.chatId);
+        void sendStatus();
       }, refreshMs);
 
       let reply = "";
@@ -287,10 +436,31 @@ export async function runTelegramServer(
         : reply.length > 0
           ? reply
           : "(no reply)";
+
+      // Voice in → voice out (when TTS is configured AND no error).
+      // Text in → text out, always.
+      let sentAsVoice = false;
       try {
-        await input.transport.sendMessage(msg.chatId, outText);
+        if (willReplyWithVoice && !errored && reply.length > 0) {
+          const r = await synthesize(input.config, reply);
+          if (r.ok) {
+            await input.transport.sendVoice(
+              msg.chatId,
+              r.audio.data,
+              r.audio.mime,
+            );
+            sentAsVoice = true;
+          } else {
+            log.warn("telegram: TTS failed; falling back to text", {
+              error: r.error,
+            });
+            await input.transport.sendMessage(msg.chatId, outText);
+          }
+        } else {
+          await input.transport.sendMessage(msg.chatId, outText);
+        }
       } catch (e) {
-        log.error("telegram: sendMessage failed", {
+        log.error("telegram: send failed", {
           error: (e as Error).message,
           chatId: msg.chatId,
         });
@@ -302,6 +472,8 @@ export async function runTelegramServer(
         replyChars: outText.length,
         progressEvents: progressCount,
         harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
+        modality: sentAsVoice ? "voice" : "text",
+        inputModality: isVoice ? "voice" : "text",
         ok: !errored,
       });
     }
