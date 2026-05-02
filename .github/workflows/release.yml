@@ -38,6 +38,15 @@ jobs:
       - name: Typecheck
         run: bun tsc --noEmit
 
+      # Hotfix for a latent test-isolation bug: installPhantombotUnit writes
+      # heartbeat/nightly unit files to a hardcoded ~/.config/systemd/user/
+      # path even when tests pass an isolated tmpdir for the main unit. The
+      # dir exists on a developer's box but not on a fresh runner, so writeFile
+      # fails with ENOENT. Pre-creating the dir unblocks the pipeline; the
+      # proper fix (parameterizing the helper paths) is tracked as a follow-up.
+      - name: Pre-create ~/.config/systemd/user (hotfix; see issue tracker)
+        run: mkdir -p "$HOME/.config/systemd/user"
+
       - name: Test
         run: bun test
 
