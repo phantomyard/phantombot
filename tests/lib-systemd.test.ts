@@ -45,10 +45,32 @@ class CaptureStream {
 
 let workdir: string;
 let unitPath: string;
+let hbServicePath: string;
+let hbTimerPath: string;
+let ngServicePath: string;
+let ngTimerPath: string;
+
+/**
+ * Build the four heartbeat/nightly path overrides every install test
+ * needs. Without these, installPhantombotUnit would write to the real
+ * ~/.config/systemd/user/ on the test runner — the bug fixed in #44.
+ */
+function tmpInstallPaths() {
+  return {
+    heartbeatServicePath: hbServicePath,
+    heartbeatTimerPath: hbTimerPath,
+    nightlyServicePath: ngServicePath,
+    nightlyTimerPath: ngTimerPath,
+  };
+}
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-systemd-"));
   unitPath = join(workdir, "phantombot.service");
+  hbServicePath = join(workdir, "phantombot-heartbeat.service");
+  hbTimerPath = join(workdir, "phantombot-heartbeat.timer");
+  ngServicePath = join(workdir, "phantombot-nightly.service");
+  ngTimerPath = join(workdir, "phantombot-nightly.timer");
 });
 
 afterEach(async () => {
@@ -86,6 +108,7 @@ describe("installPhantombotUnit", () => {
     const result = await installPhantombotUnit({
       binPath: "/usr/local/bin/phantombot",
       unitPath,
+      ...tmpInstallPaths(),
       systemctl: sys,
       out,
       err,
@@ -118,6 +141,7 @@ describe("installPhantombotUnit", () => {
     const result = await installPhantombotUnit({
       binPath: "/usr/local/bin/phantombot",
       unitPath,
+      ...tmpInstallPaths(),
       systemctl: sys,
       out,
       err,

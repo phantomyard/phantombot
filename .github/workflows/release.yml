@@ -7,6 +7,12 @@ name: Release on PR merge
 # Why every PR (not manual tags): the user runs `phantombot update --force
 # --restart` from cron and wants always-fresh binaries. If a PR shouldn't
 # release, we'll add a `release:skip` label gate later.
+#
+# Why bun-linux-x64-baseline (and not plain bun-linux-x64): one of the
+# deploy targets (the `kw-openclaw` supervisor box that runs kai) is older
+# silicon without AVX2. The non-baseline target SIGILLs on launch there.
+# Don't 'optimise' to plain x64 without verifying every deploy target has
+# AVX2 — see the SIGILL post-mortem from the May 2026 first deploy.
 
 on:
   pull_request:
@@ -30,24 +36,17 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned to a major to keep releases reproducible. A point-release
+          # regression in `bun --compile` would otherwise silently break
+          # every PR merge until upstream ships a fix, and historical
+          # binaries wouldn't carry a recoverable build-toolchain version.
+          bun-version: 1.x
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bun tsc --noEmit
-
-      # Hotfix for a latent test-isolation bug: installPhantombotUnit writes
-      # heartbeat/nightly unit files to a hardcoded ~/.config/systemd/user/
-      # path even when tests pass an isolated tmpdir for the main unit. The
-      # dir exists on a developer's box but not on a fresh runner, so writeFile
-      # fails with ENOENT. The pollution side of the same bug (real files left
-      # behind in dev `~/.config/systemd/user/` after every `bun test` run) is
-      # tracked separately. When the proper fix lands, delete this step.
-      # Tracked: https://github.com/andrewagrahamhodges/phantombot/issues/44
-      - name: Pre-create ~/.config/systemd/user (hotfix; see #44)
-        run: mkdir -p "${HOME:?HOME unset}/.config/systemd/user"
 
       - name: Test
         run: bun test
@@ -59,7 +58,15 @@ jobs:
         run: |
           VERSION="1.0.${PR_NUMBER}"
           TAG="v${VERSION}"
-          printf 'export const VERSION = "%s";\n' "$VERSION" > src/version.ts
+          # Replace only the literal placeholder so the doc comment in
+          # src/version.ts (and any future sibling const) survives. The
+          # placeholder must round-trip exactly; see the file's comment.
+          sed -i "s/0.1.0-dev/${VERSION}/" src/version.ts
+          # Sanity check: the constant must now match VERSION exactly,
+          # otherwise the binary would lie about its own version and
+          # phantombot update would loop.
+          grep -q "VERSION = \"${VERSION}\"" src/version.ts \
+            || { echo "version injection failed"; cat src/version.ts; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 

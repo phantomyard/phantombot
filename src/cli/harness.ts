@@ -162,15 +162,19 @@ export async function maybePromptRestart(
 
 /**
  * Re-render the installed systemd unit if it's stale; print a one-line
- * notice when it happened. Exposed so tests can verify the rewrite path
- * without going through the @clack confirm prompt in maybePromptRestart.
+ * notice when it happened (and surface the backup path so a hand-edit is
+ * recoverable). Exposed so tests can verify the rewrite path without
+ * going through the @clack confirm prompt in maybePromptRestart.
  */
 export async function maybeUpgradeUnit(
   svc: ServiceControl,
-): Promise<{ rerendered: boolean }> {
+): Promise<{ rerendered: boolean; backupPath?: string }> {
   const r = await svc.rerenderUnitIfStale();
   if (r.rerendered) {
-    p.note("systemd unit upgraded to current template", "Unit");
+    const note = r.backupPath
+      ? `systemd unit upgraded to current template\nprevious contents saved to ${r.backupPath}`
+      : "systemd unit upgraded to current template";
+    p.note(note, "Unit");
   }
   return r;
 }

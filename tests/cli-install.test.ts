@@ -37,10 +37,24 @@ class CaptureStream {
 
 let workdir: string;
 let unitPath: string;
+let installPaths: {
+  heartbeatServicePath: string;
+  heartbeatTimerPath: string;
+  nightlyServicePath: string;
+  nightlyTimerPath: string;
+};
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
   unitPath = join(workdir, "phantombot.service");
+  // Without these, runInstall would write the heartbeat/nightly units
+  // into the real ~/.config/systemd/user/ on the test runner — see #44.
+  installPaths = {
+    heartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
+    heartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
+    nightlyServicePath: join(workdir, "phantombot-nightly.service"),
+    nightlyTimerPath: join(workdir, "phantombot-nightly.timer"),
+  };
 });
 
 afterEach(async () => {
@@ -105,6 +119,7 @@ describe("runInstall", () => {
     const code = await runInstall({
       binPath: "/usr/local/bin/phantombot",
       unitPath,
+      ...installPaths,
       systemctl: sys,
       out,
       err,
@@ -123,6 +138,7 @@ describe("runInstall", () => {
     const code = await runInstall({
       binPath: "/usr/local/bin/phantombot",
       unitPath,
+      ...installPaths,
       systemctl: sys,
       out,
       err,

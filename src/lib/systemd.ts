@@ -219,23 +219,31 @@ export interface ServiceControl {
    * reach the running service even after restart. The voice/telegram/harness
    * TUIs call this before restart so the saved config actually takes effect.
    */
-  rerenderUnitIfStale(): Promise<{ rerendered: boolean }>;
+  rerenderUnitIfStale(): Promise<{ rerendered: boolean; backupPath?: string }>;
 }
 
 /**
  * Compare the on-disk unit at unitPath against the canonical template for
  * binPath. If absent or different, write the canonical template and run
- * `systemctl --user daemon-reload`. Returns whether a rerender happened.
+ * `systemctl --user daemon-reload`. Returns whether a rerender happened
+ * and, if it did, the path of any backup written.
  *
  * Pure on the inputs — caller picks the unit path, the bin path, and the
  * systemctl runner. Tests inject a fake runner; callers in production use
  * BunSystemctlRunner with an env that has XDG_RUNTIME_DIR set.
+ *
+ * Backup behaviour: when an existing unit differs from the template,
+ * its old contents are saved to `${unitPath}.bak` *before* we overwrite,
+ * so a hand-edit (which the user really shouldn't be doing — phantombot
+ * owns this file) is recoverable instead of silently lost. The .bak path
+ * is returned so callers can surface it. A fresh install (current === undefined)
+ * has nothing to back up; in that case backupPath is undefined.
  */
 export async function ensureUnitCurrent(opts: {
   unitPath: string;
   binPath: string;
   systemctl: SystemctlRunner;
-}): Promise<{ rerendered: boolean }> {
+}): Promise<{ rerendered: boolean; backupPath?: string }> {
   const expected = generateSystemdUnit({
     binPath: opts.binPath,
     args: ["run"],
@@ -246,9 +254,14 @@ export async function ensureUnitCurrent(opts: {
   }
   if (current === expected) return { rerendered: false };
   await mkdir(dirname(opts.unitPath), { recursive: true });
+  let backupPath: string | undefined;
+  if (current !== undefined) {
+    backupPath = `${opts.unitPath}.bak`;
+    await writeFile(backupPath, current, "utf8");
+  }
   await writeFile(opts.unitPath, expected, "utf8");
   await opts.systemctl.run(["--user", "daemon-reload"]);
-  return { rerendered: true };
+  return { rerendered: true, backupPath };
 }
 
 /**
@@ -258,7 +271,10 @@ export async function ensureUnitCurrent(opts: {
  * the user-systemd bus is reachable (no linger → nothing we can daemon-
  * reload anyway).
  */
-async function defaultRerenderUnitIfStale(): Promise<{ rerendered: boolean }> {
+async function defaultRerenderUnitIfStale(): Promise<{
+  rerendered: boolean;
+  backupPath?: string;
+}> {
   const binPath = process.execPath;
   if (basename(binPath) !== "phantombot") return { rerendered: false };
   const unitPath = defaultUnitPath();
@@ -306,6 +322,17 @@ export function defaultServiceControl(): ServiceControl {
 export interface InstallOptions {
   binPath: string;
   unitPath: string;
+  /**
+   * Optional path overrides for the heartbeat/nightly companion units.
+   * Default to the per-user XDG locations (~/.config/systemd/user/...).
+   * Tests override these to keep writes inside a tmpdir; without that,
+   * `bun test` would create real files in the developer's actual
+   * ~/.config/systemd/user/ that the test cleanup never removes.
+   */
+  heartbeatServicePath?: string;
+  heartbeatTimerPath?: string;
+  nightlyServicePath?: string;
+  nightlyTimerPath?: string;
   systemctl: SystemctlRunner;
   out: WriteSink;
   err: WriteSink;
@@ -320,15 +347,19 @@ export async function installPhantombotUnit(
   opts.out.write(`wrote unit file: ${opts.unitPath}\n`);
 
   // Heartbeat service + timer
-  const hbService = heartbeatServicePath();
-  const hbTimer = heartbeatTimerPath();
+  const hbService = opts.heartbeatServicePath ?? heartbeatServicePath();
+  const hbTimer = opts.heartbeatTimerPath ?? heartbeatTimerPath();
+  await mkdir(dirname(hbService), { recursive: true });
+  await mkdir(dirname(hbTimer), { recursive: true });
   await writeFile(hbService, generateHeartbeatService(opts.binPath), "utf8");
   await writeFile(hbTimer, generateHeartbeatTimer(), "utf8");
   opts.out.write(`wrote heartbeat units: ${hbService} + ${hbTimer}\n`);
 
   // Nightly service + timer
-  const ngService = nightlyServicePath();
-  const ngTimer = nightlyTimerPath();
+  const ngService = opts.nightlyServicePath ?? nightlyServicePath();
+  const ngTimer = opts.nightlyTimerPath ?? nightlyTimerPath();
+  await mkdir(dirname(ngService), { recursive: true });
+  await mkdir(dirname(ngTimer), { recursive: true });
   await writeFile(ngService, generateNightlyService(opts.binPath), "utf8");
   await writeFile(ngTimer, generateNightlyTimer(), "utf8");
   opts.out.write(`wrote nightly units: ${ngService} + ${ngTimer}\n`);
