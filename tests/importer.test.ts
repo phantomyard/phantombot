@@ -161,11 +161,13 @@ describe("importPersona — recursive memory/ and kb/ subdirs", () => {
     await writeFile(join(source, "kb", "Home.md"), "# Home");
     const r = await importPersona({ source, personasDir, as: "x" });
     expect(r.copied).toContain("BOOT.md");
-    expect(r.copied).toContain("decisions.md");
-    expect(r.copied).toContain("2026-05-02.md");
-    expect(r.copied).toContain("Home.md");
-    // Nested entry — relative to its containing top-level subdir
-    expect(r.copied.some((c) => c.includes("DeyeInverter"))).toBe(true);
+    // Files under memory/ and kb/ keep their parent-dir prefix in the
+    // summary, so a top-level `decisions.md` (if it ever existed) would
+    // be distinguishable from `memory/decisions.md`.
+    expect(r.copied).toContain("memory/decisions.md");
+    expect(r.copied).toContain("memory/2026-05-02.md");
+    expect(r.copied).toContain("kb/Home.md");
+    expect(r.copied).toContain("kb/concepts/DeyeInverter.md");
     const { join: j } = await import("node:path");
     const { readFile } = await import("node:fs/promises");
     const dec = await readFile(
@@ -193,7 +195,7 @@ describe("importPersona — recursive memory/ and kb/ subdirs", () => {
     await writeFile(join(source, "kb", ".secret"), "shh");
     await writeFile(join(source, "kb", "Note.md"), "note");
     const r = await importPersona({ source, personasDir, as: "x" });
-    expect(r.copied).toContain("Note.md");
+    expect(r.copied).toContain("kb/Note.md");
     expect(r.copied).not.toContain("data.json");
     expect(r.copied).not.toContain(".secret");
     expect(r.skipped.some((s) => s.includes("data.json"))).toBe(true);
