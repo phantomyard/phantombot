@@ -130,23 +130,39 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 }
 
 /**
+ * A confirm prompt: returns true to proceed, false to skip. Default
+ * wraps `@clack/prompts` confirm; tests inject a stub so they can drive
+ * `maybePromptRestart` end-to-end without a real TTY.
+ */
+export type ConfirmFn = (message: string) => Promise<boolean>;
+
+const defaultConfirm: ConfirmFn = async (message) => {
+  const r = await p.confirm({ message, initialValue: true });
+  return !p.isCancel(r) && r === true;
+};
+
+/**
  * Shared post-apply hook for the config-mutating TUIs.
  *
  * Two steps. Always: re-render the on-disk systemd unit if it's stale (a
  * pre-Phase-29 unit lacks `EnvironmentFile=` and silently swallows the
  * .env secrets the TUI just wrote). Then: if phantombot is running, offer
  * to restart it inline so the change takes effect.
+ *
+ * `confirm` is parameterized so tests can drive the full ordering
+ * (rerender → confirm → restart) without going through @clack's
+ * non-TTY-friendly prompt.
  */
 export async function maybePromptRestart(
   svc: ServiceControl,
+  confirm: ConfirmFn = defaultConfirm,
 ): Promise<void> {
   await maybeUpgradeUnit(svc);
   if (!(await svc.isActive())) return;
-  const restart = await p.confirm({
-    message: "phantombot is currently running. Restart to apply changes?",
-    initialValue: true,
-  });
-  if (p.isCancel(restart) || !restart) {
+  const proceed = await confirm(
+    "phantombot is currently running. Restart to apply changes?",
+  );
+  if (!proceed) {
     p.note(
       "skipped — restart later with: systemctl --user restart phantombot",
       "Restart",
