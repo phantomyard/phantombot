@@ -740,6 +740,234 @@ describe("runTelegramServer typing refresh", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Slash commands via the polling loop
+// ---------------------------------------------------------------------------
+
+describe("runTelegramServer slash commands", () => {
+  test("/help is handled by the channel layer (no harness call)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/help",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toContain("/stop");
+    expect(transport.sent[0]!.text).toContain("/status");
+  });
+
+  test("/reset clears prior history for this chat (and only this chat)", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "old",
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:9999",
+      role: "user",
+      text: "untouched",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/reset",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(
+      await memory.recentTurns("phantom", "telegram:1001", 10),
+    ).toEqual([]);
+    expect(
+      await memory.recentTurns("phantom", "telegram:9999", 10),
+    ).toEqual([{ role: "user", text: "untouched" }]);
+    expect(transport.sent[0]!.text).toContain("cleared 1 turn");
+  });
+
+  test("/stop aborts an in-flight turn and suppresses the would-be reply", async () => {
+    // A harness that yields one text chunk then waits 5s (long enough that
+    // the test-level abort is the only way it ever finishes within the
+    // bun-test default timeout).
+    class AbortableHarness implements Harness {
+      readonly id = "abortable";
+      lastSignalAborted: boolean | undefined;
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "text", text: "thinking…" };
+        await new Promise<void>((resolve) => {
+          if (req.signal?.aborted) return resolve();
+          const onAbort = () => {
+            this.lastSignalAborted = true;
+            resolve();
+          };
+          req.signal?.addEventListener("abort", onAbort, { once: true });
+          setTimeout(resolve, 5000);
+        });
+        yield {
+          type: "error",
+          error: "stopped",
+          recoverable: false,
+        };
+      }
+    }
+
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "kick off something slow",
+    });
+    // /stop arrives ~30ms later, after the harness is already in-flight.
+    setTimeout(() => {
+      transport.pendingUpdates.push({
+        updateId: 2,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "/stop",
+      });
+    }, 30);
+
+    const harness = new AbortableHarness();
+    const ac = new AbortController();
+    // Stop the polling loop after a moment; the turn worker drain in the
+    // server's `finally` will wait for the aborted turn to resolve.
+    setTimeout(() => ac.abort(), 200);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      signal: ac.signal,
+    });
+
+    // The /stop reply lands. The aborted turn does NOT send a follow-up
+    // (no "(error: stopped)" leak).
+    const stopReplies = transport.sent.filter((s) =>
+      s.text.startsWith("stopped"),
+    );
+    expect(stopReplies.length).toBe(1);
+    const errorReplies = transport.sent.filter((s) =>
+      s.text.includes("(error:"),
+    );
+    expect(errorReplies).toEqual([]);
+    expect(harness.lastSignalAborted).toBe(true);
+    // No turn was persisted (failed turn → no history).
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored).toEqual([]);
+  });
+
+  test("/status reports the current primary harness", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/status",
+    });
+    const claude = new ScriptedHarness("claude", []);
+    const pi = new ScriptedHarness("pi", []);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [claude, pi],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toContain("harness: claude");
+    expect(transport.sent[0]!.text).toContain("claude → pi");
+  });
+
+  test("/harness <id> switches the primary so the next turn uses it", async () => {
+    const claude = new ScriptedHarness("claude", [
+      { type: "done", finalText: "from claude" },
+    ]);
+    const pi = new ScriptedHarness("pi", [
+      { type: "done", finalText: "from pi" },
+    ]);
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push(
+      { updateId: 1, chatId: 1001, fromUserId: 42, text: "/harness pi" },
+      { updateId: 2, chatId: 1001, fromUserId: 42, text: "hi" },
+    );
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [claude, pi],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    // After the switch, the second message hits pi, not claude.
+    expect(pi.invocations).toBe(1);
+    expect(claude.invocations).toBe(0);
+    const userReply = transport.sent.find((s) => s.text === "from pi");
+    expect(userReply).toBeDefined();
+  });
+
+  test("unknown /commands fall through to the LLM (so personas can own /remember etc.)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/remember the milk",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "noted" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.userMessage).toBe("/remember the milk");
+    expect(transport.sent).toEqual([{ chatId: 1001, text: "noted" }]);
+  });
+});
+
 describe("HttpTelegramTransport AbortSignal", () => {
   test("aborted fetch returns empty result without throwing", async () => {
     // Replace globalThis.fetch with one that throws AbortError immediately

@@ -86,16 +86,32 @@ export class PiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same state-machine fix as the Claude harness — boolean instead of
-    // a 3-state enum so TS narrowing doesn't fight us.
-    let timedOut = false;
+    // Same kill-cause state machine as the Claude / Gemini harnesses.
+    // Tracks why we killed the subprocess so the post-loop branch yields
+    // a recoverable error (timeout) vs non-recoverable (abort by /stop).
+    let killCause: "timeout" | "aborted" | undefined;
     const timeout = setTimeout(() => {
-      if (!timedOut) {
-        timedOut = true;
+      if (!killCause) {
+        killCause = "timeout";
         log.warn("pi.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
     }, req.timeoutMs);
+
+    const onAbort = () => {
+      if (!killCause) {
+        killCause = "aborted";
+        log.info("pi.invoke aborted via signal");
+        proc.kill("SIGTERM");
+      }
+    };
+    if (req.signal) {
+      if (req.signal.aborted) {
+        onAbort();
+      } else {
+        req.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     void consumeStderr(proc.stderr);
 
@@ -127,13 +143,24 @@ export class PiHarness implements Harness {
       }
     } finally {
       clearTimeout(timeout);
+      if (req.signal && !req.signal.aborted) {
+        req.signal.removeEventListener("abort", onAbort);
+      }
     }
 
-    if (timedOut) {
+    if (killCause === "timeout") {
       yield {
         type: "error",
         error: `pi timed out after ${req.timeoutMs}ms`,
         recoverable: true,
+      };
+      return;
+    }
+    if (killCause === "aborted") {
+      yield {
+        type: "error",
+        error: "stopped",
+        recoverable: false,
       };
       return;
     }

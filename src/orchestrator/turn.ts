@@ -48,6 +48,8 @@ export interface TurnInput {
   noHistory?: boolean;
   /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
   systemPromptSuffix?: string;
+  /** External abort signal from channel layer (e.g. /stop command). Propagated to harnesses. */
+  signal?: AbortSignal;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -83,6 +85,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     history,
     workingDir: input.agentDir,
     timeoutMs: input.timeoutMs,
+    signal: input.signal,
   })) {
     if (chunk.type === "text") finalText += chunk.text;
     if (chunk.type === "done") {

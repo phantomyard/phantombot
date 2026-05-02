@@ -105,7 +105,7 @@ export async function loadConfig(): Promise<Config> {
       (asInt(toml.turn_timeout_s) !== undefined
         ? asInt(toml.turn_timeout_s)! * 1000
         : undefined) ??
-      600_000,
+      120_000,
 
     personasDir:
       process.env.PHANTOMBOT_PERSONAS_DIR ??

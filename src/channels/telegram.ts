@@ -28,6 +28,10 @@ import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import {
+  type ActiveTurnHandle,
+  handleSlashCommand,
+} from "./commands.ts";
 
 export interface TelegramMessage {
   updateId: number;
@@ -291,14 +295,49 @@ export interface RunTelegramServerInput {
 /**
  * The long-poll loop. Returns when signal is aborted, or after one
  * iteration if oneShot is set. Otherwise runs forever.
+ *
+ * Concurrency model:
+ *
+ *   - The polling loop never `await`s a turn directly. That was the
+ *     bug that broke /stop in the old design — a hung tool call inside
+ *     the harness blocked the polling loop, so even the next slash
+ *     command from the same user couldn't be picked up off the wire.
+ *
+ *   - Slash commands are handled INLINE in the polling loop, so they
+ *     respond immediately even when an LLM turn is running.
+ *
+ *   - Regular messages are queued onto a per-chat promise chain. Same
+ *     chat → still serial (the LLM's history would get scrambled
+ *     otherwise). Different chats → parallel.
+ *
+ *   - Each in-flight turn registers an AbortController under
+ *     `activeTurns[chatId]` so /stop can abort it.
+ *
+ *   - On `oneShot`, we drain in-flight workers before returning so tests
+ *     can assert on `transport.sent` without racing the workers.
  */
 export async function runTelegramServer(
   input: RunTelegramServerInput,
 ): Promise<void> {
+  const serverStartedAt = Date.now();
   const tg = input.config.channels.telegram!;
   const allowedSet = new Set(tg.allowedUserIds);
   const checkAllowed = (userId: number): boolean =>
     allowedSet.size === 0 || allowedSet.has(userId);
+
+  // /harness reorders this in place — keep a local mutable copy so we
+  // don't mutate the caller's array.
+  const harnesses: Harness[] = [...input.harnesses];
+
+  // Active turns per chat — keyed by chatId. Read by /stop and /status.
+  const activeTurns = new Map<number, ActiveTurnHandle>();
+
+  // Per-chat promise chain so messages within one chat stay ordered.
+  // We chain `next = prev.then(work)` and store `next` here. When the
+  // next message arrives, it chains off the latest entry.
+  const chatChains = new Map<number, Promise<void>>();
+  // Set of every in-flight worker promise — drained at shutdown / oneShot.
+  const inFlight = new Set<Promise<void>>();
 
   if (allowedSet.size === 0) {
     log.warn(
@@ -308,185 +347,281 @@ export async function runTelegramServer(
 
   let offset = 0;
 
-  do {
-    if (input.signal?.aborted) return;
-
-    const { updates, nextOffset } = await input.transport.getUpdates(
-      offset,
-      tg.pollTimeoutS,
-      input.signal,
-    );
-    offset = nextOffset;
-
-    for (const msg of updates) {
+  try {
+    do {
       if (input.signal?.aborted) return;
 
-      if (!checkAllowed(msg.fromUserId)) {
-        log.info("telegram: rejecting unauthorized user", {
+      const { updates, nextOffset } = await input.transport.getUpdates(
+        offset,
+        tg.pollTimeoutS,
+        input.signal,
+      );
+      offset = nextOffset;
+
+      for (const msg of updates) {
+        if (input.signal?.aborted) return;
+
+        if (!checkAllowed(msg.fromUserId)) {
+          log.info("telegram: rejecting unauthorized user", {
+            fromUserId: msg.fromUserId,
+            fromUsername: msg.fromUsername,
+          });
+          continue;
+        }
+
+        const isVoice = Boolean(msg.voice);
+        log.info("telegram: incoming", {
+          chatId: msg.chatId,
           fromUserId: msg.fromUserId,
           fromUsername: msg.fromUsername,
+          textLength: msg.text.length,
+          persona: input.persona,
+          voice: isVoice,
+          voiceDurationS: msg.voice?.durationS,
         });
-        continue;
-      }
 
-      const startedAt = Date.now();
-      const isVoice = Boolean(msg.voice);
-      log.info("telegram: incoming", {
-        chatId: msg.chatId,
-        fromUserId: msg.fromUserId,
-        fromUsername: msg.fromUsername,
-        textLength: msg.text.length,
-        persona: input.persona,
-        voice: isVoice,
-        voiceDurationS: msg.voice?.durationS,
-      });
-
-      // For voice messages: download → transcribe → use the transcript
-      // as the user message before invoking the harness.
-      if (isVoice && msg.voice) {
-        const stt = sttSupport(input.config);
-        if (!stt.ok) {
-          await input.transport.sendMessage(
-            msg.chatId,
-            voiceUnavailableMessage(stt),
-          );
-          continue;
-        }
-        try {
-          const file = await input.transport.downloadFile(msg.voice.fileId);
-          const r = await transcribe(input.config, file.data, file.mime);
-          if (!r.ok) {
-            log.error("telegram: STT failed", { error: r.error });
-            await input.transport.sendMessage(
-              msg.chatId,
-              `(voice transcription failed: ${r.error})`,
-            );
+        // Slash commands: handled INLINE so they bypass the per-chat queue
+        // and any in-flight turn. Voice messages are never slash commands
+        // (the body is empty until STT runs, by which point we've already
+        // committed to the LLM path).
+        if (!isVoice && msg.text.startsWith("/")) {
+          const result = await handleSlashCommand(msg.text, {
+            chatId: msg.chatId,
+            persona: input.persona,
+            conversation: `telegram:${msg.chatId}`,
+            memory: input.memory,
+            harnesses,
+            startedAt: serverStartedAt,
+            activeTurn: activeTurns.get(msg.chatId),
+          });
+          if (result) {
+            try {
+              await input.transport.sendMessage(msg.chatId, result.reply);
+            } catch (e) {
+              log.error("telegram: slash reply send failed", {
+                error: (e as Error).message,
+                chatId: msg.chatId,
+              });
+            }
             continue;
           }
-          msg.text = r.text;
-          log.info("telegram: STT ok", {
-            chatId: msg.chatId,
-            transcriptChars: r.text.length,
-          });
-        } catch (e) {
-          log.error("telegram: voice download failed", {
-            error: (e as Error).message,
-          });
-          await input.transport.sendMessage(
-            msg.chatId,
-            `(couldn't download your voice message: ${(e as Error).message})`,
-          );
-          continue;
+          // Unrecognized /command — fall through to the LLM.
         }
+
+        // Regular message: enqueue onto this chat's serial chain.
+        const prev = chatChains.get(msg.chatId) ?? Promise.resolve();
+        const next = prev.then(() =>
+          processChatMessage(msg, {
+            input,
+            harnesses,
+            activeTurns,
+          }),
+        );
+        // Detach completed entries so the maps don't leak.
+        const tracked = next.finally(() => {
+          if (chatChains.get(msg.chatId) === tracked) {
+            chatChains.delete(msg.chatId);
+          }
+          inFlight.delete(tracked);
+        });
+        chatChains.set(msg.chatId, tracked);
+        inFlight.add(tracked);
       }
+    } while (!input.oneShot);
+  } finally {
+    // Drain pending workers so tests can assert on transport state, and
+    // production shutdowns don't leave zombie subprocesses behind.
+    if (inFlight.size > 0) {
+      await Promise.allSettled([...inFlight]);
+    }
+  }
+}
 
-      // Send the right indicator depending on which way we'll reply.
-      // Refresh both kinds every typingRefreshMs while the harness works.
-      const willReplyWithVoice = isVoice && ttsSupported(input.config);
-      const sendStatus = () =>
-        willReplyWithVoice
-          ? input.transport.sendRecording(msg.chatId)
-          : input.transport.sendTyping(msg.chatId);
-      void sendStatus();
-      const refreshMs = input.typingRefreshMs ?? 4000;
-      const typingTimer = setInterval(() => {
-        void sendStatus();
-      }, refreshMs);
+/**
+ * Process one (non-slash) message: STT if voice, run the harness chain,
+ * send the reply. Stays self-contained so the polling loop can fire-and-
+ * track via Promise.allSettled at shutdown.
+ */
+async function processChatMessage(
+  msg: TelegramMessage,
+  ctx: {
+    input: RunTelegramServerInput;
+    harnesses: Harness[];
+    activeTurns: Map<number, ActiveTurnHandle>;
+  },
+): Promise<void> {
+  const { input, harnesses, activeTurns } = ctx;
+  const startedAt = Date.now();
+  const isVoice = Boolean(msg.voice);
 
-      let reply = "";
-      let errored: string | undefined;
-      let progressCount = 0;
-      let chosenHarness: string | undefined;
-      try {
-        for await (const chunk of runTurn({
-          persona: input.persona,
-          conversation: `telegram:${msg.chatId}`,
-          userMessage: msg.text,
-          agentDir: input.agentDir,
-          harnesses: input.harnesses,
-          memory: input.memory,
-          timeoutMs: input.config.turnTimeoutMs,
-          // Voice-in + voice-out: append a brevity directive for this turn
-          // only. Keeps voice notes short + spoken-friendly without putting
-          // brevity rules in persona files (which would also throttle text
-          // replies, where verbosity is fine).
-          systemPromptSuffix: willReplyWithVoice
-            ? VOICE_REPLY_INSTRUCTION
-            : undefined,
-        })) {
-          if (chunk.type === "text") reply += chunk.text;
-          if (chunk.type === "progress") {
-            progressCount++;
-            log.debug("telegram: progress", {
-              chatId: msg.chatId,
-              note: chunk.note.slice(0, 200),
-            });
-          }
-          if (chunk.type === "done") {
-            reply = chunk.finalText;
-            const meta = chunk.meta as
-              | { harnessId?: unknown }
-              | undefined;
-            if (typeof meta?.harnessId === "string") {
-              chosenHarness = meta.harnessId;
-            }
-          }
-          if (chunk.type === "error") errored = chunk.error;
-        }
-      } catch (e) {
-        errored = (e as Error).message;
-        log.error("telegram: turn threw", { error: errored });
-      } finally {
-        clearInterval(typingTimer);
+  // For voice messages: download → transcribe → use the transcript as
+  // the user message before invoking the harness.
+  if (isVoice && msg.voice) {
+    const stt = sttSupport(input.config);
+    if (!stt.ok) {
+      await input.transport.sendMessage(
+        msg.chatId,
+        voiceUnavailableMessage(stt),
+      );
+      return;
+    }
+    try {
+      const file = await input.transport.downloadFile(msg.voice.fileId);
+      const r = await transcribe(input.config, file.data, file.mime);
+      if (!r.ok) {
+        log.error("telegram: STT failed", { error: r.error });
+        await input.transport.sendMessage(
+          msg.chatId,
+          `(voice transcription failed: ${r.error})`,
+        );
+        return;
       }
+      msg.text = r.text;
+      log.info("telegram: STT ok", {
+        chatId: msg.chatId,
+        transcriptChars: r.text.length,
+      });
+    } catch (e) {
+      log.error("telegram: voice download failed", {
+        error: (e as Error).message,
+      });
+      await input.transport.sendMessage(
+        msg.chatId,
+        `(couldn't download your voice message: ${(e as Error).message})`,
+      );
+      return;
+    }
+  }
 
-      const outText = errored
-        ? `(error: ${errored})`
-        : reply.length > 0
-          ? reply
-          : "(no reply)";
+  // Send the right indicator depending on which way we'll reply.
+  // Refresh both kinds every typingRefreshMs while the harness works.
+  const willReplyWithVoice = isVoice && ttsSupported(input.config);
+  const sendStatus = () =>
+    willReplyWithVoice
+      ? input.transport.sendRecording(msg.chatId)
+      : input.transport.sendTyping(msg.chatId);
+  void sendStatus();
+  const refreshMs = input.typingRefreshMs ?? 4000;
+  const typingTimer = setInterval(() => {
+    void sendStatus();
+  }, refreshMs);
 
-      // Voice in → voice out (when TTS is configured AND no error).
-      // Text in → text out, always.
-      let sentAsVoice = false;
-      try {
-        if (willReplyWithVoice && !errored && reply.length > 0) {
-          const r = await synthesize(input.config, reply);
-          if (r.ok) {
-            await input.transport.sendVoice(
-              msg.chatId,
-              r.audio.data,
-              r.audio.mime,
-            );
-            sentAsVoice = true;
-          } else {
-            log.warn("telegram: TTS failed; falling back to text", {
-              error: r.error,
-            });
-            await input.transport.sendMessage(msg.chatId, outText);
-          }
-        } else {
-          await input.transport.sendMessage(msg.chatId, outText);
-        }
-      } catch (e) {
-        log.error("telegram: send failed", {
-          error: (e as Error).message,
+  // Register the AbortController so /stop can find us.
+  const controller = new AbortController();
+  const turnHandle: ActiveTurnHandle = {
+    controller,
+    startTime: startedAt,
+  };
+  activeTurns.set(msg.chatId, turnHandle);
+
+  let reply = "";
+  let errored: string | undefined;
+  let progressCount = 0;
+  let chosenHarness: string | undefined;
+  try {
+    for await (const chunk of runTurn({
+      persona: input.persona,
+      conversation: `telegram:${msg.chatId}`,
+      userMessage: msg.text,
+      agentDir: input.agentDir,
+      harnesses,
+      memory: input.memory,
+      timeoutMs: input.config.turnTimeoutMs,
+      signal: controller.signal,
+      // Voice-in + voice-out: append a brevity directive for this turn
+      // only. Keeps voice notes short + spoken-friendly without putting
+      // brevity rules in persona files (which would also throttle text
+      // replies, where verbosity is fine).
+      systemPromptSuffix: willReplyWithVoice
+        ? VOICE_REPLY_INSTRUCTION
+        : undefined,
+    })) {
+      if (chunk.type === "text") reply += chunk.text;
+      if (chunk.type === "progress") {
+        progressCount++;
+        log.debug("telegram: progress", {
           chatId: msg.chatId,
+          note: chunk.note.slice(0, 200),
         });
       }
-
-      log.info("telegram: complete", {
-        chatId: msg.chatId,
-        durationMs: Date.now() - startedAt,
-        replyChars: outText.length,
-        progressEvents: progressCount,
-        harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
-        modality: sentAsVoice ? "voice" : "text",
-        inputModality: isVoice ? "voice" : "text",
-        ok: !errored,
-      });
+      if (chunk.type === "done") {
+        reply = chunk.finalText;
+        const meta = chunk.meta as { harnessId?: unknown } | undefined;
+        if (typeof meta?.harnessId === "string") {
+          chosenHarness = meta.harnessId;
+        }
+      }
+      if (chunk.type === "error") errored = chunk.error;
     }
-  } while (!input.oneShot);
+  } catch (e) {
+    errored = (e as Error).message;
+    log.error("telegram: turn threw", { error: errored });
+  } finally {
+    clearInterval(typingTimer);
+    // Only deregister if we're still the active turn for this chat.
+    // (Defensive: a /reset or /stop could have replaced us.)
+    if (activeTurns.get(msg.chatId) === turnHandle) {
+      activeTurns.delete(msg.chatId);
+    }
+  }
+
+  // /stop: the controller was aborted from outside. The reply text
+  // already came through from the slash command handler — don't send
+  // a second "(error: stopped)" message.
+  const wasStopped = controller.signal.aborted;
+  if (wasStopped) {
+    log.info("telegram: turn stopped by /stop", {
+      chatId: msg.chatId,
+      durationMs: Date.now() - startedAt,
+    });
+    return;
+  }
+
+  const outText = errored
+    ? `(error: ${errored})`
+    : reply.length > 0
+      ? reply
+      : "(no reply)";
+
+  // Voice in → voice out (when TTS is configured AND no error).
+  // Text in → text out, always.
+  let sentAsVoice = false;
+  try {
+    if (willReplyWithVoice && !errored && reply.length > 0) {
+      const r = await synthesize(input.config, reply);
+      if (r.ok) {
+        await input.transport.sendVoice(
+          msg.chatId,
+          r.audio.data,
+          r.audio.mime,
+        );
+        sentAsVoice = true;
+      } else {
+        log.warn("telegram: TTS failed; falling back to text", {
+          error: r.error,
+        });
+        await input.transport.sendMessage(msg.chatId, outText);
+      }
+    } else {
+      await input.transport.sendMessage(msg.chatId, outText);
+    }
+  } catch (e) {
+    log.error("telegram: send failed", {
+      error: (e as Error).message,
+      chatId: msg.chatId,
+    });
+  }
+
+  log.info("telegram: complete", {
+    chatId: msg.chatId,
+    durationMs: Date.now() - startedAt,
+    replyChars: outText.length,
+    progressEvents: progressCount,
+    harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
+    modality: sentAsVoice ? "voice" : "text",
+    inputModality: isVoice ? "voice" : "text",
+    ok: !errored,
+  });
 }
 
 /**

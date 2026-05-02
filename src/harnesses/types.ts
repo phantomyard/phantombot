@@ -26,6 +26,8 @@ export interface HarnessRequest {
   workingDir?: string;
   /** Per-turn wall-clock cap. After this, the harness should kill the subprocess and yield a recoverable error. */
   timeoutMs: number;
+  /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a recoverable error — same outcome as timeout, different trigger. */
+  signal?: AbortSignal;
 }
 
 export type HarnessChunk =

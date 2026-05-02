@@ -119,16 +119,33 @@ export class GeminiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same boolean-state-machine pattern as the Claude / Pi harnesses:
-    // a 3-state enum fights TS narrowing inside the for-await loop.
-    let timedOut = false;
+    // Same kill-cause state machine as the Claude / Pi harnesses. We track
+    // why we killed the subprocess so the post-loop branch can yield a
+    // recoverable error (timeout — try next harness) vs non-recoverable
+    // (abort — user said /stop).
+    let killCause: "timeout" | "aborted" | undefined;
     const timeout = setTimeout(() => {
-      if (!timedOut) {
-        timedOut = true;
+      if (!killCause) {
+        killCause = "timeout";
         log.warn("gemini.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
     }, req.timeoutMs);
+
+    const onAbort = () => {
+      if (!killCause) {
+        killCause = "aborted";
+        log.info("gemini.invoke aborted via signal");
+        proc.kill("SIGTERM");
+      }
+    };
+    if (req.signal) {
+      if (req.signal.aborted) {
+        onAbort();
+      } else {
+        req.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     // Write the system prompt + history to stdin and close it. gemini
     // appends the -p value (the new user message) to whatever stdin
@@ -155,13 +172,24 @@ export class GeminiHarness implements Harness {
       finalText += decoder.decode();
     } finally {
       clearTimeout(timeout);
+      if (req.signal && !req.signal.aborted) {
+        req.signal.removeEventListener("abort", onAbort);
+      }
     }
 
-    if (timedOut) {
+    if (killCause === "timeout") {
       yield {
         type: "error",
         error: `gemini timed out after ${req.timeoutMs}ms`,
         recoverable: true,
+      };
+      return;
+    }
+    if (killCause === "aborted") {
+      yield {
+        type: "error",
+        error: "stopped",
+        recoverable: false,
       };
       return;
     }

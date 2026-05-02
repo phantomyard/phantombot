@@ -103,16 +103,32 @@ export class ClaudeHarness implements Harness {
     // a SIGTERM-by-timeout kill must be distinguishable from a normal exit.
     // The pre-Bun version emitted `done` with whatever partial text it had
     // collected, which masked timeouts as successful short replies. We track
-    // the timeout via a closure-captured boolean so the post-loop branch
-    // surfaces the timeout as a recoverable error instead.
-    let timedOut = false;
+    // the kill cause so the post-loop branch surfaces the right error:
+    //   - "timeout"  → recoverable, orchestrator tries the next harness
+    //   - "aborted"  → non-recoverable, user said /stop and meant it
+    let killCause: "timeout" | "aborted" | undefined;
     const timeout = setTimeout(() => {
-      if (!timedOut) {
-        timedOut = true;
+      if (!killCause) {
+        killCause = "timeout";
         log.warn("claude.invoke timeout", { timeoutMs: req.timeoutMs });
         proc.kill("SIGTERM");
       }
     }, req.timeoutMs);
+
+    const onAbort = () => {
+      if (!killCause) {
+        killCause = "aborted";
+        log.info("claude.invoke aborted via signal");
+        proc.kill("SIGTERM");
+      }
+    };
+    if (req.signal) {
+      if (req.signal.aborted) {
+        onAbort();
+      } else {
+        req.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     // Drain stderr in the background; surface as debug logs only.
     void consumeStderr(proc.stderr);
@@ -146,13 +162,24 @@ export class ClaudeHarness implements Harness {
       }
     } finally {
       clearTimeout(timeout);
+      if (req.signal && !req.signal.aborted) {
+        req.signal.removeEventListener("abort", onAbort);
+      }
     }
 
-    if (timedOut) {
+    if (killCause === "timeout") {
       yield {
         type: "error",
         error: `claude timed out after ${req.timeoutMs}ms`,
         recoverable: true,
+      };
+      return;
+    }
+    if (killCause === "aborted") {
+      yield {
+        type: "error",
+        error: "stopped",
+        recoverable: false,
       };
       return;
     }
