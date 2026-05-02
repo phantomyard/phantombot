@@ -13,7 +13,13 @@
  */
 
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { xdgConfigHome } from "../config.ts";
 
@@ -42,12 +48,23 @@ export async function saveEnvFile(
     if (!/^[A-Z_][A-Z0-9_]*$/i.test(k)) continue; // skip invalid keys silently
     lines.push(`${k}=${quote(v)}`);
   }
-  await writeFile(path, lines.join("\n") + "\n", "utf8");
-  // Best-effort permission lock — secrets file should not be world-readable.
+  // Write to a tempfile at mode 0o600 then atomically rename over the target.
+  // Avoids the chmod race where a fresh file is briefly world-readable at
+  // umask-default 0o644 between writeFile() and a follow-up chmod().
+  const tmp = `${path}.tmp`;
   try {
-    await chmod(path, 0o600);
-  } catch {
-    /* fine on filesystems that don't support chmod (e.g. some FUSE) */
+    await writeFile(tmp, lines.join("\n") + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(tmp, path);
+  } catch (e) {
+    try {
+      await unlink(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw e;
   }
 }
 
@@ -77,10 +94,15 @@ export function parseEnv(text: string): EnvVars {
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim();
     let val = line.slice(eq + 1).trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
+    if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) {
+      // Double-quoted: undo the escapes that quote() applies. Order matters:
+      // unescape \\ → \ first, then \" → ", so a literal `\"` two-char value
+      // (written as "\\\"") round-trips correctly without double-processing.
+      val = val
+        .slice(1, -1)
+        .replace(/\\\\/g, "\\")
+        .replace(/\\"/g, '"');
+    } else if (val.startsWith("'") && val.endsWith("'") && val.length >= 2) {
       val = val.slice(1, -1);
     }
     out[key] = val;
