@@ -24,19 +24,17 @@ export type TranscribeResult =
   | { ok: false; error: string };
 
 /**
- * Tri-state diagnostic for TTS/STT support. The reason+provider+envVar
- * fields let UIs render an honest, actionable message instead of a single
- * catch-all "voice unavailable" string. Used by the Telegram channel to
- * tell the user *why* a voice message can't be processed.
+ * Tri-state diagnostic for TTS/STT support. Each `{ ok: false }` variant
+ * carries exactly the fields its reason needs — `envVar` is required on
+ * `key_missing` and absent on the other two — so consumers can render an
+ * honest, actionable message without `??` defenses against malformed
+ * payloads.
  */
 export type AudioSupport =
   | { ok: true }
-  | {
-      ok: false;
-      reason: "provider_none" | "provider_no_stt" | "key_missing";
-      provider: VoiceProvider;
-      envVar?: string;
-    };
+  | { ok: false; reason: "provider_none"; provider: VoiceProvider }
+  | { ok: false; reason: "provider_no_stt"; provider: VoiceProvider }
+  | { ok: false; reason: "key_missing"; provider: VoiceProvider; envVar: string };
 
 /** Diagnose whether the configured provider can perform STT. */
 export function sttSupport(config: Config): AudioSupport {

@@ -26,6 +26,16 @@ import type { WriteSink } from "../lib/io.ts";
 export interface RunInstallInput {
   binPath?: string;
   unitPath?: string;
+  /**
+   * Optional path overrides for the heartbeat/nightly companion units —
+   * pass-through to installPhantombotUnit. Tests use these to keep all
+   * unit writes inside a tmpdir; production leaves them undefined and
+   * the helper picks the per-user XDG locations.
+   */
+  heartbeatServicePath?: string;
+  heartbeatTimerPath?: string;
+  nightlyServicePath?: string;
+  nightlyTimerPath?: string;
   out?: WriteSink;
   err?: WriteSink;
   /** Override systemctl runner for testing. */
@@ -67,6 +77,10 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   const result = await installPhantombotUnit({
     binPath,
     unitPath,
+    heartbeatServicePath: input.heartbeatServicePath,
+    heartbeatTimerPath: input.heartbeatTimerPath,
+    nightlyServicePath: input.nightlyServicePath,
+    nightlyTimerPath: input.nightlyTimerPath,
     systemctl,
     out,
     err,
