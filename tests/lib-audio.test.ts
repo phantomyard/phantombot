@@ -5,9 +5,11 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  sttSupport,
   sttSupported,
   synthesize,
   transcribe,
+  ttsSupport,
   ttsSupported,
 } from "../src/lib/audio.ts";
 import type { Config } from "../src/config.ts";
@@ -118,6 +120,72 @@ describe("ttsSupported / sttSupported", () => {
     process.env.PHANTOMBOT_ELEVENLABS_API_KEY = "k";
     expect(ttsSupported(makeConfig("elevenlabs"))).toBe(true);
     expect(sttSupported(makeConfig("elevenlabs"))).toBe(true);
+  });
+});
+
+describe("ttsSupport / sttSupport (diagnostic variants)", () => {
+  test("none → provider_none for both", () => {
+    expect(ttsSupport(makeConfig("none"))).toEqual({
+      ok: false,
+      reason: "provider_none",
+      provider: "none",
+    });
+    expect(sttSupport(makeConfig("none"))).toEqual({
+      ok: false,
+      reason: "provider_none",
+      provider: "none",
+    });
+  });
+
+  test("azure_edge → ok for tts, provider_no_stt for stt", () => {
+    expect(ttsSupport(makeConfig("azure_edge"))).toEqual({ ok: true });
+    expect(sttSupport(makeConfig("azure_edge"))).toEqual({
+      ok: false,
+      reason: "provider_no_stt",
+      provider: "azure_edge",
+    });
+  });
+
+  test("openai without key → key_missing names env var for both", () => {
+    expect(ttsSupport(makeConfig("openai"))).toEqual({
+      ok: false,
+      reason: "key_missing",
+      provider: "openai",
+      envVar: "PHANTOMBOT_OPENAI_API_KEY",
+    });
+    expect(sttSupport(makeConfig("openai"))).toEqual({
+      ok: false,
+      reason: "key_missing",
+      provider: "openai",
+      envVar: "PHANTOMBOT_OPENAI_API_KEY",
+    });
+  });
+
+  test("openai with key → ok for both", () => {
+    process.env.PHANTOMBOT_OPENAI_API_KEY = "k";
+    expect(ttsSupport(makeConfig("openai"))).toEqual({ ok: true });
+    expect(sttSupport(makeConfig("openai"))).toEqual({ ok: true });
+  });
+
+  test("elevenlabs without key → key_missing names env var for both", () => {
+    expect(ttsSupport(makeConfig("elevenlabs"))).toEqual({
+      ok: false,
+      reason: "key_missing",
+      provider: "elevenlabs",
+      envVar: "PHANTOMBOT_ELEVENLABS_API_KEY",
+    });
+    expect(sttSupport(makeConfig("elevenlabs"))).toEqual({
+      ok: false,
+      reason: "key_missing",
+      provider: "elevenlabs",
+      envVar: "PHANTOMBOT_ELEVENLABS_API_KEY",
+    });
+  });
+
+  test("elevenlabs with key → ok for both", () => {
+    process.env.PHANTOMBOT_ELEVENLABS_API_KEY = "k";
+    expect(ttsSupport(makeConfig("elevenlabs"))).toEqual({ ok: true });
+    expect(sttSupport(makeConfig("elevenlabs"))).toEqual({ ok: true });
   });
 });
 

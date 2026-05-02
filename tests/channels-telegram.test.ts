@@ -462,7 +462,46 @@ describe("runTelegramServer voice round-trip", () => {
     });
     expect(harness.invocations).toBe(0);
     expect(transport.sent).toHaveLength(1);
-    expect(transport.sent[0]?.text).toContain("voice messages need");
+    // provider_no_stt diagnostic — names the provider and points at the fix.
+    expect(transport.sent[0]?.text).toContain("'azure_edge'");
+    expect(transport.sent[0]?.text).toContain("phantombot voice");
+  });
+
+  test("voice in but openai key missing → key_missing diagnostic names provider + env var", async () => {
+    // Drop the OPENAI key so sttSupport returns key_missing.
+    const saved = process.env.PHANTOMBOT_OPENAI_API_KEY;
+    delete process.env.PHANTOMBOT_OPENAI_API_KEY;
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "",
+        voice: { fileId: "abc", mimeType: "audio/ogg", durationS: 2 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "should not run" },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(harness.invocations).toBe(0);
+      expect(transport.sent).toHaveLength(1);
+      const text = transport.sent[0]!.text;
+      expect(text).toContain("'openai'");
+      expect(text).toContain("PHANTOMBOT_OPENAI_API_KEY");
+      expect(text).toContain("phantombot install");
+    } finally {
+      if (saved === undefined) delete process.env.PHANTOMBOT_OPENAI_API_KEY;
+      else process.env.PHANTOMBOT_OPENAI_API_KEY = saved;
+    }
   });
 });
 

@@ -18,10 +18,12 @@ import type { ServiceControl } from "../src/lib/systemd.ts";
 const svcInactive: ServiceControl = {
   isActive: async () => false,
   restart: async () => ({ ok: true }),
+  rerenderUnitIfStale: async () => ({ rerendered: false }),
 };
 const svcActive: ServiceControl = {
   isActive: async () => true,
   restart: async () => ({ ok: true }),
+  rerenderUnitIfStale: async () => ({ rerendered: false }),
 };
 
 class CaptureStream {

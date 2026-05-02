@@ -130,13 +130,17 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 }
 
 /**
- * Shared post-apply hook for the config-mutating TUIs. If phantombot is
- * currently running under systemd, offer to restart it inline so the
- * change takes effect.
+ * Shared post-apply hook for the config-mutating TUIs.
+ *
+ * Two steps. Always: re-render the on-disk systemd unit if it's stale (a
+ * pre-Phase-29 unit lacks `EnvironmentFile=` and silently swallows the
+ * .env secrets the TUI just wrote). Then: if phantombot is running, offer
+ * to restart it inline so the change takes effect.
  */
 export async function maybePromptRestart(
   svc: ServiceControl,
 ): Promise<void> {
+  await maybeUpgradeUnit(svc);
   if (!(await svc.isActive())) return;
   const restart = await p.confirm({
     message: "phantombot is currently running. Restart to apply changes?",
@@ -154,6 +158,21 @@ export async function maybePromptRestart(
     r.ok ? "restarted" : `restart failed: ${r.stderr ?? "unknown"}`,
     "Restart",
   );
+}
+
+/**
+ * Re-render the installed systemd unit if it's stale; print a one-line
+ * notice when it happened. Exposed so tests can verify the rewrite path
+ * without going through the @clack confirm prompt in maybePromptRestart.
+ */
+export async function maybeUpgradeUnit(
+  svc: ServiceControl,
+): Promise<{ rerendered: boolean }> {
+  const r = await svc.rerenderUnitIfStale();
+  if (r.rerendered) {
+    p.note("systemd unit upgraded to current template", "Unit");
+  }
+  return r;
 }
 
 export default defineCommand({

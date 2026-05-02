@@ -7,6 +7,7 @@
  */
 
 import type { Config } from "../config.ts";
+import type { VoiceProvider } from "./voice.ts";
 
 export interface SynthesizedAudio {
   data: Buffer;
@@ -23,31 +24,62 @@ export type TranscribeResult =
   | { ok: false; error: string };
 
 /**
- * True if the configured provider can do STT (i.e. transcribe Telegram
- * voice messages). Azure Edge has no STT counterpart.
+ * Tri-state diagnostic for TTS/STT support. The reason+provider+envVar
+ * fields let UIs render an honest, actionable message instead of a single
+ * catch-all "voice unavailable" string. Used by the Telegram channel to
+ * tell the user *why* a voice message can't be processed.
  */
-export function sttSupported(config: Config): boolean {
-  const p = config.voice.provider;
-  if (p === "openai" || p === "elevenlabs") {
-    const envVar =
-      p === "openai"
-        ? "PHANTOMBOT_OPENAI_API_KEY"
-        : "PHANTOMBOT_ELEVENLABS_API_KEY";
-    return Boolean(process.env[envVar]);
-  }
-  return false;
-}
+export type AudioSupport =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "provider_none" | "provider_no_stt" | "key_missing";
+      provider: VoiceProvider;
+      envVar?: string;
+    };
 
-/** True if the configured provider can synthesize TTS. */
-export function ttsSupported(config: Config): boolean {
-  const p = config.voice.provider;
-  if (p === "none") return false;
-  if (p === "azure_edge") return true; // free, no key
+/** Diagnose whether the configured provider can perform STT. */
+export function sttSupport(config: Config): AudioSupport {
+  const provider = config.voice.provider;
+  if (provider === "none") {
+    return { ok: false, reason: "provider_none", provider };
+  }
+  if (provider === "azure_edge") {
+    return { ok: false, reason: "provider_no_stt", provider };
+  }
   const envVar =
-    p === "openai"
+    provider === "openai"
       ? "PHANTOMBOT_OPENAI_API_KEY"
       : "PHANTOMBOT_ELEVENLABS_API_KEY";
-  return Boolean(process.env[envVar]);
+  return process.env[envVar]
+    ? { ok: true }
+    : { ok: false, reason: "key_missing", provider, envVar };
+}
+
+/** Diagnose whether the configured provider can synthesize TTS. */
+export function ttsSupport(config: Config): AudioSupport {
+  const provider = config.voice.provider;
+  if (provider === "none") {
+    return { ok: false, reason: "provider_none", provider };
+  }
+  if (provider === "azure_edge") return { ok: true }; // free, no key
+  const envVar =
+    provider === "openai"
+      ? "PHANTOMBOT_OPENAI_API_KEY"
+      : "PHANTOMBOT_ELEVENLABS_API_KEY";
+  return process.env[envVar]
+    ? { ok: true }
+    : { ok: false, reason: "key_missing", provider, envVar };
+}
+
+/** Boolean wrapper around sttSupport — kept for callers that don't need the reason. */
+export function sttSupported(config: Config): boolean {
+  return sttSupport(config).ok;
+}
+
+/** Boolean wrapper around ttsSupport — kept for callers that don't need the reason. */
+export function ttsSupported(config: Config): boolean {
+  return ttsSupport(config).ok;
 }
 
 export async function synthesize(
