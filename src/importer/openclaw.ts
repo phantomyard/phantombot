@@ -131,6 +131,7 @@ export async function importPersona(
           join(targetDir, e.name),
           copied,
           skipped,
+          targetDir,
         );
       } else {
         const reason = SKIP_DIRS.has(e.name)
@@ -221,13 +222,10 @@ async function copyMarkdownTree(
     }
     const target = join(dst, e.name);
     await copyFile(join(src, e.name), target);
-    // Use a slash-prefixed path relative to the persona dir so the
-    // summary is unambiguous about it being inside memory/ or kb/.
-    copied.push(
-      relative(baseDst, target) === e.name
-        ? e.name
-        : relative(baseDst, target),
-    );
+    // Path relative to the persona dir, so the summary is unambiguous
+    // about a file being inside memory/ or kb/ (e.g. "memory/decisions.md"
+    // rather than just "decisions.md", which collides with top-level files).
+    copied.push(relative(baseDst, target));
   }
 }
 
