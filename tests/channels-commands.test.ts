@@ -161,6 +161,24 @@ describe("/reset", () => {
     expect(r!.reply).toContain("1 turn ");
     expect(r!.reply).not.toContain("1 turns");
   });
+
+  test("aborts an in-flight turn so the post-reset persist doesn't refill the cleared conversation", async () => {
+    const controller = new AbortController();
+    const handle: ActiveTurnHandle = {
+      controller,
+      startTime: Date.now() - 2_500,
+    };
+    const r = await handleSlashCommand("/reset", ctx({ activeTurn: handle }));
+    expect(controller.signal.aborted).toBe(true);
+    // Reply mentions the in-flight stop so the user knows the reset
+    // really did clean up everything, not just the persisted history.
+    expect(r!.reply).toMatch(/stopped an in-flight turn that was \d+\.\ds in/);
+  });
+
+  test("no in-flight mention when there's no active turn", async () => {
+    const r = await handleSlashCommand("/reset", ctx());
+    expect(r!.reply).not.toContain("in-flight");
+  });
 });
 
 // ---------------------------------------------------------------------------

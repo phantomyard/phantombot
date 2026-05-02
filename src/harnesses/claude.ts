@@ -101,8 +101,18 @@ export class ClaudeHarness implements Harness {
       stderr: "pipe",
     });
 
-    proc.stdin.write(renderStdinPayload(req));
-    proc.stdin.end();
+    // Same EPIPE-tolerant pattern as gemini.ts: a kernel-killed proc
+    // (e.g. signal already aborted between spawn and write) makes stdin
+    // unwritable; we don't want that to escape the generator before the
+    // for-await loop yields the proper "aborted" error chunk.
+    try {
+      proc.stdin.write(renderStdinPayload(req));
+      await proc.stdin.end();
+    } catch (e) {
+      log.warn("claude.invoke stdin write failed", {
+        error: (e as Error).message,
+      });
+    }
 
     // Kill coordinator: idle timer (resets on every chunk), hard timer
     // (never resets), abort listener (user typed /stop). On any of those

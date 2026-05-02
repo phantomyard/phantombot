@@ -1156,6 +1156,75 @@ describe("placeholder lifecycle", () => {
     expect(allEditedText).toMatch(/step [12]:/);
   });
 
+  test("placeholder race: sendMessage that resolves AFTER the turn ends doesn't leak the interval or orphan the message", async () => {
+    // Reproduces the race the PR-#56 review flagged: the post timer
+    // fires near the end of the turn, the IIFE awaits sendMessage, the
+    // turn finishes (clearing the post timer no-op'ed because it had
+    // already fired), and the IIFE THEN tries to arm a setInterval and
+    // store a messageId that nobody will ever clean up.
+    //
+    // SlowSendTransport extends FakeTransport with a deliberate ~150ms
+    // sendMessage latency. Combined with placeholderThresholdMs = 50
+    // and a turn that finishes in ~80ms, the IIFE is guaranteed to
+    // outlive the turn.
+    class SlowSendTransport extends FakeTransport {
+      override async sendMessage(chatId: number, text: string): Promise<number> {
+        if (text.includes("⏳ working")) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return super.sendMessage(chatId, text);
+      }
+    }
+    const transport = new SlowSendTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 5005,
+      fromUserId: 42,
+      text: "do brief work",
+    });
+    class BriefHarness implements Harness {
+      readonly id = "brief";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        // Just over the placeholder threshold — long enough to trigger
+        // the post timer, short enough to finish before sendMessage
+        // resolves.
+        await new Promise((r) => setTimeout(r, 80));
+        yield { type: "done", finalText: "done", meta: { harnessId: this.id } };
+      }
+    }
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new BriefHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      placeholderThresholdMs: 50,
+      placeholderEditMs: 200,
+    });
+
+    // Give any leaked setInterval a window to tick — if the race fix is
+    // wrong, we'd see editMessage calls landing here.
+    const editsAfterCleanup = transport.edited.length;
+    await new Promise((r) => setTimeout(r, 350));
+
+    // No edit should have fired after the turn cleanup completed —
+    // proves the interval is NOT armed.
+    expect(transport.edited.length).toBe(editsAfterCleanup);
+    // The placeholder did get posted (slow sendMessage), and then it
+    // got deleted by the IIFE's disposed-branch self-cleanup.
+    const placeholderSends = transport.sent.filter((s) => s.text.includes("⏳ working"));
+    expect(placeholderSends.length).toBe(1);
+    expect(transport.deleted.length).toBeGreaterThanOrEqual(1);
+    // Final reply landed.
+    const finalReplies = transport.sent.filter((s) => s.text === "done");
+    expect(finalReplies.length).toBe(1);
+  });
+
   test("/stop during long turn: placeholder is cleaned up, no duplicate result message", async () => {
     const transport = new FakeTransport();
     // Use AbortableHarness pattern from the slow-turn tests: blocks on
@@ -1227,21 +1296,21 @@ describe("placeholder lifecycle", () => {
   });
 });
 
-describe("formatElapsed", () => {
+describe("formatElapsedMs", () => {
   test("formats sub-minute as plain seconds", async () => {
-    const { formatElapsed } = await import("../src/channels/telegram.ts");
-    expect(formatElapsed(0)).toBe("0s");
-    expect(formatElapsed(45_000)).toBe("45s");
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(0)).toBe("0s");
+    expect(formatElapsedMs(45_000)).toBe("45s");
   });
 
   test("formats minutes + seconds", async () => {
-    const { formatElapsed } = await import("../src/channels/telegram.ts");
-    expect(formatElapsed(65_000)).toBe("1m 5s");
-    expect(formatElapsed(7 * 60_000 + 12_000)).toBe("7m 12s");
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(65_000)).toBe("1m 5s");
+    expect(formatElapsedMs(7 * 60_000 + 12_000)).toBe("7m 12s");
   });
 
   test("formats hours + minutes for very long turns", async () => {
-    const { formatElapsed } = await import("../src/channels/telegram.ts");
-    expect(formatElapsed(2 * 3_600_000 + 15 * 60_000 + 4_000)).toBe("2h 15m");
+    const { formatElapsedMs } = await import("../src/lib/format.ts");
+    expect(formatElapsedMs(2 * 3_600_000 + 15 * 60_000 + 4_000)).toBe("2h 15m");
   });
 });

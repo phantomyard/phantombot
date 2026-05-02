@@ -24,6 +24,7 @@ import {
   transcribe,
   ttsSupported,
 } from "../lib/audio.ts";
+import { formatElapsedMs, truncateLine } from "../lib/format.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import type { MemoryStore } from "../memory/store.ts";
@@ -595,36 +596,55 @@ async function processChatMessage(
   const placeholderEditMs = input.placeholderEditMs ?? 60_000;
   let placeholderMsgId: number | undefined;
   let placeholderEditTimer: ReturnType<typeof setInterval> | undefined;
+  // `disposed` plus `placeholderPostPromise` together close the post-IIFE
+  // race: if the turn finishes between when the post timer fires and when
+  // sendMessage resolves, the IIFE bails before storing the messageId or
+  // arming the edit interval (otherwise we'd leak a setInterval forever
+  // and leave an orphan ⏳ message in the chat).
+  let disposed = false;
+  let placeholderPostPromise: Promise<void> | undefined;
   const renderPlaceholder = (): string => {
     const elapsedMs = Date.now() - startedAt;
     const note = turnHandle.lastProgressNote;
     return note
-      ? `⏳ working… ${formatElapsed(elapsedMs)} — currently: ${truncate(note, 120)}`
-      : `⏳ working… ${formatElapsed(elapsedMs)} elapsed`;
+      ? `⏳ working… ${formatElapsedMs(elapsedMs)} — currently: ${truncateLine(note, 120)}`
+      : `⏳ working… ${formatElapsedMs(elapsedMs)} elapsed`;
   };
   const placeholderPostTimer = setTimeout(() => {
-    void (async () => {
+    placeholderPostPromise = (async () => {
+      let id = 0;
       try {
-        const id = await input.transport.sendMessage(
+        id = await input.transport.sendMessage(
           msg.chatId,
           renderPlaceholder(),
         );
-        if (id > 0) {
-          placeholderMsgId = id;
-          placeholderEditTimer = setInterval(() => {
-            if (placeholderMsgId === undefined) return;
-            void input.transport.editMessage(
-              msg.chatId,
-              placeholderMsgId,
-              renderPlaceholder(),
-            );
-          }, placeholderEditMs);
-        }
       } catch (e) {
         log.warn("telegram: placeholder post failed", {
           error: (e as Error).message,
           chatId: msg.chatId,
         });
+        return;
+      }
+      // The turn may have finished while sendMessage was in flight. If so,
+      // delete the message we just posted (the cleanup phase already ran
+      // with placeholderMsgId still undefined, so it was skipped) and do
+      // NOT arm the edit interval.
+      if (disposed) {
+        if (id > 0) {
+          await input.transport.deleteMessage(msg.chatId, id).catch(() => {});
+        }
+        return;
+      }
+      if (id > 0) {
+        placeholderMsgId = id;
+        placeholderEditTimer = setInterval(() => {
+          if (disposed || placeholderMsgId === undefined) return;
+          void input.transport.editMessage(
+            msg.chatId,
+            placeholderMsgId,
+            renderPlaceholder(),
+          );
+        }, placeholderEditMs);
       }
     })();
   }, placeholderThresholdMs);
@@ -676,6 +696,9 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
+    // Mark disposed BEFORE awaiting in-flight placeholder work so the
+    // post IIFE (if still running) sees the flag and bails.
+    disposed = true;
     clearInterval(typingTimer);
     clearTimeout(placeholderPostTimer);
     if (placeholderEditTimer) clearInterval(placeholderEditTimer);
@@ -688,8 +711,13 @@ async function processChatMessage(
 
   // Always clean up the placeholder if one was posted, so the chat
   // doesn't end up with an orphan "⏳ working…" message regardless of
-  // outcome (success / error / stop).
+  // outcome (success / error / stop). Awaits any in-flight post first
+  // so a placeholder that races with completion is still observed and
+  // deleted.
   const cleanupPlaceholder = async (): Promise<void> => {
+    if (placeholderPostPromise) {
+      await placeholderPostPromise;
+    }
     if (placeholderMsgId !== undefined) {
       await input.transport.deleteMessage(msg.chatId, placeholderMsgId);
       placeholderMsgId = undefined;
@@ -780,26 +808,6 @@ async function processChatMessage(
  * triggered ONLY when the input arrived as voice AND the reply will be
  * synthesized — text replies stay as detailed as the persona wants.
  */
-/**
- * Render an elapsed-ms duration as a short human string for the
- * placeholder line. Matches the /status format intentionally.
- *
- * Exported for testing.
- */
-export function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
-}
-
 export const VOICE_REPLY_INSTRUCTION =
   `# Reply length (this turn only)
 

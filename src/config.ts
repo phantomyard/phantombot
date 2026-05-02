@@ -16,7 +16,44 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { log } from "./lib/logger.ts";
 import { loadState } from "./state.ts";
+
+/**
+ * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
+ * (env) and convert to ms. Returns undefined if neither is set.
+ *
+ * A side effect of being called: logs a one-shot warn naming the new
+ * pair so legacy users see the migration hint at startup. The warn is
+ * gated by a module-scoped flag so loadConfig can be called multiple
+ * times in tests without spamming.
+ */
+let legacyWarnLogged = false;
+function legacyTurnTimeoutMs(
+  toml: Record<string, unknown>,
+): number | undefined {
+  const envMs = asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS);
+  if (envMs !== undefined) {
+    if (!legacyWarnLogged) {
+      log.warn(
+        "config: PHANTOMBOT_TURN_TIMEOUT_MS is deprecated; set PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS and PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS instead",
+      );
+      legacyWarnLogged = true;
+    }
+    return envMs;
+  }
+  const tomlS = asInt(toml.turn_timeout_s);
+  if (tomlS !== undefined) {
+    if (!legacyWarnLogged) {
+      log.warn(
+        "config: turn_timeout_s is deprecated; replace with harness_idle_timeout_s and harness_hard_timeout_s in config.toml (currently aliased to both for back-compat)",
+      );
+      legacyWarnLogged = true;
+    }
+    return tomlS * 1000;
+  }
+  return undefined;
+}
 
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
@@ -110,11 +147,20 @@ export async function loadConfig(): Promise<Config> {
       asString(toml.default_persona) ??
       "phantom",
 
+    // Legacy alias: pre-PR-#56 configs only had `turn_timeout_s`, which
+    // meant "kill at this wall-clock with no other constraints." The new
+    // model splits that into idle (silence) + hard (total). To preserve
+    // the OLD semantics for an unmodified legacy config we map
+    // turn_timeout_s to BOTH ceilings: idle == hard == legacy value.
+    // That way a `turn_timeout_s = 600` config still tolerates 10
+    // minutes of silence, the way it used to. New configs that want the
+    // safer 120s-idle behavior set harness_idle_timeout_s explicitly.
     harnessIdleTimeoutMs:
       asInt(process.env.PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS) ??
       (asInt(toml.harness_idle_timeout_s) !== undefined
         ? asInt(toml.harness_idle_timeout_s)! * 1000
         : undefined) ??
+      legacyTurnTimeoutMs(toml) ??
       120_000,
 
     harnessHardTimeoutMs:
@@ -122,15 +168,7 @@ export async function loadConfig(): Promise<Config> {
       (asInt(toml.harness_hard_timeout_s) !== undefined
         ? asInt(toml.harness_hard_timeout_s)! * 1000
         : undefined) ??
-      // Legacy alias — keep accepting `turn_timeout_s` so older config
-      // files keep working. New configs should use the *_idle / *_hard
-      // pair above.
-      (asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS) !== undefined
-        ? asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS)!
-        : undefined) ??
-      (asInt(toml.turn_timeout_s) !== undefined
-        ? asInt(toml.turn_timeout_s)! * 1000
-        : undefined) ??
+      legacyTurnTimeoutMs(toml) ??
       3_600_000,
 
     personasDir:

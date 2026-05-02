@@ -21,6 +21,7 @@
  */
 
 import type { Harness } from "../harnesses/types.ts";
+import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
 import type { MemoryStore } from "../memory/store.ts";
 
@@ -119,6 +120,20 @@ function handleStop(ctx: SlashCommandContext): SlashCommandResult {
 async function handleReset(
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
+  // If a turn is in flight, abort it FIRST. Otherwise the user types
+  // /reset expecting a clean slate, the in-flight turn finishes a few
+  // seconds later, and `runTurn`'s on-success persist quietly appends
+  // the now-irrelevant user/assistant pair to the just-cleared
+  // conversation — defeating the reset.
+  let stoppedNote = "";
+  if (ctx.activeTurn) {
+    const elapsedS = (
+      (Date.now() - ctx.activeTurn.startTime) / 1000
+    ).toFixed(1);
+    ctx.activeTurn.controller.abort();
+    stoppedNote = ` (and stopped an in-flight turn that was ${elapsedS}s in)`;
+  }
+
   const removed = await ctx.memory.deleteConversation(
     ctx.persona,
     ctx.conversation,
@@ -128,9 +143,12 @@ async function handleReset(
     persona: ctx.persona,
     conversation: ctx.conversation,
     deletedTurns: removed,
+    abortedActiveTurn: Boolean(ctx.activeTurn),
   });
   const noun = removed === 1 ? "turn" : "turns";
-  return { reply: `reset: cleared ${removed} ${noun} from this chat` };
+  return {
+    reply: `reset: cleared ${removed} ${noun} from this chat${stoppedNote}`,
+  };
 }
 
 async function handleStatus(
@@ -174,16 +192,11 @@ async function handleStatus(
     reply:
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
-      `uptime:  ${formatUptime(uptimeS)}\n` +
+      `uptime:  ${formatElapsedSeconds(uptimeS)}\n` +
       `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last 20 turns)\n` +
       `active:  ${active}` +
       runningLine,
   };
-}
-
-function truncateLine(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
 }
 
 async function handleHarness(
@@ -256,12 +269,3 @@ export function nominalContextWindow(harnessId: string): number {
   }
 }
 
-function formatUptime(s: number): string {
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  const d = Math.floor(h / 24);
-  return `${d}d ${h % 24}h`;
-}
