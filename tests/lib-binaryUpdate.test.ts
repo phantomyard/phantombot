@@ -179,6 +179,28 @@ describe("applyUpdate", () => {
     if (r.ok) return;
     expect(r.error).toContain("temp file missing");
   });
+
+  test("clears a stale, unwriteable .bak before backing up", async () => {
+    // Repro of the kw-openclaw failure: a .bak from a prior `sudo cp`
+    // initial deploy is mode 0o644 with no write bit for the current
+    // user. copyFile with O_TRUNC needs write permission on the
+    // existing file; if applyUpdate doesn't unlink first, this fails
+    // with EACCES even though the dir and live binary are kai-owned.
+    const target = join(workdir, "phantombot");
+    const backup = join(workdir, "phantombot.bak");
+    const tmp = join(workdir, "phantombot.update.tmp");
+    await writeFile(target, "OLD", { mode: 0o755 });
+    await writeFile(tmp, "NEW", { mode: 0o755 });
+    // Stale .bak with no write bit at all — simulates a foreign-owned
+    // file we don't have permission to overwrite, but CAN unlink (since
+    // unlink takes its perms from the parent dir).
+    await writeFile(backup, "STALE_BAK", { mode: 0o444 });
+    const r = await applyUpdate({ tempPath: tmp, targetPath: target });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(await readFile(target, "utf8")).toBe("NEW");
+    expect(await readFile(backup, "utf8")).toBe("OLD");
+  });
 });
 
 describe("checkWritable", () => {
