@@ -48,7 +48,12 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import {
+  createKillCoordinator,
+  killCauseToErrorChunk,
+} from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
+import { spawnInNewSession } from "../lib/processGroup.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -88,7 +93,7 @@ export class ClaudeHarness implements Harness {
     // so claude resolves credentials from ~/.claude/.credentials.json.
     const env = filterAuthEnv(process.env);
 
-    const proc = Bun.spawn([this.config.bin, ...args], {
+    const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
       env,
       stdin: "pipe",
@@ -99,36 +104,18 @@ export class ClaudeHarness implements Harness {
     proc.stdin.write(renderStdinPayload(req));
     proc.stdin.end();
 
-    // STATE-MACHINE FIX (was the timeout-vs-close bug in the Node skeleton):
-    // a SIGTERM-by-timeout kill must be distinguishable from a normal exit.
-    // The pre-Bun version emitted `done` with whatever partial text it had
-    // collected, which masked timeouts as successful short replies. We track
-    // the kill cause so the post-loop branch surfaces the right error:
-    //   - "timeout"  → recoverable, orchestrator tries the next harness
-    //   - "aborted"  → non-recoverable, user said /stop and meant it
-    let killCause: "timeout" | "aborted" | undefined;
-    const timeout = setTimeout(() => {
-      if (!killCause) {
-        killCause = "timeout";
-        log.warn("claude.invoke timeout", { timeoutMs: req.timeoutMs });
-        proc.kill("SIGTERM");
-      }
-    }, req.timeoutMs);
-
-    const onAbort = () => {
-      if (!killCause) {
-        killCause = "aborted";
-        log.info("claude.invoke aborted via signal");
-        proc.kill("SIGTERM");
-      }
-    };
-    if (req.signal) {
-      if (req.signal.aborted) {
-        onAbort();
-      } else {
-        req.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
+    // Kill coordinator: idle timer (resets on every chunk), hard timer
+    // (never resets), abort listener (user typed /stop). On any of those
+    // firing, SIGTERM the whole process group → 5s grace → SIGKILL the
+    // group. The "kill cause" determines whether we yield a recoverable
+    // or non-recoverable error after the stdout pipe closes.
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: req.idleTimeoutMs,
+      hardTimeoutMs: req.hardTimeoutMs,
+      signal: req.signal,
+      harnessId: this.id,
+    });
 
     // Drain stderr in the background; surface as debug logs only.
     void consumeStderr(proc.stderr);
@@ -139,6 +126,7 @@ export class ClaudeHarness implements Harness {
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        killer.touch();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -161,26 +149,17 @@ export class ClaudeHarness implements Harness {
         }
       }
     } finally {
-      clearTimeout(timeout);
-      if (req.signal && !req.signal.aborted) {
-        req.signal.removeEventListener("abort", onAbort);
-      }
+      await killer.dispose();
     }
 
-    if (killCause === "timeout") {
-      yield {
-        type: "error",
-        error: `claude timed out after ${req.timeoutMs}ms`,
-        recoverable: true,
-      };
-      return;
-    }
-    if (killCause === "aborted") {
-      yield {
-        type: "error",
-        error: "stopped",
-        recoverable: false,
-      };
+    const errChunk = killCauseToErrorChunk(
+      killer.killCause(),
+      this.id,
+      req.hardTimeoutMs,
+      req.idleTimeoutMs,
+    );
+    if (errChunk) {
+      yield errChunk;
       return;
     }
 

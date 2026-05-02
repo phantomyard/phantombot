@@ -252,7 +252,7 @@ describe("defaultEmbedder", () => {
   test("returns undefined when provider is not gemini", () => {
     const e = defaultEmbedder({
       defaultPersona: "x",
-      turnTimeoutMs: 1,
+      harnessIdleTimeoutMs: 1, harnessHardTimeoutMs: 1,
       personasDir: "/tmp",
       memoryDbPath: "/tmp/m.sqlite",
       configPath: "/tmp/c.toml",
@@ -272,7 +272,7 @@ describe("defaultEmbedder", () => {
   test("returns undefined when provider is gemini but apiKey is empty", () => {
     const e = defaultEmbedder({
       defaultPersona: "x",
-      turnTimeoutMs: 1,
+      harnessIdleTimeoutMs: 1, harnessHardTimeoutMs: 1,
       personasDir: "/tmp",
       memoryDbPath: "/tmp/m.sqlite",
       configPath: "/tmp/c.toml",

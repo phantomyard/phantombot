@@ -24,9 +24,20 @@ export interface HarnessRequest {
   history: HistoryTurn[];
   /** Subprocess working directory. Defaults to the agent dir. */
   workingDir?: string;
-  /** Per-turn wall-clock cap. After this, the harness should kill the subprocess and yield a recoverable error. */
-  timeoutMs: number;
-  /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a recoverable error — same outcome as timeout, different trigger. */
+  /**
+   * Idle timeout: kill the subprocess if no chunk lands on stdout for this
+   * long. Resets on every emitted chunk. This is the right knob for
+   * "subprocess is wedged" (e.g. a tool call hanging on a TCP read) —
+   * a productive turn that's emitting tool events constantly is not stuck.
+   */
+  idleTimeoutMs: number;
+  /**
+   * Hard wall-clock ceiling. Kills the subprocess regardless of activity.
+   * Guards against runaway agents that legitimately keep the idle timer
+   * fed but never converge on a final reply.
+   */
+  hardTimeoutMs: number;
+  /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
 }
 

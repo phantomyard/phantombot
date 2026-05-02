@@ -63,7 +63,8 @@ const baseInput = () => ({
   conversation: "cli:default",
   agentDir,
   memory,
-  timeoutMs: 1_000,
+  idleTimeoutMs: 1_000,
+  hardTimeoutMs: 5_000,
 });
 
 describe("runTurn — successful path", () => {

@@ -65,7 +65,7 @@ afterEach(async () => {
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     defaultPersona: "phantom",
-    turnTimeoutMs: 1000,
+    harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 1000,
     personasDir,
     memoryDbPath: join(workdir, "memory.sqlite"),
     configPath,

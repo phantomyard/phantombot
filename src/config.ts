@@ -21,8 +21,18 @@ import { loadState } from "./state.ts";
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
-  /** Per-harness wall-clock timeout in milliseconds. */
-  turnTimeoutMs: number;
+  /**
+   * Kill the harness subprocess if no output lands on stdout for this
+   * long. Resets every time the harness emits a chunk. Right knob for
+   * "subprocess wedged on a hung tool call" — productive work that's
+   * spitting out tool events keeps the timer fed.
+   */
+  harnessIdleTimeoutMs: number;
+  /**
+   * Hard wall-clock cap on a single harness turn. Independent of activity.
+   * Caps runaway agents that legitimately keep emitting but never finish.
+   */
+  harnessHardTimeoutMs: number;
   /** Directory holding `<persona>/` subdirs. */
   personasDir: string;
   /** Path to the SQLite memory store file. */
@@ -100,12 +110,28 @@ export async function loadConfig(): Promise<Config> {
       asString(toml.default_persona) ??
       "phantom",
 
-    turnTimeoutMs:
-      asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS) ??
+    harnessIdleTimeoutMs:
+      asInt(process.env.PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS) ??
+      (asInt(toml.harness_idle_timeout_s) !== undefined
+        ? asInt(toml.harness_idle_timeout_s)! * 1000
+        : undefined) ??
+      120_000,
+
+    harnessHardTimeoutMs:
+      asInt(process.env.PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS) ??
+      (asInt(toml.harness_hard_timeout_s) !== undefined
+        ? asInt(toml.harness_hard_timeout_s)! * 1000
+        : undefined) ??
+      // Legacy alias — keep accepting `turn_timeout_s` so older config
+      // files keep working. New configs should use the *_idle / *_hard
+      // pair above.
+      (asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS) !== undefined
+        ? asInt(process.env.PHANTOMBOT_TURN_TIMEOUT_MS)!
+        : undefined) ??
       (asInt(toml.turn_timeout_s) !== undefined
         ? asInt(toml.turn_timeout_s)! * 1000
         : undefined) ??
-      120_000,
+      3_600_000,
 
     personasDir:
       process.env.PHANTOMBOT_PERSONAS_DIR ??

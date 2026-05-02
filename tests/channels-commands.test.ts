@@ -194,6 +194,39 @@ describe("/status", () => {
       ctx({ activeTurn: handle }),
     );
     expect(r!.reply).toMatch(/active:\s+yes \(\d+\.\d+s\)/);
+    // No 'running:' line when no progress note has been captured.
+    expect(r!.reply).not.toContain("running:");
+  });
+
+  test("includes 'running:' line with last progress note when present", async () => {
+    const controller = new AbortController();
+    const handle: ActiveTurnHandle = {
+      controller,
+      startTime: Date.now() - 1500,
+      lastProgressNote: "tool_execution_start: BashTool",
+    };
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({ activeTurn: handle }),
+    );
+    expect(r!.reply).toContain("running: tool_execution_start: BashTool");
+  });
+
+  test("truncates very long progress notes to keep /status readable", async () => {
+    const longNote = "a".repeat(500);
+    const handle: ActiveTurnHandle = {
+      controller: new AbortController(),
+      startTime: Date.now(),
+      lastProgressNote: longNote,
+    };
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({ activeTurn: handle }),
+    );
+    expect(r!.reply).toContain("running:");
+    expect(r!.reply).toContain("…");
+    // Must not embed the entire 500-char note.
+    expect(r!.reply.length).toBeLessThan(longNote.length);
   });
 
   test("uptime formatter handles seconds, minutes, hours, days", async () => {

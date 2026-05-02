@@ -38,7 +38,7 @@ function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
     userMessage: "user msg",
     history: [],
     workingDir: process.cwd(),
-    timeoutMs: 5_000,
+    idleTimeoutMs: 5_000, hardTimeoutMs: 5_000,
     ...overrides,
   };
 }

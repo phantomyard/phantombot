@@ -24,7 +24,7 @@ beforeEach(async () => {
   await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
   config = {
     defaultPersona: "phantom",
-    turnTimeoutMs: 600_000,
+    harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000,
     personasDir: join(workdir, "personas"),
     memoryDbPath: join(workdir, "memory.sqlite"),
     configPath: join(workdir, "config.toml"),

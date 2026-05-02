@@ -23,7 +23,7 @@ function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
     userMessage: "hi",
     history: [],
     workingDir: process.cwd(),
-    timeoutMs: 5_000,
+    idleTimeoutMs: 5_000, hardTimeoutMs: 5_000,
     ...overrides,
   };
 }
@@ -204,7 +204,7 @@ describe("PiHarness.invoke (subprocess)", () => {
   test("timeout emits recoverable error and NO done", async () => {
     process.env.FAKE_PI_MODE = "hang";
     const chunks = await collect(
-      mkHarness().invoke(newRequest({ timeoutMs: 200 })),
+      mkHarness().invoke(newRequest({ idleTimeoutMs: 200, hardTimeoutMs: 200 })),
     );
     const dones = chunks.filter((c) => c.type === "done");
     const errors = chunks.filter((c) => c.type === "error");

@@ -60,7 +60,8 @@ export interface TelegramTransport {
     timeoutS: number,
     signal?: AbortSignal,
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
-  sendMessage(chatId: number, text: string): Promise<void>;
+  /** Send a text message; returns the new message_id (used for later edit/delete). */
+  sendMessage(chatId: number, text: string): Promise<number>;
   sendTyping(chatId: number): Promise<void>;
   /** Send an OGG-Opus voice note. */
   sendVoice(chatId: number, audio: Buffer, mime: string): Promise<void>;
@@ -68,6 +69,10 @@ export interface TelegramTransport {
   sendRecording(chatId: number): Promise<void>;
   /** Download a file by Telegram file_id; returns audio bytes + content-type. */
   downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
+  /** Edit an existing text message in place. Best-effort; failures are swallowed. */
+  editMessage(chatId: number, messageId: number, text: string): Promise<void>;
+  /** Delete a message by id. Best-effort; failures are swallowed. */
+  deleteMessage(chatId: number, messageId: number): Promise<void>;
 }
 
 /**
@@ -112,7 +117,7 @@ export class HttpTelegramTransport implements TelegramTransport {
     return parseGetUpdatesResult(body.result ?? [], offset);
   }
 
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  async sendMessage(chatId: number, text: string): Promise<number> {
     const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
     // Telegram caps message length at 4096 chars. Truncate gracefully.
     const safe = text.length > 4000 ? text.slice(0, 4000) + "\n…[truncated]" : text;
@@ -126,7 +131,55 @@ export class HttpTelegramTransport implements TelegramTransport {
         chatId,
         status: res.status,
       });
+      return 0;
     }
+    // Telegram returns the sent message in `result.message_id`. Callers
+    // that don't care can ignore it; the placeholder pipeline uses it
+    // for later editMessage/deleteMessage.
+    try {
+      const body = (await res.json()) as {
+        ok?: boolean;
+        result?: { message_id?: number };
+      };
+      return body.ok && typeof body.result?.message_id === "number"
+        ? body.result.message_id
+        : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async editMessage(
+    chatId: number,
+    messageId: number,
+    text: string,
+  ): Promise<void> {
+    if (messageId === 0) return;
+    const url = `https://api.telegram.org/bot${this.token}/editMessageText`;
+    const safe = text.length > 4000 ? text.slice(0, 4000) + "\n…[truncated]" : text;
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text: safe,
+      }),
+    }).catch(() => {
+      /* edits are best-effort — placeholder editMessage failing isn't fatal */
+    });
+  }
+
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    if (messageId === 0) return;
+    const url = `https://api.telegram.org/bot${this.token}/deleteMessage`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    }).catch(() => {
+      /* deletes are best-effort — leaving an orphan placeholder isn't fatal */
+    });
   }
 
   async sendTyping(chatId: number): Promise<void> {
@@ -288,6 +341,20 @@ export interface RunTelegramServerInput {
    * stopped responding. Default 4000 ms. Tests use a smaller value.
    */
   typingRefreshMs?: number;
+  /**
+   * How long a turn can run silently before we post a "⏳ working…"
+   * placeholder message. Below this, short turns finish without any
+   * extra noise in the chat. Default 30_000 ms. Tests use smaller.
+   */
+  placeholderThresholdMs?: number;
+  /**
+   * How often we edit the placeholder with new elapsed time + last
+   * progress note while the turn is still running. Telegram allows
+   * ~1 edit/sec; we default to a generous 60_000 ms because the
+   * placeholder exists to reassure the user, not to render a real-time
+   * console. Tests override.
+   */
+  placeholderEditMs?: number;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -514,6 +581,54 @@ async function processChatMessage(
   };
   activeTurns.set(msg.chatId, turnHandle);
 
+  // Long-turn placeholder lifecycle. Three states:
+  //   1. Silent  — turn is fast, no placeholder needed.
+  //   2. Posted  — turn went past placeholderThresholdMs (default 30s);
+  //                we sent a "⏳ working… 30s elapsed" message and have
+  //                its message_id. Periodically edit it with elapsed
+  //                time + last progress note.
+  //   3. Cleanup — turn finished. Delete the placeholder, then send the
+  //                final reply as a NEW message (Option B in the design
+  //                discussion: a fresh message triggers a Telegram push
+  //                notification; an edit does not).
+  const placeholderThresholdMs = input.placeholderThresholdMs ?? 30_000;
+  const placeholderEditMs = input.placeholderEditMs ?? 60_000;
+  let placeholderMsgId: number | undefined;
+  let placeholderEditTimer: ReturnType<typeof setInterval> | undefined;
+  const renderPlaceholder = (): string => {
+    const elapsedMs = Date.now() - startedAt;
+    const note = turnHandle.lastProgressNote;
+    return note
+      ? `⏳ working… ${formatElapsed(elapsedMs)} — currently: ${truncate(note, 120)}`
+      : `⏳ working… ${formatElapsed(elapsedMs)} elapsed`;
+  };
+  const placeholderPostTimer = setTimeout(() => {
+    void (async () => {
+      try {
+        const id = await input.transport.sendMessage(
+          msg.chatId,
+          renderPlaceholder(),
+        );
+        if (id > 0) {
+          placeholderMsgId = id;
+          placeholderEditTimer = setInterval(() => {
+            if (placeholderMsgId === undefined) return;
+            void input.transport.editMessage(
+              msg.chatId,
+              placeholderMsgId,
+              renderPlaceholder(),
+            );
+          }, placeholderEditMs);
+        }
+      } catch (e) {
+        log.warn("telegram: placeholder post failed", {
+          error: (e as Error).message,
+          chatId: msg.chatId,
+        });
+      }
+    })();
+  }, placeholderThresholdMs);
+
   let reply = "";
   let errored: string | undefined;
   let progressCount = 0;
@@ -526,7 +641,8 @@ async function processChatMessage(
       agentDir: input.agentDir,
       harnesses,
       memory: input.memory,
-      timeoutMs: input.config.turnTimeoutMs,
+      idleTimeoutMs: input.config.harnessIdleTimeoutMs,
+      hardTimeoutMs: input.config.harnessHardTimeoutMs,
       signal: controller.signal,
       // Voice-in + voice-out: append a brevity directive for this turn
       // only. Keeps voice notes short + spoken-friendly without putting
@@ -539,6 +655,9 @@ async function processChatMessage(
       if (chunk.type === "text") reply += chunk.text;
       if (chunk.type === "progress") {
         progressCount++;
+        // Stash the latest progress note on the active-turn handle so
+        // /status can show "currently: <tool>" in real time.
+        turnHandle.lastProgressNote = chunk.note.slice(0, 500);
         log.debug("telegram: progress", {
           chatId: msg.chatId,
           note: chunk.note.slice(0, 200),
@@ -558,6 +677,8 @@ async function processChatMessage(
     log.error("telegram: turn threw", { error: errored });
   } finally {
     clearInterval(typingTimer);
+    clearTimeout(placeholderPostTimer);
+    if (placeholderEditTimer) clearInterval(placeholderEditTimer);
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.chatId) === turnHandle) {
@@ -565,11 +686,23 @@ async function processChatMessage(
     }
   }
 
+  // Always clean up the placeholder if one was posted, so the chat
+  // doesn't end up with an orphan "⏳ working…" message regardless of
+  // outcome (success / error / stop).
+  const cleanupPlaceholder = async (): Promise<void> => {
+    if (placeholderMsgId !== undefined) {
+      await input.transport.deleteMessage(msg.chatId, placeholderMsgId);
+      placeholderMsgId = undefined;
+    }
+  };
+
   // /stop: the controller was aborted from outside. The reply text
   // already came through from the slash command handler — don't send
-  // a second "(error: stopped)" message.
+  // a second "(error: stopped)" message. We DO still delete the
+  // placeholder so the user isn't left with a stale "working…" line.
   const wasStopped = controller.signal.aborted;
   if (wasStopped) {
+    await cleanupPlaceholder();
     log.info("telegram: turn stopped by /stop", {
       chatId: msg.chatId,
       durationMs: Date.now() - startedAt,
@@ -584,9 +717,14 @@ async function processChatMessage(
       : "(no reply)";
 
   // Voice in → voice out (when TTS is configured AND no error).
-  // Text in → text out, always.
+  // Text in → text out, always. Order: delete placeholder FIRST, then
+  // send the real reply. Telegram pushes a notification on a new
+  // message but not on an edit, so this delete-then-new sequence is
+  // what guarantees the user's phone buzzes when a long turn finishes
+  // ("Option B" from the design discussion).
   let sentAsVoice = false;
   try {
+    await cleanupPlaceholder();
     if (willReplyWithVoice && !errored && reply.length > 0) {
       const r = await synthesize(input.config, reply);
       if (r.ok) {
@@ -642,6 +780,26 @@ async function processChatMessage(
  * triggered ONLY when the input arrived as voice AND the reply will be
  * synthesized — text replies stay as detailed as the persona wants.
  */
+/**
+ * Render an elapsed-ms duration as a short human string for the
+ * placeholder line. Matches the /status format intentionally.
+ *
+ * Exported for testing.
+ */
+export function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+}
+
 export const VOICE_REPLY_INSTRUCTION =
   `# Reply length (this turn only)
 

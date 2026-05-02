@@ -34,7 +34,12 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import {
+  createKillCoordinator,
+  killCauseToErrorChunk,
+} from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
+import { spawnInNewSession } from "../lib/processGroup.ts";
 
 /**
  * Conservative ceiling on the bytes we'll put on argv via the `-p`
@@ -111,7 +116,7 @@ export class GeminiHarness implements Harness {
       userMessageBytes: Buffer.byteLength(req.userMessage, "utf8"),
     });
 
-    const proc = Bun.spawn([this.config.bin, ...args], {
+    const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
       env: process.env,
       stdin: "pipe",
@@ -119,33 +124,19 @@ export class GeminiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same kill-cause state machine as the Claude / Pi harnesses. We track
-    // why we killed the subprocess so the post-loop branch can yield a
-    // recoverable error (timeout — try next harness) vs non-recoverable
-    // (abort — user said /stop).
-    let killCause: "timeout" | "aborted" | undefined;
-    const timeout = setTimeout(() => {
-      if (!killCause) {
-        killCause = "timeout";
-        log.warn("gemini.invoke timeout", { timeoutMs: req.timeoutMs });
-        proc.kill("SIGTERM");
-      }
-    }, req.timeoutMs);
-
-    const onAbort = () => {
-      if (!killCause) {
-        killCause = "aborted";
-        log.info("gemini.invoke aborted via signal");
-        proc.kill("SIGTERM");
-      }
-    };
-    if (req.signal) {
-      if (req.signal.aborted) {
-        onAbort();
-      } else {
-        req.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
+    // Idle + hard timer + abort listener. SIGTERM the whole process group
+    // on any of those firing, escalate to SIGKILL after 5s grace. The
+    // grandchild kill is the whole point: gemini-cli routinely spawns
+    // tool subprocesses (the kw-openclaw bug was `gemini usage` wedged
+    // on a TCP read; without process-group kill, that orphan survived
+    // its parent dying and held the socket open).
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: req.idleTimeoutMs,
+      hardTimeoutMs: req.hardTimeoutMs,
+      signal: req.signal,
+      harnessId: this.id,
+    });
 
     // Write the system prompt + history to stdin and close it. gemini
     // appends the -p value (the new user message) to whatever stdin
@@ -166,31 +157,23 @@ export class GeminiHarness implements Harness {
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        killer.touch();
         finalText += decoder.decode(chunk, { stream: true });
       }
       // Flush any pending bytes in the decoder.
       finalText += decoder.decode();
     } finally {
-      clearTimeout(timeout);
-      if (req.signal && !req.signal.aborted) {
-        req.signal.removeEventListener("abort", onAbort);
-      }
+      await killer.dispose();
     }
 
-    if (killCause === "timeout") {
-      yield {
-        type: "error",
-        error: `gemini timed out after ${req.timeoutMs}ms`,
-        recoverable: true,
-      };
-      return;
-    }
-    if (killCause === "aborted") {
-      yield {
-        type: "error",
-        error: "stopped",
-        recoverable: false,
-      };
+    const errChunk = killCauseToErrorChunk(
+      killer.killCause(),
+      this.id,
+      req.hardTimeoutMs,
+      req.idleTimeoutMs,
+    );
+    if (errChunk) {
+      yield errChunk;
       return;
     }
 

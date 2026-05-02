@@ -40,8 +40,10 @@ export interface TurnInput {
   harnesses: Harness[];
   /** Open memory store; runTurn appends to it on success. */
   memory: MemoryStore;
-  /** Per-harness timeout. */
-  timeoutMs: number;
+  /** Kill subprocess after this long with no chunk on stdout. Resets per chunk. */
+  idleTimeoutMs: number;
+  /** Hard wall-clock ceiling regardless of activity. */
+  hardTimeoutMs: number;
   /** Number of prior turns to load. Default 20. */
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
@@ -84,7 +86,8 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     userMessage: input.userMessage,
     history,
     workingDir: input.agentDir,
-    timeoutMs: input.timeoutMs,
+    idleTimeoutMs: input.idleTimeoutMs,
+    hardTimeoutMs: input.hardTimeoutMs,
     signal: input.signal,
   })) {
     if (chunk.type === "text") finalText += chunk.text;

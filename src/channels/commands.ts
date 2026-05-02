@@ -27,6 +27,13 @@ import type { MemoryStore } from "../memory/store.ts";
 export interface ActiveTurnHandle {
   controller: AbortController;
   startTime: number;
+  /**
+   * Most recent progress note from the active harness — typically a tool
+   * name like "tool_execution_start: BashTool" or a stderr line. Surfaced
+   * by /status so the user can tell whether a long turn is genuinely
+   * working or stuck. The channel adapter updates this as chunks arrive.
+   */
+  lastProgressNote?: string;
 }
 
 export interface SlashCommandContext {
@@ -154,14 +161,29 @@ async function handleStatus(
     ? `yes (${((Date.now() - ctx.activeTurn.startTime) / 1000).toFixed(1)}s)`
     : "no";
 
+  // If a turn is in flight AND we've captured a progress note, append a
+  // "running:" line so the user can see what the harness is currently
+  // doing — important for the "is it stuck or just busy?" question that
+  // long Telegram-from-Claude turns provoke.
+  const runningLine =
+    ctx.activeTurn?.lastProgressNote
+      ? `\nrunning: ${truncateLine(ctx.activeTurn.lastProgressNote, 120)}`
+      : "";
+
   return {
     reply:
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
       `uptime:  ${formatUptime(uptimeS)}\n` +
       `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last 20 turns)\n` +
-      `active:  ${active}`,
+      `active:  ${active}` +
+      runningLine,
   };
+}
+
+function truncateLine(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
 }
 
 async function handleHarness(

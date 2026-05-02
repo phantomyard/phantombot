@@ -21,7 +21,7 @@ function newRequest(overrides: Partial<HarnessRequest> = {}): HarnessRequest {
     userMessage: "hi",
     history: [],
     workingDir: process.cwd(),
-    timeoutMs: 5_000,
+    idleTimeoutMs: 5_000, hardTimeoutMs: 5_000,
     ...overrides,
   };
 }
@@ -145,7 +145,7 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
   test("hang + low timeout → SIGTERM kill, recoverable timeout error", async () => {
     process.env.FAKE_GEMINI_MODE = "hang";
     const chunks = await collect(
-      harness().invoke(newRequest({ timeoutMs: 100 })),
+      harness().invoke(newRequest({ idleTimeoutMs: 100, hardTimeoutMs: 100 })),
     );
     delete process.env.FAKE_GEMINI_MODE;
     expect(chunks.find((c) => c.type === "done")).toBeUndefined();
@@ -166,7 +166,7 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     const start = Date.now();
     const chunks = await collect(
       new GeminiHarness({ bin: FAKE_GEMINI, model: "" }).invoke(
-        newRequest({ userMessage: big, timeoutMs: 30_000 }),
+        newRequest({ userMessage: big, idleTimeoutMs: 30_000, hardTimeoutMs: 30_000 }),
       ),
     );
     const elapsed = Date.now() - start;

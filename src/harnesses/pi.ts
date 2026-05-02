@@ -24,7 +24,12 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import {
+  createKillCoordinator,
+  killCauseToErrorChunk,
+} from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
+import { spawnInNewSession } from "../lib/processGroup.ts";
 
 export interface PiHarnessConfig {
   /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
@@ -78,7 +83,7 @@ export class PiHarness implements Harness {
       payloadBytes: totalBytes,
     });
 
-    const proc = Bun.spawn([this.config.bin, ...args], {
+    const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
       env: process.env,
       stdin: "ignore",
@@ -86,32 +91,16 @@ export class PiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same kill-cause state machine as the Claude / Gemini harnesses.
-    // Tracks why we killed the subprocess so the post-loop branch yields
-    // a recoverable error (timeout) vs non-recoverable (abort by /stop).
-    let killCause: "timeout" | "aborted" | undefined;
-    const timeout = setTimeout(() => {
-      if (!killCause) {
-        killCause = "timeout";
-        log.warn("pi.invoke timeout", { timeoutMs: req.timeoutMs });
-        proc.kill("SIGTERM");
-      }
-    }, req.timeoutMs);
-
-    const onAbort = () => {
-      if (!killCause) {
-        killCause = "aborted";
-        log.info("pi.invoke aborted via signal");
-        proc.kill("SIGTERM");
-      }
-    };
-    if (req.signal) {
-      if (req.signal.aborted) {
-        onAbort();
-      } else {
-        req.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
+    // Idle + hard timer + abort listener; SIGTERM-then-SIGKILL the whole
+    // process group on any of those firing. See harnessRunner.ts for the
+    // state machine.
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: req.idleTimeoutMs,
+      hardTimeoutMs: req.hardTimeoutMs,
+      signal: req.signal,
+      harnessId: this.id,
+    });
 
     void consumeStderr(proc.stderr);
 
@@ -121,6 +110,7 @@ export class PiHarness implements Harness {
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        killer.touch();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -142,26 +132,17 @@ export class PiHarness implements Harness {
         }
       }
     } finally {
-      clearTimeout(timeout);
-      if (req.signal && !req.signal.aborted) {
-        req.signal.removeEventListener("abort", onAbort);
-      }
+      await killer.dispose();
     }
 
-    if (killCause === "timeout") {
-      yield {
-        type: "error",
-        error: `pi timed out after ${req.timeoutMs}ms`,
-        recoverable: true,
-      };
-      return;
-    }
-    if (killCause === "aborted") {
-      yield {
-        type: "error",
-        error: "stopped",
-        recoverable: false,
-      };
+    const errChunk = killCauseToErrorChunk(
+      killer.killCause(),
+      this.id,
+      req.hardTimeoutMs,
+      req.idleTimeoutMs,
+    );
+    if (errChunk) {
+      yield errChunk;
       return;
     }
 
