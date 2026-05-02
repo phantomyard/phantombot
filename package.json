@@ -13,7 +13,9 @@
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
     "typecheck": "bun tsc --noEmit",
-    "build": "mkdir -p dist && bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile dist/phantombot"
+    "build": "bun run build:x64",
+    "build:x64": "mkdir -p dist && bun build --compile --target=bun-linux-x64-baseline ./src/index.ts --outfile dist/phantombot",
+    "build:arm64": "mkdir -p dist && bun build --compile --target=bun-linux-arm64 ./src/index.ts --outfile dist/phantombot-arm64"
   },
   "dependencies": {
     "@clack/prompts": "^1.3.0",

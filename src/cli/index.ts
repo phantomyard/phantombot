@@ -14,6 +14,7 @@
  */
 
 import { defineCommand } from "citty";
+import { VERSION } from "../version.ts";
 import importPersonaCmd from "./import-persona.ts";
 import createPersonaCmd from "./create-persona.ts";
 import telegramCmd from "./telegram.ts";
@@ -30,7 +31,7 @@ import voiceCmd from "./voice.ts";
 export const mainCommand = defineCommand({
   meta: {
     name: "phantombot",
-    version: "0.1.0",
+    version: VERSION,
     description:
       "Personality-first chat agent CLI. Wraps Claude Code and Pi CLIs with persona, memory, and a Telegram bot front-end.",
   },
