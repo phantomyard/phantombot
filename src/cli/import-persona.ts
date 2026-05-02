@@ -1,15 +1,19 @@
 /**
- * `phantombot import-persona <openclaw-dir>` — copy an OpenClaw agent
- * directory's persona files into phantombot's personas dir, and (if
- * --no-telegram is not passed) sniff the standard OpenClaw config at
- * ~/.openclaw/openclaw.json for a Telegram bot block; if found, write
- * it to phantombot's [channels.telegram].
+ * Persona import flow — used by `phantombot persona --import <dir>` or
+ * the "Import from a directory" / "Restore from archive" menu entries
+ * in `phantombot persona`. The top-level `phantombot import-persona`
+ * subcommand was retired in favor of `phantombot persona`
+ * (see src/cli/persona.ts).
+ *
+ * Copies an OpenClaw agent directory's persona files into phantombot's
+ * personas dir, and (if --no-telegram is not passed) sniffs the
+ * standard OpenClaw config at ~/.openclaw/openclaw.json for a Telegram
+ * bot block; if found, writes it to phantombot's [channels.telegram].
  *
  * The persona-file work is in src/importer/openclaw.ts.
  * The telegram sniff is in src/cli/telegram.ts (parseOpenClawTelegram).
  */
 
-import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -120,6 +124,15 @@ export async function runImportPersona(
     out.write(`scaffolded (${scaffold.created.length}):\n`);
     for (const f of scaffold.created) out.write(`  ${f}\n`);
   }
+
+  // Auto-set as default if the current default doesn't actually exist
+  // on disk. Without this, a fresh box with `default_persona = "phantom"`
+  // (the built-in fallback) would still try to load `personas/phantom/`
+  // even after importing `personas/robbie/` — and `phantombot run`
+  // would fail with "persona 'phantom' not found." We don't clobber a
+  // working default if the user is importing an additional persona.
+  await maybeAdoptAsDefault(config, result.name, out);
+
   out.write(
     "\nNote: conversation history was NOT imported (phantombot v1 has no transcript importer).\n",
   );
@@ -422,6 +435,38 @@ async function maybeImportOpenclawVoice(args: {
   }
 }
 
+/**
+ * If the current default_persona (from state.json or config.toml) points
+ * at a persona dir that doesn't exist, adopt the just-imported persona
+ * as the new default. The built-in fallback "phantom" is treated as
+ * non-existent if there's no `personas/phantom/` on disk — so a fresh
+ * box that imports its first persona will switch the default to it
+ * automatically, fixing the bug where `phantombot run` later failed
+ * with "persona 'phantom' not found."
+ *
+ * Doesn't override a working default — if the user already has a
+ * persona configured and is importing another, the import is additive,
+ * not destructive.
+ */
+async function maybeAdoptAsDefault(
+  config: Config,
+  importedName: string,
+  out: WriteSink,
+): Promise<void> {
+  const currentDefaultDir = personaDir(config, config.defaultPersona);
+  if (existsSync(currentDefaultDir)) {
+    // Working default already; don't touch.
+    return;
+  }
+  const { loadState, saveState } = await import("../state.ts");
+  const state = await loadState();
+  state.default_persona = importedName;
+  await saveState(state);
+  out.write(
+    `\nadopted '${importedName}' as default_persona (previous default '${config.defaultPersona}' has no persona dir on disk)\n`,
+  );
+}
+
 async function maybeRestartHint(
   serviceControl: ServiceControl | undefined,
   out: WriteSink,
@@ -453,43 +498,3 @@ function maskToken(t: string): string {
   return t.slice(0, 6) + "…" + t.slice(-4);
 }
 
-export default defineCommand({
-  meta: {
-    name: "import-persona",
-    description:
-      "Import a persona from an OpenClaw agent directory. Also imports the OpenClaw Telegram config from ~/.openclaw/openclaw.json if found (use --no-telegram to skip).",
-  },
-  args: {
-    path: {
-      type: "positional",
-      description:
-        "Path to the OpenClaw agent directory to import. If omitted, an interactive TUI is shown (current persona / restore from archive / import from path / cancel).",
-      required: false,
-    },
-    as: {
-      type: "string",
-      description:
-        "Target persona name (defaults to the basename of the source directory).",
-    },
-    overwrite: {
-      type: "boolean",
-      description: "Replace any existing persona with the same name.",
-      default: false,
-    },
-    "no-telegram": {
-      type: "boolean",
-      description:
-        "Skip the OpenClaw Telegram config sniff at ~/.openclaw/openclaw.json.",
-      default: false,
-    },
-  },
-  async run({ args }) {
-    const code = await runImportPersona({
-      source: args.path ? String(args.path) : undefined,
-      as: args.as ? String(args.as) : undefined,
-      overwrite: Boolean(args.overwrite),
-      noTelegram: Boolean(args["no-telegram"]),
-    });
-    process.exitCode = code;
-  },
-});

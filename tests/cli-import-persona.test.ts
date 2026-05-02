@@ -229,3 +229,64 @@ describe("runImportPersona — telegram sniff", () => {
     await expect(readFile(config.configPath, "utf8")).rejects.toThrow();
   });
 });
+
+describe("runImportPersona — auto-adopt as default", () => {
+  let savedStateEnv: string | undefined;
+  let stateFile: string;
+
+  beforeEach(async () => {
+    savedStateEnv = process.env.PHANTOMBOT_STATE;
+    stateFile = join(workdir, "state.json");
+    process.env.PHANTOMBOT_STATE = stateFile;
+  });
+
+  afterEach(() => {
+    if (savedStateEnv === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = savedStateEnv;
+  });
+
+  test("first import on fresh box: adopts imported name as default_persona", async () => {
+    // Fresh state — no personas/phantom/ exists. The configured default
+    // ('phantom') is the built-in fallback that doesn't have a directory.
+    expect(config.defaultPersona).toBe("phantom");
+    const out = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "robbie",
+      noTelegram: true,
+      config,
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("adopted 'robbie' as default_persona");
+    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    expect(state.default_persona).toBe("robbie");
+  });
+
+  test("doesn't override a working default (additive imports)", async () => {
+    // Pre-existing persona at the configured default — additive import
+    // shouldn't shift the default away from it.
+    await mkdir(join(config.personasDir, "phantom"), { recursive: true });
+    await writeFile(
+      join(config.personasDir, "phantom", "BOOT.md"),
+      "# id",
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "robbie",
+      noTelegram: true,
+      config,
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("adopted");
+    // No state file written.
+    await expect(readFile(stateFile, "utf8")).rejects.toThrow();
+  });
+});

@@ -15,8 +15,7 @@
 
 import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
-import importPersonaCmd from "./import-persona.ts";
-import createPersonaCmd from "./create-persona.ts";
+import personaCmd from "./persona.ts";
 import telegramCmd from "./telegram.ts";
 import harnessCmd from "./harness.ts";
 import installCmd from "./install.ts";
@@ -41,8 +40,7 @@ export const mainCommand = defineCommand({
       "Personality-first chat agent CLI. Wraps Claude Code and Pi CLIs with persona, memory, and a Telegram bot front-end.",
   },
   subCommands: {
-    "import-persona": importPersonaCmd,
-    "create-persona": createPersonaCmd,
+    persona: personaCmd,
     telegram: telegramCmd,
     harness: harnessCmd,
     embedding: embeddingCmd,

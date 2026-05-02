@@ -13,8 +13,9 @@ A personality-first chat agent. Phantombot wraps Claude Code and Inflection Pi w
 
 ```
 # First-time / config
-phantombot import-persona <openclaw-dir>     # copy persona files in; also pulls Telegram config from ~/.openclaw/openclaw.json
-phantombot create-persona                    # interactive TUI: build a fresh persona from scratch
+phantombot persona                           # TUI: create / import / restore / switch the active persona
+phantombot persona <name>                    # switch default persona to <name>
+phantombot persona --import <dir> [--as <n>] # non-interactive import (OpenClaw or phantombot-shaped)
 phantombot telegram                          # interactive TUI: configure the Telegram channel
 phantombot harness                           # interactive TUI: pick primary + fallback harnesses
 phantombot voice                             # interactive TUI: pick TTS/STT provider (ElevenLabs/OpenAI/Azure Edge)
@@ -96,24 +97,37 @@ If you literally need two personas answering simultaneously (different bots, dif
 - **(Optional)** Inflection Pi installed and configured if you want it in the fallback chain
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-### From a GitHub release (recommended)
+### One-liner install (recommended)
 
 ```bash
-# Initial install on the target box (any Linux x86-64 or arm64):
-curl -L -o ~/.local/bin/phantombot \
-  https://github.com/andrewagrahamhodges/phantombot/releases/latest/download/phantombot-vX.Y.Z-linux-x64
-chmod +x ~/.local/bin/phantombot
+curl -fsSL https://raw.githubusercontent.com/andrewagrahamhodges/phantombot/main/install.sh | sh
+```
 
-# Subsequent updates:
-phantombot update                 # interactive TUI
-phantombot update --force --restart   # unattended (cron-friendly)
+What it does:
+
+1. Detects host arch (`x86_64` → x64, `aarch64` → arm64).
+2. Fetches the latest GitHub release tag.
+3. Downloads the matching binary + `SHA256SUMS`, **verifies the checksum**, refuses on mismatch.
+4. Installs to `~/.local/bin/phantombot` (mode 0755).
+5. Warns if `~/.local/bin` isn't on `PATH`.
+6. Launches `phantombot persona` to set up the first persona — unless stdin/stdout aren't a TTY (e.g. running headless), in which case it prints the next-step hint and exits cleanly.
+
+Override the install dir: `PHANTOMBOT_INSTALL_DIR=/opt/bin curl -fsSL … | sh`.
+Skip the post-install TUI: `PHANTOMBOT_SKIP_TUI=1 curl -fsSL … | sh` (useful for CI / unattended provisioning).
+
+Subsequent updates use the same release feed:
+
+```bash
+phantombot update                       # interactive TUI
+phantombot update --check               # exit 2 if newer available, 0 if current
+phantombot update --force --restart     # unattended (cron-friendly)
 ```
 
 CI publishes a fresh release per merged PR, tagged `v1.0.<PR_NUMBER>`. Each release ships:
 
 - `phantombot-v1.0.N-linux-x64`     — x86-64, **baseline** (no AVX2 required)
 - `phantombot-v1.0.N-linux-arm64`   — ARM64
-- `SHA256SUMS`                      — `phantombot update` verifies against this
+- `SHA256SUMS`                      — both `install.sh` and `phantombot update` verify against this
 
 ### From source
 
@@ -130,8 +144,13 @@ The default `build` script targets `bun-linux-x64-baseline`. If you "optimise" t
 
 ### First-time setup
 
+The one-liner above runs `phantombot persona` for you in interactive mode. Or do it explicitly:
+
 ```bash
-phantombot create-persona                    # OR phantombot import-persona ~/clawd
+phantombot persona                           # TUI: create / import / restore / switch
+# OR non-interactively:
+phantombot persona --import ~/clawd --as robbie
+
 phantombot harness                           # claude / pi / both
 phantombot telegram                          # bot token + allowed user IDs
 phantombot voice                             # optional: TTS/STT provider for voice messages
@@ -140,6 +159,8 @@ phantombot run                               # foreground sanity check (Ctrl-C t
 phantombot install                           # then install as a systemd --user service
 journalctl --user -u phantombot -f           # tail the logs
 ```
+
+> **First-import note**: when you import a persona on a fresh box, `phantombot persona --import` automatically sets it as `default_persona` (unless you already have a persona configured). Without this, the built-in fallback `"phantom"` would still be the default and `phantombot run` would fail with "persona 'phantom' not found." Switch later with `phantombot persona <name>`.
 
 If you're a headless service account (no login session), enable linger first:
 
