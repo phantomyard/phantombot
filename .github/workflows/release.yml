@@ -42,10 +42,12 @@ jobs:
       # heartbeat/nightly unit files to a hardcoded ~/.config/systemd/user/
       # path even when tests pass an isolated tmpdir for the main unit. The
       # dir exists on a developer's box but not on a fresh runner, so writeFile
-      # fails with ENOENT. Pre-creating the dir unblocks the pipeline; the
-      # proper fix (parameterizing the helper paths) is tracked as a follow-up.
-      - name: Pre-create ~/.config/systemd/user (hotfix; see issue tracker)
-        run: mkdir -p "$HOME/.config/systemd/user"
+      # fails with ENOENT. The pollution side of the same bug (real files left
+      # behind in dev `~/.config/systemd/user/` after every `bun test` run) is
+      # tracked separately. When the proper fix lands, delete this step.
+      # Tracked: https://github.com/andrewagrahamhodges/phantombot/issues/44
+      - name: Pre-create ~/.config/systemd/user (hotfix; see #44)
+        run: mkdir -p "${HOME:?HOME unset}/.config/systemd/user"
 
       - name: Test
         run: bun test
