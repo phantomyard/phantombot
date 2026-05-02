@@ -160,9 +160,7 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     err.write(`install failed: ${swap.error}\n`);
     return 1;
   }
-  out.write(
-    `installed ${release.tag} at ${binPath} (previous binary saved to ${swap.backupPath}).\n`,
-  );
+  out.write(`installed ${release.tag} at ${binPath}.\n`);
 
   // 8. Restart handling. The running phantombot process keeps its
   // in-memory binary, so restart is needed to actually load the new bits.

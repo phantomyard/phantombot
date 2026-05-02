@@ -262,11 +262,10 @@ describe("runUpdate happy path with --force --restart", () => {
     // New binary swapped in.
     const swapped = await readFile(binPath);
     expect(swapped.equals(NEW_BYTES)).toBe(true);
-    // Old binary saved as .bak so a botched restart is recoverable.
-    const backup = await readFile(`${binPath}.bak`, "utf8");
-    expect(backup).toBe("OLD_BINARY");
-    // No leftover tmp.
+    // No leftover .bak (cleaned post-swap so it doesn't pollute install dir
+    // tab-completion) and no leftover .update.tmp.
     const { existsSync } = await import("node:fs");
+    expect(existsSync(`${binPath}.bak`)).toBe(false);
     expect(existsSync(`${binPath}.update.tmp`)).toBe(false);
     // Restart was called (and only once).
     expect(calls.filter((c) => c === "restart")).toEqual(["restart"]);
