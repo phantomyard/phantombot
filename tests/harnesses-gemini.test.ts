@@ -156,6 +156,32 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     expect(err.recoverable).toBe(true);
   });
 
+  test("ARG_MAX guard: oversized userMessage → recoverable error, no spawn", async () => {
+    // Set the fixture to "hang" so if we DID spawn, the test would
+    // hit the timeout instead of returning quickly. The precheck
+    // should fire BEFORE spawn, so we expect the recoverable error
+    // immediately — well under the 5s default timeout.
+    process.env.FAKE_GEMINI_MODE = "hang";
+    const big = "x".repeat(1_000_001); // 1 byte over the 1 MiB-ish ceiling
+    const start = Date.now();
+    const chunks = await collect(
+      new GeminiHarness({ bin: FAKE_GEMINI, model: "" }).invoke(
+        newRequest({ userMessage: big, timeoutMs: 30_000 }),
+      ),
+    );
+    const elapsed = Date.now() - start;
+    delete process.env.FAKE_GEMINI_MODE;
+    // Fired before spawn — should be near-instant, not anywhere near 30s.
+    expect(elapsed).toBeLessThan(500);
+    expect(chunks.find((c) => c.type === "done")).toBeUndefined();
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    if (err?.type !== "error") return;
+    expect(err.error).toContain("ARG_MAX");
+    expect(err.error).toContain("1000001");
+    expect(err.recoverable).toBe(true);
+  });
+
   test("argv shape: -p <user> -o text -y; -m only when model is non-empty", async () => {
     process.env.FAKE_GEMINI_MODE = "echo-args";
     // No model.

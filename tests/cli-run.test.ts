@@ -41,7 +41,7 @@ beforeEach(async () => {
     harnesses: {
       chain: ["claude"],
       claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
-      pi: { bin: "pi", maxPayloadBytes:1_000_000 },
+      pi: { bin: "pi", maxPayloadBytes: 1_000_000 },
       gemini: { bin: "gemini", model: "" },
     },
     channels: {},

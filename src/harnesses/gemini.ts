@@ -36,6 +36,20 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { log } from "../lib/logger.ts";
 
+/**
+ * Conservative ceiling on the bytes we'll put on argv via the `-p`
+ * flag. Linux ARG_MAX is typically 2 MiB on modern desktop/server
+ * kernels but can be as low as 128 KiB on embedded builds, and the
+ * usable budget is reduced by environment + other argv. 1 MiB stays
+ * well clear on every reasonable target while still being big enough
+ * for any plausible chat / voice-transcript / paste.
+ *
+ * NOT exposed via GeminiHarnessConfig in v1 — if a user runs into it,
+ * the recoverable error from the precheck guides them. We can promote
+ * it to config later if it actually bites.
+ */
+const MAX_USER_MESSAGE_BYTES = 1_000_000;
+
 export interface GeminiHarnessConfig {
   /** Path to the `gemini` CLI binary. Default: "gemini" (PATH lookup). */
   bin: string;
@@ -63,6 +77,24 @@ export class GeminiHarness implements Harness {
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    // ARG_MAX guard. We do NOT declare class-level `maxPayloadBytes`
+    // because the orchestrator's estimatePayloadBytes() sums
+    // system+history+userMessage — which would over-skip Gemini for
+    // big histories that travel via stdin and never touch argv. The
+    // only thing that actually rides on argv is `-p <userMessage>`,
+    // so we precheck just that one length and yield a recoverable
+    // error if it would blow past ARG_MAX. The orchestrator then
+    // falls through to the next harness in the chain.
+    const userMessageBytes = Buffer.byteLength(req.userMessage, "utf8");
+    if (userMessageBytes > MAX_USER_MESSAGE_BYTES) {
+      yield {
+        type: "error",
+        error: `gemini userMessage ${userMessageBytes} bytes exceeds argv limit ${MAX_USER_MESSAGE_BYTES} (linux ARG_MAX); falling through to next harness`,
+        recoverable: true,
+      };
+      return;
+    }
+
     const stdinPayload = renderStdinPayload(req);
     const args: string[] = [
       "-p", req.userMessage,
