@@ -77,24 +77,37 @@ jobs:
           sha256sum "phantombot-${TAG}-linux-x64" "phantombot-${TAG}-linux-arm64" > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Create GitHub Release with binary assets
+      - name: Write release notes to file
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          cat > release-notes.md <<EOF
+          Automated release for PR #${PR_NUMBER}: ${PR_TITLE}
+
+          Binaries:
+          - phantombot-${TAG}-linux-x64 — x86-64, baseline (no AVX2 required)
+          - phantombot-${TAG}-linux-arm64 — ARM64
+
+          Verify with: sha256sum -c SHA256SUMS
+
+          Install with: phantombot update
+          EOF
+
+      - name: Create GitHub Release with binary assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # --target pins the git tag to the merge commit we built from.
+          # Without it, a second PR landing mid-workflow would shift the
+          # tag onto the wrong sha (binaries would still be correct, but
+          # `git checkout v1.0.N` would lie about what code is in there).
           gh release create "$TAG" \
+            --target "${{ github.event.pull_request.merge_commit_sha }}" \
             --title "$TAG" \
-            --notes "Automated release for PR #${PR_NUMBER}: ${PR_TITLE}
-
-            Binaries:
-            - phantombot-${TAG}-linux-x64 — x86-64, baseline (no AVX2 required)
-            - phantombot-${TAG}-linux-arm64 — ARM64
-
-            Verify with: sha256sum -c SHA256SUMS
-
-            Install with: phantombot update" \
+            --notes-file release-notes.md \
             "dist/phantombot-${TAG}-linux-x64" \
             "dist/phantombot-${TAG}-linux-arm64" \
             "dist/SHA256SUMS"
