@@ -7,9 +7,9 @@
  * inside its prompt when it decides the user should hear about something.
  *
  * Sends to every chat in `channels.telegram.allowed_user_ids`. For the
- * common single-allowlisted-user case (kai's setup) that's exactly one
- * recipient. For multi-recipient lists, we fan out — a follow-up can
- * add `--to <userId>` if per-recipient routing matters.
+ * common single-allowlisted-user case that's exactly one recipient.
+ * For multi-recipient lists, we fan out — a follow-up can add
+ * `--to <userId>` if per-recipient routing matters.
  *
  * --message  → text via sendMessage
  * --voice    → synthesized via the configured TTS provider, sent via

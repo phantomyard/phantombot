@@ -8,7 +8,7 @@
  *
  * SHA256 verification is mandatory — we refuse to swap if the downloaded
  * bytes don't match SHA256SUMS. A poisoned mirror or in-flight tamper
- * stops the install instead of cooking kai's box with a hostile binary.
+ * stops the install instead of running a hostile binary on the host.
  */
 
 import { createHash } from "node:crypto";
@@ -166,10 +166,10 @@ export type ApplyResult =
  * truncate it, even if the parent dir is writable. So if a previous .bak
  * was written by a different user (e.g. an earlier `sudo cp` during
  * initial deploy left a root-owned .bak), running `phantombot update` as
- * the unprivileged service user fails with EACCES — even though kai owns
- * the dir and the live binary. unlink only needs write+execute on the
- * parent dir, which we've already verified via checkWritable, so an old
- * foreign-owned .bak can be cleared without elevated privileges.
+ * the unprivileged service user fails with EACCES — even though that user
+ * owns the dir and the live binary. unlink only needs write+execute on
+ * the parent dir, which we've already verified via checkWritable, so an
+ * old foreign-owned .bak can be cleared without elevated privileges.
  *
  * Returns the .bak path on success so the caller can tell the user where
  * to find the rollback if something downstream (e.g. service restart)

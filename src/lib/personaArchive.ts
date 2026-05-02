@@ -5,8 +5,8 @@
  * of the same name coexist.
  *
  *   personasDir/<name>/                   ->  personasDir/../personas-archive/<name>-<ISO>/
- *   /home/.local/share/phantombot/personas/kai/
- *     ->  /home/.local/share/phantombot/personas-archive/kai-2026-05-01T15-00-00Z/
+ *   ~/.local/share/phantombot/personas/<name>/
+ *     ->  ~/.local/share/phantombot/personas-archive/<name>-2026-05-01T15-00-00Z/
  *
  * `phantombot create-persona` calls archivePersona before overwriting an
  * existing persona; `phantombot import-persona` shows the archive list
@@ -18,13 +18,13 @@ import { cp, mkdir, readdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export interface ArchivedPersona {
-  /** The original persona name (e.g. "kai"). */
+  /** The original persona name (e.g. "phantom"). */
   name: string;
   /** ISO-8601 timestamp parsed from the archive directory name. */
   archivedAt: Date;
   /** Absolute path to the archive directory. */
   dir: string;
-  /** The basename of the archive directory ("kai-2026-05-01T15-00-00-000Z"). */
+  /** The basename of the archive directory ("<name>-2026-05-01T15-00-00-000Z"). */
   archiveName: string;
 }
 

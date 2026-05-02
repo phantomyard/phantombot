@@ -23,7 +23,7 @@ export const TICK_TIMER_NAME = "phantombot-tick.timer";
  * Both .env files we source into every phantombot unit:
  *   ~/.config/phantombot/.env  — phantombot's own runtime secrets
  *                                 (TTS keys; written by `phantombot voice`).
- *   ~/.env                     — kai's general-purpose credentials
+ *   ~/.env                     — the agent's general-purpose credentials
  *                                 (GITHUB_TOKEN, ssh passphrases, etc.;
  *                                 written via `phantombot env set`).
  *
@@ -560,7 +560,7 @@ export interface EnsureUserSystemdEnvOptions {
  * If XDG_RUNTIME_DIR is already set in env (e.g. real ssh / machinectl
  * shell session), do nothing.
  *
- * Otherwise — typical when reaching kai via `sudo su -`, where PAM does
+ * Otherwise — typical when reaching a service user via `sudo su -`, where PAM does
  * not propagate XDG_RUNTIME_DIR to the target user — derive it from
  * `/run/user/<uid>`. If that directory exists (it will when linger is
  * enabled), set both XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS so

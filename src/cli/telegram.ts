@@ -229,7 +229,7 @@ export interface OpenClawTelegramSnippet {
  * Pull the Telegram bot config out of an OpenClaw `openclaw.json`. Returns
  * undefined if the file is unreadable, malformed, or has no telegram block.
  *
- * Looks for: channels.telegram.accounts.default.botToken (kai's layout)
+ * Looks for: channels.telegram.accounts.default.botToken (modern layout)
  *      and:  channels.telegram.botToken               (older flat layout)
  */
 export function parseOpenClawTelegram(

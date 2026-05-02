@@ -125,8 +125,9 @@ discoverable:
   1. process.env  — already loaded; phantombot sources both \`~/.env\` and
                     \`~/.config/phantombot/.env\` via systemd EnvironmentFile=,
                     so most credentials are available without re-reading.
-  2. ~/.env       — kai's general credentials file. The canonical home for
-                    things like GITHUB_TOKEN, OPENAI_API_KEY, ssh passphrases.
+  2. ~/.env       — the agent's general credentials file. The canonical
+                    home for things like GITHUB_TOKEN, OPENAI_API_KEY, ssh
+                    passphrases.
   3. ~/.ssh/      — SSH keys + config (Host aliases, IdentityFile entries).
   4. ~/.bashrc, ~/.zshrc — exported shell vars (often the same keys as ~/.env
                     but exported into interactive shells too).

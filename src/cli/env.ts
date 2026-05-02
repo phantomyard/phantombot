@@ -10,7 +10,7 @@
  * What lives where:
  *   ~/.config/phantombot/.env  — phantombot's own runtime secrets
  *                                 (TTS keys; written by `phantombot voice`).
- *   ~/.env                     — kai's general-purpose credentials
+ *   ~/.env                     — the agent's general-purpose credentials
  *                                 (GITHUB_TOKEN, ssh passphrases, etc.).
  *                                 phantombot sources both via systemd
  *                                 EnvironmentFile= so the running service

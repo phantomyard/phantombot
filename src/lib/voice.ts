@@ -61,7 +61,7 @@ export const ENV_KEY_FOR_PROVIDER: Record<
 
 /** A small curated default voice list per provider for the TUI. */
 export const ELEVENLABS_DEFAULTS = {
-  voiceId: "onwK4e9ZLuTAKqWW03F9", // "Daniel" — what kai's openclaw used
+  voiceId: "onwK4e9ZLuTAKqWW03F9", // "Daniel" — common OpenClaw default
   modelId: "eleven_turbo_v2_5",
   stability: 1,
   similarityBoost: 0.7,
@@ -142,7 +142,7 @@ export async function validateOpenAIKey(
 /**
  * Extract voice config from an OpenClaw config object. Returns undefined
  * when no voice block is present. Looks at both `tts` (modern openclaw)
- * and `talk` (older variant kai's machine had).
+ * and `talk` (older variant some OpenClaw deployments had).
  */
 export function parseOpenClawVoice(
   openclawJson: unknown,
@@ -192,7 +192,7 @@ export function parseOpenClawVoice(
     };
   }
 
-  // Older `talk` block (kai): {voiceId, apiKey, modelId?}
+  // Older `talk` block: {voiceId, apiKey, modelId?}
   if (talk && (typeof talk.voiceId === "string" || typeof talk.apiKey === "string")) {
     const voiceId =
       typeof talk.voiceId === "string"
