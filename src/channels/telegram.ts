@@ -18,8 +18,9 @@
 import type { Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
+  type AudioSupport,
+  sttSupport,
   synthesize,
-  sttSupported,
   transcribe,
   ttsSupported,
 } from "../lib/audio.ts";
@@ -343,10 +344,11 @@ export async function runTelegramServer(
       // For voice messages: download → transcribe → use the transcript
       // as the user message before invoking the harness.
       if (isVoice && msg.voice) {
-        if (!sttSupported(input.config)) {
+        const stt = sttSupport(input.config);
+        if (!stt.ok) {
           await input.transport.sendMessage(
             msg.chatId,
-            `(voice messages need OpenAI or ElevenLabs configured — current provider is '${input.config.voice.provider}')`,
+            voiceUnavailableMessage(stt),
           );
           continue;
         }
@@ -478,4 +480,24 @@ export async function runTelegramServer(
       });
     }
   } while (!input.oneShot);
+}
+
+/**
+ * Render an honest, actionable explanation when sttSupport() rules a
+ * voice message out. Each variant points at the specific user action that
+ * fixes it, instead of the old single-message catch-all that misled
+ * users into thinking their provider was wrong when actually the systemd
+ * unit was stale.
+ */
+export function voiceUnavailableMessage(
+  s: Extract<AudioSupport, { ok: false }>,
+): string {
+  if (s.reason === "provider_none") {
+    return "voice transcription is disabled — run `phantombot voice` to set up OpenAI or ElevenLabs";
+  }
+  if (s.reason === "provider_no_stt") {
+    return `current provider '${s.provider}' has no STT — switch via \`phantombot voice\``;
+  }
+  // key_missing
+  return `voice key not loaded into the service environment — run \`phantombot install\` to upgrade the systemd unit, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
 }

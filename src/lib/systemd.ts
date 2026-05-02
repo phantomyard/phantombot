@@ -6,9 +6,9 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
@@ -209,6 +209,64 @@ export interface ServiceControl {
   isActive(): Promise<boolean>;
   /** Restart the phantombot service. Returns ok=false on failure. */
   restart(): Promise<{ ok: boolean; stderr?: string }>;
+  /**
+   * Bring the on-disk systemd unit up-to-date with the current template if
+   * it's stale (or absent under conditions where re-render is appropriate).
+   * Returns whether a rewrite happened — callers can use it to print a notice.
+   *
+   * Why this matters: a pre-Phase-29 unit lacks `EnvironmentFile=`, so
+   * secrets written to ~/.config/phantombot/.env (TTS keys, etc.) never
+   * reach the running service even after restart. The voice/telegram/harness
+   * TUIs call this before restart so the saved config actually takes effect.
+   */
+  rerenderUnitIfStale(): Promise<{ rerendered: boolean }>;
+}
+
+/**
+ * Compare the on-disk unit at unitPath against the canonical template for
+ * binPath. If absent or different, write the canonical template and run
+ * `systemctl --user daemon-reload`. Returns whether a rerender happened.
+ *
+ * Pure on the inputs — caller picks the unit path, the bin path, and the
+ * systemctl runner. Tests inject a fake runner; callers in production use
+ * BunSystemctlRunner with an env that has XDG_RUNTIME_DIR set.
+ */
+export async function ensureUnitCurrent(opts: {
+  unitPath: string;
+  binPath: string;
+  systemctl: SystemctlRunner;
+}): Promise<{ rerendered: boolean }> {
+  const expected = generateSystemdUnit({
+    binPath: opts.binPath,
+    args: ["run"],
+  });
+  let current: string | undefined;
+  if (existsSync(opts.unitPath)) {
+    current = await readFile(opts.unitPath, "utf8");
+  }
+  if (current === expected) return { rerendered: false };
+  await mkdir(dirname(opts.unitPath), { recursive: true });
+  await writeFile(opts.unitPath, expected, "utf8");
+  await opts.systemctl.run(["--user", "daemon-reload"]);
+  return { rerendered: true };
+}
+
+/**
+ * Default rerenderUnitIfStale wiring: only fires when the running binary is
+ * an installed `phantombot` (not `bun` in dev), only when a unit exists on
+ * disk (don't presume an install the user never asked for), and only when
+ * the user-systemd bus is reachable (no linger → nothing we can daemon-
+ * reload anyway).
+ */
+async function defaultRerenderUnitIfStale(): Promise<{ rerendered: boolean }> {
+  const binPath = process.execPath;
+  if (basename(binPath) !== "phantombot") return { rerendered: false };
+  const unitPath = defaultUnitPath();
+  if (!existsSync(unitPath)) return { rerendered: false };
+  const sysEnv = ensureUserSystemdEnv();
+  if (!sysEnv.ready) return { rerendered: false };
+  const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
+  return ensureUnitCurrent({ unitPath, binPath, systemctl });
 }
 
 /**
@@ -241,6 +299,7 @@ export function defaultServiceControl(): ServiceControl {
         ? { ok: true }
         : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
     },
+    rerenderUnitIfStale: defaultRerenderUnitIfStale,
   };
 }
 

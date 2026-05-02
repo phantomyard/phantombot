@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildSystemctlEnv,
+  ensureUnitCurrent,
   ensureUserSystemdEnv,
   generateSystemdUnit,
   installPhantombotUnit,
@@ -268,6 +269,69 @@ describe("ensureUserSystemdEnv", () => {
     expect(r.ready).toBe(true);
     expect(r.runtimeDir).toBe("/tmp/fake-runtime");
     expect(env.XDG_RUNTIME_DIR).toBe("/tmp/fake-runtime");
+  });
+});
+
+describe("ensureUnitCurrent", () => {
+  const BIN = "/home/kai/.local/bin/phantombot";
+
+  test("identical on-disk unit → no rerender, no systemctl call", async () => {
+    const sys = new FakeSystemctl();
+    const expected = generateSystemdUnit({ binPath: BIN, args: ["run"] });
+    await writeFile(unitPath, expected, "utf8");
+    const r = await ensureUnitCurrent({ unitPath, binPath: BIN, systemctl: sys });
+    expect(r.rerendered).toBe(false);
+    expect(sys.calls).toEqual([]);
+    // File untouched.
+    expect(await readFile(unitPath, "utf8")).toBe(expected);
+  });
+
+  test("missing unit → rerender + daemon-reload", async () => {
+    const sys = new FakeSystemctl();
+    const r = await ensureUnitCurrent({ unitPath, binPath: BIN, systemctl: sys });
+    expect(r.rerendered).toBe(true);
+    expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
+    const written = await readFile(unitPath, "utf8");
+    expect(written).toBe(generateSystemdUnit({ binPath: BIN, args: ["run"] }));
+  });
+
+  test("one-byte diff → rerender + daemon-reload", async () => {
+    const sys = new FakeSystemctl();
+    const expected = generateSystemdUnit({ binPath: BIN, args: ["run"] });
+    // Append one stray newline to make the file differ by exactly one byte.
+    await writeFile(unitPath, `${expected}\n`, "utf8");
+    const r = await ensureUnitCurrent({ unitPath, binPath: BIN, systemctl: sys });
+    expect(r.rerendered).toBe(true);
+    expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
+    expect(await readFile(unitPath, "utf8")).toBe(expected);
+  });
+
+  test("pre-Phase-29 unit lacking EnvironmentFile= → rerender adds it", async () => {
+    const sys = new FakeSystemctl();
+    const stale = `[Unit]
+Description=Phantombot — personality-first chat agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${BIN} run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+`;
+    expect(stale).not.toContain("EnvironmentFile=");
+    await writeFile(unitPath, stale, "utf8");
+    const r = await ensureUnitCurrent({ unitPath, binPath: BIN, systemctl: sys });
+    expect(r.rerendered).toBe(true);
+    expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
+    const rewritten = await readFile(unitPath, "utf8");
+    expect(rewritten).toContain("EnvironmentFile=-%h/.config/phantombot/.env");
+    expect(rewritten).toContain(`ExecStart=${BIN} run`);
   });
 });
 

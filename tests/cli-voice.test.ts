@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { maybeUpgradeUnit } from "../src/cli/harness.ts";
 import { applyVoiceConfig } from "../src/cli/voice.ts";
 import { loadEnvFile } from "../src/lib/envFile.ts";
+import {
+  ensureUnitCurrent,
+  generateSystemdUnit,
+  type ServiceControl,
+  type SystemctlResult,
+  type SystemctlRunner,
+} from "../src/lib/systemd.ts";
 
 let workdir: string;
 let configPath: string;
@@ -95,5 +103,76 @@ describe("applyVoiceConfig — none", () => {
     });
     const cfg = await readFile(configPath, "utf8");
     expect(cfg).toContain('provider = "none"');
+  });
+});
+
+describe("voice save flow rewrites stale systemd unit before restart", () => {
+  test("on-disk unit lacking EnvironmentFile= is rewritten and restart sees the upgraded unit", async () => {
+    // Pre-create a stale unit (no EnvironmentFile=). This is the exact
+    // shape of an install from before Phase 29 — the bug the PR fixes.
+    const unitPath = join(workdir, "phantombot.service");
+    const BIN = "/home/kai/.local/bin/phantombot";
+    const stale = `[Unit]
+Description=Phantombot — personality-first chat agent
+
+[Service]
+Type=simple
+ExecStart=${BIN} run
+
+[Install]
+WantedBy=default.target
+`;
+    expect(stale).not.toContain("EnvironmentFile=");
+    await writeFile(unitPath, stale, "utf8");
+
+    class FakeSystemctl implements SystemctlRunner {
+      calls: string[][] = [];
+      async run(args: readonly string[]): Promise<SystemctlResult> {
+        this.calls.push([...args]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    }
+    const sys = new FakeSystemctl();
+
+    const callOrder: string[] = [];
+    let unitContentAtRestart: string | undefined;
+    const svc: ServiceControl = {
+      isActive: async () => true,
+      restart: async () => {
+        callOrder.push("restart");
+        unitContentAtRestart = await readFile(unitPath, "utf8");
+        return { ok: true };
+      },
+      rerenderUnitIfStale: async () => {
+        callOrder.push("rerender");
+        return ensureUnitCurrent({ unitPath, binPath: BIN, systemctl: sys });
+      },
+    };
+
+    // Drive through the shared upgrade-unit helper. (maybePromptRestart
+    // would block on @clack's confirm prompt in a non-TTY test runner;
+    // maybeUpgradeUnit is the prompt-free part of the flow that owns the
+    // rerender step.)
+    const r = await maybeUpgradeUnit(svc);
+    expect(r.rerendered).toBe(true);
+
+    // The on-disk unit now has EnvironmentFile= — the actual fix.
+    const rewritten = await readFile(unitPath, "utf8");
+    expect(rewritten).toContain(
+      "EnvironmentFile=-%h/.config/phantombot/.env",
+    );
+    expect(rewritten).toBe(generateSystemdUnit({ binPath: BIN, args: ["run"] }));
+
+    // daemon-reload was issued as part of the rerender.
+    expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
+
+    // Now simulate the restart step that maybePromptRestart would do
+    // after the rerender — and verify it sees the upgraded unit, not the
+    // stale one. This is the "before restart" guarantee the spec asks for.
+    await svc.restart();
+    expect(callOrder).toEqual(["rerender", "restart"]);
+    expect(unitContentAtRestart).toContain(
+      "EnvironmentFile=-%h/.config/phantombot/.env",
+    );
   });
 });
