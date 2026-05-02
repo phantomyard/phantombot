@@ -20,16 +20,15 @@ describe("phantombot CLI dispatcher", () => {
     const subs = mainCommand.subCommands ?? {};
     const names = Object.keys(subs).sort();
     expect(names).toEqual([
-      "create-persona",
       "embedding",
       "env",
       "harness",
       "heartbeat",
-      "import-persona",
       "install",
       "memory",
       "nightly",
       "notify",
+      "persona",
       "run",
       "task",
       "telegram",

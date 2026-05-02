@@ -84,7 +84,8 @@ phantombot/
 │   │   ├── memory.ts         # phantombot memory (search/get/today/index/list)
 │   │   ├── heartbeat.ts nightly.ts
 │   │   ├── embedding.ts      # phantombot embedding (TUI: Gemini config)
-│   │   ├── create-persona.ts import-persona.ts
+│   │   ├── persona.ts        # phantombot persona (consolidates create / import / restore / switch)
+│   │   ├── create-persona.ts import-persona.ts  # implementation files; no top-level subcommand
 │   ├── harnesses/
 │   │   ├── types.ts          # HarnessRequest / HarnessChunk discriminated union
 │   │   ├── claude.ts         # Bun.spawn `claude --print --output-format stream-json …`
@@ -185,10 +186,12 @@ Every merged PR auto-releases `v1.0.<PR_NUMBER>`. The workflow at `.github/workf
 
 1. **`bun-linux-x64` instead of baseline** — SIGILLs on pre-AVX2 hardware. Use `bun-linux-x64-baseline`. Documented at the top of `.github/workflows/release.yml`.
 2. **`echo … > src/version.ts` in CI** — would clobber the comment block. Use `sed -i "s/0.1.0-dev/$VERSION/" src/version.ts` instead. The placeholder literal must round-trip exactly; if you change `version.ts`, also update the sed pattern in the workflow.
-3. **`sudo cp` to install kai's binary** — leaves `.bak` root-owned, blocks future `phantombot update` from kai. Use `sudo install -o kai -g kai -m 755 …`. Documented in PR #47's repro.
+3. **`sudo cp` to install someone's binary** — leaves `.bak` root-owned, blocks future `phantombot update` from the unprivileged user. Use `sudo install -o <user> -g <group> -m 755 …`. Documented in PR #47's repro.
 4. **`copyFile` over an existing foreign-owned file** — fails with EACCES because `O_TRUNC` checks the existing file's mode. `applyUpdate` unlinks `.bak` first; if you add similar copy logic, do the same.
 5. **@clack/prompts confirm in non-TTY context** — returns the cancel sentinel. If you write code that calls `p.confirm` directly and expect a boolean, tests will hit the cancel path silently. Prefer `ConfirmFn` injection (see `src/cli/harness.ts`).
 6. **Forgetting `tests/cli.test.ts` subcommand list** — every new subcommand needs to be added there or that test fails on PR merge.
+7. **Importing a persona on a fresh box without setting it as default** — the built-in fallback `default_persona = "phantom"` doesn't have a directory; `phantombot run` would fail with "persona 'phantom' not found." `runImportPersona` now adopts the imported persona as default if the current default's dir doesn't exist. If you add another path that creates a persona, do the same — see `maybeAdoptAsDefault` in `src/cli/import-persona.ts`.
+8. **`install.sh` piped to `sh` runs without a TTY** — interactive @clack TUIs would misbehave. The script detects this with `[ -t 0 ] && [ -t 1 ]` before launching the persona TUI, and prints the next-step hint instead. If you add interactive setup steps to the install flow, repeat the check.
 
 ## Process for updating this file
 

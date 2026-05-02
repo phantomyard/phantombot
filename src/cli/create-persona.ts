@@ -1,15 +1,19 @@
 /**
- * `phantombot create-persona` — interactive TUI to create a new persona.
+ * Persona creation flow — used by `phantombot persona` (the consolidated
+ * subcommand) when the user picks "Create a new persona" from its menu.
  *
  * Asks a handful of questions, generates BOOT.md (and a placeholder
  * MEMORY.md), and optionally sets the new persona as default.
  *
- * The TUI lives in `gatherInputs`. Side effects live in `applyPersona`.
- * Tests cover applyPersona with synthetic inputs; the prompt flow is
- * verified manually.
+ * Side effects live in `applyPersona`; the prompt flow is in
+ * `runCreatePersona`. Tests cover applyPersona with synthetic inputs;
+ * the prompt flow is verified manually.
+ *
+ * This file does NOT export a `defineCommand(...)` default — the
+ * top-level `phantombot create-persona` subcommand was retired in
+ * favor of `phantombot persona` (see src/cli/persona.ts).
  */
 
-import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -226,13 +230,3 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
   return 0;
 }
 
-export default defineCommand({
-  meta: {
-    name: "create-persona",
-    description: "Create a new persona via interactive prompts.",
-  },
-  async run() {
-    const code = await runCreatePersona();
-    process.exitCode = code;
-  },
-});
