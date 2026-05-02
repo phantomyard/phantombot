@@ -42,18 +42,22 @@ let installPaths: {
   heartbeatTimerPath: string;
   nightlyServicePath: string;
   nightlyTimerPath: string;
+  tickServicePath: string;
+  tickTimerPath: string;
 };
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
   unitPath = join(workdir, "phantombot.service");
-  // Without these, runInstall would write the heartbeat/nightly units
-  // into the real ~/.config/systemd/user/ on the test runner — see #44.
+  // Without these, runInstall would write companion units into the real
+  // ~/.config/systemd/user/ on the test runner — see #44.
   installPaths = {
     heartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
     heartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
     nightlyServicePath: join(workdir, "phantombot-nightly.service"),
     nightlyTimerPath: join(workdir, "phantombot-nightly.timer"),
+    tickServicePath: join(workdir, "phantombot-tick.service"),
+    tickTimerPath: join(workdir, "phantombot-tick.timer"),
   };
 });
 
@@ -153,6 +157,8 @@ describe("runInstall", () => {
       "--user start phantombot-heartbeat.timer",
       "--user enable phantombot-nightly.timer",
       "--user start phantombot-nightly.timer",
+      "--user enable phantombot-tick.timer",
+      "--user start phantombot-tick.timer",
     ]);
     expect(out.text).toContain("journalctl --user -u phantombot");
     // No auto-set message when env was already set.
@@ -174,6 +180,8 @@ describe("runUninstall", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
+      "--user stop phantombot-tick.timer",
+      "--user disable phantombot-tick.timer",
       "--user stop phantombot-nightly.timer",
       "--user disable phantombot-nightly.timer",
       "--user stop phantombot-heartbeat.timer",

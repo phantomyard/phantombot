@@ -26,6 +26,10 @@ import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
 import heartbeatCmd from "./heartbeat.ts";
 import nightlyCmd from "./nightly.ts";
+import envCmd from "./env.ts";
+import notifyCmd from "./notify.ts";
+import taskCmd from "./task.ts";
+import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import voiceCmd from "./voice.ts";
 
@@ -42,12 +46,16 @@ export const mainCommand = defineCommand({
     telegram: telegramCmd,
     harness: harnessCmd,
     embedding: embeddingCmd,
+    env: envCmd,
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,
     memory: memoryCmd,
+    notify: notifyCmd,
     heartbeat: heartbeatCmd,
     nightly: nightlyCmd,
+    task: taskCmd,
+    tick: tickCmd,
     update: updateCmd,
     voice: voiceCmd,
   },

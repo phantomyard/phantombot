@@ -49,9 +49,11 @@ let hbServicePath: string;
 let hbTimerPath: string;
 let ngServicePath: string;
 let ngTimerPath: string;
+let tickServicePath: string;
+let tickTimerPath: string;
 
 /**
- * Build the four heartbeat/nightly path overrides every install test
+ * Build the heartbeat/nightly/tick path overrides every install test
  * needs. Without these, installPhantombotUnit would write to the real
  * ~/.config/systemd/user/ on the test runner — the bug fixed in #44.
  */
@@ -61,6 +63,8 @@ function tmpInstallPaths() {
     heartbeatTimerPath: hbTimerPath,
     nightlyServicePath: ngServicePath,
     nightlyTimerPath: ngTimerPath,
+    tickServicePath: tickServicePath,
+    tickTimerPath: tickTimerPath,
   };
 }
 
@@ -71,6 +75,8 @@ beforeEach(async () => {
   hbTimerPath = join(workdir, "phantombot-heartbeat.timer");
   ngServicePath = join(workdir, "phantombot-nightly.service");
   ngTimerPath = join(workdir, "phantombot-nightly.timer");
+  tickServicePath = join(workdir, "phantombot-tick.service");
+  tickTimerPath = join(workdir, "phantombot-tick.timer");
 });
 
 afterEach(async () => {
@@ -126,6 +132,8 @@ describe("installPhantombotUnit", () => {
       ["--user", "start", "phantombot-heartbeat.timer"],
       ["--user", "enable", "phantombot-nightly.timer"],
       ["--user", "start", "phantombot-nightly.timer"],
+      ["--user", "enable", "phantombot-tick.timer"],
+      ["--user", "start", "phantombot-tick.timer"],
     ]);
     expect(out.text).toContain("wrote unit file");
     expect(out.text).toContain("enabled and started");
@@ -373,6 +381,8 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(sys.calls).toEqual([
+      ["--user", "stop", "phantombot-tick.timer"],
+      ["--user", "disable", "phantombot-tick.timer"],
       ["--user", "stop", "phantombot-nightly.timer"],
       ["--user", "disable", "phantombot-nightly.timer"],
       ["--user", "stop", "phantombot-heartbeat.timer"],

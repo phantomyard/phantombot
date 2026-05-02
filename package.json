@@ -20,6 +20,7 @@
   "dependencies": {
     "@clack/prompts": "^1.3.0",
     "citty": "^0.1.6",
+    "cron-parser": "^5.5.0",
     "smol-toml": "^1.3.0"
   },
   "devDependencies": {

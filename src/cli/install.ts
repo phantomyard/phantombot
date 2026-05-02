@@ -36,6 +36,8 @@ export interface RunInstallInput {
   heartbeatTimerPath?: string;
   nightlyServicePath?: string;
   nightlyTimerPath?: string;
+  tickServicePath?: string;
+  tickTimerPath?: string;
   out?: WriteSink;
   err?: WriteSink;
   /** Override systemctl runner for testing. */
@@ -81,6 +83,8 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
     heartbeatTimerPath: input.heartbeatTimerPath,
     nightlyServicePath: input.nightlyServicePath,
     nightlyTimerPath: input.nightlyTimerPath,
+    tickServicePath: input.tickServicePath,
+    tickTimerPath: input.tickTimerPath,
     systemctl,
     out,
     err,
