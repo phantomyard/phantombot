@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { maybeUpgradeUnit } from "../src/cli/harness.ts";
+import { maybePromptRestart } from "../src/cli/harness.ts";
 import { applyVoiceConfig } from "../src/cli/voice.ts";
 import { loadEnvFile } from "../src/lib/envFile.ts";
 import {
@@ -149,12 +149,11 @@ WantedBy=default.target
       },
     };
 
-    // Drive through the shared upgrade-unit helper. (maybePromptRestart
-    // would block on @clack's confirm prompt in a non-TTY test runner;
-    // maybeUpgradeUnit is the prompt-free part of the flow that owns the
-    // rerender step.)
-    const r = await maybeUpgradeUnit(svc);
-    expect(r.rerendered).toBe(true);
+    // Drive the REAL maybePromptRestart (not just maybeUpgradeUnit) by
+    // injecting an auto-confirm — this proves the production code path
+    // calls rerender BEFORE restart, instead of asserting on test-local
+    // instrumentation. This is the gap #35 was filed to close.
+    await maybePromptRestart(svc, async () => true);
 
     // The on-disk unit now has EnvironmentFile= — the actual fix.
     const rewritten = await readFile(unitPath, "utf8");
@@ -166,13 +165,40 @@ WantedBy=default.target
     // daemon-reload was issued as part of the rerender.
     expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
 
-    // Now simulate the restart step that maybePromptRestart would do
-    // after the rerender — and verify it sees the upgraded unit, not the
-    // stale one. This is the "before restart" guarantee the spec asks for.
-    await svc.restart();
+    // The actual ordering inside maybePromptRestart: rerender first, then
+    // restart. If a refactor swaps the two lines, this fails — that's
+    // what was missing from the previous version of this test.
     expect(callOrder).toEqual(["rerender", "restart"]);
     expect(unitContentAtRestart).toContain(
       "EnvironmentFile=-%h/.config/phantombot/.env",
     );
+  });
+
+  test("maybePromptRestart skips restart when confirm returns false", async () => {
+    const unitPath = join(workdir, "phantombot.service");
+    const callOrder: string[] = [];
+    const fakeSystemctl: SystemctlRunner = {
+      async run(_args: readonly string[]): Promise<SystemctlResult> {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const svc: ServiceControl = {
+      isActive: async () => true,
+      restart: async () => {
+        callOrder.push("restart");
+        return { ok: true };
+      },
+      rerenderUnitIfStale: async () => {
+        callOrder.push("rerender");
+        return ensureUnitCurrent({
+          unitPath,
+          binPath: "/bin/phantombot",
+          systemctl: fakeSystemctl,
+        });
+      },
+    };
+    await maybePromptRestart(svc, async () => false);
+    // Rerender ran (always does) but restart was declined.
+    expect(callOrder).toEqual(["rerender"]);
   });
 });
