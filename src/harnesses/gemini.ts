@@ -174,10 +174,16 @@ export class GeminiHarness implements Harness {
           // ahead of the stream (e.g. terminal-color warnings, "YOLO
           // mode is enabled"). Surfaced as low-noise progress notes
           // rather than dropped, so they show up in /status diagnostics.
+          // Also logged at debug level so a future gemini-cli schema
+          // change that produces unexpected non-JSON shows up in the
+          // journal without needing to reproduce live.
           let parsed: unknown;
           try {
             parsed = JSON.parse(trimmed);
           } catch {
+            log.debug("gemini: non-JSON stdout line", {
+              line: trimmed.slice(0, 200),
+            });
             yield { type: "progress", note: trimmed.slice(0, 200) };
             continue;
           }
