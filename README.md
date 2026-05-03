@@ -27,7 +27,7 @@ When Phantom is asked to *"SSH to the home lab and write a note to the Obsidian 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andrewagrahamhodges/phantombot/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
 ```
 
 The script:
@@ -100,7 +100,7 @@ sudo loginctl enable-linger $USER
 > ⚠️ **The build target must remain `bun-linux-x64-baseline`.** If you "optimise" to plain `bun-linux-x64`, the binary will SIGILL on launch on any host without AVX2 (e.g. older silicon used by some self-hosters).
 
 ```bash
-git clone https://github.com/andrewagrahamhodges/phantombot.git
+git clone https://github.com/phantomyard/phantombot.git
 cd phantombot
 bun install
 bun run build                # → ./dist/phantombot (~98 MB, linux-x64-baseline)

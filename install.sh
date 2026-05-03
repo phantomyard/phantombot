@@ -2,7 +2,7 @@
 # phantombot installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/andrewagrahamhodges/phantombot/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
 #
 # What it does:
 #   1. Detects host arch (x86_64 → x64, aarch64 → arm64).
@@ -25,7 +25,7 @@
 
 set -eu
 
-REPO="andrewagrahamhodges/phantombot"
+REPO="phantomyard/phantombot"
 INSTALL_DIR="${PHANTOMBOT_INSTALL_DIR:-$HOME/.local/bin}"
 
 # --- arch detection ------------------------------------------------------
