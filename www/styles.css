@@ -3,6 +3,7 @@
     --fg: #ffffff;
     --muted: #888888;
     --border: #30363d;
+    --grid: rgba(255, 255, 255, 0.03);
     --accent: #3fb950;
     --font-mono: 'JetBrains Mono', monospace;
     --font-sans: 'Inter', sans-serif;
@@ -16,6 +17,11 @@
 
 body {
     background-color: var(--bg);
+    background-image: 
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 50px 50px;
+    background-attachment: fixed;
     color: var(--fg);
     font-family: var(--font-sans);
     line-height: 1.6;
@@ -23,39 +29,54 @@ body {
 }
 
 header {
-    padding: 2rem;
+    padding: 3rem 2rem;
     position: sticky;
     top: 0;
-    background: rgba(0,0,0,0.8);
-    backdrop-filter: blur(5px);
+    background: rgba(0,0,0,0.9);
+    backdrop-filter: blur(10px);
     z-index: 100;
+    border-bottom: 1px solid var(--border);
 }
 
 nav {
     max-width: 1200px;
     margin: 0 auto;
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
     align-items: center;
+    gap: 1.5rem;
 }
 
 .logo {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
     font-family: var(--font-mono);
     font-weight: bold;
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     letter-spacing: -1px;
 }
 
+.logo img {
+    height: 40px;
+}
+
+.links {
+    display: flex;
+    gap: 2rem;
+}
+
 .links a {
-    color: var(--fg);
+    color: var(--muted);
     text-decoration: none;
-    margin-left: 2rem;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
     font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 1px;
 }
 
 .links a:hover {
-    color: var(--accent);
+    color: var(--fg);
 }
 
 main {
@@ -66,24 +87,44 @@ main {
 
 .hero {
     margin-bottom: 8rem;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
 }
 
 .crooked {
     transform: rotate(-1.5deg);
 }
 
+.hero-logo img {
+    height: 120px;
+    margin-bottom: 2.5rem;
+    filter: drop-shadow(0 0 30px rgba(63, 185, 80, 0.3));
+}
+
 h1 {
     font-family: var(--font-mono);
-    font-size: 4rem;
-    line-height: 1;
-    margin-bottom: 2rem;
+    font-size: 3.5rem;
+    line-height: 1.1;
+    margin-bottom: 1.5rem;
+    letter-spacing: -2px;
 }
 
 .tagline {
-    font-size: 1.5rem;
+    font-size: 1.2rem;
     color: var(--muted);
-    max-width: 600px;
+    max-width: 500px;
     margin-bottom: 3rem;
+}
+
+.cta-label {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 1rem;
 }
 
 .cta code {
@@ -93,6 +134,8 @@ h1 {
     font-family: var(--font-mono);
     font-size: 1.1rem;
     display: inline-block;
+    color: var(--fg);
+    border: 1px solid var(--grid);
 }
 
 .grid {
@@ -117,19 +160,25 @@ h1 {
 }
 
 .terminal-window {
-    background: #161b22;
+    background: #0d1117;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    transition: transform 0.3s ease;
+}
+
+.terminal-window:hover {
+    transform: rotate(0deg) scale(1.02);
 }
 
 .terminal-header {
-    background: #21262d;
-    padding: 0.5rem 1rem;
+    background: #161b22;
+    padding: 0.75rem 1rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    border-bottom: 1px solid var(--border);
 }
 
 .dot {
@@ -149,19 +198,27 @@ h1 {
     margin-left: 1rem;
 }
 
-.placeholder {
+.terminal-body {
+    padding: 0;
+    background: #000;
+    line-height: 0;
+}
+
+.screenshot {
     width: 100%;
     display: block;
-    background: #000;
+    height: auto;
+    border: none;
 }
 
 .iphone-frame {
     max-width: 300px;
     margin: 2rem auto;
-    border: 8px solid #333;
+    border: 12px solid #1f2328;
     border-radius: 40px;
     overflow: hidden;
     background: #000;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
 }
 
 h2 {
@@ -182,12 +239,6 @@ footer {
 @media (max-width: 768px) {
     h1 { font-size: 2.5rem; }
     .crooked { transform: none; }
-}
-
-.screenshot {
-    width: 100%;
-    display: block;
-    height: auto;
 }
 
 .philosophy {

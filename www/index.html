@@ -12,7 +12,10 @@
 <body>
     <header>
         <nav>
-            <div class="logo"><img src="assets/img/logo.png" alt="Phantombot Logo" style="height: 40px;"></div>
+            <div class="logo">
+                <img src="assets/img/logo.png" alt="Phantombot Logo">
+                <span>Phantombot</span>
+            </div>
             <div class="links">
                 <a href="https://github.com/phantomyard/phantombot">GitHub</a>
                 <a href="https://phantomops.app">PhantomOps</a>
@@ -22,36 +25,19 @@
 
     <main>
         <section class="hero crooked">
-            <h1>Stop building tool-call parsers. Start building agents with souls.</h1>
-            <p class="tagline">Phantombot is a personality-first chat agent for Telegram. Minimalist, high-torque, and YoYo (You're On Your Own) by default. Zero tool-call translation layer.</p>
+            <div class="hero-logo">
+                <img src="assets/img/logo.png" alt="Phantombot Logo">
+            </div>
+            <h1>Phantombot. Agents with souls.</h1>
+            <p class="tagline">The personality-first chat agent for Telegram. Minimalist, high-torque, and Pi-native by design.</p>
             <div class="cta">
+                <p class="cta-label">Install on Linux (x64/ARM64):</p>
                 <code>curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh</code>
             </div>
         </section>
 
-        <section class="content">
-            <div class="grid">
-                <div class="card">
-                    <h3>Harness-Agnostic</h3>
-                    <p>Pi is the recommended primary; Claude and Gemini are first-class fallbacks. The harness provides the hands; Phantombot provides the soul.</p>
-                </div>
-                <div class="card">
-                    <h3>Zero Abstractions</h3>
-                    <p>No tool-call translation layer. The harness already knows how to use Bash. Phantombot doesn't second-guess it. Direct, raw power.</p>
-                </div>
-                <div class="card">
-                    <h3>Persistent Memory</h3>
-                    <p>Local SQLite turn store with hybrid search. Your agents remember every decision, lesson, and preference across sessions.</p>
-                </div>
-                <div class="card">
-                    <h3>High-Torque Ops</h3>
-                    <p>98 MB single binary, atomic self-updates in &lt;2s, and systemd integration for survivor-mode persistence.</p>
-                </div>
-            </div>
-        </section>
-
         <section class="showcase">
-            <div class="terminal-window">
+            <div class="terminal-window crooked">
                 <div class="terminal-header">
                     <span class="dot red"></span>
                     <span class="dot yellow"></span>
@@ -65,9 +51,30 @@
         </section>
 
         <section class="philosophy">
-            <h2>Why Phantombot?</h2>
-            <p>Phantombot was built because existing gateways became "enshitified." It's the answer to sluggish performance, fragile tool-call parsing, and bloated abstractions.</p>
-            <p><strong>The motivating insight:</strong> <em>the harness can do its own tools &mdash; let it.</em></p>
+            <h2>The Harness is the Platform</h2>
+            <p>Phantombot is built on the Pi-First insight: <strong>let the harness lead.</strong> Pi, Claude, and Gemini already know how to use Bash and SSH. Phantombot provides the soul, the memory, and the channel — and stays out of the way.</p>
+            <p>Zero tool-call translation. Zero bloat. Maximum torque.</p>
+        </section>
+
+        <section class="content">
+            <div class="grid">
+                <div class="card">
+                    <h3>Pi-Native</h3>
+                    <p>Built for the Pi aesthetic. Minimalist, single-binary, and focused on the essence of agency. Claude and Gemini serve as high-fidelity fallbacks.</p>
+                </div>
+                <div class="card">
+                    <h3>Atomic Updates</h3>
+                    <p>98 MB single binary. Atomic self-updates in &lt;2s. Built with Bun for zero-runtime dependencies on your host.</p>
+                </div>
+                <div class="card">
+                    <h3>Persistent Memory</h3>
+                    <p>Local SQLite turn store with hybrid search. Your agents remember every decision, lesson, and preference across sessions.</p>
+                </div>
+                <div class="card">
+                    <h3>Survivor Mode</h3>
+                    <p>Full systemd integration. Phantombot survives logouts, reboots, and network hiccups with robust auto-restart logic.</p>
+                </div>
+            </div>
         </section>
 
         <section class="features-detailed">
