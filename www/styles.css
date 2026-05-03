@@ -7,6 +7,7 @@
     --accent: #3fb950;
     --font-mono: 'JetBrains Mono', monospace;
     --font-sans: 'Inter', sans-serif;
+    --font-serif: 'Lora', serif;
 }
 
 * {
@@ -111,9 +112,11 @@ h1 {
 }
 
 .tagline {
-    font-size: 1.2rem;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 1.4rem;
     color: var(--muted);
-    max-width: 500px;
+    max-width: 600px;
     margin-bottom: 3rem;
 }
 
@@ -250,7 +253,8 @@ footer {
 }
 
 .philosophy p {
-    font-size: 1.2rem;
+    font-family: var(--font-serif);
+    font-size: 1.4rem;
     color: var(--muted);
     max-width: 700px;
     margin: 0 auto 1.5rem auto;
