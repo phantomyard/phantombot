@@ -57,7 +57,7 @@ nav {
 }
 
 .logo img {
-    height: 32px;
+    height: 40px;
 }
 
 .links {
@@ -97,7 +97,7 @@ main {
 }
 
 .hero-logo img {
-    height: 120px;
+    height: 160px;
     margin-bottom: 2.5rem;
     filter: drop-shadow(0 0 30px rgba(63, 185, 80, 0.3));
 }
