@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPersona } from "../src/cli/create-persona.ts";
@@ -107,8 +107,11 @@ describe("applyPersona", () => {
     expect(archives[0]?.name).toBe("robbie");
   });
 
-  test("setDefault=false leaves state.json untouched", async () => {
-    await applyPersona(config, {
+  test("setDefault=false leaves state.json untouched when current default exists on disk", async () => {
+    // Pre-existing valid default — additive create shouldn't shift the default.
+    await mkdir(join(config.personasDir, "phantom"), { recursive: true });
+    await writeFile(join(config.personasDir, "phantom", "BOOT.md"), "# id");
+    const r = await applyPersona(config, {
       name: "x",
       identity: "y",
       tone: "casual",
@@ -117,7 +120,26 @@ describe("applyPersona", () => {
       greeting: "",
       setDefault: false,
     });
+    expect(r.adoptedAsDefault).toBe(false);
     const state = await loadState();
     expect(state.default_persona).toBeUndefined();
+  });
+
+  test("setDefault=false adopts as default when current default has no dir on disk", async () => {
+    // Fresh box — config.defaultPersona = "phantom" but no personas/phantom/
+    // exists. Without auto-adopt, `phantombot run` would later fail with
+    // "persona 'phantom' not found at .../personas/phantom".
+    const r = await applyPersona(config, {
+      name: "robbie",
+      identity: "y",
+      tone: "casual",
+      expertise: [],
+      hardRules: "",
+      greeting: "",
+      setDefault: false,
+    });
+    expect(r.adoptedAsDefault).toBe(true);
+    const state = await loadState();
+    expect(state.default_persona).toBe("robbie");
   });
 });

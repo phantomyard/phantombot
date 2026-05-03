@@ -31,6 +31,7 @@ import {
   type ArchivedPersona,
 } from "../lib/personaArchive.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { adoptAsDefaultIfMissing } from "../lib/personaDefault.ts";
 import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { loadState, saveState } from "../state.ts";
 
@@ -64,6 +65,13 @@ export interface CreatePersonaResult {
   name: string;
   dir: string;
   setDefault: boolean;
+  /**
+   * True when the persona was adopted as default because the previously
+   * configured default had no directory on disk — even though the user
+   * said no to setDefault. Without this, `phantombot run` would still
+   * try to load the missing previous default and fail.
+   */
+  adoptedAsDefault?: boolean;
   /** If an existing persona was archived to make room. */
   archived?: ArchivedPersona;
 }
@@ -86,13 +94,22 @@ export async function applyPersona(
   );
   await ensurePersonaScaffold(dir);
 
+  let adoptedAsDefault = false;
   if (inputs.setDefault) {
     const state = await loadState();
     state.default_persona = inputs.name;
     await saveState(state);
+  } else {
+    adoptedAsDefault = await adoptAsDefaultIfMissing(config, inputs.name);
   }
 
-  return { name: inputs.name, dir, setDefault: inputs.setDefault, archived };
+  return {
+    name: inputs.name,
+    dir,
+    setDefault: inputs.setDefault,
+    adoptedAsDefault,
+    archived,
+  };
 }
 
 interface RunInput {
@@ -222,9 +239,16 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
     );
   }
 
+  if (result.adoptedAsDefault) {
+    p.note(
+      `'${result.name}' was set as default_persona because the previous default ('${config.defaultPersona}') has no persona dir on disk.`,
+      "Default",
+    );
+  }
+
   p.outro(
     `Persona '${result.name}' created at ${result.dir}` +
-      (result.setDefault ? " (set as default)" : ""),
+      (result.setDefault || result.adoptedAsDefault ? " (set as default)" : ""),
   );
   out.write("");
   return 0;

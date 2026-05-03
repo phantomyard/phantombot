@@ -32,6 +32,7 @@ import {
   listArchives,
   restoreArchive,
 } from "../lib/personaArchive.ts";
+import { adoptAsDefaultIfMissing } from "../lib/personaDefault.ts";
 import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
 import { defaultEnvFilePath, updateEnvFile } from "../lib/envFile.ts";
@@ -125,13 +126,7 @@ export async function runImportPersona(
     for (const f of scaffold.created) out.write(`  ${f}\n`);
   }
 
-  // Auto-set as default if the current default doesn't actually exist
-  // on disk. Without this, a fresh box with `default_persona = "phantom"`
-  // (the built-in fallback) would still try to load `personas/phantom/`
-  // even after importing `personas/robbie/` — and `phantombot run`
-  // would fail with "persona 'phantom' not found." We don't clobber a
-  // working default if the user is importing an additional persona.
-  await maybeAdoptAsDefault(config, result.name, out);
+  await adoptAsDefaultIfMissing(config, result.name, out);
 
   out.write(
     "\nNote: conversation history was NOT imported (phantombot v1 has no transcript importer).\n",
@@ -271,6 +266,8 @@ async function runImportFromPath(
     "Imported",
   );
 
+  await adoptAsDefaultIfMissing(input.config, result.name, input.out);
+
   if (!input.noTelegram) {
     await maybeImportOpenclawTelegram({
       config: input.config,
@@ -344,6 +341,8 @@ async function runRestoreArchive(
       (r.alsoArchived ? `\nprevious '${targetName}' archived to ${r.alsoArchived.dir}` : ""),
     "Restored",
   );
+
+  await adoptAsDefaultIfMissing(input.config, r.name, input.out);
 
   await maybeRestartHint(input.serviceControl, input.out);
   p.outro("done");
@@ -433,38 +432,6 @@ async function maybeImportOpenclawVoice(args: {
         `  (no API key in source; run \`phantombot voice\` to set one)\n`,
     );
   }
-}
-
-/**
- * If the current default_persona (from state.json or config.toml) points
- * at a persona dir that doesn't exist, adopt the just-imported persona
- * as the new default. The built-in fallback "phantom" is treated as
- * non-existent if there's no `personas/phantom/` on disk — so a fresh
- * box that imports its first persona will switch the default to it
- * automatically, fixing the bug where `phantombot run` later failed
- * with "persona 'phantom' not found."
- *
- * Doesn't override a working default — if the user already has a
- * persona configured and is importing another, the import is additive,
- * not destructive.
- */
-async function maybeAdoptAsDefault(
-  config: Config,
-  importedName: string,
-  out: WriteSink,
-): Promise<void> {
-  const currentDefaultDir = personaDir(config, config.defaultPersona);
-  if (existsSync(currentDefaultDir)) {
-    // Working default already; don't touch.
-    return;
-  }
-  const { loadState, saveState } = await import("../state.ts");
-  const state = await loadState();
-  state.default_persona = importedName;
-  await saveState(state);
-  out.write(
-    `\nadopted '${importedName}' as default_persona (previous default '${config.defaultPersona}' has no persona dir on disk)\n`,
-  );
 }
 
 async function maybeRestartHint(
