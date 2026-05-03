@@ -15,7 +15,10 @@
  * answered. We log a warning at startup so this isn't accidental.
  */
 
-import type { Config } from "../config.ts";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { type Config, xdgDataHome } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
   type AudioSupport,
@@ -33,19 +36,97 @@ import {
   handleSlashCommand,
 } from "./commands.ts";
 
+/**
+ * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
+ * for larger files outright, regardless of attachment type. Documented at
+ * https://core.telegram.org/bots/api#getfile. Client-side uploads can be
+ * much bigger, but bots literally cannot fetch them through this API —
+ * the right user-facing behavior is to surface the size and move on, not
+ * to silently drop.
+ */
+const TELEGRAM_BOT_DOWNLOAD_CAP_BYTES = 20 * 1024 * 1024;
+
+/** Per-chat inbox where Telegram attachments are saved. */
+export function inboxDir(chatId: number): string {
+  return join(xdgDataHome(), "phantombot", "inbox", String(chatId));
+}
+
+/**
+ * Build the user message handed to the harness for an attachment-bearing
+ * Telegram message. Caption + a single bracketed line that names the
+ * absolute file path (or explains why we couldn't fetch it). The agent
+ * decides what to do — read it, ignore it, ask for clarification.
+ *
+ * Exported for testing.
+ */
+export function formatAttachmentUserText(args: {
+  caption: string | undefined;
+  attachment: TelegramAttachment;
+  /** Absolute path on disk if the download succeeded. */
+  savedPath?: string;
+  /** Set when the file was over Telegram's bot-API download cap. */
+  oversizeBytes?: number;
+  /** Set when getFile or the actual download threw. */
+  downloadError?: string;
+}): string {
+  const captionPart = (args.caption ?? "").trim();
+  let line: string;
+  if (args.savedPath) {
+    line = `[attached: ${args.savedPath}]`;
+  } else if (args.oversizeBytes !== undefined) {
+    const mb = (args.oversizeBytes / 1024 / 1024).toFixed(1);
+    line = `[attached but too large to fetch: ${args.attachment.fileName} (${mb} MB > 20 MB Telegram bot-API cap)]`;
+  } else {
+    line = `[attached but couldn't download: ${args.attachment.fileName}${args.downloadError ? ` (${args.downloadError})` : ""}]`;
+  }
+  return captionPart ? `${captionPart}\n\n${line}` : line;
+}
+
+export interface TelegramAttachment {
+  /** Telegram file_id; pass to getFile + the resulting file_path URL. */
+  fileId: string;
+  /** Filename to use on disk. Either Telegram's `file_name` (documents,
+   *  audio, video) or synthesized from the message id + kind + mime. */
+  fileName: string;
+  /** Bytes if Telegram included it. Used to skip the download when the
+   *  file is over Telegram's bot-API cap (getFile rejects > 20 MB). */
+  fileSize?: number;
+  /** MIME type if Telegram included one. */
+  mimeType?: string;
+  /** The Telegram message field this came from — useful for log clarity. */
+  kind:
+    | "document"
+    | "photo"
+    | "audio"
+    | "video"
+    | "video_note"
+    | "animation"
+    | "sticker";
+}
+
 export interface TelegramMessage {
   updateId: number;
   chatId: number;
   fromUserId: number;
   fromUsername?: string;
-  /** For text messages — the text. For voice messages — empty string until STT runs. */
+  /** For text messages — the text. For voice messages — empty string until
+   *  STT runs. For attachment-only messages — empty until processChatMessage
+   *  rewrites it to "<caption>\n\n[attached: <path>]". */
   text: string;
-  /** Set when the incoming message was a voice note. */
+  /** Caption accompanying media (Telegram delivers `caption` not `text`
+   *  for media messages). Empty when absent. */
+  caption?: string;
+  /** Set when the incoming message was a voice note. Voice keeps its
+   *  dedicated STT path; it is NOT carried via `attachment`. */
   voice?: {
     fileId: string;
     mimeType: string;
     durationS: number;
   };
+  /** Any non-voice attachment (photo, document, audio, video, etc.).
+   *  Downloaded to the per-chat inbox and surfaced to the harness as
+   *  an absolute path the agent can `read`. */
+  attachment?: TelegramAttachment;
 }
 
 export interface TelegramTransport {
@@ -216,18 +297,175 @@ function abortReasonString(reason: unknown): string {
   return "aborted";
 }
 
+interface TelegramRawFile {
+  file_id?: string;
+  file_size?: number;
+  mime_type?: string;
+  file_name?: string;
+}
+
+interface TelegramRawPhotoSize {
+  file_id?: string;
+  file_size?: number;
+  width?: number;
+  height?: number;
+}
+
 interface TelegramRawUpdate {
   update_id?: number;
   message?: {
+    message_id?: number;
     chat?: { id?: number };
     from?: { id?: number; username?: string };
     text?: string;
+    caption?: string;
     voice?: {
       duration?: number;
       mime_type?: string;
       file_id?: string;
     };
+    document?: TelegramRawFile;
+    audio?: TelegramRawFile;
+    video?: TelegramRawFile;
+    video_note?: TelegramRawFile;
+    animation?: TelegramRawFile;
+    sticker?: TelegramRawFile;
+    photo?: TelegramRawPhotoSize[];
   };
+}
+
+/**
+ * Walk a raw message looking for an attachment. Photos are an array of
+ * sizes; we pick the largest. Voice is intentionally skipped — it has its
+ * own STT path. Returns undefined when the message has nothing
+ * attachment-shaped.
+ *
+ * Exported for testing.
+ */
+export function extractAttachment(
+  msg: NonNullable<TelegramRawUpdate["message"]>,
+): TelegramAttachment | undefined {
+  const msgId = typeof msg.message_id === "number" ? msg.message_id : 0;
+
+  // Documents/audio/video/etc. all have the same shape: file_id + optional
+  // file_name, mime_type, file_size. Walked in priority order.
+  const simpleKinds: Array<{
+    field: TelegramAttachment["kind"];
+    raw: TelegramRawFile | undefined;
+  }> = [
+    { field: "document", raw: msg.document },
+    { field: "audio", raw: msg.audio },
+    { field: "video", raw: msg.video },
+    { field: "video_note", raw: msg.video_note },
+    { field: "animation", raw: msg.animation },
+    { field: "sticker", raw: msg.sticker },
+  ];
+  for (const { field, raw } of simpleKinds) {
+    if (raw && typeof raw.file_id === "string") {
+      return {
+        fileId: raw.file_id,
+        fileName: raw.file_name ?? synthesizeFileName(msgId, field, raw.mime_type),
+        fileSize: typeof raw.file_size === "number" ? raw.file_size : undefined,
+        mimeType: raw.mime_type,
+        kind: field,
+      };
+    }
+  }
+
+  // Photos: pick the largest size. file_size may be missing on some
+  // sizes; rank by (file_size ?? width*height ?? 0) descending.
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+    const sized = msg.photo
+      .filter((p): p is TelegramRawPhotoSize & { file_id: string } =>
+        typeof p?.file_id === "string",
+      )
+      .map((p) => ({
+        p,
+        rank:
+          p.file_size ??
+          (typeof p.width === "number" && typeof p.height === "number"
+            ? p.width * p.height
+            : 0),
+      }))
+      .sort((a, b) => b.rank - a.rank);
+    const best = sized[0]?.p;
+    if (best) {
+      return {
+        fileId: best.file_id,
+        fileName: synthesizeFileName(msgId, "photo", "image/jpeg"),
+        fileSize: typeof best.file_size === "number" ? best.file_size : undefined,
+        mimeType: "image/jpeg",
+        kind: "photo",
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function synthesizeFileName(
+  msgId: number,
+  kind: TelegramAttachment["kind"],
+  mimeType: string | undefined,
+): string {
+  return `${msgId}-${kind}${extensionFromMime(mimeType)}`;
+}
+
+/**
+ * Map a MIME to a file extension. Conservative: handles the common ones
+ * we'll actually see from Telegram (photo, voice, audio, video, common
+ * documents); unknown → ".bin" so we still write *something* the agent
+ * can `read`. Exported for testing.
+ */
+export function extensionFromMime(mime: string | undefined): string {
+  if (!mime) return ".bin";
+  const m = mime.toLowerCase().split(";")[0]!.trim();
+  switch (m) {
+    case "image/jpeg":
+    case "image/jpg":
+      return ".jpg";
+    case "image/png":
+      return ".png";
+    case "image/gif":
+      return ".gif";
+    case "image/webp":
+      return ".webp";
+    case "image/heic":
+      return ".heic";
+    case "application/pdf":
+      return ".pdf";
+    case "text/plain":
+      return ".txt";
+    case "text/markdown":
+      return ".md";
+    case "text/csv":
+      return ".csv";
+    case "application/json":
+      return ".json";
+    case "application/zip":
+      return ".zip";
+    case "audio/ogg":
+      return ".ogg";
+    case "audio/mpeg":
+      return ".mp3";
+    case "audio/mp4":
+      return ".m4a";
+    case "video/mp4":
+      return ".mp4";
+    case "video/quicktime":
+      return ".mov";
+    case "video/webm":
+      return ".webm";
+    default:
+      // Generic fallback: take everything after the slash, strip
+      // anything non-alphanumeric, cap at 8 chars. So "application/
+      // vnd.openxmlformats-officedocument.wordprocessingml.document"
+      // becomes ".vndopenx" — ugly but unique-ish, and the absolute
+      // path the agent gets includes the kind, so it's fine.
+      const sub = m.split("/")[1] ?? "";
+      const cleaned = sub.replace(/[^a-z0-9]/g, "").slice(0, 8);
+      return cleaned ? `.${cleaned}` : ".bin";
+  }
 }
 
 /**
@@ -254,6 +492,28 @@ export function parseGetUpdatesResult(
       continue;
     }
 
+    // Attachments take priority over plain text, but if BOTH text and an
+    // attachment are present (rare; Telegram normally uses `caption` not
+    // `text` for media), use text as the caption.
+    const attachment = extractAttachment(msg);
+    if (attachment) {
+      const captionFromMedia =
+        typeof msg.caption === "string" ? msg.caption : undefined;
+      const captionFromText =
+        typeof msg.text === "string" && msg.text.length > 0
+          ? msg.text
+          : undefined;
+      updates.push({
+        updateId: u.update_id,
+        chatId: msg.chat.id,
+        fromUserId: msg.from.id,
+        fromUsername: msg.from.username,
+        text: "", // filled by processChatMessage after download
+        caption: captionFromMedia ?? captionFromText,
+        attachment,
+      });
+      continue;
+    }
     if (typeof msg.text === "string" && msg.text.length > 0) {
       updates.push({
         updateId: u.update_id,
@@ -393,6 +653,15 @@ export async function runTelegramServer(
           persona: input.persona,
           voice: isVoice,
           voiceDurationS: msg.voice?.durationS,
+          attachment: msg.attachment
+            ? {
+                kind: msg.attachment.kind,
+                fileName: msg.attachment.fileName,
+                fileSize: msg.attachment.fileSize,
+                mimeType: msg.attachment.mimeType,
+              }
+            : undefined,
+          captionLength: msg.caption?.length,
         });
 
         // Slash commands: handled INLINE so they bypass the per-chat queue
@@ -525,6 +794,62 @@ async function processChatMessage(
       );
       return;
     }
+  }
+
+  // Non-voice attachment: download to per-chat inbox, then rewrite the
+  // user-facing text to "<caption>\n\n[attached: <abs-path>]". The
+  // harness decides what to do with the file — read, ignore, ask. We
+  // never inspect or transform contents.
+  if (msg.attachment) {
+    const att = msg.attachment;
+    let savedPath: string | undefined;
+    let oversizeBytes: number | undefined;
+    let downloadError: string | undefined;
+
+    if (
+      att.fileSize !== undefined &&
+      att.fileSize > TELEGRAM_BOT_DOWNLOAD_CAP_BYTES
+    ) {
+      oversizeBytes = att.fileSize;
+      log.warn("telegram: attachment over bot-API cap, not downloading", {
+        chatId: msg.chatId,
+        kind: att.kind,
+        fileName: att.fileName,
+        fileSize: att.fileSize,
+      });
+    } else {
+      try {
+        const dir = inboxDir(msg.chatId);
+        await mkdir(dir, { recursive: true });
+        const path = join(dir, `${msg.updateId}-${att.fileName}`);
+        const file = await input.transport.downloadFile(att.fileId);
+        await writeFile(path, file.data);
+        savedPath = path;
+        log.info("telegram: attachment saved", {
+          chatId: msg.chatId,
+          kind: att.kind,
+          path,
+          bytes: file.data.byteLength,
+          mime: file.mime,
+        });
+      } catch (e) {
+        downloadError = (e as Error).message;
+        log.error("telegram: attachment download failed", {
+          chatId: msg.chatId,
+          kind: att.kind,
+          fileName: att.fileName,
+          error: downloadError,
+        });
+      }
+    }
+
+    msg.text = formatAttachmentUserText({
+      caption: msg.caption,
+      attachment: att,
+      savedPath,
+      oversizeBytes,
+      downloadError,
+    });
   }
 
   // Send the right indicator depending on which way we'll reply.
