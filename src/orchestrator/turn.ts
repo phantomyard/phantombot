@@ -21,6 +21,8 @@
  * to catch them and present cleanly.
  */
 
+import { homedir } from "node:os";
+
 import { runWithFallback } from "./fallback.ts";
 import { buildSystemPrompt } from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
@@ -36,6 +38,16 @@ export interface TurnInput {
   userMessage: string;
   /** Path to the persona directory (BOOT.md / SOUL.md / IDENTITY.md etc. live here). */
   agentDir: string;
+  /**
+   * cwd for harness subprocesses. Defaults to the running user's home
+   * dir. Set to `agentDir` (or anything else) to scope down. Affects:
+   *   - pi:     where relative-path tools resolve (no sandbox).
+   *   - claude: same + the "trusted dir" framing for the workspace.
+   *   - gemini: the *workspace sandbox root* — gemini hard-rejects tool
+   *             calls that touch paths outside cwd + its temp dir.
+   * Persona files load via absolute paths regardless of this setting.
+   */
+  workingDir?: string;
   /** Harness chain in priority order; first that succeeds wins. */
   harnesses: Harness[];
   /** Open memory store; runTurn appends to it on success. */
@@ -85,7 +97,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     systemPrompt,
     userMessage: input.userMessage,
     history,
-    workingDir: input.agentDir,
+    workingDir: input.workingDir ?? homedir(),
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,
     signal: input.signal,
