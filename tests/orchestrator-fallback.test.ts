@@ -130,3 +130,45 @@ describe("runWithFallback — maxPayloadBytes precheck", () => {
     expect(chunks.map((c) => c.type)).toEqual(["done"]);
   });
 });
+
+describe("runWithFallback — empty done falls through", () => {
+  test("non-last harness emitting done with empty finalText falls through", async () => {
+    // Repro of the gemini "(no reply)" bug: gemini exits 0 (e.g.
+    // SIGTERMed by an updater restart, or did tool calls without a
+    // final assistant message) and yields done with empty finalText.
+    // Without the fall-through, the orchestrator considered this
+    // success and the user got "(no reply)" instead of pi's reply.
+    const empty = new FakeHarness("gemini-like", [
+      { type: "progress", note: "tool: do_something" },
+      { type: "done", finalText: "" },
+    ]);
+    const filler = new FakeHarness("pi-like", [
+      { type: "text", text: "real reply" },
+      { type: "done", finalText: "real reply" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([empty, filler], newRequest()),
+    );
+    expect(empty.invocations).toBe(1);
+    expect(filler.invocations).toBe(1);
+    // The empty done is suppressed; pi's progress + real reply land.
+    expect(chunks.map((c) => c.type)).toEqual(["progress", "text", "done"]);
+    const last = chunks[chunks.length - 1];
+    expect(last && last.type === "done" ? last.finalText : "").toBe(
+      "real reply",
+    );
+  });
+
+  test("LAST harness emitting done with empty finalText still yields the empty done", async () => {
+    // We deliberately preserve the existing "(no reply)" surface on the
+    // last harness so the user sees that something happened — better
+    // than no reply at all when there are no more harnesses to try.
+    const empty = new FakeHarness("only", [
+      { type: "done", finalText: "" },
+    ]);
+    const chunks = await collect(runWithFallback([empty], newRequest()));
+    expect(empty.invocations).toBe(1);
+    expect(chunks.map((c) => c.type)).toEqual(["done"]);
+    expect(chunks[0]).toMatchObject({ type: "done", finalText: "" });
+  });
+});

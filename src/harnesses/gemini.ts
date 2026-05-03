@@ -349,6 +349,18 @@ export function renderStdinPayload(req: HarnessRequest): string {
   return parts.join("\n\n") + (parts.length > 0 ? "\n\n" : "");
 }
 
+/**
+ * Per-invocation banner lines that gemini-cli always prints — useless
+ * noise at info level. Anything else (auth failures, quota errors,
+ * network warnings) gets surfaced so journalctl shows it without needing
+ * PHANTOMBOT_LOG_LEVEL=debug.
+ */
+const GEMINI_STDERR_BANNER_PATTERNS: readonly RegExp[] = [
+  /^Warning: 256-color support not detected/i,
+  /^YOLO mode is enabled/i,
+  /^Ripgrep is not available/i,
+];
+
 async function consumeStderr(
   stream: ReadableStream<Uint8Array>,
 ): Promise<void> {
@@ -360,9 +372,13 @@ async function consumeStderr(
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) {
-          log.debug("gemini stderr", { text: line.slice(0, 500) });
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (GEMINI_STDERR_BANNER_PATTERNS.some((re) => re.test(trimmed))) {
+          log.debug("gemini stderr (banner)", { text: trimmed.slice(0, 500) });
+          continue;
         }
+        log.info("gemini stderr", { text: trimmed.slice(0, 500) });
       }
     }
   } catch {
