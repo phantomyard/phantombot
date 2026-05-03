@@ -1,6 +1,26 @@
-# phantombot
+# Phantombot
 
-A personality-first chat agent for Telegram. Wraps Claude Code, Inflection Pi, and Google Gemini CLI — and otherwise stays out of their way. The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
+A personality-first chat agent for Telegram. Built around the **Pi Coder (pi.dev)** philosophy: minimalist, high-torque, and **YoYo (You're On Your Own)** by default.
+
+Phantombot extends **Inflection Pi** onto Telegram — and uses **Claude Code** or **Google Gemini CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude and Gemini are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
+
+---
+
+## Why this exists
+
+Phantombot was built because the existing agent gateways became "enshitified." If you've used **OpenClaw**, you know the pain:
+
+- Gateways that take forever to restart (if they restart at all).
+- Sluggish performance and fragile tool-call parsing.
+- Bloated abstractions that fight with the model's native abilities.
+
+**Phantombot's answer:** a 98 MB single binary, atomic update in <2s, no tool-call layer at all. The harness already knows how to use Bash; phantombot doesn't second-guess it.
+
+**The motivating insight:** *the harness can do its own tools — let it.*
+
+The author's daily-driver assistant ("Robbie") used to run on [OpenClaw](https://github.com/openclaw/openclaw). OpenClaw provides personality + channels + memory **and** its own model abstraction **and** its own tool layer. The model abstraction is fine. The tool layer fights with how Pi, Claude Code, and Gemini CLI already do tools — better than OpenClaw could. Phantombot keeps the personality + memory + Telegram channel and lets the harness be the brain *and* the hands.
+
+When Phantom is asked to *"SSH to the home lab and write a note to the Obsidian vault,"* the request goes to `pi --print --mode json` (or `claude --print` if Pi isn't the active harness) with Phantom's system prompt installed. The harness uses *its* Bash / Write / SSH tools to do the work and returns the final text. Phantombot relays it to Telegram. No tool-call translation layer, no permission gates, no `tools[]` array conversion. Phantombot just provides the *SOUL*, the memory, and the Telegram channel.
 
 ---
 
@@ -41,31 +61,28 @@ Updates download to `${binPath}.update.tmp`, SHA256-verify, atomically rename ov
 
 ## Quick start
 
-After `install.sh` completes (or builds-from-source — see below):
+After `install.sh` completes:
 
 ```bash
-phantombot persona              # TUI — create or import (OpenClaw works) your first persona
-phantombot harness              # pick claude / pi / gemini chain
-phantombot telegram             # paste your @BotFather bot token + allowlisted user IDs
-phantombot voice                # (optional) pick TTS/STT provider for voice messages
+phantombot persona # TUI — create or import (OpenClaw works) your first persona
+phantombot harness # primary harness — pi recommended; claude/gemini as fallback
+phantombot telegram # paste your @BotFather bot token + allowlisted user IDs
+phantombot voice # (optional) pick TTS/STT provider for voice messages
 
-phantombot run                  # foreground — Ctrl-C to stop. Try sending a Telegram message.
-phantombot install              # then install as a systemd --user service (survives logout)
-journalctl --user -u phantombot -f
+phantombot run # foreground — Ctrl-C to stop.
+phantombot install # install as a systemd --user service (survives logout)
 ```
-
-> **First-import note**: when you import a persona on a fresh box, `phantombot persona --import` automatically sets it as `default_persona` (unless you already have a persona configured). Without this, the built-in fallback `"phantom"` would be the default and `phantombot run` would fail with *"persona 'phantom' not found."* Switch later with `phantombot persona <name>`.
 
 ---
 
 ## Prerequisites
 
 - **At least one harness** installed and authenticated as the user that will run phantombot:
+  - **Inflection Pi** *(recommended primary)* — `pi` configured per its own setup
   - **Claude Code** — `claude /login` (OAuth on host; phantombot filters `ANTHROPIC_API_KEY` so OAuth is the path)
-  - **Inflection Pi** — `pi` configured per its own setup
   - **Google Gemini CLI** — `gemini` then OAuth via the in-app `/auth`, OR set `GEMINI_API_KEY` in `~/.env`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- Linux (`systemd --user` for the service install path; the binary itself is portable)
+- Linux (`systemd --user` for the service install path; the binary itself is portable across Linux distros)
 
 If you'll run as a headless service account (no login session), enable linger so the unit survives logout:
 
@@ -75,9 +92,12 @@ sudo loginctl enable-linger $USER
 
 **Bun** is only needed if you're building from source — the released binary has no runtime dep.
 
+
 ---
 
 ## Build from source (optional)
+
+> ⚠️ **The build target must remain `bun-linux-x64-baseline`.** If you "optimise" to plain `bun-linux-x64`, the binary will SIGILL on launch on any host without AVX2 (e.g. older silicon used by some self-hosters).
 
 ```bash
 git clone https://github.com/andrewagrahamhodges/phantombot.git
@@ -89,8 +109,6 @@ bun run build                # → ./dist/phantombot (~98 MB, linux-x64-baseline
 mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 # (or: scp dist/phantombot user@host:~/.local/bin/phantombot)
 ```
-
-The build target **must remain `bun-linux-x64-baseline`**. If you "optimise" to plain `bun-linux-x64`, the binary will SIGILL on hosts without AVX2.
 
 ---
 
@@ -104,7 +122,7 @@ The build target **must remain `bun-linux-x64-baseline`**. If you "optimise" to 
 | `phantombot persona <name>` | Switch default persona to `<name>` |
 | `phantombot persona --import <dir> [--as <n>]` | Non-interactive import (OpenClaw or phantombot-shaped) |
 | `phantombot telegram` | Configure the Telegram channel (token + allowed users) |
-| `phantombot harness` | Pick primary + fallback harnesses (claude / pi / gemini) |
+| `phantombot harness` | Pick primary + fallback harnesses (pi / claude / gemini) |
 | `phantombot voice` | Pick TTS/STT provider (ElevenLabs / OpenAI / Azure Edge) |
 | `phantombot embedding` | (Optional) configure Gemini embeddings for memory search |
 
@@ -201,12 +219,6 @@ Manage from anywhere: ask Phantom on Telegram *"list my scheduled tasks"* / *"ca
 
 ---
 
-## Voice replies in Telegram
-
-When a Telegram voice message comes in (and the configured provider can do TTS), phantombot transcribes via STT, runs the harness, and synthesizes the reply as a voice note. **For these voice-in/voice-out turns only**, phantombot appends a one-paragraph brevity directive to the system prompt — telling the model to keep the reply to 1-3 sentences (~30 seconds of speech, ≈100 tokens), drop work narration ("Let me check…"), and skip markdown the TTS would read awkwardly.
-
-The directive lives at the channel layer (`VOICE_REPLY_INSTRUCTION` in `src/channels/telegram.ts`), not in persona files — so text replies stay as detailed as the persona wants. If your voice notes still feel too long after this, the next lever is the persona's own tone in BOOT.md/SOUL.md, not a config knob.
-
 ## `phantombot notify` (agent's voice to you)
 
 ```bash
@@ -240,14 +252,6 @@ The persona system prompt includes a **credential discovery + hygiene** section 
 
 ---
 
-## Why this exists
-
-The author's daily-driver assistant ("Robbie") used to run on [OpenClaw](https://github.com/openclaw/openclaw). OpenClaw provides personality + channels + memory **and** its own model abstraction **and** its own tool layer. The model abstraction is fine. The tool layer fights with how Claude Code, Pi, and Gemini CLI already do tools — better than OpenClaw could. Phantombot keeps the personality + memory + Telegram channel and lets the harness be the brain *and* the hands.
-
-When Phantom is asked to *"SSH to the home lab and write a note to the Obsidian vault,"* the request goes to `claude --print` with Phantom's system prompt installed. Claude Code uses *its* Bash / Write / SSH tools to do the work and returns the final text. Phantombot relays it to Telegram. No tool-call translation layer, no permission gates, no `tools[]` array conversion.
-
----
-
 ## Architecture
 
 ```
@@ -261,12 +265,12 @@ phantombot run                    # the only long-running command
    ┌───────┼─────────────────┐
    ▼       ▼                 ▼
 load     load history    run harness chain
-persona  (bun:sqlite)    (claude → pi → gemini)
+persona  (bun:sqlite)    (pi → claude → gemini)
                               │
                               ▼
-                  spawn `claude --print …`
+                  spawn `pi --print --mode json …`
                   stream stream-json from stdout
-                  yield text/progress/done/error chunks
+                  yield text/heartbeat/progress/done chunks
                               │
                               ▼
                   on recoverable error → next harness
@@ -354,7 +358,7 @@ phantombot/
 │   ├── orchestrator/              # turn coordinator + harness fallback chain
 │   ├── channels/telegram.ts       # Telegram adapter (HTTP + long-poll)
 │   ├── cli/                       # one file per Citty subcommand
-│   ├── harnesses/                 # claude + pi + gemini wrappers
+│   ├── harnesses/                 # pi + claude + gemini wrappers
 │   └── lib/                       # logger, IO, configWriter, systemd, audio,
 │                                  # tasks, cronSchedule, binaryUpdate, githubReleases…
 ├── agents/phantom/                # placeholder persona used by tests
@@ -371,7 +375,7 @@ phantombot/
 - **Harness-agnostic interface, harness-specific implementations.** Every harness wrapper translates the same `HarnessRequest` into its CLI's specific flags. No shared "model spec." See `src/harnesses/claude.ts` for the reference shape.
 - **Personality lives in markdown files, not config.** Persona changes are commits to `BOOT.md`, not config-knob flips. The TUI is bootstrap-only.
 - **Memory is local.** SQLite on disk. No cloud sync.
-- **OAuth on host. Phantombot holds no model API keys.** Claude / Pi / Gemini are pre-configured by you; phantombot just spawns them.
+- **OAuth on host. Phantombot holds no model API keys.** Pi / Claude / Gemini are pre-configured by you; phantombot just spawns them.
 - **Single-operator.** One person, one machine, one persona at a time.
 - **Updates are atomic.** `phantombot update` rename-swaps the binary on Linux (kernel keeps the running process backed by the original inode), SHA256-verifies before swap, and cleans up after itself — no `.bak` files left behind.
 
