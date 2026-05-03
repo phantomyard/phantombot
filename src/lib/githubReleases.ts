@@ -5,12 +5,11 @@
  * No GitHub auth needed because the repo is public; if the API ever rate-
  * limits us (60/h unauth), GITHUB_TOKEN in env is honored for higher caps.
  *
- * Repo coordinates default to the current upstream and are env-overridable
- * (PHANTOMBOT_UPDATE_REPO=owner/name) so the impending repo rename can be
- * staged through env without a phantombot rebuild.
+ * Repo coordinates are env-overridable (PHANTOMBOT_UPDATE_REPO=owner/name)
+ * so a future repo move can be staged through env without a rebuild.
  */
 
-const DEFAULT_REPO = "andrewagrahamhodges/phantombot";
+const DEFAULT_REPO = "phantomyard/phantombot";
 
 /** What kind of host arch the running phantombot needs an asset for. */
 export type SupportedArch = "x64" | "arm64";
