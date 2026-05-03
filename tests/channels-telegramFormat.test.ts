@@ -174,6 +174,100 @@ describe("markdownToTelegramHtml — block-level", () => {
   });
 });
 
+describe("markdownToTelegramHtml — tables", () => {
+  test("simple pipe table → <pre>", () => {
+    const md = [
+      "| Name | Value |",
+      "|------|-------|",
+      "| SOC  | 61%   |",
+      "| Temp | 27°C  |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toBe(
+      "<pre>| Name | Value |\n|------|-------|\n| SOC  | 61%   |\n| Temp | 27°C  |</pre>",
+    );
+  });
+
+  test("table with leading/trailing whitespace on rows", () => {
+    const md = [
+      "  | A | B |  ",
+      "  |---|---|  ",
+      "  | 1 | 2 |  ",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("<pre>");
+    expect(html).toContain("| A | B |");
+  });
+
+  test("table with alignment colons in separator", () => {
+    const md = [
+      "| Left | Center | Right |",
+      "|:-----|:------:|------:|",
+      "| a    | b      | c     |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("<pre>");
+    expect(html).toContain("|:-----|:------:|------:|");
+  });
+
+  test("two tables separated by text", () => {
+    const md = [
+      "| A | B |",
+      "|---|---|",
+      "| 1 | 2 |",
+      "",
+      "Some text in between.",
+      "",
+      "| X | Y |",
+      "|---|---|",
+      "| 3 | 4 |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("Some text in between.");
+    // Two <pre> blocks.
+    const preCount = (html.match(/<pre>/g) ?? []).length;
+    expect(preCount).toBe(2);
+  });
+
+  test("bold markers inside table cells are preserved literally", () => {
+    // Inside <pre> everything is literal — no formatting tags.
+    const md = [
+      "| Key | Value |",
+      "|-----|-------|",
+      "| **SOC** | 61% |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("| **SOC** | 61% |");
+    expect(html).not.toContain("<b>SOC</b>");
+  });
+
+  test("table cells with < > & are HTML-escaped inside <pre>", () => {
+    const md = [
+      "| Op | Result |",
+      "|----|--------|",
+      "| a < b | true |",
+      "| a & b | false |",
+    ].join("\n");
+    const html = markdownToTelegramHtml(md);
+    expect(html).toContain("a &lt; b");
+    expect(html).toContain("a &amp; b");
+  });
+
+  test("single pipe in a line is NOT treated as a table", () => {
+    // A line with just `a | b` (no leading pipe) is prose, not a table row.
+    const md = "Voltage: 52 V | Current: 10 A";
+    const html = markdownToTelegramHtml(md);
+    // Should NOT be in <pre>.
+    expect(html).not.toContain("<pre>");
+  });
+
+  test("isolated | with no separator row is NOT a table", () => {
+    const md = "| just a pipe character in prose |";
+    const html = markdownToTelegramHtml(md);
+    expect(html).not.toContain("<pre>");
+  });
+});
+
 describe("markdownToTelegramHtml — realistic LLM reply (Robbie's screenshot)", () => {
   test("the actual Deye fault reply renders cleanly", () => {
     const md = [
