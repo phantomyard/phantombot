@@ -55,13 +55,8 @@ class FakeTransport implements TelegramTransport {
         : offset;
     return { updates, nextOffset };
   }
-  edited: Array<{ chatId: number; messageId: number; text: string }> = [];
-  deleted: Array<{ chatId: number; messageId: number }> = [];
-  private nextMessageId = 1;
-  async sendMessage(chatId: number, text: string): Promise<number> {
-    const id = this.nextMessageId++;
+  async sendMessage(chatId: number, text: string): Promise<void> {
     this.sent.push({ chatId, text });
-    return id;
   }
   async sendTyping(chatId: number): Promise<void> {
     this.typing.push(chatId);
@@ -81,16 +76,6 @@ class FakeTransport implements TelegramTransport {
   ): Promise<{ data: Buffer; mime: string }> {
     this.downloadedFileIds.push(fileId);
     return { data: this.fakeFileBytes, mime: "audio/ogg" };
-  }
-  async editMessage(
-    chatId: number,
-    messageId: number,
-    text: string,
-  ): Promise<void> {
-    this.edited.push({ chatId, messageId, text });
-  }
-  async deleteMessage(chatId: number, messageId: number): Promise<void> {
-    this.deleted.push({ chatId, messageId });
   }
 }
 
@@ -522,10 +507,14 @@ describe("runTelegramServer voice round-trip", () => {
 });
 
 // ---------------------------------------------------------------------------
-// VOICE_REPLY_INSTRUCTION — brevity directive for voice-in/voice-out turns
+// Channel-layer system-prompt suffixes:
+//   - TELEGRAM_REPLY_INSTRUCTION applies to every Telegram turn
+//     (short conversational + plan-then-confirm before long jobs)
+//   - VOICE_REPLY_INSTRUCTION stacks on top for voice-in/voice-out
+//     (stricter 1-3 sentence limit + no markdown for TTS)
 // ---------------------------------------------------------------------------
 
-describe("runTelegramServer voice brevity instruction", () => {
+describe("runTelegramServer system-prompt suffixes", () => {
   const SAVED_KEY = process.env.PHANTOMBOT_OPENAI_API_KEY;
   beforeEach(() => {
     process.env.PHANTOMBOT_OPENAI_API_KEY = "test-key";
@@ -546,7 +535,7 @@ describe("runTelegramServer voice brevity instruction", () => {
     };
   }
 
-  test("voice-in + voice-out: harness sees the brevity directive", async () => {
+  test("voice-in + voice-out: harness sees BOTH the chat-style and the voice-brevity instructions", async () => {
     const originalFetch = globalThis.fetch;
     (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
       url: string | URL | Request,
@@ -582,18 +571,20 @@ describe("runTelegramServer voice brevity instruction", () => {
         oneShot: true,
       });
       expect(harness.invocations).toBe(1);
-      expect(harness.lastRequest?.systemPrompt).toContain(
-        "Reply length (this turn only)",
-      );
-      expect(harness.lastRequest?.systemPrompt).toContain("text-to-speech");
-      // Match across the line break that the constant naturally has.
-      expect(harness.lastRequest?.systemPrompt).toMatch(/1-3\s+sentences/);
+      const prompt = harness.lastRequest?.systemPrompt ?? "";
+      // Telegram chat-style suffix is present.
+      expect(prompt).toContain("Reply style (Telegram chat)");
+      expect(prompt).toContain("Confirm before long jobs");
+      // Voice overlay is also present (stacked on top).
+      expect(prompt).toContain("Reply length (this turn only)");
+      expect(prompt).toContain("text-to-speech");
+      expect(prompt).toMatch(/1-3\s+sentences/);
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }
   });
 
-  test("text-in + text-out: NO brevity directive (chat verbosity is fine)", async () => {
+  test("text-in + text-out: harness sees ONLY the chat-style instruction (no voice overlay)", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
@@ -613,59 +604,13 @@ describe("runTelegramServer voice brevity instruction", () => {
       transport,
       oneShot: true,
     });
-    expect(harness.lastRequest?.systemPrompt).not.toContain(
-      "Reply length (this turn only)",
-    );
-  });
-
-  test("voice-in but TTS unavailable (text reply): NO brevity directive", async () => {
-    // Voice came in, but the configured provider can't TTS the reply,
-    // so we'll send text. No need for the brevity directive.
-    const originalFetch = globalThis.fetch;
-    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
-      url: string | URL | Request,
-    ) => {
-      if (String(url).includes("audio/transcriptions")) {
-        return new Response(JSON.stringify({ text: "hi" }), { status: 200 });
-      }
-      throw new Error(`unexpected fetch: ${url}`);
-    }) as unknown as typeof fetch;
-    try {
-      const cfg = baseConfig();
-      // azure_edge has TTS but no STT — but we want the OPPOSITE shape:
-      // STT works, TTS doesn't. Force it by deleting the TTS key after STT.
-      cfg.voice = {
-        provider: "openai",
-        openai: { model: "tts-1", voice: "nova", speed: 1 },
-      };
-      // ttsSupported reads env at call time; flip it to "no" right before.
-      const saved = process.env.PHANTOMBOT_OPENAI_API_KEY;
-      // Keep the key (STT needs it) — we'll instead just check the
-      // willReplyWithVoice gate by forcing voice provider to a config
-      // that has STT but not TTS for the current key shape. Simpler:
-      // intercept ttsSupported indirectly by using azure_edge for TTS
-      // with no STT — but azure has no STT either. The cleanest test
-      // is to verify: voice in + provider=none → text reply path.
-      // For that we need provider with STT but not TTS. ElevenLabs has
-      // both; openai has both. Azure has TTS but no STT. There's no
-      // built-in "STT only" provider. So we synthesize the gate by
-      // forcing willReplyWithVoice=false via a different route:
-      // text-in trivially gives willReplyWithVoice=false (test 2 above).
-      // Voice-in always implies STT support (otherwise the user gets
-      // a "voice transcription disabled" message, no harness call).
-      // So the only paths are voice-in/voice-out and text-in/text-out.
-      // This third branch (voice-in/text-out) requires a provider
-      // mismatch we don't ship. Skip with a doc comment.
-      void saved; // unused
-    } finally {
-      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
-    }
-    // No assertions: this test exists to document why the third branch
-    // isn't reachable in v1 (no provider in our matrix has STT-only).
-    // If a future provider does (e.g. a "transcribe-only" Whisper
-    // gateway), the brevity directive should NOT fire — same gate as
-    // willReplyWithVoice in src/channels/telegram.ts.
-    expect(true).toBe(true);
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    // The chat-style instruction is always applied for Telegram turns.
+    expect(prompt).toContain("Reply style (Telegram chat)");
+    expect(prompt).toContain("Confirm before long jobs");
+    // The voice-only overlay must NOT leak into text replies.
+    expect(prompt).not.toContain("text-to-speech");
+    expect(prompt).not.toContain("Reply length (this turn only)");
   });
 });
 
@@ -1020,297 +965,5 @@ describe("HttpTelegramTransport AbortSignal", () => {
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Long-turn placeholder lifecycle (Option B from the design discussion)
-//
-// A turn that goes silent for placeholderThresholdMs gets a "⏳ working…"
-// message posted; that message is edited every placeholderEditMs; on
-// completion it is deleted and the real reply is sent as a NEW message
-// (so Telegram pushes a notification — the load-bearing reason we picked
-// delete-then-send over edit-into-reply).
-// ---------------------------------------------------------------------------
-
-describe("placeholder lifecycle", () => {
-  test("fast turn: no placeholder ever posted, no edits, no deletes", async () => {
-    const transport = new FakeTransport();
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
-      text: "ping",
-    });
-    const harness = new ScriptedHarness("fast", [
-      { type: "done", finalText: "pong" },
-    ]);
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [harness],
-      agentDir,
-      persona: "phantom",
-      transport,
-      oneShot: true,
-      // Long threshold relative to the turn — won't fire.
-      placeholderThresholdMs: 5_000,
-      placeholderEditMs: 60_000,
-    });
-
-    expect(transport.sent).toEqual([{ chatId: 1001, text: "pong" }]);
-    expect(transport.edited).toEqual([]);
-    expect(transport.deleted).toEqual([]);
-  });
-
-  test("slow turn: placeholder posted + edited + deleted; final reply sent fresh", async () => {
-    const transport = new FakeTransport();
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 2002,
-      fromUserId: 42,
-      text: "build the thing",
-    });
-    // Slow harness: emits a progress note partway through, then sleeps
-    // long enough that the placeholder fires AND gets edited at least once.
-    class SlowProgressHarness implements Harness {
-      readonly id = "slow";
-      async available(): Promise<boolean> {
-        return true;
-      }
-      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-        yield { type: "progress", note: "tool_execution_start: BashTool" };
-        await new Promise((r) => setTimeout(r, 250));
-        yield {
-          type: "done",
-          finalText: "built it",
-          meta: { harnessId: this.id },
-        };
-      }
-    }
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [new SlowProgressHarness()],
-      agentDir,
-      persona: "phantom",
-      transport,
-      oneShot: true,
-      placeholderThresholdMs: 50, // post quickly
-      placeholderEditMs: 80, // edit at least once before the 250ms hold ends
-    });
-
-    // The placeholder was posted (first sendMessage), then deleted, then
-    // the real reply was sent as a NEW message.
-    expect(transport.sent.length).toBe(2);
-    expect(transport.sent[0]!.text).toContain("⏳ working");
-    expect(transport.sent[1]!.text).toBe("built it");
-    // At least one edit happened.
-    expect(transport.edited.length).toBeGreaterThanOrEqual(1);
-    expect(transport.edited[0]!.text).toContain("⏳ working");
-    // The placeholder message was deleted before the final reply went out.
-    expect(transport.deleted.length).toBe(1);
-    const placeholderId = transport.sent[0]!.chatId === 2002 ? 1 : 0;
-    expect(transport.deleted[0]).toEqual({
-      chatId: 2002,
-      messageId: placeholderId === 0 ? 0 : 1, // FakeTransport assigns id=1 first
-    });
-  });
-
-  test("placeholder edits include the most recent progress note", async () => {
-    const transport = new FakeTransport();
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 3003,
-      fromUserId: 42,
-      text: "do work",
-    });
-    class ProgressHarness implements Harness {
-      readonly id = "progressive";
-      async available(): Promise<boolean> {
-        return true;
-      }
-      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-        yield { type: "progress", note: "step 1: cloning" };
-        await new Promise((r) => setTimeout(r, 100));
-        yield { type: "progress", note: "step 2: building" };
-        await new Promise((r) => setTimeout(r, 100));
-        yield { type: "done", finalText: "ok", meta: { harnessId: this.id } };
-      }
-    }
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [new ProgressHarness()],
-      agentDir,
-      persona: "phantom",
-      transport,
-      oneShot: true,
-      placeholderThresholdMs: 30,
-      placeholderEditMs: 60,
-    });
-
-    // Some edit must mention the latest progress note.
-    const allEditedText = transport.edited.map((e) => e.text).join("\n");
-    // Either step 1 or step 2 will appear, depending on edit timing.
-    expect(allEditedText).toMatch(/step [12]:/);
-  });
-
-  test("placeholder race: sendMessage that resolves AFTER the turn ends doesn't leak the interval or orphan the message", async () => {
-    // Reproduces the race the PR-#56 review flagged: the post timer
-    // fires near the end of the turn, the IIFE awaits sendMessage, the
-    // turn finishes (clearing the post timer no-op'ed because it had
-    // already fired), and the IIFE THEN tries to arm a setInterval and
-    // store a messageId that nobody will ever clean up.
-    //
-    // SlowSendTransport extends FakeTransport with a deliberate ~150ms
-    // sendMessage latency. Combined with placeholderThresholdMs = 50
-    // and a turn that finishes in ~80ms, the IIFE is guaranteed to
-    // outlive the turn.
-    class SlowSendTransport extends FakeTransport {
-      override async sendMessage(chatId: number, text: string): Promise<number> {
-        if (text.includes("⏳ working")) {
-          await new Promise((r) => setTimeout(r, 150));
-        }
-        return super.sendMessage(chatId, text);
-      }
-    }
-    const transport = new SlowSendTransport();
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 5005,
-      fromUserId: 42,
-      text: "do brief work",
-    });
-    class BriefHarness implements Harness {
-      readonly id = "brief";
-      async available(): Promise<boolean> {
-        return true;
-      }
-      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-        // Just over the placeholder threshold — long enough to trigger
-        // the post timer, short enough to finish before sendMessage
-        // resolves.
-        await new Promise((r) => setTimeout(r, 80));
-        yield { type: "done", finalText: "done", meta: { harnessId: this.id } };
-      }
-    }
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [new BriefHarness()],
-      agentDir,
-      persona: "phantom",
-      transport,
-      oneShot: true,
-      placeholderThresholdMs: 50,
-      placeholderEditMs: 200,
-    });
-
-    // Give any leaked setInterval a window to tick — if the race fix is
-    // wrong, we'd see editMessage calls landing here.
-    const editsAfterCleanup = transport.edited.length;
-    await new Promise((r) => setTimeout(r, 350));
-
-    // No edit should have fired after the turn cleanup completed —
-    // proves the interval is NOT armed.
-    expect(transport.edited.length).toBe(editsAfterCleanup);
-    // The placeholder did get posted (slow sendMessage), and then it
-    // got deleted by the IIFE's disposed-branch self-cleanup.
-    const placeholderSends = transport.sent.filter((s) => s.text.includes("⏳ working"));
-    expect(placeholderSends.length).toBe(1);
-    expect(transport.deleted.length).toBeGreaterThanOrEqual(1);
-    // Final reply landed.
-    const finalReplies = transport.sent.filter((s) => s.text === "done");
-    expect(finalReplies.length).toBe(1);
-  });
-
-  test("/stop during long turn: placeholder is cleaned up, no duplicate result message", async () => {
-    const transport = new FakeTransport();
-    // Use AbortableHarness pattern from the slow-turn tests: blocks on
-    // signal, yields a stopped error when aborted.
-    class AbortableHarness implements Harness {
-      readonly id = "abortable";
-      async available(): Promise<boolean> {
-        return true;
-      }
-      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, 5_000);
-          req.signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(t);
-              resolve();
-            },
-            { once: true },
-          );
-        });
-        if (req.signal?.aborted) {
-          yield { type: "error", error: "stopped", recoverable: false };
-        } else {
-          yield { type: "done", finalText: "shouldn't get here" };
-        }
-      }
-    }
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 4004,
-      fromUserId: 42,
-      text: "do something long",
-    });
-    // Inject a /stop after the placeholder has had time to fire.
-    setTimeout(() => {
-      transport.pendingUpdates.push({
-        updateId: 2,
-        chatId: 4004,
-        fromUserId: 42,
-        text: "/stop",
-      });
-    }, 200);
-    // Stop the polling loop after a moment; the worker drain in the
-    // server's `finally` waits for the aborted turn to resolve.
-    const ac = new AbortController();
-    setTimeout(() => ac.abort(), 400);
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [new AbortableHarness()],
-      agentDir,
-      persona: "phantom",
-      transport,
-      signal: ac.signal,
-      placeholderThresholdMs: 50,
-      placeholderEditMs: 60,
-    });
-
-    // Three categories of message in `sent`: the placeholder (⏳…), the
-    // /stop ack (stopped …), and ideally NO duplicate "(error: stopped)".
-    const replyTexts = transport.sent.map((s) => s.text);
-    expect(replyTexts.some((t) => /^stopped \(/.test(t))).toBe(true);
-    expect(replyTexts.some((t) => t.includes("(error: stopped)"))).toBe(false);
-    // Placeholder posted then deleted.
-    const placeholderTexts = replyTexts.filter((t) => t.includes("⏳ working"));
-    expect(placeholderTexts.length).toBeGreaterThanOrEqual(1);
-    expect(transport.deleted.length).toBeGreaterThanOrEqual(1);
-  });
-});
-
-describe("formatElapsedMs", () => {
-  test("formats sub-minute as plain seconds", async () => {
-    const { formatElapsedMs } = await import("../src/lib/format.ts");
-    expect(formatElapsedMs(0)).toBe("0s");
-    expect(formatElapsedMs(45_000)).toBe("45s");
-  });
-
-  test("formats minutes + seconds", async () => {
-    const { formatElapsedMs } = await import("../src/lib/format.ts");
-    expect(formatElapsedMs(65_000)).toBe("1m 5s");
-    expect(formatElapsedMs(7 * 60_000 + 12_000)).toBe("7m 12s");
-  });
-
-  test("formats hours + minutes for very long turns", async () => {
-    const { formatElapsedMs } = await import("../src/lib/format.ts");
-    expect(formatElapsedMs(2 * 3_600_000 + 15 * 60_000 + 4_000)).toBe("2h 15m");
   });
 });
