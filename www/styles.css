@@ -29,7 +29,7 @@ body {
 }
 
 header {
-    padding: 3rem 2rem;
+    padding: 1.5rem 2rem;
     position: sticky;
     top: 0;
     background: rgba(0,0,0,0.9);
@@ -42,9 +42,8 @@ nav {
     max-width: 1200px;
     margin: 0 auto;
     display: flex;
-    flex-direction: column;
+    justify-content: space-between;
     align-items: center;
-    gap: 1.5rem;
 }
 
 .logo {
@@ -53,12 +52,12 @@ nav {
     gap: 1rem;
     font-family: var(--font-mono);
     font-weight: bold;
-    font-size: 1.8rem;
+    font-size: 1.5rem;
     letter-spacing: -1px;
 }
 
 .logo img {
-    height: 40px;
+    height: 32px;
 }
 
 .links {
