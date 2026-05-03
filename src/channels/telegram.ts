@@ -24,7 +24,6 @@ import {
   transcribe,
   ttsSupported,
 } from "../lib/audio.ts";
-import { formatElapsedMs, truncateLine } from "../lib/format.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import type { MemoryStore } from "../memory/store.ts";
@@ -61,8 +60,7 @@ export interface TelegramTransport {
     timeoutS: number,
     signal?: AbortSignal,
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
-  /** Send a text message; returns the new message_id (used for later edit/delete). */
-  sendMessage(chatId: number, text: string): Promise<number>;
+  sendMessage(chatId: number, text: string): Promise<void>;
   sendTyping(chatId: number): Promise<void>;
   /** Send an OGG-Opus voice note. */
   sendVoice(chatId: number, audio: Buffer, mime: string): Promise<void>;
@@ -70,10 +68,6 @@ export interface TelegramTransport {
   sendRecording(chatId: number): Promise<void>;
   /** Download a file by Telegram file_id; returns audio bytes + content-type. */
   downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
-  /** Edit an existing text message in place. Best-effort; failures are swallowed. */
-  editMessage(chatId: number, messageId: number, text: string): Promise<void>;
-  /** Delete a message by id. Best-effort; failures are swallowed. */
-  deleteMessage(chatId: number, messageId: number): Promise<void>;
 }
 
 /**
@@ -118,7 +112,7 @@ export class HttpTelegramTransport implements TelegramTransport {
     return parseGetUpdatesResult(body.result ?? [], offset);
   }
 
-  async sendMessage(chatId: number, text: string): Promise<number> {
+  async sendMessage(chatId: number, text: string): Promise<void> {
     const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
     // Telegram caps message length at 4096 chars. Truncate gracefully.
     const safe = text.length > 4000 ? text.slice(0, 4000) + "\n…[truncated]" : text;
@@ -132,55 +126,7 @@ export class HttpTelegramTransport implements TelegramTransport {
         chatId,
         status: res.status,
       });
-      return 0;
     }
-    // Telegram returns the sent message in `result.message_id`. Callers
-    // that don't care can ignore it; the placeholder pipeline uses it
-    // for later editMessage/deleteMessage.
-    try {
-      const body = (await res.json()) as {
-        ok?: boolean;
-        result?: { message_id?: number };
-      };
-      return body.ok && typeof body.result?.message_id === "number"
-        ? body.result.message_id
-        : 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  async editMessage(
-    chatId: number,
-    messageId: number,
-    text: string,
-  ): Promise<void> {
-    if (messageId === 0) return;
-    const url = `https://api.telegram.org/bot${this.token}/editMessageText`;
-    const safe = text.length > 4000 ? text.slice(0, 4000) + "\n…[truncated]" : text;
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text: safe,
-      }),
-    }).catch(() => {
-      /* edits are best-effort — placeholder editMessage failing isn't fatal */
-    });
-  }
-
-  async deleteMessage(chatId: number, messageId: number): Promise<void> {
-    if (messageId === 0) return;
-    const url = `https://api.telegram.org/bot${this.token}/deleteMessage`;
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
-    }).catch(() => {
-      /* deletes are best-effort — leaving an orphan placeholder isn't fatal */
-    });
   }
 
   async sendTyping(chatId: number): Promise<void> {
@@ -337,25 +283,16 @@ export interface RunTelegramServerInput {
   signal?: AbortSignal;
   /**
    * How often to refresh the "typing…" indicator while a turn is in
-   * flight. Telegram's chat-action lasts only ~5s, so without refresh
-   * the indicator disappears after ~5s and the user thinks the bot
-   * stopped responding. Default 4000 ms. Tests use a smaller value.
+   * flight. Telegram's chat-action expires after ~5s; the default 8s
+   * refresh deliberately leaves a ~3s gap between pulses, so the user
+   * sees `typing…` come and go rather than a frozen-looking permanent
+   * indicator. The pulse is the primary "I'm alive" signal — replaces
+   * the canned `⏳ working… 30s elapsed` placeholder we tried in
+   * PR #56, which was English-only noise without the per-tool
+   * progress notes the harnesses don't reliably emit. Tests use a
+   * smaller value to verify the refresh fires at all.
    */
   typingRefreshMs?: number;
-  /**
-   * How long a turn can run silently before we post a "⏳ working…"
-   * placeholder message. Below this, short turns finish without any
-   * extra noise in the chat. Default 30_000 ms. Tests use smaller.
-   */
-  placeholderThresholdMs?: number;
-  /**
-   * How often we edit the placeholder with new elapsed time + last
-   * progress note while the turn is still running. Telegram allows
-   * ~1 edit/sec; we default to a generous 60_000 ms because the
-   * placeholder exists to reassure the user, not to render a real-time
-   * console. Tests override.
-   */
-  placeholderEditMs?: number;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -569,7 +506,9 @@ async function processChatMessage(
       ? input.transport.sendRecording(msg.chatId)
       : input.transport.sendTyping(msg.chatId);
   void sendStatus();
-  const refreshMs = input.typingRefreshMs ?? 4000;
+  // Refresh interval defaults to 8s (5s indicator-on / 3s gap pulse) —
+  // see RunTelegramServerInput for the full rationale.
+  const refreshMs = input.typingRefreshMs ?? 8000;
   const typingTimer = setInterval(() => {
     void sendStatus();
   }, refreshMs);
@@ -581,73 +520,6 @@ async function processChatMessage(
     startTime: startedAt,
   };
   activeTurns.set(msg.chatId, turnHandle);
-
-  // Long-turn placeholder lifecycle. Three states:
-  //   1. Silent  — turn is fast, no placeholder needed.
-  //   2. Posted  — turn went past placeholderThresholdMs (default 30s);
-  //                we sent a "⏳ working… 30s elapsed" message and have
-  //                its message_id. Periodically edit it with elapsed
-  //                time + last progress note.
-  //   3. Cleanup — turn finished. Delete the placeholder, then send the
-  //                final reply as a NEW message (Option B in the design
-  //                discussion: a fresh message triggers a Telegram push
-  //                notification; an edit does not).
-  const placeholderThresholdMs = input.placeholderThresholdMs ?? 30_000;
-  const placeholderEditMs = input.placeholderEditMs ?? 60_000;
-  let placeholderMsgId: number | undefined;
-  let placeholderEditTimer: ReturnType<typeof setInterval> | undefined;
-  // `disposed` plus `placeholderPostPromise` together close the post-IIFE
-  // race: if the turn finishes between when the post timer fires and when
-  // sendMessage resolves, the IIFE bails before storing the messageId or
-  // arming the edit interval (otherwise we'd leak a setInterval forever
-  // and leave an orphan ⏳ message in the chat).
-  let disposed = false;
-  let placeholderPostPromise: Promise<void> | undefined;
-  const renderPlaceholder = (): string => {
-    const elapsedMs = Date.now() - startedAt;
-    const note = turnHandle.lastProgressNote;
-    return note
-      ? `⏳ working… ${formatElapsedMs(elapsedMs)} — currently: ${truncateLine(note, 120)}`
-      : `⏳ working… ${formatElapsedMs(elapsedMs)} elapsed`;
-  };
-  const placeholderPostTimer = setTimeout(() => {
-    placeholderPostPromise = (async () => {
-      let id = 0;
-      try {
-        id = await input.transport.sendMessage(
-          msg.chatId,
-          renderPlaceholder(),
-        );
-      } catch (e) {
-        log.warn("telegram: placeholder post failed", {
-          error: (e as Error).message,
-          chatId: msg.chatId,
-        });
-        return;
-      }
-      // The turn may have finished while sendMessage was in flight. If so,
-      // delete the message we just posted (the cleanup phase already ran
-      // with placeholderMsgId still undefined, so it was skipped) and do
-      // NOT arm the edit interval.
-      if (disposed) {
-        if (id > 0) {
-          await input.transport.deleteMessage(msg.chatId, id).catch(() => {});
-        }
-        return;
-      }
-      if (id > 0) {
-        placeholderMsgId = id;
-        placeholderEditTimer = setInterval(() => {
-          if (disposed || placeholderMsgId === undefined) return;
-          void input.transport.editMessage(
-            msg.chatId,
-            placeholderMsgId,
-            renderPlaceholder(),
-          );
-        }, placeholderEditMs);
-      }
-    })();
-  }, placeholderThresholdMs);
 
   let reply = "";
   let errored: string | undefined;
@@ -664,13 +536,19 @@ async function processChatMessage(
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
       signal: controller.signal,
-      // Voice-in + voice-out: append a brevity directive for this turn
-      // only. Keeps voice notes short + spoken-friendly without putting
-      // brevity rules in persona files (which would also throttle text
-      // replies, where verbosity is fine).
+      // Channel-layer prompt suffix:
+      //   - Always: TELEGRAM_REPLY_INSTRUCTION — short conversational
+      //     replies + plan-then-confirm before long jobs (git/build/
+      //     deploy or anything that would spawn more than one tool call).
+      //   - Voice-out: stack VOICE_REPLY_INSTRUCTION on top — stricter
+      //     1-3 sentence limit and no markdown so TTS doesn't read out
+      //     headers/bullets.
+      // Living at the channel layer (not in persona files) keeps these
+      // rules from leaking into CLI/nightly turns, where verbosity is
+      // fine and the user isn't on a phone.
       systemPromptSuffix: willReplyWithVoice
-        ? VOICE_REPLY_INSTRUCTION
-        : undefined,
+        ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+        : TELEGRAM_REPLY_INSTRUCTION,
     })) {
       if (chunk.type === "text") reply += chunk.text;
       if (chunk.type === "progress") {
@@ -696,12 +574,7 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
-    // Mark disposed BEFORE awaiting in-flight placeholder work so the
-    // post IIFE (if still running) sees the flag and bails.
-    disposed = true;
     clearInterval(typingTimer);
-    clearTimeout(placeholderPostTimer);
-    if (placeholderEditTimer) clearInterval(placeholderEditTimer);
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.chatId) === turnHandle) {
@@ -709,28 +582,11 @@ async function processChatMessage(
     }
   }
 
-  // Always clean up the placeholder if one was posted, so the chat
-  // doesn't end up with an orphan "⏳ working…" message regardless of
-  // outcome (success / error / stop). Awaits any in-flight post first
-  // so a placeholder that races with completion is still observed and
-  // deleted.
-  const cleanupPlaceholder = async (): Promise<void> => {
-    if (placeholderPostPromise) {
-      await placeholderPostPromise;
-    }
-    if (placeholderMsgId !== undefined) {
-      await input.transport.deleteMessage(msg.chatId, placeholderMsgId);
-      placeholderMsgId = undefined;
-    }
-  };
-
   // /stop: the controller was aborted from outside. The reply text
   // already came through from the slash command handler — don't send
-  // a second "(error: stopped)" message. We DO still delete the
-  // placeholder so the user isn't left with a stale "working…" line.
+  // a second "(error: stopped)" message.
   const wasStopped = controller.signal.aborted;
   if (wasStopped) {
-    await cleanupPlaceholder();
     log.info("telegram: turn stopped by /stop", {
       chatId: msg.chatId,
       durationMs: Date.now() - startedAt,
@@ -745,14 +601,11 @@ async function processChatMessage(
       : "(no reply)";
 
   // Voice in → voice out (when TTS is configured AND no error).
-  // Text in → text out, always. Order: delete placeholder FIRST, then
-  // send the real reply. Telegram pushes a notification on a new
-  // message but not on an edit, so this delete-then-new sequence is
-  // what guarantees the user's phone buzzes when a long turn finishes
-  // ("Option B" from the design discussion).
+  // Text in → text out, always. The reply lands as a fresh message,
+  // so Telegram pushes a notification — important when the user kicked
+  // off a long job and walked away from the chat.
   let sentAsVoice = false;
   try {
-    await cleanupPlaceholder();
     if (willReplyWithVoice && !errored && reply.length > 0) {
       const r = await synthesize(input.config, reply);
       if (r.ok) {
@@ -791,22 +644,59 @@ async function processChatMessage(
 }
 
 /**
- * System-prompt suffix appended for voice-in / voice-out turns only.
+ * System-prompt suffix applied to EVERY Telegram turn.
  *
- * Why this exists: a chat reply that's fine as a Telegram text message
- * — say 4-6 sentences, with some narration of what the agent did —
- * becomes a 90-second voice note when synthesized via TTS. Users
- * report it sounds like a YouTuber explaining their workflow.
+ * Two purposes:
  *
- * Target: ~100 tokens (~60 words / ~30 seconds of speech). Concrete
- * numbers in the instruction so the model has something to anchor on,
- * but the real win is killing narration ("Let me check…", "Right,
- * here's what I found…") and markdown formatting that TTS reads
- * awkwardly.
+ * 1. Reply style. The user is on a phone with a narrow column. Long
+ *    walls of text and meta-narration ("Let me check…", "Right,
+ *    here's what I found…") read poorly there. Default to short,
+ *    conversational answers; structured-and-clear is fine when the
+ *    user explicitly asks for a detailed report.
  *
- * Lives at the channel layer (not in persona files) so brevity is
- * triggered ONLY when the input arrived as voice AND the reply will be
- * synthesized — text replies stay as detailed as the persona wants.
+ * 2. Plan-then-confirm before long jobs. A Telegram round-trip is
+ *    seconds, but a misaligned 10-minute build burns the user's time
+ *    AND tokens. Asking the agent to outline the plan and wait for
+ *    confirmation when it's about to do something irreversible (git
+ *    push, deploy) or expensive (multi-tool-call work) avoids that.
+ *
+ * Lives at the channel layer (not in persona files) so CLI / nightly
+ * turns aren't affected — those run unattended and don't want a
+ * confirmation gate, and verbose CLI output is fine.
+ */
+export const TELEGRAM_REPLY_INSTRUCTION =
+  `# Reply style (Telegram chat)
+
+You're chatting via Telegram. Default to short, conversational
+replies — typically 1-4 sentences. The user is usually on a phone,
+and the narrow column makes long walls of text hard to read. Skip
+narration ("Let me…", "Right, here's what I found…"); answer directly.
+
+Longer replies are fine when the user explicitly asks for a detailed
+report or analysis. Use clear structure (headings, lists) when the
+content earns it.
+
+# Confirm before long jobs
+
+Before starting any of these, briefly outline your plan in 2-3
+sentences and ask the user to confirm or adjust:
+
+- Anything involving git, build, or deploy operations
+- Anything where you're going to spawn more than one tool call
+
+Telegram round-trips are slow and tokens aren't free — confirming up
+front beats producing the wrong thing minutes later. For
+straightforward questions, just answer.`;
+
+/**
+ * Voice-only overlay, stacked on top of TELEGRAM_REPLY_INSTRUCTION
+ * when the reply will be synthesized via TTS.
+ *
+ * Why this exists separately: the chat-style instruction allows
+ * "longer when asked" and structured markdown — both wrong for TTS,
+ * which reads bullets/headers awkwardly and turns 4-sentence replies
+ * into 90-second voice notes. This overlay tightens the length cap
+ * to 1-3 sentences and forbids markdown.
  */
 export const VOICE_REPLY_INSTRUCTION =
   `# Reply length (this turn only)

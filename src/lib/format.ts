@@ -20,22 +20,13 @@ export function truncateLine(s: string, max: number): string {
 }
 
 /**
- * Format a wall-clock duration (in MILLISECONDS) for the long-turn
- * placeholder line. Always shows the largest two units, dropping
- * subseconds entirely.
+ * Format a wall-clock duration in seconds as a short two-unit string.
+ * Used by /status to show uptime + active-turn elapsed time.
  *
- *   45_000   → "45s"
- *   65_000   → "1m 5s"
- *   8_000_000 → "2h 13m"
- */
-export function formatElapsedMs(ms: number): string {
-  return formatElapsedSeconds(Math.floor(ms / 1000));
-}
-
-/**
- * Same shape as formatElapsedMs but takes seconds. Used by /status,
- * which already speaks in seconds. Adds a `Nd Nh` form for uptimes
- * that exceed a day — placeholders never run that long.
+ *   45      → "45s"
+ *   65      → "1m 5s"
+ *   8_000   → "2h 13m"
+ *   90_000  → "1d 1h"
  */
 export function formatElapsedSeconds(s: number): string {
   if (s < 60) return `${s}s`;

@@ -26,9 +26,8 @@ class FakeTransport implements TelegramTransport {
   }> {
     return { updates: [], nextOffset: 0 };
   }
-  async sendMessage(chatId: number, text: string): Promise<number> {
+  async sendMessage(chatId: number, text: string): Promise<void> {
     this.sent.push({ chatId, text });
-    return 1;
   }
   async sendTyping(): Promise<void> {}
   async sendRecording(): Promise<void> {}
@@ -42,8 +41,6 @@ class FakeTransport implements TelegramTransport {
   async downloadFile(): Promise<{ data: Buffer; mime: string }> {
     return { data: Buffer.alloc(0), mime: "" };
   }
-  async editMessage(): Promise<void> {}
-  async deleteMessage(): Promise<void> {}
 }
 
 const SAVED_KEY = process.env.PHANTOMBOT_OPENAI_API_KEY;
