@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Phantombot | The Autonomous Agent Harness</title>
+    <title>Phantombot | Personality-First Chat Agent</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -22,26 +22,30 @@
 
     <main>
         <section class="hero crooked">
-            <h1>The harness for your autonomous workforce.</h1>
-            <p class="tagline">Run, manage, and coordinate Gemini-powered agents from a single CLI. No fluff, just execution.</p>
+            <h1>Stop building tool-call parsers. Start building agents with souls.</h1>
+            <p class="tagline">Phantombot is a personality-first chat agent for Telegram. Minimalist, high-torque, and YoYo (You're On Your Own) by default. Zero tool-call translation layer.</p>
             <div class="cta">
-                <code>bun install -g @phantomyard/phantombot</code>
+                <code>curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh</code>
             </div>
         </section>
 
         <section class="content">
             <div class="grid">
                 <div class="card">
-                    <h3>Multi-Agent Orchestration</h3>
-                    <p>Lena, Kai, Robbie, and Jake. A specialized team that shares memory, credentials, and context to get the job done.</p>
+                    <h3>Harness-Agnostic</h3>
+                    <p>Pi is the recommended primary; Claude and Gemini are first-class fallbacks. The harness provides the hands; Phantombot provides the soul.</p>
+                </div>
+                <div class="card">
+                    <h3>Zero Abstractions</h3>
+                    <p>No tool-call translation layer. The harness already knows how to use Bash. Phantombot doesn't second-guess it. Direct, raw power.</p>
                 </div>
                 <div class="card">
                     <h3>Persistent Memory</h3>
-                    <p>Full long-term memory across sessions. Your agents remember decisions, lessons, and personal preferences.</p>
+                    <p>Local SQLite turn store with hybrid search. Your agents remember every decision, lesson, and preference across sessions.</p>
                 </div>
                 <div class="card">
-                    <h3>Secure & Private</h3>
-                    <p>Local-first credential management. Your keys stay in your .env, your logs stay on your machine.</p>
+                    <h3>High-Torque Ops</h3>
+                    <p>98 MB single binary, atomic self-updates in &lt;2s, and systemd integration for survivor-mode persistence.</p>
                 </div>
             </div>
         </section>
@@ -52,19 +56,40 @@
                     <span class="dot red"></span>
                     <span class="dot yellow"></span>
                     <span class="dot green"></span>
-                    <span class="title">phantombot --status</span>
+                    <span class="title">phantombot run</span>
                 </div>
                 <div class="terminal-body">
-                    <img src="assets/img/terminal-screenshot.png" alt="Phantombot CLI Screenshot" class="placeholder">
+                    <img src="assets/img/terminal-screenshot.png" alt="Phantombot CLI in action" class="screenshot">
                 </div>
+            </div>
+        </section>
+
+        <section class="philosophy">
+            <h2>Why Phantombot?</h2>
+            <p>Phantombot was built because existing gateways became "enshitified." It's the answer to sluggish performance, fragile tool-call parsing, and bloated abstractions.</p>
+            <p><strong>The motivating insight:</strong> <em>the harness can do its own tools &mdash; let it.</em></p>
+        </section>
+
+        <section class="features-detailed">
+            <div class="feature">
+                <h3>Personas</h3>
+                <p>Switch identities with a single command. Memory is partitioned, so each persona keeps its own private history forever. Create, import, and switch seamlessly.</p>
+            </div>
+            <div class="feature">
+                <h3>Voice Native</h3>
+                <p>Talk to your agents. Phantombot transcribes voice messages, runs the harness, and synthesizes the reply. Automatic brevity ensures natural conversation.</p>
+            </div>
+            <div class="feature">
+                <h3>Scheduled Tasks</h3>
+                <p>Let your agent handle the routine. Schedule recurring work with simple cron expressions. Your agent checks your email, monitors your servers, and notifies you only when it matters.</p>
             </div>
         </section>
 
         <section class="telegram-preview">
             <h2>Command from anywhere.</h2>
-            <p>Seamlessly integrated with Telegram. Talk to your agents like they're in the room.</p>
+            <p>Seamlessly integrated with Telegram. Talk to your agents via text or voice. Command your digital world from your pocket.</p>
             <div class="iphone-frame">
-                <img src="assets/img/telegram-interaction.png" alt="Telegram Interaction Screenshot" class="placeholder">
+                <img src="assets/img/telegram-interaction.png" alt="Telegram Interaction" class="screenshot">
             </div>
         </section>
     </main>

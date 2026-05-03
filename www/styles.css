@@ -183,3 +183,49 @@ footer {
     h1 { font-size: 2.5rem; }
     .crooked { transform: none; }
 }
+
+.screenshot {
+    width: 100%;
+    display: block;
+    height: auto;
+}
+
+.philosophy {
+    margin-bottom: 8rem;
+    text-align: center;
+}
+
+.philosophy h2 {
+    margin-bottom: 2rem;
+}
+
+.philosophy p {
+    font-size: 1.2rem;
+    color: var(--muted);
+    max-width: 700px;
+    margin: 0 auto 1.5rem auto;
+}
+
+.philosophy strong {
+    color: var(--fg);
+}
+
+.features-detailed {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 3rem;
+    margin-bottom: 8rem;
+}
+
+.feature h3 {
+    font-family: var(--font-mono);
+    margin-bottom: 1rem;
+    font-size: 1.5rem;
+    border-left: 4px solid var(--accent);
+    padding-left: 1rem;
+}
+
+.feature p {
+    color: var(--muted);
+    font-size: 1.1rem;
+}
