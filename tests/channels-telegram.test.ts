@@ -538,6 +538,54 @@ describe("runTelegramServer attachment dispatch", () => {
     );
   });
 
+  test("malicious file_name with path separators is contained inside the inbox dir", async () => {
+    // Sender controls Telegram's file_name field. Without basename()
+    // sanitization, file_name="../../etc/passwd" would join to a path
+    // outside the inbox — a real OOB write vulnerability. The
+    // <updateId>- prefix doesn't help; it's the basename() call that
+    // does. Verify the saved path stays under the per-chat inbox.
+    const transport = new FakeTransport();
+    transport.fileResponses.set("evil", {
+      data: Buffer.from("evil-bytes"),
+      mime: "text/plain",
+    });
+    transport.pendingUpdates.push({
+      updateId: 559,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      attachment: {
+        fileId: "evil",
+        fileName: "../../etc/passwd",
+        mimeType: "text/plain",
+        kind: "document",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    const dir = inboxDir(1001);
+    const expectedPath = join(dir, "559-passwd");
+    expect(harness.lastRequest?.userMessage).toBe(`[attached: ${expectedPath}]`);
+    // The saved file must live under the inbox dir, not at /etc/passwd
+    // or anywhere else.
+    expect(expectedPath.startsWith(dir + "/")).toBe(true);
+    const onDisk = await import("node:fs/promises").then((m) =>
+      m.readFile(expectedPath, "utf8"),
+    );
+    expect(onDisk).toBe("evil-bytes");
+  });
+
   test("attachment with no caption: user message is the bracketed line only", async () => {
     const transport = new FakeTransport();
     transport.fileResponses.set("photo-1", {

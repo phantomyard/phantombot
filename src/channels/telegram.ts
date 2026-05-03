@@ -16,7 +16,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { type Config, xdgDataHome } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -821,7 +821,11 @@ async function processChatMessage(
       try {
         const dir = inboxDir(msg.chatId);
         await mkdir(dir, { recursive: true });
-        const path = join(dir, `${msg.updateId}-${att.fileName}`);
+        // basename strips any path separators or "../" climbs from
+        // Telegram's user-controlled file_name field — without this,
+        // a sender with file_name="../../etc/passwd" could write
+        // outside the inbox dir.
+        const path = join(dir, `${msg.updateId}-${basename(att.fileName)}`);
         const file = await input.transport.downloadFile(att.fileId);
         await writeFile(path, file.data);
         savedPath = path;
