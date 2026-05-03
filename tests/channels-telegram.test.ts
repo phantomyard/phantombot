@@ -684,7 +684,7 @@ describe("runTelegramServer typing indicator", () => {
       agentDir,
       persona: "phantom",
       transport,
-      typingThrottleMs: 1, // disable throttle for this test
+      typingThrottleMs: 0, // disable throttle for this test
       oneShot: true,
     });
     // 1 initial + 4 chunks (heartbeat, text, progress, text). `done`
