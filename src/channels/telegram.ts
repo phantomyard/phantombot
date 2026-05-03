@@ -204,6 +204,18 @@ function guessMimeFromPath(path: string): string {
   return "audio/ogg";
 }
 
+/**
+ * Render an AbortSignal.reason as a short string for logging.
+ * Callers pass plain strings ("stop", "reset", "interrupt"); the DOM
+ * default for a parameterless abort() is a DOMException — fold it down
+ * to its message so journalctl stays readable.
+ */
+function abortReasonString(reason: unknown): string {
+  if (typeof reason === "string") return reason;
+  if (reason instanceof Error) return reason.message;
+  return "aborted";
+}
+
 interface TelegramRawUpdate {
   update_id?: number;
   message?: {
@@ -411,7 +423,26 @@ export async function runTelegramServer(
           // Unrecognized /command — fall through to the LLM.
         }
 
-        // Regular message: enqueue onto this chat's serial chain.
+        // Regular message. If a turn is already in flight for this
+        // chat, abort it — the user typing again means "pay attention
+        // to this instead." The aborted turn returns silently via the
+        // wasAborted path; only the new turn's reply lands. Same UX
+        // as Claude Code's "type to interrupt." The new task still
+        // chains off `prev` (the aborted turn's worker promise) so
+        // the harness's process group has time to clean up before we
+        // spawn the next subprocess.
+        const active = activeTurns.get(msg.chatId);
+        if (active) {
+          log.info("telegram: new message — interrupting active turn", {
+            chatId: msg.chatId,
+            elapsedS: (
+              (Date.now() - active.startTime) / 1000
+            ).toFixed(1),
+          });
+          active.controller.abort("interrupt");
+        }
+
+        // Enqueue onto this chat's serial chain.
         const prev = chatChains.get(msg.chatId) ?? Promise.resolve();
         const next = prev.then(() =>
           processChatMessage(msg, {
@@ -600,14 +631,18 @@ async function processChatMessage(
     }
   }
 
-  // /stop: the controller was aborted from outside. The reply text
-  // already came through from the slash command handler — don't send
-  // a second "(error: stopped)" message.
-  const wasStopped = controller.signal.aborted;
-  if (wasStopped) {
-    log.info("telegram: turn stopped by /stop", {
+  // The controller was aborted from outside. Causes:
+  //   - "stop"      — /stop slash command (slash handler already replied).
+  //   - "reset"     — /reset slash command (handler replied).
+  //   - "interrupt" — a new message arrived for this chat; the new
+  //                   turn supersedes us. Stay silent so only the new
+  //                   reply lands.
+  // In every case, suppress the would-be reply.
+  if (controller.signal.aborted) {
+    log.info("telegram: turn aborted", {
       chatId: msg.chatId,
       durationMs: Date.now() - startedAt,
+      reason: abortReasonString(controller.signal.reason),
     });
     return;
   }

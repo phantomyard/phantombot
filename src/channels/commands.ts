@@ -112,7 +112,7 @@ function handleStop(ctx: SlashCommandContext): SlashCommandResult {
     return { reply: "no active turn to stop" };
   }
   const elapsedS = ((Date.now() - ctx.activeTurn.startTime) / 1000).toFixed(1);
-  ctx.activeTurn.controller.abort();
+  ctx.activeTurn.controller.abort("stop");
   log.info("commands: /stop fired", { chatId: ctx.chatId, elapsedS });
   return { reply: `stopped (was running ${elapsedS}s)` };
 }
@@ -130,7 +130,7 @@ async function handleReset(
     const elapsedS = (
       (Date.now() - ctx.activeTurn.startTime) / 1000
     ).toFixed(1);
-    ctx.activeTurn.controller.abort();
+    ctx.activeTurn.controller.abort("reset");
     stoppedNote = ` (and stopped an in-flight turn that was ${elapsedS}s in)`;
   }
 
