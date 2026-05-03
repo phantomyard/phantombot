@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runTurn } from "../src/orchestrator/turn.ts";
 import {
@@ -90,6 +90,49 @@ describe("runTurn — successful path", () => {
       { role: "user", text: "hello" },
       { role: "assistant", text: "hi there" },
     ]);
+  });
+
+  test("workingDir defaults to the running user's home dir (gemini sandbox spans the whole user account)", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "x",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(captured?.workingDir).toBe(homedir());
+  });
+
+  test("workingDir override is respected (callers can scope down)", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "x",
+        harnesses: [harness],
+        workingDir: agentDir,
+      }),
+    );
+
+    expect(captured?.workingDir).toBe(agentDir);
   });
 
   test("passes loaded history to the harness", async () => {

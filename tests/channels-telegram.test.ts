@@ -900,9 +900,109 @@ describe("runTelegramServer slash commands", () => {
     );
     expect(errorReplies).toEqual([]);
     expect(harness.lastSignalAborted).toBe(true);
-    // No turn was persisted (failed turn → no history).
+    // The aborted turn persists a synthetic interrupted-pair so the
+    // next user message has context for follow-ups like "actually do X
+    // instead." Skipped only when the abort reason is "reset" (history
+    // was just wiped) or the message text is empty (voice STT aborted
+    // before it ran).
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
-    expect(stored).toEqual([]);
+    expect(stored).toEqual([
+      { role: "user", text: "kick off something slow" },
+      { role: "assistant", text: "[interrupted before reply]" },
+    ]);
+  });
+
+  test("a second non-slash message interrupts an in-flight turn (no reply for the aborted one)", async () => {
+    // First message kicks off a slow harness; ~30ms later a second
+    // message arrives. The first turn should be aborted — no reply
+    // sent — and the second message's reply should land.
+    class InterruptableHarness implements Harness {
+      readonly id = "interruptable";
+      invocations = 0;
+      abortedSignals: boolean[] = [];
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        const turn = ++this.invocations;
+        if (turn === 1) {
+          // Slow turn — only ends when aborted.
+          yield { type: "text", text: "thinking…" };
+          await new Promise<void>((resolve) => {
+            if (req.signal?.aborted) return resolve();
+            req.signal?.addEventListener(
+              "abort",
+              () => {
+                this.abortedSignals.push(true);
+                resolve();
+              },
+              { once: true },
+            );
+            setTimeout(resolve, 5_000);
+          });
+          yield { type: "error", error: "stopped", recoverable: false };
+          return;
+        }
+        // Second turn — a fresh, fast reply.
+        yield { type: "text", text: "second reply" };
+        yield { type: "done", finalText: "second reply" };
+      }
+    }
+
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "kick off something slow",
+    });
+    setTimeout(() => {
+      transport.pendingUpdates.push({
+        updateId: 2,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "actually do this instead",
+      });
+    }, 30);
+
+    const harness = new InterruptableHarness();
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 300);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      signal: ac.signal,
+    });
+
+    // First turn was aborted (signal fired).
+    expect(harness.abortedSignals).toEqual([true]);
+    // Second turn ran.
+    expect(harness.invocations).toBe(2);
+    // Exactly one user-visible reply: the second turn's.
+    const userReplies = transport.sent.filter(
+      (s) => !s.text.startsWith("/"),
+    );
+    expect(userReplies.length).toBe(1);
+    expect(userReplies[0]!.text).toBe("second reply");
+    // No "(error:" leak from the aborted first turn.
+    const errorReplies = transport.sent.filter((s) =>
+      s.text.includes("(error:"),
+    );
+    expect(errorReplies).toEqual([]);
+    // History records the interrupted message + a synthetic "[interrupted
+    // before reply]" so the model has context for the follow-up. Then
+    // the second turn's successful user/assistant pair lands as normal.
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored.map((t) => t.text)).toEqual([
+      "kick off something slow",
+      "[interrupted before reply]",
+      "actually do this instead",
+      "second reply",
+    ]);
   });
 
   test("/status reports the current primary harness", async () => {

@@ -92,6 +92,25 @@ export async function* runWithFallback(
         yield chunk;
         return;
       }
+      // Empty `done` = the harness exited cleanly but produced no
+      // assistant text (gemini SIGTERMed mid-stream by an updater
+      // restart, or a tool-only run with no final message). On a
+      // non-last harness, fall through — pi getting a chance is far
+      // better than the user seeing "(no reply)". On the last harness,
+      // yield it and let the channel surface "(no reply)" so the user
+      // knows something happened.
+      if (
+        chunk.type === "done" &&
+        chunk.finalText.length === 0 &&
+        !isLast
+      ) {
+        log.warn(
+          "orchestrator: harness produced empty reply, falling through",
+          { harnessId: harness.id },
+        );
+        recoverableError = true;
+        break;
+      }
       yield chunk;
       if (chunk.type === "done") succeeded = true;
     }
