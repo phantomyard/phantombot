@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   GeminiHarness,
+  parseGeminiEvent,
   renderStdinPayload,
 } from "../src/harnesses/gemini.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
@@ -80,6 +81,84 @@ describe("renderStdinPayload (Gemini)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseGeminiEvent — pure mapper from stream-json to HarnessChunk
+// ---------------------------------------------------------------------------
+
+describe("parseGeminiEvent", () => {
+  test("assistant message → text chunk", () => {
+    expect(
+      parseGeminiEvent({
+        type: "message",
+        role: "assistant",
+        content: "hello",
+        delta: true,
+      }),
+    ).toEqual({ type: "text", text: "hello" });
+  });
+
+  test("user-echo message → undefined (no signal)", () => {
+    expect(
+      parseGeminiEvent({
+        type: "message",
+        role: "user",
+        content: "the prompt",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("tool_use → progress chunk with tool name in note", () => {
+    expect(
+      parseGeminiEvent({
+        type: "tool_use",
+        tool_name: "run_shell_command",
+        tool_id: "x",
+        parameters: {},
+      }),
+    ).toEqual({ type: "progress", note: "tool: run_shell_command" });
+  });
+
+  test("tool_use without tool_name → progress with placeholder", () => {
+    const c = parseGeminiEvent({ type: "tool_use" });
+    expect(c?.type).toBe("progress");
+  });
+
+  test("tool_result → heartbeat", () => {
+    expect(
+      parseGeminiEvent({
+        type: "tool_result",
+        tool_id: "x",
+        status: "success",
+      }),
+    ).toEqual({ type: "heartbeat" });
+  });
+
+  test("result → done with stats meta", () => {
+    const c = parseGeminiEvent({
+      type: "result",
+      status: "success",
+      stats: { total_tokens: 100, duration_ms: 500 },
+    });
+    expect(c?.type).toBe("done");
+    if (c?.type !== "done") return;
+    expect(c.finalText).toBe("");
+    expect(c.meta?.stats).toEqual({ total_tokens: 100, duration_ms: 500 });
+  });
+
+  test("init → undefined (session-start chatter)", () => {
+    expect(
+      parseGeminiEvent({ type: "init", session_id: "x", model: "y" }),
+    ).toBeUndefined();
+  });
+
+  test("malformed input → undefined", () => {
+    expect(parseGeminiEvent(null)).toBeUndefined();
+    expect(parseGeminiEvent("string")).toBeUndefined();
+    expect(parseGeminiEvent({})).toBeUndefined();
+    expect(parseGeminiEvent({ type: 42 })).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // End-to-end via the fake-gemini fixture
 // ---------------------------------------------------------------------------
 
@@ -91,7 +170,7 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     return new GeminiHarness({ bin: FAKE_GEMINI, model: "" });
   }
 
-  test("normal: stdin received, -p value used as prompt, exit 0 → text + done", async () => {
+  test("normal: stream-json events parsed; stdin + -p both reach the model; exit 0 → text + heartbeat + progress + done", async () => {
     process.env.FAKE_GEMINI_MODE = "normal";
     const chunks = await collect(
       harness().invoke(
@@ -106,18 +185,32 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
       ),
     );
     delete process.env.FAKE_GEMINI_MODE;
-    // text chunk includes both stdin (last line) and the -p value
-    const textChunk = chunks.find((c) => c.type === "text");
-    expect(textChunk).toBeDefined();
-    if (textChunk?.type !== "text") return;
-    expect(textChunk.text).toContain("prompt=the new question");
-    expect(textChunk.text).toContain("Assistant: ok"); // last stdin line
-    // done chunk follows
+
+    // The fake's tool_use → progress chunk; tool_result → heartbeat;
+    // assistant deltas → text chunks (concatenated by the harness loop).
+    const progressChunks = chunks.filter((c) => c.type === "progress");
+    expect(progressChunks.length).toBe(1);
+    if (progressChunks[0]?.type === "progress") {
+      expect(progressChunks[0].note).toBe("tool: echo");
+    }
+
+    const heartbeats = chunks.filter((c) => c.type === "heartbeat");
+    expect(heartbeats.length).toBeGreaterThanOrEqual(1);
+
+    const textChunks = chunks.filter(
+      (c): c is { type: "text"; text: string } => c.type === "text",
+    );
+    const fullText = textChunks.map((c) => c.text).join("");
+    expect(fullText).toContain("prompt=the new question");
+    expect(fullText).toContain("Assistant: ok"); // last stdin line
+
+    // Final done carries the concatenated text and the result-event stats.
     const done = chunks.find((c) => c.type === "done");
     expect(done).toBeDefined();
     if (done?.type !== "done") return;
-    expect(done.finalText).toBe(textChunk.text);
+    expect(done.finalText).toBe(fullText);
     expect(done.meta?.harnessId).toBe("gemini");
+    expect(done.meta?.stats).toMatchObject({ total_tokens: 42 });
   });
 
   test("error: non-zero exit → recoverable error chunk; no done", async () => {
@@ -182,7 +275,7 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     expect(err.recoverable).toBe(true);
   });
 
-  test("argv shape: -p <user> -o text -y; -m only when model is non-empty", async () => {
+  test("argv shape: -p <user> -o stream-json -y; -m only when model is non-empty", async () => {
     process.env.FAKE_GEMINI_MODE = "echo-args";
     // No model.
     const noModel = await collect(
@@ -196,7 +289,7 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     expect(text1.text).toContain("-p");
     expect(text1.text).toContain("the message");
     expect(text1.text).toContain("-o");
-    expect(text1.text).toContain("text");
+    expect(text1.text).toContain("stream-json");
     expect(text1.text).toContain("-y");
     expect(text1.text).not.toContain("-m");
 

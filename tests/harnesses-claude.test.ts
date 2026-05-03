@@ -115,12 +115,36 @@ describe("parseStreamJson", () => {
     expect(parseStreamJson({ type: "result" })).toBeUndefined();
   });
 
-  test("returns undefined for assistant messages with no text parts (e.g. pure tool_use)", () => {
+  test("emits heartbeat for assistant messages with only non-text parts (e.g. pure tool_use)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: {} }] },
     });
-    expect(c).toBeUndefined();
+    expect(c).toEqual({ type: "heartbeat" });
+  });
+
+  test("emits heartbeat for thinking blocks (and does NOT leak the content)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [{ type: "thinking", thinking: "internal chain-of-thought" }],
+      },
+    });
+    expect(c).toEqual({ type: "heartbeat" });
+    expect(JSON.stringify(c)).not.toContain("chain-of-thought");
+  });
+
+  test("text takes precedence: when a message has both text and tool_use, text wins (no heartbeat)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "hello" },
+          { type: "tool_use", name: "Bash", input: {} },
+        ],
+      },
+    });
+    expect(c).toEqual({ type: "text", text: "hello" });
   });
 
   test("returns undefined for malformed input", () => {

@@ -44,7 +44,16 @@ export interface HarnessRequest {
 export type HarnessChunk =
   /** Streamed assistant text. Concatenate all `text` chunks for the final reply. */
   | { type: "text"; text: string }
-  /** Out-of-band progress (e.g. "running tool X"). Useful for keeping channels alive on long turns. */
+  /**
+   * Payload-less "model is alive" tick. Emitted on internal events the
+   * channel layer shouldn't surface (chain-of-thought tokens,
+   * tool_use block starts) but that prove the harness is working.
+   * Channel adapters use these to refresh their typing/working
+   * indicator — when heartbeats stop, the indicator naturally
+   * expires, which is the truthful "frozen" signal.
+   */
+  | { type: "heartbeat" }
+  /** Out-of-band progress with a human-readable note (e.g. "running tool X"). */
   | { type: "progress"; note: string }
   /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }

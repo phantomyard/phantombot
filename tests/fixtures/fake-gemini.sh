@@ -3,18 +3,17 @@
 #
 # Mirrors the surface of the real google-gemini/gemini-cli that the
 # GeminiHarness invokes:
-#   gemini -p <user_message> -o text -y [-m <model>]
+#   gemini -p <user_message> -o stream-json -y [-m <model>]
 #
 # Modes (set via FAKE_GEMINI_MODE):
-#   normal    — read stdin, echo "<reply prefix>" + last line of stdin + " | " + prompt arg, exit 0
+#   normal    — emit a fake stream-json transcript: init → tool_use →
+#               tool_result → assistant text deltas (whose content
+#               echoes the prompt + last stdin line so tests can
+#               verify stdin/argv plumbing) → result. Exit 0.
 #   error     — print "auth failed" to stderr, exit 1
 #   notfound  — exit 127 (simulates "command not found"-ish)
 #   hang      — sleep forever (timeout test)
 #   echo-args — print all argv joined with " | " on stdout, exit 0 (arg-shape test)
-#
-# Note: the real gemini -p reads stdin and appends the -p value. For
-# the normal-mode reply we synthesize something deterministic so tests
-# can assert on the output without needing a real model.
 
 mode="${FAKE_GEMINI_MODE:-normal}"
 
@@ -37,9 +36,29 @@ while IFS= read -r line; do
   fi
 done
 
+# JSON-escape a string for embedding inside a JSON-string literal.
+# Handles backslash, double-quote, and newline — enough for the
+# deterministic test payloads below.
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
 case "$mode" in
   normal)
-    printf 'GEMINI_REPLY: stdin=%s prompt=%s\n' "$last_stdin_line" "$prompt"
+    printf '{"type":"init","session_id":"fake","model":"fake-model"}\n'
+    printf '{"type":"tool_use","tool_name":"echo","tool_id":"t1","parameters":{}}\n'
+    printf '{"type":"tool_result","tool_id":"t1","status":"success"}\n'
+    # Two assistant deltas so the harness must concatenate them.
+    body=$(printf 'GEMINI_REPLY: stdin=%s prompt=%s' "$last_stdin_line" "$prompt")
+    head="${body:0:20}"
+    tail="${body:20}"
+    printf '{"type":"message","role":"assistant","content":"%s","delta":true}\n' "$(json_escape "$head")"
+    printf '{"type":"message","role":"assistant","content":"%s","delta":true}\n' "$(json_escape "$tail")"
+    printf '{"type":"result","status":"success","stats":{"total_tokens":42,"input_tokens":30,"output_tokens":12}}\n'
     exit 0
     ;;
   error)
@@ -53,9 +72,19 @@ case "$mode" in
     exec sleep 3600
     ;;
   echo-args)
-    # Joined argv on stdout for the arg-shape assertion.
-    IFS=' | '
-    printf '%s' "$*"
+    # Wrap argv inside a single fake assistant message so the harness's
+    # stream-json parser still picks up the content as `text`. The test
+    # asserts on substrings.
+    joined=""
+    for a in "$@"; do
+      if [ -z "$joined" ]; then
+        joined="$a"
+      else
+        joined="$joined | $a"
+      fi
+    done
+    printf '{"type":"message","role":"assistant","content":"%s","delta":true}\n' "$(json_escape "$joined")"
+    printf '{"type":"result","status":"success","stats":{}}\n'
     exit 0
     ;;
   *)

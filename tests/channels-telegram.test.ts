@@ -96,27 +96,6 @@ class ScriptedHarness implements Harness {
   }
 }
 
-/**
- * A harness that pauses for `holdMs` between yielding the first text chunk
- * and the done chunk — used to verify typing-indicator refresh behavior.
- */
-class SlowHarness implements Harness {
-  invocations = 0;
-  constructor(
-    public readonly id: string,
-    private readonly holdMs: number,
-  ) {}
-  async available(): Promise<boolean> {
-    return true;
-  }
-  async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    this.invocations++;
-    yield { type: "text", text: "thinking…" };
-    await new Promise((r) => setTimeout(r, this.holdMs));
-    yield { type: "text", text: "done" };
-    yield { type: "done", finalText: "thinking…done", meta: { harnessId: this.id } };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // parseGetUpdatesResult
@@ -234,7 +213,11 @@ describe("runTelegramServer dispatch", () => {
       oneShot: true,
     });
 
-    expect(transport.typing).toEqual([1001]);
+    // 1+ typing actions (initial + chunk-driven refresh on text), all
+    // for the right chat. Exact count varies with chunk timing — the
+    // contract is "the user saw `typing…`," not a precise sequence.
+    expect(transport.typing.length).toBeGreaterThanOrEqual(1);
+    expect(transport.typing.every((c) => c === 1001)).toBe(true);
     expect(transport.sent).toEqual([{ chatId: 1001, text: "hi alice" }]);
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored).toEqual([
@@ -640,39 +623,12 @@ describe("runTelegramServer AbortSignal", () => {
   });
 });
 
-describe("runTelegramServer typing refresh", () => {
-  test("refreshes the typing indicator while a slow harness is working", async () => {
-    const transport = new FakeTransport();
-    transport.pendingUpdates.push({
-      updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
-      text: "hi",
-    });
-    // Hold the harness for 250ms so we get >1 typing refresh at 50ms cadence.
-    const harness = new SlowHarness("slow", 250);
-    await runTelegramServer({
-      config: baseConfig(),
-      memory,
-      harnesses: [harness],
-      agentDir,
-      persona: "phantom",
-      transport,
-      typingRefreshMs: 50,
-      oneShot: true,
-    });
-    // 1 initial sendTyping + at least 2 refresh ticks during the 250ms hold.
-    // We don't assert an exact count to stay scheduling-tolerant; > 2 is the contract.
-    expect(transport.typing.length).toBeGreaterThan(2);
-    // All typing calls were for the right chat
-    expect(transport.typing.every((c) => c === 1001)).toBe(true);
-    // The reply was sent.
-    expect(transport.sent).toEqual([
-      { chatId: 1001, text: "thinking…done" },
-    ]);
-  });
+// ---------------------------------------------------------------------------
+// Typing indicator: chunk-driven only (no timers, no random pulses)
+// ---------------------------------------------------------------------------
 
-  test("clears the typing interval when the turn completes (no stray refreshes after)", async () => {
+describe("runTelegramServer typing indicator", () => {
+  test("initial nudge fires once at turn start", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
@@ -690,12 +646,111 @@ describe("runTelegramServer typing refresh", () => {
       agentDir,
       persona: "phantom",
       transport,
-      typingRefreshMs: 50,
+      oneShot: true,
+    });
+    // Just the initial sendStatus — the harness emitted no streamable
+    // chunks (only `done`).
+    expect(transport.typing).toEqual([1001]);
+  });
+
+  test("refreshes on text + heartbeat + progress chunks (with throttle disabled)", async () => {
+    class StreamingHarness implements Harness {
+      readonly id = "streaming";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "heartbeat" };
+        await new Promise((r) => setTimeout(r, 10));
+        yield { type: "text", text: "hi " };
+        await new Promise((r) => setTimeout(r, 10));
+        yield { type: "progress", note: "tool: BashTool" };
+        await new Promise((r) => setTimeout(r, 10));
+        yield { type: "text", text: "there" };
+        yield { type: "done", finalText: "hi there", meta: { harnessId: this.id } };
+      }
+    }
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "stream me",
+    });
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new StreamingHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      typingThrottleMs: 1, // disable throttle for this test
+      oneShot: true,
+    });
+    // 1 initial + 4 chunks (heartbeat, text, progress, text). `done`
+    // doesn't refresh.
+    expect(transport.typing.length).toBeGreaterThanOrEqual(5);
+    expect(transport.typing.every((c) => c === 1001)).toBe(true);
+  });
+
+  test("throttle: rapid chunks within the window collapse to one sendStatus", async () => {
+    class BurstHarness implements Harness {
+      readonly id = "burst";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        for (let i = 0; i < 10; i++) {
+          yield { type: "heartbeat" };
+        }
+        yield { type: "done", finalText: "" };
+      }
+    }
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "x",
+    });
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new BurstHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      typingThrottleMs: 5_000,
+      oneShot: true,
+    });
+    // Initial nudge sets lastSendStatusAt; all 10 burst chunks fall
+    // inside the 5_000ms window and get throttled out → just the initial.
+    expect(transport.typing.length).toBe(1);
+  });
+
+  test("no background timer: no sendStatus calls land after the turn completes", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hi",
+    });
+    const harness = new ScriptedHarness("fast", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
       oneShot: true,
     });
     const baseline = transport.typing.length;
-    // Wait longer than the refresh interval — no further typing should appear.
-    await new Promise((r) => setTimeout(r, 150));
+    // Wait well past anything that could plausibly be a stale timer.
+    await new Promise((r) => setTimeout(r, 200));
     expect(transport.typing.length).toBe(baseline);
   });
 });

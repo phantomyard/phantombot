@@ -76,7 +76,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "text", text: "hi" });
   });
 
-  test("ignores thinking_delta — those are the model's chain-of-thought, not the reply", () => {
+  test("emits heartbeat for thinking_delta (and does NOT leak the chain-of-thought content)", () => {
     const c = parsePiEvent({
       type: "message_update",
       assistantMessageEvent: {
@@ -87,10 +87,12 @@ describe("parsePiEvent", () => {
       },
       message: {},
     });
-    expect(c).toBeUndefined();
+    expect(c).toEqual({ type: "heartbeat" });
+    // The reasoning content MUST NOT appear in the chunk.
+    expect(JSON.stringify(c)).not.toContain("internal reasoning");
   });
 
-  test("ignores text_start / text_end / thinking_start / thinking_end markers", () => {
+  test("emits heartbeat for text_start / text_end / thinking_start / thinking_end markers", () => {
     for (const ameType of [
       "text_start",
       "text_end",
@@ -103,7 +105,7 @@ describe("parsePiEvent", () => {
           assistantMessageEvent: { type: ameType, contentIndex: 0 },
           message: {},
         }),
-      ).toBeUndefined();
+      ).toEqual({ type: "heartbeat" });
     }
   });
 

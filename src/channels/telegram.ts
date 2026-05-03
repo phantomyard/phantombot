@@ -282,17 +282,15 @@ export interface RunTelegramServerInput {
   /** Signal to stop the loop cleanly. */
   signal?: AbortSignal;
   /**
-   * How often to refresh the "typing…" indicator while a turn is in
-   * flight. Telegram's chat-action expires after ~5s; the default 8s
-   * refresh deliberately leaves a ~3s gap between pulses, so the user
-   * sees `typing…` come and go rather than a frozen-looking permanent
-   * indicator. The pulse is the primary "I'm alive" signal — replaces
-   * the canned `⏳ working… 30s elapsed` placeholder we tried in
-   * PR #56, which was English-only noise without the per-tool
-   * progress notes the harnesses don't reliably emit. Tests use a
-   * smaller value to verify the refresh fires at all.
+   * Minimum gap between two `sendChatAction` calls (ms). Used to throttle
+   * the per-chunk refresh so a fast stream-json burst doesn't fire
+   * dozens of typing actions per second. Default 2000ms — well under
+   * Telegram's ~5s chat-action lifetime, so the indicator stays solid
+   * during continuous activity but vanishes within ~5s when the harness
+   * goes silent (the truthful "frozen / no signal" cue). Tests pass a
+   * smaller value for determinism.
    */
-  typingRefreshMs?: number;
+  typingThrottleMs?: number;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -499,19 +497,31 @@ async function processChatMessage(
   }
 
   // Send the right indicator depending on which way we'll reply.
-  // Refresh both kinds every typingRefreshMs while the harness works.
   const willReplyWithVoice = isVoice && ttsSupported(input.config);
   const sendStatus = () =>
     willReplyWithVoice
       ? input.transport.sendRecording(msg.chatId)
       : input.transport.sendTyping(msg.chatId);
-  void sendStatus();
-  // Refresh interval defaults to 8s (5s indicator-on / 3s gap pulse) —
-  // see RunTelegramServerInput for the full rationale.
-  const refreshMs = input.typingRefreshMs ?? 8000;
-  const typingTimer = setInterval(() => {
+
+  // Indicator policy: refresh on EVERY harness chunk (text, heartbeat,
+  // progress). When chunks stop, the indicator naturally expires after
+  // ~5s — that vanishing IS the user-visible "harness has gone silent /
+  // possibly frozen" signal. No background timer, no fake pulse: the
+  // indicator's presence is a true reflection of the harness's current
+  // activity. The throttle just prevents stream-json bursts from
+  // hitting Telegram's per-bot rate cap.
+  const throttleMs = input.typingThrottleMs ?? 2000;
+  let lastSendStatusAt = 0;
+  const refreshIndicator = () => {
+    const now = Date.now();
+    if (now - lastSendStatusAt < throttleMs) return;
+    lastSendStatusAt = now;
     void sendStatus();
-  }, refreshMs);
+  };
+
+  // Initial nudge so the user sees "typing…" the moment we start
+  // working, before the first chunk lands.
+  refreshIndicator();
 
   // Register the AbortController so /stop can find us.
   const controller = new AbortController();
@@ -550,7 +560,15 @@ async function processChatMessage(
         ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
         : TELEGRAM_REPLY_INSTRUCTION,
     })) {
-      if (chunk.type === "text") reply += chunk.text;
+      if (chunk.type === "text") {
+        reply += chunk.text;
+        refreshIndicator();
+      }
+      if (chunk.type === "heartbeat") {
+        // Model is alive (chain-of-thought / tool start / etc.) — keep
+        // the indicator visible without surfacing the content.
+        refreshIndicator();
+      }
       if (chunk.type === "progress") {
         progressCount++;
         // Stash the latest progress note on the active-turn handle so
@@ -560,6 +578,7 @@ async function processChatMessage(
           chatId: msg.chatId,
           note: chunk.note.slice(0, 200),
         });
+        refreshIndicator();
       }
       if (chunk.type === "done") {
         reply = chunk.finalText;
@@ -574,7 +593,6 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
-    clearInterval(typingTimer);
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.chatId) === turnHandle) {

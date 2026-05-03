@@ -2,16 +2,20 @@
  * Google Gemini CLI harness — wraps `gemini` (the open-source agentic
  * CLI from google-gemini/gemini-cli).
  *
- * Spawn shape: `gemini -p <new_user_message> -o text -y [-m <model>]`.
+ * Spawn shape: `gemini -p <new_user_message> -o stream-json -y [-m <model>]`.
  *   - `-p` (required) puts the binary in non-interactive headless mode.
  *     Per `gemini --help`, the -p value is appended to whatever's on
  *     stdin — so we send the system prompt + prior turns via stdin and
  *     use -p for just the new user message. This keeps the argv small
  *     enough that ARG_MAX isn't a concern (Pi has the same problem and
  *     guards it with maxPayloadBytes; gemini's stdin+argv split avoids it).
- *   - `-o text` (v1): collect all stdout, emit one text + one done
- *     chunk on exit 0. Stream-json upgrade is a follow-up — needs a
- *     real schema sample, not a guess.
+ *   - `-o stream-json` emits one JSON object per line for every internal
+ *     event: init, user-echo, tool_use, tool_result, assistant-message
+ *     deltas, and a final result with token stats. We map those into
+ *     phantombot's HarnessChunk taxonomy (see parseGeminiEvent below).
+ *     This replaces the v1 `-o text` mode, which collapsed everything
+ *     to a single blob and gave the channel layer no way to distinguish
+ *     "model is thinking" from "model is silent / wedged."
  *   - `-y` (yolo): auto-approve all tool calls. Required for headless
  *     because the default mode prompts for approval, which would block
  *     forever in a non-interactive subprocess. Same posture phantombot
@@ -103,7 +107,7 @@ export class GeminiHarness implements Harness {
     const stdinPayload = renderStdinPayload(req);
     const args: string[] = [
       "-p", req.userMessage,
-      "-o", "text",
+      "-o", "stream-json",
       "-y",
     ];
     if (this.config.model && this.config.model.length > 0) {
@@ -152,16 +156,65 @@ export class GeminiHarness implements Harness {
 
     void consumeStderr(proc.stderr);
 
+    let buffer = "";
     let finalText = "";
+    let resultMeta: Record<string, unknown> | undefined;
     const decoder = new TextDecoder();
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
         killer.touch();
-        finalText += decoder.decode(chunk, { stream: true });
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          // Tolerate non-JSON noise that gemini-cli sometimes prints
+          // ahead of the stream (e.g. terminal-color warnings, "YOLO
+          // mode is enabled"). Surfaced as low-noise progress notes
+          // rather than dropped, so they show up in /status diagnostics.
+          // Also logged at debug level so a future gemini-cli schema
+          // change that produces unexpected non-JSON shows up in the
+          // journal without needing to reproduce live.
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(trimmed);
+          } catch {
+            log.debug("gemini: non-JSON stdout line", {
+              line: trimmed.slice(0, 200),
+            });
+            yield { type: "progress", note: trimmed.slice(0, 200) };
+            continue;
+          }
+          const c = parseGeminiEvent(parsed);
+          if (!c) continue;
+          if (c.type === "text") finalText += c.text;
+          if (c.type === "done") {
+            // gemini's `result` event carries the authoritative stats.
+            // We hold them in resultMeta and emit a single done chunk
+            // after the loop so the orchestrator sees one terminal event.
+            resultMeta = c.meta;
+            continue;
+          }
+          yield c;
+        }
       }
       // Flush any pending bytes in the decoder.
-      finalText += decoder.decode();
+      buffer += decoder.decode();
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const c = parseGeminiEvent(JSON.parse(tail));
+          if (c) {
+            if (c.type === "text") finalText += c.text;
+            if (c.type === "done") resultMeta = c.meta;
+            else yield c;
+          }
+        } catch {
+          /* drop trailing partial line */
+        }
+      }
     } finally {
       await killer.dispose();
     }
@@ -182,7 +235,7 @@ export class GeminiHarness implements Harness {
     if (code !== 0) {
       yield {
         type: "error",
-        error: `gemini exited with code ${code}${finalText ? `: ${finalText.slice(0, 200)}` : ""}`,
+        error: `gemini exited with code ${code}`,
         // 127 = "command not found"; not recoverable by retrying the next harness
         // (the binary itself is missing). Other non-zero exits are typically
         // model/network/auth issues that the next harness in the chain can handle.
@@ -191,11 +244,6 @@ export class GeminiHarness implements Harness {
       return;
     }
 
-    // v1 emits the whole reply as one text chunk + a done. Stream-json
-    // upgrade is a follow-up.
-    if (finalText.length > 0) {
-      yield { type: "text", text: finalText };
-    }
     yield {
       type: "done",
       finalText,
@@ -203,9 +251,77 @@ export class GeminiHarness implements Harness {
         harnessId: this.id,
         model: this.config.model || "(default)",
         replyBytes: Buffer.byteLength(finalText, "utf8"),
+        ...(resultMeta ?? {}),
       },
     };
   }
+}
+
+/**
+ * Translate one gemini stream-json event line into a HarnessChunk.
+ *
+ * Schema (verified against gemini-cli v0.40.x with `-o stream-json`):
+ *
+ *   {"type":"init","session_id":"...","model":"..."}
+ *   {"type":"message","role":"user","content":"..."}            // input echo
+ *   {"type":"tool_use","tool_name":"...","tool_id":"...",
+ *      "parameters":{...}}
+ *   {"type":"tool_result","tool_id":"...","status":"success"}
+ *   {"type":"message","role":"assistant","content":"...",
+ *      "delta":true}                                             // reply token
+ *   {"type":"result","status":"...","stats":{
+ *      "total_tokens":N, "input_tokens":N, "output_tokens":N,
+ *      "duration_ms":N, "tool_calls":N, ... }}
+ *
+ * Mapping rules:
+ *   - assistant message (delta or full) → `text` chunk
+ *   - tool_use → `progress` chunk; the note is "tool: <name>" so /status
+ *     can surface "currently: tool: run_shell_command" without the channel
+ *     layer needing gemini-specific knowledge
+ *   - tool_result → `heartbeat` (signal only; the actual output already
+ *     went into the model's context for synthesis)
+ *   - result → synthetic `done` chunk carrying the stats as meta
+ *   - init / user-echo → ignored (no signal value for the user)
+ *
+ * Exported for testing.
+ */
+export function parseGeminiEvent(parsed: unknown): HarnessChunk | undefined {
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const type = obj.type;
+  if (typeof type !== "string") return undefined;
+
+  if (type === "message") {
+    if (obj.role !== "assistant") return undefined;
+    const content = obj.content;
+    if (typeof content !== "string" || content.length === 0) return undefined;
+    return { type: "text", text: content };
+  }
+
+  if (type === "tool_use") {
+    const name =
+      typeof obj.tool_name === "string" ? obj.tool_name : "(unknown tool)";
+    return { type: "progress", note: `tool: ${name}` };
+  }
+
+  if (type === "tool_result") {
+    return { type: "heartbeat" };
+  }
+
+  if (type === "result") {
+    // Caller treats this as a "done"-shaped event for stats capture.
+    const stats =
+      typeof obj.stats === "object" && obj.stats !== null
+        ? (obj.stats as Record<string, unknown>)
+        : undefined;
+    return {
+      type: "done",
+      finalText: "", // caller maintains its own running concat from text chunks
+      meta: stats ? { stats } : undefined,
+    };
+  }
+
+  return undefined;
 }
 
 /**
