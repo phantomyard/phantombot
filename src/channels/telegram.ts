@@ -282,15 +282,14 @@ export interface RunTelegramServerInput {
   /** Signal to stop the loop cleanly. */
   signal?: AbortSignal;
   /**
-   * How often to refresh the "typing…" indicator while a turn is in
-   * flight. Telegram's chat-action expires after ~5s; the default 8s
-   * refresh deliberately leaves a ~3s gap between pulses, so the user
-   * sees `typing…` come and go rather than a frozen-looking permanent
-   * indicator. The pulse is the primary "I'm alive" signal — replaces
-   * the canned `⏳ working… 30s elapsed` placeholder we tried in
-   * PR #56, which was English-only noise without the per-tool
-   * progress notes the harnesses don't reliably emit. Tests use a
-   * smaller value to verify the refresh fires at all.
+   * Optional FIXED refresh interval for the typing indicator pulse,
+   * in milliseconds. When unset (production default), each pulse
+   * picks a random value from {4, 6, 8, 10}s so long chats don't feel
+   * like they're hitting a metronome. When the harness is actively
+   * emitting text, we ALSO refresh on every chunk (throttled to 1 per
+   * 2s) so the indicator stays solid during real typing.
+   *
+   * Tests pass an explicit value to make the cadence deterministic.
    */
   typingRefreshMs?: number;
   out?: WriteSink;
@@ -499,19 +498,47 @@ async function processChatMessage(
   }
 
   // Send the right indicator depending on which way we'll reply.
-  // Refresh both kinds every typingRefreshMs while the harness works.
   const willReplyWithVoice = isVoice && ttsSupported(input.config);
   const sendStatus = () =>
     willReplyWithVoice
       ? input.transport.sendRecording(msg.chatId)
       : input.transport.sendTyping(msg.chatId);
+
+  // Initial nudge so the user sees "typing…" immediately.
   void sendStatus();
-  // Refresh interval defaults to 8s (5s indicator-on / 3s gap pulse) —
-  // see RunTelegramServerInput for the full rationale.
-  const refreshMs = input.typingRefreshMs ?? 8000;
-  const typingTimer = setInterval(() => {
+
+  // Throttle ONLY for the text-chunk-driven path: a fast stream-json
+  // burst could otherwise fire dozens of typing actions per second.
+  // The pulse self-rate-limits via its own interval (always >= 4s in
+  // production, or whatever a test sets), so it bypasses the throttle.
+  // Initialised at 0 (not Date.now()) so the FIRST text chunk always
+  // lands immediately — the user sees `typing…` snap on the moment
+  // real output starts. Subsequent chunks within 2s get throttled.
+  let lastChunkRefreshAt = 0;
+  const refreshOnChunk = () => {
+    const now = Date.now();
+    if (now - lastChunkRefreshAt < 2000) return;
+    lastChunkRefreshAt = now;
     void sendStatus();
-  }, refreshMs);
+  };
+
+  // Pulse cadence: in production, each interval is randomly picked from
+  // {4, 6, 8, 10}s so a long silent stretch doesn't feel mechanical.
+  // Tests inject a fixed value via `typingRefreshMs` for determinism.
+  const fixedPulseMs = input.typingRefreshMs;
+  const nextPulseMs = (): number =>
+    fixedPulseMs ?? PULSE_INTERVALS_MS[
+      Math.floor(Math.random() * PULSE_INTERVALS_MS.length)
+    ]!;
+  let pulseTimer: ReturnType<typeof setTimeout> = setTimeout(() => {}, 0);
+  clearTimeout(pulseTimer);
+  const schedulePulse = (): void => {
+    pulseTimer = setTimeout(() => {
+      void sendStatus();
+      schedulePulse();
+    }, nextPulseMs());
+  };
+  schedulePulse();
 
   // Register the AbortController so /stop can find us.
   const controller = new AbortController();
@@ -550,7 +577,13 @@ async function processChatMessage(
         ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
         : TELEGRAM_REPLY_INSTRUCTION,
     })) {
-      if (chunk.type === "text") reply += chunk.text;
+      if (chunk.type === "text") {
+        reply += chunk.text;
+        // Real text is flowing — keep the typing indicator solid by
+        // refreshing on every chunk. Throttled to 1/2s so a fast
+        // stream-json burst doesn't fire dozens of actions.
+        refreshOnChunk();
+      }
       if (chunk.type === "progress") {
         progressCount++;
         // Stash the latest progress note on the active-turn handle so
@@ -574,7 +607,7 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
-    clearInterval(typingTimer);
+    clearTimeout(pulseTimer);
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.chatId) === turnHandle) {
@@ -664,6 +697,18 @@ async function processChatMessage(
  * turns aren't affected — those run unattended and don't want a
  * confirmation gate, and verbose CLI output is fine.
  */
+/**
+ * Candidate intervals (ms) for the random typing-indicator pulse.
+ * One is picked per pulse so the cadence varies across a long turn —
+ * a fixed-cadence pulse felt mechanical, like a heartbeat monitor.
+ * Range chosen around Telegram's ~5s chat-action lifetime: 4s gives
+ * an essentially-solid indicator, 10s leaves a clear ~5s gap. Mixing
+ * them keeps the user from learning to predict the next pulse.
+ *
+ * Exported for tests that want to assert intervals fall in this set.
+ */
+export const PULSE_INTERVALS_MS = [4000, 6000, 8000, 10000] as const;
+
 export const TELEGRAM_REPLY_INSTRUCTION =
   `# Reply style (Telegram chat)
 

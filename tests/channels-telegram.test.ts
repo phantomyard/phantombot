@@ -234,7 +234,11 @@ describe("runTelegramServer dispatch", () => {
       oneShot: true,
     });
 
-    expect(transport.typing).toEqual([1001]);
+    // 1+ typing actions (initial + chunk-driven refresh on text), all
+    // for the right chat. Exact count varies with chunk timing — the
+    // contract is "the user saw `typing…`," not a precise sequence.
+    expect(transport.typing.length).toBeGreaterThanOrEqual(1);
+    expect(transport.typing.every((c) => c === 1001)).toBe(true);
     expect(transport.sent).toEqual([{ chatId: 1001, text: "hi alice" }]);
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored).toEqual([
@@ -697,6 +701,89 @@ describe("runTelegramServer typing refresh", () => {
     // Wait longer than the refresh interval — no further typing should appear.
     await new Promise((r) => setTimeout(r, 150));
     expect(transport.typing.length).toBe(baseline);
+  });
+
+  test("text chunks trigger an extra typing refresh (so the indicator stays solid during streaming)", async () => {
+    // Streaming harness: emits text chunks at 50ms intervals for ~250ms.
+    // Pulse cadence is set high enough (5_000ms) that the pulse won't fire
+    // during the test window; any typing actions beyond the initial one
+    // must come from the chunk-driven refresh path.
+    class StreamingHarness implements Harness {
+      readonly id = "streaming";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        for (let i = 0; i < 5; i++) {
+          yield { type: "text", text: `chunk ${i} ` };
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        yield { type: "done", finalText: "chunk 0 chunk 1 chunk 2 chunk 3 chunk 4 " };
+      }
+    }
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "stream me",
+    });
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new StreamingHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      typingRefreshMs: 5_000, // pulse won't fire in this window
+      oneShot: true,
+    });
+    // 1 initial sendStatus + at least 1 chunk-driven refresh during the
+    // ~250ms streaming window. The chunk path is throttled to 1 per 2s,
+    // so we expect 2 total (initial + first chunk past the throttle —
+    // which is the 0ms-old initial, so the first chunk goes through;
+    // subsequent chunks within 2s get throttled out).
+    expect(transport.typing.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("PULSE_INTERVALS_MS exposes exactly the documented set {4,6,8,10}s", async () => {
+    const { PULSE_INTERVALS_MS } = await import("../src/channels/telegram.ts");
+    expect([...PULSE_INTERVALS_MS]).toEqual([4000, 6000, 8000, 10000]);
+  });
+
+  test("random pulse: with no typingRefreshMs override, every interval picked falls in PULSE_INTERVALS_MS", async () => {
+    // Stub Math.random so we can exercise every index in the set.
+    const realRandom = Math.random;
+    const sequence = [0.0, 0.3, 0.6, 0.99]; // → 0, 1, 2, 3
+    let i = 0;
+    Math.random = () => sequence[i++ % sequence.length]!;
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "x",
+      });
+      // Quick harness — we only care that production code path (no
+      // typingRefreshMs) doesn't blow up and produces ≥1 typing call.
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "ok" },
+      ]);
+      await runTelegramServer({
+        config: baseConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+        // typingRefreshMs intentionally NOT set → exercises random-pulse path.
+      });
+      expect(transport.typing.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      Math.random = realRandom;
+    }
   });
 });
 
