@@ -35,6 +35,7 @@ import {
   type ActiveTurnHandle,
   handleSlashCommand,
 } from "./commands.ts";
+import { markdownToTelegramHtml } from "./telegramFormat.ts";
 
 /**
  * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
@@ -195,19 +196,58 @@ export class HttpTelegramTransport implements TelegramTransport {
 
   async sendMessage(chatId: number, text: string): Promise<void> {
     const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
-    // Telegram caps message length at 4096 chars. Truncate gracefully.
-    const safe = text.length > 4000 ? text.slice(0, 4000) + "\n…[truncated]" : text;
+    // Telegram caps message length at 4096 chars. Truncate the SOURCE
+    // markdown to stay clear of the cap after HTML conversion adds
+    // tags. ~3500 source chars leaves comfortable headroom for the
+    // tag overhead a heavily-formatted reply could introduce.
+    const safe =
+      text.length > 3500 ? text.slice(0, 3500) + "\n…[truncated]" : text;
+    const html = markdownToTelegramHtml(safe);
+
+    // First try: rendered HTML. If Telegram rejects with 400 (parse
+    // error from a converter bug we haven't seen yet), retry once as
+    // plain text so the user always gets *some* reply rather than the
+    // assistant going silent on a malformed conversion.
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: safe }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: html,
+        parse_mode: "HTML",
+      }),
     });
-    if (!res.ok) {
-      log.warn("telegram: sendMessage non-OK", {
-        chatId,
-        status: res.status,
+    if (res.ok) return;
+
+    if (res.status === 400) {
+      log.warn(
+        "telegram: HTML sendMessage rejected, falling back to plain text",
+        {
+          chatId,
+          status: res.status,
+          // First 200 chars helps a future contributor reproduce the
+          // converter bug without pulling the full transcript.
+          htmlPreview: html.slice(0, 200),
+        },
+      );
+      const fallback = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: safe }),
       });
+      if (!fallback.ok) {
+        log.warn("telegram: plain-text fallback also failed", {
+          chatId,
+          status: fallback.status,
+        });
+      }
+      return;
     }
+
+    log.warn("telegram: sendMessage non-OK", {
+      chatId,
+      status: res.status,
+    });
   }
 
   async sendTyping(chatId: number): Promise<void> {

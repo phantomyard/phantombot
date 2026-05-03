@@ -1517,6 +1517,123 @@ describe("runTelegramServer slash commands", () => {
   });
 });
 
+describe("HttpTelegramTransport HTML rendering", () => {
+  type Captured = { url: string; body: Record<string, unknown> };
+  function fakeFetch(
+    captured: Captured[],
+    statusFor: (url: string, body: Record<string, unknown>) => number,
+  ): typeof fetch {
+    return (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      const body =
+        init?.body && typeof init.body === "string"
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : {};
+      captured.push({ url: u, body });
+      const status = statusFor(u, body);
+      const responseBody = status === 200
+        ? JSON.stringify({ ok: true, result: {} })
+        : JSON.stringify({ ok: false, description: "bad request" });
+      return new Response(responseBody, { status });
+    }) as unknown as typeof fetch;
+  }
+
+  test("sendMessage converts markdown to HTML and sets parse_mode=HTML", async () => {
+    const captured: Captured[] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = fakeFetch(
+        captured,
+        () => 200,
+      );
+      const t = new HttpTelegramTransport("test-token");
+      await t.sendMessage(7, "**hi** _there_ `code`");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.body.parse_mode).toBe("HTML");
+      expect(captured[0]!.body.text).toBe(
+        "<b>hi</b> <i>there</i> <code>code</code>",
+      );
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("falls back to plain text on 400 from the HTML attempt", async () => {
+    const captured: Captured[] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = fakeFetch(
+        captured,
+        // First call (HTML) → 400; second call (fallback) → 200.
+        (_url, body) => (body.parse_mode === "HTML" ? 400 : 200),
+      );
+      const t = new HttpTelegramTransport("test-token");
+      await t.sendMessage(7, "**hi**");
+      expect(captured).toHaveLength(2);
+      expect(captured[0]!.body.parse_mode).toBe("HTML");
+      expect(captured[1]!.body.parse_mode).toBeUndefined();
+      // Fallback sends the original markdown, not the HTML.
+      expect(captured[1]!.body.text).toBe("**hi**");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("does NOT fall back when the HTML send succeeds", async () => {
+    const captured: Captured[] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = fakeFetch(
+        captured,
+        () => 200,
+      );
+      const t = new HttpTelegramTransport("test-token");
+      await t.sendMessage(7, "**hi**");
+      expect(captured).toHaveLength(1);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("does NOT fall back on non-400 errors (e.g. 500 / 429)", async () => {
+    const captured: Captured[] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = fakeFetch(
+        captured,
+        () => 500,
+      );
+      const t = new HttpTelegramTransport("test-token");
+      await t.sendMessage(7, "**hi**");
+      // Just the one HTML attempt; we don't retry server errors as
+      // plain text (the issue isn't our markup).
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.body.parse_mode).toBe("HTML");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("truncates long source markdown before HTML conversion", async () => {
+    const captured: Captured[] = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = fakeFetch(
+        captured,
+        () => 200,
+      );
+      const t = new HttpTelegramTransport("test-token");
+      const huge = "x".repeat(10_000);
+      await t.sendMessage(7, huge);
+      const sent = captured[0]!.body.text as string;
+      expect(sent.length).toBeLessThan(4096);
+      expect(sent.endsWith("\n…[truncated]")).toBe(true);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+});
+
 describe("HttpTelegramTransport AbortSignal", () => {
   test("aborted fetch returns empty result without throwing", async () => {
     // Replace globalThis.fetch with one that throws AbortError immediately
