@@ -633,17 +633,48 @@ async function processChatMessage(
 
   // The controller was aborted from outside. Causes:
   //   - "stop"      — /stop slash command (slash handler already replied).
-  //   - "reset"     — /reset slash command (handler replied).
+  //   - "reset"     — /reset slash command (handler replied; history wiped).
   //   - "interrupt" — a new message arrived for this chat; the new
   //                   turn supersedes us. Stay silent so only the new
   //                   reply lands.
   // In every case, suppress the would-be reply.
   if (controller.signal.aborted) {
+    const reason = abortReasonString(controller.signal.reason);
     log.info("telegram: turn aborted", {
       chatId: msg.chatId,
       durationMs: Date.now() - startedAt,
-      reason: abortReasonString(controller.signal.reason),
+      reason,
     });
+    // Persist a synthetic interrupted-pair so the next turn knows what
+    // the user just said and that the agent never got to respond.
+    // Without this, follow-ups like "actually use blue instead" land
+    // with no referent in history and the model is surprised. Skip
+    // when:
+    //   - reason === "reset"  → /reset just wiped this conversation;
+    //                           writing here would un-wipe it.
+    //   - msg.text.length === 0 → voice message aborted before STT
+    //                             completed; nothing meaningful to log.
+    if (reason !== "reset" && msg.text.length > 0) {
+      try {
+        await input.memory.appendTurn({
+          persona: input.persona,
+          conversation: `telegram:${msg.chatId}`,
+          role: "user",
+          text: msg.text,
+        });
+        await input.memory.appendTurn({
+          persona: input.persona,
+          conversation: `telegram:${msg.chatId}`,
+          role: "assistant",
+          text: "[interrupted before reply]",
+        });
+      } catch (e) {
+        log.warn("telegram: failed to persist interrupted-pair", {
+          chatId: msg.chatId,
+          error: (e as Error).message,
+        });
+      }
+    }
     return;
   }
 

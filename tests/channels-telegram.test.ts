@@ -900,9 +900,16 @@ describe("runTelegramServer slash commands", () => {
     );
     expect(errorReplies).toEqual([]);
     expect(harness.lastSignalAborted).toBe(true);
-    // No turn was persisted (failed turn → no history).
+    // The aborted turn persists a synthetic interrupted-pair so the
+    // next user message has context for follow-ups like "actually do X
+    // instead." Skipped only when the abort reason is "reset" (history
+    // was just wiped) or the message text is empty (voice STT aborted
+    // before it ran).
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
-    expect(stored).toEqual([]);
+    expect(stored).toEqual([
+      { role: "user", text: "kick off something slow" },
+      { role: "assistant", text: "[interrupted before reply]" },
+    ]);
   });
 
   test("a second non-slash message interrupts an in-flight turn (no reply for the aborted one)", async () => {
@@ -986,10 +993,13 @@ describe("runTelegramServer slash commands", () => {
       s.text.includes("(error:"),
     );
     expect(errorReplies).toEqual([]);
-    // Only the second turn was persisted (aborted first turn never reached
-    // the on-success persist branch, so its user message isn't in history).
+    // History records the interrupted message + a synthetic "[interrupted
+    // before reply]" so the model has context for the follow-up. Then
+    // the second turn's successful user/assistant pair lands as normal.
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored.map((t) => t.text)).toEqual([
+      "kick off something slow",
+      "[interrupted before reply]",
       "actually do this instead",
       "second reply",
     ]);
