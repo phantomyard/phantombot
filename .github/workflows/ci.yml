@@ -10,6 +10,12 @@ on:
   pull_request:
     branches: [main]
 
+# Explicit least-privilege scope. `pull_request` defaults to read-only
+# already, but stating it makes the intended attack surface auditable
+# and survives any future change in org/repo defaults.
+permissions:
+  contents: read
+
 jobs:
   typecheck:
     runs-on: ubuntu-latest
