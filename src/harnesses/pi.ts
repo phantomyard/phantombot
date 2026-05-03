@@ -203,14 +203,16 @@ export function renderPayload(req: HarnessRequest): string {
  *   {"type":"session", ...}    // emitted at startup
  *   {"type":"message_start"|"message_end", ...}
  *
- * Only `assistantMessageEvent.type === "text_delta"` events contribute
- * to the assistant's reply. `thinking_delta` events are the model's
- * chain-of-thought and must be excluded — they'd otherwise leak the
- * model's reasoning into the user-facing reply.
+ * `text_delta` events contribute to the user-facing reply.
+ * `thinking_delta` events are the model's chain-of-thought; we deliberately
+ * do NOT surface their content (would leak reasoning into the reply), but
+ * we DO emit a payload-less `heartbeat` so the channel layer can refresh
+ * its typing indicator. When the user sees `typing…` come and go in real
+ * time, that's pi actually thinking — the indicator vanishing means the
+ * model has gone silent (and may be wedged on a tool call).
  *
- * Tool execution events (when they appear in the schema for tool-using
- * runs) would map to progress chunks here. Not yet observed in the
- * --print --mode json output for plain conversational turns.
+ * Other unknown event types (tool_use_*, etc.) also fold into heartbeats
+ * so we don't pretend the model is silent during legitimate work.
  *
  * Exported for testing.
  */
@@ -227,10 +229,15 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     if (typeof delta === "string" && delta.length > 0) {
       return { type: "text", text: delta };
     }
+    return undefined;
   }
 
-  // tool_use_start (or whatever pi names it for this version) would map to
-  // a progress chunk here when we observe it in the wild.
+  // thinking_delta + any other assistantMessageEvent type → heartbeat.
+  // We intentionally do NOT include the content in the chunk (would leak
+  // chain-of-thought to the user). The signal is just "pi is alive."
+  if (typeof ame.type === "string") {
+    return { type: "heartbeat" };
+  }
 
   return undefined;
 }

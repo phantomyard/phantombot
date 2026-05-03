@@ -256,7 +256,19 @@ export function renderStdinPayload(req: HarnessRequest): string {
  *
  * Claude's stream-json schema is documented in the Claude Code docs but
  * informally: each line has a `type` (system / user / assistant / result)
- * and a `message` payload. We only need the assistant text content.
+ * and a `message` payload. The assistant content is an array of blocks
+ * with their own `type`: `text`, `thinking`, `tool_use`, `tool_result`.
+ *
+ * Channel layers want two distinct signals from us:
+ *   - `text` blocks → user-visible reply (concatenate, surface verbatim).
+ *   - Anything else (`thinking`, `tool_use`, `tool_result`, …) → "model
+ *     is alive" tick, no payload. The actual content stays inside the
+ *     subprocess; we just emit `heartbeat` so the channel can refresh
+ *     its typing indicator without leaking chain-of-thought.
+ *
+ * If a single assistant message contains BOTH text and non-text blocks,
+ * we prefer the text chunk (it carries strictly more signal — text
+ * implicitly proves the model is alive too).
  *
  * Exported for testing.
  */
@@ -271,16 +283,20 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (!Array.isArray(content)) return undefined;
 
   let text = "";
+  let sawNonText = false;
   for (const part of content) {
     if (typeof part === "object" && part !== null) {
       const p = part as Record<string, unknown>;
       if (p.type === "text" && typeof p.text === "string") {
         text += p.text;
+      } else if (typeof p.type === "string") {
+        sawNonText = true;
       }
     }
   }
-  if (!text) return undefined;
-  return { type: "text", text };
+  if (text) return { type: "text", text };
+  if (sawNonText) return { type: "heartbeat" };
+  return undefined;
 }
 
 async function consumeStderr(
