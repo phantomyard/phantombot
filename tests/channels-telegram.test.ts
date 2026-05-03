@@ -15,7 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   HttpTelegramTransport,
+  extensionFromMime,
+  extractAttachment,
+  formatAttachmentUserText,
+  inboxDir,
   parseGetUpdatesResult,
+  type TelegramAttachment,
   type TelegramMessage,
   type TelegramTransport,
   runTelegramServer,
@@ -36,6 +41,8 @@ class FakeTransport implements TelegramTransport {
   recording: number[] = [];
   downloadedFileIds: string[] = [];
   fakeFileBytes = Buffer.from([0x4f, 0x67, 0x67, 0x53]); // "OggS" magic
+  /** Per-fileId override for `downloadFile`. */
+  fileResponses: Map<string, { data: Buffer; mime: string } | Error> = new Map();
   receivedSignals: Array<AbortSignal | undefined> = [];
   async getUpdates(
     offset: number,
@@ -75,6 +82,9 @@ class FakeTransport implements TelegramTransport {
     fileId: string,
   ): Promise<{ data: Buffer; mime: string }> {
     this.downloadedFileIds.push(fileId);
+    const override = this.fileResponses.get(fileId);
+    if (override instanceof Error) throw override;
+    if (override) return override;
     return { data: this.fakeFileBytes, mime: "audio/ogg" };
   }
 }
@@ -140,6 +150,211 @@ describe("parseGetUpdatesResult", () => {
   test("preserves prior offset on empty result", () => {
     expect(parseGetUpdatesResult([], 555).nextOffset).toBe(555);
   });
+
+  test("extracts a document attachment with caption", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 300,
+          message: {
+            message_id: 77,
+            chat: { id: 1 },
+            from: { id: 42 },
+            caption: "look at this",
+            document: {
+              file_id: "doc-abc",
+              file_name: "report.pdf",
+              file_size: 12345,
+              mime_type: "application/pdf",
+            },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates).toHaveLength(1);
+    expect(r.updates[0]).toMatchObject({
+      updateId: 300,
+      chatId: 1,
+      fromUserId: 42,
+      text: "",
+      caption: "look at this",
+      attachment: {
+        kind: "document",
+        fileId: "doc-abc",
+        fileName: "report.pdf",
+        fileSize: 12345,
+        mimeType: "application/pdf",
+      },
+    });
+  });
+
+  test("extracts a photo and picks the largest size", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 301,
+          message: {
+            message_id: 88,
+            chat: { id: 1 },
+            from: { id: 42 },
+            photo: [
+              { file_id: "small", file_size: 100, width: 90, height: 67 },
+              { file_id: "medium", file_size: 8_000, width: 320, height: 240 },
+              { file_id: "large", file_size: 50_000, width: 800, height: 600 },
+            ],
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.attachment).toMatchObject({
+      kind: "photo",
+      fileId: "large",
+      fileName: "88-photo.jpg",
+      fileSize: 50_000,
+      mimeType: "image/jpeg",
+    });
+  });
+
+  test("attachment takes priority over plain text (text becomes caption)", () => {
+    // Defensive: Telegram normally uses `caption` for media, not `text`,
+    // but if we ever see both, the attachment is the main thing.
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 302,
+          message: {
+            message_id: 91,
+            chat: { id: 1 },
+            from: { id: 42 },
+            text: "fallback caption from text field",
+            document: {
+              file_id: "doc-x",
+              file_name: "x.txt",
+              mime_type: "text/plain",
+            },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.caption).toBe("fallback caption from text field");
+    expect(r.updates[0]?.attachment?.fileId).toBe("doc-x");
+  });
+
+  test("voice still routes through the voice path, not attachment", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 303,
+          message: {
+            chat: { id: 1 },
+            from: { id: 42 },
+            voice: { file_id: "voice-1", duration: 3, mime_type: "audio/ogg" },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.voice?.fileId).toBe("voice-1");
+    expect(r.updates[0]?.attachment).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractAttachment / extensionFromMime / formatAttachmentUserText
+// ---------------------------------------------------------------------------
+
+describe("extensionFromMime", () => {
+  test("known images and docs", () => {
+    expect(extensionFromMime("image/png")).toBe(".png");
+    expect(extensionFromMime("application/pdf")).toBe(".pdf");
+    expect(extensionFromMime("text/markdown")).toBe(".md");
+    expect(extensionFromMime("audio/mpeg")).toBe(".mp3");
+  });
+
+  test("ignores parameters after the semicolon", () => {
+    expect(extensionFromMime("text/plain; charset=utf-8")).toBe(".txt");
+  });
+
+  test("unknown mime falls back to alphanumeric subtype slice", () => {
+    expect(extensionFromMime("application/x-custom-type")).toBe(".xcustomt");
+  });
+
+  test("missing or empty mime → .bin", () => {
+    expect(extensionFromMime(undefined)).toBe(".bin");
+    expect(extensionFromMime("")).toBe(".bin");
+  });
+});
+
+describe("extractAttachment", () => {
+  test("synthesizes filename when document has none", () => {
+    const att = extractAttachment({
+      message_id: 5,
+      chat: { id: 1 },
+      from: { id: 42 },
+      document: { file_id: "d1", mime_type: "image/png" },
+    });
+    expect(att?.fileName).toBe("5-document.png");
+  });
+
+  test("returns undefined for plain-text-only messages", () => {
+    expect(
+      extractAttachment({ chat: { id: 1 }, from: { id: 42 }, text: "hi" }),
+    ).toBeUndefined();
+  });
+});
+
+describe("formatAttachmentUserText", () => {
+  const att: TelegramAttachment = {
+    fileId: "f1",
+    fileName: "report.pdf",
+    fileSize: 1024,
+    mimeType: "application/pdf",
+    kind: "document",
+  };
+
+  test("caption + saved path", () => {
+    expect(
+      formatAttachmentUserText({
+        caption: "have a look",
+        attachment: att,
+        savedPath: "/inbox/1/55-report.pdf",
+      }),
+    ).toBe("have a look\n\n[attached: /inbox/1/55-report.pdf]");
+  });
+
+  test("no caption + saved path", () => {
+    expect(
+      formatAttachmentUserText({
+        caption: undefined,
+        attachment: att,
+        savedPath: "/inbox/1/55-report.pdf",
+      }),
+    ).toBe("[attached: /inbox/1/55-report.pdf]");
+  });
+
+  test("oversize file surfaces the cap and the size", () => {
+    const text = formatAttachmentUserText({
+      caption: "big file",
+      attachment: att,
+      oversizeBytes: 50 * 1024 * 1024,
+    });
+    expect(text).toContain("big file");
+    expect(text).toContain("[attached but too large to fetch: report.pdf");
+    expect(text).toContain("50.0 MB > 20 MB");
+  });
+
+  test("download error surfaces the error message", () => {
+    expect(
+      formatAttachmentUserText({
+        caption: undefined,
+        attachment: att,
+        downloadError: "ECONNRESET",
+      }),
+    ).toBe("[attached but couldn't download: report.pdf (ECONNRESET)]");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -187,6 +402,225 @@ const baseConfig = (
   },
   embeddings: { provider: "none" },
   voice: { provider: "none" },
+});
+
+describe("runTelegramServer attachment dispatch", () => {
+  let savedXdgDataHome: string | undefined;
+
+  beforeEach(() => {
+    // Isolate the inbox dir into the per-test workdir so tests don't
+    // pollute the real ~/.local/share/phantombot/inbox/.
+    savedXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = workdir;
+  });
+
+  afterEach(() => {
+    if (savedXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedXdgDataHome;
+  });
+
+  test("downloads document, saves to inbox, harness sees [attached: <path>]", async () => {
+    const transport = new FakeTransport();
+    transport.fileResponses.set("doc-abc", {
+      data: Buffer.from("hello-pdf-bytes"),
+      mime: "application/pdf",
+    });
+    transport.pendingUpdates.push({
+      updateId: 555,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      caption: "look at this report",
+      attachment: {
+        fileId: "doc-abc",
+        fileName: "report.pdf",
+        fileSize: 15,
+        mimeType: "application/pdf",
+        kind: "document",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "got it" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.downloadedFileIds).toEqual(["doc-abc"]);
+    const expectedPath = join(
+      inboxDir(1001),
+      "555-report.pdf",
+    );
+    const onDisk = await import("node:fs/promises").then((m) =>
+      m.readFile(expectedPath, "utf8"),
+    );
+    expect(onDisk).toBe("hello-pdf-bytes");
+    expect(harness.lastRequest?.userMessage).toBe(
+      `look at this report\n\n[attached: ${expectedPath}]`,
+    );
+    expect(transport.sent.map((s) => s.text)).toEqual(["got it"]);
+  });
+
+  test("oversize attachment skips download and surfaces the cap to the harness", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 556,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      caption: "big one",
+      attachment: {
+        fileId: "huge",
+        fileName: "huge.zip",
+        fileSize: 50 * 1024 * 1024, // 50 MB > 20 MB cap
+        mimeType: "application/zip",
+        kind: "document",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "noted" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.downloadedFileIds).toEqual([]);
+    expect(harness.lastRequest?.userMessage).toContain(
+      "[attached but too large to fetch: huge.zip",
+    );
+    expect(harness.lastRequest?.userMessage).toContain("50.0 MB > 20 MB");
+    expect(harness.lastRequest?.userMessage).toContain("big one");
+  });
+
+  test("download failure surfaces the error to the harness (no crash)", async () => {
+    const transport = new FakeTransport();
+    transport.fileResponses.set("flaky", new Error("ECONNRESET"));
+    transport.pendingUpdates.push({
+      updateId: 557,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      attachment: {
+        fileId: "flaky",
+        fileName: "fail.png",
+        mimeType: "image/png",
+        kind: "photo",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.downloadedFileIds).toEqual(["flaky"]);
+    expect(harness.lastRequest?.userMessage).toBe(
+      "[attached but couldn't download: fail.png (ECONNRESET)]",
+    );
+  });
+
+  test("malicious file_name with path separators is contained inside the inbox dir", async () => {
+    // Sender controls Telegram's file_name field. Without basename()
+    // sanitization, file_name="../../etc/passwd" would join to a path
+    // outside the inbox — a real OOB write vulnerability. The
+    // <updateId>- prefix doesn't help; it's the basename() call that
+    // does. Verify the saved path stays under the per-chat inbox.
+    const transport = new FakeTransport();
+    transport.fileResponses.set("evil", {
+      data: Buffer.from("evil-bytes"),
+      mime: "text/plain",
+    });
+    transport.pendingUpdates.push({
+      updateId: 559,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      attachment: {
+        fileId: "evil",
+        fileName: "../../etc/passwd",
+        mimeType: "text/plain",
+        kind: "document",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    const dir = inboxDir(1001);
+    const expectedPath = join(dir, "559-passwd");
+    expect(harness.lastRequest?.userMessage).toBe(`[attached: ${expectedPath}]`);
+    // The saved file must live under the inbox dir, not at /etc/passwd
+    // or anywhere else.
+    expect(expectedPath.startsWith(dir + "/")).toBe(true);
+    const onDisk = await import("node:fs/promises").then((m) =>
+      m.readFile(expectedPath, "utf8"),
+    );
+    expect(onDisk).toBe("evil-bytes");
+  });
+
+  test("attachment with no caption: user message is the bracketed line only", async () => {
+    const transport = new FakeTransport();
+    transport.fileResponses.set("photo-1", {
+      data: Buffer.from([0xff, 0xd8, 0xff]),
+      mime: "image/jpeg",
+    });
+    transport.pendingUpdates.push({
+      updateId: 558,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "",
+      attachment: {
+        fileId: "photo-1",
+        fileName: "558-photo.jpg",
+        fileSize: 3,
+        mimeType: "image/jpeg",
+        kind: "photo",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    const expectedPath = join(inboxDir(1001), "558-558-photo.jpg");
+    expect(harness.lastRequest?.userMessage).toBe(`[attached: ${expectedPath}]`);
+  });
 });
 
 describe("runTelegramServer dispatch", () => {
