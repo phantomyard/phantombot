@@ -97,7 +97,7 @@ Type=simple
 ExecStart=${exec}
 Restart=on-failure
 RestartSec=5
-Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -121,7 +121,7 @@ Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 [Service]
 Type=oneshot
 ExecStart=${exec}
-Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -156,7 +156,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=2700
-Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -189,7 +189,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${exec}
-Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
