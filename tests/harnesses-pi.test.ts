@@ -92,6 +92,31 @@ describe("parsePiEvent", () => {
     expect(JSON.stringify(c)).not.toContain("internal reasoning");
   });
 
+  test("emits progress for tool_execution_start (top-level event)", () => {
+    const c = parsePiEvent({
+      type: "tool_execution_start",
+      tool_name: "run_shell_command",
+    });
+    expect(c).toEqual({ type: "progress", note: "tool: run_shell_command" });
+  });
+
+  test("emits progress for tool_execution_start without a tool_name", () => {
+    const c = parsePiEvent({ type: "tool_execution_start" });
+    expect(c).toEqual({ type: "progress", note: "tool" });
+  });
+
+  test("emits progress for tool_use assistantMessageEvent (not heartbeat)", () => {
+    for (const ameType of ["tool_use_start", "tool_use_end", "tool_use"]) {
+      expect(
+        parsePiEvent({
+          type: "message_update",
+          assistantMessageEvent: { type: ameType, contentIndex: 0 },
+          message: {},
+        }),
+      ).toEqual({ type: "progress", note: "tool" });
+    }
+  });
+
   test("emits heartbeat for text_start / text_end / thinking_start / thinking_end markers", () => {
     for (const ameType of [
       "text_start",

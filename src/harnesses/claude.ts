@@ -251,24 +251,28 @@ export function renderStdinPayload(req: HarnessRequest): string {
 
 /**
  * Translate one stream-json line into a HarnessChunk. Returns undefined for
- * lines we want to ignore (e.g. tool-use events that the agent handles
- * internally and doesn't need to surface to phantombot).
+ * lines we want to ignore.
  *
  * Claude's stream-json schema is documented in the Claude Code docs but
  * informally: each line has a `type` (system / user / assistant / result)
  * and a `message` payload. The assistant content is an array of blocks
  * with their own `type`: `text`, `thinking`, `tool_use`, `tool_result`.
  *
- * Channel layers want two distinct signals from us:
+ * Channel layers want three distinct signals from us:
  *   - `text` blocks → user-visible reply (concatenate, surface verbatim).
- *   - Anything else (`thinking`, `tool_use`, `tool_result`, …) → "model
- *     is alive" tick, no payload. The actual content stays inside the
- *     subprocess; we just emit `heartbeat` so the channel can refresh
- *     its typing indicator without leaking chain-of-thought.
+ *   - `tool_use` blocks → `progress` so the channel layer can flush pending
+ *     narration before the model runs its tool.
+ *   - `thinking` / `tool_result` → `heartbeat` (refreshes typing indicator,
+ *     but does NOT flush narration — mirrors pi.ts behavior).
  *
  * If a single assistant message contains BOTH text and non-text blocks,
- * we prefer the text chunk (it carries strictly more signal — text
- * implicitly proves the model is alive too).
+ * text wins (it carries strictly more signal). If it has both tool_use
+ * and thinking, progress wins (tool_use is the signal that matters).
+ * Thinking-only messages get a heartbeat — they don't fragment the
+ * narration bubble.
+ *
+ * Actual content stays inside the subprocess; we never leak
+ * chain-of-thought.
  *
  * Exported for testing.
  */
@@ -283,19 +287,23 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (!Array.isArray(content)) return undefined;
 
   let text = "";
-  let sawNonText = false;
+  let toolName: string | undefined;
+  let sawOtherNonText = false;
   for (const part of content) {
     if (typeof part === "object" && part !== null) {
       const p = part as Record<string, unknown>;
       if (p.type === "text" && typeof p.text === "string") {
         text += p.text;
+      } else if (p.type === "tool_use") {
+        toolName = typeof p.name === "string" ? p.name : toolName ?? "tool";
       } else if (typeof p.type === "string") {
-        sawNonText = true;
+        sawOtherNonText = true;
       }
     }
   }
   if (text) return { type: "text", text };
-  if (sawNonText) return { type: "heartbeat" };
+  if (toolName) return { type: "progress", note: `tool: ${toolName}` };
+  if (sawOtherNonText) return { type: "heartbeat" };
   return undefined;
 }
 

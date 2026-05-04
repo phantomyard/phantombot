@@ -8,7 +8,7 @@
  *
  * Stream-json events translated to phantombot HarnessChunks:
  *   message_update with text_delta  → { type: "text", text }
- *   tool_execution_start            → { type: "progress", note: "running <tool>" }
+ *   tool_execution_start            → { type: "progress", note: "tool: <name>" }
  *   anything else (agent_start,
  *     tool_execution_end, turn_end,
  *     extension_*) → ignored        (the done chunk is emitted from process exit)
@@ -211,14 +211,25 @@ export function renderPayload(req: HarnessRequest): string {
  * time, that's pi actually thinking — the indicator vanishing means the
  * model has gone silent (and may be wedged on a tool call).
  *
- * Other unknown event types (tool_use_*, etc.) also fold into heartbeats
- * so we don't pretend the model is silent during legitimate work.
+ * tool_use_* event types inside assistantMessageEvent → `progress`
+ * so the channel layer flushes narration into a bubble before the tool
+ * runs. thinking_delta + other event types → `heartbeat`.
  *
  * Exported for testing.
  */
 export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
+
+  // tool_execution_start is a top-level event pi emits just before
+  // it invokes a tool. Emit as `progress` so the channel layer
+  // flushes any buffered narration into a bubble before the tool
+  // runs (keeping the user oriented during the silence).
+  if (obj.type === "tool_execution_start") {
+    const toolName = typeof obj.tool_name === "string" ? obj.tool_name : undefined;
+    return { type: "progress", note: toolName ? `tool: ${toolName}` : "tool" };
+  }
+
   if (obj.type !== "message_update") return undefined;
 
   const ame = obj.assistantMessageEvent;
@@ -232,10 +243,18 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     return undefined;
   }
 
-  // thinking_delta + any other assistantMessageEvent type → heartbeat.
-  // We intentionally do NOT include the content in the chunk (would leak
-  // chain-of-thought to the user). The signal is just "pi is alive."
   if (typeof ame.type === "string") {
+    // tool_use_* assistantMessageEvent: the model has decided to call
+    // a tool — emit `progress` so the channel layer flushes narration
+    // into a bubble before the tool runs. Previously these were mapped
+    // to heartbeats, which kept the typing indicator alive but never
+    // triggered a bubble flush (defeating the purpose of PR #74).
+    if (ame.type.startsWith("tool_use")) {
+      return { type: "progress", note: "tool" };
+    }
+    // thinking_delta + anything else → heartbeat.
+    // We intentionally do NOT include the content in the chunk (would leak
+    // chain-of-thought to the user). The signal is just "pi is alive."
     return { type: "heartbeat" };
   }
 

@@ -115,15 +115,15 @@ describe("parseStreamJson", () => {
     expect(parseStreamJson({ type: "result" })).toBeUndefined();
   });
 
-  test("emits heartbeat for assistant messages with only non-text parts (e.g. pure tool_use)", () => {
+  test("progress for tool_use blocks with tool name in note", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: {} }] },
     });
-    expect(c).toEqual({ type: "heartbeat" });
+    expect(c).toEqual({ type: "progress", note: "tool: Bash" });
   });
 
-  test("emits heartbeat for thinking blocks (and does NOT leak the content)", () => {
+  test("heartbeat for thinking blocks (no flush — mirrors pi.ts)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: {
@@ -131,10 +131,45 @@ describe("parseStreamJson", () => {
       },
     });
     expect(c).toEqual({ type: "heartbeat" });
-    expect(JSON.stringify(c)).not.toContain("chain-of-thought");
   });
 
-  test("text takes precedence: when a message has both text and tool_use, text wins (no heartbeat)", () => {
+  test("heartbeat for tool_result blocks (no flush)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "abc", content: "done" }],
+      },
+    });
+    expect(c).toEqual({ type: "heartbeat" });
+  });
+
+  test("progress when tool_use present, even if thinking also present", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "hm..." },
+          { type: "tool_use", name: "Read", input: {} },
+        ],
+      },
+    });
+    expect(c).toEqual({ type: "progress", note: "tool: Read" });
+  });
+
+  test("heartbeat for thinking + tool_result (no tool_use)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "hm..." },
+          { type: "tool_result", tool_use_id: "abc", content: "ok" },
+        ],
+      },
+    });
+    expect(c).toEqual({ type: "heartbeat" });
+  });
+
+  test("text takes precedence: when a message has both text and tool_use, text wins (no progress)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: {
