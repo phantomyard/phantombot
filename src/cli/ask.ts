@@ -111,6 +111,14 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       noHistory: !input.history,
+      // Streaming consumers benefit from pre-tool narration: the
+      // assistant's intent sentence flushes to stdout before the
+      // tool's silence begins. Non-streaming consumers see the whole
+      // reply at the end anyway, so narration is just bloat there.
+      // `phantombot ask --stream` is also what the voice agent's
+      // Twilio relay calls into — Twilio gets the same benefit for
+      // free, no Twilio-specific code path needed.
+      toolNarration: stream,
       signal: input.signal,
     })) {
       if (chunk.type === "text") {

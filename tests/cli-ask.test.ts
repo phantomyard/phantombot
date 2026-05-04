@@ -238,6 +238,43 @@ describe("readAllStdin — TTY guard", () => {
   });
 });
 
+describe("runAsk — pre-tool narration", () => {
+  test("--stream enables PRE_TOOL_NARRATION_INSTRUCTION (Twilio relay rides this)", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runAsk({
+      prompt: "hi",
+      stream: true,
+      config,
+      memory,
+      harnesses: [harness],
+      out: new CapturingSink(),
+      err: new CapturingSink(),
+    });
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    expect(prompt).toContain("Narration before tool calls");
+    expect(prompt).toMatch(/user'?s language/i);
+  });
+
+  test("plain ask (no --stream) does NOT enable narration", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runAsk({
+      prompt: "hi",
+      // stream defaults to false
+      config,
+      memory,
+      harnesses: [harness],
+      out: new CapturingSink(),
+      err: new CapturingSink(),
+    });
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    expect(prompt).not.toContain("Narration before tool calls");
+  });
+});
+
 describe("runAsk — persona override", () => {
   test("--persona <name> uses the named persona, not the default", async () => {
     const altDir = join(workdir, "personas", "lena");

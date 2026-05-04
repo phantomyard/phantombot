@@ -109,6 +109,60 @@ the day. Don't try to do nightly's job mid-conversation; just capture
 well and the nightly cycle handles synthesis.`;
 
 /**
+ * Optional channel-level overlay: ask the model to narrate one short
+ * sentence before each tool call so streaming channels (Telegram text,
+ * Twilio voice via `phantombot ask --stream`) have something to render
+ * during the silence while a tool runs.
+ *
+ * Why a model-driven nudge and not a harness-emitted filler:
+ *   - Harness-emitted filler ("checking your email…") would be in
+ *     English. Many users converse with the agent in other languages —
+ *     the leak is jarring. Letting the model write the line means it
+ *     comes out in whatever language the conversation is already in.
+ *   - The harnesses already flush text the moment it arrives (Claude
+ *     streams partial deltas; Pi/Gemini emit text_delta / message
+ *     events one at a time). So as long as the model produces a
+ *     sentence BEFORE the tool_use block, that sentence reaches the
+ *     channel before the silence — no harness change needed.
+ *
+ * Channels enable this via `TurnInput.toolNarration: true`. Off by
+ * default so CLI/nightly turns aren't padded with intent narration.
+ *
+ * Voice notes (Telegram voice in → voice out) deliberately do NOT
+ * enable this — VOICE_REPLY_INSTRUCTION already says "no narration of
+ * your work," and voice-note replies are one-shot anyway, so there's
+ * no streaming silence to fill.
+ *
+ * Exported for testing.
+ */
+export const PRE_TOOL_NARRATION_INSTRUCTION =
+  `# Narration before tool calls
+
+You're in a streaming channel — the user sees / hears your reply as
+you produce it, not all at once at the end. While a tool runs the
+channel goes silent, which is unsettling for the user.
+
+Rule: before each tool call, say ONE short sentence describing what
+you're about to do. Then run the tool. Examples:
+
+  "Checking your calendar..."
+  "Looking at your email now..."
+  "One sec, asking Home Assistant..."
+
+Use the user's language — match whatever language the conversation
+is in. (Don't always say it in English. If the user wrote to you in
+Spanish, narrate in Spanish.)
+
+One sentence per tool call, no more. Don't pile multiple
+narrations together ahead of time, and don't repeat yourself across
+back-to-back tools — vary the wording. Keep each sentence short
+(under ~12 words) so it's quick to read or speak.
+
+Never narrate after the tool finishes ("got it!", "done!"). The
+narration is purely to fill the pre-tool silence; once the result
+is in, just answer.`;
+
+/**
  * System-level credential discovery + hygiene. Injected into every
  * persona's prompt so the agent has a consistent contract for finding
  * credentials and persisting new ones, regardless of which persona is
