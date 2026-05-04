@@ -24,7 +24,10 @@
 import { homedir } from "node:os";
 
 import { runWithFallback } from "./fallback.ts";
-import { buildSystemPrompt } from "../persona/builder.ts";
+import {
+  buildSystemPrompt,
+  PRE_TOOL_NARRATION_INSTRUCTION,
+} from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { MemoryStore } from "../memory/store.ts";
@@ -62,6 +65,27 @@ export interface TurnInput {
   noHistory?: boolean;
   /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
   systemPromptSuffix?: string;
+  /**
+   * Append PRE_TOOL_NARRATION_INSTRUCTION to the system prompt — asks
+   * the model to say one short sentence before each tool call so
+   * streaming channels have something to render during the silence
+   * while a tool runs.
+   *
+   * Off by default. Channels that stream assistant text in real time
+   * should set this true:
+   *   - Telegram text-in/text-out (text streams as it lands)
+   *   - `phantombot ask --stream` (stdout flushes per text chunk;
+   *     Twilio's voice relay tee'd off this)
+   *
+   * Leave false for one-shot consumers — the CLI's `ask` (no stream),
+   * nightly distillation, the heartbeat — where there's no live
+   * channel to fill silence on.
+   *
+   * Telegram voice-in/voice-out should also leave this false: the
+   * voice reply is one synthesized clip at the end, not a stream, so
+   * narration would just bloat the spoken output.
+   */
+  toolNarration?: boolean;
   /** External abort signal from channel layer (e.g. /stop command). Propagated to harnesses. */
   signal?: AbortSignal;
 }
@@ -86,9 +110,20 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     },
     undefined, // vector-search retrieval reserved for a later phase
   );
-  const systemPrompt = input.systemPromptSuffix
-    ? baseSystemPrompt + "\n\n" + input.systemPromptSuffix
-    : baseSystemPrompt;
+  // Channel-layer overlays in append order:
+  //   1. systemPromptSuffix — caller-provided (e.g. Telegram's
+  //      reply-style + voice-brevity rules; nightly's distillation
+  //      directives).
+  //   2. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration,
+  //      added LAST so its directive sits closest to the user message
+  //      and is the most prominent format-of-reply rule the model sees.
+  const overlays: string[] = [];
+  if (input.systemPromptSuffix) overlays.push(input.systemPromptSuffix);
+  if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
+  const systemPrompt =
+    overlays.length > 0
+      ? baseSystemPrompt + "\n\n" + overlays.join("\n\n")
+      : baseSystemPrompt;
 
   let finalText = "";
   let succeeded = false;

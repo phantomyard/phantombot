@@ -45,6 +45,17 @@ export interface RunAskInput {
   conversation?: string;
   /** Persist + load history for this conversation. Default false (stateless). */
   history?: boolean;
+  /**
+   * Stream assistant text to `out` as `text` chunks arrive, instead of
+   * buffering and writing the final reply at the end. Lets downstream
+   * consumers (e.g. the voice agent's Twilio relay) start TTS on the
+   * first sentence while the rest is still being generated.
+   *
+   * Tool-call chatter never reaches us as `text` chunks — runTurn
+   * surfaces those as `progress`/`heartbeat` — so streaming is safe:
+   * what hits stdout is exactly the assistant's spoken reply.
+   */
+  stream?: boolean;
   /** Test injection points. */
   config?: Config;
   memory?: MemoryStore;
@@ -86,7 +97,18 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     input.memory ?? (await openMemoryStore(config.memoryDbPath));
   const ownsMemory = !input.memory;
 
-  let finalText = "";
+  const stream = input.stream === true;
+  // Two distinct accumulators on purpose:
+  //   `streamedText`  — exactly what we wrote to `out` in stream mode
+  //                     (concatenation of `chunk.text` deltas).
+  //   `harnessFinal`  — the harness's authoritative `chunk.finalText`,
+  //                     which may be reformatted vs the deltas.
+  // Non-stream mode writes `harnessFinal` at the end; stream mode has
+  // already flushed `streamedText`. The trailing-newline check must
+  // consult whichever string was actually emitted, otherwise we can
+  // either drop a needed newline or append a redundant one.
+  let streamedText = "";
+  let harnessFinal = "";
   let succeeded = false;
   try {
     for await (const chunk of runTurn({
@@ -99,11 +121,29 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       noHistory: !input.history,
+      // Streaming consumers benefit from pre-tool narration: the
+      // assistant's intent sentence flushes to stdout before the
+      // tool's silence begins. Non-streaming consumers see the whole
+      // reply at the end anyway, so narration is just bloat there.
+      // `phantombot ask --stream` is also what the voice agent's
+      // Twilio relay calls into — Twilio gets the same benefit for
+      // free, no Twilio-specific code path needed.
+      toolNarration: stream,
       signal: input.signal,
     })) {
-      if (chunk.type === "text") finalText += chunk.text;
+      if (chunk.type === "text") {
+        if (stream) {
+          // Flush each text chunk straight to stdout as it lands.
+          // text chunks are guaranteed assistant-spoken text only —
+          // tool calls / chain-of-thought come through as
+          // progress/heartbeat and are dropped here, same as
+          // non-stream mode.
+          out.write(chunk.text);
+          streamedText += chunk.text;
+        }
+      }
       if (chunk.type === "done") {
-        finalText = chunk.finalText;
+        harnessFinal = chunk.finalText;
         succeeded = true;
       }
     }
@@ -120,11 +160,17 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     return 1;
   }
 
-  out.write(finalText);
-  // Trail a newline if the harness didn't, so shell consumers don't get
-  // a half-line at the prompt. Idempotent: if finalText already ends
-  // with \n we leave it alone.
-  if (!finalText.endsWith("\n")) out.write("\n");
+  if (!stream) {
+    out.write(harnessFinal);
+  }
+  // Trail a newline if the emitted text didn't, so shell consumers
+  // don't get a half-line at the prompt. Idempotent. Crucially, in
+  // stream mode we check what we actually streamed (`streamedText`)
+  // rather than the harness's reformatted `finalText` — the two can
+  // disagree, and only what we wrote determines whether stdout ends
+  // on a newline.
+  const emitted = stream ? streamedText : harnessFinal;
+  if (!emitted.endsWith("\n")) out.write("\n");
   return 0;
 }
 
@@ -157,6 +203,12 @@ export default defineCommand({
         "Persist this turn and load prior turns for the conversation. Default off (stateless).",
       default: false,
     },
+    stream: {
+      type: "boolean",
+      description:
+        "Stream assistant text to stdout as chunks arrive (lower latency for downstream consumers).",
+      default: false,
+    },
   },
   async run({ args }) {
     let prompt = String(args.prompt ?? "");
@@ -174,6 +226,7 @@ export default defineCommand({
       persona: args.persona ? String(args.persona) : undefined,
       conversation: args.conversation ? String(args.conversation) : undefined,
       history: Boolean(args.history),
+      stream: Boolean(args.stream),
     });
   },
 });

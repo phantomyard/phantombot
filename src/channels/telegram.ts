@@ -959,6 +959,14 @@ async function processChatMessage(
       systemPromptSuffix: willReplyWithVoice
         ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
         : TELEGRAM_REPLY_INSTRUCTION,
+      // Pre-tool narration: ON for text-out (the user sees streamed
+      // text as it lands, so a "checking your calendar..." sentence
+      // before a tool call usefully fills the silence). OFF for
+      // voice-out: the reply is synthesized as one clip at the end,
+      // so narration would just lengthen the spoken output without
+      // helping with perceived latency. VOICE_REPLY_INSTRUCTION
+      // already forbids work narration too, so off is consistent.
+      toolNarration: !willReplyWithVoice,
     })) {
       if (chunk.type === "text") {
         reply += chunk.text;

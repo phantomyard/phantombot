@@ -1029,6 +1029,72 @@ describe("runTelegramServer system-prompt suffixes", () => {
     expect(prompt).not.toContain("text-to-speech");
     expect(prompt).not.toContain("Reply length (this turn only)");
   });
+
+  test("text-in + text-out: pre-tool narration is enabled (streamed text fills tool-call silence)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hi",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    expect(prompt).toContain("Narration before tool calls");
+  });
+
+  test("voice-in + voice-out: pre-tool narration is suppressed (one-shot synthesized clip, no live channel to fill)", async () => {
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        return new Response(JSON.stringify({ text: "hello" }), { status: 200 });
+      }
+      return new Response(Buffer.from([1, 2, 3]), {
+        status: 200,
+        headers: { "content-type": "audio/ogg" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "",
+        voice: { fileId: "f", mimeType: "audio/ogg", durationS: 2 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "ok" },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      const prompt = harness.lastRequest?.systemPrompt ?? "";
+      expect(prompt).not.toContain("Narration before tool calls");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -195,6 +195,79 @@ describe("runTurn — successful path", () => {
     expect(captured?.systemPrompt).toContain("# I am Phantom");
   });
 
+  test("toolNarration off by default — narration block is NOT in the prompt", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(captured?.systemPrompt).not.toContain("Narration before tool calls");
+  });
+
+  test("toolNarration: true appends PRE_TOOL_NARRATION_INSTRUCTION", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        toolNarration: true,
+      }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("Narration before tool calls");
+    // Multilingual nudge: the rule must explicitly say "use the user's
+    // language" so non-English speakers don't get English filler leaking
+    // into their conversations.
+    expect(prompt).toMatch(/user'?s language/i);
+  });
+
+  test("toolNarration coexists with systemPromptSuffix — both land in the prompt", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        systemPromptSuffix: "# CUSTOM SUFFIX MARKER",
+        toolNarration: true,
+      }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("# CUSTOM SUFFIX MARKER");
+    expect(prompt).toContain("Narration before tool calls");
+  });
+
   test("uses the done chunk's finalText (not the running text accumulation) for persistence", async () => {
     const harness = new ScriptedHarness("fake", [
       { type: "text", text: "draft " },

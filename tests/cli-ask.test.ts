@@ -238,6 +238,143 @@ describe("readAllStdin — TTY guard", () => {
   });
 });
 
+describe("runAsk — pre-tool narration", () => {
+  test("--stream enables PRE_TOOL_NARRATION_INSTRUCTION (Twilio relay rides this)", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runAsk({
+      prompt: "hi",
+      stream: true,
+      config,
+      memory,
+      harnesses: [harness],
+      out: new CapturingSink(),
+      err: new CapturingSink(),
+    });
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    expect(prompt).toContain("Narration before tool calls");
+    expect(prompt).toMatch(/user'?s language/i);
+  });
+
+  test("plain ask (no --stream) does NOT enable narration", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runAsk({
+      prompt: "hi",
+      // stream defaults to false
+      config,
+      memory,
+      harnesses: [harness],
+      out: new CapturingSink(),
+      err: new CapturingSink(),
+    });
+    const prompt = harness.lastRequest?.systemPrompt ?? "";
+    expect(prompt).not.toContain("Narration before tool calls");
+  });
+});
+
+describe("runAsk — streaming sink behavior", () => {
+  // A sink that records each individual write() call so we can tell
+  // delta-by-delta streaming apart from a single final write.
+  class RecordingSink {
+    writes: string[] = [];
+    get buf(): string {
+      return this.writes.join("");
+    }
+    write(s: string): boolean {
+      this.writes.push(s);
+      return true;
+    }
+  }
+
+  test("--stream flushes each text delta to out as it arrives", async () => {
+    // Three deltas pre-tool, then a final reformatted finalText. If
+    // streaming is wired, the sink sees each delta separately *before*
+    // the done chunk lands. If it isn't, we'd see a single finalText
+    // write at the end (the non-stream behavior).
+    const harness = new ScriptedHarness("h", [
+      { type: "text", text: "Checking your inboxes" },
+      { type: "text", text: " now" },
+      { type: "text", text: "..." },
+      { type: "done", finalText: "Checking your inboxes now... done." },
+    ]);
+    const out = new RecordingSink();
+    const code = await runAsk({
+      prompt: "any new mail?",
+      stream: true,
+      config,
+      memory,
+      harnesses: [harness],
+      out,
+      err: new CapturingSink(),
+    });
+    expect(code).toBe(0);
+    // Each delta arrives as its own write() call — proves we didn't
+    // buffer-then-emit. The trailing "\n" is the cleanup write at the
+    // end (streamedText didn't end with \n, so ask.ts adds one).
+    expect(out.writes).toEqual([
+      "Checking your inboxes",
+      " now",
+      "...",
+      "\n",
+    ]);
+    // And critically: the harness's authoritative finalText is *not*
+    // re-emitted — that would duplicate the reply on stdout. We only
+    // see the streamed deltas plus the cleanup newline.
+    expect(out.buf).toBe("Checking your inboxes now...\n");
+    expect(out.buf).not.toContain("done.");
+  });
+
+  test("non-stream mode writes finalText once at the end (no per-delta flushes)", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "text", text: "partial " },
+      { type: "text", text: "draft" },
+      { type: "done", finalText: "Final reformatted reply." },
+    ]);
+    const out = new RecordingSink();
+    const code = await runAsk({
+      prompt: "q",
+      // stream defaults to false
+      config,
+      memory,
+      harnesses: [harness],
+      out,
+      err: new CapturingSink(),
+    });
+    expect(code).toBe(0);
+    // Exactly two writes: the harness's finalText, then the trailing
+    // newline. The mid-stream text deltas were correctly suppressed.
+    expect(out.writes).toEqual(["Final reformatted reply.", "\n"]);
+  });
+
+  test("stream mode trailing-newline check uses streamed bytes, not finalText", async () => {
+    // Regression for Kai's note: the trailing-newline check used to
+    // consult `chunk.finalText` even in stream mode. If finalText ends
+    // in "\n" but the streamed deltas didn't, we'd skip the cleanup
+    // newline and leave stdout on a half-line. This test pins the
+    // behavior: streamed bytes have no \n, finalText does, and we
+    // still emit the cleanup \n.
+    const harness = new ScriptedHarness("h", [
+      { type: "text", text: "hello" },
+      // finalText differs from the deltas (reformatted) AND ends in \n.
+      { type: "done", finalText: "hello\n" },
+    ]);
+    const out = new RecordingSink();
+    await runAsk({
+      prompt: "q",
+      stream: true,
+      config,
+      memory,
+      harnesses: [harness],
+      out,
+      err: new CapturingSink(),
+    });
+    expect(out.writes).toEqual(["hello", "\n"]);
+  });
+});
+
 describe("runAsk — persona override", () => {
   test("--persona <name> uses the named persona, not the default", async () => {
     const altDir = join(workdir, "personas", "lena");
