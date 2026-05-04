@@ -14,6 +14,11 @@
 #   notfound  — exit 127 (simulates "command not found"-ish)
 #   hang      — sleep forever (timeout test)
 #   echo-args — print all argv joined with " | " on stdout, exit 0 (arg-shape test)
+#   429-then-hang — print gemini-cli-shaped 429 retry trace to stderr,
+#                   then sleep forever. Used to verify the harness's
+#                   fast-fallback path: it should detect the 4XX,
+#                   SIGKILL the proc, and yield a recoverable error
+#                   chunk with httpStatus=429 well before any timeout.
 
 mode="${FAKE_GEMINI_MODE:-normal}"
 
@@ -69,6 +74,17 @@ case "$mode" in
     exit 127
     ;;
   hang)
+    exec sleep 3600
+    ;;
+  429-then-hang)
+    # Mirror the shape of gemini-cli's retryWithBackoff trace.
+    # The harness's stderr scanner should match the first line and
+    # kill us early.
+    echo "Attempt 1 failed with status 429. Retrying with backoff... _GaxiosError: [{" >&2
+    echo '"code": 429,' >&2
+    echo '"message": "No capacity available for model gemini-3-flash-preview on the server",' >&2
+    echo '"reason": "MODEL_CAPACITY_EXHAUSTED"' >&2
+    echo "}]" >&2
     exec sleep 3600
     ;;
   echo-args)

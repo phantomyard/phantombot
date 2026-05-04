@@ -43,7 +43,7 @@ import {
   killCauseToErrorChunk,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
-import { spawnInNewSession } from "../lib/processGroup.ts";
+import { killProcessGroup, spawnInNewSession } from "../lib/processGroup.ts";
 
 /**
  * Conservative ceiling on the bytes we'll put on argv via the `-p`
@@ -154,7 +154,24 @@ export class GeminiHarness implements Harness {
       });
     }
 
-    void consumeStderr(proc.stderr);
+    // Watch stderr for HTTP 4XX errors emerging from gemini-cli's
+    // built-in retryWithBackoff loop. Once we spot a 4XX, kill the
+    // subprocess immediately so the orchestrator can fall through to
+    // the next harness without waiting for gemini-cli to finish its
+    // own ~2-minute retry budget. The status is stored here and
+    // surfaced in the post-loop error chunk.
+    const httpStatusBox: { status?: number } = {};
+    void consumeStderr(proc.stderr, (status) => {
+      if (httpStatusBox.status !== undefined) return; // first one wins
+      httpStatusBox.status = status;
+      log.warn("gemini stderr: 4XX detected, killing early for fast fallback", {
+        httpStatus: status,
+      });
+      // Fire-and-forget — process group SIGTERM → 5 s grace → SIGKILL.
+      // The for-await over stdout below ends naturally as the kernel
+      // closes the pipe.
+      void killProcessGroup(proc, 5000);
+    });
 
     let buffer = "";
     let finalText = "";
@@ -217,6 +234,22 @@ export class GeminiHarness implements Harness {
       }
     } finally {
       await killer.dispose();
+    }
+
+    // 4XX detected mid-stream takes priority over kill-cause / exit
+    // code: it carries the most specific signal ("upstream said 429,
+    // bail and cool the harness off") and the orchestrator wants to
+    // see it in `httpStatus` for cooldown decisions. Drain the proc
+    // first so we don't dangle.
+    if (httpStatusBox.status !== undefined) {
+      await proc.exited;
+      yield {
+        type: "error",
+        error: `gemini upstream HTTP ${httpStatusBox.status}; aborted gemini-cli's internal retry loop for fast fallback`,
+        recoverable: true,
+        httpStatus: httpStatusBox.status,
+      };
+      return;
     }
 
     const errChunk = killCauseToErrorChunk(
@@ -361,8 +394,49 @@ const GEMINI_STDERR_BANNER_PATTERNS: readonly RegExp[] = [
   /^Ripgrep is not available/i,
 ];
 
+/**
+ * Match patterns for HTTP status lines emitted by gemini-cli's
+ * Gaxios-based fetch wrapper. The shapes seen in production
+ * (verified against gemini-cli v0.40.x stderr on a 429 capacity
+ * exhaustion):
+ *
+ *   "Attempt 1 failed with status 429. Retrying with backoff..."
+ *   "status: 429,"
+ *
+ * The first form is gemini-cli's retryWithBackoff trace; the second
+ * is the Gaxios error body Node.js stringifies. We look for either —
+ * the first signal we see kicks the early-kill path. Capturing only
+ * 4XX (4\d\d) on purpose: 5XX is genuinely transient and the
+ * upstream's own retry usually clears it within a couple of seconds,
+ * which is faster than burning a fallback hop.
+ *
+ * Exported for testing.
+ */
+export const GEMINI_HTTP_STATUS_PATTERNS: readonly RegExp[] = [
+  /Attempt\s+\d+\s+failed\s+with\s+status\s+(4\d\d)\b/i,
+  /^\s*status:\s*(4\d\d)\s*,?\s*$/i,
+];
+
+/**
+ * Scan one stderr line for a 4XX HTTP status; return the captured
+ * code if any pattern matches. Exported for testing.
+ */
+export function extractHttpStatus(line: string): number | undefined {
+  for (const re of GEMINI_HTTP_STATUS_PATTERNS) {
+    const m = re.exec(line);
+    if (m && m[1]) {
+      const code = Number.parseInt(m[1], 10);
+      if (Number.isFinite(code) && code >= 400 && code < 500) {
+        return code;
+      }
+    }
+  }
+  return undefined;
+}
+
 async function consumeStderr(
   stream: ReadableStream<Uint8Array>,
+  onHttp4xx?: (status: number) => void,
 ): Promise<void> {
   const decoder = new TextDecoder();
   let buf = "";
@@ -377,6 +451,15 @@ async function consumeStderr(
         if (GEMINI_STDERR_BANNER_PATTERNS.some((re) => re.test(trimmed))) {
           log.debug("gemini stderr (banner)", { text: trimmed.slice(0, 500) });
           continue;
+        }
+        if (onHttp4xx) {
+          const status = extractHttpStatus(trimmed);
+          if (status !== undefined) {
+            // Still log the line so journal forensics keep the trail.
+            log.info("gemini stderr", { text: trimmed.slice(0, 500) });
+            onHttp4xx(status);
+            continue;
+          }
         }
         log.info("gemini stderr", { text: trimmed.slice(0, 500) });
       }
