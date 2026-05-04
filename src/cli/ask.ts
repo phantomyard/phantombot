@@ -45,6 +45,17 @@ export interface RunAskInput {
   conversation?: string;
   /** Persist + load history for this conversation. Default false (stateless). */
   history?: boolean;
+  /**
+   * Stream assistant text to `out` as `text` chunks arrive, instead of
+   * buffering and writing the final reply at the end. Lets downstream
+   * consumers (e.g. the voice agent's Twilio relay) start TTS on the
+   * first sentence while the rest is still being generated.
+   *
+   * Tool-call chatter never reaches us as `text` chunks — runTurn
+   * surfaces those as `progress`/`heartbeat` — so streaming is safe:
+   * what hits stdout is exactly the assistant's spoken reply.
+   */
+  stream?: boolean;
   /** Test injection points. */
   config?: Config;
   memory?: MemoryStore;
@@ -86,6 +97,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     input.memory ?? (await openMemoryStore(config.memoryDbPath));
   const ownsMemory = !input.memory;
 
+  const stream = input.stream === true;
   let finalText = "";
   let succeeded = false;
   try {
@@ -101,8 +113,23 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       noHistory: !input.history,
       signal: input.signal,
     })) {
-      if (chunk.type === "text") finalText += chunk.text;
+      if (chunk.type === "text") {
+        finalText += chunk.text;
+        if (stream) {
+          // Flush each text chunk straight to stdout as it lands.
+          // text chunks are guaranteed assistant-spoken text only —
+          // tool calls / chain-of-thought come through as
+          // progress/heartbeat and are dropped here, same as
+          // non-stream mode.
+          out.write(chunk.text);
+        }
+      }
       if (chunk.type === "done") {
+        // In non-stream mode we prefer the harness's authoritative
+        // finalText (it may be reformatted). In stream mode we've
+        // already flushed everything, so we just mark success and
+        // skip the final write below — re-emitting finalText would
+        // duplicate the reply on stdout.
         finalText = chunk.finalText;
         succeeded = true;
       }
@@ -120,10 +147,13 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     return 1;
   }
 
-  out.write(finalText);
+  if (!stream) {
+    out.write(finalText);
+  }
   // Trail a newline if the harness didn't, so shell consumers don't get
   // a half-line at the prompt. Idempotent: if finalText already ends
-  // with \n we leave it alone.
+  // with \n we leave it alone. Applies to both modes: a streamed run
+  // also benefits from a clean line terminator.
   if (!finalText.endsWith("\n")) out.write("\n");
   return 0;
 }
@@ -157,6 +187,12 @@ export default defineCommand({
         "Persist this turn and load prior turns for the conversation. Default off (stateless).",
       default: false,
     },
+    stream: {
+      type: "boolean",
+      description:
+        "Stream assistant text to stdout as chunks arrive (lower latency for downstream consumers).",
+      default: false,
+    },
   },
   async run({ args }) {
     let prompt = String(args.prompt ?? "");
@@ -174,6 +210,7 @@ export default defineCommand({
       persona: args.persona ? String(args.persona) : undefined,
       conversation: args.conversation ? String(args.conversation) : undefined,
       history: Boolean(args.history),
+      stream: Boolean(args.stream),
     });
   },
 });
