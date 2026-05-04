@@ -131,6 +131,7 @@ mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 | Command | What it does |
 |---|---|
 | `phantombot run` | Foreground long-running listener (Ctrl-C to stop) |
+| `phantombot ask "<prompt>"` | One-shot prompt through the persona + harness chain. Prints the assistant's reply to stdout and exits. Stateless by default — pass `--history --conversation <id>` to thread. Built for non-interactive callers (shell scripts, the Twilio voice-agent's `askRobbie` relay) that want the bot's brain without a Telegram conversation. |
 | `phantombot install` | Install systemd --user units (main + heartbeat + nightly + tick) |
 | `phantombot uninstall` | Remove the systemd units |
 | `phantombot update [--check] [--force] [--restart]` | Atomic, SHA256-verified self-update |

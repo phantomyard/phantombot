@@ -50,9 +50,9 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 ```
 phantombot ask "what's on my calendar?"
   → ask.ts: load config, resolve persona, open memory, build harness chain
-  → orchestrator.turn.runTurn(...)
+  → orchestrator.turn.runTurn({ noHistory: true, conversation: "cli:ask", ... })
        → loadPersona(agentDir) → { boot, memory, tools, identitySource, ... }
-       → memory.recentTurns(persona, "cli:default", 20) → [{role,text}, ...]
+       → memory.recentTurns(persona, "cli:ask", 20) → [] (skipped: noHistory)
        → buildSystemPrompt(persona, channelCtx) → systemPrompt
        → orchestrator.fallback.runWithFallback([claude, pi], req)
             → estimatePayloadBytes(req) → bytes
@@ -68,8 +68,8 @@ phantombot ask "what's on my calendar?"
                  → on exit 0: yield {type:"done", finalText, meta:{harnessId,model}}
                  → on exit !=0: yield error/recoverable: code !== 127
             → if recoverable error and chain has more: try pi.invoke(req)
-       → on done chunk: memory.appendTurn(user) + memory.appendTurn(assistant)
-  → ask.ts: write text chunks to stdout as they arrive, "\n" on done
+       → on done chunk: skip persistence (noHistory). With --history, append both turns.
+  → ask.ts: write the harness's final assistant text to stdout, ensure trailing "\n"
   → exit 0 / 1 / 2
 ```
 
@@ -77,7 +77,7 @@ phantombot ask "what's on my calendar?"
 
 1. **Streaming display in the REPL.** Text chunks are written to stdout as they arrive. Looks responsive, but if the harness reformats the final reply (claude sometimes does), the user sees draft text replaced by the canonical version when `done` arrives — currently we just persist the canonical version, which may differ from what was on screen. Acceptable trade-off for v1.
 
-2. **History scope.** Both `ask` and `chat` use conversation key `cli:default` so they share memory per persona. If a future channels phase lands, channel adapters would use distinct keys (`telegram:42`, `signal:abc`).
+2. **History scope.** `phantombot ask` is stateless by default (conversation `cli:ask`, `noHistory: true`) — fitted to non-interactive callers like the Twilio voice-agent that don't want their tool-calls polluting the persona's rolling memory. Pass `--history --conversation <id>` to thread asks together. The Telegram channel uses distinct keys per chat (`telegram:<chat_id>`).
 
 3. **Multi-line REPL input.** Currently line-by-line via node:readline. Long pasted content works (terminal sends it as one line); explicit multi-line mode (Esc-Enter) is not implemented. Add if it bites.
 

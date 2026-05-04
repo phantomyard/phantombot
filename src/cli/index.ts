@@ -8,13 +8,17 @@
  *   install         - install systemd --user unit so phantombot survives logout
  *   uninstall       - remove the systemd unit
  *   run             - run the bot in the foreground (Ctrl-C to stop)
+ *   ask             - one-shot prompt through the persona + harness chain
  *
- * Dev/debug commands (ask, chat, doctor, history, list-personas, etc.)
- * have been removed as part of the v0.1 surface lock.
+ * Dev/debug commands (chat, doctor, history, list-personas, etc.) were
+ * removed as part of the v0.1 surface lock. `ask` was reintroduced for
+ * external programs that want Robbie's brain as a non-interactive tool
+ * (e.g. the Twilio voice-agent's `askRobbie` relay).
  */
 
 import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
+import askCmd from "./ask.ts";
 import personaCmd from "./persona.ts";
 import telegramCmd from "./telegram.ts";
 import harnessCmd from "./harness.ts";
@@ -48,6 +52,7 @@ export const mainCommand = defineCommand({
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,
+    ask: askCmd,
     memory: memoryCmd,
     notify: notifyCmd,
     heartbeat: heartbeatCmd,
