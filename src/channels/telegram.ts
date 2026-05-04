@@ -6,10 +6,16 @@
  * memory uses conversation key `telegram:<chatId>` so DMs and groups are
  * isolated from the CLI's `cli:default` history.
  *
- * Streaming: we send `sendChatAction(typing)` at the start of each turn so
- * the user sees "Phantom is typing…" while the harness runs, then post the
- * final reply as one message. Live token-by-token edits would be nicer but
- * Telegram rate-limits edits at ~1/sec — not worth the complexity for v1.
+ * Streaming: we send `sendChatAction(typing)` at the start of each turn,
+ * refresh it on every harness chunk, and — for text-out turns — flush
+ * any buffered prose as a separate Telegram message right before each
+ * tool call (signalled by a `progress` chunk). That makes one-line
+ * narrations like "Checking your inboxes…" land *before* the silent
+ * tool-run window instead of arriving stapled to the back of the final
+ * answer. Voice-out skips chunked flushing — voice is one synthesized
+ * clip at the end, mid-turn flushes would just bloat the audio.
+ * Token-by-token live edits would be nicer still but Telegram
+ * rate-limits edits at ~1/sec — not worth the complexity.
  *
  * Auth gating: if `allowedUserIds` is empty, anyone who DMs the bot is
  * answered. We log a warning at startup so this isn't accidental.
@@ -931,10 +937,53 @@ async function processChatMessage(
   };
   activeTurns.set(msg.chatId, turnHandle);
 
-  let reply = "";
+  // Streaming-narration accumulators. The text-out path flushes
+  // buffered prose as a separate Telegram message right before each
+  // tool call (signalled by a `progress` chunk), so the user sees
+  // "Checking your inboxes…" land *before* the silent tool-run window.
+  // Without this, the entire turn batches into one bubble at the end
+  // and narration is invisible.
+  //
+  //   streamedReply  — running sum of `text` chunks seen so far
+  //   flushedReply   — what's already been sent as narration bubbles;
+  //                    a prefix of streamedReply (and, in the happy
+  //                    path, of the final reply too)
+  //   finalReply     — set on the `done` chunk; authoritative full
+  //                    text the harness wants delivered
+  //
+  // Voice-out skips flushing entirely — voice is one synthesized clip
+  // at the end, so mid-turn flushes would just bloat the audio.
+  let streamedReply = "";
+  let flushedReply = "";
+  let finalReply: string | undefined;
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
+
+  // Flush whatever's buffered since the last flush as a narration
+  // bubble. No-ops in voice-out (we synthesize once at the end) and
+  // when there's nothing meaningful to send (whitespace-only). Logs
+  // and swallows send failures rather than aborting the turn — a
+  // dropped narration bubble is a cosmetic loss, not a correctness
+  // one.
+  const flushNarration = async () => {
+    if (willReplyWithVoice) return;
+    const pending = streamedReply.slice(flushedReply.length);
+    if (pending.trim().length === 0) return;
+    flushedReply = streamedReply;
+    try {
+      await input.transport.sendMessage(msg.chatId, pending);
+    } catch (e) {
+      log.warn("telegram: narration flush failed", {
+        error: (e as Error).message,
+        chatId: msg.chatId,
+      });
+    }
+    // Sending a real message replaces the typing indicator — re-arm
+    // it so the user sees we're still working on the next step.
+    refreshIndicator();
+  };
+
   try {
     for await (const chunk of runTurn({
       persona: input.persona,
@@ -969,7 +1018,7 @@ async function processChatMessage(
       toolNarration: !willReplyWithVoice,
     })) {
       if (chunk.type === "text") {
-        reply += chunk.text;
+        streamedReply += chunk.text;
         refreshIndicator();
       }
       if (chunk.type === "heartbeat") {
@@ -986,10 +1035,15 @@ async function processChatMessage(
           chatId: msg.chatId,
           note: chunk.note.slice(0, 200),
         });
+        // A tool is about to run — flush whatever narration the model
+        // emitted before this point so the user sees it during the
+        // silence. (Inside the loop so multi-tool turns get one
+        // bubble per tool, not one wall at the end.)
+        await flushNarration();
         refreshIndicator();
       }
       if (chunk.type === "done") {
-        reply = chunk.finalText;
+        finalReply = chunk.finalText;
         const meta = chunk.meta as { harnessId?: unknown } | undefined;
         if (typeof meta?.harnessId === "string") {
           chosenHarness = meta.harnessId;
@@ -1055,20 +1109,46 @@ async function processChatMessage(
     return;
   }
 
-  const outText = errored
-    ? `(error: ${errored})`
-    : reply.length > 0
-      ? reply
-      : "(no reply)";
+  // The authoritative full reply: prefer the harness's `done.finalText`
+  // (which may have been reformatted), fall back to whatever streamed.
+  const fullReply = finalReply ?? streamedReply;
+
+  // Compute what to send in the FINAL bubble (post-tool answer):
+  //   - error: surface the diagnostic
+  //   - flushed prefix matches: send only the suffix (the part of the
+  //     answer the user hasn't seen yet)
+  //   - flushed prefix doesn't match (harness reformatted): send the
+  //     full reply. We accept some duplication of the narration text
+  //     over silently truncating the answer.
+  //   - nothing came back AND nothing was flushed: "(no reply)"
+  //   - nothing came back BUT we flushed: stay silent (the narration
+  //     bubbles are the user-visible reply)
+  let outText: string;
+  if (errored) {
+    outText = `(error: ${errored})`;
+  } else if (fullReply.length === 0) {
+    outText = flushedReply.length > 0 ? "" : "(no reply)";
+  } else if (
+    flushedReply.length > 0 &&
+    fullReply.startsWith(flushedReply)
+  ) {
+    outText = fullReply.slice(flushedReply.length);
+  } else {
+    outText = fullReply;
+  }
 
   // Voice in → voice out (when TTS is configured AND no error).
   // Text in → text out, always. The reply lands as a fresh message,
   // so Telegram pushes a notification — important when the user kicked
   // off a long job and walked away from the chat.
+  //
+  // Voice-out always synthesizes the *full* reply (ignoring the chunked
+  // outText), since flushNarration is a no-op for voice and the user
+  // expects one coherent audio clip.
   let sentAsVoice = false;
   try {
-    if (willReplyWithVoice && !errored && reply.length > 0) {
-      const r = await synthesize(input.config, reply);
+    if (willReplyWithVoice && !errored && fullReply.length > 0) {
+      const r = await synthesize(input.config, fullReply);
       if (r.ok) {
         await input.transport.sendVoice(
           msg.chatId,
@@ -1080,9 +1160,17 @@ async function processChatMessage(
         log.warn("telegram: TTS failed; falling back to text", {
           error: r.error,
         });
-        await input.transport.sendMessage(msg.chatId, outText);
+        // TTS failure fallback: send the full reply as text (not the
+        // prefix-trimmed outText) since we never flushed narration on
+        // the voice path — there's nothing to dedupe against.
+        await input.transport.sendMessage(msg.chatId, fullReply);
       }
-    } else {
+    } else if (outText.length > 0) {
+      // Empty outText is intentional silence: we already flushed the
+      // narration bubbles and the harness produced nothing further
+      // (and there's no error to surface). Skipping the send avoids
+      // a stray "(no reply)" tacked onto the end of a perfectly
+      // delivered turn.
       await input.transport.sendMessage(msg.chatId, outText);
     }
   } catch (e) {
@@ -1096,6 +1184,7 @@ async function processChatMessage(
     chatId: msg.chatId,
     durationMs: Date.now() - startedAt,
     replyChars: outText.length,
+    flushedChars: flushedReply.length,
     progressEvents: progressCount,
     harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
     modality: sentAsVoice ? "voice" : "text",
