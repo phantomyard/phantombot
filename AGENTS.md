@@ -110,7 +110,7 @@ phantombot/
 
 ## Architecture at a glance
 
-- **Citty CLI dispatcher** (`src/cli/index.ts`) → subcommand → orchestrator (for turn-spending commands like `run`, `tick`, `nightly`).
+- **Citty CLI dispatcher** (`src/cli/index.ts`) → subcommand → orchestrator (for turn-spending commands like `run`, `ask`, `tick`, `nightly`).
 - **One-turn coordinator** (`src/orchestrator/turn.ts`) loads persona files, loads recent turns from memory, builds system prompt, runs the harness chain, and persists the user+assistant turns on success.
 - **Harness chain** (`src/orchestrator/fallback.ts`) tries primary; if it returns a recoverable error, falls through to the next.
 - **Channels listen** (`src/channels/telegram.ts`); `phantombot run` is the long-running process.
