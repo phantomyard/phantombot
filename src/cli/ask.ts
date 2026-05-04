@@ -98,7 +98,17 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   const ownsMemory = !input.memory;
 
   const stream = input.stream === true;
-  let finalText = "";
+  // Two distinct accumulators on purpose:
+  //   `streamedText`  — exactly what we wrote to `out` in stream mode
+  //                     (concatenation of `chunk.text` deltas).
+  //   `harnessFinal`  — the harness's authoritative `chunk.finalText`,
+  //                     which may be reformatted vs the deltas.
+  // Non-stream mode writes `harnessFinal` at the end; stream mode has
+  // already flushed `streamedText`. The trailing-newline check must
+  // consult whichever string was actually emitted, otherwise we can
+  // either drop a needed newline or append a redundant one.
+  let streamedText = "";
+  let harnessFinal = "";
   let succeeded = false;
   try {
     for await (const chunk of runTurn({
@@ -122,7 +132,6 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       signal: input.signal,
     })) {
       if (chunk.type === "text") {
-        finalText += chunk.text;
         if (stream) {
           // Flush each text chunk straight to stdout as it lands.
           // text chunks are guaranteed assistant-spoken text only —
@@ -130,15 +139,11 @@ export async function runAsk(input: RunAskInput): Promise<number> {
           // progress/heartbeat and are dropped here, same as
           // non-stream mode.
           out.write(chunk.text);
+          streamedText += chunk.text;
         }
       }
       if (chunk.type === "done") {
-        // In non-stream mode we prefer the harness's authoritative
-        // finalText (it may be reformatted). In stream mode we've
-        // already flushed everything, so we just mark success and
-        // skip the final write below — re-emitting finalText would
-        // duplicate the reply on stdout.
-        finalText = chunk.finalText;
+        harnessFinal = chunk.finalText;
         succeeded = true;
       }
     }
@@ -156,13 +161,16 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   }
 
   if (!stream) {
-    out.write(finalText);
+    out.write(harnessFinal);
   }
-  // Trail a newline if the harness didn't, so shell consumers don't get
-  // a half-line at the prompt. Idempotent: if finalText already ends
-  // with \n we leave it alone. Applies to both modes: a streamed run
-  // also benefits from a clean line terminator.
-  if (!finalText.endsWith("\n")) out.write("\n");
+  // Trail a newline if the emitted text didn't, so shell consumers
+  // don't get a half-line at the prompt. Idempotent. Crucially, in
+  // stream mode we check what we actually streamed (`streamedText`)
+  // rather than the harness's reformatted `finalText` — the two can
+  // disagree, and only what we wrote determines whether stdout ends
+  // on a newline.
+  const emitted = stream ? streamedText : harnessFinal;
+  if (!emitted.endsWith("\n")) out.write("\n");
   return 0;
 }
 
