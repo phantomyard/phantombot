@@ -57,8 +57,20 @@ export type HarnessChunk =
   | { type: "progress"; note: string }
   /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }
-  /** Error. `recoverable: true` means the orchestrator should try the next harness. `false` means abort the turn. */
-  | { type: "error"; error: string; recoverable: boolean };
+  /**
+   * Error. `recoverable: true` means the orchestrator should try the next harness.
+   * `false` means abort the turn.
+   *
+   * `httpStatus` is the upstream HTTP status code when the failure originates
+   * from a network request the CLI made (e.g. gemini's 429 for capacity
+   * exhaustion). Optional — many failures don't have one (timeouts, missing
+   * binary, ARG_MAX guard). The orchestrator uses presence of a 4XX as a
+   * signal to apply a longer cooldown to the harness, since 4XX usually
+   * means "this CLI's auth/quota/model state is bad" rather than a transient
+   * blip a retry would fix. 5XX is just logged; we don't treat server-side
+   * blips as a reason to cool the harness off.
+   */
+  | { type: "error"; error: string; recoverable: boolean; httpStatus?: number };
 
 export interface Harness {
   /** Stable identifier — matches the wrapper file name. */

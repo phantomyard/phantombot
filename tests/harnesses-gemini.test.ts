@@ -8,7 +8,9 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
+  extractHttpStatus,
   GeminiHarness,
+  GEMINI_HTTP_STATUS_PATTERNS,
   parseGeminiEvent,
   renderStdinPayload,
 } from "../src/harnesses/gemini.ts";
@@ -249,6 +251,36 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     expect(err.recoverable).toBe(true);
   });
 
+  test("4XX on stderr → fast fallback: harness kills proc, yields recoverable error with httpStatus, well under hardTimeoutMs", async () => {
+    // The fixture prints a gemini-cli-shaped 429 retry trace then
+    // sleeps for an hour. If our scanner fires we should kill it
+    // and return in well under a second; if it doesn't, the 30s
+    // hardTimeoutMs would catch it.
+    process.env.FAKE_GEMINI_MODE = "429-then-hang";
+    const start = Date.now();
+    const chunks = await collect(
+      harness().invoke(
+        newRequest({ idleTimeoutMs: 30_000, hardTimeoutMs: 30_000 }),
+      ),
+    );
+    const elapsed = Date.now() - start;
+    delete process.env.FAKE_GEMINI_MODE;
+
+    // Must not have come back via the timeout path — that would be
+    // ~30s and prove the scanner didn't fire.
+    expect(elapsed).toBeLessThan(8_000);
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    if (err?.type !== "error") return;
+    expect(err.recoverable).toBe(true);
+    expect(err.httpStatus).toBe(429);
+    expect(err.error).toContain("429");
+    // Must NOT be a "timed out" error — that would mean the early-kill
+    // path didn't fire and we just hit the hard timeout.
+    expect(err.error).not.toContain("timed out");
+  });
+
   test("ARG_MAX guard: oversized userMessage → recoverable error, no spawn", async () => {
     // Set the fixture to "hang" so if we DID spawn, the test would
     // hit the timeout instead of returning quickly. The precheck
@@ -313,6 +345,52 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
 // ---------------------------------------------------------------------------
 // available()
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// extractHttpStatus — pure stderr-line scanner
+// ---------------------------------------------------------------------------
+
+describe("extractHttpStatus", () => {
+  test("matches gemini-cli's retryWithBackoff trace verbatim", () => {
+    expect(
+      extractHttpStatus(
+        "Attempt 1 failed with status 429. Retrying with backoff...",
+      ),
+    ).toBe(429);
+    expect(
+      extractHttpStatus("Attempt 6 failed with status 404."),
+    ).toBe(404);
+  });
+
+  test("matches the JSON-stringified gaxios body 'status: 429,' line", () => {
+    expect(extractHttpStatus("status: 429,")).toBe(429);
+    expect(extractHttpStatus("    status: 401,")).toBe(401);
+  });
+
+  test("ignores 5XX (we trust upstream's own retry on transient blips)", () => {
+    expect(
+      extractHttpStatus("Attempt 1 failed with status 503."),
+    ).toBeUndefined();
+    expect(extractHttpStatus("status: 502,")).toBeUndefined();
+  });
+
+  test("ignores 2XX/3XX status lines that aren't real errors", () => {
+    expect(extractHttpStatus("status: 200,")).toBeUndefined();
+    expect(
+      extractHttpStatus("Attempt 1 failed with status 301."),
+    ).toBeUndefined();
+  });
+
+  test("non-status lines → undefined", () => {
+    expect(extractHttpStatus("YOLO mode is enabled")).toBeUndefined();
+    expect(extractHttpStatus("at async retryWithBackoff (...)")).toBeUndefined();
+    expect(extractHttpStatus("")).toBeUndefined();
+  });
+
+  test("patterns are exported as a defensive sanity check", () => {
+    expect(GEMINI_HTTP_STATUS_PATTERNS.length).toBeGreaterThan(0);
+  });
+});
 
 describe("GeminiHarness.available", () => {
   test("absolute path that doesn't exist → false", async () => {

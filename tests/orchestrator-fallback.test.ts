@@ -10,6 +10,7 @@ import {
   estimatePayloadBytes,
   runWithFallback,
 } from "../src/orchestrator/fallback.ts";
+import { CooldownStore } from "../src/lib/cooldown.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -170,5 +171,174 @@ describe("runWithFallback — empty done falls through", () => {
     expect(empty.invocations).toBe(1);
     expect(chunks.map((c) => c.type)).toEqual(["done"]);
     expect(chunks[0]).toMatchObject({ type: "done", finalText: "" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cooldown integration. Per-harness cooldown lives in CooldownStore; the
+// orchestrator owns the markFailure/markSuccess calls. Each test passes a
+// fresh store via options.cooldown to avoid bleed.
+// ---------------------------------------------------------------------------
+
+describe("runWithFallback — cooldown integration", () => {
+  test("recoverable error → cooldown.markFailure called for that harness", async () => {
+    const cooldown = new CooldownStore(() => 0.5);
+    const failing = new FakeHarness("gemini", [
+      { type: "error", error: "boom", recoverable: true },
+    ]);
+    const ok = new FakeHarness("pi", [
+      { type: "text", text: "hi" },
+      { type: "done", finalText: "hi" },
+    ]);
+    await collect(runWithFallback([failing, ok], newRequest(), { cooldown }));
+    // gemini should now be cooled; pi should remain cool-free (it succeeded).
+    expect(cooldown.isCooledDown("gemini").cooled).toBe(true);
+    expect(cooldown.isCooledDown("pi").cooled).toBe(false);
+  });
+
+  test("4XX error chunk → cooldown counted same as any recoverable error", async () => {
+    // The orchestrator doesn't special-case the httpStatus value beyond
+    // logging it — counting it as a failure is enough; the store handles
+    // the exponential backoff identically. Verify the failure DID land.
+    const cooldown = new CooldownStore(() => 0.5);
+    const four_xx = new FakeHarness("gemini", [
+      { type: "error", error: "429 capacity", recoverable: true, httpStatus: 429 },
+    ]);
+    const ok = new FakeHarness("pi", [
+      { type: "text", text: "hi" },
+      { type: "done", finalText: "hi" },
+    ]);
+    await collect(runWithFallback([four_xx, ok], newRequest(), { cooldown }));
+    expect(cooldown.isCooledDown("gemini").consecutiveFailures).toBe(1);
+  });
+
+  test("successful done with non-empty text clears prior cooldown for that harness", async () => {
+    const cooldown = new CooldownStore(() => 0.5);
+    cooldown.markFailure("gemini"); // simulate prior turn's failure
+    cooldown.markFailure("gemini"); // and another
+    expect(cooldown.isCooledDown("gemini").consecutiveFailures).toBe(2);
+
+    // Trick: skip cooldown skipping for THIS test by also cooling pi
+    // and claude — escape hatch fires when everything is cooled, so the
+    // orchestrator tries gemini first regardless of cooldown state.
+    cooldown.markFailure("pi");
+    cooldown.markFailure("claude");
+
+    const ok = new FakeHarness("gemini", [
+      { type: "text", text: "back online" },
+      { type: "done", finalText: "back online" },
+    ]);
+    const pi = new FakeHarness("pi", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const claude = new FakeHarness("claude", [
+      { type: "done", finalText: "should not run" },
+    ]);
+
+    await collect(
+      runWithFallback([ok, pi, claude], newRequest(), { cooldown }),
+    );
+    expect(ok.invocations).toBe(1);
+    expect(pi.invocations).toBe(0);
+    expect(claude.invocations).toBe(0);
+    // Success cleared gemini's failure counter; pi/claude untouched.
+    const after = cooldown.isCooledDown("gemini");
+    expect(after.consecutiveFailures).toBe(0);
+    expect(after.cooled).toBe(false);
+  });
+
+  test("cooled harness is skipped when at least one non-cooled harness remains", async () => {
+    const cooldown = new CooldownStore(() => 0.5);
+    cooldown.markFailure("gemini"); // cool gemini
+    const gemini = new FakeHarness("gemini", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const pi = new FakeHarness("pi", [
+      { type: "text", text: "answered" },
+      { type: "done", finalText: "answered" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([gemini, pi], newRequest(), { cooldown }),
+    );
+    expect(gemini.invocations).toBe(0);
+    expect(pi.invocations).toBe(1);
+    expect(chunks.map((c) => c.type)).toEqual(["text", "done"]);
+  });
+
+  test("escape hatch: every harness in the chain is cooled → run them anyway in chain order", async () => {
+    const cooldown = new CooldownStore(() => 0.5);
+    cooldown.markFailure("gemini");
+    cooldown.markFailure("pi");
+    cooldown.markFailure("claude");
+    const gemini = new FakeHarness("gemini", [
+      { type: "error", error: "still down", recoverable: true },
+    ]);
+    const pi = new FakeHarness("pi", [
+      { type: "error", error: "still down", recoverable: true },
+    ]);
+    const claude = new FakeHarness("claude", [
+      { type: "text", text: "rescue" },
+      { type: "done", finalText: "rescue" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([gemini, pi, claude], newRequest(), { cooldown }),
+    );
+    // All three were attempted in order; claude saved the day.
+    expect(gemini.invocations).toBe(1);
+    expect(pi.invocations).toBe(1);
+    expect(claude.invocations).toBe(1);
+    const last = chunks[chunks.length - 1];
+    expect(last && last.type === "done" ? last.finalText : "").toBe("rescue");
+    // Claude succeeded → its failure counter cleared.
+    expect(cooldown.isCooledDown("claude").consecutiveFailures).toBe(0);
+  });
+
+  test("three-harness chain traversal: recoverable failure on first two → third gets the turn", async () => {
+    // Direct expression of the user request: "if primary and fallback
+    // both fail, go down the chain to the third harness if configured."
+    // Independent of cooldown; just verifies the loop handles N>=3.
+    const cooldown = new CooldownStore(() => 0.5);
+    const a = new FakeHarness("a", [
+      { type: "error", error: "down", recoverable: true },
+    ]);
+    const b = new FakeHarness("b", [
+      { type: "error", error: "also down", recoverable: true, httpStatus: 429 },
+    ]);
+    const c = new FakeHarness("c", [
+      { type: "text", text: "saved" },
+      { type: "done", finalText: "saved" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([a, b, c], newRequest(), { cooldown }),
+    );
+    expect(a.invocations).toBe(1);
+    expect(b.invocations).toBe(1);
+    expect(c.invocations).toBe(1);
+    const types = chunks.map((c) => c.type);
+    expect(types).toEqual(["text", "done"]);
+    // First two are now cooled; third is clean.
+    expect(cooldown.isCooledDown("a").cooled).toBe(true);
+    expect(cooldown.isCooledDown("b").cooled).toBe(true);
+    expect(cooldown.isCooledDown("c").cooled).toBe(false);
+  });
+
+  test("cooldown snapshot is taken at turn start; mid-turn failures don't cause same-turn skips", async () => {
+    // Subtle: if we re-polled the store on every chain index, a
+    // failure on harness[0] could mark it cooled and then the loop
+    // could decide harness[1] should also be skipped because it's
+    // ALSO suddenly considered cooled (it isn't — only harness[0] was
+    // marked). The snapshot guarantees the chain marches forward
+    // regardless of in-flight failures.
+    const cooldown = new CooldownStore(() => 0.5);
+    const a = new FakeHarness("a", [
+      { type: "error", error: "down", recoverable: true },
+    ]);
+    const b = new FakeHarness("b", [
+      { type: "text", text: "hi" },
+      { type: "done", finalText: "hi" },
+    ]);
+    await collect(runWithFallback([a, b], newRequest(), { cooldown }));
+    expect(a.invocations).toBe(1);
+    expect(b.invocations).toBe(1);
   });
 });
