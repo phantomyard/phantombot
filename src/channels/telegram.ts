@@ -1039,8 +1039,9 @@ async function processChatMessage(
         // emitted before this point so the user sees it during the
         // silence. (Inside the loop so multi-tool turns get one
         // bubble per tool, not one wall at the end.)
+        // flushNarration() re-arms the typing indicator after sending,
+        // so we don't need to call refreshIndicator() again here.
         await flushNarration();
-        refreshIndicator();
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
