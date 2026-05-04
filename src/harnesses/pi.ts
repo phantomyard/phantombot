@@ -249,7 +249,7 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     // into a bubble before the tool runs. Previously these were mapped
     // to heartbeats, which kept the typing indicator alive but never
     // triggered a bubble flush (defeating the purpose of PR #74).
-    if ((ame.type as string).startsWith("tool_use")) {
+    if (ame.type.startsWith("tool_use")) {
       return { type: "progress", note: "tool" };
     }
     // thinking_delta + anything else → heartbeat.
