@@ -161,7 +161,13 @@ export default defineCommand({
   async run({ args }) {
     let prompt = String(args.prompt ?? "");
     if (prompt === "-") {
-      prompt = await readAllStdin();
+      try {
+        prompt = await readAllStdin();
+      } catch (e) {
+        process.stderr.write(`phantombot ask: ${(e as Error).message}\n`);
+        process.exitCode = 2;
+        return;
+      }
     }
     process.exitCode = await runAsk({
       prompt,
@@ -172,9 +178,24 @@ export default defineCommand({
   },
 });
 
-async function readAllStdin(): Promise<string> {
+/**
+ * Read all of stdin to a string. Refuses to read from a TTY — if the
+ * caller asked for `-` but stdin isn't piped, we'd hang forever waiting
+ * for an EOF that only arrives on Ctrl-D. Failing fast with a clear
+ * message is friendlier than a silent hang. (Flagged by Kai in PR #71.)
+ */
+export async function readAllStdin(
+  stdin: NodeJS.ReadStream = process.stdin,
+): Promise<string> {
+  if (stdin.isTTY) {
+    throw new Error(
+      'cannot read prompt from "-": stdin is a TTY. ' +
+        'Pipe input (e.g. `echo "hi" | phantombot ask -`) ' +
+        "or pass the prompt as an argument.",
+    );
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
+  for await (const chunk of stdin) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks).toString("utf8");

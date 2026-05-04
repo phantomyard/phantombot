@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runAsk } from "../src/cli/ask.ts";
+import { Readable } from "node:stream";
+
+import { readAllStdin, runAsk } from "../src/cli/ask.ts";
 import type { Config } from "../src/config.ts";
 import type {
   Harness,
@@ -216,6 +218,23 @@ describe("runAsk — error paths", () => {
     });
     expect(code).toBe(1);
     expect(err.buf).toContain("no final reply");
+  });
+});
+
+describe("readAllStdin — TTY guard", () => {
+  test("throws fast when stdin is a TTY (does not hang)", async () => {
+    const fakeTty = new Readable({ read() {} }) as unknown as NodeJS.ReadStream;
+    (fakeTty as { isTTY: boolean }).isTTY = true;
+    await expect(readAllStdin(fakeTty)).rejects.toThrow(/stdin is a TTY/);
+  });
+
+  test("reads piped input normally when stdin is not a TTY", async () => {
+    const piped = Readable.from([
+      Buffer.from("hello "),
+      Buffer.from("world"),
+    ]) as unknown as NodeJS.ReadStream;
+    (piped as { isTTY: boolean }).isTTY = false;
+    expect(await readAllStdin(piped)).toBe("hello world");
   });
 });
 
