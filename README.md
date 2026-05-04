@@ -1,6 +1,6 @@
 # Phantombot
 
-A personality-first chat agent for Telegram. Built around the **Pi Coder (pi.dev)** philosophy: minimalist, high-torque, and **YoYo (You're On Your Own)** by default.
+Giving the harness a Soul. The harness can do its own tools — let it. A personality-first chat agent for Telegram, built for minimalist, high-torque agency.
 
 Phantombot extends **Inflection Pi** onto Telegram — and uses **Claude Code** or **Google Gemini CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude and Gemini are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
 

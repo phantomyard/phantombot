@@ -86,7 +86,7 @@ export interface SystemdUnitParams {
 export function generateSystemdUnit(params: SystemdUnitParams): string {
   const exec = [params.binPath, ...params.args].map(quoteArg).join(" ");
   const desc =
-    params.description ?? "Phantombot — personality-first chat agent";
+    params.description ?? "Phantombot — Giving the harness a Soul";
   return `[Unit]
 Description=${desc}
 After=network-online.target
