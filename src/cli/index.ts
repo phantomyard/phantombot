@@ -37,7 +37,7 @@ export const mainCommand = defineCommand({
     name: "phantombot",
     version: VERSION,
     description:
-      "Personality-first chat agent CLI. Wraps Claude Code and Pi CLIs with persona, memory, and a Telegram bot front-end.",
+      "Giving the harness a Soul. The harness can do its own tools — let it. Personality-first chat agent CLI.",
   },
   subCommands: {
     persona: personaCmd,
