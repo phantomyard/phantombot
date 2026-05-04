@@ -115,26 +115,26 @@ describe("parseStreamJson", () => {
     expect(parseStreamJson({ type: "result" })).toBeUndefined();
   });
 
-  test("emits heartbeat for assistant messages with only non-text parts (e.g. pure tool_use)", () => {
+  test("emits progress for assistant messages with only non-text parts (e.g. pure tool_use)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: {} }] },
     });
-    expect(c).toEqual({ type: "heartbeat" });
+    expect(c).toEqual({ type: "progress" });
   });
 
-  test("emits heartbeat for thinking blocks (and does NOT leak the content)", () => {
+  test("emits progress for thinking blocks (and does NOT leak the content)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: {
         content: [{ type: "thinking", thinking: "internal chain-of-thought" }],
       },
     });
-    expect(c).toEqual({ type: "heartbeat" });
+    expect(c).toEqual({ type: "progress" });
     expect(JSON.stringify(c)).not.toContain("chain-of-thought");
   });
 
-  test("text takes precedence: when a message has both text and tool_use, text wins (no heartbeat)", () => {
+  test("text takes precedence: when a message has both text and tool_use, text wins (no progress)", () => {
     const c = parseStreamJson({
       type: "assistant",
       message: {

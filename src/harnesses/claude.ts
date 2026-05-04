@@ -261,10 +261,10 @@ export function renderStdinPayload(req: HarnessRequest): string {
  *
  * Channel layers want two distinct signals from us:
  *   - `text` blocks → user-visible reply (concatenate, surface verbatim).
- *   - Anything else (`thinking`, `tool_use`, `tool_result`, …) → "model
- *     is alive" tick, no payload. The actual content stays inside the
- *     subprocess; we just emit `heartbeat` so the channel can refresh
- *     its typing indicator without leaking chain-of-thought.
+ *   - Anything else (`thinking`, `tool_use`, `tool_result`, …) → `progress`
+ *     so the channel layer can flush pending narration before the model
+ *     runs its tool. Actual content stays inside the subprocess; we never
+ *     leak chain-of-thought.
  *
  * If a single assistant message contains BOTH text and non-text blocks,
  * we prefer the text chunk (it carries strictly more signal — text
@@ -295,7 +295,7 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
     }
   }
   if (text) return { type: "text", text };
-  if (sawNonText) return { type: "heartbeat" };
+  if (sawNonText) return { type: "progress" };
   return undefined;
 }
 
