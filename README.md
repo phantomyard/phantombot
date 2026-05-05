@@ -30,6 +30,34 @@ When Phantom is asked to *"SSH to the home lab and write a note to the Obsidian 
 curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
 ```
 
+### Quick start
+
+After `install.sh` completes:
+
+**Getting a Telegram bot token:**
+
+1. Open Telegram and chat with [@BotFather](https://t.me/BotFather)
+2. Send `/newbot` and follow the prompts to name your bot
+3. Copy the token — it'll look like `1234567890:ABCdef...`
+
+**Getting your Telegram user ID:**
+
+1. Open Telegram and chat with [@userinfobot](https://t.me/userinfobot)
+2. Send any message (or `/start`)
+3. Copy the numeric ID it returns
+
+Then run:
+
+```bash
+phantombot persona   # TUI — create or import (OpenClaw works) your first persona
+phantombot harness   # primary harness — pi recommended; claude/gemini as fallback
+phantombot telegram  # paste your @BotFather bot token + allowlisted user IDs
+phantombot voice     # (optional) pick TTS/STT provider for voice messages
+
+phantombot run       # foreground — Ctrl-C to stop.
+phantombot install   # install as a systemd --user service (survives logout)
+```
+
 The script:
 
 - Detects host arch (`x86_64` / `aarch64`).
@@ -56,22 +84,6 @@ phantombot update --force --restart     # cron-friendly: no prompts, restart aft
 ```
 
 Updates download to `${binPath}.update.tmp`, SHA256-verify, atomically rename over the live binary, and clean up after themselves — no `.bak` files left in your install dir.
-
----
-
-## Quick start
-
-After `install.sh` completes:
-
-```bash
-phantombot persona # TUI — create or import (OpenClaw works) your first persona
-phantombot harness # primary harness — pi recommended; claude/gemini as fallback
-phantombot telegram # paste your @BotFather bot token + allowlisted user IDs
-phantombot voice # (optional) pick TTS/STT provider for voice messages
-
-phantombot run # foreground — Ctrl-C to stop.
-phantombot install # install as a systemd --user service (survives logout)
-```
 
 ---
 
