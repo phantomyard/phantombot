@@ -46,11 +46,23 @@ After `install.sh` completes:
 2. Send any message (or `/start`)
 3. Copy the numeric ID it returns
 
+### Before you configure a harness
+
+Phantombot doesn't bundle an AI model — it delegates to one you already have installed. We call the AI tool a **harness**: phantombot passes your persona + conversation to it, the harness runs its own tools (Bash, file access, web search), and phantombot relays the result to Telegram.
+
+**You must install and authenticate at least one harness yourself before `phantombot harness` will work:**
+
+- **Pi** *(recommended primary)* — install `pi` from Inflection, then run `pi` once to authenticate.
+- **Claude Code** — `npm install -g @anthropic-ai/claude-code`, then `claude /login` for OAuth.
+- **Gemini CLI** — install Google's Gemini CLI, then `gemini` and follow the `/auth` flow (or set `GEMINI_API_KEY` in `~/.env`).
+
+**Primary vs. fallback:** The primary handles every turn by default. If it fails (auth expiry, rate limit, transient error), phantombot automatically tries the fallback. Pi as primary + Claude as fallback is the recommended combo — you get Pi's speed and personality day-to-day, with Claude catching errors seamlessly.
+
 Then run:
 
 ```bash
 phantombot persona   # TUI — create or import (OpenClaw works) your first persona
-phantombot harness   # primary harness — pi recommended; claude/gemini as fallback
+phantombot harness   # TUI — picks up installed harnesses; choose primary + fallback
 phantombot telegram  # paste your @BotFather bot token + allowlisted user IDs
 phantombot voice     # (optional) pick TTS/STT provider for voice messages
 
