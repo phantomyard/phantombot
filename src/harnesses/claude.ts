@@ -209,10 +209,54 @@ export class ClaudeHarness implements Harness {
     if (this.config.fallbackModel) {
       args.push("--fallback-model", this.config.fallbackModel);
     }
+    // Per-invocation settings injection. Layers additively on top of the user's
+    // own ~/.claude/settings.json — we don't touch that file, so an operator
+    // running `claude` directly on this host (e.g. for emergency repairs) is
+    // unaffected. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS for the policy.
+    args.push("--settings", JSON.stringify(PHANTOMBOT_INJECTED_CLAUDE_SETTINGS));
     args.push("--system-prompt", systemPrompt);
     return args;
   }
 }
+
+/**
+ * Settings injected into every `claude --print` invocation via `--settings`.
+ *
+ * The Claude Code harness ships a small set of "deferred" tools the model can
+ * call from inside a session — including `CronCreate` / `CronDelete` /
+ * `CronList`, an in-memory single-session scheduler. They're session-bound:
+ * dies with the subprocess, invisible to `phantombot task list`, no audit
+ * trail, no persistence across phantombot restarts.
+ *
+ * That makes them a foot-gun for our use case. A persona ("matt") asked for a
+ * recurring check called CronCreate — the schedule lived ~5 seconds (until
+ * the --print subprocess exited) and the user had no way to verify. The
+ * positive fix is the SCHEDULING_TOOLS_SECTION in persona/builder.ts which
+ * teaches the model to use `phantombot task` instead. THIS deny-list is the
+ * backstop: even if the model reaches for CronCreate in a moment of weakness,
+ * the harness refuses.
+ *
+ * We deliberately deny only the three scheduler tools. Bash, Read, Edit,
+ * WebFetch, and the rest of the Claude Code surface remain available — we're
+ * not crippling the harness, just removing the one footgun that has zero
+ * legitimate use given `phantombot task` exists.
+ *
+ * Layering: --settings is additive on top of ~/.claude/settings.json. The
+ * operator's own user settings are NOT modified by phantombot, so running
+ * `claude` directly outside phantombot (emergency repairs, dev work) is
+ * unaffected by this injection.
+ *
+ * Exported for testing and so the doc-string above is greppable.
+ */
+export const PHANTOMBOT_INJECTED_CLAUDE_SETTINGS = {
+  permissions: {
+    deny: [
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+    ],
+  },
+} as const;
 
 /**
  * Strip ANTHROPIC_API_KEY from the inherited env so the subprocess uses
