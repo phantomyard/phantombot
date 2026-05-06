@@ -106,7 +106,7 @@ export default defineCommand({
     const config = await loadConfig();
 
     const spinner = p.spinner();
-    spinner.start("Probing installed AI harnesses to find a configured one...");
+    spinner.start("Probing installed AI harnesses to find ones on PATH...");
 
     // Check which ones are on PATH. Reused below by `runHarness` so we don't
     // walk PATH twice during the same wizard.
@@ -123,12 +123,12 @@ export default defineCommand({
 
     spinner.stop("Probe complete.");
 
-    const configured = Object.entries(probeResults)
+    const onPath = Object.entries(probeResults)
       .filter(([, isReady]) => isReady)
       .map(([id]) => id);
 
-    if (configured.length > 0) {
-      p.note("Found configured AI harnesses: " + configured.join(", "), "Probe result");
+    if (onPath.length > 0) {
+      p.note("Found AI harnesses on PATH: " + onPath.join(", "), "Probe result");
     } else {
       p.note(
         "No AI harness responded to '--version'.\n" +
@@ -209,13 +209,13 @@ export default defineCommand({
         process.exitCode = installCode;
         return;
       }
-      if (configured.length === 0) {
-        p.outro("All done! Your Phantombot is running, but it has no configured harness.\nOnce you install and configure a harness (like gemini or claude), run `phantombot harness` to wire it up.");
+      if (onPath.length === 0) {
+        p.outro("All done! Your Phantombot is running, but no AI harness was found on PATH.\nOnce you install and configure a harness (like gemini or claude), run `phantombot harness` to wire it up.");
       } else {
         p.outro("All done! Your Phantombot is now running and ready to chat.");
       }
     } else {
-      if (configured.length === 0) {
+      if (onPath.length === 0) {
         p.outro("Setup complete! Start your bot anytime with `phantombot run`.\nRemember to run `phantombot harness` after you configure an AI harness.");
       } else {
         p.outro("Setup complete! Start your bot anytime with `phantombot run`.");
