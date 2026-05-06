@@ -166,15 +166,49 @@ trap - EXIT INT TERM
 printf 'phantombot: installed %s to %s/phantombot\n' "$tag" "$INSTALL_DIR"
 
 # --- PATH check ----------------------------------------------------------
+#
+# If the install dir isn't on the user's PATH, try to fix it for them by
+# appending an export line to their shell rc file. We pick the rc file
+# from $SHELL (the user's login shell), not from the script's interpreter
+# — the installer runs under /bin/sh regardless of what the user uses
+# interactively. If $SHELL isn't one we recognise, fall back to printing
+# manual instructions.
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
-    printf '\nphantombot: %s is not on your PATH.\n' "$INSTALL_DIR" >&2
-    printf 'add this to your shell profile (~/.bashrc or ~/.zshrc):\n' >&2
-    printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR" >&2
-    printf '\nthen re-open your shell, or for this session:\n' >&2
-    printf '  export PATH="%s:$PATH"\n\n' "$INSTALL_DIR" >&2
+    rc_file=""
+    case "${SHELL:-}" in
+      */zsh)  rc_file="$HOME/.zshrc" ;;
+      */bash) rc_file="$HOME/.bashrc" ;;
+    esac
+
+    if [ -n "$rc_file" ]; then
+      # Make sure the rc file exists so the grep + append below behave.
+      [ -f "$rc_file" ] || touch "$rc_file"
+
+      # Substring match: if the install dir is mentioned anywhere in the
+      # rc file (export, prepend, comment) assume the user has it covered
+      # and don't duplicate.
+      if grep -Fq "$INSTALL_DIR" "$rc_file"; then
+        printf '\nphantombot: %s is already referenced in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
+        printf 'open a new shell, or run this to use phantombot now:\n' >&2
+        printf '  source %s\n\n' "$rc_file" >&2
+      else
+        {
+          printf '\n# added by phantombot installer\n'
+          printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+        } >> "$rc_file"
+        printf '\nphantombot: added %s to PATH in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
+        printf 'open a new shell, or run this to use phantombot now:\n' >&2
+        printf '  source %s\n\n' "$rc_file" >&2
+      fi
+    else
+      printf '\nphantombot: %s is not on your PATH and your shell (%s) is not auto-supported.\n' \
+        "$INSTALL_DIR" "${SHELL:-unknown}" >&2
+      printf 'add this to your shell profile:\n' >&2
+      printf '  export PATH="%s:$PATH"\n\n' "$INSTALL_DIR" >&2
+    fi
     ;;
 esac
 
