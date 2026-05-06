@@ -10,6 +10,8 @@
 #   error    — emit a stderr line, exit 1
 #   notfound — exit 127 (terminal, simulates "command not found")
 #   hang     — sleep forever (used for the timeout test)
+#   argv     — emit argv as a single assistant text event (so the test can
+#              inspect what flags the harness passed), then exit 0
 
 mode="${FAKE_CLAUDE_MODE:-normal}"
 
@@ -36,6 +38,18 @@ case "$mode" in
     # the actual blocking process. Without exec, bash absorbs SIGTERM and
     # the orphaned sleep keeps stdout open, leaking the timeout into a hang.
     exec sleep 3600
+    ;;
+  argv)
+    # Emit our argv as a single assistant text event so the test can verify
+    # which flags the harness passed (e.g. --settings + the deny-list JSON).
+    # jq isn't guaranteed to be available on the target hosts, so build the
+    # JSON by hand and escape characters that would break stream-json: \, ".
+    payload="$*"
+    payload="${payload//\\/\\\\}"
+    payload="${payload//\"/\\\"}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"${payload}\"}]}}"
+    printf '%s\n' '{"type":"result"}'
+    exit 0
     ;;
   *)
     echo "fake-claude.sh: unknown FAKE_CLAUDE_MODE=$mode" >&2

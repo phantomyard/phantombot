@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   ClaudeHarness,
+  PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
   parseStreamJson,
   renderStdinPayload,
@@ -266,6 +267,51 @@ describe("ClaudeHarness.invoke (subprocess)", () => {
       recoverable: true,
       error: expect.stringContaining("timed out"),
     });
+  });
+});
+
+describe("PHANTOMBOT_INJECTED_CLAUDE_SETTINGS", () => {
+  test("denies the three harness-native scheduler tools and only those", () => {
+    const denied = PHANTOMBOT_INJECTED_CLAUDE_SETTINGS.permissions.deny;
+    expect(denied).toContain("CronCreate");
+    expect(denied).toContain("CronDelete");
+    expect(denied).toContain("CronList");
+    // We're not crippling the harness — this list is intentionally narrow.
+    expect(denied).toHaveLength(3);
+  });
+
+  test("serializes to valid JSON for --settings flag", () => {
+    const json = JSON.stringify(PHANTOMBOT_INJECTED_CLAUDE_SETTINGS);
+    const round = JSON.parse(json);
+    expect(round.permissions.deny).toEqual([
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+    ]);
+  });
+});
+
+describe("ClaudeHarness subprocess invocation passes injected settings", () => {
+  test("--settings JSON appears in argv received by claude subprocess", async () => {
+    // fake-claude.sh in 'argv' mode (added below) prints argv to stdout
+    // as a stream-json text event so we can inspect what it received.
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({
+      bin: FAKE_CLAUDE,
+      model: "test",
+      fallbackModel: "",
+    });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // --settings should be present and immediately followed by JSON
+    // containing the deny list.
+    expect(texts).toContain("--settings");
+    expect(texts).toContain("CronCreate");
+    expect(texts).toContain("CronDelete");
+    expect(texts).toContain("CronList");
   });
 });
 

@@ -38,6 +38,13 @@ export function buildSystemPrompt(
   // commands exist and that it should use them.
   sections.push(MEMORY_TOOLS_SECTION);
 
+  // Always-on scheduling rules. The Claude Code harness ships native
+  // CronCreate/Delete/List tools that are session-bound and invisible
+  // to the user — we want the agent to reach for `phantombot task`
+  // instead. Injected even when the persona has its own tools.md so
+  // every persona gets the same scheduling discipline.
+  sections.push(SCHEDULING_TOOLS_SECTION);
+
   // Credential discovery + hygiene rules. Same rationale as memory tools:
   // injected after the persona's own tools.md so persona overrides stay
   // primary, but always present so the agent doesn't reinvent the
@@ -107,6 +114,68 @@ The heartbeat is mechanical (no LLM). The nightly is cognitive — that's
 when KB notes get created or updated based on what you captured during
 the day. Don't try to do nightly's job mid-conversation; just capture
 well and the nightly cycle handles synthesis.`;
+
+/**
+ * Scheduling — always use `phantombot task`, never harness-native
+ * scheduler tools. Same shape as MEMORY_TOOLS_SECTION: present a
+ * contract, list the relevant subcommands, then a hard rule.
+ *
+ * Background: the Claude Code harness exposes a deferred toolset
+ * including `CronCreate` / `CronDelete` / `CronList` — an in-memory,
+ * single-session scheduler that dies with the subprocess. A persona
+ * called CronCreate once and the user had no way to know nothing was
+ * actually scheduled (no DB row, no audit trail, no fire log). We
+ * mitigate at two layers:
+ *
+ *   1. THIS section, taught into every persona's context. Positive
+ *      pattern: "use phantombot task, here's why."
+ *   2. A claude.ts --settings injection that adds CronCreate/Delete/
+ *      List to permissions.deny. The model can't reach the tool even
+ *      if it tried. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS.
+ *
+ * Pi and Gemini have no native scheduler tools, so they only need
+ * this section — there's nothing to deny in those harnesses.
+ *
+ * Exported for testing.
+ */
+export const SCHEDULING_TOOLS_SECTION =
+  `# Scheduling tasks
+
+For anything that should run on a schedule — a check every N
+minutes, a daily reminder, a one-off "wake me in 10 minutes" —
+always use \`phantombot task\`. It writes to a SQLite store the
+user can inspect with \`phantombot task list\`, every fire is logged
+to \`task_runs\`, and tasks survive phantombot restarts.
+
+  phantombot task add "<prompt>" --in 10m              # one-off, fires once in 10 min
+  phantombot task add "<prompt>" --at "2026-05-06T18:00:00+02:00"
+                                                       # one-off at ISO time
+  phantombot task add "<prompt>" --every 30m --until "..."
+                                                       # recurring, requires expiry
+  phantombot task add "<prompt>" --every 1h --count 24 # recurring, fixed run count
+  phantombot task add "<prompt>" --every 5m  --for 2h  # recurring, duration
+  phantombot task list                                  # active tasks
+  phantombot task log <id>                              # fire history for a task
+  phantombot task rm <id>                               # delete a task
+  phantombot task selftest                              # 60-second end-to-end check
+
+Recurring tasks REQUIRE an expiry (--until / --count / --for) —
+without one the CLI exits non-zero and prints an error. Default
+maximum is 90 days; use \`--force-long-running\` only with the
+user's explicit permission.
+
+When you call \`task add\`, the CLI echoes \`task <id> scheduled at
+<local-time>\`. Repeat that line verbatim in your reply to the
+user — it's the proof-of-creation contract. No id in your reply
+means no schedule was made, full stop.
+
+DO NOT use harness-native scheduler tools (\`CronCreate\`,
+\`CronDelete\`, \`CronList\`, or any equivalent under another
+harness). They are session-bound — the schedule dies the moment
+the subprocess exits, the user can't see it in
+\`phantombot task list\`, and there's no fire log. They look like
+they work and silently don't. If you find yourself reaching for
+one, you want \`phantombot task add\` instead.`;
 
 /**
  * Optional channel-level overlay: ask the model to narrate one short
