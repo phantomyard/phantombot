@@ -14,6 +14,14 @@ const DEFAULT_REPO = "phantomyard/phantombot";
 /** What kind of host arch the running phantombot needs an asset for. */
 export type SupportedArch = "x64" | "arm64";
 
+/**
+ * The full release-target tuple — phantombot ships one binary per
+ * (platform, arch) pair, named `phantombot-${tag}-${target}`. Currently
+ * built: linux-x64, linux-arm64, darwin-arm64. No darwin-x64 because no
+ * deploy target uses Intel Mac.
+ */
+export type SupportedTarget = "linux-x64" | "linux-arm64" | "darwin-arm64";
+
 export interface ReleaseAsset {
   name: string;
   url: string;
@@ -39,11 +47,11 @@ export type FindLatestResult =
 
 /**
  * Hit GitHub's `/releases/latest` endpoint, find the binary asset that
- * matches the requested arch + the SHA256SUMS file beside it, and return
- * everything `phantombot update` needs to download and verify.
+ * matches the requested target + the SHA256SUMS file beside it, and
+ * return everything `phantombot update` needs to download and verify.
  */
 export async function findLatestRelease(opts: {
-  arch: SupportedArch;
+  target: SupportedTarget;
   /** Override the upstream repo. Default: env var or DEFAULT_REPO. */
   repo?: string;
   fetchImpl?: typeof fetch;
@@ -106,7 +114,7 @@ export async function findLatestRelease(opts: {
 
   const tag = body.tag_name;
   const version = tag.startsWith("v") ? tag.slice(1) : tag;
-  const wantedBinaryName = `phantombot-${tag}-linux-${opts.arch}`;
+  const wantedBinaryName = `phantombot-${tag}-${opts.target}`;
   const binary = body.assets.find((a) => a.name === wantedBinaryName);
   const checksums = body.assets.find((a) => a.name === "SHA256SUMS");
 
@@ -148,12 +156,35 @@ export async function findLatestRelease(opts: {
  * Map node/bun's process.arch to the suffix the release workflow uses.
  * Returns undefined on architectures we don't ship binaries for, so the
  * CLI can refuse with a clear message instead of trying a missing asset.
+ *
+ * Kept for tests + back-compat. New code should prefer
+ * detectSupportedTarget which also includes the platform.
  */
 export function detectSupportedArch(
   procArch: string = process.arch,
 ): SupportedArch | undefined {
   if (procArch === "x64") return "x64";
   if (procArch === "arm64") return "arm64";
+  return undefined;
+}
+
+/**
+ * Map (process.platform, process.arch) to one of the release-target
+ * tuples we actually ship. Returns undefined for combinations the
+ * release workflow doesn't build (e.g. darwin-x64, linux-ia32, win32-*),
+ * so `phantombot update` can refuse with a clear message instead of
+ * 404-ing on a missing asset.
+ *
+ * Built targets: linux-x64, linux-arm64, darwin-arm64.
+ */
+export function detectSupportedTarget(
+  procPlatform: string = process.platform,
+  procArch: string = process.arch,
+): SupportedTarget | undefined {
+  const arch = detectSupportedArch(procArch);
+  if (!arch) return undefined;
+  if (procPlatform === "linux") return `linux-${arch}` as SupportedTarget;
+  if (procPlatform === "darwin" && arch === "arm64") return "darwin-arm64";
   return undefined;
 }
 

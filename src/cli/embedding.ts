@@ -17,7 +17,7 @@ import {
   type EmbedResult,
 } from "../lib/geminiEmbed.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { maybePromptRestart } from "./harness.ts";
 
 const DEFAULT_MODEL = "gemini-embedding-001";

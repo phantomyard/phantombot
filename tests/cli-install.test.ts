@@ -11,6 +11,10 @@ import { join } from "node:path";
 import { runInstall } from "../src/cli/install.ts";
 import { runUninstall } from "../src/cli/uninstall.ts";
 import type {
+  LaunchctlResult,
+  LaunchctlRunner,
+} from "../src/lib/launchd.ts";
+import type {
   SystemctlResult,
   SystemctlRunner,
   UserSystemdEnv,
@@ -19,6 +23,14 @@ import type {
 class FakeSystemctl implements SystemctlRunner {
   calls: string[][] = [];
   async run(args: readonly string[]): Promise<SystemctlResult> {
+    this.calls.push([...args]);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  }
+}
+
+class FakeLaunchctl implements LaunchctlRunner {
+  calls: string[][] = [];
+  async run(args: readonly string[]): Promise<LaunchctlResult> {
     this.calls.push([...args]);
     return { exitCode: 0, stdout: "", stderr: "" };
   }
@@ -81,7 +93,7 @@ const sysEnvMissing = (): UserSystemdEnv => ({
   reason: "/run/user/1003 does not exist — enable linger first: sudo loginctl enable-linger kai",
 });
 
-describe("runInstall", () => {
+describe("runInstall (linux/systemd)", () => {
   test("rejects when bin name isn't 'phantombot'", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
@@ -93,6 +105,7 @@ describe("runInstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvReady,
+      platform: "linux",
     });
     expect(code).toBe(2);
     expect(err.text).toContain("compiled binary");
@@ -110,6 +123,7 @@ describe("runInstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvMissing,
+      platform: "linux",
     });
     expect(code).toBe(2);
     expect(err.text).toContain("no user-level systemd bus available");
@@ -128,6 +142,7 @@ describe("runInstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvAutoSet,
+      platform: "linux",
     });
     expect(code).toBe(0);
     expect(out.text).toContain(
@@ -147,6 +162,7 @@ describe("runInstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvReady,
+      platform: "linux",
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
@@ -160,13 +176,96 @@ describe("runInstall", () => {
       "--user enable phantombot-tick.timer",
       "--user start phantombot-tick.timer",
     ]);
-    expect(out.text).toContain("journalctl --user -u phantombot");
+    // The hint text uses the host's restartCommand/logsCommand, so it'll
+    // be journalctl on linux CI; match loosely.
+    expect(out.text).toContain("view logs:");
+    expect(out.text).toContain("restart:");
     // No auto-set message when env was already set.
     expect(out.text).not.toContain("auto-detected");
   });
 });
 
-describe("runUninstall", () => {
+describe("runInstall (darwin/launchd)", () => {
+  test("happy path writes plists + bootstraps each into the gui domain", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lc = new FakeLaunchctl();
+    const code = await runInstall({
+      binPath: "/Users/andrew/.local/bin/phantombot",
+      plistPath: join(workdir, "dev.phantombot.phantombot.plist"),
+      heartbeatPlistPath: join(workdir, "dev.phantombot.heartbeat.plist"),
+      nightlyPlistPath: join(workdir, "dev.phantombot.nightly.plist"),
+      tickPlistPath: join(workdir, "dev.phantombot.tick.plist"),
+      domain: "gui/501",
+      launchctl: lc,
+      out,
+      err,
+      platform: "darwin",
+    });
+    expect(code).toBe(0);
+    // bootouts of nothing × 4, then bootstrap each plist × 4. We check the
+    // verb sequence rather than full strings so test stays readable.
+    const verbs = lc.calls.map((c) => c[0]);
+    expect(verbs).toEqual([
+      "bootout",
+      "bootout",
+      "bootout",
+      "bootout",
+      "bootstrap",
+      "bootstrap",
+      "bootstrap",
+      "bootstrap",
+    ]);
+    // bootstraps target the correct domain.
+    for (const c of lc.calls.filter((c) => c[0] === "bootstrap")) {
+      expect(c[1]).toBe("gui/501");
+    }
+  });
+
+  test("doesn't fall through to systemctl on darwin (the bug Andrew hit on his Mac)", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const sys = new FakeSystemctl();
+    const lc = new FakeLaunchctl();
+    const code = await runInstall({
+      binPath: "/Users/andrew/.local/bin/phantombot",
+      plistPath: join(workdir, "dev.phantombot.phantombot.plist"),
+      heartbeatPlistPath: join(workdir, "dev.phantombot.heartbeat.plist"),
+      nightlyPlistPath: join(workdir, "dev.phantombot.nightly.plist"),
+      tickPlistPath: join(workdir, "dev.phantombot.tick.plist"),
+      domain: "gui/501",
+      systemctl: sys,
+      launchctl: lc,
+      out,
+      err,
+      platform: "darwin",
+    });
+    expect(code).toBe(0);
+    // No systemctl calls — the regression test for the original Mac bug.
+    expect(sys.calls).toEqual([]);
+    // No "loginctl" appears anywhere.
+    expect(err.text).not.toContain("loginctl");
+    expect(out.text).not.toContain("loginctl");
+  });
+
+  test("rejects when bin name isn't 'phantombot' regardless of platform", async () => {
+    const err = new CaptureStream();
+    const lc = new FakeLaunchctl();
+    const code = await runInstall({
+      binPath: "/Users/andrew/.local/bin/bun",
+      domain: "gui/501",
+      launchctl: lc,
+      out: new CaptureStream(),
+      err,
+      platform: "darwin",
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("compiled binary");
+    expect(lc.calls).toEqual([]);
+  });
+});
+
+describe("runUninstall (linux/systemd)", () => {
   test("issues stop/disable/daemon-reload regardless of unit existing", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
@@ -177,6 +276,7 @@ describe("runUninstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvReady,
+      platform: "linux",
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
@@ -203,8 +303,35 @@ describe("runUninstall", () => {
       out,
       err,
       ensureSystemdEnv: sysEnvMissing,
+      platform: "linux",
     });
     expect(code).toBe(0);
     expect(err.text).toContain("no user-level systemd bus available");
+  });
+});
+
+describe("runUninstall (darwin/launchd)", () => {
+  test("boots out each label without touching systemctl", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const sys = new FakeSystemctl();
+    const lc = new FakeLaunchctl();
+    const code = await runUninstall({
+      plistPath: join(workdir, "dev.phantombot.phantombot.plist"),
+      heartbeatPlistPath: join(workdir, "dev.phantombot.heartbeat.plist"),
+      nightlyPlistPath: join(workdir, "dev.phantombot.nightly.plist"),
+      tickPlistPath: join(workdir, "dev.phantombot.tick.plist"),
+      domain: "gui/501",
+      systemctl: sys,
+      launchctl: lc,
+      out,
+      err,
+      platform: "darwin",
+    });
+    expect(code).toBe(0);
+    expect(sys.calls).toEqual([]);
+    expect(lc.calls.length).toBe(4);
+    expect(lc.calls.every((c) => c[0] === "bootout")).toBe(true);
+    expect(out.text).toContain("uninstall complete");
   });
 });

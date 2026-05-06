@@ -11,7 +11,11 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import {
+  defaultServiceControl,
+  restartCommand,
+  type ServiceControl,
+} from "../lib/platform.ts";
 
 export type HarnessId = "claude" | "pi" | "gemini";
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
@@ -149,9 +153,10 @@ const defaultConfirm: ConfirmFn = async (message) => {
 /**
  * Shared post-apply hook for the config-mutating TUIs.
  *
- * Two steps. Always: re-render the on-disk systemd unit if it's stale (a
- * pre-Phase-29 unit lacks `EnvironmentFile=` and silently swallows the
- * .env secrets the TUI just wrote). Then: if phantombot is running, offer
+ * Two steps. Always: re-render the on-disk service-manager unit if it's
+ * stale (a pre-Phase-29 systemd unit lacks `EnvironmentFile=` and
+ * silently swallows the .env secrets the TUI just wrote; the launchd
+ * plist has analogous templating). Then: if phantombot is running, offer
  * to restart it inline so the change takes effect.
  *
  * `confirm` is parameterized so tests can drive the full ordering
@@ -169,7 +174,7 @@ export async function maybePromptRestart(
   );
   if (!proceed) {
     p.note(
-      "skipped — restart later with: systemctl --user restart phantombot",
+      `skipped — restart later with: ${restartCommand()}`,
       "Restart",
     );
     return;
@@ -182,10 +187,11 @@ export async function maybePromptRestart(
 }
 
 /**
- * Re-render the installed systemd unit if it's stale; print a one-line
- * notice when it happened (and surface the backup path so a hand-edit is
- * recoverable). Exposed so tests can verify the rewrite path without
- * going through the @clack confirm prompt in maybePromptRestart.
+ * Re-render the installed service-manager unit if it's stale; print a
+ * one-line notice when it happened (and surface the backup path so a
+ * hand-edit is recoverable). Exposed so tests can verify the rewrite
+ * path without going through the @clack confirm prompt in
+ * maybePromptRestart.
  */
 export async function maybeUpgradeUnit(
   svc: ServiceControl,
@@ -193,8 +199,8 @@ export async function maybeUpgradeUnit(
   const r = await svc.rerenderUnitIfStale();
   if (r.rerendered) {
     const note = r.backupPath
-      ? `systemd unit upgraded to current template\nprevious contents saved to ${r.backupPath}`
-      : "systemd unit upgraded to current template";
+      ? `service-manager unit upgraded to current template\nprevious contents saved to ${r.backupPath}`
+      : "service-manager unit upgraded to current template";
     p.note(note, "Unit");
   }
   return r;

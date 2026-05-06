@@ -16,6 +16,7 @@ import {
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
   acquireRunLock,
   defaultLockPath,
@@ -68,8 +69,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   if (!isLockHandle(lock)) {
     err.write(
       `phantombot is already running (pid ${Number.isFinite(lock.pid) ? lock.pid : "unknown"}; lock at ${lock.path})\n` +
-        "view logs:    journalctl --user -u phantombot -f\n" +
-        "status:       systemctl --user status phantombot\n" +
+        `view logs:    ${logsCommand()}\n` +
+        `status:       ${statusCommand()}\n` +
         "stop the other instance first, or remove the lock if it's stale.\n",
     );
     return 1;

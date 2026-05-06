@@ -11,7 +11,7 @@ import * as p from "@clack/prompts";
 import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { defaultEnvFilePath, updateEnvFile } from "../lib/envFile.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import {
   AZURE_EDGE_DEFAULTS,
   AZURE_EDGE_VOICE_OPTIONS,

@@ -241,6 +241,90 @@ describe("runUpdate refusals", () => {
     expect(code).toBe(1);
     expect(err.text).toContain("only released for");
   });
+
+  test("darwin-x64 → exit 1 (Intel Mac isn't released)", async () => {
+    const err = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      out: new CaptureStream(),
+      err,
+      force: true,
+    });
+    expect(code).toBe(1);
+    expect(err.text).toContain("only released for");
+    expect(err.text).toContain("darwin-arm64");
+    expect(err.text).toContain("platform=darwin");
+  });
+});
+
+describe("runUpdate on darwin-arm64", () => {
+  // On Mac, the asset name is `phantombot-vX-darwin-arm64`, not the
+  // hardcoded `linux-${arch}` from before this PR. Verify the right
+  // asset is fetched and the restart hint is launchctl-shaped.
+  const DARWIN_ASSET = "phantombot-v1.0.99-darwin-arm64";
+  const DARWIN_BYTES = Buffer.from("DARWIN_BINARY_VERIFIED");
+  const DARWIN_SHA = createHash("sha256").update(DARWIN_BYTES).digest("hex");
+
+  function darwinFetch(): typeof fetch {
+    const releaseBody = {
+      tag_name: "v1.0.99",
+      body: "test release",
+      assets: [
+        {
+          name: DARWIN_ASSET,
+          browser_download_url: "https://example/" + DARWIN_ASSET,
+          size: DARWIN_BYTES.byteLength,
+        },
+        {
+          name: "phantombot-v1.0.99-linux-x64",
+          browser_download_url: "https://example/linux-x64",
+          size: DARWIN_BYTES.byteLength,
+        },
+        {
+          name: "SHA256SUMS",
+          browser_download_url: "https://example/SHA256SUMS",
+          size: 256,
+        },
+      ],
+    };
+    return (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("api.github.com")) {
+        return new Response(JSON.stringify(releaseBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("SHA256SUMS")) {
+        return new Response(`${DARWIN_SHA}  ${DARWIN_ASSET}\n`, {
+          status: 200,
+        });
+      }
+      return new Response(DARWIN_BYTES, { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  test("picks the darwin-arm64 asset, not the linux one", async () => {
+    const out = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "arm64",
+      currentVersion: "1.0.42",
+      fetchImpl: darwinFetch(),
+      out,
+      err: new CaptureStream(),
+      force: true,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("phantombot-v1.0.99-darwin-arm64");
+    // Binary on disk is the darwin one.
+    expect((await readFile(binPath)).equals(DARWIN_BYTES)).toBe(true);
+  });
 });
 
 describe("runUpdate happy path with --force --restart", () => {

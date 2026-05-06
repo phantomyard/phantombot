@@ -26,14 +26,15 @@ import {
   downloadAndVerify,
 } from "../lib/binaryUpdate.ts";
 import {
-  detectSupportedArch,
+  detectSupportedTarget,
   findLatestRelease,
   type LatestRelease,
 } from "../lib/githubReleases.ts";
 import {
   defaultServiceControl,
+  restartCommand,
   type ServiceControl,
-} from "../lib/systemd.ts";
+} from "../lib/platform.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { VERSION } from "../version.ts";
 
@@ -45,10 +46,15 @@ export interface RunUpdateInput {
   binPath?: string;
   /**
    * Raw arch string (matches `process.arch`); converted via
-   * detectSupportedArch internally. Defaults to process.arch. Tests pass
-   * a value like "ia32" to exercise the unsupported-arch refusal.
+   * detectSupportedTarget internally. Defaults to process.arch. Tests
+   * pass a value like "ia32" to exercise the unsupported-arch refusal.
    */
   procArch?: string;
+  /**
+   * Raw platform string (matches `process.platform`). Defaults to
+   * process.platform. Tests use this to exercise darwin / linux / unsupported.
+   */
+  procPlatform?: string;
   /** Defaults to VERSION constant. Tests override. */
   currentVersion?: string;
   /** Inject for testing. */
@@ -66,11 +72,13 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const currentVersion = input.currentVersion ?? VERSION;
   const procArch = input.procArch ?? process.arch;
-  const arch = detectSupportedArch(procArch);
+  const procPlatform = input.procPlatform ?? process.platform;
+  const target = detectSupportedTarget(procPlatform, procArch);
 
-  if (!arch) {
+  if (!target) {
     err.write(
-      `phantombot is only released for linux-x64 and linux-arm64; this machine reports arch=${procArch}\n`,
+      `phantombot is only released for linux-x64, linux-arm64, and darwin-arm64; ` +
+        `this machine reports platform=${procPlatform} arch=${procArch}\n`,
     );
     return 1;
   }
@@ -97,7 +105,7 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
 
   // 1. Discover latest release.
   const r = await findLatestRelease({
-    arch,
+    target,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {
@@ -179,15 +187,13 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
       out.write("restarted phantombot.service.\n");
     } else {
       err.write(
-        `restart failed: ${r.stderr ?? "unknown"} — run 'systemctl --user restart phantombot' manually.\n`,
+        `restart failed: ${r.stderr ?? "unknown"} — run '${restartCommand()}' manually.\n`,
       );
       // Don't fail the whole command; the binary swap succeeded. The
       // user just needs to restart by hand.
     }
   } else if (!input.force) {
-    out.write(
-      "restart with: systemctl --user restart phantombot\n",
-    );
+    out.write(`restart with: ${restartCommand()}\n`);
   }
 
   return 0;

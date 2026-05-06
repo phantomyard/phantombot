@@ -72,7 +72,7 @@ describe("detectSupportedArch", () => {
 describe("findLatestRelease", () => {
   test("picks the x64 binary + SHA256SUMS, strips leading v from version", async () => {
     const r = await findLatestRelease({
-      arch: "x64",
+      target: "linux-x64",
       fetchImpl: fakeFetch(200, SAMPLE_RELEASE),
     });
     expect(r.ok).toBe(true);
@@ -88,7 +88,7 @@ describe("findLatestRelease", () => {
 
   test("picks the arm64 binary on arm64 host", async () => {
     const r = await findLatestRelease({
-      arch: "arm64",
+      target: "linux-arm64",
       fetchImpl: fakeFetch(200, SAMPLE_RELEASE),
     });
     expect(r.ok).toBe(true);
@@ -102,7 +102,7 @@ describe("findLatestRelease", () => {
       assets: SAMPLE_RELEASE.assets.filter((a) => a.name === "SHA256SUMS"),
     };
     const r = await findLatestRelease({
-      arch: "x64",
+      target: "linux-x64",
       fetchImpl: fakeFetch(200, partial),
     });
     expect(r.ok).toBe(false);
@@ -116,7 +116,7 @@ describe("findLatestRelease", () => {
       assets: SAMPLE_RELEASE.assets.filter((a) => a.name !== "SHA256SUMS"),
     };
     const r = await findLatestRelease({
-      arch: "x64",
+      target: "linux-x64",
       fetchImpl: fakeFetch(200, noChecksums),
     });
     expect(r.ok).toBe(false);
@@ -127,7 +127,7 @@ describe("findLatestRelease", () => {
 
   test("403 → rate limit hint mentioning GITHUB_TOKEN", async () => {
     const r = await findLatestRelease({
-      arch: "x64",
+      target: "linux-x64",
       fetchImpl: fakeFetch(403, { message: "rate limited" }),
     });
     expect(r.ok).toBe(false);
@@ -137,7 +137,7 @@ describe("findLatestRelease", () => {
 
   test("404 → 'no releases found' hint", async () => {
     const r = await findLatestRelease({
-      arch: "x64",
+      target: "linux-x64",
       fetchImpl: fakeFetch(404, { message: "not found" }),
     });
     expect(r.ok).toBe(false);
@@ -155,7 +155,7 @@ describe("findLatestRelease", () => {
         headers: { "content-type": "application/json" },
       });
     }) as unknown as typeof fetch;
-    await findLatestRelease({ arch: "x64", fetchImpl: recordingFetch });
+    await findLatestRelease({ target: "linux-x64", fetchImpl: recordingFetch });
     expect(seenUrl).toContain("fakeorg/fakerepo");
   });
 });
