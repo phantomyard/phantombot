@@ -65,9 +65,9 @@ describe("runTaskAdd", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    expect(out.text).toContain("task 1 added: hourly email");
-    expect(out.text).toContain("next run:");
-    expect(out.text).toContain("next review:");
+    expect(out.text).toContain("task 1 scheduled");
+    expect(out.text).toContain("description: hourly email");
+    expect(out.text).toContain("fires at:");
   });
 
   test("bad cron → exit 2", async () => {

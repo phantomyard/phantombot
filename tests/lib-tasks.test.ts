@@ -224,6 +224,226 @@ describe("TaskStore.recordReview", () => {
     expect(t.active).toBe(true);
   });
 
+describe("TaskStore.oneOff", () => {
+  test("creates one-off task without cron", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "one-shot",
+      schedule: "",
+      prompt: "do thing",
+      oneOff: true,
+      nextRunAt: new Date(NOW.getTime() + 600_000), // 10 min from now
+      now: NOW,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.task.oneOff).toBe(true);
+    expect(r.task.schedule).toBe("");
+    expect(r.task.nextRunAt.toISOString()).toBe("2026-05-02T09:40:00.000Z");
+  });
+
+  test("one-off deactivates after single run", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "one-shot",
+      schedule: "",
+      prompt: "x",
+      oneOff: true,
+      nextRunAt: new Date(NOW.getTime() + 60_000),
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(r.task.active).toBe(true);
+    store.recordRun(r.id, new Date(NOW.getTime() + 120_000));
+    const t = store.get(r.id)!;
+    expect(t.active).toBe(false);
+    expect(t.runCount).toBe(1);
+  });
+});
+
+describe("TaskStore.expiry", () => {
+  test("maxRuns deactivates after reaching limit", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "counted",
+      schedule: "0 * * * *",
+      prompt: "x",
+      maxRuns: 3,
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    // Run 3 times.
+    store.recordRun(r.id, new Date("2026-05-02T10:00:00Z"));
+    store.recordRun(r.id, new Date("2026-05-02T11:00:00Z"));
+    store.recordRun(r.id, new Date("2026-05-02T12:00:00Z"));
+    const t = store.get(r.id)!;
+    expect(t.active).toBe(false);
+    expect(t.runCount).toBe(3);
+  });
+
+  test("expireStaleTasks deactivates past expiresAt", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "expiring",
+      schedule: "0 * * * *",
+      prompt: "x",
+      expiresAt: new Date("2026-05-03T00:00:00Z"),
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(r.task.active).toBe(true);
+    // expire as of a date past the expiry.
+    const expired = store.expireStaleTasks(new Date("2026-05-04T00:00:00Z"));
+    expect(expired).toBe(1);
+    expect(store.get(r.id)!.active).toBe(false);
+  });
+
+  test("expireStaleTasks does not deactivate future expiry", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "future",
+      schedule: "0 * * * *",
+      prompt: "x",
+      expiresAt: new Date("2026-06-01T00:00:00Z"),
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    const expired = store.expireStaleTasks(new Date("2026-05-03T00:00:00Z"));
+    expect(expired).toBe(0);
+    expect(store.get(r.id)!.active).toBe(true);
+  });
+});
+
+describe("TaskStore.logRun / taskRuns", () => {
+  test("logRun persists fire events", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "logged",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    const firedAt = new Date("2026-05-02T10:00:00Z");
+    store.logRun({
+      taskId: r.id,
+      firedAt,
+      status: "ok",
+      exitCode: 0,
+      outputExcerpt: "Task finished successfully",
+      delivered: true,
+    });
+    store.logRun({
+      taskId: r.id,
+      firedAt: new Date("2026-05-02T11:00:00Z"),
+      status: "error",
+      exitCode: 1,
+      outputExcerpt: "Connection refused",
+      delivered: false,
+    });
+    const runs = store.taskRuns(r.id);
+    expect(runs.length).toBe(2);
+    // Most recent first.
+    const [first, second] = runs;
+    if (!first || !second) throw new Error("expected 2 runs");
+    expect(first.status).toBe("error");
+    expect(first.delivered).toBe(false);
+    expect(second.status).toBe("ok");
+    expect(second.delivered).toBe(true);
+    expect(second.outputExcerpt).toBe("Task finished successfully");
+  });
+
+  test("taskRuns returns empty for task with no runs", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "virgin",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(store.taskRuns(r.id)).toEqual([]);
+  });
+
+  test("outputExcerpt truncated to 500 chars", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "verbose",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    const long = "x".repeat(1000);
+    store.logRun({
+      taskId: r.id,
+      firedAt: NOW,
+      status: "ok",
+      exitCode: 0,
+      outputExcerpt: long,
+      delivered: false,
+    });
+    const runs = store.taskRuns(r.id);
+    const first = runs[0];
+    if (!first) throw new Error("expected 1 run");
+    expect(first.outputExcerpt.length).toBe(500);
+  });
+});
+
+describe("TaskStore.silent / createdBy", () => {
+  test("silent defaults to false", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "loud",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(r.task.silent).toBe(false);
+  });
+
+  test("silent true persists", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "quiet",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+      silent: true,
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(r.task.silent).toBe(true);
+  });
+
+  test("createdBy persists", () => {
+    const r = store.add({
+      persona: "phantom",
+      description: "tracked",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: NOW,
+      createdBy: "telegram:7995070089",
+    });
+    if (!r.ok) throw new Error("setup");
+    expect(r.task.createdBy).toBe("telegram:7995070089");
+  });
+});
+
+describe("TaskStore.selftest", () => {
+  test("selftest creates a 60s one-off task", () => {
+    const { id, firesAt } = store.selftest("phantom", NOW);
+    expect(id).toBeGreaterThan(0);
+    const expected = new Date(NOW.getTime() + 60_000);
+    expect(firesAt.toISOString()).toBe(expected.toISOString());
+    const t = store.get(id)!;
+    expect(t.oneOff).toBe(true);
+    expect(t.silent).toBe(false);
+    expect(t.description).toBe("selftest");
+    expect(t.active).toBe(true);
+  });
+});
+
   test("STOP deactivates the task", () => {
     const r = store.add({
       persona: "phantom",
