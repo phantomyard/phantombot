@@ -5,20 +5,23 @@
 #   curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
 #
 # What it does:
-#   1. Detects host arch (x86_64 → x64, aarch64 → arm64).
+#   1. Detects host OS (Linux / Darwin) and arch (x86_64 → x64, aarch64/arm64 → arm64).
 #   2. Fetches the latest GitHub release tag.
 #   3. Downloads the matching binary + SHA256SUMS.
-#   4. Verifies the SHA256.
-#   5. Installs to ~/.local/bin/phantombot (mode 0755).
-#   6. Warns if ~/.local/bin isn't on PATH.
-#   7. Launches `phantombot persona` to set up the first persona.
+#   4. Verifies the SHA256 (sha256sum on Linux, shasum -a 256 on Mac).
+#   5. On Mac: clears quarantine xattrs and applies an ad-hoc codesign so
+#      Gatekeeper accepts the unsigned-by-Apple binary.
+#   6. Installs to ~/.local/bin/phantombot (mode 0755).
+#   7. Warns if ~/.local/bin isn't on PATH.
+#   8. Launches `phantombot persona` to set up the first persona.
 #
 # Override the install dir with PHANTOMBOT_INSTALL_DIR=/some/path.
 # Skip the persona TUI launch with PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
 #
 # Refusal modes (intentional — bail fast):
-#   - unsupported arch
+#   - unsupported OS or arch
 #   - no curl available
+#   - no sha256 tool available (sha256sum / shasum)
 #   - GitHub API didn't return a parseable tag
 #   - SHA256 mismatch
 #   - install dir not writable
@@ -28,17 +31,34 @@ set -eu
 REPO="phantomyard/phantombot"
 INSTALL_DIR="${PHANTOMBOT_INSTALL_DIR:-$HOME/.local/bin}"
 
-# --- arch detection ------------------------------------------------------
+# --- OS + arch detection -------------------------------------------------
 
+uname_s="$(uname -s)"
 uname_m="$(uname -m)"
+
+case "$uname_s" in
+  Linux)   platform="linux" ;;
+  Darwin)  platform="darwin" ;;
+  *)
+    printf 'phantombot: unsupported OS %s (only Linux and Darwin are released)\n' "$uname_s" >&2
+    exit 1
+    ;;
+esac
+
 case "$uname_m" in
   x86_64|amd64)        arch="x64" ;;
   aarch64|arm64)       arch="arm64" ;;
   *)
-    printf 'phantombot: unsupported arch %s (only linux x86_64 / aarch64 are released)\n' "$uname_m" >&2
+    printf 'phantombot: unsupported arch %s\n' "$uname_m" >&2
     exit 1
     ;;
 esac
+
+# Only darwin-arm64 is built (Apple Silicon). Refuse Intel Mac.
+if [ "$platform" = "darwin" ] && [ "$arch" != "arm64" ]; then
+  printf 'phantombot: only darwin-arm64 (Apple Silicon) is released; %s on Mac is unsupported\n' "$arch" >&2
+  exit 1
+fi
 
 # --- preflight -----------------------------------------------------------
 
@@ -46,9 +66,29 @@ if ! command -v curl >/dev/null 2>&1; then
   printf 'phantombot: curl not found (needed to download the release)\n' >&2
   exit 1
 fi
-if ! command -v sha256sum >/dev/null 2>&1; then
-  printf 'phantombot: sha256sum not found (needed to verify the download)\n' >&2
+
+# Pick a SHA256 tool: sha256sum on Linux, shasum -a 256 on Mac.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_cmd="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_cmd="shasum -a 256"
+else
+  printf 'phantombot: no sha256 tool found (need sha256sum or shasum)\n' >&2
   exit 1
+fi
+
+# Mac-only: codesign + xattr are needed to satisfy Gatekeeper on
+# unsigned-by-Apple binaries. Both ship with the Xcode Command Line Tools
+# (and a stock macOS install has them too).
+if [ "$platform" = "darwin" ]; then
+  if ! command -v codesign >/dev/null 2>&1; then
+    printf 'phantombot: codesign not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+    exit 1
+  fi
+  if ! command -v xattr >/dev/null 2>&1; then
+    printf 'phantombot: xattr not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -78,7 +118,7 @@ if [ -z "$tag" ]; then
   exit 1
 fi
 
-asset="phantombot-${tag}-linux-${arch}"
+asset="phantombot-${tag}-${platform}-${arch}"
 binary_url="https://github.com/$REPO/releases/download/${tag}/${asset}"
 sums_url="https://github.com/$REPO/releases/download/${tag}/SHA256SUMS"
 
@@ -96,16 +136,29 @@ if [ -z "$expected" ]; then
   printf 'phantombot: SHA256SUMS has no entry for %s\n' "$asset" >&2
   exit 1
 fi
-actual="$(sha256sum "$tmp_bin" | awk '{print $1}')"
+actual="$($sha256_cmd "$tmp_bin" | awk '{print $1}')"
 if [ "$expected" != "$actual" ]; then
   printf 'phantombot: SHA256 mismatch (expected %s, got %s) — refusing to install\n' "$expected" "$actual" >&2
   exit 1
 fi
 
+# --- macOS Gatekeeper prep ----------------------------------------------
+
+# On Apple Silicon, unsigned ARM64 binaries are rejected by the kernel
+# unless they carry a code signature (even ad-hoc), and Gatekeeper also
+# refuses anything carrying the com.apple.quarantine xattr from a
+# browser/curl download. Strip xattrs and apply an ad-hoc signature so
+# the user doesn't have to run this dance manually after install.
+if [ "$platform" = "darwin" ]; then
+  printf 'phantombot: clearing quarantine and ad-hoc codesigning (macOS)\n'
+  xattr -cr "$tmp_bin"
+  codesign --force --sign - "$tmp_bin" >/dev/null 2>&1
+fi
+
 # --- install -------------------------------------------------------------
 
-# Atomic on Linux: rename(2) over the destination is safe even if the
-# destination is the running binary (kernel uses inode, not path).
+# Atomic on Linux + macOS: rename(2) over the destination is safe even if
+# the destination is the running binary (kernel uses inode, not path).
 chmod 0755 "$tmp_bin"
 mv "$tmp_bin" "$INSTALL_DIR/phantombot"
 trap - EXIT INT TERM
