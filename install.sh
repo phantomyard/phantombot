@@ -214,14 +214,37 @@ if [ -n "${PHANTOMBOT_SKIP_TUI:-}" ]; then
 fi
 
 # If stdin or stdout is not a TTY (e.g. when this script was piped from
-# `curl … | sh`), reattach all three streams to /dev/tty before exec'ing
-# the wizard. @clack/prompts checks `process.stdout.isTTY` to enable its
-# interactive renderer; redirecting only stdin would leave the spinner
-# and prompt output rendering against a pipe and degrade the UI.
+# `curl … | sh`), reattach to /dev/tty before exec'ing the wizard.
+#
+# Linux: redirect all three streams to /dev/tty directly. Bun's epoll-based
+#   io_uring accepts /dev/tty as an event source, so node:tty WriteStream
+#   wraps it without complaint.
+#
+# macOS: Bun's kqueue rejects /dev/tty registration with EINVAL (it's a
+#   character device, not a pollable kqueue source), which crashes
+#   node:tty's WriteStream with "invalid argument, kqueue". Workaround:
+#   use BSD `script -q /dev/null` to allocate a real pseudo-terminal pair
+#   for the child. The child sees a normal pty (/dev/ttysNN), which kqueue
+#   handles fine, and clack's TTY detection lights up.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
   if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf '\nphantombot: not a TTY (script was piped). Launching interactive setup via /dev/tty.\n\n'
-    exec "$INSTALL_DIR/phantombot" init </dev/tty >/dev/tty 2>&1
+    if [ "$platform" = "darwin" ]; then
+      if command -v script >/dev/null 2>&1; then
+        # BSD script: `script [-q] file [command ...]` — /dev/null discards
+        # the typescript log; </dev/tty hands the user's terminal to script
+        # so it can drive the child pty.
+        exec script -q /dev/null "$INSTALL_DIR/phantombot" init </dev/tty
+      else
+        # script(1) ships with macOS by default, but bail gracefully if absent.
+        printf 'phantombot: script(1) not found; cannot allocate a pty.\n'
+        printf 'next, run this in your terminal to finish setup:\n'
+        printf '  phantombot init\n\n'
+        exit 0
+      fi
+    else
+      exec "$INSTALL_DIR/phantombot" init </dev/tty >/dev/tty 2>&1
+    fi
   else
     printf '\nnext, run this to finish setup:\n'
     printf '  phantombot init\n\n'
