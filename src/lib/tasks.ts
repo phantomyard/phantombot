@@ -435,7 +435,7 @@ export class TaskStore {
       .prepare(
         "SELECT * FROM task_runs WHERE task_id = ? ORDER BY fired_at DESC LIMIT 50",
       )
-      .all(taskId) as (Omit<TaskRunRow, "firedAt"> & { fired_at: string })[];
+      .all(taskId) as (Omit<TaskRunRow, "firedAt" | "delivered"> & { fired_at: string; delivered: number })[];
     return rows.map((r) => ({
       id: r.id,
       taskId: r.task_id,
@@ -443,7 +443,7 @@ export class TaskStore {
       status: r.status,
       exitCode: r.exit_code,
       outputExcerpt: r.output_excerpt,
-      delivered: r.delivered,
+      delivered: r.delivered === 1,
     }));
   }
 
