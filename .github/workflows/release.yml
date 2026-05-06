@@ -87,6 +87,16 @@ jobs:
             ./src/index.ts \
             --outfile "dist/phantombot-${TAG}-linux-arm64"
 
+      - name: Build darwin-x64 (Intel Mac)
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Cross-compiled from the Linux runner; Bun emits an unsigned
+          # Mach-O. install.sh handles the xattr / ad-hoc codesign dance.
+          bun build --compile --target=bun-darwin-x64 \
+            ./src/index.ts \
+            --outfile "dist/phantombot-${TAG}-darwin-x64"
+
       - name: Build darwin-arm64 (Apple Silicon)
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -94,7 +104,6 @@ jobs:
           # Cross-compiled from the Linux runner; Bun emits an unsigned
           # Mach-O. First-run on macOS will be quarantined by Gatekeeper —
           # see release notes for the `xattr -d com.apple.quarantine` step.
-          # No darwin-x64 build: no current deploy target uses Intel Macs.
           bun build --compile --target=bun-darwin-arm64 \
             ./src/index.ts \
             --outfile "dist/phantombot-${TAG}-darwin-arm64"
@@ -107,6 +116,7 @@ jobs:
           sha256sum \
             "phantombot-${TAG}-linux-x64" \
             "phantombot-${TAG}-linux-arm64" \
+            "phantombot-${TAG}-darwin-x64" \
             "phantombot-${TAG}-darwin-arm64" \
             > SHA256SUMS
           cat SHA256SUMS
@@ -123,15 +133,19 @@ jobs:
           Binaries:
           - phantombot-${TAG}-linux-x64 — x86-64, baseline (no AVX2 required)
           - phantombot-${TAG}-linux-arm64 — ARM64
+          - phantombot-${TAG}-darwin-x64 — macOS x86-64 (unsigned; see below)
           - phantombot-${TAG}-darwin-arm64 — macOS Apple Silicon (unsigned; see below)
 
           Verify with: sha256sum -c SHA256SUMS
 
           Install with: phantombot update
 
-          macOS note: the darwin-arm64 binary is cross-compiled and unsigned.
-          On first run, clear the Gatekeeper quarantine attribute:
+          macOS note: the darwin binaries are cross-compiled and unsigned.
+          install.sh handles the xattr / ad-hoc codesign dance for you. If
+          you download the binary directly, clear the Gatekeeper quarantine
+          attribute on first run:
             xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-arm64
+            xattr -d com.apple.quarantine ./phantombot-${TAG}-darwin-x64
           EOF
 
       - name: Create GitHub Release with binary assets
@@ -149,5 +163,6 @@ jobs:
             --notes-file release-notes.md \
             "dist/phantombot-${TAG}-linux-x64" \
             "dist/phantombot-${TAG}-linux-arm64" \
+            "dist/phantombot-${TAG}-darwin-x64" \
             "dist/phantombot-${TAG}-darwin-arm64" \
             "dist/SHA256SUMS"

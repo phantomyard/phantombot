@@ -96,6 +96,18 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
       return updateAllowedUsersOnly(config, existing.token, svc);
     }
     // fallthrough to replace flow
+  } else {
+    p.note(
+      `How to get a Telegram Bot Token:\n` +
+        `  1. Open Telegram and search for "@BotFather"\n` +
+        `  2. Send him: /newbot\n` +
+        `  3. Give it a name and a username (must end in 'bot')\n` +
+        `  4. Copy the HTTP API Token he gives you.\n\n` +
+        `How to find your User ID:\n` +
+        `  1. Search for "@userinfobot" in Telegram\n` +
+        `  2. Start the chat, it will reply with your ID (e.g. 123456789).`,
+      "Setup Guide",
+    );
   }
 
   const token = await p.password({

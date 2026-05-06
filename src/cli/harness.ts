@@ -85,6 +85,16 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     "Detected harnesses",
   );
 
+  const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
+  if (!hasAnyHarness) {
+    p.note(
+      "No supported harness (claude, pi, gemini) was found on your PATH.\n" +
+      "You will need to install at least one of them before the agent can think.\n" +
+      "We will continue the setup anyway so your configuration is ready.",
+      "Warning: No Harness Found",
+    );
+  }
+
   const primary = await p.select<HarnessId>({
     message: "Primary harness",
     options: SUPPORTED_HARNESSES.map((id) => ({

@@ -13,10 +13,11 @@
 #      Gatekeeper accepts the unsigned-by-Apple binary.
 #   6. Installs to ~/.local/bin/phantombot (mode 0755).
 #   7. Warns if ~/.local/bin isn't on PATH.
-#   8. Launches `phantombot persona` to set up the first persona.
+#   8. Launches `phantombot init` to set up harness, persona, telegram, and
+#      (on Linux) the systemd background service.
 #
 # Override the install dir with PHANTOMBOT_INSTALL_DIR=/some/path.
-# Skip the persona TUI launch with PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
+# Skip the init TUI launch with PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
 #
 # Refusal modes (intentional — bail fast):
 #   - unsupported OS or arch
@@ -49,16 +50,10 @@ case "$uname_m" in
   x86_64|amd64)        arch="x64" ;;
   aarch64|arm64)       arch="arm64" ;;
   *)
-    printf 'phantombot: unsupported arch %s\n' "$uname_m" >&2
+    printf 'phantombot: unsupported arch %s (only x86_64 / aarch64 are released)\n' "$uname_m" >&2
     exit 1
     ;;
 esac
-
-# Only darwin-arm64 is built (Apple Silicon). Refuse Intel Mac.
-if [ "$platform" = "darwin" ] && [ "$arch" != "arm64" ]; then
-  printf 'phantombot: only darwin-arm64 (Apple Silicon) is released; %s on Mac is unsupported\n' "$arch" >&2
-  exit 1
-fi
 
 # --- preflight -----------------------------------------------------------
 
@@ -212,20 +207,27 @@ case ":$PATH:" in
     ;;
 esac
 
-# --- launch the persona TUI ---------------------------------------------
+# --- launch the init wizard ---------------------------------------------
 
 if [ -n "${PHANTOMBOT_SKIP_TUI:-}" ]; then
   exit 0
 fi
 
-# If stdin is not a TTY (e.g. piped from `curl … | sh`), the @clack
-# prompts in `phantombot persona` will misbehave — exit cleanly with
-# a next-step hint instead of trying to exec the TUI.
+# If stdin or stdout is not a TTY (e.g. when this script was piped from
+# `curl … | sh`), reattach all three streams to /dev/tty before exec'ing
+# the wizard. @clack/prompts checks `process.stdout.isTTY` to enable its
+# interactive renderer; redirecting only stdin would leave the spinner
+# and prompt output rendering against a pipe and degrade the UI.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
-  printf '\nnext, run this to set up your first persona:\n'
-  printf '  phantombot persona\n\n'
-  exit 0
+  if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '\nphantombot: not a TTY (script was piped). Launching interactive setup via /dev/tty.\n\n'
+    exec "$INSTALL_DIR/phantombot" init </dev/tty >/dev/tty 2>&1
+  else
+    printf '\nnext, run this to finish setup:\n'
+    printf '  phantombot init\n\n'
+    exit 0
+  fi
 fi
 
-printf '\nphantombot: launching persona TUI to set up your first persona.\n\n'
-exec "$INSTALL_DIR/phantombot" persona
+printf '\nphantombot: launching setup wizard.\n\n'
+exec "$INSTALL_DIR/phantombot" init
