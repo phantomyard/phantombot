@@ -423,10 +423,10 @@ describe("TaskStore.silent / createdBy", () => {
       schedule: "0 * * * *",
       prompt: "x",
       now: NOW,
-      createdBy: "telegram:7995070089",
+      createdBy: "telegram:123456789",
     });
     if (!r.ok) throw new Error("setup");
-    expect(r.task.createdBy).toBe("telegram:7995070089");
+    expect(r.task.createdBy).toBe("telegram:123456789");
   });
 });
 
