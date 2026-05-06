@@ -177,8 +177,9 @@ Look in this order; don't ask the user for anything that's already
 discoverable:
 
   1. process.env  — already loaded; phantombot sources both \`~/.env\` and
-                    \`~/.config/phantombot/.env\` via systemd EnvironmentFile=,
-                    so most credentials are available without re-reading.
+                    \`~/.config/phantombot/.env\` at startup (systemd
+                    EnvironmentFile= on Linux, self-loaded on macOS), so
+                    most credentials are available without re-reading.
   2. ~/.env       — the agent's general credentials file. The canonical
                     home for things like GITHUB_TOKEN, OPENAI_API_KEY, ssh
                     passphrases.

@@ -34,7 +34,11 @@ import {
 } from "../lib/personaArchive.ts";
 import { adoptAsDefaultIfMissing } from "../lib/personaDefault.ts";
 import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import {
+  defaultServiceControl,
+  restartCommand,
+  type ServiceControl,
+} from "../lib/platform.ts";
 import { defaultEnvFilePath, updateEnvFile } from "../lib/envFile.ts";
 import { parseOpenClawVoice } from "../lib/voice.ts";
 import { applyVoiceConfig } from "./voice.ts";
@@ -442,7 +446,7 @@ async function maybeRestartHint(
   if (await svc.isActive()) {
     out.write(
       "\nphantombot is currently running. Restart to pick up the imported persona/config:\n" +
-        "  systemctl --user restart phantombot\n",
+        `  ${restartCommand()}\n`,
     );
   }
 }

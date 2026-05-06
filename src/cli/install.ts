@@ -1,6 +1,9 @@
 /**
- * `phantombot install` — write a systemd --user unit for `phantombot run`,
- * reload, enable, start.
+ * `phantombot install` — write the host-appropriate service-manager
+ * units for `phantombot run` and start them.
+ *
+ *   - Linux  → systemd --user units in ~/.config/systemd/user/
+ *   - macOS  → launchd plists in ~/Library/LaunchAgents/
  *
  * Requires the compiled binary (process.execPath ends in 'phantombot' or
  * the user passes --bin). Running from `bun src/index.ts` won't work
@@ -11,6 +14,17 @@
 import { defineCommand } from "citty";
 import { basename } from "node:path";
 
+import {
+  BunLaunchctlRunner,
+  defaultPlistPath,
+  guiDomain,
+  heartbeatPlistPath as launchdHeartbeatPath,
+  installPhantombotPlists,
+  type LaunchctlRunner,
+  nightlyPlistPath as launchdNightlyPath,
+  tickPlistPath as launchdTickPath,
+} from "../lib/launchd.ts";
+import { currentPlatform, logsCommand, restartCommand } from "../lib/platform.ts";
 import {
   BunSystemctlRunner,
   buildSystemctlEnv,
@@ -25,12 +39,16 @@ import type { WriteSink } from "../lib/io.ts";
 
 export interface RunInstallInput {
   binPath?: string;
+  /** systemd unit path (Linux) — defaults to ~/.config/systemd/user/phantombot.service. */
   unitPath?: string;
+  /** launchd plist path (macOS) — defaults to ~/Library/LaunchAgents/dev.phantombot.phantombot.plist. */
+  plistPath?: string;
   /**
-   * Optional path overrides for the heartbeat/nightly companion units —
-   * pass-through to installPhantombotUnit. Tests use these to keep all
-   * unit writes inside a tmpdir; production leaves them undefined and
-   * the helper picks the per-user XDG locations.
+   * Optional path overrides for the heartbeat/nightly/tick companion
+   * units — pass-through to the platform-specific install helpers.
+   * Tests use these to keep all unit writes inside a tmpdir; production
+   * leaves them undefined and the helper picks the per-user XDG / Library
+   * locations.
    */
   heartbeatServicePath?: string;
   heartbeatTimerPath?: string;
@@ -38,12 +56,24 @@ export interface RunInstallInput {
   nightlyTimerPath?: string;
   tickServicePath?: string;
   tickTimerPath?: string;
+  heartbeatPlistPath?: string;
+  nightlyPlistPath?: string;
+  tickPlistPath?: string;
   out?: WriteSink;
   err?: WriteSink;
   /** Override systemctl runner for testing. */
   systemctl?: SystemctlRunner;
+  /** Override launchctl runner for testing. */
+  launchctl?: LaunchctlRunner;
   /** Override systemd-env detection for testing. */
   ensureSystemdEnv?: () => UserSystemdEnv;
+  /**
+   * Override the platform check for testing. Defaults to currentPlatform()
+   * which reads process.platform.
+   */
+  platform?: "linux" | "darwin" | "unsupported";
+  /** Override gui domain (e.g. "gui/501") on darwin. Defaults to gui/<current uid>. */
+  domain?: string;
 }
 
 export async function runInstall(input: RunInstallInput = {}): Promise<number> {
@@ -59,6 +89,26 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
     return 2;
   }
 
+  const platform = input.platform ?? currentPlatform();
+  switch (platform) {
+    case "linux":
+      return runInstallLinux(input, binPath, out, err);
+    case "darwin":
+      return runInstallDarwin(input, binPath, out, err);
+    default:
+      err.write(
+        `phantombot install supports linux and darwin only; this host reports platform=${process.platform}\n`,
+      );
+      return 2;
+  }
+}
+
+async function runInstallLinux(
+  input: RunInstallInput,
+  binPath: string,
+  out: WriteSink,
+  err: WriteSink,
+): Promise<number> {
   const sysEnv = input.ensureSystemdEnv
     ? input.ensureSystemdEnv()
     : ensureUserSystemdEnv();
@@ -92,8 +142,45 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   if (!result.installed) return 1;
 
   out.write(
-    `\nview logs:    journalctl --user -u phantombot -f\n` +
-      `restart:      systemctl --user restart phantombot\n` +
+    `\nview logs:    ${logsCommand()}\n` +
+      `restart:      ${restartCommand()}\n` +
+      `uninstall:    phantombot uninstall\n`,
+  );
+  return 0;
+}
+
+async function runInstallDarwin(
+  input: RunInstallInput,
+  binPath: string,
+  out: WriteSink,
+  err: WriteSink,
+): Promise<number> {
+  const launchctl = input.launchctl ?? new BunLaunchctlRunner();
+  let domain: string;
+  try {
+    domain = input.domain ?? guiDomain();
+  } catch (e) {
+    err.write(`cannot determine launchd gui domain: ${(e as Error).message}\n`);
+    return 2;
+  }
+
+  const result = await installPhantombotPlists({
+    binPath,
+    plistPath: input.plistPath ?? defaultPlistPath(),
+    heartbeatPlistPath:
+      input.heartbeatPlistPath ?? launchdHeartbeatPath(),
+    nightlyPlistPath: input.nightlyPlistPath ?? launchdNightlyPath(),
+    tickPlistPath: input.tickPlistPath ?? launchdTickPath(),
+    domain,
+    launchctl,
+    out,
+    err,
+  });
+  if (!result.installed) return 1;
+
+  out.write(
+    `\nview logs:    ${logsCommand()}\n` +
+      `restart:      ${restartCommand()}\n` +
       `uninstall:    phantombot uninstall\n`,
   );
   return 0;
@@ -103,7 +190,7 @@ export default defineCommand({
   meta: {
     name: "install",
     description:
-      "Install a systemd --user unit for phantombot run, reload, enable, and start it.",
+      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS) and start it.",
   },
   async run() {
     const code = await runInstall();

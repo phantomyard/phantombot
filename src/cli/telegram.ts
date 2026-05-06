@@ -13,7 +13,7 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { telegramGetMe, type GetMeResult } from "../lib/telegramApi.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { maybePromptRestart } from "./harness.ts";

@@ -33,7 +33,7 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/systemd.ts";
+import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { loadState, saveState } from "../state.ts";
 import { runCreatePersona } from "./create-persona.ts";
 import { runImportPersona } from "./import-persona.ts";

@@ -358,8 +358,12 @@ async function defaultRerenderUnitIfStale(): Promise<{
  * Returns `isActive: false` when systemd isn't reachable (no linger / no
  * runtime dir) so callers can treat "service unknown" the same as
  * "service not running" — they don't need to print a restart hint.
+ *
+ * Most callers want the platform-router `defaultServiceControl` in
+ * `./platform.ts`, which dispatches to this on Linux and to launchd on
+ * macOS. This export stays for direct Linux-only usage and tests.
  */
-export function defaultServiceControl(): ServiceControl {
+export function defaultSystemdServiceControl(): ServiceControl {
   return {
     async isActive() {
       const sysEnv = ensureUserSystemdEnv();
