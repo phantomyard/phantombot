@@ -127,7 +127,7 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
   const allowedRaw = await p.text({
     message:
       "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning)",
-    placeholder: "7995070089",
+    placeholder: "123456789",
     defaultValue: currentAllowed,
   });
   if (p.isCancel(allowedRaw)) {
@@ -177,7 +177,7 @@ async function updateAllowedUsersOnly(
   const allowedRaw = await p.text({
     message:
       "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning)",
-    placeholder: "7995070089",
+    placeholder: "123456789",
     defaultValue: currentAllowed,
   });
   if (p.isCancel(allowedRaw)) {
