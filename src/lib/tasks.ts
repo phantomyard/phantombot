@@ -431,11 +431,20 @@ export class TaskStore {
    * Return all runs for a task, most recent first.
    */
   taskRuns(taskId: number): TaskRunRow[] {
+    interface RawTaskRunRow {
+      id: number;
+      task_id: number;
+      fired_at: string;
+      status: TaskRunRow["status"];
+      exit_code: number;
+      output_excerpt: string;
+      delivered: number;
+    }
     const rows = this.db
       .prepare(
-        "SELECT * FROM task_runs WHERE task_id = ? ORDER BY fired_at DESC LIMIT 50",
+        "SELECT id, task_id, fired_at, status, exit_code, output_excerpt, delivered FROM task_runs WHERE task_id = ? ORDER BY fired_at DESC LIMIT 50",
       )
-      .all(taskId) as (Omit<TaskRunRow, "firedAt" | "delivered"> & { fired_at: string; delivered: number })[];
+      .all(taskId) as RawTaskRunRow[];
     return rows.map((r) => ({
       id: r.id,
       taskId: r.task_id,
@@ -466,23 +475,38 @@ export class TaskStore {
    */
   selftest(persona: string, now: Date = new Date()): { id: number; firesAt: Date } {
     const firesAt = new Date(now.getTime() + 60_000);
+    // Named columns + named parameters: every value is a binding, not an
+    // inline literal. Adding a new task column won't silently shift
+    // positional values out from under us.
     const stmt = this.db.prepare(
       `INSERT INTO tasks (
          persona, description, schedule, prompt,
          created_at, next_run_at, next_review_at, active,
          one_off, expires_at, max_runs, silent, created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, NULL, NULL, 0, ?)`,
+       ) VALUES (
+         $persona, $description, $schedule, $prompt,
+         $createdAt, $nextRunAt, $nextReviewAt, $active,
+         $oneOff, $expiresAt, $maxRuns, $silent, $createdBy
+       )`,
     );
-    const result = stmt.run(
-      persona,
-      "selftest",
-      "",
-      "This is a phantombot scheduler selftest. Reply with only: 'SELFTEST OK — ' followed by the current time. Then exit.",
-      now.toISOString(),
-      firesAt.toISOString(),
-      new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      "selftest",
-    );
+    const result = stmt.run({
+      $persona: persona,
+      $description: "selftest",
+      $schedule: "",
+      $prompt:
+        "This is a phantombot scheduler selftest. Reply with only: 'SELFTEST OK — ' followed by the current time. Then exit.",
+      $createdAt: now.toISOString(),
+      $nextRunAt: firesAt.toISOString(),
+      $nextReviewAt: new Date(
+        now.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      $active: 1,
+      $oneOff: 1,
+      $expiresAt: null,
+      $maxRuns: null,
+      $silent: 0,
+      $createdBy: "selftest",
+    });
     return { id: Number(result.lastInsertRowid), firesAt };
   }
 }

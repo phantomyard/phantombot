@@ -36,8 +36,8 @@ export function parseDuration(raw: string): ParseDurationResult | ParseError {
       error: `invalid duration "${raw}" — use format like 10m, 5h, 2d, 1w`,
     };
   }
-  const num = parseInt(m[1], 10);
-  const unit = m[2].toLowerCase();
+  const num = parseInt(m[1]!, 10);
+  const unit = m[2]!.toLowerCase();
   let ms: number;
   switch (unit) {
     case "s":
@@ -68,7 +68,7 @@ export function parseDuration(raw: string): ParseDurationResult | ParseError {
  * Parse an absolute timestamp. Accepts ISO 8601 or a looser
  * "YYYY-MM-DD HH:MM" format with optional timezone offset.
  */
-export function parseAt(raw: string, now: Date = new Date()): { ok: true; firesAt: Date } | ParseError {
+export function parseAt(raw: string, _now: Date = new Date()): { ok: true; firesAt: Date } | ParseError {
   const trimmed = raw.trim();
   // Try ISO 8601 first.
   let d = new Date(trimmed);
@@ -92,7 +92,7 @@ export function parseAt(raw: string, now: Date = new Date()): { ok: true; firesA
 
 /**
  * Convert a human repetition interval to a 5-field cron expression.
- * Supported: "Ns", "Nm", "Nh", "Nd", "Nw" for small N.
+ * Supported: "Nm", "Nh", "Nd" for small N, and "1w".
  *
  * Mapping (all anchored at :00 or :00:00 for sub-minute alignment):
  *   30s  - not expressible as 5-field cron; returns error (use 1m)
@@ -103,8 +103,18 @@ export function parseAt(raw: string, now: Date = new Date()): { ok: true; firesA
  *   2h   - every 2 hours at :00
  *   6h   - every 6 hours at :00
  *   1d   - midnight UTC every day
- *   2d   - midnight UTC every 2 days
+ *   2d   - midnight UTC every 2 days (drifts at month boundary; see below)
  *   1w   - midnight UTC every Sunday
+ *
+ * KNOWN LIMITATION (cron month-boundary drift):
+ *   Cron's day-of-month step ("(asterisk)/N" in the day field) restarts every
+ *   month, so any --every Nd where N does not divide the month length, and
+ *   any --every Nw for N > 1, will drift at month boundaries. Example:
+ *   "0 0 (asterisk)/14 (asterisk) (asterisk)" fires on day 1 and day 15 of
+ *   each month, not strictly every 14 days. We accept this for daily
+ *   intervals (it's how POSIX cron works and users expect it for "every 2
+ *   days"), but multi-week intervals are explicitly refused — pick "1w"
+ *   (every Sunday) or use --in for a one-off.
  */
 export function parseEvery(raw: string): { ok: true; cron: string } | ParseError {
   const parsed = parseDuration(raw);
@@ -142,14 +152,18 @@ export function parseEvery(raw: string): { ok: true; cron: string } | ParseError
     return { ok: true, cron: `0 0 */${days} * *` };
   }
 
-  // >= 1w → weekly (midnight Sunday every N weeks using day-of-week)
+  // >= 1w → weekly (midnight Sunday)
   const weeks = Math.floor(ms / WEEK_MS);
   if (weeks === 1) {
     return { ok: true, cron: "0 0 * * 0" };
   }
-  // Multi-week: use day-of-month stepping (first of month every N weeks ≈ every 7*N days)
-  const days = weeks * 7;
-  return { ok: true, cron: `0 0 */${days} * *` };
+  // Multi-week intervals can't be expressed as a stable cron (day-of-month
+  // step resets each month → drift). Refuse and point the user at
+  // alternatives.
+  return {
+    ok: false,
+    error: `--every ${label} drifts at month boundaries — use "1w" (every Sunday) or schedule a one-off with --at`,
+  };
 }
 
 /**

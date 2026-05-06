@@ -95,9 +95,6 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     transport = input.transport ?? new HttpTelegramTransport(tg.token);
   }
 
-  // Build path to phantombot binary for self-calling notify.
-  const phantombotBin = process.execPath;
-
   try {
     // Expire any tasks past their expires_at before processing due.
     taskStore.expireStaleTasks(now);

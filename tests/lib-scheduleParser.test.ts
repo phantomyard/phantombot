@@ -134,6 +134,18 @@ describe("parseEvery", () => {
     const r = parseEvery("banana");
     expect(r.ok).toBe(false);
   });
+
+  test("rejects multi-week intervals (cron drift at month boundaries)", () => {
+    const r = parseEvery("2w");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("drifts");
+  });
+
+  test("rejects 4w as well (forces user to 1w or one-off)", () => {
+    const r = parseEvery("4w");
+    expect(r.ok).toBe(false);
+  });
 });
 
 describe("parseFor", () => {

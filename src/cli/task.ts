@@ -172,8 +172,15 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
 
     const t = result.task;
 
-    // Write [commitment] to today's daily file.
-    await writeCommitmentToDaily(config, t);
+    // Write [commitment] to today's daily file. If this fails the agent
+    // loses an audit-trail row — surface to stderr so the user notices,
+    // not just the structured log.
+    const commitErr = await writeCommitmentToDaily(config, t);
+    if (commitErr) {
+      err.write(
+        `warning: task ${t.id} created but commitment log write failed: ${commitErr}\n`,
+      );
+    }
 
     // Mandatory echo — agent contract requires repeating this to user.
     out.write(
@@ -198,7 +205,13 @@ function describeExpiry(t: Task): string {
   return parts.join(" or ") || "none set";
 }
 
-async function writeCommitmentToDaily(config: Config, t: Task): Promise<void> {
+/**
+ * Append a [commitment] line to today's daily memory file so the agent
+ * has a second source of truth alongside the task DB. Best-effort: if
+ * the write fails we return the error string so the caller can surface
+ * it to the user (the task itself was already persisted).
+ */
+async function writeCommitmentToDaily(config: Config, t: Task): Promise<string | null> {
   try {
     const dateStr = t.nextRunAt.toISOString().slice(0, 10);
     const dailyPath = join(personaDir(config, config.defaultPersona), "memory", `${dateStr}.md`);
@@ -207,11 +220,15 @@ async function writeCommitmentToDaily(config: Config, t: Task): Promise<void> {
     const { dirname } = await import("node:path");
     await mkdir(dirname(dailyPath), { recursive: true });
     await appendFile(dailyPath, line, "utf8");
+    return null;
   } catch (e) {
-    // Best-effort only — don't fail task creation if the commit log write fails.
+    const msg = (e as Error).message;
+    // Persistent log entry too, in case stderr was redirected.
     log.warn("task: failed to write commitment to daily file", {
-      error: (e as Error).message,
+      taskId: t.id,
+      error: msg,
     });
+    return msg;
   }
 }
 
@@ -355,6 +372,9 @@ export async function runTaskSelftest(
       `  or wait 60s and check phantombot task list\n`,
     );
     return 0;
+  } catch (e) {
+    err.write(`selftest failed: ${(e as Error).message}\n`);
+    return 1;
   } finally {
     if (!input.store) store.close();
   }

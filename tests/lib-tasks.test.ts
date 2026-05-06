@@ -344,11 +344,13 @@ describe("TaskStore.logRun / taskRuns", () => {
     const runs = store.taskRuns(r.id);
     expect(runs.length).toBe(2);
     // Most recent first.
-    expect(runs[0].status).toBe("error");
-    expect(runs[0].delivered).toBe(false);
-    expect(runs[1].status).toBe("ok");
-    expect(runs[1].delivered).toBe(true);
-    expect(runs[1].outputExcerpt).toBe("Task finished successfully");
+    const [first, second] = runs;
+    if (!first || !second) throw new Error("expected 2 runs");
+    expect(first.status).toBe("error");
+    expect(first.delivered).toBe(false);
+    expect(second.status).toBe("ok");
+    expect(second.delivered).toBe(true);
+    expect(second.outputExcerpt).toBe("Task finished successfully");
   });
 
   test("taskRuns returns empty for task with no runs", () => {
@@ -382,7 +384,9 @@ describe("TaskStore.logRun / taskRuns", () => {
       delivered: false,
     });
     const runs = store.taskRuns(r.id);
-    expect(runs[0].outputExcerpt.length).toBe(500);
+    const first = runs[0];
+    if (!first) throw new Error("expected 1 run");
+    expect(first.outputExcerpt.length).toBe(500);
   });
 });
 
