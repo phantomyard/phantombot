@@ -1,14 +1,59 @@
-import { execFile, execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { userInfo } from "node:os";
 
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
-import { loadConfig } from "../config.ts";
+import { type Config, loadConfig } from "../config.ts";
 import { ensureUserSystemdEnv } from "../lib/systemd.ts";
-import { runHarness } from "./harness.ts";
+import {
+  detectAvailability,
+  type HarnessId,
+  runHarness,
+} from "./harness.ts";
 import { runInstall } from "./install.ts";
 import { runPersona } from "./persona.ts";
 import { runTelegram } from "./telegram.ts";
+
+export interface InitFlowInput {
+  config: Config;
+  availability: Record<HarnessId, string | undefined>;
+}
+
+export interface InitFlowDeps {
+  runHarness: (input: {
+    config: Config;
+    availability: Record<HarnessId, string | undefined>;
+  }) => Promise<number>;
+  runPersona: () => Promise<number>;
+  runTelegram: () => Promise<number>;
+}
+
+/**
+ * Pure orchestration of the three configuration wizards: harness → persona
+ * → telegram. Short-circuits on the first non-zero exit. Extracted from the
+ * interactive `run()` so the ordering and short-circuit behavior is testable
+ * without a TTY. The install wizard runs after this in `run()` so it can be
+ * gated on a separate user confirmation and a Linux-only linger pre-check.
+ */
+export async function runInitFlow(
+  input: InitFlowInput,
+  deps: InitFlowDeps,
+): Promise<number> {
+  const harnessCode = await deps.runHarness({
+    config: input.config,
+    availability: input.availability,
+  });
+  if (harnessCode !== 0) return harnessCode;
+
+  const personaCode = await deps.runPersona();
+  if (personaCode !== 0) return personaCode;
+
+  const telegramCode = await deps.runTelegram();
+  if (telegramCode !== 0) return telegramCode;
+
+  return 0;
+}
 
 /**
  * Cheap "is this CLI installed and runnable?" probe. We deliberately use
@@ -36,7 +81,6 @@ export default defineCommand({
     description: "Launch the full Phantombot unified setup wizard.",
   },
   async run() {
-    console.clear();
     p.intro("Welcome to Phantombot");
 
     p.note(
@@ -63,11 +107,11 @@ export default defineCommand({
 
     const spinner = p.spinner();
     spinner.start("Probing installed AI harnesses to find a configured one...");
-    
-    // We check which ones are on PATH first
-    const { detectAvailability } = await import("./harness.ts");
+
+    // Check which ones are on PATH. Reused below by `runHarness` so we don't
+    // walk PATH twice during the same wizard.
     const avail = await detectAvailability(config);
-    
+
     const probeResults: Record<string, boolean> = {};
     for (const [id, bin] of Object.entries(avail)) {
       if (bin) {
@@ -76,9 +120,9 @@ export default defineCommand({
         probeResults[id] = false;
       }
     }
-    
+
     spinner.stop("Probe complete.");
-    
+
     const configured = Object.entries(probeResults)
       .filter(([, isReady]) => isReady)
       .map(([id]) => id);
@@ -87,32 +131,25 @@ export default defineCommand({
       p.note("Found configured AI harnesses: " + configured.join(", "), "Probe result");
     } else {
       p.note(
-        "No AI harness replied to a test 'hello'.\n" +
-        "You might need to authenticate with them first (e.g. running 'claude' or 'pi' manually), " +
+        "No AI harness responded to '--version'.\n" +
+        "You might need to install one (claude, pi, or gemini) first, " +
         "but we can still set up the configuration now.",
         "Probe result"
       );
     }
 
-    // 1. Harness
-
-    const harnessCode = await runHarness();
-    if (harnessCode !== 0) {
-      process.exitCode = harnessCode;
-      return;
-    }
-
-    // 2. Persona
-    const personaCode = await runPersona();
-    if (personaCode !== 0) {
-      process.exitCode = personaCode;
-      return;
-    }
-
-    // 3. Telegram
-    const telegramCode = await runTelegram();
-    if (telegramCode !== 0) {
-      process.exitCode = telegramCode;
+    // 1-3: harness → persona → telegram, orchestrated by runInitFlow so
+    // the ordering + short-circuit behavior can be tested without a TTY.
+    const flowCode = await runInitFlow(
+      { config, availability: avail },
+      {
+        runHarness: (input) => runHarness(input),
+        runPersona,
+        runTelegram,
+      },
+    );
+    if (flowCode !== 0) {
+      process.exitCode = flowCode;
       return;
     }
 
@@ -125,9 +162,16 @@ export default defineCommand({
     if (process.platform === "linux") {
       const sysEnv = ensureUserSystemdEnv();
       if (!sysEnv.ready && sysEnv.reason?.includes("enable linger first")) {
+        // Resolve the username in Node, not the shell — `$USER` may be
+        // unset/empty in stripped environments (some sudoers configs,
+        // minimal containers) or contain unexpected characters that
+        // would corrupt a shell-interpolated command. Fall back to
+        // `os.userInfo()` which reads from the password database.
+        const username = process.env.USER || userInfo().username;
+        const lingerCmd = `sudo loginctl enable-linger ${username}`;
         p.note(
           "Linux requires 'linger' to run services in the background when you are not logged in.\n" +
-          "We need to run 'sudo loginctl enable-linger $USER' to configure this.",
+          `We need to run '${lingerCmd}' to configure this.`,
           "Systemd Linger Required"
         );
         const installLinger = await p.confirm({
@@ -142,10 +186,14 @@ export default defineCommand({
         }
 
         try {
-          execSync(`sudo loginctl enable-linger $USER`, { stdio: "inherit" });
+          // Pass the username as an explicit argv element rather than via a
+          // shell-interpolated string — no command injection or word-splitting
+          // surprises if the resolved username contains spaces or shell
+          // metacharacters.
+          execFileSync("sudo", ["loginctl", "enable-linger", username], { stdio: "inherit" });
           p.note("Linger enabled successfully.", "Success");
         } catch (error) {
-          p.note("Failed to enable linger. You may need to run 'sudo loginctl enable-linger $USER' manually.", "Error");
+          p.note(`Failed to enable linger. You may need to run '${lingerCmd}' manually.`, "Error");
         }
       }
     }
@@ -173,7 +221,7 @@ export default defineCommand({
         p.outro("Setup complete! Start your bot anytime with `phantombot run`.");
       }
     }
-    
+
     process.exitCode = 0;
   },
 });

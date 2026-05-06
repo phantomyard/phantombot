@@ -69,11 +69,17 @@ export async function applyHarnessChain(
 interface RunInput {
   config?: Config;
   serviceControl?: ServiceControl;
+  /**
+   * Optional pre-computed availability map. If provided, skips the PATH
+   * sweep — useful when the caller (e.g. `init`) has already detected
+   * availability and we don't want to re-walk PATH for every harness.
+   */
+  availability?: Record<HarnessId, string | undefined>;
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
-  const availability = await detectAvailability(config);
+  const availability = input.availability ?? (await detectAvailability(config));
   const svc = input.serviceControl ?? defaultServiceControl();
 
   p.intro("Configure the harness chain");
