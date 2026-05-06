@@ -415,12 +415,12 @@ export default defineCommand({
       },
       args: {
         prompt: {
-          type: "string",
+          type: "positional",
           required: true,
           description: "Prompt to fire at the scheduled time.",
         },
         description: {
-          type: "string",
+          type: "positional",
           required: true,
           description: "Human-readable label shown by `task list`.",
         },
