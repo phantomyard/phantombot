@@ -69,11 +69,17 @@ export async function applyHarnessChain(
 interface RunInput {
   config?: Config;
   serviceControl?: ServiceControl;
+  /**
+   * Optional pre-computed availability map. If provided, skips the PATH
+   * sweep — useful when the caller (e.g. `init`) has already detected
+   * availability and we don't want to re-walk PATH for every harness.
+   */
+  availability?: Record<HarnessId, string | undefined>;
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
-  const availability = await detectAvailability(config);
+  const availability = input.availability ?? (await detectAvailability(config));
   const svc = input.serviceControl ?? defaultServiceControl();
 
   p.intro("Configure the harness chain");
@@ -84,6 +90,16 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     ).join("\n"),
     "Detected harnesses",
   );
+
+  const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
+  if (!hasAnyHarness) {
+    p.note(
+      "No supported harness (claude, pi, gemini) was found on your PATH.\n" +
+      "You will need to install at least one of them before the agent can think.\n" +
+      "We will continue the setup anyway so your configuration is ready.",
+      "Warning: No Harness Found",
+    );
+  }
 
   const primary = await p.select<HarnessId>({
     message: "Primary harness",

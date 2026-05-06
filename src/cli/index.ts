@@ -24,6 +24,7 @@ import telegramCmd from "./telegram.ts";
 import harnessCmd from "./harness.ts";
 import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
+import initCmd from "./init.ts";
 import runCmd from "./run.ts";
 import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
@@ -49,6 +50,7 @@ export const mainCommand = defineCommand({
     harness: harnessCmd,
     embedding: embeddingCmd,
     env: envCmd,
+    init: initCmd,
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,
