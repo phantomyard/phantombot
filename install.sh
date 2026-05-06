@@ -219,10 +219,11 @@ if [ -n "${PHANTOMBOT_SKIP_TUI:-}" ]; then
 fi
 
 # If stdin is not a TTY (e.g. piped from `curl … | sh`), the @clack
-# prompts will misbehave. Detect and print the next-step hint instead.
+# prompts in `phantombot persona` will misbehave — exit cleanly with
+# a next-step hint instead of trying to exec the TUI.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
-  printf '\nphantombot: not a TTY (script was piped). Run this next to set up your first persona:\n' >&2
-  printf '  phantombot persona\n\n' >&2
+  printf '\nnext, run this to set up your first persona:\n'
+  printf '  phantombot persona\n\n'
   exit 0
 fi
 
