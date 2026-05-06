@@ -95,16 +95,16 @@ export function parseAt(raw: string, now: Date = new Date()): { ok: true; firesA
  * Supported: "Ns", "Nm", "Nh", "Nd", "Nw" for small N.
  *
  * Mapping (all anchored at :00 or :00:00 for sub-minute alignment):
- *   30s  → not expressible as 5-field cron; returns error (use 1m)
- *   1m   → * * * * *        (every minute)
- *   5m   → */5 * * * *
- *   30m  → */30 * * * *
- *   1h   → 0 * * * *        (top of every hour)
- *   2h   → 0 */2 * * *
- *   6h   → 0 */6 * * *
- *   1d   → 0 0 * * *        (midnight UTC every day)
- *   2d   → 0 0 */2 * *
- *   1w   → 0 0 * * 0        (midnight UTC every Sunday)
+ *   30s  - not expressible as 5-field cron; returns error (use 1m)
+ *   1m   - every minute
+ *   5m   - every 5 minutes
+ *   30m  - every 30 minutes
+ *   1h   - top of every hour
+ *   2h   - every 2 hours at :00
+ *   6h   - every 6 hours at :00
+ *   1d   - midnight UTC every day
+ *   2d   - midnight UTC every 2 days
+ *   1w   - midnight UTC every Sunday
  */
 export function parseEvery(raw: string): { ok: true; cron: string } | ParseError {
   const parsed = parseDuration(raw);
