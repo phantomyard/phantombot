@@ -185,7 +185,7 @@ case ":$PATH:" in
 
     if [ -n "$rc_file" ]; then
       # Make sure the rc file exists so the grep + append below behave.
-      [ -f "$rc_file" ] || : > "$rc_file"
+      [ -f "$rc_file" ] || touch "$rc_file"
 
       # Substring match: if the install dir is mentioned anywhere in the
       # rc file (export, prepend, comment) assume the user has it covered
