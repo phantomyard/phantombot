@@ -81,13 +81,13 @@ describe("parseOpenClawTelegram", () => {
           accounts: {
             default: {
               botToken: "111:abc",
-              execApprovals: { approvers: ["7995070089"] },
+              execApprovals: { approvers: ["123456789"] },
             },
           },
         },
       },
     });
-    expect(r).toEqual({ token: "111:abc", allowedUserIds: [7995070089] });
+    expect(r).toEqual({ token: "111:abc", allowedUserIds: [123456789] });
   });
 
   test("supports the older flat layout", () => {
