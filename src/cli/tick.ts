@@ -23,6 +23,10 @@ import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  HttpTelegramTransport,
+  type TelegramTransport,
+} from "../channels/telegram.ts";
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -50,6 +54,8 @@ export interface RunTickInput {
   taskStore?: TaskStore;
   memory?: MemoryStore;
   harnesses?: Harness[];
+  /** Inject telegram transport for testing. */
+  transport?: TelegramTransport;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -82,7 +88,20 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     return 1;
   }
 
+  // Init telegram transport for notifications.
+  let transport: TelegramTransport | undefined;
+  const tg = config.channels.telegram;
+  if (tg && tg.allowedUserIds.length > 0) {
+    transport = input.transport ?? new HttpTelegramTransport(tg.token);
+  }
+
+  // Build path to phantombot binary for self-calling notify.
+  const phantombotBin = process.execPath;
+
   try {
+    // Expire any tasks past their expires_at before processing due.
+    taskStore.expireStaleTasks(now);
+
     const due = taskStore.due(now);
     if (due.length === 0) {
       log.debug("tick: no due tasks");
@@ -115,6 +134,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       }
 
       let finalText = "";
+      let runError: string | undefined;
       try {
         for await (const chunk of runTurn({
           persona: task.persona,
@@ -130,15 +150,53 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           if (chunk.type === "done") finalText = chunk.finalText;
         }
       } catch (e) {
+        runError = (e as Error).message;
         log.error("tick: task threw", {
           id: task.id,
-          error: (e as Error).message,
+          error: runError,
         });
-        // Even on throw we advance next_run_at — otherwise a permanently
-        // failing task would re-fire every tick forever.
-        taskStore.recordRun(task.id, now);
-        continue;
       }
+
+      // Log the fire to task_runs for auditability.
+      const outputExcerpt = runError
+        ? `ERROR: ${runError}`.slice(0, 500)
+        : finalText.slice(0, 500);
+      const status = runError ? "error" : "ok";
+      const exitCode = runError ? 1 : 0;
+
+      // For non-silent, non-review tasks: notify the user via Telegram.
+      let delivered = false;
+      if (!isReview && !task.silent && !runError && finalText.trim().length > 0 && transport) {
+        try {
+          const notifyMsg = formatTaskNotify(task, finalText);
+          for (const chatId of tg!.allowedUserIds) {
+            try {
+              await transport.sendMessage(chatId, notifyMsg);
+              delivered = true;
+            } catch (e) {
+              log.warn("tick: notify send failed", {
+                taskId: task.id,
+                chatId,
+                error: (e as Error).message,
+              });
+            }
+          }
+        } catch (e) {
+          log.warn("tick: notify failed", {
+            taskId: task.id,
+            error: (e as Error).message,
+          });
+        }
+      }
+
+      taskStore.logRun({
+        taskId: task.id,
+        firedAt: now,
+        status: status as "ok" | "error",
+        exitCode,
+        outputExcerpt,
+        delivered,
+      });
 
       if (isReview) {
         const decision = parseReviewDecision(finalText);
@@ -148,11 +206,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           replyChars: finalText.length,
         });
         taskStore.recordReview(task.id, decision, now);
-        // Don't recordRun on review — review IS the run for that minute.
       } else {
         taskStore.recordRun(task.id, now);
       }
-      out.write(`tick: task ${task.id} done (${finalText.length} chars)\n`);
+      out.write(
+        `tick: task ${task.id} done (${finalText.length} chars, ${status}, notified=${delivered})\n`,
+      );
     }
     return 0;
   } finally {
@@ -160,6 +219,16 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     if (!input.memory) await memory.close();
     lock.release();
   }
+}
+
+/**
+ * Format a task's output as a Telegram notification message.
+ * Truncates to avoid hitting Telegram's 4096 char limit.
+ */
+function formatTaskNotify(task: Task, output: string): string {
+  const header = `📋 *${task.description}*`;
+  const body = output.trim().slice(0, 3500); // leave room for Markdown
+  return `${header}\n\n${body}`;
 }
 
 /**
@@ -179,7 +248,8 @@ function buildReviewPrompt(t: Task): string {
   return (
     `Self-review of scheduled task #${t.id}: "${t.description}".\n` +
     `\n` +
-    `You scheduled this on ${t.createdAt.toISOString()}. It has run ${t.runCount} times. Schedule: ${t.schedule}.\n` +
+    `You scheduled this on ${t.createdAt.toISOString()}. It has run ${t.runCount} times. ` +
+    (t.schedule ? `Schedule: ${t.schedule}.\n` : `Type: one-off.\n`) +
     `Original prompt:\n  ${t.prompt}\n` +
     `\n` +
     `Looking at recent memory + this task's recent run history, decide:\n` +
