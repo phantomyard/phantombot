@@ -40,18 +40,36 @@ describe("buildSystemPrompt — scheduling tools section", () => {
     expect(SCHEDULING_TOOLS_SECTION).toMatch(/DO NOT use/);
   });
 
-  test("documents the recurring-requires-expiry contract", () => {
+  test("documents optional expiry flags for recurring tasks", () => {
     expect(SCHEDULING_TOOLS_SECTION).toContain("--until");
     expect(SCHEDULING_TOOLS_SECTION).toContain("--count");
     expect(SCHEDULING_TOOLS_SECTION).toContain("--for");
-    expect(SCHEDULING_TOOLS_SECTION).toMatch(/REQUIRE.*expiry/i);
+    // The new contract: expiry is OPTIONAL, not REQUIRED. The agent
+    // self-polices via the hygiene footer instead of being blocked
+    // at scheduling time.
+    expect(SCHEDULING_TOOLS_SECTION).toMatch(/optional|without an expiry|self-polic/i);
+  });
+
+  test("documents the agent self-policing hygiene contract", () => {
+    // Forever-recurring tasks (no --until/--count/--for) get a footer
+    // appended to every fire that asks the agent whether the task is
+    // still useful and provides the exact cancel command.
+    expect(SCHEDULING_TOOLS_SECTION).toMatch(/Task hygiene/);
+    expect(SCHEDULING_TOOLS_SECTION).toContain("phantombot task cancel");
+  });
+
+  test("documents the two-positional signature (prompt + description)", () => {
+    // Old docs only showed `phantombot task add "<prompt>" --in 10m` which
+    // failed at the CLI because <description> is also required. The new
+    // examples must show both positionals.
+    expect(SCHEDULING_TOOLS_SECTION).toContain('"<prompt>" "<description>"');
   });
 
   test("documents the proof-of-creation echo contract", () => {
-    // The CLI echoes "task <id> scheduled at ..." — the persona must
-    // repeat that verbatim. This is the audit trail that defeats
-    // hallucinated schedules.
-    expect(SCHEDULING_TOOLS_SECTION).toContain("scheduled at");
+    // The CLI echoes "task <id> scheduled" — the persona must repeat
+    // that verbatim. This is the audit trail that defeats hallucinated
+    // schedules.
+    expect(SCHEDULING_TOOLS_SECTION).toMatch(/task <id> scheduled/);
     expect(SCHEDULING_TOOLS_SECTION).toMatch(/proof[- ]of[- ]creation/);
   });
 
