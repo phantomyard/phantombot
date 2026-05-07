@@ -111,6 +111,14 @@ h1 {
     letter-spacing: -2px;
 }
 
+.subtitle {
+    font-family: var(--font-sans);
+    font-size: 1.25rem;
+    color: #bbbbbb;
+    max-width: 600px;
+    margin-bottom: 0.5rem;
+}
+
 .tagline {
     font-family: var(--font-serif);
     font-style: italic;
