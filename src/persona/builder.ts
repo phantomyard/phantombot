@@ -45,7 +45,14 @@ export function buildSystemPrompt(
   // every persona gets the same scheduling discipline.
   sections.push(SCHEDULING_TOOLS_SECTION);
 
-  // Credential discovery + hygiene rules. Same rationale as memory tools:
+  // Out-of-band notification rules. Sits next to scheduling on purpose:
+  // the most common reason for an agent to notify is a scheduled task
+  // surfacing something material. Kept in its own section (rather than
+  // tucked under credentials, where it used to live) because it's
+  // about *talking to the user*, not about secrets.
+  sections.push(NOTIFICATION_SECTION);
+
+  // Credential discovery + persistence rules. Same rationale as memory tools:
   // injected after the persona's own tools.md so persona overrides stay
   // primary, but always present so the agent doesn't reinvent the
   // credential workflow per persona.
@@ -178,6 +185,43 @@ they work and silently don't. If you find yourself reaching for
 one, you want \`phantombot task add\` instead.`;
 
 /**
+ * Out-of-band notification — the only sanctioned way for the agent to
+ * proactively talk to the user from a non-interactive turn (a scheduled
+ * task fire, a heartbeat-discovered finding, a long-running job that
+ * just finished).
+ *
+ * Companion to SCHEDULING_TOOLS_SECTION: the most common reason to
+ * notify is a scheduled task surfacing something material, but the
+ * mechanism is general — any non-interactive turn that produces
+ * something the user should hear about should use \`phantombot notify\`.
+ *
+ * Previously lived inside CREDENTIALS_SECTION, which was a category
+ * mistake — credentials and notifications have nothing in common.
+ *
+ * Exported for testing.
+ */
+export const NOTIFICATION_SECTION =
+  `# Surfacing things to the user
+
+Scheduled tasks (\`phantombot tick\`) and any other out-of-band work
+run silently by default — no Telegram chatter on every fire. When
+something material happens that the user genuinely needs to know,
+surface it explicitly with the notify CLI:
+
+  phantombot notify --message "..."         # text via Telegram
+  phantombot notify --voice   "..."         # synthesized voice note via TTS
+
+Both flags can be combined to send text AND voice. The user's
+standing rule: don't notify unless asked, or unless something
+material happened. "Nothing new" is a successful silent run — stay
+quiet.
+
+This is the only sanctioned proactive channel from a non-interactive
+turn. Don't try to inject text by other means (writing to a TTY,
+scheduling a self-message, posting on Google Chat, etc.) — the user
+reads notifications on Telegram.`;
+
+/**
  * Optional channel-level overlay: ask the model to narrate one short
  * sentence before each tool call so streaming channels (Telegram text,
  * Twilio voice via `phantombot ask --stream`) have something to render
@@ -232,52 +276,69 @@ narration is purely to fill the pre-tool silence; once the result
 is in, just answer.`;
 
 /**
- * System-level credential discovery + hygiene. Injected into every
+ * System-level credential discovery + persistence. Injected into every
  * persona's prompt so the agent has a consistent contract for finding
- * credentials and persisting new ones, regardless of which persona is
+ * credentials and saving new ones, regardless of which persona is
  * loaded. Persona-specific tools.md sections can override.
+ *
+ * Framing note: the store (\`~/.env\` via \`phantombot env set\`) is a
+ * *convenience layer*, not a cage. The agent should be free — and
+ * encouraged — to scan creatively for credentials wherever they
+ * actually live (git history, config files, keychains, password
+ * managers, log lines, …) and to file what's worth keeping. The
+ * starter-spots list below is a fast path, not a wall.
  */
 export const CREDENTIALS_SECTION =
   `# Credentials
 
-## Discovery — where to find them when a task needs them
+Phantombot keeps a small, atomic credential store at \`~/.env\` (write
+via \`phantombot env set\`). Treat it as a *convenience layer*, not a
+cage: scan widely for what you need, and when you find or earn a
+useful credential, file it so the next turn — or the next persona —
+doesn't have to re-derive it.
 
-Look in this order; don't ask the user for anything that's already
-discoverable:
+## Where to look first — the fast path
+
+These are the *starter spots*. Most things will be here. Don't ask
+the user for anything in this list that you can read directly:
 
   1. process.env  — already loaded; phantombot sources both \`~/.env\` and
                     \`~/.config/phantombot/.env\` at startup (systemd
                     EnvironmentFile= on Linux, self-loaded on macOS), so
                     most credentials are available without re-reading.
-  2. ~/.env       — the agent's general credentials file. The canonical
-                    home for things like GITHUB_TOKEN, OPENAI_API_KEY, ssh
-                    passphrases.
+  2. ~/.env       — the canonical credentials file. GITHUB_TOKEN,
+                    OPENAI_API_KEY, ssh passphrases, API keys.
   3. ~/.ssh/      — SSH keys + config (Host aliases, IdentityFile entries).
-  4. ~/.bashrc, ~/.zshrc — exported shell vars (often the same keys as ~/.env
-                    but exported into interactive shells too).
+  4. ~/.bashrc, ~/.zshrc — exported shell vars (often the same keys as
+                    ~/.env but exported into interactive shells too).
   5. Memory store: \`phantombot memory search "<credential name>"\` — anything
-                    you've stashed under your own persona memory.
-  6. Knowledge base — embedded notes and runbooks.
+                    a previous turn stashed under your persona memory.
+  6. Knowledge base — embedded notes, runbooks, infra docs.
 
-If nothing turns up across all six, then ask the user.
+## Follow your nose if those fail
 
-## Scheduled-task notification
+The starter list is not exhaustive. Real credentials live in many
+places — be resourceful before asking the user. Reasonable places
+to look, when context warrants:
 
-Scheduled tasks (\`phantombot tick\`) run silently by default — no Telegram
-chatter on every fire. When a task you're running detects something the
-user genuinely needs to know, surface it explicitly:
+  - git history of repos you can read (old commits, .env.example,
+    sample configs, CI files)
+  - per-tool config: \`~/.config/<tool>/\`, \`~/.<tool>rc\`, \`/etc/<tool>/\`
+  - browser profiles, OS keychains, password managers, secret stores
+  - shell history for one-off \`export FOO=...\` lines
+  - service definitions (systemd unit \`Environment=\`, launchd plists)
+  - CI/CD config visible to your account
+  - cloud-provider metadata services if you're on a VM
 
-  phantombot notify --message "..."         # text via Telegram
-  phantombot notify --voice   "..."         # synthesized voice note via TTS
+Use judgement: scan when the task genuinely needs the credential, not
+speculatively. If you discover something useful while doing other
+work, save it (next subsection) so the next agent doesn't have to
+redo the search.
 
-Both flags can be combined. The user explicitly asked: don't notify
-unless asked or unless something material happened. "Nothing important"
-is a successful run — stay quiet.
+## Persistence — save what you find
 
-## Hygiene — how to handle new credentials
-
-When the user gives you a new credential (an API token, a password, a
-private key), persist it via the safe-write CLI:
+When the user gives you a credential, OR when you discover one in
+the wild that's worth keeping, persist it via the safe-write CLI:
 
   phantombot env set NAME "value"           # atomic write to ~/.env, mode 0o600
   phantombot env get NAME                   # read (avoid in interactive: leaks to scrollback)
@@ -288,8 +349,9 @@ NEVER \`echo … >> ~/.env\` directly — you lose atomicity, drop file mode,
 and accumulate duplicate entries.
 
 After saving, ACKNOWLEDGE BY NAME ONLY: "saved GITHUB_TOKEN". Do not
-echo the value back. The user pasted it once; further reflection in
-the conversation is leakage that ends up in the memory store.
+echo the value back. The user pasted it once (or you just discovered
+it); further reflection in the conversation is leakage that ends up
+in transcripts and the memory store.
 
 When INVOKING a tool that needs a credential, reference the env var,
 not the literal value. Example:
@@ -302,6 +364,12 @@ not the literal value. Example:
   gh api -H "Authorization: Bearer ghp_actualtokenhere..."
 
 Credentials don't go in memory drawers, KB notes, or task prompts.
-They're a runtime concern — the file (\`~/.env\`) and the process env
-are the only places they live.`;
+They're a runtime concern — \`~/.env\` and the process env are the
+only places they live.
+
+## Last resort
+
+If after checking starter spots and following your nose the
+credential genuinely isn't anywhere, then ask the user. Asking
+first — without scanning — is the lazy path; don't take it.`;
 
