@@ -54,11 +54,11 @@ describe("buildSystemPrompt — credentials section", () => {
     expect(CREDENTIALS_SECTION).toContain("Do not\necho the value back");
   });
 
-  test("documents phantombot notify for scheduled-task notification", () => {
-    expect(CREDENTIALS_SECTION).toContain("phantombot notify");
-    expect(CREDENTIALS_SECTION).toContain("--message");
-    expect(CREDENTIALS_SECTION).toContain("--voice");
-    expect(CREDENTIALS_SECTION).toContain("silently by default");
+  test("does not document phantombot notify (lives in NOTIFICATION_SECTION)", () => {
+    // `phantombot notify` was previously misfiled under credentials. It
+    // belongs to its own section now — credentials should stay focused
+    // on secret discovery and persistence.
+    expect(CREDENTIALS_SECTION).not.toContain("phantombot notify");
   });
 
   test("credentials section comes after the memory tools section", () => {

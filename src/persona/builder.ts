@@ -45,7 +45,14 @@ export function buildSystemPrompt(
   // every persona gets the same scheduling discipline.
   sections.push(SCHEDULING_TOOLS_SECTION);
 
-  // Credential discovery + hygiene rules. Same rationale as memory tools:
+  // Out-of-band notification rules. Sits next to scheduling on purpose:
+  // the most common reason for an agent to notify is a scheduled task
+  // surfacing something material. Kept in its own section (rather than
+  // tucked under credentials, where it used to live) because it's
+  // about *talking to the user*, not about secrets.
+  sections.push(NOTIFICATION_SECTION);
+
+  // Credential discovery + persistence rules. Same rationale as memory tools:
   // injected after the persona's own tools.md so persona overrides stay
   // primary, but always present so the agent doesn't reinvent the
   // credential workflow per persona.
@@ -178,6 +185,43 @@ they work and silently don't. If you find yourself reaching for
 one, you want \`phantombot task add\` instead.`;
 
 /**
+ * Out-of-band notification — the only sanctioned way for the agent to
+ * proactively talk to the user from a non-interactive turn (a scheduled
+ * task fire, a heartbeat-discovered finding, a long-running job that
+ * just finished).
+ *
+ * Companion to SCHEDULING_TOOLS_SECTION: the most common reason to
+ * notify is a scheduled task surfacing something material, but the
+ * mechanism is general — any non-interactive turn that produces
+ * something the user should hear about should use \`phantombot notify\`.
+ *
+ * Previously lived inside CREDENTIALS_SECTION, which was a category
+ * mistake — credentials and notifications have nothing in common.
+ *
+ * Exported for testing.
+ */
+export const NOTIFICATION_SECTION =
+  `# Surfacing things to the user
+
+Scheduled tasks (\`phantombot tick\`) and any other out-of-band work
+run silently by default — no Telegram chatter on every fire. When
+something material happens that the user genuinely needs to know,
+surface it explicitly with the notify CLI:
+
+  phantombot notify --message "..."         # text via Telegram
+  phantombot notify --voice   "..."         # synthesized voice note via TTS
+
+Both flags can be combined to send text AND voice. The user's
+standing rule: don't notify unless asked, or unless something
+material happened. "Nothing new" is a successful silent run — stay
+quiet.
+
+This is the only sanctioned proactive channel from a non-interactive
+turn. Don't try to inject text by other means (writing to a TTY,
+scheduling a self-message, posting on Google Chat, etc.) — the user
+reads notifications on Telegram.`;
+
+/**
  * Optional channel-level overlay: ask the model to narrate one short
  * sentence before each tool call so streaming channels (Telegram text,
  * Twilio voice via `phantombot ask --stream`) have something to render
@@ -260,19 +304,6 @@ discoverable:
   6. Knowledge base — embedded notes and runbooks.
 
 If nothing turns up across all six, then ask the user.
-
-## Scheduled-task notification
-
-Scheduled tasks (\`phantombot tick\`) run silently by default — no Telegram
-chatter on every fire. When a task you're running detects something the
-user genuinely needs to know, surface it explicitly:
-
-  phantombot notify --message "..."         # text via Telegram
-  phantombot notify --voice   "..."         # synthesized voice note via TTS
-
-Both flags can be combined. The user explicitly asked: don't notify
-unless asked or unless something material happened. "Nothing important"
-is a successful run — stay quiet.
 
 ## Hygiene — how to handle new credentials
 
