@@ -134,7 +134,7 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
 
   const name = await p.text({
     message: "Persona name (lowercase letters, digits, '-', '_')",
-    placeholder: "robbie",
+    placeholder: "phantom",
     validate: (v) => {
       if (!v || v.length === 0) return "name is required";
       if (!/^[a-z0-9_-]+$/.test(v))
