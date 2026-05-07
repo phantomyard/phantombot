@@ -48,6 +48,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
   killCauseToErrorChunk,
@@ -88,6 +89,12 @@ export class ClaudeHarness implements Harness {
       bin: this.config.bin,
       argCount: args.length,
     });
+
+    // Re-source ~/.env / ~/.config/phantombot/.env so secrets the agent
+    // saved on the previous turn (`phantombot env set FOO bar`) are
+    // visible in this turn's env without needing a daemon restart.
+    // Shell-exported keys remain sticky — see envBootstrap.ts header.
+    await reloadEnvFiles();
 
     // OAuth-on-host: don't leak ANTHROPIC_API_KEY into the subprocess env,
     // so claude resolves credentials from ~/.claude/.credentials.json.

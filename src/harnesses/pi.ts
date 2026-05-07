@@ -24,6 +24,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
   killCauseToErrorChunk,
@@ -82,6 +83,11 @@ export class PiHarness implements Harness {
       bin: this.config.bin,
       payloadBytes: totalBytes,
     });
+
+    // Re-source ~/.env so secrets saved by the agent on the previous turn
+    // (`phantombot env set FOO bar`) are visible here without a daemon
+    // restart. See envBootstrap.ts for the sticky-vs-reloadable rules.
+    await reloadEnvFiles();
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
