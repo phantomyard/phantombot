@@ -108,7 +108,9 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
 
     for (const task of due) {
       const isReview = task.nextReviewAt.getTime() <= now.getTime();
-      const promptText = isReview ? buildReviewPrompt(task) : task.prompt;
+      const promptText = isReview
+        ? buildReviewPrompt(task)
+        : appendHygieneFooter(task);
       const conversation = isReview
         ? `tick:${task.id}:review`
         : `tick:${task.id}`;
@@ -216,6 +218,37 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     if (!input.memory) await memory.close();
     lock.release();
   }
+}
+
+/**
+ * Soft self-policing nudge appended to the prompt of every recurring,
+ * forever-running fire (i.e. recurring tasks with no expiry set).
+ *
+ * Recurring tasks with an explicit expiry (--until/--count/--for) skip
+ * this — the user has already set an end. One-offs skip it — they
+ * delete themselves. Reviews skip it — `buildReviewPrompt` does its
+ * own thing.
+ *
+ * The nudge is short, factual, and ends with the exact cancel command.
+ * The aim is that even a small model notices the line and acts on it
+ * when the task is genuinely no longer useful, without us having to
+ * hard-stop everything that doesn't have a calendar end-date.
+ *
+ * Exported for testing.
+ */
+export function appendHygieneFooter(task: Task): string {
+  if (task.oneOff) return task.prompt;
+  const hasExpiry = task.expiresAt !== undefined || task.maxRuns !== undefined;
+  if (hasExpiry) return task.prompt;
+  return (
+    task.prompt +
+    `\n\n---\n` +
+    `Task hygiene: this is recurring task #${task.id} ("${task.description}"), ` +
+    `schedule \`${task.schedule}\`, has fired ${task.runCount} time(s) so far, no expiry set.\n` +
+    `After completing the work above, briefly ask yourself: is this task still useful? ` +
+    `If not, run \`phantombot task cancel ${task.id}\` to retire it. ` +
+    `If yes, ignore this footer and continue.`
+  );
 }
 
 /**

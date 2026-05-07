@@ -154,27 +154,57 @@ always use \`phantombot task\`. It writes to a SQLite store the
 user can inspect with \`phantombot task list\`, every fire is logged
 to \`task_runs\`, and tasks survive phantombot restarts.
 
-  phantombot task add "<prompt>" --in 10m              # one-off, fires once in 10 min
-  phantombot task add "<prompt>" --at "2026-05-06T18:00:00+02:00"
-                                                       # one-off at ISO time
-  phantombot task add "<prompt>" --every 30m --until "..."
-                                                       # recurring, requires expiry
-  phantombot task add "<prompt>" --every 1h --count 24 # recurring, fixed run count
-  phantombot task add "<prompt>" --every 5m  --for 2h  # recurring, duration
-  phantombot task list                                  # active tasks
-  phantombot task log <id>                              # fire history for a task
-  phantombot task rm <id>                               # delete a task
-  phantombot task selftest                              # 60-second end-to-end check
+The signature is always two positionals — \`<prompt>\` (what to do
+when it fires) followed by \`<description>\` (a short human label
+shown by \`task list\`). Both are required. Then exactly one
+scheduling flag:
 
-Recurring tasks REQUIRE an expiry (--until / --count / --for) —
-without one the CLI exits non-zero and prints an error. Default
-maximum is 90 days; use \`--force-long-running\` only with the
-user's explicit permission.
+  # One-off (fires once, then deletes itself)
+  phantombot task add "<prompt>" "<description>" --in 10m
+  phantombot task add "<prompt>" "<description>" --at "2026-05-06T18:00:00+02:00"
 
-When you call \`task add\`, the CLI echoes \`task <id> scheduled at
-<local-time>\`. Repeat that line verbatim in your reply to the
-user — it's the proof-of-creation contract. No id in your reply
-means no schedule was made, full stop.
+  # Recurring (no expiry — runs forever; you'll be asked at every
+  # fire whether it's still useful, see "Task hygiene" below)
+  phantombot task add "<prompt>" "<description>" --every 1h
+  phantombot task add "<prompt>" "<description>" --every 30m
+
+  # Recurring with an expiry (optional — use when you already know
+  # when the task should stop)
+  phantombot task add "<prompt>" "<description>" --every 30m --until "2026-06-01T00:00:00Z"
+  phantombot task add "<prompt>" "<description>" --every 1h --count 24
+  phantombot task add "<prompt>" "<description>" --every 5m  --for 2h
+
+  # Inspect / cancel
+  phantombot task list                                 # active tasks
+  phantombot task log <id>                             # fire history for one task
+  phantombot task cancel <id>                          # deactivate a task
+  phantombot task selftest                             # 60-second end-to-end check
+
+Cron syntax check: \`--every\` accepts a duration (\`30m\`, \`1h\`,
+\`2d\`, \`1w\`); the CLI compiles it to a cron expression. Bad
+durations and bad cron exit non-zero with a clear error — if you
+see \`task <id> scheduled\` you got a real schedule, otherwise read
+the error and fix the invocation. Don't proceed without an id.
+
+Task hygiene — important: recurring tasks WITHOUT an expiry run
+until you cancel them. Phantombot does NOT enforce an expiry; you
+do, by self-policing. At every fire of a forever-recurring task
+you'll see a short footer reminding you which task this is, how
+many times it has fired, and the exact \`phantombot task cancel <id>\`
+command. After completing the actual work, take a beat: is this
+task still useful? If not, cancel it. If yes, ignore the footer
+and continue. This is how the system stays clean.
+
+When you call \`task add\`, the CLI echoes:
+
+  task <id> scheduled
+    description: ...
+    fires at:    ...
+
+Repeat the first line (\`task <id> scheduled\` plus the local
+fires-at time) verbatim in your reply to the user — it's the
+proof-of-creation contract. No id in your reply means no schedule
+was made, full stop.
 
 DO NOT use harness-native scheduler tools (\`CronCreate\`,
 \`CronDelete\`, \`CronList\`, or any equivalent under another

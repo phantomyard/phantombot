@@ -84,6 +84,74 @@ describe("runTaskAdd", () => {
     expect(code).toBe(2);
     expect(err.text).toContain("bad cron");
   });
+
+  test("--every WITHOUT an expiry succeeds (forever-recurring)", async () => {
+    // Used to require --until/--count/--for; expiry is now optional.
+    // The agent self-polices via the hygiene footer at fire time.
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "check email",
+      description: "hourly email",
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(err.text).toBe("");
+    expect(out.text).toContain("task 1 scheduled");
+    // Echo surfaces the hygiene contract so the agent + user know
+    // what they signed up for.
+    expect(out.text).toContain("hygiene:");
+    expect(out.text).toContain("phantombot task cancel 1");
+    // Stored row reflects no expiry.
+    const t = store.get(1)!;
+    expect(t.expiresAt).toBeUndefined();
+    expect(t.maxRuns).toBeUndefined();
+    expect(t.oneOff).toBe(false);
+  });
+
+  test("--every with --count records maxRuns and skips the hygiene line", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      count: 24,
+      prompt: "x",
+      description: "capped",
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(err.text).toBe("");
+    expect(out.text).toContain("task 1 scheduled");
+    // No hygiene line — user already set an end (24 runs).
+    expect(out.text).not.toContain("hygiene:");
+    expect(out.text).toContain("24 runs");
+    expect(store.get(1)!.maxRuns).toBe(24);
+  });
+
+  test("--every with --until records expiresAt", async () => {
+    const out = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      until: "2026-06-01T00:00:00Z",
+      prompt: "x",
+      description: "until-bound",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("hygiene:");
+    const t = store.get(1)!;
+    expect(t.expiresAt?.toISOString()).toBe("2026-06-01T00:00:00.000Z");
+  });
 });
 
 describe("runTaskList", () => {

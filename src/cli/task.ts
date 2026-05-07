@@ -12,8 +12,12 @@
  *
  * One-off vs recurring:
  *   - One-off (default): --in 10m or --at "2026-05-07 09:00"
- *   - Recurring: --every 1h --until <date> or --count <N> or --for <dur>
- *   - Recurring WITHOUT an expiry is an error.
+ *   - Recurring: --every 1h (optionally --until <date> / --count <N> / --for <dur>)
+ *   - Recurring WITHOUT an expiry runs forever. The agent is asked at every
+ *     fire whether the task is still useful and is expected to cancel it
+ *     (`phantombot task cancel <id>`) when not — see the hygiene footer in
+ *     src/cli/tick.ts. Expiries remain available for tasks with a known
+ *     end (e.g. "ping me every hour for the next 8 hours").
  */
 
 import { defineCommand } from "citty";
@@ -106,14 +110,10 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       if (!everyParsed.ok) { err.write(`${everyParsed.error}\n`); return 2; }
       schedule = everyParsed.cron;
 
-      // Require an expiry.
-      if (!input.until && !input.count && !input.relFor) {
-        err.write(
-          "recurring tasks require --until <date>, --count <N>, or --for <duration>.\n" +
-          "  No task runs forever. Add an expiry.\n",
-        );
-        return 2;
-      }
+      // Expiry is optional. If none is set, the task runs forever and the
+      // agent is asked at every fire (via the hygiene footer in tick.ts)
+      // whether it's still useful. Expiries are still useful for tasks
+      // with a known end — they short-circuit the self-policing dance.
 
       // Parse expiry.
       if (input.until) {
@@ -183,6 +183,8 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
     }
 
     // Mandatory echo — agent contract requires repeating this to user.
+    const hasExpiry =
+      t.expiresAt !== undefined || t.maxRuns !== undefined;
     out.write(
       `task ${t.id} scheduled\n` +
       `  description: ${t.description}\n` +
@@ -190,7 +192,11 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       (t.oneOff
         ? `  type:        one-off\n`
         : `  schedule:    ${t.schedule}\n  expiry:      ${describeExpiry(t)}\n`) +
-      (t.silent ? `  silent:      yes\n` : ""),
+      (t.silent ? `  silent:      yes\n` : "") +
+      (!t.oneOff && !hasExpiry
+        ? `  hygiene:     no expiry — every fire will ask if it's still needed.\n` +
+          `               cancel with: phantombot task cancel ${t.id}\n`
+        : ""),
     );
     return 0;
   } finally {
@@ -202,7 +208,7 @@ function describeExpiry(t: Task): string {
   const parts: string[] = [];
   if (t.expiresAt) parts.push(`until ${formatLocal(t.expiresAt)}`);
   if (t.maxRuns !== undefined) parts.push(`${t.maxRuns} runs`);
-  return parts.join(" or ") || "none set";
+  return parts.join(" or ") || "none (runs forever — agent self-polices)";
 }
 
 /**
@@ -431,7 +437,7 @@ export default defineCommand({
       meta: {
         name: "add",
         description:
-          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every requires --until, --count, or --for.",
+          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every (e.g. --every 1h) runs forever unless you add --until, --count, or --for. The agent is asked at every fire whether the task is still needed.",
       },
       args: {
         prompt: {
@@ -467,17 +473,17 @@ export default defineCommand({
         until: {
           type: "string",
           required: false,
-          description: "Expiry date for recurring tasks (ISO 8601).",
+          description: "Optional expiry date for recurring tasks (ISO 8601). Without one, the task runs forever and self-polices at each fire.",
         },
         count: {
           type: "string",
           required: false,
-          description: "Max number of runs for recurring tasks.",
+          description: "Optional max number of runs for recurring tasks.",
         },
         for: {
           type: "string",
           required: false,
-          description: "Expiry duration for recurring tasks (e.g. 30d).",
+          description: "Optional expiry duration for recurring tasks (e.g. 30d).",
         },
         silent: {
           type: "boolean",

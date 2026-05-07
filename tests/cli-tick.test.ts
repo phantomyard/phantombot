@@ -95,6 +95,7 @@ describe("runTick — normal task fire", () => {
       description: "hourly check",
       schedule: "0 * * * *",
       prompt: "do the thing",
+      // Forever-recurring (no expiry) — fires get the hygiene footer.
       now: new Date("2026-05-02T09:30:00Z"),
     });
     if (!created.ok) throw new Error("setup");
@@ -113,11 +114,67 @@ describe("runTick — normal task fire", () => {
     });
     expect(code).toBe(0);
     expect(harness.invocations).toBe(1);
-    expect(harness.lastUserMessage).toBe("do the thing");
+    // The original prompt is still there...
+    expect(harness.lastUserMessage).toContain("do the thing");
+    // ...followed by the hygiene footer because there's no expiry.
+    expect(harness.lastUserMessage).toContain("Task hygiene");
+    expect(harness.lastUserMessage).toContain(
+      `phantombot task cancel ${created.id}`,
+    );
     // After recordRun, next_run_at moved to 11:00.
     const t = store.get(created.id)!;
     expect(t.runCount).toBe(1);
     expect(t.nextRunAt.toISOString()).toBe("2026-05-02T11:00:00.000Z");
+  });
+
+  test("recurring task WITH an expiry skips the hygiene footer", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check, capped",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      expiresAt: new Date("2026-05-09T00:00:00Z"),
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "result" },
+    ]);
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    // No footer when the user has already set an end-date.
+    expect(harness.lastUserMessage).toBe("do the thing");
+  });
+
+  test("one-off task skips the hygiene footer (it's self-deleting)", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "wake me up",
+      schedule: "",
+      prompt: "do the thing",
+      oneOff: true,
+      nextRunAt: new Date("2026-05-02T10:00:00Z"),
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "result" },
+    ]);
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(harness.lastUserMessage).toBe("do the thing");
   });
 });
 
