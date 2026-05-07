@@ -30,6 +30,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -39,6 +40,26 @@ import { defaultEnvFilePath, loadEnvFile } from "./envFile.ts";
 function envFilesToLoad(): string[] {
   const userEnv = join(homedir(), ".env");
   return [userEnv, defaultEnvFilePath()];
+}
+
+/**
+ * Cache entry for a single .env file. Keyed in the cache map by absolute path.
+ *
+ * Invalidation uses `(mtimeNs, size)` together. Either changing means the file
+ * was edited; both must match for a cache hit:
+ *   - `mtimeNs` (BigInt nanoseconds) catches almost all real edits — modern
+ *     filesystems on Linux/macOS update it on every write.
+ *   - `size` is the belt to the mtime suspenders. Some VFS layers (overlayfs,
+ *     tmpfs under heavy load, NFS) coalesce same-millisecond writes onto a
+ *     single mtime tick, and a `phantombot env set` flow in tests can land
+ *     two writes inside that window. Almost any real-world content change
+ *     also changes the byte length, so combining them is reliable in
+ *     practice without ever reading the file body.
+ */
+interface CachedParse {
+  mtimeNs: bigint;
+  size: bigint;
+  parsed: Record<string, string>;
 }
 
 export interface PreloadOptions {
@@ -53,10 +74,20 @@ export interface PreloadOptions {
    * runs isolated.
    */
   tracked?: Set<string>;
+  /**
+   * Override the per-path parse cache. Defaults to a module-scope singleton
+   * shared between `preloadEnvFiles()` and `reloadEnvFiles()` so an unchanged
+   * file is statted but not re-parsed across spawns. Tests pass their own to
+   * keep runs isolated.
+   */
+  statCache?: Map<string, CachedParse>;
 }
 
 /** Module-scope tracking of which keys came from a file at boot. */
 const _moduleTracked = new Set<string>();
+
+/** Module-scope mtime+parse cache shared across preload and reload calls. */
+const _moduleStatCache = new Map<string, CachedParse>();
 
 /**
  * For tests: clear the module-scope tracked set. Production code never calls
@@ -64,6 +95,61 @@ const _moduleTracked = new Set<string>();
  */
 export function _resetTrackingForTesting(): void {
   _moduleTracked.clear();
+}
+
+/**
+ * For tests: clear the module-scope stat cache. Production code never calls
+ * this — the cache lives for the daemon's lifetime and is invalidated only
+ * by mtime changes.
+ */
+export function _resetStatCacheForTesting(): void {
+  _moduleStatCache.clear();
+}
+
+/**
+ * Stat the file; if its mtime matches the cached entry, return the previously
+ * parsed object (skipping the read + parse). Otherwise read, parse, and refresh
+ * the cache. Returns `null` if the file is missing or the parse fails — the
+ * caller treats null as "skip this file silently", matching legacy behaviour.
+ *
+ * Per-spawn cost on a hot, unchanged file: one `fs.stat` (~0.1ms) instead of a
+ * stat + read + parse (~1ms+). The win compounds across two files × every
+ * agent spawn.
+ */
+async function readEnvFileCached(
+  path: string,
+  cache: Map<string, CachedParse>,
+): Promise<Record<string, string> | null> {
+  if (!existsSync(path)) {
+    // File no longer exists — drop any stale cache entry so a recreated
+    // file later isn't served from the old parse.
+    cache.delete(path);
+    return null;
+  }
+  let mtimeNs: bigint;
+  let size: bigint;
+  try {
+    const st = await stat(path, { bigint: true });
+    mtimeNs = st.mtimeNs;
+    size = st.size;
+  } catch {
+    cache.delete(path);
+    return null;
+  }
+  const cached = cache.get(path);
+  if (cached && cached.mtimeNs === mtimeNs && cached.size === size) {
+    return cached.parsed;
+  }
+  let parsed: Record<string, string>;
+  try {
+    parsed = await loadEnvFile(path);
+  } catch {
+    // Malformed .env shouldn't crash startup or a spawn — `phantombot env`
+    // commands surface the parse error in a more useful way.
+    return null;
+  }
+  cache.set(path, { mtimeNs, size, parsed });
+  return parsed;
 }
 
 /**
@@ -83,18 +169,12 @@ export async function preloadEnvFiles(
   const env = opts.env ?? process.env;
   const files = opts.files ?? envFilesToLoad();
   const tracked = opts.tracked ?? _moduleTracked;
+  const cache = opts.statCache ?? _moduleStatCache;
   const loaded: string[] = [];
 
   for (const path of files) {
-    if (!existsSync(path)) continue;
-    let vars: Record<string, string>;
-    try {
-      vars = await loadEnvFile(path);
-    } catch {
-      // A malformed .env shouldn't crash startup. The follow-up `phantombot
-      // env` commands will surface the parse error in a more useful way.
-      continue;
-    }
+    const vars = await readEnvFileCached(path, cache);
+    if (vars === null) continue;
     for (const [k, v] of Object.entries(vars)) {
       if (env[k] === undefined) {
         env[k] = v;
@@ -127,18 +207,16 @@ export async function reloadEnvFiles(
   const env = opts.env ?? process.env;
   const files = opts.files ?? envFilesToLoad();
   const tracked = opts.tracked ?? _moduleTracked;
+  const cache = opts.statCache ?? _moduleStatCache;
 
   // Collect every key the union of files would contribute, with first-file
-  // priority — same precedence rule preloadEnvFiles uses.
+  // priority — same precedence rule preloadEnvFiles uses. Cache lookups
+  // short-circuit the read+parse when a file's mtime hasn't changed, so a
+  // hot per-spawn reload on an unchanged ~/.env costs roughly one stat call.
   const fileValues = new Map<string, string>();
   for (const path of files) {
-    if (!existsSync(path)) continue;
-    let vars: Record<string, string>;
-    try {
-      vars = await loadEnvFile(path);
-    } catch {
-      continue;
-    }
+    const vars = await readEnvFileCached(path, cache);
+    if (vars === null) continue;
     for (const [k, v] of Object.entries(vars)) {
       if (!fileValues.has(k)) fileValues.set(k, v);
     }
