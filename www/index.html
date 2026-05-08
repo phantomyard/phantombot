@@ -33,7 +33,10 @@
             <p class="tagline">The harness can do its own tools — let it. Built for minimalist, high-torque agency.</p>
             <div class="cta">
                 <p class="cta-label">Install on Linux (x64/ARM64):</p>
-                <code>curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh</code>
+                <div class="cta-command">
+                    <code>curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh</code>
+                    <button class="copy-button" type="button" aria-label="Copy install command" data-clipboard-text="curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh">Copy</button>
+                </div>
             </div>
         </section>
 
@@ -104,5 +107,26 @@
     <footer>
         <p>&copy; 2026 Phantomyard. Built with Phantombot.</p>
     </footer>
+
+    <script>
+        document.querySelectorAll('.copy-button').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var text = btn.getAttribute('data-clipboard-text') || '';
+                var original = btn.textContent;
+                var done = function (msg) {
+                    btn.textContent = msg;
+                    setTimeout(function () { btn.textContent = original; }, 1500);
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(
+                        function () { done('Copied!'); },
+                        function () { done('Press Ctrl+C'); }
+                    );
+                } else {
+                    done('Press Ctrl+C');
+                }
+            });
+        });
+    </script>
 </body>
 </html>
