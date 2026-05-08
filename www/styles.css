@@ -139,7 +139,7 @@ h1 {
 
 .cta code {
     background: var(--border);
-    padding: 1rem 2rem;
+    padding: 1rem 3.5rem 1rem 2rem;
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: 1.1rem;
@@ -148,9 +148,33 @@ h1 {
     border: 1px solid var(--grid);
 }
 
-/* Copy button is mobile-only — desktop layout stays unchanged. */
+.cta-command {
+    position: relative;
+    display: inline-block;
+}
+
 .copy-button {
-    display: none;
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: rgba(0, 0, 0, 0.5);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.25rem 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.copy-button:hover,
+.copy-button:focus-visible {
+    color: var(--accent);
+    border-color: var(--accent);
+    outline: none;
 }
 
 .grid {
