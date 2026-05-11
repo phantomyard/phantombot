@@ -97,6 +97,14 @@ Type=simple
 ExecStart=${exec}
 Restart=on-failure
 RestartSec=5
+# /restart and /update terminate the running process via systemctl restart,
+# which sends SIGTERM. If the process exits with 143 (128+SIGTERM) before
+# the in-process handler can swap that for a clean 0 — for example because
+# the SIGTERM lands while we're still inside an async cleanup chain —
+# systemd would otherwise log it as a failure and try Restart=on-failure.
+# Declaring 143 a success exit status keeps self-restart journals quiet
+# and stops a spurious Restart= cycle on top of the real one.
+SuccessExitStatus=143
 Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
@@ -272,6 +280,25 @@ export function buildSystemctlEnv(
   return env;
 }
 
+/**
+ * systemctl args used by `defaultSystemdServiceControl().restart()`.
+ *
+ * --no-block: enqueue the restart job and return immediately rather than
+ * waiting for the unit to come back up. The /restart and /update flows
+ * call restart() from INSIDE the running service, so systemd kills our
+ * whole cgroup the moment the stop begins — including the systemctl
+ * child, which would otherwise be reported back as exit 143 ("commands:
+ * /restart failed, stderr: exit 143"). With --no-block, systemctl exits
+ * 0 cleanly before the kill arrives. Exported so the unit-test layer
+ * can pin this without spawning a real subprocess.
+ */
+export const SELF_RESTART_ARGS: readonly string[] = [
+  "--user",
+  "--no-block",
+  "restart",
+  PHANTOMBOT_UNIT_NAME,
+];
+
 export interface ServiceControl {
   /** True iff `systemctl --user is-active phantombot.service` returns "active". */
   isActive(): Promise<boolean>;
@@ -378,11 +405,9 @@ export function defaultSystemdServiceControl(): ServiceControl {
     async restart() {
       const sysEnv = ensureUserSystemdEnv();
       if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
-      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
-        "--user",
-        "restart",
-        PHANTOMBOT_UNIT_NAME,
-      ]);
+      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run(
+        SELF_RESTART_ARGS,
+      );
       return r.exitCode === 0
         ? { ok: true }
         : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };

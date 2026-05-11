@@ -15,6 +15,7 @@ import {
   ensureUserSystemdEnv,
   generateSystemdUnit,
   installPhantombotUnit,
+  SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
   type SystemctlResult,
   type SystemctlRunner,
@@ -103,6 +104,32 @@ describe("generateSystemdUnit", () => {
       args: ["run"],
     });
     expect(u).toContain('ExecStart="/path with space/phantombot" run');
+  });
+
+  test("SELF_RESTART_ARGS passes --no-block so the systemctl child can exit cleanly before the cgroup kill", () => {
+    // The /restart and /update flows call svc.restart() from INSIDE the
+    // running service. Without --no-block, systemctl blocks awaiting
+    // unit start-up — but the same restart sends SIGTERM through the
+    // whole cgroup, taking out the systemctl child too, which we then
+    // observed as exit 143 and (mis-)logged as "/restart failed".
+    expect(SELF_RESTART_ARGS).toContain("--no-block");
+    expect(SELF_RESTART_ARGS).toContain("--user");
+    expect(SELF_RESTART_ARGS).toContain("restart");
+    expect(SELF_RESTART_ARGS).toContain("phantombot.service");
+  });
+
+  test("declares SuccessExitStatus=143 so SIGTERM-on-self-restart isn't a failure", () => {
+    // /restart and /update terminate the running process via
+    // systemctl restart, which sends SIGTERM. If the in-process handler
+    // doesn't translate that to a clean exit 0 in time, the runtime
+    // exits with 143 (128+SIGTERM). Without this declaration, systemd
+    // logs the unit as failed and Restart=on-failure kicks in on top of
+    // the legitimate restart — visible noise + a redundant cycle.
+    const u = generateSystemdUnit({
+      binPath: "/home/kai/.local/bin/phantombot",
+      args: ["run"],
+    });
+    expect(u).toContain("SuccessExitStatus=143");
   });
 });
 

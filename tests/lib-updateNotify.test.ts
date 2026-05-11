@@ -44,6 +44,7 @@ class FakeTransport implements TelegramTransport {
   }> {
     return { updates: [], nextOffset: 0 };
   }
+  async ackUpdates(): Promise<void> {}
   async sendMessage(chatId: number, text: string): Promise<void> {
     if (this.sendMessageImpl) await this.sendMessageImpl(chatId, text);
     this.sent.push({ chatId, text });

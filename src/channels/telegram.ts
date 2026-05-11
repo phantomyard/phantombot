@@ -35,6 +35,7 @@ import {
 } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import type { ServiceControl } from "../lib/systemd.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import {
@@ -148,6 +149,18 @@ export interface TelegramTransport {
     timeoutS: number,
     signal?: AbortSignal,
   ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
+  /**
+   * Confirm to Telegram that all updates with `update_id < offset` have
+   * been processed, so the next long-poll won't re-deliver them. Per the
+   * Bot API: "An update is considered confirmed as soon as getUpdates is
+   * called with an offset higher than its update_id." This is a fire-
+   * and-forget short-timeout getUpdates whose only purpose is to commit
+   * the offset before we do something that would kill the process (e.g.
+   * /restart). Without it, SIGTERM during the long-poll window means
+   * Telegram never sees the offset advance, and the freshly-started
+   * process gets the same /restart again — restart loop.
+   */
+  ackUpdates(offset: number): Promise<void>;
   sendMessage(chatId: number, text: string): Promise<void>;
   sendTyping(chatId: number): Promise<void>;
   /** Send an OGG-Opus voice note. */
@@ -198,6 +211,32 @@ export class HttpTelegramTransport implements TelegramTransport {
       return { updates: [], nextOffset: offset };
     }
     return parseGetUpdatesResult(body.result ?? [], offset);
+  }
+
+  /**
+   * Commit `offset` to Telegram by making a zero-timeout getUpdates call.
+   * Best-effort: failures are logged and swallowed because the caller is
+   * about to do something destructive (e.g. systemctl restart) and the
+   * worst case of a missed ack is a single duplicate delivery — not
+   * something to crash the channel for. Uses timeout=0 so this returns
+   * in tens of milliseconds; no long-poll involved.
+   */
+  async ackUpdates(offset: number): Promise<void> {
+    const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=0&limit=1&allowed_updates=%5B%22message%22%5D`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        log.warn("telegram: ackUpdates non-OK", {
+          status: res.status,
+          offset,
+        });
+      }
+    } catch (e) {
+      log.warn("telegram: ackUpdates fetch failed", {
+        error: (e as Error).message,
+        offset,
+      });
+    }
   }
 
   async sendMessage(chatId: number, text: string): Promise<void> {
@@ -611,6 +650,14 @@ export interface RunTelegramServerInput {
   typingThrottleMs?: number;
   out?: WriteSink;
   err?: WriteSink;
+  /**
+   * Optional override for the service control passed to /restart's
+   * afterSend. Tests inject a stub so they can verify the channel
+   * layer's "ack offset before fatal callback" ordering without
+   * actually invoking systemctl on the developer's host. Production
+   * leaves this undefined and /restart picks up the host backend.
+   */
+  serviceControl?: ServiceControl;
 }
 
 /**
@@ -724,6 +771,7 @@ export async function runTelegramServer(
             startedAt: serverStartedAt,
             activeTurn: activeTurns.get(msg.chatId),
             config: input.config,
+            serviceControl: input.serviceControl,
           });
           if (result) {
             try {
@@ -736,9 +784,16 @@ export async function runTelegramServer(
             }
             // afterSend runs strictly after sendMessage so heads-up
             // text lands before any side-effect that could kill us
-            // (used by /update to trigger systemctl restart). Swallow
-            // and log so a failure here can't crash the poll loop.
+            // (used by /update and /restart to trigger systemctl
+            // restart). Before firing it, ack the current offset to
+            // Telegram so a SIGTERM mid-restart doesn't leave the just-
+            // handled command on the wire — without this, the next
+            // process's long-poll re-delivers the same /restart and
+            // the user gets two restarts from one tap. Ack is best-
+            // effort: failures are logged inside ackUpdates and we
+            // proceed regardless.
             if (result.afterSend) {
+              await input.transport.ackUpdates(offset);
               try {
                 await result.afterSend();
               } catch (e) {

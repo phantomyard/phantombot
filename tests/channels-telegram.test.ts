@@ -31,6 +31,7 @@ import type {
   HarnessChunk,
   HarnessRequest,
 } from "../src/harnesses/types.ts";
+import type { ServiceControl } from "../src/lib/systemd.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
 class FakeTransport implements TelegramTransport {
@@ -44,6 +45,12 @@ class FakeTransport implements TelegramTransport {
   /** Per-fileId override for `downloadFile`. */
   fileResponses: Map<string, { data: Buffer; mime: string } | Error> = new Map();
   receivedSignals: Array<AbortSignal | undefined> = [];
+  /**
+   * Offsets passed to `ackUpdates`, in order. Tests assert on this to
+   * verify /restart and /update ack the heads-up message offset to
+   * Telegram before firing the destructive callback.
+   */
+  ackedOffsets: number[] = [];
   async getUpdates(
     offset: number,
     _timeoutS: number,
@@ -61,6 +68,9 @@ class FakeTransport implements TelegramTransport {
         ? Math.max(...updates.map((u) => u.updateId)) + 1
         : offset;
     return { updates, nextOffset };
+  }
+  async ackUpdates(offset: number): Promise<void> {
+    this.ackedOffsets.push(offset);
   }
   async sendMessage(chatId: number, text: string): Promise<void> {
     this.sent.push({ chatId, text });
@@ -1992,6 +2002,69 @@ describe("runTelegramServer slash commands", () => {
     expect(claude.invocations).toBe(0);
     const userReply = transport.sent.find((s) => s.text === "from pi");
     expect(userReply).toBeDefined();
+  });
+
+  test("/restart acks the offset to Telegram BEFORE the restart callback fires", async () => {
+    // Bug fix: pre-fix, the polling loop's `offset = nextOffset` only
+    // commits to Telegram on the NEXT getUpdates call. SIGTERM from the
+    // self-triggered systemctl restart killed us before that next call
+    // ran, so Telegram re-delivered the /restart to the freshly-started
+    // process — restart loop. Fix: ack the offset (a timeout=0
+    // getUpdates with offset = max(updateId)+1) BEFORE invoking the
+    // afterSend that might kill us.
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 5,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "/restart",
+    });
+
+    const restartOrder: string[] = [];
+    let restartCalled = false;
+    const stubServiceControl: ServiceControl = {
+      async isActive() {
+        return true;
+      },
+      async restart() {
+        restartCalled = true;
+        restartOrder.push("restart");
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        return { rerendered: false };
+      },
+    };
+    // Wrap ackUpdates so we can observe call order vs restart.
+    const origAck = transport.ackUpdates.bind(transport);
+    transport.ackUpdates = async (offset: number) => {
+      restartOrder.push("ack");
+      await origAck(offset);
+    };
+
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [new ScriptedHarness("fake", [])],
+      agentDir,
+      persona: "phantom",
+      transport,
+      serviceControl: stubServiceControl,
+      oneShot: true,
+    });
+
+    // The "restarting…" heads-up landed.
+    expect(transport.sent.some((s) => s.text.includes("restarting"))).toBe(
+      true,
+    );
+    // Ack was called with the post-update offset (max updateId 5 + 1 = 6).
+    expect(transport.ackedOffsets).toContain(6);
+    // And restart actually fired.
+    expect(restartCalled).toBe(true);
+    // Critical ordering: ack must come BEFORE restart. Otherwise SIGTERM
+    // mid-restart leaves the /restart still on Telegram's wire and the
+    // new process gets it again.
+    expect(restartOrder).toEqual(["ack", "restart"]);
   });
 
   test("unknown /commands fall through to the LLM (so personas can own /remember etc.)", async () => {

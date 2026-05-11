@@ -274,6 +274,7 @@ describe("runHeartbeat update check hook", () => {
       async getUpdates() {
         return { updates: [], nextOffset: 0 };
       },
+      async ackUpdates() {},
       async sendTyping() {},
       async sendRecording() {},
       async sendVoice() {},
@@ -307,6 +308,7 @@ describe("runHeartbeat update check hook", () => {
       async getUpdates() {
         return { updates: [], nextOffset: 0 };
       },
+      async ackUpdates() {},
       async sendTyping() {},
       async sendRecording() {},
       async sendVoice() {},
