@@ -24,7 +24,9 @@ import {
   defaultLockPath,
   isLockHandle,
 } from "../lib/runLock.ts";
+import { notifyPostRestartIfPending } from "../lib/updateNotify.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import { VERSION } from "../version.ts";
 import { runNightly } from "./nightly.ts";
 
 export interface RunInput {
@@ -81,6 +83,31 @@ export async function runRun(input: RunInput = {}): Promise<number> {
 
   const memory = await openMemoryStore(config.memoryDbPath);
   const transport = new HttpTelegramTransport(tg.token);
+
+  // Post-restart check: if `/update` wrote a pending-update marker before
+  // we got SIGTERMed, surface the result to the chat that triggered it.
+  // Runs once at startup; if no marker exists this is a quick no-op stat.
+  // Logged + swallowed so a notify-send failure can't keep us out of the
+  // poll loop — startup must always succeed.
+  try {
+    const r = await notifyPostRestartIfPending({
+      config,
+      currentVersion: VERSION,
+      transport,
+    });
+    if (r.status === "success_notified" || r.status === "failure_notified") {
+      log.info("run: post-restart notify", {
+        status: r.status,
+        targetTag: r.marker?.targetTag,
+        previousVersion: r.marker?.previousVersion,
+        currentVersion: VERSION,
+      });
+    }
+  } catch (e) {
+    log.warn("run: post-restart notify threw", {
+      error: (e as Error).message,
+    });
+  }
 
   out.write(
     `phantombot — persona '${persona}', harnesses ${config.harnesses.chain.join(" → ")}\n`,

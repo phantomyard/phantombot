@@ -20,10 +20,13 @@
  *     so the LLM can interpret it (some personas use `/remember`, etc.).
  */
 
+import type { Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
+import { runUpdateFlow } from "../lib/updateNotify.ts";
 import type { MemoryStore } from "../memory/store.ts";
+import { VERSION } from "../version.ts";
 
 export interface ActiveTurnHandle {
   controller: AbortController;
@@ -55,11 +58,28 @@ export interface SlashCommandContext {
   startedAt: number;
   /** Currently running turn for this chat, if any. /stop aborts it. */
   activeTurn?: ActiveTurnHandle;
+  /**
+   * Full loaded config — currently used only by /update so it can hand
+   * the telegram channel + chatId to runUpdateFlow. Optional so existing
+   * tests can leave it out for commands that don't need it. The channel
+   * adapter always provides it in production.
+   */
+  config?: Config;
 }
 
 export interface SlashCommandResult {
   /** Reply text to send back to the user. Always non-empty for handled commands. */
   reply: string;
+  /**
+   * Optional callback the channel layer awaits AFTER sending `reply`.
+   *
+   * Used by /update: the binary swap completes, we send the user
+   * "installed vX.Y.Z, restarting…", and THEN trigger the systemctl
+   * restart that SIGTERMs us. If we ran the restart synchronously
+   * before returning, sendMessage would race the SIGTERM and the user
+   * would never see the heads-up.
+   */
+  afterSend?: () => Promise<void>;
 }
 
 const HELP =
@@ -68,6 +88,7 @@ const HELP =
   `/reset    — clear this chat's history\n` +
   `/status   — show harness, uptime, context usage\n` +
   `/harness  — list or switch the active harness (e.g. /harness pi)\n` +
+  `/update   — install the latest phantombot release if newer than this build\n` +
   `/help     — this list`;
 
 /**
@@ -100,11 +121,48 @@ export async function handleSlashCommand(
       return await handleStatus(ctx);
     case "/harness":
       return await handleHarness(arg, ctx);
+    case "/update":
+      return await handleUpdate(ctx);
     case "/help":
       return { reply: HELP };
     default:
       return null;
   }
+}
+
+/**
+ * /update — idempotent self-update.
+ *
+ * Three outcomes the user sees:
+ *   1. "already on vX.Y.Z — nothing to do" (we're current)
+ *   2. "installed vX.Y.Z (was vA.B.C). Restarting now…" then, post-restart,
+ *      a separate "✅ Updated to vX.Y.Z" / "⚠️ Update didn't take" message
+ *   3. an error string explaining why the check or install failed
+ *
+ * The restart is fired via `afterSend` so the channel layer sends the
+ * heads-up message FIRST, then SIGTERMs us — without afterSend, the
+ * `systemctl restart` would race the sendMessage call.
+ */
+async function handleUpdate(
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  if (!ctx.config) {
+    // Defensive — production channel always provides this. If a future
+    // caller forgets, fail loud rather than silently no-op.
+    return {
+      reply: "update unavailable: channel didn't pass config to the dispatcher",
+    };
+  }
+  log.info("commands: /update invoked", {
+    chatId: ctx.chatId,
+    currentVersion: VERSION,
+  });
+  const r = await runUpdateFlow({
+    config: ctx.config,
+    currentVersion: VERSION,
+    chatId: ctx.chatId,
+  });
+  return { reply: r.reply, afterSend: r.restart };
 }
 
 function handleStop(ctx: SlashCommandContext): SlashCommandResult {
