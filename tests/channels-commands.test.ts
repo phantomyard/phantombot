@@ -338,6 +338,7 @@ describe("/help", () => {
     expect(r!.reply).toContain("/status");
     expect(r!.reply).toContain("/harness");
     expect(r!.reply).toContain("/update");
+    expect(r!.reply).toContain("/restart");
     expect(r!.reply).toContain("/help");
   });
 });
@@ -410,6 +411,24 @@ describe("/update", () => {
     expect(r).not.toBeNull();
     expect(r!.reply).toContain("update unavailable");
     expect(r!.afterSend).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /restart
+// ---------------------------------------------------------------------------
+
+describe("/restart", () => {
+  test("recognized as a slash command and returns restarting reply", async () => {
+    const r = await handleSlashCommand("/restart", ctx());
+    expect(r).not.toBeNull();
+    expect(r!.reply).toContain("restarting");
+  });
+
+  test("provides an afterSend callback for the channel layer", async () => {
+    const r = await handleSlashCommand("/restart", ctx());
+    expect(r).not.toBeNull();
+    expect(typeof r!.afterSend).toBe("function");
   });
 });
 
