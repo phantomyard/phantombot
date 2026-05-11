@@ -16,6 +16,8 @@ import {
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { log } from "../lib/logger.ts";
+import { shouldRunCatchupNightly } from "../lib/nightly.ts";
 import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
   acquireRunLock,
@@ -23,6 +25,7 @@ import {
   isLockHandle,
 } from "../lib/runLock.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import { runNightly } from "./nightly.ts";
 
 export interface RunInput {
   config?: Config;
@@ -88,6 +91,22 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     }\n`,
   );
   out.write("Ctrl-C to stop.\n");
+
+  // Catch-up nightly: if the machine was off during the 02:00 window
+  // and the last run is >24h stale, fire it now in the background.
+  // Don't await — must not slow startup.
+  if (await shouldRunCatchupNightly(agentDir)) {
+    log.info("run: nightly stale, starting background catch-up");
+    runNightly({ config, persona, out, err }).then(
+      (code) => {
+        if (code !== 0) log.warn("run: catch-up nightly exited", { code });
+      },
+      (e: unknown) =>
+        log.error("run: catch-up nightly threw", {
+          error: (e as Error).message,
+        }),
+    );
+  }
 
   const ac = new AbortController();
   const onSig = () => ac.abort();
