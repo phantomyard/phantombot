@@ -109,13 +109,24 @@ function fakeReleaseFetch(opts: {
   };
   return (async (url: string | URL | Request) => {
     const u = String(url);
-    if (u.includes("api.github.com")) {
+    // Strict hostname check — substring matching can be bypassed
+    // by hostile URLs like `evil.com/api.github.com`.
+    let host = "";
+    let path = "";
+    try {
+      const parsed = new URL(u);
+      host = parsed.hostname;
+      path = parsed.pathname;
+    } catch {
+      // leave host/path empty so we fall through to the binary case
+    }
+    if (host === "api.github.com") {
       return new Response(
         typeof body === "string" ? body : JSON.stringify(body),
         { status, headers: { "content-type": "application/json" } },
       );
     }
-    if (u.includes("SHA256SUMS")) {
+    if (path.endsWith("SHA256SUMS")) {
       return new Response(`${NEW_SHA}  ${ASSET}\n`, { status: 200 });
     }
     return new Response(NEW_BYTES, { status: 200 });

@@ -240,7 +240,15 @@ describe("runHeartbeat update check hook", () => {
     };
     return (async (url: string | URL | Request) => {
       const u = String(url);
-      if (u.includes("api.github.com")) {
+      // Strict hostname check — substring matching can be bypassed
+      // by hostile URLs like `evil.com/api.github.com`.
+      let host = "";
+      try {
+        host = new URL(u).hostname;
+      } catch {
+        host = "";
+      }
+      if (host === "api.github.com") {
         return new Response(JSON.stringify(body), {
           status: 200,
           headers: { "content-type": "application/json" },

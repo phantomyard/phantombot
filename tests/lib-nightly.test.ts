@@ -144,12 +144,23 @@ describe("shouldRunCatchupNightly", () => {
   });
 
   test("returns false exactly at the window boundary", async () => {
-    const atBoundary = new Date(Date.now() - CATCHUP_WINDOW_MS);
-    await saveNightlyState(workdir, {
-      last_run: atBoundary.toISOString(),
-    });
-    // Exactly at boundary: still within window (strictly greater than)
-    expect(await shouldRunCatchupNightly(workdir)).toBe(false);
+    // Pin Date.now() so the boundary check is deterministic — without this,
+    // elapsed time between the two Date.now() calls (here vs inside
+    // shouldRunCatchupNightly) pushes `now - lastRun` past CATCHUP_WINDOW_MS
+    // and the strict `>` comparison flips true.
+    const fixedNow = Date.now();
+    const origNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      const atBoundary = new Date(fixedNow - CATCHUP_WINDOW_MS);
+      await saveNightlyState(workdir, {
+        last_run: atBoundary.toISOString(),
+      });
+      // Exactly at boundary: still within window (strictly greater than)
+      expect(await shouldRunCatchupNightly(workdir)).toBe(false);
+    } finally {
+      Date.now = origNow;
+    }
   });
 });
 
