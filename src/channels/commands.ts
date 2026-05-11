@@ -24,6 +24,7 @@ import type { Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
+import { defaultServiceControl } from "../lib/platform.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
@@ -89,6 +90,7 @@ const HELP =
   `/status   — show harness, uptime, context usage\n` +
   `/harness  — list or switch the active harness (e.g. /harness pi)\n` +
   `/update   — install the latest phantombot release if newer than this build\n` +
+  `/restart  — restart the phantombot service\n` +
   `/help     — this list`;
 
 /**
@@ -123,6 +125,8 @@ export async function handleSlashCommand(
       return await handleHarness(arg, ctx);
     case "/update":
       return await handleUpdate(ctx);
+    case "/restart":
+      return handleRestart(ctx);
     case "/help":
       return { reply: HELP };
     default:
@@ -163,6 +167,34 @@ async function handleUpdate(
     chatId: ctx.chatId,
   });
   return { reply: r.reply, afterSend: r.restart };
+}
+
+/**
+ * /restart — restart the phantombot service.
+ *
+ * Sends "restarting…" to the user, then triggers a service restart via
+ * the platform-appropriate backend (systemctl --user on Linux, launchctl
+ * on macOS). The restart is fired via `afterSend` so the channel layer
+ * sends the heads-up message FIRST, then SIGTERMs us.
+ *
+ * On unsupported platforms (Windows, BSD) where there's no service
+ * manager backend, we tell the user restart isn't supported rather than
+ * failing cryptically.
+ */
+function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
+  const svc = defaultServiceControl();
+
+  const afterSend = async (): Promise<void> => {
+    const r = await svc.restart();
+    if (!r.ok) {
+      log.error("commands: /restart failed", {
+        chatId: ctx.chatId,
+        stderr: r.stderr,
+      });
+    }
+  };
+
+  return { reply: "restarting…", afterSend };
 }
 
 function handleStop(ctx: SlashCommandContext): SlashCommandResult {
