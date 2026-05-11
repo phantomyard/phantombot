@@ -49,6 +49,30 @@ export function nightlyStatePath(personaDir: string): string {
   return join(personaDir, "memory", ".nightly-state.json");
 }
 
+/**
+ * Catch-up window: if the last nightly run was more than this many
+ * milliseconds ago, a startup catch-up is warranted. Default: 24 hours.
+ */
+export const CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Should a catch-up nightly run at startup?
+ *
+ * Returns `true` when the persona has no record of a previous nightly
+ * run OR the last run was more than {@link CATCHUP_WINDOW_MS} ago.
+ * Designed for users who shut down their machine overnight and miss
+ * the 02:00 scheduled run.
+ */
+export async function shouldRunCatchupNightly(
+  personaDir: string,
+): Promise<boolean> {
+  const state = await loadNightlyState(personaDir);
+  if (!state.last_run) return true;
+  const lastRun = Date.parse(state.last_run);
+  if (Number.isNaN(lastRun)) return true;
+  return Date.now() - lastRun > CATCHUP_WINDOW_MS;
+}
+
 /** Read the previous nightly state. Returns {} if no prior run. */
 export async function loadNightlyState(
   personaDir: string,

@@ -5,10 +5,12 @@ import { join } from "node:path";
 import {
   buildNightlyPrompt,
   buildNightlyPromptForPersona,
+  CATCHUP_WINDOW_MS,
   loadNightlyState,
   nightlyConversationKey,
   nightlyStatePath,
   saveNightlyState,
+  shouldRunCatchupNightly,
 } from "../src/lib/nightly.ts";
 
 let workdir: string;
@@ -107,6 +109,47 @@ describe("buildNightlyPrompt", () => {
     expect(p).toContain("phantombot memory search");
     expect(p).toContain("phantombot memory get");
     expect(p).toContain("phantombot memory index --rebuild");
+  });
+});
+
+describe("shouldRunCatchupNightly", () => {
+  test("returns true when no state file exists", async () => {
+    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  });
+
+  test("returns true when last_run is more than 24h ago", async () => {
+    const old = new Date(Date.now() - CATCHUP_WINDOW_MS - 60_000);
+    await saveNightlyState(workdir, {
+      last_run: old.toISOString(),
+    });
+    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  });
+
+  test("returns false when last_run is within the last 24h", async () => {
+    const recent = new Date(Date.now() - 60_000); // 1 minute ago
+    await saveNightlyState(workdir, {
+      last_run: recent.toISOString(),
+    });
+    expect(await shouldRunCatchupNightly(workdir)).toBe(false);
+  });
+
+  test("returns true when last_run is unparseable", async () => {
+    // Write malformed last_run directly (bypass saveNightlyState which uses Date.toISOString)
+    await writeFile(
+      nightlyStatePath(workdir),
+      JSON.stringify({ last_run: "not-a-date" }, null, 2) + "\n",
+      "utf8",
+    );
+    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  });
+
+  test("returns false exactly at the window boundary", async () => {
+    const atBoundary = new Date(Date.now() - CATCHUP_WINDOW_MS);
+    await saveNightlyState(workdir, {
+      last_run: atBoundary.toISOString(),
+    });
+    // Exactly at boundary: still within window (strictly greater than)
+    expect(await shouldRunCatchupNightly(workdir)).toBe(false);
   });
 });
 
