@@ -25,6 +25,7 @@ import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
 import { defaultServiceControl } from "../lib/platform.ts";
+import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
@@ -66,6 +67,15 @@ export interface SlashCommandContext {
    * adapter always provides it in production.
    */
   config?: Config;
+  /**
+   * ServiceControl override for /restart's afterSend. Production
+   * callers leave this undefined and /restart picks up
+   * `defaultServiceControl()`; tests inject a stub so a `bun test` run
+   * never invokes the host's real systemctl restart on the developer's
+   * own phantombot.service. Matches the override seam already used by
+   * runUpdateFlow.
+   */
+  serviceControl?: ServiceControl;
 }
 
 export interface SlashCommandResult {
@@ -182,7 +192,7 @@ async function handleUpdate(
  * failing cryptically.
  */
 function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
-  const svc = defaultServiceControl();
+  const svc = ctx.serviceControl ?? defaultServiceControl();
 
   const afterSend = async (): Promise<void> => {
     const r = await svc.restart();
