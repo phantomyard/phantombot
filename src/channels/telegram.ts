@@ -723,6 +723,7 @@ export async function runTelegramServer(
             harnesses,
             startedAt: serverStartedAt,
             activeTurn: activeTurns.get(msg.chatId),
+            config: input.config,
           });
           if (result) {
             try {
@@ -732,6 +733,20 @@ export async function runTelegramServer(
                 error: (e as Error).message,
                 chatId: msg.chatId,
               });
+            }
+            // afterSend runs strictly after sendMessage so heads-up
+            // text lands before any side-effect that could kill us
+            // (used by /update to trigger systemctl restart). Swallow
+            // and log so a failure here can't crash the poll loop.
+            if (result.afterSend) {
+              try {
+                await result.afterSend();
+              } catch (e) {
+                log.error("telegram: slash afterSend failed", {
+                  error: (e as Error).message,
+                  chatId: msg.chatId,
+                });
+              }
             }
             continue;
           }

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { VERSION } from "../version.ts";
 
 function indexPath(persona: string): string {
   return join(
@@ -46,11 +47,22 @@ export async function runHeartbeatCli(
   const r = await runHeartbeat({
     personaDir: dir,
     indexPath: indexPath(persona),
+    // Pass config + version so the heartbeat can hit GitHub for new
+    // releases and dispatch a one-time Telegram notification when a
+    // newer version is out. See src/lib/updateNotify.ts.
+    config,
+    currentVersion: VERSION,
   });
+  const updateLine =
+    r.updateCheck?.status === "notified"
+      ? `, notified update ${r.updateCheck.latestVersion}`
+      : r.updateCheck?.status === "release_check_failed"
+        ? `, update-check failed (${r.updateCheck.error})`
+        : "";
   out.write(
     `heartbeat ok: promoted ${r.promoted.length}, ` +
       `stale ${r.staleRecent.length}, ` +
-      `indexed ${r.indexedFiles}\n`,
+      `indexed ${r.indexedFiles}${updateLine}\n`,
   );
   return 0;
 }

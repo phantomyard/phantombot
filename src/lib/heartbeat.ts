@@ -20,8 +20,15 @@
 import { existsSync } from "node:fs";
 import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
+
+import type { TelegramTransport } from "../channels/telegram.ts";
+import type { Config } from "../config.ts";
 import { log } from "./logger.ts";
 import { MemoryIndex } from "./memoryIndex.ts";
+import {
+  checkAndNotifyOnce,
+  type CheckAndNotifyOnceResult,
+} from "./updateNotify.ts";
 
 export interface HeartbeatResult {
   promoted: { drawer: string; line: string }[];
@@ -29,6 +36,11 @@ export interface HeartbeatResult {
   indexedFiles: number;
   /** When the heartbeat ran. */
   ranAt: Date;
+  /**
+   * Result of the optional update check. Undefined when the heartbeat
+   * wasn't given a config (e.g. tests that skip the network path).
+   */
+  updateCheck?: CheckAndNotifyOnceResult;
 }
 
 const TAG_TO_DRAWER: Record<string, string> = {
@@ -54,6 +66,25 @@ export interface RunHeartbeatInput {
   index?: MemoryIndex;
   /** Path to the FTS index file (used only if index isn't passed). */
   indexPath?: string;
+  /**
+   * Loaded config — required to enable the once-per-version update
+   * notification. When omitted the heartbeat skips the GitHub check
+   * entirely. The CLI entry point passes this; tests can omit it to
+   * keep the network out of the path.
+   */
+  config?: Config;
+  /**
+   * Currently running phantombot version. Compared against GitHub's
+   * latest release to decide whether to notify. Defaults to the
+   * VERSION constant via the CLI; tests inject a known value.
+   */
+  currentVersion?: string;
+  /** Override fetch for the GitHub release check (test seam). */
+  fetchImpl?: typeof fetch;
+  /** Override transport for the notify send (test seam). */
+  transport?: TelegramTransport;
+  /** Override the dedup-cache path (test seam). */
+  lastNotifiedPath?: string;
 }
 
 export async function runHeartbeat(
@@ -84,7 +115,37 @@ export async function runHeartbeat(
     });
   }
 
-  return { promoted, staleRecent, indexedFiles, ranAt: now };
+  // Update check — guarded by config + currentVersion so tests that
+  // pre-date the wiring stay opt-out. Errors here never bubble up
+  // (checkAndNotifyOnce catches everything internally and returns a
+  // status); a transient GitHub blip mustn't fail the whole heartbeat.
+  let updateCheck: CheckAndNotifyOnceResult | undefined;
+  if (input.config && input.currentVersion) {
+    try {
+      updateCheck = await checkAndNotifyOnce({
+        config: input.config,
+        currentVersion: input.currentVersion,
+        fetchImpl: input.fetchImpl,
+        transport: input.transport,
+        lastNotifiedPath: input.lastNotifiedPath,
+      });
+      if (updateCheck.status === "notified") {
+        log.info("heartbeat: notified update available", {
+          version: updateCheck.latestVersion,
+          recipients: updateCheck.notifiedRecipients,
+        });
+      }
+    } catch (e) {
+      // checkAndNotifyOnce shouldn't throw — but if it does, log and
+      // keep going. The heartbeat's primary job is the local
+      // promotions/staleness/index work; the update notify is a bonus.
+      log.warn("heartbeat: update check threw unexpectedly", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  return { promoted, staleRecent, indexedFiles, ranAt: now, updateCheck };
 }
 
 /** Scan today's daily file for [tag] lines; append to matching drawer. */

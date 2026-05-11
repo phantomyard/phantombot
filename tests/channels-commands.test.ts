@@ -337,7 +337,79 @@ describe("/help", () => {
     expect(r!.reply).toContain("/reset");
     expect(r!.reply).toContain("/status");
     expect(r!.reply).toContain("/harness");
+    expect(r!.reply).toContain("/update");
     expect(r!.reply).toContain("/help");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /update
+// ---------------------------------------------------------------------------
+//
+// The happy path (update flow, marker write, restart callback) is tested
+// exhaustively in tests/lib-updateNotify.test.ts where the fetch + runUpdate
+// seams are mocked. Here we just verify the dispatcher wires through and
+// fails loud when config wasn't plumbed.
+describe("/update", () => {
+  test("recognized as a slash command (not null)", async () => {
+    // Plumb a config so the handler reaches runUpdateFlow and a non-null
+    // result comes back. With procPlatform=win32 the flow short-circuits
+    // to "can't self-update", so we don't have to mock fetch here — and
+    // we get to verify the dispatcher routed the call correctly.
+    // Construct a minimal config inline rather than importing baseConfig.
+    const minimalConfig = {
+      defaultPersona: "phantom",
+      harnessIdleTimeoutMs: 1000,
+      harnessHardTimeoutMs: 1000,
+      personasDir: "/tmp",
+      memoryDbPath: ":memory:",
+      configPath: "/tmp/c.toml",
+      harnesses: {
+        chain: ["claude"],
+        claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+        pi: { bin: "pi", maxPayloadBytes: 1 },
+        gemini: { bin: "gemini", model: "" },
+      },
+      channels: {
+        telegram: {
+          token: "fake-token",
+          pollTimeoutS: 30,
+          allowedUserIds: [42],
+        },
+      },
+      embeddings: { provider: "none" as const },
+      voice: { provider: "none" as const },
+    };
+    // We can't mock procPlatform from outside runUpdateFlow because the
+    // dispatcher doesn't accept seams. Instead, swap process.platform
+    // briefly so the flow exits early at the platform check — far before
+    // any network call. (Bun preserves the property descriptor; restore
+    // in finally.)
+    const origPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const r = await handleSlashCommand(
+        "/update",
+        ctx({ config: minimalConfig }),
+      );
+      expect(r).not.toBeNull();
+      expect(r!.reply).toContain("can't self-update");
+      expect(r!.reply).toContain("platform=win32");
+      // No restart callback when the flow short-circuits at the platform
+      // check (nothing was installed, nothing to restart).
+      expect(r!.afterSend).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "platform", { value: origPlatform });
+    }
+  });
+
+  test("missing config in context → loud refusal rather than silent no-op", async () => {
+    // Production always plumbs config. This is the defensive branch for
+    // a future caller that forgets — fail visibly, don't pretend we ran.
+    const r = await handleSlashCommand("/update", ctx());
+    expect(r).not.toBeNull();
+    expect(r!.reply).toContain("update unavailable");
+    expect(r!.afterSend).toBeUndefined();
   });
 });
 
