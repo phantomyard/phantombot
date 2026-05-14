@@ -931,6 +931,146 @@ describe("runTelegramServer voice round-trip", () => {
       else process.env.PHANTOMBOT_OPENAI_API_KEY = saved;
     }
   });
+
+  // ---------------------------------------------------------------------
+  // Per-message modality override — voice-in/text-in routing can be
+  // flipped by an explicit directive in the message text. STT still
+  // runs for voice-in so the directive in the transcript is visible.
+  // ---------------------------------------------------------------------
+
+  test("voice-in + 'respond in text' override → text reply, no TTS call, no sendVoice", async () => {
+    const originalFetch = globalThis.fetch;
+    let whisperCalled = 0;
+    let ttsCalled = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        whisperCalled++;
+        return new Response(
+          JSON.stringify({ text: "what's the weather — respond in text" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (u.includes("audio/speech")) {
+        ttsCalled++;
+        return new Response(Buffer.from([1, 2, 3]), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "",
+        voice: { fileId: "v1", mimeType: "audio/ogg", durationS: 2 },
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "sunny" },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(whisperCalled).toBe(1); // STT still ran
+      expect(ttsCalled).toBe(0); // but TTS was skipped
+      expect(transport.voiceSent).toEqual([]);
+      expect(transport.sent).toEqual([{ chatId: 1001, text: "sunny" }]);
+      // typing indicator (text-out) not recording (voice-out)
+      expect(transport.typing.length).toBeGreaterThan(0);
+      expect(transport.recording).toEqual([]);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("text-in + 'send a voice note' override → voice reply (TTS called, sendVoice fired)", async () => {
+    const originalFetch = globalThis.fetch;
+    let ttsCalled = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/speech")) {
+        ttsCalled++;
+        return new Response(Buffer.from([1, 2, 3, 4]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "give me today's agenda — send me a voice note",
+      });
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "two meetings and a haircut" },
+      ]);
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(ttsCalled).toBe(1);
+      expect(transport.voiceSent).toHaveLength(1);
+      expect(transport.voiceSent[0]?.chatId).toBe(1001);
+      // No text fallback when the voice send succeeded.
+      expect(transport.sent).toEqual([]);
+      // recording indicator (voice-out path)
+      expect(transport.recording.length).toBeGreaterThan(0);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("text-in + voice override + provider=none (no TTS) → graceful text reply", async () => {
+    // The override asks for voice but the configured provider can't do
+    // TTS — caller must NOT crash, just send text as if no override
+    // existed.
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "ping — reply with voice please",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "pong" },
+    ]);
+    const cfg = baseConfig(); // provider: "none"
+    await runTelegramServer({
+      config: cfg,
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.voiceSent).toEqual([]);
+    expect(transport.sent).toEqual([{ chatId: 1001, text: "pong" }]);
+    expect(transport.recording).toEqual([]);
+    expect(transport.typing.length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

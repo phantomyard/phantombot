@@ -214,6 +214,15 @@ When a Telegram voice message comes in (and the configured provider can do TTS),
 
 The directive lives at the channel layer (`VOICE_REPLY_INSTRUCTION` in `src/channels/telegram.ts`), not in persona files — so text replies stay as detailed as the persona wants. If voice notes still feel too long after this, the next lever is the persona's tone in BOOT.md/SOUL.md, not a config knob.
 
+### Per-message modality override
+
+The default is "mirror the input" (voice-in → voice-out, text-in → text-out). You can flip it per message with an explicit directive inside the message itself:
+
+- *Voice-in, text-out:* send a voice note saying *"…and respond in text"* (or *"reply in text please"*, *"no voice"*, *"text reply only"*). The STT transcript is what gets inspected, so the directive lands.
+- *Text-in, voice-out:* send a text message saying *"…send me a voice note"* (or *"reply with voice"*, *"voice please"*, *"as a voice note"*). Synthesises the reply via the configured TTS provider.
+
+The override is parsed by `replyModalityOverride()` in `src/lib/audio.ts` — deliberately conservative regexes anchored on reply-verbs ("reply/respond/answer with text") and unmistakable shorthand ("voice note", "no voice"). Bare nouns like *"compose a text message to John"* or *"the chapter is text-heavy"* do not trigger. If the user asks for voice but no TTS provider is configured, phantombot degrades to text gracefully (same fallback as a voice-in with a broken TTS provider).
+
 ---
 
 ## Scheduled tasks (`phantombot task` + `phantombot tick`)
