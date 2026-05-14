@@ -28,6 +28,7 @@ import { type Config, xdgDataHome } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
   type AudioSupport,
+  replyModalityOverride,
   sttSupport,
   synthesize,
   transcribe,
@@ -972,8 +973,26 @@ async function processChatMessage(
     });
   }
 
-  // Send the right indicator depending on which way we'll reply.
-  const willReplyWithVoice = isVoice && ttsSupported(input.config);
+  // Reply-modality routing.
+  //
+  //   default       — mirror the input modality (voice-in → voice-out,
+  //                   text-in → text-out)
+  //   user override — explicit per-message directive in the message
+  //                   text ("reply in text", "send a voice note") flips
+  //                   the wire format. Applies AFTER STT so the
+  //                   transcript is what gets inspected for voice-in.
+  //
+  // Voice is still capped by ttsSupported(): if the user asks for a
+  // voice reply but the provider can't do TTS, we degrade to text
+  // gracefully (same fallback as the original voice-in path).
+  const modalityOverride = replyModalityOverride(msg.text);
+  const wantsVoiceReply =
+    modalityOverride === "voice"
+      ? true
+      : modalityOverride === "text"
+        ? false
+        : isVoice;
+  const willReplyWithVoice = wantsVoiceReply && ttsSupported(input.config);
   const sendStatus = () =>
     willReplyWithVoice
       ? input.transport.sendRecording(msg.chatId)
@@ -1260,6 +1279,7 @@ async function processChatMessage(
     harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
     modality: sentAsVoice ? "voice" : "text",
     inputModality: isVoice ? "voice" : "text",
+    modalityOverride: modalityOverride ?? "none",
     ok: !errored,
   });
 }

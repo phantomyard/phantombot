@@ -80,6 +80,89 @@ export function ttsSupported(config: Config): boolean {
   return ttsSupport(config).ok;
 }
 
+/**
+ * Detect an explicit reply-modality directive in the user's message.
+ *
+ *   "text"     — user asked for a text reply ("reply in text", "no voice")
+ *   "voice"    — user asked for a voice reply ("send a voice note", "as voice")
+ *   undefined  — no clear directive; caller falls back to input modality
+ *
+ * Used by the Telegram channel to let users override the default
+ * mirror-the-input-modality routing on a per-message basis. The model
+ * still sees the directive verbatim in the prompt either way — this is
+ * purely about picking the wire format (sendMessage vs sendVoice) and
+ * the brevity directive applied to the system prompt.
+ *
+ * Deliberately conservative. Only matches explicit reply-form phrases
+ * ("respond with text", "as voice") and near-unmistakable shorthand
+ * ("voice note", "no voice"). Avoids false positives on bare nouns —
+ * "the chapter is text-heavy" must NOT trigger, nor "compose a text
+ * message to John". When the same message contains both a text and a
+ * voice directive (a user mid-correction), the later one wins.
+ */
+export function replyModalityOverride(
+  text: string | undefined,
+): "text" | "voice" | undefined {
+  if (!text) return undefined;
+  const t = text.toLowerCase();
+
+  // Negation short-circuit. "Do not reply with voice" literally CONTAINS
+  // the substring "reply with voice" which would otherwise hit the
+  // positive voice pattern below — so we check negations first and exit.
+  // Symmetric "no text / don't reply with text" isn't covered: it's an
+  // unlikely phrasing, and adding it just bloats the surface. Easy to
+  // bolt on if anyone asks.
+  const NEGATION_VOICE =
+    /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?voice(?:\s*(?:note|message|reply|response))?\b/;
+  if (NEGATION_VOICE.test(t)) return "text";
+
+  // Patterns are anchored on reply-verbs ("reply", "respond", "answer"),
+  // unmistakable shorthand ("text reply", "voice note"), or "as/in text|
+  // voice". Bare "text" or "voice" never trigger on their own — the
+  // exclusion of "text message" from the noun-list is deliberate
+  // ("compose a text message to john" must not flip routing).
+  const textPatterns: RegExp[] = [
+    // "(please) reply/respond/answer/get back to me with/in/as/using (plain) text"
+    /\b(?:reply|respond|answer|response|get\s+back(?:\s+to\s+me)?)\s+(?:to\s+me\s+)?(?:with|in|as|using)\s+(?:plain\s+|just\s+|only\s+)?text\b/,
+    // "text reply / response / answer / please / only" — "message" is
+    // deliberately omitted (false-positive bait).
+    /\btext[ -](?:reply|response|answer|please|only)\b/,
+    // "as text" / "in text form|format"
+    /\bas\s+text\b/,
+    /\bin\s+text\s+(?:form|format)\b/,
+  ];
+
+  const voicePatterns: RegExp[] = [
+    // "reply/respond/answer/get back to me with/in/as/using (a) voice"
+    /\b(?:reply|respond|answer|response|get\s+back(?:\s+to\s+me)?)\s+(?:to\s+me\s+)?(?:with|in|as|using)\s+(?:a\s+|just\s+)?voice\b/,
+    // "voice note / message / reply / response / answer / please / only"
+    /\bvoice[ -](?:note|message|reply|response|answer|please|only)\b/,
+    // "send (me) (a) voice (note|message)?"
+    /\bsend(?:\s+me)?\s+(?:a\s+)?voice(?:\s*(?:note|message))?\b/,
+    // "as (a) voice"
+    /\bas\s+(?:a\s+)?voice\b/,
+  ];
+
+  let textIdx = -1;
+  for (const re of textPatterns) {
+    const m = re.exec(t);
+    if (m && (textIdx === -1 || m.index < textIdx)) textIdx = m.index;
+  }
+  let voiceIdx = -1;
+  for (const re of voicePatterns) {
+    const m = re.exec(t);
+    if (m && (voiceIdx === -1 || m.index < voiceIdx)) voiceIdx = m.index;
+  }
+
+  if (textIdx >= 0 && voiceIdx >= 0) {
+    // Both fired: the later mention is the user's settled intent.
+    return textIdx > voiceIdx ? "text" : "voice";
+  }
+  if (textIdx >= 0) return "text";
+  if (voiceIdx >= 0) return "voice";
+  return undefined;
+}
+
 export async function synthesize(
   config: Config,
   text: string,
