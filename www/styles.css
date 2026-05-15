@@ -153,6 +153,27 @@ h1 {
     display: inline-block;
 }
 
+.cta-note {
+    margin-top: 1.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--muted);
+    max-width: 720px;
+}
+
+.cta-note code {
+    background: var(--border);
+    padding: 0.1rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    color: var(--fg);
+}
+
+.cta-note a {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 .copy-button {
     position: absolute;
     top: 0.5rem;

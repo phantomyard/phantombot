@@ -2,7 +2,9 @@
 
 Giving the harness a Soul. The harness can do its own tools — let it. A personality-first chat agent for Telegram, built for minimalist, high-torque agency.
 
-Phantombot extends **Inflection Pi** onto Telegram — and uses **Claude Code** or **Google Gemini CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude and Gemini are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
+Phantombot extends **[Pi](https://pi.dev)** — the terminal-based coding agent from Earendil Works — onto Telegram, and uses **Claude Code** or **Google Gemini CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude and Gemini are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
+
+Grab Pi from <https://pi.dev> — `curl -fsSL https://pi.dev/install.sh | sh` — before configuring phantombot.
 
 ---
 
@@ -52,7 +54,7 @@ Phantombot doesn't bundle an AI model — it delegates to one you already have i
 
 **You must install and authenticate at least one harness yourself before `phantombot harness` will work:**
 
-- **Pi** *(recommended primary)* — install `pi` from Inflection, then run `pi` once to authenticate.
+- **Pi** *(recommended primary)* — get it from [pi.dev](https://pi.dev) with `curl -fsSL https://pi.dev/install.sh | sh`, then run `pi` once to authenticate.
 - **Claude Code** — `npm install -g @anthropic-ai/claude-code`, then `claude /login` for OAuth.
 - **Gemini CLI** — install Google's Gemini CLI, then `gemini` and follow the `/auth` flow (or set `GEMINI_API_KEY` in `~/.env`).
 
@@ -102,7 +104,7 @@ Updates download to `${binPath}.update.tmp`, SHA256-verify, atomically rename ov
 ## Prerequisites
 
 - **At least one harness** installed and authenticated as the user that will run phantombot:
-  - **Inflection Pi** *(recommended primary)* — `pi` configured per its own setup
+  - **[Pi](https://pi.dev)** *(recommended primary)* — install via `curl -fsSL https://pi.dev/install.sh | sh`, then `pi` configured per its own setup
   - **Claude Code** — `claude /login` (OAuth on host; phantombot filters `ANTHROPIC_API_KEY` so OAuth is the path)
   - **Google Gemini CLI** — `gemini` then OAuth via the in-app `/auth`, OR set `GEMINI_API_KEY` in `~/.env`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)

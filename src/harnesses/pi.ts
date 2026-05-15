@@ -1,5 +1,5 @@
 /**
- * Inflection Pi harness.
+ * Pi harness (https://pi.dev — Pi Coding Agent from Earendil Works).
  *
  * Spawns `pi --print --mode json` with the system prompt as a flag and the
  * full rendered payload (history + new message) as the LAST positional
