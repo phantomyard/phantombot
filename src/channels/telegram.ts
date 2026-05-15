@@ -16,12 +16,11 @@
  * clip at the end, mid-turn flushes would just bloat the audio.
  *
  * Gemini-cli models often go straight to tool calls without narration.
- * For that case: we send a "Running \`tool_name\`…" status message on
- * the first progress event with no text to flush, run a background
- * typing-indicator refresh timer during tool execution (gemini emits
- * zero events during tools, causing Telegram's ~5s indicator to expire),
- * and flush accumulated text on post-tool heartbeat events so replies
- * stream progressively instead of arriving as one blob at turn-end.
+ * For that case: we run a background typing-indicator refresh timer
+ * during tool execution (the status bar keeps showing "typing…" or
+ * "recording voice…" — no canned chat messages), and flush accumulated
+ * text on post-tool heartbeat events so replies stream progressively
+ * instead of arriving as one blob at turn-end.
  *
  * Token-by-token live edits would be nicer still but Telegram
  * rate-limits edits at ~1/sec — not worth the complexity.
@@ -1197,26 +1196,6 @@ async function processChatMessage(
         const pendingBeforeTool = streamedReply.slice(flushedReply.length);
         if (pendingBeforeTool.trim().length > 0) {
           await flushNarration();
-        } else if (!willReplyWithVoice && streamedReply.length === 0) {
-          // No narration at all: the model went straight to tool call
-          // without emitting any text. This is common with gemini-cli.
-          // Send a one-line status message so the user knows work is
-          // underway during the (potentially minutes-long) tool
-          // execution. (streamedReply.length check avoids triggering on
-          // whitespace-only output, which is a model quirk, not silence.)
-          const toolName = chunk.note.replace(/^tool:\s*/, "");
-          try {
-            await input.transport.sendMessage(
-              msg.chatId,
-              `Running \`${toolName}\`…`,
-            );
-          } catch (e) {
-            log.warn("telegram: tool status send failed", {
-              error: (e as Error).message,
-              chatId: msg.chatId,
-            });
-          }
-          refreshIndicator();
         }
         // Start a background timer to keep the typing/recording
         // indicator visible during tool execution. Without this,
