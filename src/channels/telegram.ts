@@ -14,6 +14,15 @@
  * tool-run window instead of arriving stapled to the back of the final
  * answer. Voice-out skips chunked flushing — voice is one synthesized
  * clip at the end, mid-turn flushes would just bloat the audio.
+ *
+ * Gemini-cli models often go straight to tool calls without narration.
+ * For that case: we send a "Running \`tool_name\`…" status message on
+ * the first progress event with no text to flush, run a background
+ * typing-indicator refresh timer during tool execution (gemini emits
+ * zero events during tools, causing Telegram's ~5s indicator to expire),
+ * and flush accumulated text on post-tool heartbeat events so replies
+ * stream progressively instead of arriving as one blob at turn-end.
+ *
  * Token-by-token live edits would be nicer still but Telegram
  * rate-limits edits at ~1/sec — not worth the complexity.
  *
@@ -1001,10 +1010,12 @@ async function processChatMessage(
   // Indicator policy: refresh on EVERY harness chunk (text, heartbeat,
   // progress). When chunks stop, the indicator naturally expires after
   // ~5s — that vanishing IS the user-visible "harness has gone silent /
-  // possibly frozen" signal. No background timer, no fake pulse: the
-  // indicator's presence is a true reflection of the harness's current
-  // activity. The throttle just prevents stream-json bursts from
-  // hitting Telegram's per-bot rate cap.
+  // possibly frozen" signal. One exception: during tool execution,
+  // gemini-cli emits zero events (potentially for minutes), which would
+  // make the indicator expire and look frozen. For that gap we run a
+  // background refresh timer (startToolRefresh / stopToolRefresh). The
+  // throttle just prevents stream-json bursts from hitting Telegram's
+  // per-bot rate cap.
   const throttleMs = input.typingThrottleMs ?? 2000;
   let lastSendStatusAt = 0;
   const refreshIndicator = () => {
@@ -1012,6 +1023,26 @@ async function processChatMessage(
     if (now - lastSendStatusAt < throttleMs) return;
     lastSendStatusAt = now;
     void sendStatus();
+  };
+
+  // Background typing/recording indicator refresh during tool execution.
+  // gemini-cli emits zero events while a tool runs (potentially minutes),
+  // causing Telegram's chat-action indicator to expire after ~5s. This
+  // interval timer keeps it visible during the gap. Started on the first
+  // `progress` event, stopped on the next `text` / `heartbeat` / `done`
+  // / `error` / `finally`.
+  let toolRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  const startToolRefresh = () => {
+    if (toolRefreshTimer) return; // already running
+    toolRefreshTimer = setInterval(() => {
+      void sendStatus();
+    }, 4000);
+  };
+  const stopToolRefresh = () => {
+    if (toolRefreshTimer) {
+      clearInterval(toolRefreshTimer);
+      toolRefreshTimer = undefined;
+    }
   };
 
   // Initial nudge so the user sees "typing…" the moment we start
@@ -1048,6 +1079,12 @@ async function processChatMessage(
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
+  // Gemini-cli streaming UX: track whether we're past the first tool
+  // call (so we know when heartbeat events signal post-tool reply
+  // streaming), and throttle heartbeat-triggered text flushes so
+  // replies stream progressively instead of arriving as one blob.
+  let pastFirstTool = false;
+  let lastHeartbeatFlushAt = 0;
 
   // Flush whatever's buffered since the last flush as a narration
   // bubble. No-ops in voice-out (we synthesize once at the end) and
@@ -1108,15 +1145,42 @@ async function processChatMessage(
     })) {
       if (chunk.type === "text") {
         streamedReply += chunk.text;
+        stopToolRefresh();
         refreshIndicator();
       }
       if (chunk.type === "heartbeat") {
-        // Model is alive (chain-of-thought / tool start / etc.) — keep
-        // the indicator visible without surfacing the content.
+        // Tool completed (or model is thinking) — stop the background
+        // tool-refresh timer and show the indicator naturally.
+        stopToolRefresh();
         refreshIndicator();
+        // After the first tool call, heartbeat events signal the model
+        // has started streaming its post-tool reply. Flush accumulated
+        // text so gemini-cli users see replies progressively instead of
+        // waiting for the entire turn to finish. Throttled to avoid
+        // sending a new message on every heartbeat/token pair.
+        if (pastFirstTool) {
+          const now = Date.now();
+          if (now - lastHeartbeatFlushAt >= 1500) {
+            const pending = streamedReply.slice(flushedReply.length);
+            if (pending.trim().length > 0) {
+              flushedReply = streamedReply;
+              try {
+                await input.transport.sendMessage(msg.chatId, pending);
+                lastHeartbeatFlushAt = now;
+              } catch (e) {
+                log.warn("telegram: heartbeat flush failed", {
+                  error: (e as Error).message,
+                  chatId: msg.chatId,
+                });
+              }
+              refreshIndicator();
+            }
+          }
+        }
       }
       if (chunk.type === "progress") {
         progressCount++;
+        pastFirstTool = true;
         // Stash the latest progress note on the active-turn handle so
         // /status can show "currently: <tool>" in real time.
         turnHandle.lastProgressNote = chunk.note.slice(0, 500);
@@ -1130,7 +1194,36 @@ async function processChatMessage(
         // bubble per tool, not one wall at the end.)
         // flushNarration() re-arms the typing indicator after sending,
         // so we don't need to call refreshIndicator() again here.
-        await flushNarration();
+        const pendingBeforeTool = streamedReply.slice(flushedReply.length);
+        if (pendingBeforeTool.trim().length > 0) {
+          await flushNarration();
+        } else if (!willReplyWithVoice && streamedReply.length === 0) {
+          // No narration at all: the model went straight to tool call
+          // without emitting any text. This is common with gemini-cli.
+          // Send a one-line status message so the user knows work is
+          // underway during the (potentially minutes-long) tool
+          // execution. (streamedReply.length check avoids triggering on
+          // whitespace-only output, which is a model quirk, not silence.)
+          const toolName = chunk.note.replace(/^tool:\s*/, "");
+          try {
+            await input.transport.sendMessage(
+              msg.chatId,
+              `Running \`${toolName}\`…`,
+            );
+          } catch (e) {
+            log.warn("telegram: tool status send failed", {
+              error: (e as Error).message,
+              chatId: msg.chatId,
+            });
+          }
+          refreshIndicator();
+        }
+        // Start a background timer to keep the typing/recording
+        // indicator visible during tool execution. Without this,
+        // gemini-cli's multi-minute tool runs cause Telegram's
+        // indicator to expire after ~5s, making it look like the
+        // bot has frozen. Stopped on the next text/heartbeat/done/error.
+        startToolRefresh();
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
@@ -1145,6 +1238,7 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
+    stopToolRefresh();
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.chatId) === turnHandle) {
