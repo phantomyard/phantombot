@@ -2,7 +2,7 @@
 
 ## Goal
 
-Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. All model + tool work delegates to a CLI harness (Claude Code primary, Inflection Pi fallback). Phantombot's job is identity + memory + harness fallback.
+Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. All model + tool work delegates to a CLI harness (Claude Code primary, [Pi](https://pi.dev) fallback). Phantombot's job is identity + memory + harness fallback.
 
 ## What phantombot does
 
