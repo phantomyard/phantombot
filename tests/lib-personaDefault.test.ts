@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,7 +12,7 @@ import {
   healDefaultPersonaIfBroken,
 } from "../src/lib/personaDefault.ts";
 import type { Config } from "../src/config.ts";
-import { loadState, saveState, type State } from "../src/state.ts";
+import { loadState } from "../src/state.ts";
 
 class CaptureStream {
   chunks: string[] = [];
@@ -91,6 +91,14 @@ describe("healDefaultPersonaIfBroken", () => {
     const healed = await healDefaultPersonaIfBroken(config);
     // Sorted: "kai", "lena" → picks "kai"
     expect(healed).toBe("kai");
+  });
+
+  test("prefers case-insensitive name match over first alphabetical", async () => {
+    await mkdir(join(personasDir, "Robbie"), { recursive: true });
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    const config = makeConfig(personasDir, "robbie");
+    const healed = await healDefaultPersonaIfBroken(config);
+    expect(healed).toBe("Robbie");
   });
 
   test("no-ops when personas dir doesn't exist (returns null)", async () => {

@@ -67,6 +67,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     // so we can compute it directly.
     persona = healed;
     agentDir = personaDir(config, persona);
+    config.defaultPersona = healed;
   }
 
   const harnesses = buildHarnessChain(config, err);

@@ -78,6 +78,11 @@ export async function healDefaultPersonaIfBroken(
   const state = await loadState();
   state.default_persona = healed;
   await saveState(state);
+  log.warn("persona healed", {
+    from: config.defaultPersona,
+    to: healed,
+    reason: "missing on disk",
+  });
   out?.write(
     `healed default_persona: '${config.defaultPersona}' → '${healed}' ` +
       `(previous default has no persona dir on disk)\n`,
