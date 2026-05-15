@@ -44,6 +44,8 @@ function makeConfig(personasDir: string, defaultPersona = "phantom"): Config {
   };
 }
 
+const SAVED_STATE = process.env.PHANTOMBOT_STATE;
+
 let workdir: string;
 let personasDir: string;
 
@@ -51,9 +53,12 @@ beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-pd-"));
   personasDir = join(workdir, "personas");
   await mkdir(personasDir, { recursive: true });
+  process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
 });
 
 afterEach(async () => {
+  if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
+  else process.env.PHANTOMBOT_STATE = SAVED_STATE;
   await rm(workdir, { recursive: true, force: true });
 });
 

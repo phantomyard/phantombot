@@ -22,11 +22,14 @@ class CaptureStream {
   }
 }
 
+const SAVED_STATE = process.env.PHANTOMBOT_STATE;
+
 let workdir: string;
 let config: Config;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-run-"));
+  process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
   await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
   await writeFile(
     join(workdir, "personas", "phantom", "BOOT.md"),
@@ -51,6 +54,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
+  else process.env.PHANTOMBOT_STATE = SAVED_STATE;
   await rm(workdir, { recursive: true, force: true });
 });
 
