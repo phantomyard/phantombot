@@ -1,7 +1,7 @@
 name: Release on PR merge
 
 # Fires for every PR merged into main. Cuts a GitHub Release tagged
-# v1.0.<RUN_NUMBER> with cross-compiled binaries (linux x64-baseline +
+# v1.1.<RUN_NUMBER> with cross-compiled binaries (linux x64-baseline +
 # arm64, darwin x64 + arm64) and a SHA256SUMS file. `phantombot update`
 # reads this feed.
 #
@@ -16,6 +16,17 @@ name: Release on PR merge
 # pivot from a deployed binary to the build that produced it in one click.
 # The originating PR number is preserved in the release title and notes
 # so the audit trail (which PR shipped what) is still intact.
+#
+# Why the minor bump from 1.0 → 1.1: the first run under run_number-based
+# tagging would have been v1.0.64, which collided with the old PR-numbered
+# v1.0.64 (from PR #64 back in early May 2026) and made `gh release create`
+# fail with "tag already exists". The PR-numbered era went up to ~v1.0.109,
+# so any run_number under ~110 would have collided. Bumping minor to 1.1
+# gives us a clean namespace with no overlap, while the run_number itself
+# keeps its meaning (it's still the per-workflow counter, just one minor
+# slot higher). Don't bump minor again on the next collision risk —
+# there isn't one; run_number only grows from here and 1.1.<N> can run
+# to infinity.
 #
 # Why every PR (not manual tags): the user runs `phantombot update --force
 # --restart` from cron and wants always-fresh binaries. If a PR shouldn't
@@ -74,7 +85,7 @@ jobs:
           # for the why.
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          VERSION="1.0.${RUN_NUMBER}"
+          VERSION="1.1.${RUN_NUMBER}"
           TAG="v${VERSION}"
           # Replace only the literal placeholder so the doc comment in
           # src/version.ts (and any future sibling const) survives. The
