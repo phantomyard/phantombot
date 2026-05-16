@@ -18,6 +18,7 @@ import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { shouldRunCatchupNightly } from "../lib/nightly.ts";
+import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
   acquireRunLock,
@@ -50,15 +51,23 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     return 2;
   }
 
-  const persona = config.defaultPersona;
-  const agentDir = personaDir(config, persona);
+  let persona = config.defaultPersona;
+  let agentDir = personaDir(config, persona);
   if (!existsSync(agentDir)) {
-    err.write(
-      `persona '${persona}' not found at ${agentDir}\n` +
-        "import or create one with `phantombot import-persona <openclaw-dir>` " +
-        "or `phantombot create-persona`.\n",
-    );
-    return 2;
+    const healed = await healDefaultPersonaIfBroken(config, err);
+    if (!healed) {
+      err.write(
+        `default persona '${persona}' not found at ${agentDir} and no other personas exist.\n` +
+          "Create one with `phantombot persona`.\n",
+      );
+      return 2;
+    }
+    // Re-resolve paths with the healed persona. loadConfig() cached the
+    // stale default, but personaDir(healed) is deterministic from config
+    // so we can compute it directly.
+    persona = healed;
+    agentDir = personaDir(config, persona);
+    config.defaultPersona = healed;
   }
 
   const harnesses = buildHarnessChain(config, err);

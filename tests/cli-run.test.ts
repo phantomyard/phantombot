@@ -22,11 +22,14 @@ class CaptureStream {
   }
 }
 
+const SAVED_STATE = process.env.PHANTOMBOT_STATE;
+
 let workdir: string;
 let config: Config;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-run-"));
+  process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
   await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
   await writeFile(
     join(workdir, "personas", "phantom", "BOOT.md"),
@@ -51,6 +54,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
+  else process.env.PHANTOMBOT_STATE = SAVED_STATE;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -63,7 +68,7 @@ describe("runRun — early exits", () => {
     expect(err.text).toContain("phantombot telegram");
   });
 
-  test("returns 2 when persona dir is missing", async () => {
+  test("returns 2 when persona dir is missing and no other personas exist", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     await rm(join(workdir, "personas", "phantom"), { recursive: true });
@@ -82,7 +87,41 @@ describe("runRun — early exits", () => {
       err,
     });
     expect(code).toBe(2);
-    expect(err.text).toContain("import-persona");
+    expect(err.text).toContain("no other personas exist");
+  });
+
+  test("heals to another persona when default is missing but others exist", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    // Remove the configured default persona, but leave a different one.
+    await rm(join(workdir, "personas", "phantom"), { recursive: true });
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(join(workdir, "personas", "kai", "BOOT.md"), "# Kai");
+
+    // Use an empty harness chain to force an early exit (code 2) after
+    // the persona validation passes. This proves healing worked without
+    // launching a full Telegram polling server.
+    const code = await runRun({
+      config: {
+        ...config,
+        defaultPersona: "ghostfixture",
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: {
+          telegram: {
+            token: "abc",
+            pollTimeoutS: 30,
+            allowedUserIds: [],
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    // Should fail on harness chain, not persona-missing.
+    expect(code).toBe(2);
+    expect(err.text).not.toContain("no other personas exist");
+    expect(err.text).toContain("phantombot harness");
   });
 
   test("returns 2 when harness chain is empty", async () => {
