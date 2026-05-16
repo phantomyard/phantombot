@@ -78,11 +78,11 @@ describe("healDefaultPersonaIfBroken", () => {
 
   test("heals to the only persona on disk", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
-    const config = makeConfig(personasDir, "robbie");
+    const config = makeConfig(personasDir, "ghostfixture");
     const out = new CaptureStream();
     const healed = await healDefaultPersonaIfBroken(config, out);
     expect(healed).toBe("kai");
-    expect(out.text).toContain("robbie' → 'kai'");
+    expect(out.text).toContain("ghostfixture' → 'kai'");
 
     // Verify state.json was written.
     const state = await loadState();
@@ -92,23 +92,23 @@ describe("healDefaultPersonaIfBroken", () => {
   test("picks first alphabetically when no name match exists", async () => {
     await mkdir(join(personasDir, "lena"), { recursive: true });
     await mkdir(join(personasDir, "kai"), { recursive: true });
-    const config = makeConfig(personasDir, "robbie");
+    const config = makeConfig(personasDir, "ghostfixture");
     const healed = await healDefaultPersonaIfBroken(config);
     // Sorted: "kai", "lena" → picks "kai"
     expect(healed).toBe("kai");
   });
 
   test("prefers case-insensitive name match over first alphabetical", async () => {
-    await mkdir(join(personasDir, "Robbie"), { recursive: true });
+    await mkdir(join(personasDir, "Ghostfixture"), { recursive: true });
     await mkdir(join(personasDir, "kai"), { recursive: true });
-    const config = makeConfig(personasDir, "robbie");
+    const config = makeConfig(personasDir, "ghostfixture");
     const healed = await healDefaultPersonaIfBroken(config);
-    expect(healed).toBe("Robbie");
+    expect(healed).toBe("Ghostfixture");
   });
 
   test("no-ops when personas dir doesn't exist (returns null)", async () => {
     await rm(personasDir, { recursive: true });
-    const config = makeConfig(personasDir, "robbie");
+    const config = makeConfig(personasDir, "ghostfixture");
     const healed = await healDefaultPersonaIfBroken(config);
     expect(healed).toBeNull();
   });
@@ -124,7 +124,7 @@ describe("adoptAsDefaultIfMissing", () => {
 
   test("adopts the given name when default is missing", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
-    const config = makeConfig(personasDir, "robbie");
+    const config = makeConfig(personasDir, "ghostfixture");
     const out = new CaptureStream();
     const changed = await adoptAsDefaultIfMissing(config, "kai", out);
     expect(changed).toBe(true);

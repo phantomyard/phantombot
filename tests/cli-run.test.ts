@@ -104,6 +104,7 @@ describe("runRun — early exits", () => {
     const code = await runRun({
       config: {
         ...config,
+        defaultPersona: "ghostfixture",
         harnesses: { ...config.harnesses, chain: [] },
         channels: {
           telegram: {
