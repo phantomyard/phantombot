@@ -115,8 +115,15 @@ export function replyModalityOverride(
   // matching the later-wins rule used by the positive patterns below.
   const NEGATION_VOICE =
     /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?voice(?:\s*(?:note|message|reply|response))?\b/;
+  // Asymmetric with NEGATION_VOICE on purpose: "text message" means SMS,
+  // not a reply-form directive (see positive textPatterns below, which
+  // also exclude "text message"). Both forms of that exclusion live here:
+  //   - the trailing-noun group omits "message" (only "reply"/"response")
+  //   - a negative lookahead `(?!\s+messages?\b)` blocks bare "no text"
+  //     from matching when "message(s)" follows ("no text messages today"
+  //     must stay a no-op, not flip routing to voice).
   const NEGATION_TEXT =
-    /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?text(?:\s*(?:reply|response|message))?\b/;
+    /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?text(?:\s*(?:reply|response))?(?!\s+messages?\b)\b/;
   const negVoice = NEGATION_VOICE.exec(t);
   const negText = NEGATION_TEXT.exec(t);
   if (negVoice && negText) {

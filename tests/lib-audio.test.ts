@@ -352,6 +352,11 @@ describe("replyModalityOverride", () => {
     "I'm reading a textbook",
     "summarise this text",
     "what's the difference between text and audio formats",
+    // Regression: NEGATION_TEXT must not match "no text message(s)" — the
+    // positive textPatterns deliberately exclude "text message" (SMS), so
+    // negating it shouldn't flip routing to voice either.
+    "no text messages today please",
+    "don't send any text message to john",
     "",
     undefined,
   ])("no directive: %p → undefined", (input) => {
