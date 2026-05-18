@@ -34,7 +34,9 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/state.ts` | Phantombot-managed runtime state (currently just `default_persona`). Lives at `$XDG_DATA_HOME/phantombot/state.json`. | filesystem |
 | `src/persona/loader.ts` | Reads BOOT.md / SOUL.md / IDENTITY.md (required) + MEMORY.md / tools.md / AGENTS.md (optional). | filesystem |
 | `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |
-| `src/memory/store.ts` | bun:sqlite wrapper. `appendTurn`, `recentTurns`, `recentTurnsForDisplay`, `close`. | `bun:sqlite` |
+| `src/memory/store.ts` | bun:sqlite wrapper. `turns` table (`appendTurn`, `recentTurns`, …) + `capture_log` table (`appendCapture`, `lastCaptureAt`, `countCapturesSince`, turn counters for the nudge/doctor). | `bun:sqlite` |
+| `src/lib/nightly.ts` | Nightly stage list, per-stage prompt bodies, `.nightly-progress.json` checkpoint read/write, `pendingNightlyStages`. | filesystem |
+| `src/cli/doctor.ts` | `phantombot doctor`: reads nightly state/progress + `capture_log`, decides if repair is needed, spawns detached `nightly --resume`. | `memory/store`, `lib/nightly` |
 | `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
 | `src/orchestrator/turn.ts` | `runTurn`: persona → memory → harness chain → persist. The one function every entry point calls. | `loader`, `builder`, `memory`, `fallback` |
 | `src/orchestrator/fallback.ts` | `runWithFallback`: tries each harness in order, advances on recoverable error, terminates on success or terminal error. Pre-spawn skip when `maxPayloadBytes` is too small. | `harnesses/*` |
@@ -72,6 +74,34 @@ phantombot ask "what's on my calendar?"
   → ask.ts: write the harness's final assistant text to stdout, ensure trailing "\n"
   → exit 0 / 1 / 2
 ```
+
+## Memory subsystem
+
+Memory is two layers — see the README `## Memory` section for the operator-facing
+picture. From an architecture standpoint:
+
+- **SQLite (`memory.sqlite`)** is machine state. `turns` is a *rolling* per-conversation
+  context buffer, deliberately pruned — it is not a transcript archive, and nothing
+  should be designed assuming old turns survive. `capture_log` is append-only and
+  exists purely as an observability trail.
+- **Markdown (the persona dir)** is the durable memory: `memory/<date>.md` daily
+  journals → four structured drawers → `kb/` atomic notes → `MEMORY.md`.
+
+Three properties worth knowing when touching this code:
+
+1. **Capture has a CLI** (`phantombot memory capture`). It is the *only* sanctioned
+   write path into the daily journal, so every capture leaves a `capture_log` row.
+   A CLI cannot *force* a harness to capture — it makes a missed capture observable
+   instead of silent.
+2. **The 30-turn nudge is mechanical.** `src/channels/telegram.ts` counts user turns
+   since the last `capture_log` row; at every multiple of `CAPTURE_NUDGE_INTERVAL`
+   (30) it stacks a fixed reminder onto the next system prompt. No LLM decides this.
+3. **The nightly is checkpointed and resumable.** It is decomposed into five
+   idempotent stages (`essence` → `promote` → `kb` → `compress` → `state`), each a
+   bounded harness turn. `.nightly-progress.json` is written after every stage;
+   `--resume` skips completed stages. A stage timeout costs one stage, not the night.
+   `phantombot doctor` (also wired into the `run` startup catch-up) detects a
+   missed/failed/partial nightly and repairs it by spawning a detached `nightly --resume`.
 
 ## Open design questions
 

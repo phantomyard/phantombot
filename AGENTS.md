@@ -61,7 +61,8 @@ phantombot/
 │   │   ├── loader.ts         # accepts BOOT.md / SOUL.md / IDENTITY.md, MEMORY.md, tools.md / AGENTS.md
 │   │   └── builder.ts        # buildSystemPrompt + MEMORY_TOOLS_SECTION + CREDENTIALS_SECTION
 │   ├── memory/
-│   │   └── store.ts          # bun:sqlite turn store (turns table)
+│   │   └── store.ts          # bun:sqlite store: turns table + capture_log table
+│   │                         #   (capture_log backs the 30-turn nudge + doctor)
 │   ├── importer/
 │   │   └── openclaw.ts       # OpenClaw → phantombot persona import
 │   ├── orchestrator/
@@ -81,8 +82,9 @@ phantombot/
 │   │   ├── voice.ts          # phantombot voice (TUI: TTS/STT provider config)
 │   │   ├── telegram.ts       # phantombot telegram (TUI: token + allowed users)
 │   │   ├── harness.ts        # phantombot harness (TUI: chain) + maybePromptRestart helper
-│   │   ├── memory.ts         # phantombot memory (search/get/today/index/list)
-│   │   ├── heartbeat.ts nightly.ts
+│   │   ├── memory.ts         # phantombot memory (search/get/today/index/list/capture)
+│   │   ├── heartbeat.ts nightly.ts  # nightly is 5 checkpointed stages (--resume)
+│   │   ├── doctor.ts         # phantombot doctor (memory health check + nightly auto-repair)
 │   │   ├── embedding.ts      # phantombot embedding (TUI: Gemini config)
 │   │   ├── persona.ts        # phantombot persona (consolidates create / import / restore / switch)
 │   │   ├── create-persona.ts import-persona.ts  # implementation files; no top-level subcommand
