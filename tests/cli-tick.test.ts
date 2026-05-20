@@ -16,6 +16,18 @@ import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 // (tick trying to POST to the Telegram API on every fire) fails loud
 // instead of silently working in the test environment.
 type FetchCall = { url: string; init?: RequestInit };
+
+// Hostname-precise match — substring matching against arbitrary URLs is
+// what CodeQL's "Incomplete URL substring sanitization" rule flags, even
+// in test code. Use the parsed hostname so we never accept e.g.
+// `https://evil.com/api.telegram.org/x`.
+function isTelegramApiUrl(u: string): boolean {
+  try {
+    return new URL(u).hostname === "api.telegram.org";
+  } catch {
+    return false;
+  }
+}
 function installFetchTrap(): { calls: FetchCall[]; restore: () => void } {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
@@ -386,9 +398,7 @@ describe("runTick — quiet-by-default (no auto-Telegram delivery)", () => {
       trap.restore();
     }
     // No Telegram API call at all — tick is the wrong place for it.
-    const telegramCalls = trap.calls.filter((c) =>
-      c.url.includes("api.telegram.org"),
-    );
+    const telegramCalls = trap.calls.filter((c) => isTelegramApiUrl(c.url));
     expect(telegramCalls).toEqual([]);
     // Run row records the fire but `delivered` is false (we never auto-deliver).
     const runs = store.taskRuns(created.id);
@@ -432,9 +442,7 @@ describe("runTick — quiet-by-default (no auto-Telegram delivery)", () => {
     } finally {
       trap.restore();
     }
-    expect(
-      trap.calls.filter((c) => c.url.includes("api.telegram.org")),
-    ).toEqual([]);
+    expect(trap.calls.filter((c) => isTelegramApiUrl(c.url))).toEqual([]);
   });
 });
 
