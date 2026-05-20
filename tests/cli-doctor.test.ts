@@ -161,3 +161,112 @@ describe("runDoctor", () => {
     expect(report.nightly.last_status).toBe("ok");
   });
 });
+
+describe("runDoctor systemd health check", () => {
+  // Driven by the checkSystemd test seam so we don't depend on real
+  // systemctl. The new check catches the broken-symlink class of bug
+  // where timers look enabled but never fire — exactly the failure that
+  // stranded all scheduled tasks on hz-phantombot in May 2026.
+
+  test("reports a healthy systemd subsystem in the human summary", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: [],
+        inactive_timers: [],
+        repaired: false,
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain(
+      "systemd: ok — all unit files present, all timers active",
+    );
+  });
+
+  test("reports missing unit files and inactive timers", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: ["phantombot-tick.timer"],
+        inactive_timers: ["phantombot-tick.timer"],
+        repaired: false,
+      }),
+    });
+    // Nightly is healthy, but systemd has unrepaired damage → exit 1.
+    expect(code).toBe(1);
+    expect(out.text).toContain("systemd: WARN");
+    expect(out.text).toContain("missing: phantombot-tick.timer");
+    expect(out.text).toContain("inactive: phantombot-tick.timer");
+    expect(out.text).toContain("run `phantombot install` to repair");
+  });
+
+  test("repaired=true tells the user no manual action is needed", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: ["phantombot-tick.timer"],
+        inactive_timers: [],
+        repaired: true,
+      }),
+    });
+    // Damage was healed → exit 0, message tells user it's fixed.
+    expect(code).toBe(0);
+    expect(out.text).toContain("re-rendered units and re-armed timers");
+  });
+
+  test("checkSystemd=false omits the systemd section entirely", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+    });
+    expect(out.text).not.toContain("systemd:");
+  });
+
+  test("json mode includes the systemd block when checked", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      json: true,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: [],
+        inactive_timers: ["phantombot-tick.timer"],
+        repaired: false,
+      }),
+    });
+    const report = JSON.parse(out.text);
+    expect(report.systemd).toEqual({
+      missing_unit_files: [],
+      inactive_timers: ["phantombot-tick.timer"],
+      repaired: false,
+    });
+  });
+});

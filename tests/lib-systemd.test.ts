@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildSystemctlEnv,
+  ensureSystemdUnitsCurrent,
   ensureUnitCurrent,
   ensureUserSystemdEnv,
   generateSystemdUnit,
@@ -185,6 +186,195 @@ describe("installPhantombotUnit", () => {
     expect(err.text).toContain("systemctl --user daemon-reload failed");
     // Did NOT proceed to enable / start.
     expect(sys.calls).toHaveLength(1);
+  });
+});
+
+describe("ensureSystemdUnitsCurrent", () => {
+  // Drive every test through the tmpdir paths so we never touch the real
+  // ~/.config/systemd/user/ on the test runner. Same pattern as the
+  // installPhantombotUnit tests above.
+  function paths() {
+    return {
+      unitPath,
+      heartbeatServicePath: hbServicePath,
+      heartbeatTimerPath: hbTimerPath,
+      nightlyServicePath: ngServicePath,
+      nightlyTimerPath: ngTimerPath,
+      tickServicePath,
+      tickTimerPath,
+    };
+  }
+
+  function isEnabledActive(): SystemctlResult {
+    return { exitCode: 0, stdout: "enabled\n", stderr: "" };
+  }
+  function isActiveActive(): SystemctlResult {
+    return { exitCode: 0, stdout: "active\n", stderr: "" };
+  }
+
+  test("nothing to do when all units already match and timers are active", async () => {
+    // Pre-populate every unit file with the canonical template.
+    const bin = "/usr/local/bin/phantombot";
+    await writeFile(
+      unitPath,
+      generateSystemdUnit({ binPath: bin, args: ["run"] }),
+      "utf8",
+    );
+    const sys = new FakeSystemctl();
+    // Need the heartbeat/nightly/tick canonical contents too. Easier:
+    // ask the helper to write them first, then run again and assert it
+    // does nothing the second time.
+    await ensureSystemdUnitsCurrent({ binPath: bin, ...paths(), systemctl: sys });
+    sys.calls = [];
+    // Second call: everything already current, timers report enabled+active.
+    sys.responses = [
+      isEnabledActive(),
+      isActiveActive(),
+      isEnabledActive(),
+      isActiveActive(),
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+    });
+    expect(r.rewrote).toEqual([]);
+    expect(r.backups).toEqual([]);
+    expect(r.repairedTimers).toEqual([]);
+    // No daemon-reload, no enable, no start — only the 6 inspect calls
+    // (is-enabled + is-active for each of the 3 timers).
+    expect(sys.calls).toEqual([
+      ["--user", "is-enabled", "phantombot-heartbeat.timer"],
+      ["--user", "is-active", "phantombot-heartbeat.timer"],
+      ["--user", "is-enabled", "phantombot-nightly.timer"],
+      ["--user", "is-active", "phantombot-nightly.timer"],
+      ["--user", "is-enabled", "phantombot-tick.timer"],
+      ["--user", "is-active", "phantombot-tick.timer"],
+    ]);
+  });
+
+  test("rewrites every missing unit file, runs daemon-reload once, enables timers", async () => {
+    const sys = new FakeSystemctl();
+    // Workdir is empty; every target file is missing. After running:
+    // daemon-reload + for each of 3 timers we'll see is-enabled
+    // returning "disabled" (exit 1) + enable --now.
+    sys.responses = [
+      // daemon-reload after rewrite
+      { exitCode: 0, stdout: "", stderr: "" },
+      // heartbeat: is-enabled, is-active, enable --now
+      { exitCode: 1, stdout: "disabled\n", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+      // nightly
+      { exitCode: 1, stdout: "disabled\n", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+      // tick
+      { exitCode: 1, stdout: "disabled\n", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: "/usr/local/bin/phantombot",
+      ...paths(),
+      systemctl: sys,
+    });
+    expect(r.rewrote.sort()).toEqual(
+      [
+        "phantombot-heartbeat.service",
+        "phantombot-heartbeat.timer",
+        "phantombot-nightly.service",
+        "phantombot-nightly.timer",
+        "phantombot-tick.service",
+        "phantombot-tick.timer",
+        "phantombot.service",
+      ].sort(),
+    );
+    expect(r.backups).toEqual([]); // nothing pre-existing to back up
+    expect(r.repairedTimers).toEqual([
+      "phantombot-heartbeat.timer",
+      "phantombot-nightly.timer",
+      "phantombot-tick.timer",
+    ]);
+    // Verify each canonical body landed on disk.
+    expect(await readFile(unitPath, "utf8")).toContain(
+      "ExecStart=/usr/local/bin/phantombot run",
+    );
+    expect(await readFile(hbTimerPath, "utf8")).toContain(
+      "Phantombot heartbeat timer",
+    );
+    // daemon-reload runs exactly once (not 7 times) when content changed.
+    const reloadCount = sys.calls.filter(
+      (c) => c[0] === "--user" && c[1] === "daemon-reload",
+    ).length;
+    expect(reloadCount).toBe(1);
+  });
+
+  test("backs up a hand-edited unit file before overwriting", async () => {
+    const sys = new FakeSystemctl();
+    await writeFile(unitPath, "HAND_EDITED_CONTENT_DO_NOT_LOSE", "utf8");
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(),
+      isActiveActive(),
+      isEnabledActive(),
+      isActiveActive(),
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: "/usr/local/bin/phantombot",
+      ...paths(),
+      systemctl: sys,
+    });
+    // phantombot.service was rewritten; others (missing) also rewritten;
+    // but only the existing-and-different one produces a backup.
+    expect(r.rewrote).toContain("phantombot.service");
+    expect(r.backups).toEqual([`${unitPath}.bak`]);
+    expect(await readFile(`${unitPath}.bak`, "utf8")).toBe(
+      "HAND_EDITED_CONTENT_DO_NOT_LOSE",
+    );
+  });
+
+  test("re-arms a timer whose is-active reports inactive", async () => {
+    // All unit files in place and current, but the heartbeat timer
+    // claims active=no — simulates a rotted timers.target.wants/ symlink.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      // heartbeat: enabled but inactive → enable --now
+      isEnabledActive(),
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+      // nightly OK
+      isEnabledActive(),
+      isActiveActive(),
+      // tick OK
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+    });
+    expect(r.rewrote).toEqual([]);
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    // Verify the repair call was enable --now (not just start), which
+    // both arms the symlink and starts the timer in one shot.
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "enable",
+      "--now",
+      "phantombot-heartbeat.timer",
+    ]);
   });
 });
 

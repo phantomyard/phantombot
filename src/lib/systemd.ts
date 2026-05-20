@@ -416,6 +416,145 @@ export function defaultSystemdServiceControl(): ServiceControl {
   };
 }
 
+/**
+ * Surgical re-render of all six phantombot systemd unit files, plus a
+ * re-enable / re-start of any timer that isn't currently active.
+ *
+ * This is the post-update healer: a `phantombot update` swaps the
+ * binary, then calls this to make sure the on-disk unit files still
+ * match the new version's templates AND that the timers are actually
+ * armed. Without it, a release that renames or moves a unit (or that
+ * lands on a host whose `~/.config/systemd/user/timers.target.wants/`
+ * symlinks have rotted from a previous bad update) leaves the user
+ * with timers that look enabled but never fire — exactly the bug that
+ * stranded ~2 days of scheduled tasks on hz-phantombot in 2026-05.
+ *
+ * Pure on the inputs: caller picks the paths and the systemctl
+ * runner. Tests inject a FakeSystemctl and a tmpdir; production calls
+ * this with real ones via `runHealSystemdUnits` below.
+ *
+ * Idempotent: writing the same content is a no-op; an already-enabled
+ * + active timer is left alone. Only changes get logged.
+ */
+export interface EnsureUnitsCurrentOptions {
+  binPath: string;
+  unitPath?: string;
+  heartbeatServicePath?: string;
+  heartbeatTimerPath?: string;
+  nightlyServicePath?: string;
+  nightlyTimerPath?: string;
+  tickServicePath?: string;
+  tickTimerPath?: string;
+  systemctl: SystemctlRunner;
+}
+
+export interface EnsureUnitsCurrentResult {
+  /** Basenames of unit files that were (re)written. Empty = nothing changed. */
+  rewrote: string[];
+  /** Backups created for any unit file whose previous content differed. */
+  backups: string[];
+  /** Timer unit names that were re-enabled and/or restarted to repair them. */
+  repairedTimers: string[];
+}
+
+export async function ensureSystemdUnitsCurrent(
+  opts: EnsureUnitsCurrentOptions,
+): Promise<EnsureUnitsCurrentResult> {
+  const targets: Array<{
+    path: string;
+    content: string;
+    unit: string;
+    isTimer: boolean;
+  }> = [
+    {
+      path: opts.unitPath ?? defaultUnitPath(),
+      content: generateSystemdUnit({ binPath: opts.binPath, args: ["run"] }),
+      unit: PHANTOMBOT_UNIT_NAME,
+      isTimer: false,
+    },
+    {
+      path: opts.heartbeatServicePath ?? heartbeatServicePath(),
+      content: generateHeartbeatService(opts.binPath),
+      unit: HEARTBEAT_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: opts.heartbeatTimerPath ?? heartbeatTimerPath(),
+      content: generateHeartbeatTimer(),
+      unit: HEARTBEAT_TIMER_NAME,
+      isTimer: true,
+    },
+    {
+      path: opts.nightlyServicePath ?? nightlyServicePath(),
+      content: generateNightlyService(opts.binPath),
+      unit: NIGHTLY_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: opts.nightlyTimerPath ?? nightlyTimerPath(),
+      content: generateNightlyTimer(),
+      unit: NIGHTLY_TIMER_NAME,
+      isTimer: true,
+    },
+    {
+      path: opts.tickServicePath ?? tickServicePath(),
+      content: generateTickService(opts.binPath),
+      unit: TICK_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: opts.tickTimerPath ?? tickTimerPath(),
+      content: generateTickTimer(),
+      unit: TICK_TIMER_NAME,
+      isTimer: true,
+    },
+  ];
+
+  const rewrote: string[] = [];
+  const backups: string[] = [];
+  for (const t of targets) {
+    let current: string | undefined;
+    if (existsSync(t.path)) {
+      current = await readFile(t.path, "utf8");
+    }
+    if (current === t.content) continue;
+    await mkdir(dirname(t.path), { recursive: true });
+    if (current !== undefined) {
+      const bak = `${t.path}.bak`;
+      await writeFile(bak, current, "utf8");
+      backups.push(bak);
+    }
+    await writeFile(t.path, t.content, "utf8");
+    rewrote.push(basename(t.path));
+  }
+  if (rewrote.length > 0) {
+    await opts.systemctl.run(["--user", "daemon-reload"]);
+  }
+
+  // For each timer, verify it is enabled AND active. is-enabled exits 0 +
+  // prints "enabled" when good; is-active exits 0 + prints "active" when
+  // armed. Anything else means the timer isn't actually running and we
+  // need to enable --now to repair it. Cheap to recheck — systemctl is
+  // local IPC and these calls take ~ms.
+  const repairedTimers: string[] = [];
+  for (const t of targets) {
+    if (!t.isTimer) continue;
+    const enabled = await opts.systemctl.run([
+      "--user",
+      "is-enabled",
+      t.unit,
+    ]);
+    const active = await opts.systemctl.run(["--user", "is-active", t.unit]);
+    const isEnabled = enabled.exitCode === 0 && enabled.stdout.trim() === "enabled";
+    const isActive = active.exitCode === 0 && active.stdout.trim() === "active";
+    if (isEnabled && isActive) continue;
+    await opts.systemctl.run(["--user", "enable", "--now", t.unit]);
+    repairedTimers.push(t.unit);
+  }
+
+  return { rewrote, backups, repairedTimers };
+}
+
 export interface InstallOptions {
   binPath: string;
   unitPath: string;

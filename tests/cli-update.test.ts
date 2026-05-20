@@ -319,6 +319,7 @@ describe("runUpdate on darwin-arm64", () => {
       out,
       err: new CaptureStream(),
       force: true,
+      healSystemdUnits: false,
     });
     expect(code).toBe(0);
     expect(out.text).toContain("phantombot-v1.0.99-darwin-arm64");
@@ -341,6 +342,7 @@ describe("runUpdate happy path with --force --restart", () => {
       err: new CaptureStream(),
       force: true,
       restart: true,
+      healSystemdUnits: false,
     });
     expect(code).toBe(0);
     // New binary swapped in.
@@ -371,6 +373,7 @@ describe("runUpdate happy path with --force --restart", () => {
       err: new CaptureStream(),
       force: true,
       // restart NOT set
+      healSystemdUnits: false,
     });
     expect(code).toBe(0);
     expect(calls).not.toContain("restart");
@@ -392,6 +395,7 @@ describe("runUpdate happy path with --force --restart", () => {
       err,
       force: true,
       restart: true,
+      healSystemdUnits: false,
     });
     // Exit 0 — the install succeeded; restart is best-effort.
     expect(code).toBe(0);
@@ -399,6 +403,150 @@ describe("runUpdate happy path with --force --restart", () => {
     expect(err.text).toContain("manually");
     // Binary still got swapped.
     expect((await readFile(binPath)).equals(NEW_BYTES)).toBe(true);
+  });
+});
+
+describe("runUpdate post-swap systemd heal", () => {
+  // The bug being fixed: a successful binary swap used to leave systemd
+  // unit files exactly as the previous version installed them, which
+  // meant a previous bad update that left broken symlinks in
+  // ~/.config/systemd/user/timers.target.wants/ would silently strand
+  // every scheduled task forever. The heal step calls
+  // ensureSystemdUnitsCurrent after the swap so the next minute's tick
+  // is actually armed.
+
+  test("calls healSystemdUnits with the swapped binPath on linux", async () => {
+    const called: string[] = [];
+    const out = new CaptureStream();
+    const { svc } = makeSvc({ active: false });
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "linux",
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: svc,
+      out,
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: async (bin) => {
+        called.push(bin);
+        return { rewrote: [], backups: [], repairedTimers: [] };
+      },
+    });
+    expect(code).toBe(0);
+    expect(called).toEqual([binPath]);
+    expect(out.text).toContain("systemd units already current");
+  });
+
+  test("reports rewritten units and re-armed timers", async () => {
+    const out = new CaptureStream();
+    const { svc } = makeSvc({ active: false });
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "linux",
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: svc,
+      out,
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: async () => ({
+        rewrote: ["phantombot-tick.timer", "phantombot.service"],
+        backups: [],
+        repairedTimers: ["phantombot-tick.timer"],
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("re-rendered systemd units: phantombot-tick.timer, phantombot.service");
+    expect(out.text).toContain("re-armed timers: phantombot-tick.timer");
+  });
+
+  test("heal failure is non-fatal: binary swap still succeeds, warning logged", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const { svc } = makeSvc({ active: false });
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "linux",
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: svc,
+      out,
+      err,
+      force: true,
+      healSystemdUnits: async () => {
+        throw new Error("dbus is missing");
+      },
+    });
+    // Exit 0 — the install succeeded; heal is best-effort. Matches the
+    // restart-failure contract (binary swap is the critical operation).
+    expect(code).toBe(0);
+    expect(err.text).toContain("could not re-stitch systemd units");
+    expect(err.text).toContain("dbus is missing");
+    // Binary was still swapped.
+    expect((await readFile(binPath)).equals(NEW_BYTES)).toBe(true);
+  });
+
+  test("skipped entirely on darwin (launchd, not systemd)", async () => {
+    // Darwin doesn't have systemd; the heal step would just panic. The
+    // implementation guards with `procPlatform === "linux"`. Use a
+    // darwin-shaped release feed via the existing darwin fixture.
+    const DARWIN_ASSET = "phantombot-v1.0.99-darwin-arm64";
+    const DARWIN_BYTES = Buffer.from("DARWIN_BINARY_VERIFIED");
+    const DARWIN_SHA = createHash("sha256")
+      .update(DARWIN_BYTES)
+      .digest("hex");
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("api.github.com")) {
+        return new Response(
+          JSON.stringify({
+            tag_name: "v1.0.99",
+            body: "",
+            assets: [
+              {
+                name: DARWIN_ASSET,
+                browser_download_url: "https://example/" + DARWIN_ASSET,
+                size: DARWIN_BYTES.byteLength,
+              },
+              {
+                name: "SHA256SUMS",
+                browser_download_url: "https://example/SHA256SUMS",
+                size: 256,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (u.includes("SHA256SUMS")) {
+        return new Response(`${DARWIN_SHA}  ${DARWIN_ASSET}\n`, {
+          status: 200,
+        });
+      }
+      return new Response(DARWIN_BYTES, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    let healCalled = false;
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "arm64",
+      currentVersion: "1.0.42",
+      fetchImpl,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: async () => {
+        healCalled = true;
+        return null;
+      },
+    });
+    expect(code).toBe(0);
+    expect(healCalled).toBe(false);
   });
 });
 
@@ -436,6 +584,7 @@ describe("runUpdate confirm injection", () => {
       err: new CaptureStream(),
       confirmInstall: async () => true,
       confirmRestart: async () => false,
+      healSystemdUnits: false,
     });
     expect(code).toBe(0);
     expect(calls).not.toContain("restart");
