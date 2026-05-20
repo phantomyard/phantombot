@@ -37,6 +37,7 @@ import {
   isLockHandle,
 } from "../lib/runLock.ts";
 import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
+import { recordTickFired } from "../lib/timerHealth.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
@@ -65,6 +66,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
   const now = input.now ?? new Date();
+
+  // Record that the tick timer fired — even if the body exits early
+  // because the lock is held. Doctor uses this marker's mtime to flag
+  // a dead tick timer; the signal we want is "the timer fires," not
+  // "tick did meaningful work."
+  await recordTickFired();
 
   const lockPath = input.lockPath ?? defaultTickLockPath();
   const lock = acquireRunLock(lockPath);

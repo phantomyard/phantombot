@@ -37,6 +37,9 @@ let lockPath: string;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-tick-"));
+  // Redirect the timer-fired marker path so runTick writes into the
+  // test workdir, not the developer's real ~/.local/state/.
+  process.env.XDG_STATE_HOME = workdir;
   store = await openTaskStore(join(workdir, "tasks.sqlite"));
   memory = await openMemoryStore(join(workdir, "memory.sqlite"));
   lockPath = join(workdir, "tick.lock");
@@ -85,6 +88,24 @@ describe("runTick — no-op cases", () => {
     });
     expect(code).toBe(0);
     expect(harness.invocations).toBe(0);
+  });
+
+  test("even a no-due-tasks tick records a fire-marker", async () => {
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "unused" },
+    ]);
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T09:00:00Z"),
+    });
+    // Use a deferred import so we read XDG_STATE_HOME at call time.
+    const { tickMarkerPath } = await import("../src/lib/timerHealth.ts");
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(tickMarkerPath())).toBe(true);
   });
 });
 

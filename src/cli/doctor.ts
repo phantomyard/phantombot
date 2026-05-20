@@ -51,6 +51,13 @@ import {
   tickServicePath,
   tickTimerPath,
 } from "../lib/systemd.ts";
+import {
+  HEARTBEAT_STALE_MINUTES,
+  loadHeartbeatLastFired,
+  loadTickLastFired,
+  TICK_STALE_MINUTES,
+  type TimerLastFired,
+} from "../lib/timerHealth.ts";
 import { openMemoryStore } from "../memory/store.ts";
 
 /** Window for the capture-health check: a "dry day" is judged over 24h. */
@@ -96,6 +103,29 @@ export interface DoctorReport {
     /** True when we re-rendered or re-armed at least one thing. */
     repaired: boolean;
   };
+  /**
+   * Heartbeat + tick "last fired" markers. Catches the long-uptime
+   * failure mode where systemd reports timers as active but they're
+   * not actually firing (bus drop, host suspend, runaway lockfile).
+   * `stale` = age exceeds the per-timer threshold, OR no marker
+   * exists at all. Undefined entries (e.g. `tick.last_fired` missing)
+   * still flag stale=true so a freshly-installed-but-never-fired
+   * timer is visible.
+   */
+  timers?: {
+    heartbeat: {
+      last_fired?: string;
+      age_minutes?: number;
+      stale: boolean;
+      threshold_minutes: number;
+    };
+    tick: {
+      last_fired?: string;
+      age_minutes?: number;
+      stale: boolean;
+      threshold_minutes: number;
+    };
+  };
   repair_needed: boolean;
   repair_reason?: string;
   repair_triggered: boolean;
@@ -122,6 +152,15 @@ export interface RunDoctorInput {
   checkSystemd?:
     | false
     | (() => Promise<DoctorReport["systemd"] | undefined>);
+  /**
+   * Test seam for the timer-fired marker check. Pass `false` to skip
+   * (used by tests that don't care about staleness). Pass a function
+   * to substitute fake marker reads. In production this is undefined
+   * and doctor reads the real marker files from XDG_STATE_HOME.
+   */
+  checkTimers?:
+    | false
+    | (() => Promise<DoctorReport["timers"] | undefined>);
 }
 
 function decideRepair(
@@ -232,6 +271,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  // Timer "last fired" check — catches the long-uptime failure mode
+  // where systemd thinks a timer is active but it hasn't fired in
+  // hours. is-active says "active", LastTriggerUSec says "n/a", and
+  // the only ground-truth signal is what tick + heartbeat actually
+  // wrote to disk the last time they ran.
+  let timersReport: DoctorReport["timers"] | undefined;
+  if (input.checkTimers !== false) {
+    if (input.checkTimers) {
+      timersReport = await input.checkTimers();
+    } else {
+      timersReport = computeTimersReport();
+    }
+  }
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -259,6 +312,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       dry_day: dryDay,
     },
     ...(systemdReport ? { systemd: systemdReport } : {}),
+    ...(timersReport ? { timers: timersReport } : {}),
     repair_needed: needed,
     repair_reason: reason,
     repair_triggered: repairTriggered,
@@ -330,12 +384,45 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  if (timersReport) {
+    const renderTimer = (
+      label: string,
+      t: NonNullable<DoctorReport["timers"]>["heartbeat"],
+    ): void => {
+      out.write(`  ${label}: ${tick(!t.stale)} — `);
+      if (t.last_fired === undefined) {
+        out.write(
+          `never recorded (threshold ${t.threshold_minutes}m) — ` +
+            "timer may not be installed or has not fired since the marker was added\n",
+        );
+      } else {
+        out.write(
+          `last fired ${t.last_fired} (${t.age_minutes}m ago, ` +
+            `threshold ${t.threshold_minutes}m)` +
+            (t.stale ? " — STALE\n" : "\n"),
+        );
+      }
+    };
+    renderTimer("heartbeat", timersReport.heartbeat);
+    renderTimer("tick", timersReport.tick);
+  }
+
   const systemdBroken =
     !!systemdReport &&
     !systemdReport.repaired &&
     (systemdReport.missing_unit_files.length > 0 ||
       systemdReport.inactive_timers.length > 0);
-  const exitCode = needed && !repairTriggered ? 1 : systemdBroken ? 1 : 0;
+  const timersBroken =
+    !!timersReport &&
+    (timersReport.heartbeat.stale || timersReport.tick.stale);
+  const exitCode =
+    needed && !repairTriggered
+      ? 1
+      : systemdBroken
+        ? 1
+        : timersBroken
+          ? 1
+          : 0;
   return exitCode;
 }
 
@@ -390,6 +477,42 @@ async function defaultCheckSystemd(
     missing_unit_files: missing,
     inactive_timers: inactive,
     repaired,
+  };
+}
+
+/**
+ * Build the timers report from the on-disk marker files. A missing
+ * marker still flags stale=true — that's the "fresh install, hasn't
+ * fired yet" case AND the "marker was deleted somehow" case, both of
+ * which the operator should see.
+ *
+ * Returns undefined when we're not running as the real phantombot
+ * binary (e.g. `bun test`, `bun run` during development). Mirrors the
+ * same gate `defaultCheckSystemd` uses so the check stays inert in
+ * dev contexts and tests don't need to clean up marker files.
+ */
+function computeTimersReport(): DoctorReport["timers"] | undefined {
+  if (basename(process.execPath) !== "phantombot") return undefined;
+  const now = new Date();
+  const heartbeat = loadHeartbeatLastFired(now);
+  const tickFired = loadTickLastFired(now);
+  return {
+    heartbeat: timerSection(heartbeat, HEARTBEAT_STALE_MINUTES),
+    tick: timerSection(tickFired, TICK_STALE_MINUTES),
+  };
+}
+
+function timerSection(
+  m: TimerLastFired,
+  thresholdMinutes: number,
+): NonNullable<DoctorReport["timers"]>["heartbeat"] {
+  const stale =
+    m.ageMinutes === undefined ? true : m.ageMinutes > thresholdMinutes;
+  return {
+    ...(m.iso !== undefined ? { last_fired: m.iso } : {}),
+    ...(m.ageMinutes !== undefined ? { age_minutes: m.ageMinutes } : {}),
+    stale,
+    threshold_minutes: thresholdMinutes,
   };
 }
 
