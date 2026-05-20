@@ -58,6 +58,15 @@ function parseMarker(text: string): MarkerPayload | undefined {
  * Record that the named timer just fired. Best-effort: any write
  * failure is logged and swallowed — we never want a disk hiccup in
  * the marker to break the actual heartbeat/tick work.
+ *
+ * The ISO timestamp comes from `new Date().toISOString()`, i.e.
+ * wall-clock time. A backward NTP step between two fires would make
+ * the recorded age look briefly negative (clamped to 0 by
+ * `loadLastFired`) or smaller than the real elapsed time. Fine here
+ * because the staleness bars are coarse: heartbeat 120m, tick 5m. If
+ * tighter age thresholding becomes important, switch to a monotonic
+ * clock (`process.hrtime.bigint()` snapshotted at process start) for
+ * the age delta and keep the wall-clock ISO only for forensic logs.
  */
 async function recordFired(path: string): Promise<void> {
   try {

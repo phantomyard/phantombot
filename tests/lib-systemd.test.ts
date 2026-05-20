@@ -163,7 +163,8 @@ describe("installPhantombotUnit", () => {
       ["--user", "enable", "phantombot-tick.timer"],
       ["--user", "start", "phantombot-tick.timer"],
     ]);
-    expect(out.text).toContain("wrote unit file");
+    expect(out.text).toContain("wrote phantombot.service");
+    expect(out.text).toContain("wrote phantombot-tick.timer");
     expect(out.text).toContain("enabled and started");
   });
 

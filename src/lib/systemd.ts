@@ -417,6 +417,96 @@ export function defaultSystemdServiceControl(): ServiceControl {
 }
 
 /**
+ * One canonical entry for each of the 7 phantombot systemd unit
+ * files (1 main service + 3 oneshot service/timer pairs).
+ *
+ * Centralised so `installPhantombotUnit` and `ensureSystemdUnitsCurrent`
+ * can't drift: changing a template here updates both. Was inlined twice
+ * before, which review flagged as a maintenance hazard.
+ */
+export interface PhantombotUnitTarget {
+  /** Absolute on-disk path of the unit file. */
+  path: string;
+  /** Rendered unit body. */
+  content: string;
+  /** systemd unit name (e.g. "phantombot-tick.timer"). */
+  unit: string;
+  /** True for `.timer` units; false for `.service` units. */
+  isTimer: boolean;
+}
+
+/**
+ * Optional per-unit path overrides. Production callers leave these
+ * empty and pick up the XDG defaults; tests override to keep writes
+ * inside a tmpdir.
+ */
+export interface PhantombotUnitPathOverrides {
+  unitPath?: string;
+  heartbeatServicePath?: string;
+  heartbeatTimerPath?: string;
+  nightlyServicePath?: string;
+  nightlyTimerPath?: string;
+  tickServicePath?: string;
+  tickTimerPath?: string;
+}
+
+/**
+ * Render the canonical (path, content, unit, isTimer) tuples for every
+ * phantombot unit file. Single source of truth shared by
+ * `installPhantombotUnit` (writes them fresh) and
+ * `ensureSystemdUnitsCurrent` (re-writes any that drifted).
+ */
+export function phantombotUnitTargets(
+  binPath: string,
+  overrides: PhantombotUnitPathOverrides = {},
+): PhantombotUnitTarget[] {
+  return [
+    {
+      path: overrides.unitPath ?? defaultUnitPath(),
+      content: generateSystemdUnit({ binPath, args: ["run"] }),
+      unit: PHANTOMBOT_UNIT_NAME,
+      isTimer: false,
+    },
+    {
+      path: overrides.heartbeatServicePath ?? heartbeatServicePath(),
+      content: generateHeartbeatService(binPath),
+      unit: HEARTBEAT_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: overrides.heartbeatTimerPath ?? heartbeatTimerPath(),
+      content: generateHeartbeatTimer(),
+      unit: HEARTBEAT_TIMER_NAME,
+      isTimer: true,
+    },
+    {
+      path: overrides.nightlyServicePath ?? nightlyServicePath(),
+      content: generateNightlyService(binPath),
+      unit: NIGHTLY_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: overrides.nightlyTimerPath ?? nightlyTimerPath(),
+      content: generateNightlyTimer(),
+      unit: NIGHTLY_TIMER_NAME,
+      isTimer: true,
+    },
+    {
+      path: overrides.tickServicePath ?? tickServicePath(),
+      content: generateTickService(binPath),
+      unit: TICK_SERVICE_NAME,
+      isTimer: false,
+    },
+    {
+      path: overrides.tickTimerPath ?? tickTimerPath(),
+      content: generateTickTimer(),
+      unit: TICK_TIMER_NAME,
+      isTimer: true,
+    },
+  ];
+}
+
+/**
  * Surgical re-render of all six phantombot systemd unit files, plus a
  * re-enable / re-start of any timer that isn't currently active.
  *
@@ -436,15 +526,8 @@ export function defaultSystemdServiceControl(): ServiceControl {
  * Idempotent: writing the same content is a no-op; an already-enabled
  * + active timer is left alone. Only changes get logged.
  */
-export interface EnsureUnitsCurrentOptions {
+export interface EnsureUnitsCurrentOptions extends PhantombotUnitPathOverrides {
   binPath: string;
-  unitPath?: string;
-  heartbeatServicePath?: string;
-  heartbeatTimerPath?: string;
-  nightlyServicePath?: string;
-  nightlyTimerPath?: string;
-  tickServicePath?: string;
-  tickTimerPath?: string;
   systemctl: SystemctlRunner;
 }
 
@@ -460,55 +543,7 @@ export interface EnsureUnitsCurrentResult {
 export async function ensureSystemdUnitsCurrent(
   opts: EnsureUnitsCurrentOptions,
 ): Promise<EnsureUnitsCurrentResult> {
-  const targets: Array<{
-    path: string;
-    content: string;
-    unit: string;
-    isTimer: boolean;
-  }> = [
-    {
-      path: opts.unitPath ?? defaultUnitPath(),
-      content: generateSystemdUnit({ binPath: opts.binPath, args: ["run"] }),
-      unit: PHANTOMBOT_UNIT_NAME,
-      isTimer: false,
-    },
-    {
-      path: opts.heartbeatServicePath ?? heartbeatServicePath(),
-      content: generateHeartbeatService(opts.binPath),
-      unit: HEARTBEAT_SERVICE_NAME,
-      isTimer: false,
-    },
-    {
-      path: opts.heartbeatTimerPath ?? heartbeatTimerPath(),
-      content: generateHeartbeatTimer(),
-      unit: HEARTBEAT_TIMER_NAME,
-      isTimer: true,
-    },
-    {
-      path: opts.nightlyServicePath ?? nightlyServicePath(),
-      content: generateNightlyService(opts.binPath),
-      unit: NIGHTLY_SERVICE_NAME,
-      isTimer: false,
-    },
-    {
-      path: opts.nightlyTimerPath ?? nightlyTimerPath(),
-      content: generateNightlyTimer(),
-      unit: NIGHTLY_TIMER_NAME,
-      isTimer: true,
-    },
-    {
-      path: opts.tickServicePath ?? tickServicePath(),
-      content: generateTickService(opts.binPath),
-      unit: TICK_SERVICE_NAME,
-      isTimer: false,
-    },
-    {
-      path: opts.tickTimerPath ?? tickTimerPath(),
-      content: generateTickTimer(),
-      unit: TICK_TIMER_NAME,
-      isTimer: true,
-    },
-  ];
+  const targets = phantombotUnitTargets(opts.binPath, opts);
 
   const rewrote: string[] = [];
   const backups: string[] = [];
@@ -579,37 +614,15 @@ export interface InstallOptions {
 export async function installPhantombotUnit(
   opts: InstallOptions,
 ): Promise<{ installed: boolean }> {
-  const unit = generateSystemdUnit({ binPath: opts.binPath, args: ["run"] });
-  await mkdir(dirname(opts.unitPath), { recursive: true });
-  await writeFile(opts.unitPath, unit, "utf8");
-  opts.out.write(`wrote unit file: ${opts.unitPath}\n`);
-
-  // Heartbeat service + timer
-  const hbService = opts.heartbeatServicePath ?? heartbeatServicePath();
-  const hbTimer = opts.heartbeatTimerPath ?? heartbeatTimerPath();
-  await mkdir(dirname(hbService), { recursive: true });
-  await mkdir(dirname(hbTimer), { recursive: true });
-  await writeFile(hbService, generateHeartbeatService(opts.binPath), "utf8");
-  await writeFile(hbTimer, generateHeartbeatTimer(), "utf8");
-  opts.out.write(`wrote heartbeat units: ${hbService} + ${hbTimer}\n`);
-
-  // Nightly service + timer
-  const ngService = opts.nightlyServicePath ?? nightlyServicePath();
-  const ngTimer = opts.nightlyTimerPath ?? nightlyTimerPath();
-  await mkdir(dirname(ngService), { recursive: true });
-  await mkdir(dirname(ngTimer), { recursive: true });
-  await writeFile(ngService, generateNightlyService(opts.binPath), "utf8");
-  await writeFile(ngTimer, generateNightlyTimer(), "utf8");
-  opts.out.write(`wrote nightly units: ${ngService} + ${ngTimer}\n`);
-
-  // Tick service + timer
-  const tkService = opts.tickServicePath ?? tickServicePath();
-  const tkTimer = opts.tickTimerPath ?? tickTimerPath();
-  await mkdir(dirname(tkService), { recursive: true });
-  await mkdir(dirname(tkTimer), { recursive: true });
-  await writeFile(tkService, generateTickService(opts.binPath), "utf8");
-  await writeFile(tkTimer, generateTickTimer(), "utf8");
-  opts.out.write(`wrote tick units: ${tkService} + ${tkTimer}\n`);
+  // Single source of truth for path + body of every unit file. Shared
+  // with `ensureSystemdUnitsCurrent` so a template change in one place
+  // can't get out of sync with the other.
+  const targets = phantombotUnitTargets(opts.binPath, opts);
+  for (const t of targets) {
+    await mkdir(dirname(t.path), { recursive: true });
+    await writeFile(t.path, t.content, "utf8");
+    opts.out.write(`wrote ${t.unit}: ${t.path}\n`);
+  }
 
   for (const args of [
     ["--user", "daemon-reload"],

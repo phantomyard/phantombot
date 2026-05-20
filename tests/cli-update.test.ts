@@ -46,6 +46,23 @@ const ASSET = "phantombot-v1.0.99-linux-x64";
 const NEW_BYTES = Buffer.from("NEW_BINARY_VERIFIED");
 const NEW_SHA = createHash("sha256").update(NEW_BYTES).digest("hex");
 
+/**
+ * Exact hostname match — `URL.hostname` returns the parsed host with no
+ * userinfo / port noise, so an attacker-shaped URL like
+ * `https://api.github.com.evil.example/...` is correctly rejected, and
+ * `https://evil.example/?u=api.github.com` likewise. Earlier
+ * substring-based `u.includes("api.github.com")` tripped CodeQL
+ * "incomplete URL substring sanitization"; this is the precise form.
+ * Invalid URLs are simply non-matches rather than throwing.
+ */
+function isGitHubApiUrl(u: string): boolean {
+  try {
+    return new URL(u).hostname === "api.github.com";
+  } catch {
+    return false;
+  }
+}
+
 function fakeReleaseFetch(opts: {
   releaseStatus?: number;
   releaseBody?: unknown;
@@ -79,7 +96,7 @@ function fakeReleaseFetch(opts: {
     opts.checksumsText ?? `${NEW_SHA}  ${ASSET}\n`;
   return (async (url: string | URL | Request) => {
     const u = String(url);
-    if (u.includes("api.github.com")) {
+    if (isGitHubApiUrl(u)) {
       return new Response(
         typeof releaseBody === "string"
           ? releaseBody
@@ -293,7 +310,7 @@ describe("runUpdate on darwin-arm64", () => {
     };
     return (async (url: string | URL | Request) => {
       const u = String(url);
-      if (u.includes("api.github.com")) {
+      if (isGitHubApiUrl(u)) {
         return new Response(JSON.stringify(releaseBody), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -501,7 +518,7 @@ describe("runUpdate post-swap systemd heal", () => {
       .digest("hex");
     const fetchImpl = (async (url: string | URL | Request) => {
       const u = String(url);
-      if (u.includes("api.github.com")) {
+      if (isGitHubApiUrl(u)) {
         return new Response(
           JSON.stringify({
             tag_name: "v1.0.99",
