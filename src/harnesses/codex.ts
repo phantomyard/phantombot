@@ -1,7 +1,8 @@
 /**
  * Codex harness.
  *
- * Uses `codex exec --json` for non-interactive JSONL streaming. We run with
+ * Uses `codex exec --json` for non-interactive JSONL streaming. We run in
+ * YOLO mode (`--dangerously-bypass-approvals-and-sandbox`) and with
  * `--ephemeral --ignore-user-config --ignore-rules` so phantombot-managed
  * persona/memory stays authoritative and Codex local memory/rules do not leak
  * into agent behavior.
@@ -143,11 +144,9 @@ export class CodexHarness implements Harness {
 
   private buildArgs(): string[] {
     const args = [
-      "-a", "never",
       "exec",
       "--json",
       "--skip-git-repo-check",
-      "--sandbox", "workspace-write",
       ...PHANTOMBOT_INJECTED_CODEX_FLAGS,
     ];
     if (this.config.model) {
@@ -175,6 +174,7 @@ export function renderStdinPayload(req: HarnessRequest): string {
 }
 
 export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
+  "--dangerously-bypass-approvals-and-sandbox",
   "--ephemeral",
   "--ignore-user-config",
   "--ignore-rules",
