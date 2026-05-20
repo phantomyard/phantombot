@@ -1,0 +1,229 @@
+/**
+ * Codex harness.
+ *
+ * Uses `codex exec --json` for non-interactive JSONL streaming. We run with
+ * `--ephemeral --ignore-user-config --ignore-rules` so phantombot-managed
+ * persona/memory stays authoritative and Codex local memory/rules do not leak
+ * into agent behavior.
+ */
+
+import { access, constants } from "node:fs/promises";
+import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { reloadEnvFiles } from "../lib/envBootstrap.ts";
+import {
+  createKillCoordinator,
+  killCauseToErrorChunk,
+} from "../lib/harnessRunner.ts";
+import { log } from "../lib/logger.ts";
+import { spawnInNewSession } from "../lib/processGroup.ts";
+
+export interface CodexHarnessConfig {
+  bin: string;
+  model: string;
+}
+
+export class CodexHarness implements Harness {
+  readonly id = "codex";
+
+  constructor(private readonly config: CodexHarnessConfig) {}
+
+  async available(): Promise<boolean> {
+    try {
+      if (this.config.bin.startsWith("/")) {
+        await access(this.config.bin, constants.X_OK);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    const args = this.buildArgs();
+    log.debug("codex.invoke spawning", {
+      bin: this.config.bin,
+      argCount: args.length,
+    });
+
+    await reloadEnvFiles();
+
+    const proc = spawnInNewSession([this.config.bin, ...args], {
+      cwd: req.workingDir,
+      env: process.env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      proc.stdin.write(renderStdinPayload(req));
+      await proc.stdin.end();
+    } catch (e) {
+      log.warn("codex.invoke stdin write failed", {
+        error: (e as Error).message,
+      });
+    }
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: req.idleTimeoutMs,
+      hardTimeoutMs: req.hardTimeoutMs,
+      signal: req.signal,
+      harnessId: this.id,
+    });
+
+    void consumeStderr(proc.stderr);
+
+    let buffer = "";
+    let finalText = "";
+    let usageMeta: Record<string, unknown> | undefined;
+    const decoder = new TextDecoder();
+
+    try {
+      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+        killer.touch();
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(trimmed);
+          } catch {
+            yield { type: "progress", note: trimmed.slice(0, 200) };
+            continue;
+          }
+          const c = parseCodexEvent(parsed);
+          if (!c) continue;
+          if (c.type === "text") finalText += c.text;
+          if (c.type === "done") {
+            usageMeta = c.meta;
+            continue;
+          }
+          yield c;
+        }
+      }
+    } finally {
+      await killer.dispose();
+    }
+
+    const errChunk = killCauseToErrorChunk(
+      killer.killCause(),
+      this.id,
+      req.hardTimeoutMs,
+      req.idleTimeoutMs,
+    );
+    if (errChunk) {
+      yield errChunk;
+      return;
+    }
+
+    const code = await proc.exited;
+    if (code !== 0) {
+      yield {
+        type: "error",
+        error: `codex exited with code ${code}`,
+        recoverable: code !== 127,
+      };
+      return;
+    }
+
+    yield {
+      type: "done",
+      finalText,
+      meta: {
+        harnessId: this.id,
+        model: this.config.model || "(default)",
+        ...(usageMeta ?? {}),
+      },
+    };
+  }
+
+  private buildArgs(): string[] {
+    const args = [
+      "-a", "never",
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "--sandbox", "workspace-write",
+      ...PHANTOMBOT_INJECTED_CODEX_FLAGS,
+    ];
+    if (this.config.model) {
+      args.push("-m", this.config.model);
+    }
+    args.push("-");
+    return args;
+  }
+}
+
+export function renderStdinPayload(req: HarnessRequest): string {
+  const parts: string[] = [];
+  if (req.systemPrompt && req.systemPrompt.trim().length > 0) {
+    parts.push(req.systemPrompt.trim());
+  }
+  for (const turn of req.history) {
+    if (turn.role === "user") {
+      parts.push(turn.text);
+    } else {
+      parts.push(`<previous_response>\n${turn.text}\n</previous_response>`);
+    }
+  }
+  parts.push(req.userMessage);
+  return parts.join("\n\n");
+}
+
+export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
+  "--ephemeral",
+  "--ignore-user-config",
+  "--ignore-rules",
+] as const;
+
+export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const type = obj.type;
+  if (type === "item.completed") {
+    const item = obj.item;
+    if (typeof item !== "object" || item === null) return undefined;
+    const it = item as Record<string, unknown>;
+    if (it.type === "agent_message" && typeof it.text === "string") {
+      return { type: "text", text: it.text };
+    }
+    if (typeof it.type === "string" && it.type.includes("tool")) {
+      return { type: "progress", note: "tool" };
+    }
+    return { type: "heartbeat" };
+  }
+  if (type === "turn.started") return { type: "heartbeat" };
+  if (type === "turn.completed") {
+    const usage = obj.usage;
+    if (typeof usage === "object" && usage !== null) {
+      return { type: "done", finalText: "", meta: { usage } };
+    }
+    return { type: "done", finalText: "", meta: undefined };
+  }
+  return undefined;
+}
+
+async function consumeStderr(
+  stream: ReadableStream<Uint8Array>,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for await (const chunk of stream) {
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim()) {
+          log.info("codex stderr", { text: line.slice(0, 500) });
+        }
+      }
+    }
+  } catch {
+    /* swallow */
+  }
+}

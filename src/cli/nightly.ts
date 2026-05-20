@@ -27,6 +27,8 @@ import { join } from "node:path";
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { ClaudeHarness } from "../harnesses/claude.ts";
 import { PiHarness } from "../harnesses/pi.ts";
+import { GeminiHarness } from "../harnesses/gemini.ts";
+import { CodexHarness } from "../harnesses/codex.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -261,6 +263,8 @@ function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
   for (const id of config.harnesses.chain) {
     if (id === "claude") out.push(new ClaudeHarness(config.harnesses.claude));
     else if (id === "pi") out.push(new PiHarness(config.harnesses.pi));
+    else if (id === "gemini") out.push(new GeminiHarness(config.harnesses.gemini));
+    else if (id === "codex") out.push(new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" }));
     else err.write(`warning: unknown harness '${id}', skipping\n`);
   }
   return out;

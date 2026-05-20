@@ -14,6 +14,7 @@ import type { WriteSink } from "../lib/io.ts";
 import { ClaudeHarness } from "./claude.ts";
 import { GeminiHarness } from "./gemini.ts";
 import { PiHarness } from "./pi.ts";
+import { CodexHarness } from "./codex.ts";
 import type { Harness } from "./types.ts";
 
 export function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
@@ -25,6 +26,8 @@ export function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
       out.push(new PiHarness(config.harnesses.pi));
     } else if (id === "gemini") {
       out.push(new GeminiHarness(config.harnesses.gemini));
+    } else if (id === "codex") {
+      out.push(new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" }));
     } else {
       err.write(`warning: unknown harness '${id}', skipping\n`);
     }
