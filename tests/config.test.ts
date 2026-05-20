@@ -24,6 +24,8 @@ const ENV_KEYS = [
   "PHANTOMBOT_CLAUDE_FALLBACK_MODEL",
   "PHANTOMBOT_PI_BIN",
   "PHANTOMBOT_PI_MAX_PAYLOAD",
+  "PHANTOMBOT_CODEX_BIN",
+  "PHANTOMBOT_CODEX_MODEL",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
 ];
@@ -66,6 +68,10 @@ describe("loadConfig — defaults (no file)", () => {
       bin: "pi",
       maxPayloadBytes: 1_500_000,
     });
+    expect(c.harnesses.codex).toEqual({
+      bin: "codex",
+      model: "",
+    });
   });
 
   test("XDG paths resolve to ~/.config and ~/.local/share by default", async () => {
@@ -95,6 +101,10 @@ fallback_model = ""
 [harnesses.pi]
 bin = "/opt/pi/pi"
 max_payload_bytes = 500000
+
+[harnesses.codex]
+bin = "/opt/codex/codex"
+model = "gpt-5.3-codex"
 `,
       "utf8",
     );
@@ -111,6 +121,9 @@ max_payload_bytes = 500000
     expect(c.harnesses.claude.fallbackModel).toBe("");
     expect(c.harnesses.pi.bin).toBe("/opt/pi/pi");
     expect(c.harnesses.pi.maxPayloadBytes).toBe(500_000);
+    expect(c.harnesses.codex).toBeDefined();
+    expect(c.harnesses.codex!.bin).toBe("/opt/codex/codex");
+    expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");
   });
 });
 

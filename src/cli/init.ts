@@ -85,7 +85,7 @@ export default defineCommand({
 
     p.note(
       "This wizard will guide you through 4 quick steps to get your agent running:\n" +
-      "  1. Pick your AI harness (claude, pi, or gemini)\n" +
+      "  1. Pick your AI harness (claude, pi, gemini, or codex)\n" +
       "  2. Create a persona (identity & memory)\n" +
       "  3. Connect to Telegram\n" +
       "  4. Install as a background service",
@@ -132,7 +132,7 @@ export default defineCommand({
     } else {
       p.note(
         "No AI harness responded to '--version'.\n" +
-        "You might need to install one (claude, pi, or gemini) first, " +
+        "You might need to install one (claude, pi, gemini, or codex) first, " +
         "but we can still set up the configuration now.",
         "Probe result"
       );
