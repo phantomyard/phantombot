@@ -12,6 +12,32 @@ import type {
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
+// Test seam: capture any HTTP egress so a quiet-by-default regression
+// (tick trying to POST to the Telegram API on every fire) fails loud
+// instead of silently working in the test environment.
+type FetchCall = { url: string; init?: RequestInit };
+function installFetchTrap(): { calls: FetchCall[]; restore: () => void } {
+  const calls: FetchCall[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: RequestInit,
+  ) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ ok: true, result: {} }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return { calls, restore: () => { globalThis.fetch = original; } };
+}
+
 class ScriptedHarness implements Harness {
   invocations = 0;
   lastUserMessage?: string;
@@ -314,6 +340,101 @@ describe("runTick — lockfile", () => {
     });
     expect(code).toBe(0);
     expect(harness.invocations).toBe(0);
+  });
+});
+
+describe("runTick — quiet-by-default (no auto-Telegram delivery)", () => {
+  // The system prompt promises tick fires are silent unless the agent
+  // explicitly calls `phantombot notify`. These tests pin that contract
+  // so the regression that produced PR #117 can't sneak back in.
+
+  test("a fired task with Telegram fully configured does NOT post to the Telegram API", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "should be silent",
+      schedule: "0 * * * *",
+      prompt: "x",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    const configWithTelegram: Config = {
+      ...config,
+      channels: {
+        telegram: {
+          token: "fake-token",
+          pollTimeoutS: 30,
+          allowedUserIds: [12345],
+        },
+      },
+    };
+
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "this is the agent's reply — nothing material" },
+    ]);
+    const trap = installFetchTrap();
+    try {
+      await runTick({
+        config: configWithTelegram,
+        taskStore: store,
+        memory,
+        harnesses: [harness],
+        lockPath,
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+    } finally {
+      trap.restore();
+    }
+    // No Telegram API call at all — tick is the wrong place for it.
+    const telegramCalls = trap.calls.filter((c) =>
+      c.url.includes("api.telegram.org"),
+    );
+    expect(telegramCalls).toEqual([]);
+    // Run row records the fire but `delivered` is false (we never auto-deliver).
+    const runs = store.taskRuns(created.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.delivered).toBe(false);
+  });
+
+  test("legacy `silent: true` tasks also fire silently — the field is a no-op", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "legacy quiet flag",
+      schedule: "0 * * * *",
+      prompt: "x",
+      silent: true,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const configWithTelegram: Config = {
+      ...config,
+      channels: {
+        telegram: {
+          token: "fake-token",
+          pollTimeoutS: 30,
+          allowedUserIds: [12345],
+        },
+      },
+    };
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "still silent" },
+    ]);
+    const trap = installFetchTrap();
+    try {
+      await runTick({
+        config: configWithTelegram,
+        taskStore: store,
+        memory,
+        harnesses: [harness],
+        lockPath,
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+    } finally {
+      trap.restore();
+    }
+    expect(
+      trap.calls.filter((c) => c.url.includes("api.telegram.org")),
+    ).toEqual([]);
   });
 });
 

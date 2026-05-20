@@ -52,7 +52,13 @@ export interface RunTaskAddInput {
   count?: number;
   /** --for 30d — recurring expiry (relative) */
   relFor?: string;
-  /** --silent — suppress user notification after fire */
+  /**
+   * @deprecated `--silent` is a no-op as of the quiet-by-default fix.
+   * Tick never auto-posts the harness reply to Telegram anymore; the
+   * agent decides whether to call `phantombot notify` from inside the
+   * prompt. Accepted for back-compat (with a stderr warning) until a
+   * follow-up PR drops the flag and the DB column.
+   */
   silent?: boolean;
   /** --force-long-running — allow recurring > 90d */
   forceLongRunning?: boolean;
@@ -69,6 +75,18 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {
     const now = new Date();
+
+    // `--silent` is now a no-op (see RunTaskAddInput JSDoc). Warn loudly
+    // so the agent / caller stops scheduling around it before it goes
+    // away entirely.
+    if (input.silent) {
+      err.write(
+        "warning: --silent is deprecated and now a no-op. " +
+        "Scheduled task fires are silent by default; call " +
+        "`phantombot notify` from inside the task prompt if you " +
+        "want the user notified.\n",
+      );
+    }
 
     // Determine mode: one-off or recurring.
     const isRecurring = Boolean(input.every);
@@ -192,7 +210,6 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       (t.oneOff
         ? `  type:        one-off\n`
         : `  schedule:    ${t.schedule}\n  expiry:      ${describeExpiry(t)}\n`) +
-      (t.silent ? `  silent:      yes\n` : "") +
       (!t.oneOff && !hasExpiry
         ? `  hygiene:     no expiry — every fire will ask if it's still needed.\n` +
           `               cancel with: phantombot task cancel ${t.id}\n`
@@ -404,7 +421,6 @@ function formatTaskFull(t: Task): string {
     `type:         ${t.oneOff ? "one-off" : "recurring"}\n` +
     `schedule:     ${t.schedule || "(none — one-off)"}\n` +
     `active:       ${t.active}\n` +
-    `silent:       ${t.silent}\n` +
     `created:      ${t.createdAt.toISOString()}\n` +
     `last run:     ${t.lastRunAt ? formatLocal(t.lastRunAt) : "(never)"}\n` +
     `next run:     ${formatLocal(t.nextRunAt)}\n` +
@@ -488,7 +504,8 @@ export default defineCommand({
         silent: {
           type: "boolean",
           required: false,
-          description: "Suppress user notification after tick fires this task.",
+          description:
+            "DEPRECATED — no-op. Scheduled task fires are silent by default; use `phantombot notify` inside the task prompt to surface anything to the user.",
           default: false,
         },
         "force-long-running": {
