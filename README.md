@@ -174,13 +174,15 @@ mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 | `phantombot task list / show <id> / cancel <id>` | Manage tasks |
 | `phantombot tick` | Fire any due tasks (called every minute by `phantombot-tick.timer`) |
 | `phantombot memory today / search / get / list / index` | Read/write the persona's memory + KB |
+| `phantombot memory capture "<text>" --tag <tag>` | Append a tagged line to today's daily file (`decision` / `lesson` / `person` / `commitment`; `--tag` repeatable) and record it in `capture_log` |
 
 ### Periodic maintenance (called by systemd timers, occasionally by hand)
 
 | Command | What it does |
 |---|---|
 | `phantombot heartbeat` | Mechanical 30-min pass (no LLM) |
-| `phantombot nightly` | Cognitive distillation pass (LLM) |
+| `phantombot nightly [--resume]` | Cognitive distillation pass (LLM), checkpointed in five stages; `--resume` continues from `.nightly-progress.json` |
+| `phantombot doctor [--no-repair]` | Memory-subsystem health check; auto-repairs a missed/failed/partial nightly by spawning `nightly --resume` |
 
 ---
 
@@ -335,16 +337,52 @@ Every service has **two `EnvironmentFile=` lines** (`~/.config/phantombot/.env` 
 
 ## Memory
 
-Local SQLite at `~/.local/share/phantombot/memory.sqlite`. Two tables:
+Phantombot's memory has **two layers** that do different jobs. The SQLite layer is short-term machine state; the markdown layer is the durable, human-readable knowledge the agent accumulates over time. Most "where did my memory go?" confusion comes from conflating the two — so they're documented separately below.
+
+### Layer 1 — SQLite (`memory.sqlite`)
+
+Local SQLite at `~/.local/share/phantombot/memory.sqlite`. Three tables:
 
 ```sql
 turns(id, persona, conversation, role, text, created_at)
 tasks(id, persona, description, schedule, prompt, created_at,
       last_run_at, next_run_at, run_count,
       next_review_at, review_count, active)
+capture_log(id, persona, conversation, tags, created_at)
 ```
 
-Each persona × conversation gets its own namespace (`telegram:<chatId>`, `tick:<task-id>`, etc.). FTS5-based hybrid search via `phantombot memory search` (built into bun:sqlite); optional Gemini embeddings if `phantombot embedding` is configured.
+- **`turns`** is a **rolling per-conversation context buffer, not an archive.** Each persona × conversation namespace (`telegram:<chatId>`, `tick:<task-id>`, `system:nightly:<date>`, …) keeps only its most recent turns so the harness has continuity when threading a reply. Older turns are pruned — on a live box the table holds ~100–150 rows even after thousands of turns. Don't treat it as a transcript log; yesterday's chat is already gone.
+- **`tasks`** backs `phantombot task` — the scheduled-task store.
+- **`capture_log`** records every `phantombot memory capture` invocation (one row, tags joined). It is *not* the memory itself — it's the **observability trail** that lets the 30-turn nudge and `phantombot doctor` answer "did capture actually fire today?".
+
+FTS5-based hybrid search via `phantombot memory search` (built into bun:sqlite); optional Gemini embeddings if `phantombot embedding` is configured.
+
+### Layer 2 — markdown (the persona working directory)
+
+The durable memory lives as plain markdown under `~/.local/share/phantombot/personas/<name>/`, and flows through a four-stage pipeline:
+
+```
+  capture             heartbeat (30 min)       nightly (02:00, LLM)
+  ───────             ──────────────────       ────────────────────
+  memory/             promote tagged lines     distill drawers → KB
+  <YYYY-MM-DD>.md ──▶  into the four drawers ──▶ atomic notes, sweep
+  (daily journal)     (mechanical, no LLM)     kb/inbox/, compress
+```
+
+1. **Daily journal** — `memory/<YYYY-MM-DD>.md`. The agent appends tagged lines as things happen via `phantombot memory capture "<text>" --tag <tag>`, which writes `- [tag] text · HH:MMZ` and creates the file on the day's first capture. Valid tags: `decision`, `lesson`, `person`, `commitment`.
+2. **Drawers** — `memory/{decisions,lessons,people,commitments}.md`. The **heartbeat** (mechanical, every 30 min, no LLM) promotes tagged daily-file lines into the matching structured drawer.
+3. **KB** — `kb/`, an Obsidian-shaped vault of atomic notes with frontmatter and `[[wikilinks]]`. The **nightly** (cognitive, LLM-driven) distills the drawers into KB notes and sweeps `kb/inbox/`.
+4. **Persistent memory** — `MEMORY.md`, the always-loaded summary the nightly keeps lean.
+
+`phantombot memory capture` exists so this protocol has the same shape as every other subsystem — a command, a log line, an exit code, a queryable trace — instead of being a prose-only instruction a harness might silently skip.
+
+### The nightly is checkpointed
+
+The nightly runs as **five idempotent stages** — `essence` → `promote` → `kb` → `compress` → `state` — each its own bounded harness turn. After every completed stage phantombot writes `.nightly-progress.json`. If a stage times out, or the box powers off mid-run, the next invocation (`phantombot nightly --resume`, the startup catch-up, or `phantombot doctor`) skips the finished stages and continues. A timeout therefore costs at most one stage, never the whole night. The final result is recorded in `.nightly-state.json` (`last_run`, `last_status`, item counts).
+
+### Health check
+
+`phantombot doctor` reads `.nightly-state.json`, `.nightly-progress.json` and `capture_log`, and reports — then auto-repairs — memory-subsystem problems: a nightly that never ran, errored, or is >24h stale; a partial checkpoint left behind; or a "dry day" (≥20 real user turns with zero captures). When repair is warranted it spawns a detached `phantombot nightly --resume`. The `run` startup catch-up routes through the same logic, so a box powered off overnight self-heals on next boot.
 
 ---
 
@@ -389,7 +427,7 @@ phantombot/
 │   ├── version.ts                 # CI sed-replaces "0.1.0-dev" with "1.0.<PR_NUMBER>"
 │   ├── config.ts state.ts
 │   ├── persona/                   # loader + builder (system-prompt sections)
-│   ├── memory/                    # bun:sqlite turn store
+│   ├── memory/                    # bun:sqlite store (turns + capture_log)
 │   ├── importer/                  # OpenClaw → phantombot persona import
 │   ├── orchestrator/              # turn coordinator + harness fallback chain
 │   ├── channels/telegram.ts       # Telegram adapter (HTTP + long-poll)

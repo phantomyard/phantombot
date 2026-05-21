@@ -28,6 +28,7 @@ function fakeInput(): InitFlowInput {
       claude: undefined,
       pi: undefined,
       gemini: undefined,
+      codex: undefined,
     } as Record<HarnessId, string | undefined>,
   };
 }

@@ -17,11 +17,12 @@ import {
   type ServiceControl,
 } from "../lib/platform.ts";
 
-export type HarnessId = "claude" | "pi" | "gemini";
+export type HarnessId = "claude" | "pi" | "gemini" | "codex";
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
   "claude",
   "pi",
   "gemini",
+  "codex",
 ];
 
 export async function whichBinary(bin: string): Promise<string | undefined> {
@@ -47,6 +48,11 @@ export async function whichBinary(bin: string): Promise<string | undefined> {
   return undefined;
 }
 
+function harnessBin(config: Config, id: HarnessId): string {
+  if (id === "codex") return config.harnesses.codex?.bin ?? "codex";
+  return config.harnesses[id].bin;
+}
+
 export async function detectAvailability(
   config: Config,
 ): Promise<Record<HarnessId, string | undefined>> {
@@ -54,6 +60,7 @@ export async function detectAvailability(
     claude: await whichBinary(config.harnesses.claude.bin),
     pi: await whichBinary(config.harnesses.pi.bin),
     gemini: await whichBinary(config.harnesses.gemini.bin),
+    codex: await whichBinary(config.harnesses.codex?.bin ?? "codex"),
   };
 }
 
@@ -86,7 +93,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 
   p.note(
     SUPPORTED_HARNESSES.map(
-      (id) => `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? config.harnesses[id].bin}`,
+      (id) => `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
     ).join("\n"),
     "Detected harnesses",
   );
@@ -94,7 +101,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
   if (!hasAnyHarness) {
     p.note(
-      "No supported harness (claude, pi, gemini) was found on your PATH.\n" +
+      "No supported harness (claude, pi, gemini, codex) was found on your PATH.\n" +
       "You will need to install at least one of them before the agent can think.\n" +
       "We will continue the setup anyway so your configuration is ready.",
       "Warning: No Harness Found",

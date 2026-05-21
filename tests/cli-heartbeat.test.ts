@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runHeartbeatCli } from "../src/cli/heartbeat.ts";
 import type { Config } from "../src/config.ts";
+import { heartbeatMarkerPath } from "../src/lib/timerHealth.ts";
 
 class CaptureStream {
   chunks: string[] = [];
@@ -28,6 +30,9 @@ beforeEach(async () => {
     recursive: true,
   });
   process.env.XDG_DATA_HOME = workdir;
+  // Redirect the timer-fired marker path so heartbeat writes into the
+  // test workdir, not the developer's real ~/.local/state/.
+  process.env.XDG_STATE_HOME = workdir;
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000,
@@ -81,5 +86,49 @@ describe("runHeartbeatCli", () => {
     });
     expect(code).toBe(2);
     expect(err.text).toContain("not found");
+  });
+
+  test("happy path records a fire-marker for the doctor staleness check", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const code = await runHeartbeatCli({
+      config,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      // Skip the real systemd self-heal — we're testing the marker write.
+      healSystemd: false,
+    });
+    expect(code).toBe(0);
+    expect(existsSync(heartbeatMarkerPath())).toBe(true);
+  });
+
+  test("healSystemd seam runs after the heartbeat body", async () => {
+    let healCalled = false;
+    await runHeartbeatCli({
+      config,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: async () => {
+        healCalled = true;
+      },
+    });
+    expect(healCalled).toBe(true);
+  });
+
+  test("healSystemd throwing does not break the heartbeat", async () => {
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: async () => {
+        throw new Error("systemctl exploded");
+      },
+    });
+    // Primary work still completes and exit is 0; the heal failure is logged but swallowed.
+    expect(code).toBe(0);
+    expect(out.text).toContain("heartbeat ok");
   });
 });

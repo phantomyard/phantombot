@@ -44,7 +44,13 @@ export interface Task {
   expiresAt?: Date;
   /** Max number of runs for this recurring task. Null = no limit. */
   maxRuns?: number;
-  /** If true, tick will NOT notify the user after firing. */
+  /**
+   * @deprecated No-op as of the quiet-by-default fix. Tick never
+   * auto-posts harness output to Telegram anymore — the agent is the
+   * sole arbiter via `phantombot notify`. Kept on the type and column
+   * for back-compat with existing DB rows; will be dropped in a
+   * follow-up migration.
+   */
   silent: boolean;
   /** Conversation/channel that created this task (for daily-file audit). */
   createdBy: string;
@@ -57,7 +63,15 @@ export interface TaskRunRow {
   status: "ok" | "error";
   exitCode: number;
   outputExcerpt: string; // first 500 chars
-  delivered: boolean; // whether notify was sent to user
+  /**
+   * Historical: in pre-quiet-by-default builds this was true when tick
+   * auto-posted the harness reply to Telegram. Tick no longer does
+   * auto-delivery, so this is always false on rows written by current
+   * code. Old rows retain their original value; the column stays for
+   * back-compat and as a slot if we ever wire up post-hoc "did the
+   * agent call notify during this run" tracking.
+   */
+  delivered: boolean;
 }
 
 export interface TaskAddInput {
@@ -78,7 +92,11 @@ export interface TaskAddInput {
   expiresAt?: Date;
   /** Max runs for recurring tasks. */
   maxRuns?: number;
-  /** Suppress user notification after tick fire. */
+  /**
+   * @deprecated No-op as of the quiet-by-default fix. Accepted for
+   * back-compat with the CLI's deprecated `--silent` flag. See the
+   * Task interface for the field-level note.
+   */
   silent?: boolean;
   /** Channel/conversation that created this task. */
   createdBy?: string;

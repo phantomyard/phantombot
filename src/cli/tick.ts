@@ -3,10 +3,19 @@
  *
  * Reads tasks where next_run_at <= now() AND active=1, runs each through
  * the harness chain, and either:
- *   - runs the task's normal prompt (yielding to the agent's notify rule
- *     embedded in that prompt), then advances next_run_at;
+ *   - runs the task's normal prompt (the agent owns whether to surface
+ *     anything to the user; tick itself is silent), then advances
+ *     next_run_at;
  *   - or, if next_review_at <= now(), runs the SELF-REVIEW prompt that
  *     asks the agent KEEP / STOP, and updates the task accordingly.
+ *
+ * Quiet-by-default contract: tick does NOT post the harness reply to
+ * Telegram. The harnessed agent is the sole arbiter of whether the
+ * user hears about a fire — if it wants to notify, it calls
+ * `phantombot notify` from inside the prompt. This matches the standing
+ * rule embedded in the persona builder ("Scheduled tasks run silently
+ * by default — no Telegram chatter on every fire") which the previous
+ * auto-delivery branch directly contradicted.
  *
  * Lockfile prevents overlapping ticks: if a previous tick is still
  * running (e.g. a slow Claude call), this minute's tick exits 0 and
@@ -23,10 +32,6 @@ import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import {
-  HttpTelegramTransport,
-  type TelegramTransport,
-} from "../channels/telegram.ts";
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -37,6 +42,7 @@ import {
   isLockHandle,
 } from "../lib/runLock.ts";
 import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
+import { recordTickFired } from "../lib/timerHealth.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
@@ -54,8 +60,6 @@ export interface RunTickInput {
   taskStore?: TaskStore;
   memory?: MemoryStore;
   harnesses?: Harness[];
-  /** Inject telegram transport for testing. */
-  transport?: TelegramTransport;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -65,6 +69,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
   const now = input.now ?? new Date();
+
+  // Record that the tick timer fired — even if the body exits early
+  // because the lock is held. Doctor uses this marker's mtime to flag
+  // a dead tick timer; the signal we want is "the timer fires," not
+  // "tick did meaningful work."
+  await recordTickFired();
 
   const lockPath = input.lockPath ?? defaultTickLockPath();
   const lock = acquireRunLock(lockPath);
@@ -86,13 +96,6 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     if (!input.memory) await memory.close();
     lock.release();
     return 1;
-  }
-
-  // Init telegram transport for notifications.
-  let transport: TelegramTransport | undefined;
-  const tg = config.channels.telegram;
-  if (tg && tg.allowedUserIds.length > 0) {
-    transport = input.transport ?? new HttpTelegramTransport(tg.token);
   }
 
   try {
@@ -163,38 +166,20 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       const status = runError ? "error" : "ok";
       const exitCode = runError ? 1 : 0;
 
-      // For non-silent, non-review tasks: notify the user via Telegram.
-      let delivered = false;
-      if (!isReview && !task.silent && !runError && finalText.trim().length > 0 && transport) {
-        try {
-          const notifyMsg = formatTaskNotify(task, finalText);
-          for (const chatId of tg!.allowedUserIds) {
-            try {
-              await transport.sendMessage(chatId, notifyMsg);
-              delivered = true;
-            } catch (e) {
-              log.warn("tick: notify send failed", {
-                taskId: task.id,
-                chatId,
-                error: (e as Error).message,
-              });
-            }
-          }
-        } catch (e) {
-          log.warn("tick: notify failed", {
-            taskId: task.id,
-            error: (e as Error).message,
-          });
-        }
-      }
-
+      // Quiet-by-default: tick never auto-posts the harness reply to
+      // Telegram. The agent calls `phantombot notify` from inside the
+      // prompt if it wants the user to see something. `delivered` is
+      // recorded false here for back-compat with the task_runs schema;
+      // it no longer corresponds to a tick-side delivery decision. If
+      // we ever wire up post-hoc "did notify fire during this run"
+      // tracking, this is the field to revive.
       taskStore.logRun({
         taskId: task.id,
         firedAt: now,
         status: status as "ok" | "error",
         exitCode,
         outputExcerpt,
-        delivered,
+        delivered: false,
       });
 
       if (isReview) {
@@ -209,7 +194,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
         taskStore.recordRun(task.id, now);
       }
       out.write(
-        `tick: task ${task.id} done (${finalText.length} chars, ${status}, notified=${delivered})\n`,
+        `tick: task ${task.id} done (${finalText.length} chars, ${status})\n`,
       );
     }
     return 0;
@@ -249,16 +234,6 @@ export function appendHygieneFooter(task: Task): string {
     `If not, run \`phantombot task cancel ${task.id}\` to retire it. ` +
     `If yes, ignore this footer and continue.`
   );
-}
-
-/**
- * Format a task's output as a Telegram notification message.
- * Truncates to avoid hitting Telegram's 4096 char limit.
- */
-function formatTaskNotify(task: Task, output: string): string {
-  const header = `📋 *${task.description}*`;
-  const body = output.trim().slice(0, 3500); // leave room for Markdown
-  return `${header}\n\n${body}`;
 }
 
 /**

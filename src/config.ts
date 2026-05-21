@@ -78,11 +78,12 @@ export interface Config {
   configPath: string;
 
   harnesses: {
-    /** Order = primary → fallback. Recognized ids: "claude", "pi", "gemini". */
+    /** Order = primary → fallback. Recognized ids: "claude", "pi", "gemini", "codex". */
     chain: string[];
     claude: { bin: string; model: string; fallbackModel: string };
     pi: { bin: string; maxPayloadBytes: number };
     gemini: { bin: string; model: string };
+    codex?: { bin: string; model: string };
   };
 
   channels: {
@@ -134,6 +135,7 @@ export async function loadConfig(): Promise<Config> {
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
   const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
   const tomlGeminiHarness = (tomlHarnesses.gemini ?? {}) as Record<string, unknown>;
+  const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
@@ -228,6 +230,18 @@ export async function loadConfig(): Promise<Config> {
         model:
           process.env.PHANTOMBOT_GEMINI_MODEL ??
           asString(tomlGeminiHarness.model) ??
+          "",
+      },
+
+      codex: {
+        bin:
+          process.env.PHANTOMBOT_CODEX_BIN ??
+          asString(tomlCodex.bin) ??
+          "codex",
+        // Empty string = "let codex pick its own default".
+        model:
+          process.env.PHANTOMBOT_CODEX_MODEL ??
+          asString(tomlCodex.model) ??
           "",
       },
     },

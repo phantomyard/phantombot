@@ -35,6 +35,13 @@ import {
   restartCommand,
   type ServiceControl,
 } from "../lib/platform.ts";
+import {
+  BunSystemctlRunner,
+  buildSystemctlEnv,
+  ensureSystemdUnitsCurrent,
+  ensureUserSystemdEnv,
+  type EnsureUnitsCurrentResult,
+} from "../lib/systemd.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { VERSION } from "../version.ts";
 
@@ -63,6 +70,16 @@ export interface RunUpdateInput {
   /** Inject confirm to bypass @clack's TTY-only prompt in tests. */
   confirmInstall?: (release: LatestRelease) => Promise<boolean>;
   confirmRestart?: () => Promise<boolean>;
+  /**
+   * Test seam — override the post-swap "re-stitch systemd units" step.
+   * Pass `false` to skip entirely (the common case for tests that don't
+   * care about the heal pass). Pass a function to substitute a fake. In
+   * production this is undefined and runUpdate uses the real systemd
+   * runner via `defaultHealUnits`.
+   */
+  healSystemdUnits?:
+    | false
+    | ((binPath: string) => Promise<EnsureUnitsCurrentResult | null>);
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -170,6 +187,43 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   }
   out.write(`installed ${release.tag} at ${binPath}.\n`);
 
+  // 7.5. Re-stitch systemd unit files so the new binary's templates land
+  // on disk and any timer whose enabled/active state has rotted gets
+  // re-armed. Without this step a previous bad update can leave broken
+  // symlinks in ~/.config/systemd/user/timers.target.wants/ that
+  // silently strand all scheduled tasks — the runs=0 bug we shipped in
+  // 2026-05. Idempotent: nothing changes when units already match.
+  // Non-fatal on failure: the binary swap is the critical step, and
+  // `phantombot install` is still available as a manual fallback.
+  if (input.healSystemdUnits !== false && procPlatform === "linux") {
+    try {
+      const heal = input.healSystemdUnits
+        ? await input.healSystemdUnits(binPath)
+        : await defaultHealUnits(binPath);
+      if (heal) {
+        if (heal.rewrote.length > 0) {
+          out.write(
+            `re-rendered systemd units: ${heal.rewrote.join(", ")}\n`,
+          );
+        }
+        if (heal.repairedTimers.length > 0) {
+          out.write(
+            `re-armed timers: ${heal.repairedTimers.join(", ")}\n`,
+          );
+        }
+        if (heal.rewrote.length === 0 && heal.repairedTimers.length === 0) {
+          out.write("systemd units already current.\n");
+        }
+      }
+    } catch (e) {
+      err.write(
+        `warning: could not re-stitch systemd units: ${(e as Error).message} — ` +
+          `run 'phantombot install' manually if scheduled tasks stop firing.\n`,
+      );
+      // Non-fatal — fall through to restart handling.
+    }
+  }
+
   // 8. Restart handling. The running phantombot process keeps its
   // in-memory binary, so restart is needed to actually load the new bits.
   const svc = input.serviceControl ?? defaultServiceControl();
@@ -197,6 +251,20 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * Production wiring for the post-swap "heal units" step. Returns null
+ * when the user-systemd bus isn't reachable (no linger, dev workstation,
+ * etc.) — the update succeeded, we just have nothing to repair.
+ */
+async function defaultHealUnits(
+  binPath: string,
+): Promise<EnsureUnitsCurrentResult | null> {
+  const sysEnv = ensureUserSystemdEnv();
+  if (!sysEnv.ready) return null;
+  const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
+  return ensureSystemdUnitsCurrent({ binPath, systemctl });
 }
 
 async function defaultConfirmInstall(
