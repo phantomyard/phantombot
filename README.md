@@ -87,7 +87,7 @@ Environment overrides:
 |---|---|---|
 | `PHANTOMBOT_INSTALL_DIR` | `~/.local/bin` | Where to install the binary |
 | `PHANTOMBOT_SKIP_TUI` | unset | Set to skip the post-install persona TUI (useful in CI / unattended provisioning) |
-| `GITHUB_TOKEN` | unset | Sent as `Authorization: Bearer …` for the GitHub API call (lifts unauth rate limits) |
+| `GITHUB_TOKEN` | unset | Sent as `Authorization: Bearer …` for the GitHub API call (lifts unauth rate limits). If the token is rejected (401) or rate-limited (403) — e.g. a GitHub App installation token scoped to a different org — `phantombot update` transparently retries once without the auth header before failing. |
 
 After install, subsequent updates use:
 
