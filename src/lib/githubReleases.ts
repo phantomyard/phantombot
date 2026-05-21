@@ -4,6 +4,9 @@
  *
  * No GitHub auth needed because the repo is public; if the API ever rate-
  * limits us (60/h unauth), GITHUB_TOKEN in env is honored for higher caps.
+ * If the token is rejected (401) or rate-limited (403) — e.g. a GitHub
+ * App installation token scoped to a different org — we transparently
+ * retry once without the auth header before failing.
  *
  * Repo coordinates are env-overridable (PHANTOMBOT_UPDATE_REPO=owner/name)
  * so a future repo move can be staged through env without a rebuild.
@@ -61,28 +64,49 @@ export async function findLatestRelease(opts: {
     opts.repo ?? process.env.PHANTOMBOT_UPDATE_REPO ?? DEFAULT_REPO;
   const url = `https://api.github.com/repos/${repo}/releases/latest`;
 
-  const headers: Record<string, string> = {
-    accept: "application/vnd.github+json",
-    "x-github-api-version": "2022-11-28",
-  };
-  if (process.env.GITHUB_TOKEN) {
-    headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  }
+  const hadToken = !!process.env.GITHUB_TOKEN;
 
   let res: Response;
   try {
-    res = await fetchImpl(url, { headers });
+    res = await fetchImpl(url, { headers: buildHeaders(hadToken) });
   } catch (e) {
     return {
       ok: false,
       error: `network error reaching ${url}: ${(e as Error).message}`,
     };
   }
+
+  // GitHub App installation tokens are scoped to a single org's repos.
+  // Using one against a public repo outside that org returns 401 — the
+  // token is "valid" but not authorized for this resource. The release
+  // endpoint is public, so an unauthenticated retry usually succeeds.
+  // We also retry on 403 in case the token itself is rate-limited or
+  // suspended while the unauth pool still has budget. See issue #115.
+  let retriedUnauth = false;
+  if (hadToken && (res.status === 401 || res.status === 403)) {
+    try {
+      res = await fetchImpl(url, { headers: buildHeaders(false) });
+      retriedUnauth = true;
+    } catch {
+      // Network error on the retry — fall through and report the
+      // original status below.
+    }
+  }
+
   if (res.status === 403) {
     return {
       ok: false,
-      error:
-        "GitHub API rate-limited (60/h unauth). Set GITHUB_TOKEN in env to lift the cap.",
+      error: retriedUnauth
+        ? "GitHub API rate-limited (60/h) even after retrying without GITHUB_TOKEN. Try again later."
+        : "GitHub API rate-limited (60/h unauth). Set GITHUB_TOKEN in env to lift the cap.",
+    };
+  }
+  if (res.status === 401) {
+    return {
+      ok: false,
+      error: retriedUnauth
+        ? `GitHub API HTTP 401 from ${url} (unauth retry also rejected — unexpected for a public repo)`
+        : `GitHub API HTTP 401 from ${url} (token rejected; is GITHUB_TOKEN scoped to a different org?)`,
     };
   }
   if (res.status === 404) {
@@ -186,6 +210,22 @@ export function detectSupportedTarget(
   if (procPlatform === "linux") return `linux-${arch}` as SupportedTarget;
   if (procPlatform === "darwin" && arch === "arm64") return "darwin-arm64";
   return undefined;
+}
+
+/**
+ * Build the request headers for a GitHub API call. If `withAuth` is
+ * true and GITHUB_TOKEN is in env, the `authorization` header is added;
+ * otherwise the call is unauthenticated (subject to the 60/h IP cap).
+ */
+function buildHeaders(withAuth: boolean): Record<string, string> {
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (withAuth && process.env.GITHUB_TOKEN) {
+    headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  return headers;
 }
 
 interface GithubReleaseResponse {

@@ -38,6 +38,35 @@ function fakeFetch(
     })) as unknown as typeof fetch;
 }
 
+/**
+ * Fetch mock that returns different responses based on whether the
+ * call carries an `authorization` header. Lets us assert the
+ * try-unauth fallback path without race-y call counters.
+ */
+function authAwareFetch(
+  withAuth: { status: number; body: unknown },
+  noAuth: { status: number; body: unknown },
+): { fetchImpl: typeof fetch; calls: Array<{ hasAuth: boolean }> } {
+  const calls: Array<{ hasAuth: boolean }> = [];
+  const fetchImpl = (async (
+    _url: string | URL | Request,
+    init?: { headers?: Record<string, string> },
+  ) => {
+    const headers = init?.headers ?? {};
+    const hasAuth = "authorization" in headers || "Authorization" in headers;
+    calls.push({ hasAuth });
+    const reply = hasAuth ? withAuth : noAuth;
+    return new Response(
+      typeof reply.body === "string" ? reply.body : JSON.stringify(reply.body),
+      {
+        status: reply.status,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls };
+}
+
 const SAMPLE_RELEASE = {
   tag_name: "v1.0.43",
   body: "Automated release for PR #43.",
@@ -143,6 +172,79 @@ describe("findLatestRelease", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error).toContain("no releases");
+  });
+
+  test("with token, 401 from auth call retries without auth and succeeds (issue #115)", async () => {
+    process.env.GITHUB_TOKEN = "ghs_pretend_app_installation_token";
+    const { fetchImpl, calls } = authAwareFetch(
+      { status: 401, body: { message: "Bad credentials" } },
+      { status: 200, body: SAMPLE_RELEASE },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.version).toBe("1.0.43");
+    expect(calls).toEqual([{ hasAuth: true }, { hasAuth: false }]);
+  });
+
+  test("with token, 403 from auth call retries without auth and succeeds", async () => {
+    process.env.GITHUB_TOKEN = "ghs_pretend_token";
+    const { fetchImpl, calls } = authAwareFetch(
+      { status: 403, body: { message: "rate limited" } },
+      { status: 200, body: SAMPLE_RELEASE },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(calls.map((c) => c.hasAuth)).toEqual([true, false]);
+  });
+
+  test("with token, 401 then unauth also 403 → rate-limit-after-retry error", async () => {
+    process.env.GITHUB_TOKEN = "ghs_pretend_token";
+    const { fetchImpl } = authAwareFetch(
+      { status: 401, body: { message: "Bad credentials" } },
+      { status: 403, body: { message: "rate limited" } },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("even after retrying without GITHUB_TOKEN");
+  });
+
+  test("with token, 401 then unauth also 401 → labelled as unexpected", async () => {
+    process.env.GITHUB_TOKEN = "ghs_pretend_token";
+    const { fetchImpl } = authAwareFetch(
+      { status: 401, body: { message: "Bad credentials" } },
+      { status: 401, body: { message: "Bad credentials" } },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("unauth retry also rejected");
+  });
+
+  test("without token, 401 → single call, no fallback, 401 error", async () => {
+    // Both branches of the mock return 401 so we can prove that the
+    // no-token path makes exactly one call (no retry attempted).
+    const { fetchImpl, calls } = authAwareFetch(
+      { status: 401, body: { message: "Bad credentials" } },
+      { status: 401, body: { message: "Bad credentials" } },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("401");
+    expect(calls).toEqual([{ hasAuth: false }]);
+  });
+
+  test("with token, successful first call does not retry", async () => {
+    process.env.GITHUB_TOKEN = "ghs_pretend_token";
+    const { fetchImpl, calls } = authAwareFetch(
+      { status: 200, body: SAMPLE_RELEASE },
+      { status: 500, body: { message: "should never be called" } },
+    );
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(calls).toEqual([{ hasAuth: true }]);
   });
 
   test("PHANTOMBOT_UPDATE_REPO env var overrides repo", async () => {
