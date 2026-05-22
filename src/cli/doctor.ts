@@ -144,14 +144,15 @@ export interface RunDoctorInput {
   spawnRepair?: (persona: string) => void;
   /**
    * Test seam for the systemd check. Pass `false` to skip the check
-   * (the default outside Linux). Pass a function to substitute a fake
-   * — the function receives the binary path doctor would use and
-   * returns a SystemctlRunner snapshot to inspect. In production this
-   * is undefined and doctor uses the real systemctl.
+   * (the default outside Linux). Pass a function to substitute a fake —
+   * it receives the list of timer units whose last-fired markers are
+   * stale (so the heal step can force-re-arm a zombie timer that systemd
+   * still reports as active) and returns the systemd report. In
+   * production this is undefined and doctor uses the real systemctl.
    */
   checkSystemd?:
     | false
-    | (() => Promise<DoctorReport["systemd"] | undefined>);
+    | ((staleTimers: string[]) => Promise<DoctorReport["systemd"] | undefined>);
   /**
    * Test seam for the timer-fired marker check. Pass `false` to skip
    * (used by tests that don't care about staleness). Pass a function
@@ -259,29 +260,55 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     repairTriggered = true;
   }
 
-  // systemd health (Linux only) — catches the broken-symlink class of
-  // bug where timers look enabled but never fire. Skipped on macOS,
-  // skipped in tests via checkSystemd: false.
-  let systemdReport: DoctorReport["systemd"] | undefined;
-  if (input.checkSystemd !== false) {
-    if (input.checkSystemd) {
-      systemdReport = await input.checkSystemd();
-    } else if (currentPlatform() === "linux") {
-      systemdReport = await defaultCheckSystemd(repair);
-    }
-  }
-
   // Timer "last fired" check — catches the long-uptime failure mode
   // where systemd thinks a timer is active but it hasn't fired in
   // hours. is-active says "active", LastTriggerUSec says "n/a", and
   // the only ground-truth signal is what tick + heartbeat actually
-  // wrote to disk the last time they ran.
+  // wrote to disk the last time they ran. Computed BEFORE the systemd
+  // check so a stale marker can drive a forced re-arm of the zombie
+  // timer below.
   let timersReport: DoctorReport["timers"] | undefined;
   if (input.checkTimers !== false) {
     if (input.checkTimers) {
       timersReport = await input.checkTimers();
     } else {
       timersReport = computeTimersReport();
+    }
+  }
+
+  // Map any "fired before, then went stale" marker to its timer unit.
+  // These are the `active (elapsed)` zombies that is-active can't see —
+  // the heal step restarts them to force a reschedule. We deliberately
+  // require last_fired to be present: a missing marker (never fired) is
+  // a fresh install whose first fire is imminent, and is already covered
+  // by the missing-file / inactive-timer checks. Nightly has no marker,
+  // so only heartbeat + tick can be re-armed this way.
+  const staleTimerUnits: string[] = [];
+  if (timersReport) {
+    if (
+      timersReport.heartbeat.stale &&
+      timersReport.heartbeat.last_fired !== undefined
+    ) {
+      staleTimerUnits.push(HEARTBEAT_TIMER_NAME);
+    }
+    if (
+      timersReport.tick.stale &&
+      timersReport.tick.last_fired !== undefined
+    ) {
+      staleTimerUnits.push(TICK_TIMER_NAME);
+    }
+  }
+
+  // systemd health (Linux only) — catches the broken-symlink class of
+  // bug where timers look enabled but never fire, plus the zombie timers
+  // surfaced by staleTimerUnits above. Skipped on macOS, skipped in
+  // tests via checkSystemd: false.
+  let systemdReport: DoctorReport["systemd"] | undefined;
+  if (input.checkSystemd !== false) {
+    if (input.checkSystemd) {
+      systemdReport = await input.checkSystemd(staleTimerUnits);
+    } else if (currentPlatform() === "linux") {
+      systemdReport = await defaultCheckSystemd(repair, staleTimerUnits);
     }
   }
 
@@ -366,7 +393,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       systemdReport.inactive_timers.length === 0;
     out.write(`  systemd: ${tick(sdOk)} — `);
     if (sdOk) {
-      out.write("all unit files present, all timers active\n");
+      out.write("all unit files present, all timers active");
+      // A pure zombie re-arm (timer was active but had stopped firing)
+      // leaves missing/inactive empty yet repaired=true — call it out so
+      // the operator knows a stalled timer was restarted.
+      out.write(systemdReport.repaired ? " (re-armed a stalled timer)\n" : "\n");
     } else {
       const bits: string[] = [];
       if (systemdReport.missing_unit_files.length > 0) {
@@ -439,6 +470,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
  */
 async function defaultCheckSystemd(
   repair: boolean,
+  staleTimers: string[] = [],
 ): Promise<DoctorReport["systemd"] | undefined> {
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return undefined;
@@ -462,9 +494,16 @@ async function defaultCheckSystemd(
     .map((f) => f.name);
   const inactive = await listInactiveTimers(systemctl);
   let repaired = false;
-  if (repair && (missing.length > 0 || inactive.length > 0)) {
+  if (
+    repair &&
+    (missing.length > 0 || inactive.length > 0 || staleTimers.length > 0)
+  ) {
     try {
-      const heal = await ensureSystemdUnitsCurrent({ binPath, systemctl });
+      const heal = await ensureSystemdUnitsCurrent({
+        binPath,
+        systemctl,
+        forceRearmTimers: staleTimers,
+      });
       repaired =
         heal.rewrote.length > 0 || heal.repairedTimers.length > 0;
     } catch (e) {

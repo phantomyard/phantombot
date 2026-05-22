@@ -377,6 +377,99 @@ describe("ensureSystemdUnitsCurrent", () => {
       "phantombot-heartbeat.timer",
     ]);
   });
+
+  test("force-re-arms a stale-but-active timer via restart", async () => {
+    // All unit files in place and current; the heartbeat timer reports
+    // enabled AND active so systemd thinks it's fine — but the caller has
+    // detected (via the last-fired marker) that it stopped firing: the
+    // `active (elapsed)` zombie. The healer must `restart` it to force a
+    // reschedule; `enable --now` is a no-op on an active timer and would
+    // silently fail to recover this state.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      // heartbeat: enabled + active, but in the force set → restart
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // restart
+      // nightly OK, not in the force set → left alone
+      isEnabledActive(),
+      isActiveActive(),
+      // tick OK, not in the force set → left alone
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      forceRearmTimers: ["phantombot-heartbeat.timer"],
+    });
+    expect(r.rewrote).toEqual([]);
+    // Only the listed zombie is touched; the other healthy timers aren't.
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-heartbeat.timer",
+    ]);
+    // It must NOT have used enable --now, which can't recover an
+    // already-active timer.
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "enable",
+      "--now",
+      "phantombot-heartbeat.timer",
+    ]);
+  });
+
+  test("a force-rearm timer that is also inactive uses enable --now, not restart", async () => {
+    // Precedence check: when a timer is in the force set AND systemd
+    // already reports it inactive, the normal enable --now path arms +
+    // starts it. A restart would be redundant, so we don't issue one.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      // heartbeat: enabled but inactive → enable --now (force set is moot)
+      isEnabledActive(),
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" }, // enable --now
+      // nightly OK
+      isEnabledActive(),
+      isActiveActive(),
+      // tick OK
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      forceRearmTimers: ["phantombot-heartbeat.timer"],
+    });
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "enable",
+      "--now",
+      "phantombot-heartbeat.timer",
+    ]);
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-heartbeat.timer",
+    ]);
+  });
 });
 
 describe("BunSystemctlRunner constructor env", () => {

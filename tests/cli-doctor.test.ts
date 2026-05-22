@@ -414,3 +414,118 @@ describe("runDoctor timer-fired staleness check", () => {
     expect(report.timers.tick.stale).toBe(false);
   });
 });
+
+describe("runDoctor zombie-timer re-arm wiring", () => {
+  // A timer can sit in `active (elapsed)` — systemd's is-active says
+  // "active" but it has stopped firing. is-active/missing-file checks
+  // can't see this; only the last-fired marker can. These tests verify
+  // that a stale marker drives the systemd heal step to force-re-arm the
+  // corresponding timer (and that a never-fired marker does not).
+
+  test("stale heartbeat marker → systemd heal force-re-arms that timer", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    let receivedStale: string[] | undefined;
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async (staleTimers) => {
+        receivedStale = staleTimers;
+        return {
+          missing_unit_files: [],
+          inactive_timers: [],
+          repaired: staleTimers.length > 0,
+        };
+      },
+      checkTimers: async () => ({
+        heartbeat: {
+          last_fired: "2026-05-14T06:52:00.000Z",
+          age_minutes: 11_520,
+          stale: true,
+          threshold_minutes: 120,
+        },
+        tick: {
+          last_fired: "2026-05-20T08:57:30.000Z",
+          age_minutes: 0,
+          stale: false,
+          threshold_minutes: 5,
+        },
+      }),
+    });
+    // The stale heartbeat (with a real last_fired) was passed down.
+    expect(receivedStale).toEqual(["phantombot-heartbeat.timer"]);
+    // Marker is still stale this run, so exit 1 (visibility) — the
+    // re-arm fires a catch-up that refreshes the marker for next time.
+    expect(code).toBe(1);
+    // The systemd line acknowledges the re-arm even though no unit file
+    // was missing or inactive.
+    expect(out.text).toContain("(re-armed a stalled timer)");
+  });
+
+  test("never-fired marker (no last_fired) is NOT force-re-armed", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    let receivedStale: string[] | undefined;
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      checkSystemd: async (staleTimers) => {
+        receivedStale = staleTimers;
+        return {
+          missing_unit_files: [],
+          inactive_timers: [],
+          repaired: false,
+        };
+      },
+      checkTimers: async () => ({
+        // Missing last_fired = fresh install, first fire imminent. Stale
+        // but must not trigger a restart — the install/inactive checks
+        // own that case.
+        heartbeat: { stale: true, threshold_minutes: 120 },
+        tick: { stale: true, threshold_minutes: 5 },
+      }),
+    });
+    expect(receivedStale).toEqual([]);
+  });
+
+  test("stale tick marker → tick timer re-armed", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    let receivedStale: string[] | undefined;
+    await runDoctor({
+      config,
+      out: new CaptureStream(),
+      checkSystemd: async (staleTimers) => {
+        receivedStale = staleTimers;
+        return {
+          missing_unit_files: [],
+          inactive_timers: [],
+          repaired: staleTimers.length > 0,
+        };
+      },
+      checkTimers: async () => ({
+        heartbeat: {
+          last_fired: "2026-05-20T08:55:00.000Z",
+          age_minutes: 2,
+          stale: false,
+          threshold_minutes: 120,
+        },
+        tick: {
+          last_fired: "2026-05-20T08:30:00.000Z",
+          age_minutes: 27,
+          stale: true,
+          threshold_minutes: 5,
+        },
+      }),
+    });
+    expect(receivedStale).toEqual(["phantombot-tick.timer"]);
+  });
+});
