@@ -292,7 +292,7 @@ describe("runDoctor timer-fired staleness check", () => {
           last_fired: "2026-05-20T08:55:00.000Z",
           age_minutes: 2,
           stale: false,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:57:30.000Z",
@@ -322,7 +322,7 @@ describe("runDoctor timer-fired staleness check", () => {
           last_fired: "2026-05-20T05:00:00.000Z",
           age_minutes: 240,
           stale: true,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:57:30.000Z",
@@ -351,7 +351,7 @@ describe("runDoctor timer-fired staleness check", () => {
       checkTimers: async () => ({
         heartbeat: {
           stale: true,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:57:30.000Z",
@@ -397,7 +397,7 @@ describe("runDoctor timer-fired staleness check", () => {
           last_fired: "2026-05-20T08:55:00.000Z",
           age_minutes: 2,
           stale: false,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:57:30.000Z",
@@ -445,7 +445,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
           last_fired: "2026-05-14T06:52:00.000Z",
           age_minutes: 11_520,
           stale: true,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:57:30.000Z",
@@ -487,7 +487,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         // Missing last_fired = fresh install, first fire imminent. Stale
         // but must not trigger a restart — the install/inactive checks
         // own that case.
-        heartbeat: { stale: true, threshold_minutes: 120 },
+        heartbeat: { stale: true, threshold_minutes: 75 },
         tick: { stale: true, threshold_minutes: 5 },
       }),
     });
@@ -516,7 +516,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
           last_fired: "2026-05-20T08:55:00.000Z",
           age_minutes: 2,
           stale: false,
-          threshold_minutes: 120,
+          threshold_minutes: 75,
         },
         tick: {
           last_fired: "2026-05-20T08:30:00.000Z",

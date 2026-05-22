@@ -155,11 +155,12 @@ export function loadTickLastFired(now: Date = new Date()): TimerLastFired {
 }
 
 /**
- * Default staleness bars used by doctor. Heartbeat fires every 30m,
- * so a 2h bar tolerates 3 missed fires before yelling. Tick fires
- * every minute, so a 5m bar tolerates 4 missed fires. Both are
- * deliberately loose — we want a "this timer is dead" signal, not a
- * "this timer was 30 seconds late" signal.
+ * Default staleness bars used by doctor. Heartbeat fires every 30m, so a
+ * 75m bar (2× cadence + 15m slack) tolerates 2 missed fires before
+ * yelling — tight enough to catch a wedged timer within an hour rather
+ * than the old 2h, while still ignoring a single late fire. Tick fires
+ * every minute, so a 5m bar tolerates 4 missed fires. Both want a "this
+ * timer is dead" signal, not a "this timer was 30 seconds late" signal.
  */
-export const HEARTBEAT_STALE_MINUTES = 120;
+export const HEARTBEAT_STALE_MINUTES = 75;
 export const TICK_STALE_MINUTES = 5;

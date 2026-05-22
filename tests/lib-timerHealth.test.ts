@@ -92,7 +92,10 @@ describe("timerHealth", () => {
 
   test("default thresholds are sane (heartbeat > tick)", () => {
     expect(HEARTBEAT_STALE_MINUTES).toBeGreaterThan(TICK_STALE_MINUTES);
+    // 2× the 30m cadence + slack: tight enough to flag a wedged timer
+    // within ~an hour, loose enough to ignore a single late fire.
     expect(HEARTBEAT_STALE_MINUTES).toBeGreaterThanOrEqual(60);
+    expect(HEARTBEAT_STALE_MINUTES).toBeLessThanOrEqual(90);
     expect(TICK_STALE_MINUTES).toBeLessThanOrEqual(15);
   });
 });

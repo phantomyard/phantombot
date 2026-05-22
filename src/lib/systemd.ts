@@ -136,14 +136,22 @@ StandardError=journal
 `;
 }
 
-/** Generate the heartbeat timer body — fires every 30 minutes. */
+/**
+ * Generate the heartbeat timer body — fires every 30 minutes.
+ *
+ * Uses OnCalendar (wall-clock anchored) rather than OnUnitActiveSec
+ * (relative to the last service activation). OnUnitActiveSec can wedge
+ * into the `active (elapsed) / Trigger: n/a` zombie state after long
+ * user-manager uptime and silently stop rescheduling — the heartbeat
+ * stalled 8 days this way (2026-05-14 → 2026-05-22). A calendar schedule
+ * cannot enter that state. Matches nightly.timer's anchoring.
+ */
 export function generateHeartbeatTimer(): string {
   return `[Unit]
 Description=Phantombot heartbeat timer (every 30 min)
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=30min
+OnCalendar=*:0/30
 AccuracySec=1min
 Persistent=true
 
@@ -604,9 +612,9 @@ export async function ensureSystemdUnitsCurrent(
       // timer has stopped firing (the `active (elapsed)` zombie), re-arm
       // it with `restart` — enable --now won't touch an already-active
       // timer, so it can't recover this state. restart forces systemd to
-      // recompute the next elapse; with OnBootSec/OnUnitActiveSec already
-      // in the past it fires a catch-up almost immediately, which also
-      // refreshes the last-fired marker.
+      // recompute the next elapse and re-arm the trigger; combined with
+      // Persistent=true any missed run fires a catch-up almost
+      // immediately, which also refreshes the last-fired marker.
       if (forceRearm.has(t.unit)) {
         await opts.systemctl.run(["--user", "restart", t.unit]);
         repairedTimers.push(t.unit);
