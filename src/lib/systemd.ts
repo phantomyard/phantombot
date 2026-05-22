@@ -515,6 +515,35 @@ export function phantombotUnitTargets(
 }
 
 /**
+ * Names of phantombot unit files that exist on disk but whose content no
+ * longer matches the running binary's templates. This is the *detection*
+ * half of the reconcile loop — `ensureSystemdUnitsCurrent` does the
+ * rewriting; this just names what would be rewritten, so `doctor` can SEE
+ * and report drift instead of cheerfully printing "systemd: ok" while a
+ * stale unit (e.g. a pre-`OnCalendar` heartbeat timer that an in-place
+ * `update` swapped the binary but never rewrote) sits latent on disk.
+ *
+ * Only existing files count: a missing file isn't "drift" (you can't drift
+ * from a file that isn't there) and is reported separately as
+ * `missing_unit_files`. Pure on its inputs — the caller supplies the
+ * targets (from `phantombotUnitTargets`) and a reader that returns the
+ * on-disk content or `undefined` when the file is absent — so it unit-tests
+ * without touching the filesystem.
+ */
+export function driftedUnitNames(
+  targets: PhantombotUnitTarget[],
+  readUnit: (path: string) => string | undefined,
+): string[] {
+  const drifted: string[] = [];
+  for (const t of targets) {
+    const current = readUnit(t.path);
+    if (current === undefined) continue; // missing, not drift
+    if (current !== t.content) drifted.push(basename(t.path));
+  }
+  return drifted;
+}
+
+/**
  * Surgical re-render of all six phantombot systemd unit files, plus a
  * re-enable / re-start of any timer that isn't currently active.
  *
@@ -571,6 +600,12 @@ export async function ensureSystemdUnitsCurrent(
 
   const rewrote: string[] = [];
   const backups: string[] = [];
+  // Timer units whose *content* we just rewrote. A daemon-reload alone is
+  // not enough to recover a timer whose definition changed while it sat in
+  // the `active (elapsed)` zombie state (the pre-OnCalendar bug): the unit
+  // stays wedged until restarted. We restart these below so the new
+  // schedule actually arms.
+  const rewroteTimerUnits = new Set<string>();
   for (const t of targets) {
     let current: string | undefined;
     if (existsSync(t.path)) {
@@ -585,6 +620,7 @@ export async function ensureSystemdUnitsCurrent(
     }
     await writeFile(t.path, t.content, "utf8");
     rewrote.push(basename(t.path));
+    if (t.isTimer) rewroteTimerUnits.add(t.unit);
   }
   if (rewrote.length > 0) {
     await opts.systemctl.run(["--user", "daemon-reload"]);
@@ -608,14 +644,19 @@ export async function ensureSystemdUnitsCurrent(
     const isEnabled = enabled.exitCode === 0 && enabled.stdout.trim() === "enabled";
     const isActive = active.exitCode === 0 && active.stdout.trim() === "active";
     if (isEnabled && isActive) {
-      // Looks healthy to systemd. But if a ground-truth marker says this
-      // timer has stopped firing (the `active (elapsed)` zombie), re-arm
-      // it with `restart` — enable --now won't touch an already-active
-      // timer, so it can't recover this state. restart forces systemd to
-      // recompute the next elapse and re-arm the trigger; combined with
-      // Persistent=true any missed run fires a catch-up almost
-      // immediately, which also refreshes the last-fired marker.
-      if (forceRearm.has(t.unit)) {
+      // Looks healthy to systemd. But re-arm with `restart` if either:
+      //   (a) a ground-truth marker says this timer has stopped firing (the
+      //       `active (elapsed)` zombie), or
+      //   (b) we just rewrote this timer's content (its schedule changed,
+      //       e.g. OnUnitActiveSec → OnCalendar) — a daemon-reload doesn't
+      //       un-wedge an elapsed timer, only a restart re-evaluates and
+      //       arms the new definition.
+      // `enable --now` won't touch an already-active timer, so it can't
+      // recover either case. restart forces systemd to recompute the next
+      // elapse and re-arm the trigger; combined with Persistent=true any
+      // missed run fires a catch-up almost immediately, which also
+      // refreshes the last-fired marker.
+      if (forceRearm.has(t.unit) || rewroteTimerUnits.has(t.unit)) {
         await opts.systemctl.run(["--user", "restart", t.unit]);
         repairedTimers.push(t.unit);
       }

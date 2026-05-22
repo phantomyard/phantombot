@@ -179,13 +179,14 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: [],
+        drifted_unit_files: [],
         inactive_timers: [],
         repaired: false,
       }),
     });
     expect(code).toBe(0);
     expect(out.text).toContain(
-      "systemd: ok — all unit files present, all timers active",
+      "systemd: ok — all unit files present and current, all timers active",
     );
   });
 
@@ -200,6 +201,7 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: ["phantombot-tick.timer"],
+        drifted_unit_files: [],
         inactive_timers: ["phantombot-tick.timer"],
         repaired: false,
       }),
@@ -223,6 +225,7 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: ["phantombot-tick.timer"],
+        drifted_unit_files: [],
         inactive_timers: [],
         repaired: true,
       }),
@@ -258,6 +261,7 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: [],
+        drifted_unit_files: [],
         inactive_timers: ["phantombot-tick.timer"],
         repaired: false,
       }),
@@ -265,9 +269,57 @@ describe("runDoctor systemd health check", () => {
     const report = JSON.parse(out.text);
     expect(report.systemd).toEqual({
       missing_unit_files: [],
+      drifted_unit_files: [],
       inactive_timers: ["phantombot-tick.timer"],
       repaired: false,
     });
+  });
+
+  test("reports drifted unit files and exits 1 when unrepaired", async () => {
+    // A unit file that exists and is "active" but whose content no longer
+    // matches the binary's template (the pre-OnCalendar heartbeat timer that
+    // an in-place update left behind). missing/inactive stay empty, so only
+    // the drift signal catches it — the gap that made doctor say "ok" while
+    // a wedge-prone timer sat on disk.
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: [],
+        drifted_unit_files: ["phantombot-heartbeat.timer"],
+        inactive_timers: [],
+        repaired: false,
+      }),
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("systemd: WARN");
+    expect(out.text).toContain("drifted: phantombot-heartbeat.timer");
+    expect(out.text).toContain("run `phantombot install` to repair");
+  });
+
+  test("drift healed in place → exit 0 and no manual action needed", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: async () => ({
+        missing_unit_files: [],
+        drifted_unit_files: ["phantombot-heartbeat.timer"],
+        inactive_timers: [],
+        repaired: true,
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("re-rendered units and re-armed timers");
   });
 });
 
@@ -436,6 +488,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         receivedStale = staleTimers;
         return {
           missing_unit_files: [],
+          drifted_unit_files: [],
           inactive_timers: [],
           repaired: staleTimers.length > 0,
         };
@@ -479,6 +532,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         receivedStale = staleTimers;
         return {
           missing_unit_files: [],
+          drifted_unit_files: [],
           inactive_timers: [],
           repaired: false,
         };
@@ -507,6 +561,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         receivedStale = staleTimers;
         return {
           missing_unit_files: [],
+          drifted_unit_files: [],
           inactive_timers: [],
           repaired: staleTimers.length > 0,
         };

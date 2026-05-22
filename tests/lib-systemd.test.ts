@@ -11,11 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildSystemctlEnv,
+  driftedUnitNames,
   ensureSystemdUnitsCurrent,
   ensureUnitCurrent,
   ensureUserSystemdEnv,
   generateSystemdUnit,
   installPhantombotUnit,
+  phantombotUnitTargets,
   SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
   type SystemctlResult,
@@ -428,6 +430,62 @@ describe("ensureSystemdUnitsCurrent", () => {
     ]);
   });
 
+  test("rewriting a timer's content also restarts it to arm the new schedule", async () => {
+    // The drifted-timer cure: a timer file whose body changed (e.g.
+    // OnUnitActiveSec → OnCalendar) needs more than a daemon-reload — an
+    // `active (elapsed)` timer stays wedged until restarted. So when we
+    // rewrite a timer's content, we restart it even though systemd still
+    // reports it enabled + active. Without this, doctor would rewrite the
+    // unit but the box would stay on the dead schedule until a manual kick.
+    const bin = "/usr/local/bin/phantombot";
+    // Populate every unit with canonical content first.
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    // Now corrupt only the heartbeat *timer* so its content drifts.
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload (content changed)
+      // heartbeat: enabled + active, but its content was just rewritten → restart
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // restart
+      // nightly: unchanged, enabled + active → left alone
+      isEnabledActive(),
+      isActiveActive(),
+      // tick: unchanged, enabled + active → left alone
+      isEnabledActive(),
+      isActiveActive(),
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+    });
+    expect(r.rewrote).toEqual(["phantombot-heartbeat.timer"]);
+    expect(r.backups).toEqual([`${hbTimerPath}.bak`]);
+    // The rewritten timer was restarted; the untouched ones were not.
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-heartbeat.timer",
+    ]);
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-nightly.timer",
+    ]);
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-tick.timer",
+    ]);
+  });
+
   test("a force-rearm timer that is also inactive uses enable --now, not restart", async () => {
     // Precedence check: when a timer is in the force set AND systemd
     // already reports it inactive, the normal enable --now path arms +
@@ -469,6 +527,41 @@ describe("ensureSystemdUnitsCurrent", () => {
       "restart",
       "phantombot-heartbeat.timer",
     ]);
+  });
+});
+
+describe("driftedUnitNames", () => {
+  const bin = "/usr/local/bin/phantombot";
+
+  test("returns [] when every on-disk unit matches its template", () => {
+    const targets = phantombotUnitTargets(bin);
+    const byPath = new Map(targets.map((t) => [t.path, t.content]));
+    const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
+    expect(drifted).toEqual([]);
+  });
+
+  test("flags only the unit whose on-disk content differs", () => {
+    const targets = phantombotUnitTargets(bin);
+    const byPath = new Map(targets.map((t) => [t.path, t.content]));
+    const heartbeat = targets.find(
+      (t) => t.unit === "phantombot-heartbeat.timer",
+    );
+    if (!heartbeat) throw new Error("heartbeat timer target missing");
+    // Simulate the pre-OnCalendar body left behind by an in-place update.
+    byPath.set(heartbeat.path, "OnUnitActiveSec=30min\n");
+    const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
+    expect(drifted).toEqual(["phantombot-heartbeat.timer"]);
+  });
+
+  test("a missing file (reader returns undefined) is not counted as drift", () => {
+    const targets = phantombotUnitTargets(bin);
+    const byPath = new Map(targets.map((t) => [t.path, t.content]));
+    const tick = targets.find((t) => t.unit === "phantombot-tick.timer");
+    if (!tick) throw new Error("tick timer target missing");
+    byPath.delete(tick.path); // absent on disk
+    const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
+    // Missing ≠ drift — doctor reports absent files via missing_unit_files.
+    expect(drifted).toEqual([]);
   });
 });
 

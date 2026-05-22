@@ -20,7 +20,7 @@
 
 import { spawn } from "node:child_process";
 import { defineCommand } from "citty";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
@@ -38,6 +38,7 @@ import {
   BunSystemctlRunner,
   buildSystemctlEnv,
   defaultUnitPath,
+  driftedUnitNames,
   ensureSystemdUnitsCurrent,
   ensureUserSystemdEnv,
   HEARTBEAT_TIMER_NAME,
@@ -46,6 +47,7 @@ import {
   NIGHTLY_TIMER_NAME,
   nightlyServicePath,
   nightlyTimerPath,
+  phantombotUnitTargets,
   type SystemctlRunner,
   TICK_TIMER_NAME,
   tickServicePath,
@@ -93,12 +95,21 @@ export interface DoctorReport {
   };
   /**
    * Linux-only — undefined on macOS and dev hosts without a user-systemd
-   * bus. When present, lists which unit files are missing from disk and
-   * which timers are not active right now. A healthy box reports empty
-   * arrays for both.
+   * bus. When present, lists which unit files are missing from disk, which
+   * present-but-stale unit files have drifted from the running binary's
+   * templates, and which timers are not active right now. A healthy box
+   * reports empty arrays for all three.
    */
   systemd?: {
     missing_unit_files: string[];
+    /**
+     * Unit files present on disk but whose content no longer matches the
+     * running binary's templates — e.g. a pre-`OnCalendar` heartbeat timer
+     * that an in-place `update` left behind because the post-swap heal
+     * couldn't reach the systemd bus. Healed by the same re-render path as
+     * missing files (and, for timers, restarted so the new schedule arms).
+     */
+    drifted_unit_files: string[];
     inactive_timers: string[];
     /** True when we re-rendered or re-armed at least one thing. */
     repaired: boolean;
@@ -390,18 +401,22 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   if (systemdReport) {
     const sdOk =
       systemdReport.missing_unit_files.length === 0 &&
+      systemdReport.drifted_unit_files.length === 0 &&
       systemdReport.inactive_timers.length === 0;
     out.write(`  systemd: ${tick(sdOk)} — `);
     if (sdOk) {
-      out.write("all unit files present, all timers active");
+      out.write("all unit files present and current, all timers active");
       // A pure zombie re-arm (timer was active but had stopped firing)
-      // leaves missing/inactive empty yet repaired=true — call it out so
-      // the operator knows a stalled timer was restarted.
+      // leaves missing/drifted/inactive empty yet repaired=true — call it
+      // out so the operator knows a stalled timer was restarted.
       out.write(systemdReport.repaired ? " (re-armed a stalled timer)\n" : "\n");
     } else {
       const bits: string[] = [];
       if (systemdReport.missing_unit_files.length > 0) {
         bits.push(`missing: ${systemdReport.missing_unit_files.join(", ")}`);
+      }
+      if (systemdReport.drifted_unit_files.length > 0) {
+        bits.push(`drifted: ${systemdReport.drifted_unit_files.join(", ")}`);
       }
       if (systemdReport.inactive_timers.length > 0) {
         bits.push(`inactive: ${systemdReport.inactive_timers.join(", ")}`);
@@ -442,6 +457,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     !!systemdReport &&
     !systemdReport.repaired &&
     (systemdReport.missing_unit_files.length > 0 ||
+      systemdReport.drifted_unit_files.length > 0 ||
       systemdReport.inactive_timers.length > 0);
   const timersBroken =
     !!timersReport &&
@@ -492,11 +508,23 @@ async function defaultCheckSystemd(
   const missing = expectedFiles
     .filter((f) => !existsSync(f.path))
     .map((f) => f.name);
+  // Detect content drift: a unit file that exists but no longer matches the
+  // running binary's template. This is the gap that let the wedge-prone
+  // pre-OnCalendar heartbeat timer hide in plain sight — it was present and
+  // "active", so missing/inactive both stayed empty and doctor reported
+  // "ok". Comparing on-disk bytes against `phantombotUnitTargets` is the
+  // only way to see it.
+  const drifted = driftedUnitNames(phantombotUnitTargets(binPath), (p) =>
+    existsSync(p) ? readFileSync(p, "utf8") : undefined,
+  );
   const inactive = await listInactiveTimers(systemctl);
   let repaired = false;
   if (
     repair &&
-    (missing.length > 0 || inactive.length > 0 || staleTimers.length > 0)
+    (missing.length > 0 ||
+      drifted.length > 0 ||
+      inactive.length > 0 ||
+      staleTimers.length > 0)
   ) {
     try {
       const heal = await ensureSystemdUnitsCurrent({
@@ -514,6 +542,7 @@ async function defaultCheckSystemd(
   }
   return {
     missing_unit_files: missing,
+    drifted_unit_files: drifted,
     inactive_timers: inactive,
     repaired,
   };
