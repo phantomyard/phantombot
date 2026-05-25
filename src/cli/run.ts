@@ -305,12 +305,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       // Surface any additional rejections — they would otherwise be
       // silently swallowed since we only re-raise the first one.
       for (const r of results) {
-        if (r.status === "rejected" && (r.reason as Error)?.message !==
-            (e as Error)?.message) {
-          log.error("run: sibling listener also failed during teardown", {
-            error: (r.reason as Error).message,
-          });
-        }
+        if (r.status !== "rejected") continue;
+        const reason = r.reason as Error | undefined;
+        // Skip the originally re-raised error (already logged above)
+        // and AbortErrors triggered by our own ac.abort() — those are
+        // expected during teardown, not independent failures.
+        if (reason?.message === (e as Error)?.message) continue;
+        if (reason?.name === "AbortError") continue;
+        log.error("run: sibling listener also failed during teardown", {
+          error: reason?.message,
+        });
       }
       throw e;
     }

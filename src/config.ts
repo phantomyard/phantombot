@@ -385,6 +385,12 @@ function buildTelegramConfig(
  * shell-safe env-var naming.
  */
 export function personaEnvSuffix(personaName: string): string {
+  // Empty name is unreachable in practice (TOML can't express
+  // `[channels.telegram.personas.]`) but guard anyway so we never
+  // construct a dangling `TELEGRAM_BOT_TOKEN_` lookup.
+  if (!personaName) {
+    throw new Error("personaEnvSuffix: persona name must be non-empty");
+  }
   return personaName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
 
