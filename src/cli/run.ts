@@ -216,6 +216,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       config,
       currentVersion: VERSION,
       transport: adminTransport,
+      adminAccount: adminListener.account,
     });
     if (r.status === "success_notified" || r.status === "failure_notified") {
       log.info("run: post-restart notify", {

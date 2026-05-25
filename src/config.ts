@@ -379,11 +379,28 @@ function buildTelegramConfig(
 }
 
 /**
+ * Map a persona name to its env-var suffix. Uppercased, with anything
+ * outside [A-Z0-9] replaced by `_` so a persona like "my-bot.test"
+ * resolves to `TELEGRAM_BOT_TOKEN_MY_BOT_TEST`. Matches conventional
+ * shell-safe env-var naming.
+ */
+export function personaEnvSuffix(personaName: string): string {
+  return personaName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+/**
  * Parse `[channels.telegram.personas.<name>]` blocks into a
  * persona → TelegramAccount map. Entries without a token are dropped
  * with a warning (a half-configured bot would just crash at startup).
  * Returns undefined when no per-persona bots are configured so the
  * field is genuinely optional on the resolved Config.
+ *
+ * Tokens may come from either TOML (`token = "..."`) or the environment
+ * (`TELEGRAM_BOT_TOKEN_<PERSONA_UPPERCASE>` — same convention you'd
+ * expect from a 12-factor app, and matches the default account's
+ * `TELEGRAM_BOT_TOKEN` env var). Env wins over TOML so operators can
+ * pin tokens in systemd unit files / .env without rewriting the
+ * checked-in config.
  */
 function buildTelegramPersonasConfig(
   tomlTelegram: Record<string, unknown>,
@@ -398,17 +415,28 @@ function buildTelegramPersonasConfig(
   )) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const entry = raw as Record<string, unknown>;
-    const token = asString(entry.token);
+    const envSuffix = personaEnvSuffix(personaName);
+    const tokenFromEnv = process.env[`TELEGRAM_BOT_TOKEN_${envSuffix}`];
+    const token = tokenFromEnv ?? asString(entry.token);
     if (!token) {
       log.warn(
-        `config: channels.telegram.personas.${personaName} has no token — skipping`,
+        `config: channels.telegram.personas.${personaName} has no token — skipping (set TELEGRAM_BOT_TOKEN_${envSuffix} or token = "...")`,
       );
       continue;
     }
+    const allowedFromEnv = process.env[
+      `PHANTOMBOT_TELEGRAM_ALLOWED_USERS_${envSuffix}`
+    ]
+      ?.split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n));
     const pollTimeoutS = clampPollTimeout(
-      asInt(entry.poll_timeout_s) ?? 30,
+      asInt(process.env[`PHANTOMBOT_TELEGRAM_POLL_S_${envSuffix}`]) ??
+        asInt(entry.poll_timeout_s) ??
+        30,
     );
-    const allowedUserIds = asIntArray(entry.allowed_user_ids) ?? [];
+    const allowedUserIds =
+      allowedFromEnv ?? asIntArray(entry.allowed_user_ids) ?? [];
     out[personaName] = { token, pollTimeoutS, allowedUserIds };
   }
   return Object.keys(out).length > 0 ? out : undefined;
