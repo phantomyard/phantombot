@@ -13,7 +13,12 @@ import {
   HttpTelegramTransport,
   runTelegramServer,
 } from "../channels/telegram.ts";
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  personaDir,
+  type TelegramAccount,
+} from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -37,36 +42,135 @@ export interface RunInput {
   lockPath?: string;
 }
 
+/** One persona-bound listener that runRun() will spawn. */
+interface ListenerSpec {
+  persona: string;
+  agentDir: string;
+  account: TelegramAccount;
+  /** "default" or "personas.<name>" — used in log/error messages. */
+  source: string;
+}
+
+/**
+ * Build the list of listeners to spawn from the resolved config.
+ * - `[channels.telegram]` becomes one listener bound to `defaultPersona`.
+ * - Each `[channels.telegram.personas.<name>]` becomes a listener bound
+ *   to that persona.
+ *
+ * Missing persona dirs are dropped with a warn so a typo in one persona
+ * block doesn't take down the others. Duplicate tokens (the same bot
+ * reused by two personas) fail fast — Telegram serializes long-poll on
+ * a single token so two listeners on the same bot would silently
+ * starve each other.
+ */
+function planListeners(
+  config: Config,
+  defaultPersona: string,
+  err: WriteSink,
+): { listeners: ListenerSpec[]; fatal?: string } {
+  const listeners: ListenerSpec[] = [];
+
+  if (config.channels.telegram) {
+    const agentDir = personaDir(config, defaultPersona);
+    if (existsSync(agentDir)) {
+      listeners.push({
+        persona: defaultPersona,
+        agentDir,
+        account: config.channels.telegram,
+        source: "default",
+      });
+    } else {
+      err.write(
+        `warning: default persona '${defaultPersona}' agent dir missing at ${agentDir} — skipping default telegram listener\n`,
+      );
+    }
+  }
+
+  for (const [persona, account] of Object.entries(
+    config.channels.telegramPersonas ?? {},
+  )) {
+    const agentDir = personaDir(config, persona);
+    if (!existsSync(agentDir)) {
+      err.write(
+        `warning: channels.telegram.personas.${persona} references persona '${persona}' but no agent dir at ${agentDir} — skipping\n`,
+      );
+      continue;
+    }
+    listeners.push({
+      persona,
+      agentDir,
+      account,
+      source: `personas.${persona}`,
+    });
+  }
+
+  // Duplicate-token guard. Two listeners on the same Telegram bot would
+  // both call getUpdates(offset=...) — the second call's confirmation
+  // would mark the first call's batch as read, dropping messages. Fail
+  // loudly at startup rather than ship a flaky setup.
+  const tokenOwner = new Map<string, string>();
+  for (const l of listeners) {
+    const prev = tokenOwner.get(l.account.token);
+    if (prev) {
+      return {
+        listeners: [],
+        fatal: `telegram: token reused by '${prev}' and '${l.source}'. Each persona needs its own bot (create a fresh one via @BotFather).`,
+      };
+    }
+    tokenOwner.set(l.account.token, l.source);
+  }
+
+  return { listeners };
+}
+
 export async function runRun(input: RunInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
 
   const config = input.config ?? (await loadConfig());
-  const tg = config.channels.telegram;
-  if (!tg) {
+  const hasDefault = !!config.channels.telegram;
+  const hasPersonas =
+    !!config.channels.telegramPersonas &&
+    Object.keys(config.channels.telegramPersonas).length > 0;
+  if (!hasDefault && !hasPersonas) {
     err.write(
       "no telegram bot token configured. Run `phantombot telegram` to set one up.\n",
     );
     return 2;
   }
 
-  let persona = config.defaultPersona;
-  let agentDir = personaDir(config, persona);
-  if (!existsSync(agentDir)) {
-    const healed = await healDefaultPersonaIfBroken(config, err);
-    if (!healed) {
-      err.write(
-        `default persona '${persona}' not found at ${agentDir} and no other personas exist.\n` +
-          "Create one with `phantombot persona`.\n",
-      );
-      return 2;
+  // Heal the default persona BEFORE planning listeners — planListeners
+  // checks agentDir existence, so we want a freshly-healed default
+  // visible to it. Only relevant when the default account is configured;
+  // a personas-only setup doesn't depend on defaultPersona's dir.
+  let defaultPersona = config.defaultPersona;
+  if (hasDefault) {
+    const agentDir = personaDir(config, defaultPersona);
+    if (!existsSync(agentDir)) {
+      const healed = await healDefaultPersonaIfBroken(config, err);
+      if (healed) {
+        defaultPersona = healed;
+        config.defaultPersona = healed;
+      } else {
+        err.write(
+          `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
+            "Create one with `phantombot persona`.\n",
+        );
+        return 2;
+      }
     }
-    // Re-resolve paths with the healed persona. loadConfig() cached the
-    // stale default, but personaDir(healed) is deterministic from config
-    // so we can compute it directly.
-    persona = healed;
-    agentDir = personaDir(config, persona);
-    config.defaultPersona = healed;
+  }
+
+  const plan = planListeners(config, defaultPersona, err);
+  if (plan.fatal) {
+    err.write(`${plan.fatal}\n`);
+    return 2;
+  }
+  if (plan.listeners.length === 0) {
+    err.write(
+      "no telegram listeners could be started — every configured bot's persona is missing.\n",
+    );
+    return 2;
   }
 
   const harnesses = buildHarnessChain(config, err);
@@ -90,7 +194,17 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
 
   const memory = await openMemoryStore(config.memoryDbPath);
-  const transport = new HttpTelegramTransport(tg.token);
+
+  // The post-restart-notify + startup-doctor hooks operate against the
+  // DEFAULT persona's bot. That's intentional — they're administrative
+  // signals to the operator, and the operator is the same human across
+  // all personas, so picking one channel keeps them from getting four
+  // copies of the same notification. Falls back to the first listener
+  // when no default account is configured.
+  // Non-null: we returned above if plan.listeners.length === 0.
+  const adminListener: ListenerSpec =
+    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0]!;
+  const adminTransport = new HttpTelegramTransport(adminListener.account.token);
 
   // Post-restart check: if `/update` wrote a pending-update marker before
   // we got SIGTERMed, surface the result to the chat that triggered it.
@@ -101,7 +215,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     const r = await notifyPostRestartIfPending({
       config,
       currentVersion: VERSION,
-      transport,
+      transport: adminTransport,
     });
     if (r.status === "success_notified" || r.status === "failure_notified") {
       log.info("run: post-restart notify", {
@@ -118,13 +232,17 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
 
   out.write(
-    `phantombot — persona '${persona}', harnesses ${config.harnesses.chain.join(" → ")}\n`,
+    `phantombot — ${plan.listeners.length} telegram listener(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
   );
-  out.write(
-    `telegram long-poll ${tg.pollTimeoutS}s; allowed users: ${
-      tg.allowedUserIds.length === 0 ? "ANY (no allowlist)" : tg.allowedUserIds.join(",")
-    }\n`,
-  );
+  for (const l of plan.listeners) {
+    out.write(
+      `  [${l.source}] persona '${l.persona}', long-poll ${l.account.pollTimeoutS}s, allowed users: ${
+        l.account.allowedUserIds.length === 0
+          ? "ANY (no allowlist)"
+          : l.account.allowedUserIds.join(",")
+      }\n`,
+    );
+  }
   out.write("Ctrl-C to stop.\n");
 
   // Startup catch-up: `doctor` checks for a stale, failed, or partially
@@ -132,7 +250,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // `nightly --resume` that picks up from the last good stage. This
   // covers machines powered off during the 02:00 window. Don't await —
   // doctor's repair is a detached child, so this returns immediately.
-  runDoctor({ config, persona, out, err }).then(
+  // Runs against the admin persona for the same reason as notify above.
+  runDoctor({ config, persona: adminListener.persona, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
@@ -148,17 +267,30 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   process.on("SIGTERM", onSig);
 
   try {
-    await runTelegramServer({
-      config,
-      memory,
-      harnesses,
-      agentDir,
-      persona,
-      transport,
-      signal: ac.signal,
-      out,
-      err,
-    });
+    // Fan-out: one listener per (persona, account). Shared AbortSignal
+    // so Ctrl-C cleanly tears all of them down together.
+    await Promise.all(
+      plan.listeners.map((l) =>
+        runTelegramServer({
+          config,
+          memory,
+          harnesses,
+          agentDir: l.agentDir,
+          persona: l.persona,
+          account: l.account,
+          transport:
+            // Reuse the admin transport for the admin listener — the
+            // post-restart notify already opened it. Other listeners
+            // get their own.
+            l === adminListener
+              ? adminTransport
+              : new HttpTelegramTransport(l.account.token),
+          signal: ac.signal,
+          out,
+          err,
+        }),
+      ),
+    );
   } finally {
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);

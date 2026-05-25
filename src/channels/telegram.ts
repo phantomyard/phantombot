@@ -643,6 +643,13 @@ export interface RunTelegramServerInput {
   agentDir: string;
   persona: string;
   transport: TelegramTransport;
+  /**
+   * Telegram account this listener is bound to. When omitted, falls
+   * back to `config.channels.telegram` (single-bot legacy path).
+   * `runRun()` always passes this explicitly so multi-persona listeners
+   * each see their own token / allowlist / poll timeout.
+   */
+  account?: import("../config.ts").TelegramAccount;
   /** Stop after one polling cycle. For tests. */
   oneShot?: boolean;
   /** Signal to stop the loop cleanly. */
@@ -697,7 +704,10 @@ export async function runTelegramServer(
   input: RunTelegramServerInput,
 ): Promise<void> {
   const serverStartedAt = Date.now();
-  const tg = input.config.channels.telegram!;
+  // Prefer the explicit per-listener account passed by runRun(); fall
+  // back to the legacy single-bot field for older callers (tests, and
+  // anyone embedding runTelegramServer directly).
+  const tg = input.account ?? input.config.channels.telegram!;
   const allowedSet = new Set(tg.allowedUserIds);
   const checkAllowed = (userId: number): boolean =>
     allowedSet.size === 0 || allowedSet.has(userId);

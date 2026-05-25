@@ -169,3 +169,91 @@ describe("personaDir", () => {
     expect(personaDir(c, "robbie")).toBe("/tmp/personas/robbie");
   });
 });
+
+describe("loadConfig — telegramPersonas", () => {
+  async function writeToml(toml: string): Promise<void> {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), toml, "utf8");
+  }
+
+  test("undefined when no personas block present", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "abc"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram?.token).toBe("abc");
+    expect(c.channels.telegramPersonas).toBeUndefined();
+  });
+
+  test("parses persona-bound bots from [channels.telegram.personas.<name>]", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "default-token"
+allowed_user_ids = [1]
+
+[channels.telegram.personas.miles]
+token = "miles-token"
+allowed_user_ids = [2, 3]
+poll_timeout_s = 25
+
+[channels.telegram.personas.desiree]
+token = "desiree-token"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram?.token).toBe("default-token");
+    expect(c.channels.telegramPersonas).toBeDefined();
+    expect(c.channels.telegramPersonas!.miles).toEqual({
+      token: "miles-token",
+      pollTimeoutS: 25,
+      allowedUserIds: [2, 3],
+    });
+    expect(c.channels.telegramPersonas!.desiree).toEqual({
+      token: "desiree-token",
+      pollTimeoutS: 30,
+      allowedUserIds: [],
+    });
+  });
+
+  test("works without a default [channels.telegram] block", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+token = "miles-token"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram).toBeUndefined();
+    expect(c.channels.telegramPersonas!.miles!.token).toBe("miles-token");
+  });
+
+  test("skips persona entries without a token", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "default-token"
+
+[channels.telegram.personas.miles]
+token = "miles-token"
+
+[channels.telegram.personas.broken]
+allowed_user_ids = [9]
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles).toBeDefined();
+    expect(c.channels.telegramPersonas!.broken).toBeUndefined();
+  });
+
+  test("clamps poll_timeout_s into [1,50]", async () => {
+    await writeToml(`
+[channels.telegram.personas.tooBig]
+token = "a"
+poll_timeout_s = 9999
+
+[channels.telegram.personas.tooSmall]
+token = "b"
+poll_timeout_s = 0
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.tooBig!.pollTimeoutS).toBe(50);
+    expect(c.channels.telegramPersonas!.tooSmall!.pollTimeoutS).toBe(1);
+  });
+});

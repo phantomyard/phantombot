@@ -55,6 +55,20 @@ function legacyTurnTimeoutMs(
   return undefined;
 }
 
+/**
+ * One Telegram bot account: token + per-bot poll/allowlist tuning.
+ * The default account in `channels.telegram` binds to
+ * `config.defaultPersona`. Entries in `channels.telegramPersonas`
+ * each bind to the persona named by their map key.
+ */
+export interface TelegramAccount {
+  token: string;
+  /** Long-poll timeout in seconds (1..50). Default 30. */
+  pollTimeoutS: number;
+  /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
+  allowedUserIds: number[];
+}
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
@@ -87,13 +101,15 @@ export interface Config {
   };
 
   channels: {
-    telegram?: {
-      token: string;
-      /** Long-poll timeout in seconds (1..50). Default 30. */
-      pollTimeoutS: number;
-      /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
-      allowedUserIds: number[];
-    };
+    telegram?: TelegramAccount;
+    /**
+     * Optional additional Telegram bots, keyed by persona name. Each
+     * entry spawns its own listener bound to the named persona, so the
+     * same host can run several persona-bound bots from one process.
+     * Backward compatible: configs without `[channels.telegram.personas]`
+     * resolve to undefined and behave exactly as before.
+     */
+    telegramPersonas?: Record<string, TelegramAccount>;
   };
 
   embeddings: {
@@ -248,6 +264,7 @@ export async function loadConfig(): Promise<Config> {
 
     channels: {
       telegram: buildTelegramConfig(tomlTelegram),
+      telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
     },
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
@@ -359,6 +376,42 @@ function buildTelegramConfig(
   const allowedUserIds = allowedFromEnv ?? allowedFromToml ?? [];
 
   return { token, pollTimeoutS, allowedUserIds };
+}
+
+/**
+ * Parse `[channels.telegram.personas.<name>]` blocks into a
+ * persona → TelegramAccount map. Entries without a token are dropped
+ * with a warning (a half-configured bot would just crash at startup).
+ * Returns undefined when no per-persona bots are configured so the
+ * field is genuinely optional on the resolved Config.
+ */
+function buildTelegramPersonasConfig(
+  tomlTelegram: Record<string, unknown>,
+): Record<string, TelegramAccount> | undefined {
+  const personas = tomlTelegram.personas;
+  if (!personas || typeof personas !== "object" || Array.isArray(personas)) {
+    return undefined;
+  }
+  const out: Record<string, TelegramAccount> = {};
+  for (const [personaName, raw] of Object.entries(
+    personas as Record<string, unknown>,
+  )) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    const token = asString(entry.token);
+    if (!token) {
+      log.warn(
+        `config: channels.telegram.personas.${personaName} has no token — skipping`,
+      );
+      continue;
+    }
+    const pollTimeoutS = clampPollTimeout(
+      asInt(entry.poll_timeout_s) ?? 30,
+    );
+    const allowedUserIds = asIntArray(entry.allowed_user_ids) ?? [];
+    out[personaName] = { token, pollTimeoutS, allowedUserIds };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function clampPollTimeout(s: number): number {

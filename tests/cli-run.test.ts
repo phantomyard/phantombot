@@ -146,3 +146,159 @@ describe("runRun — early exits", () => {
     expect(err.text).toContain("phantombot harness");
   });
 });
+
+describe("runRun — multi-persona telegram", () => {
+  test("starts when only [channels.telegram.personas.*] is configured (no default block)", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "miles"), { recursive: true });
+    await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] }, // force early exit after planning
+        channels: {
+          telegramPersonas: {
+            miles: { token: "miles-token", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    // Plan succeeded; failed on empty harness chain (proves planner accepted personas-only setup).
+    expect(code).toBe(2);
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).not.toContain("phantombot telegram");
+  });
+
+  test("plans one listener per configured persona", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "miles"), { recursive: true });
+    await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
+    await mkdir(join(workdir, "personas", "desiree"), { recursive: true });
+    await writeFile(join(workdir, "personas", "desiree", "BOOT.md"), "# Desiree");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [] },
+            desiree: { token: "desiree-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2); // empty harness chain
+    expect(err.text).toContain("phantombot harness");
+    // No multi-listener output yet — we exit before printing the listener
+    // table. Test the duplicate-token guard instead (next test) to prove
+    // the planner actually iterates personas.
+  });
+
+  test("skips a persona block whose agent dir is missing but keeps the others", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    // 'phantom' (default) exists from beforeEach; 'miles' is configured but missing on disk.
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2); // empty harness chain (planner did NOT fatal)
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).toContain("personas.miles");
+    expect(err.text).toContain("no agent dir");
+  });
+
+  test("fatal when default + persona share the same token", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "miles"), { recursive: true });
+    await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        channels: {
+          telegram: { token: "shared", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            miles: { token: "shared", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toMatch(/token reused/);
+  });
+
+  test("fatal when two persona entries share the same token", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "miles"), { recursive: true });
+    await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
+    await mkdir(join(workdir, "personas", "desiree"), { recursive: true });
+    await writeFile(join(workdir, "personas", "desiree", "BOOT.md"), "# Desiree");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        channels: {
+          telegramPersonas: {
+            miles: { token: "shared", pollTimeoutS: 30, allowedUserIds: [] },
+            desiree: { token: "shared", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toMatch(/token reused/);
+  });
+
+  test("returns 2 when every configured persona is missing", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    // No default block, miles configured but no miles persona on disk.
+    const code = await runRun({
+      config: {
+        ...config,
+        channels: {
+          telegramPersonas: {
+            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("no telegram listeners could be started");
+  });
+});
