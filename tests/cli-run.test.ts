@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runRun } from "../src/cli/run.ts";
+import { planListeners, runRun } from "../src/cli/run.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -174,35 +174,85 @@ describe("runRun — multi-persona telegram", () => {
     expect(err.text).not.toContain("phantombot telegram");
   });
 
-  test("plans one listener per configured persona", async () => {
-    const out = new CaptureStream();
+  // Direct unit test of planListeners — the runRun() wrapper exits on
+  // the empty harness chain before printing its listener table, so the
+  // only way to assert on the planner output is to call it directly.
+  test("planListeners builds one listener per configured persona, in order", async () => {
     const err = new CaptureStream();
     await mkdir(join(workdir, "personas", "miles"), { recursive: true });
     await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
     await mkdir(join(workdir, "personas", "desiree"), { recursive: true });
     await writeFile(join(workdir, "personas", "desiree", "BOOT.md"), "# Desiree");
 
-    const code = await runRun({
-      config: {
+    const plan = planListeners(
+      {
         ...config,
-        harnesses: { ...config.harnesses, chain: [] },
         channels: {
-          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [1] },
           telegramPersonas: {
-            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [] },
-            desiree: { token: "desiree-tok", pollTimeoutS: 30, allowedUserIds: [] },
+            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [2] },
+            desiree: { token: "desiree-tok", pollTimeoutS: 30, allowedUserIds: [3] },
           },
         },
       },
-      lockPath: join(workdir, "run.lock"),
-      out,
+      "phantom",
       err,
+    );
+
+    expect(plan.fatal).toBeUndefined();
+    expect(plan.listeners).toHaveLength(3);
+
+    // Default listener is first (defines the admin channel).
+    expect(plan.listeners[0]).toMatchObject({
+      persona: "phantom",
+      source: "default",
+      account: { token: "default-tok" },
     });
-    expect(code).toBe(2); // empty harness chain
-    expect(err.text).toContain("phantombot harness");
-    // No multi-listener output yet — we exit before printing the listener
-    // table. Test the duplicate-token guard instead (next test) to prove
-    // the planner actually iterates personas.
+
+    // Persona listeners follow, each bound to its own bot + agentDir.
+    const byPersona = Object.fromEntries(
+      plan.listeners.map((l) => [l.persona, l]),
+    );
+    expect(byPersona.miles).toMatchObject({
+      source: "personas.miles",
+      account: { token: "miles-tok", allowedUserIds: [2] },
+    });
+    expect(byPersona.miles!.agentDir).toBe(join(workdir, "personas", "miles"));
+    expect(byPersona.desiree).toMatchObject({
+      source: "personas.desiree",
+      account: { token: "desiree-tok", allowedUserIds: [3] },
+    });
+    expect(byPersona.desiree!.agentDir).toBe(
+      join(workdir, "personas", "desiree"),
+    );
+
+    // Tokens are all distinct (the duplicate-token guard didn't trip).
+    const tokens = plan.listeners.map((l) => l.account.token);
+    expect(new Set(tokens).size).toBe(3);
+  });
+
+  test("planListeners returns personas-only listeners when no default block is set", async () => {
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "miles"), { recursive: true });
+    await writeFile(join(workdir, "personas", "miles", "BOOT.md"), "# Miles");
+
+    const plan = planListeners(
+      {
+        ...config,
+        channels: {
+          telegramPersonas: {
+            miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      "phantom",
+      err,
+    );
+
+    expect(plan.fatal).toBeUndefined();
+    expect(plan.listeners).toHaveLength(1);
+    expect(plan.listeners[0]!.source).toBe("personas.miles");
+    expect(plan.listeners.find((l) => l.source === "default")).toBeUndefined();
   });
 
   test("skips a persona block whose agent dir is missing but keeps the others", async () => {

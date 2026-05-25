@@ -43,7 +43,7 @@ export interface RunInput {
 }
 
 /** One persona-bound listener that runRun() will spawn. */
-interface ListenerSpec {
+export interface ListenerSpec {
   persona: string;
   agentDir: string;
   account: TelegramAccount;
@@ -63,7 +63,7 @@ interface ListenerSpec {
  * a single token so two listeners on the same bot would silently
  * starve each other.
  */
-function planListeners(
+export function planListeners(
   config: Config,
   defaultPersona: string,
   err: WriteSink,
@@ -269,28 +269,50 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   try {
     // Fan-out: one listener per (persona, account). Shared AbortSignal
     // so Ctrl-C cleanly tears all of them down together.
-    await Promise.all(
-      plan.listeners.map((l) =>
-        runTelegramServer({
-          config,
-          memory,
-          harnesses,
-          agentDir: l.agentDir,
-          persona: l.persona,
-          account: l.account,
-          transport:
-            // Reuse the admin transport for the admin listener — the
-            // post-restart notify already opened it. Other listeners
-            // get their own.
-            l === adminListener
-              ? adminTransport
-              : new HttpTelegramTransport(l.account.token),
-          signal: ac.signal,
-          out,
-          err,
-        }),
-      ),
+    const tasks = plan.listeners.map((l) =>
+      runTelegramServer({
+        config,
+        memory,
+        harnesses,
+        agentDir: l.agentDir,
+        persona: l.persona,
+        account: l.account,
+        transport:
+          // Reuse the admin transport for the admin listener — the
+          // post-restart notify already opened it. Other listeners
+          // get their own.
+          l === adminListener
+            ? adminTransport
+            : new HttpTelegramTransport(l.account.token),
+        signal: ac.signal,
+        out,
+        err,
+      }),
     );
+    try {
+      await Promise.all(tasks);
+    } catch (e) {
+      // One listener failed. The siblings are still polling against
+      // the memory store + lock that `finally` is about to close. Abort
+      // them and wait for them to settle so cleanup is race-free, then
+      // re-raise so the caller (and exit code) sees the original error.
+      log.error("run: a telegram listener failed — aborting siblings", {
+        error: (e as Error).message,
+      });
+      ac.abort();
+      const results = await Promise.allSettled(tasks);
+      // Surface any additional rejections — they would otherwise be
+      // silently swallowed since we only re-raise the first one.
+      for (const r of results) {
+        if (r.status === "rejected" && (r.reason as Error)?.message !==
+            (e as Error)?.message) {
+          log.error("run: sibling listener also failed during teardown", {
+            error: (r.reason as Error).message,
+          });
+        }
+      }
+      throw e;
+    }
   } finally {
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);
