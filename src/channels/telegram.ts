@@ -121,6 +121,28 @@ export interface TelegramAttachment {
     | "sticker";
 }
 
+/**
+ * Quoted-message metadata when the user taps "Reply" on a previous
+ * Telegram message and sends a new one. Carried alongside the new
+ * message so the agent can disambiguate which earlier message the
+ * user is actually replying to — without this, a "merge" / "yes"
+ * lands with no referent and the agent assumes it's a response to
+ * the most recent assistant turn (which is wrong if the user
+ * deliberately scrolled up to reply to something older).
+ */
+export interface TelegramReplyTo {
+  /** Telegram's `message_id` of the quoted message. */
+  messageId: number;
+  /** Text snippet of the quoted message, truncated for prompt sanity.
+   *  Empty when the quoted message had no text (e.g. media without
+   *  caption). */
+  text: string;
+  /** True when the quoted message was sent by the bot (i.e. the
+   *  assistant itself). Lets the agent distinguish "user replied to
+   *  my earlier turn" vs "user quoted their own earlier message". */
+  fromBot: boolean;
+}
+
 export interface TelegramMessage {
   updateId: number;
   chatId: number;
@@ -144,6 +166,11 @@ export interface TelegramMessage {
    *  Downloaded to the per-chat inbox and surfaced to the harness as
    *  an absolute path the agent can `read`. */
   attachment?: TelegramAttachment;
+  /** Populated when this message was sent as a Telegram reply (the
+   *  user tapped "Reply" on an earlier message). Forwarded into the
+   *  agent's user-message envelope so it can disambiguate which past
+   *  turn the new text is actually about. */
+  replyTo?: TelegramReplyTo;
 }
 
 export interface TelegramTransport {
@@ -405,6 +432,13 @@ interface TelegramRawPhotoSize {
   height?: number;
 }
 
+interface TelegramRawReplyToMessage {
+  message_id?: number;
+  text?: string;
+  caption?: string;
+  from?: { id?: number; is_bot?: boolean; username?: string };
+}
+
 interface TelegramRawUpdate {
   update_id?: number;
   message?: {
@@ -425,6 +459,10 @@ interface TelegramRawUpdate {
     animation?: TelegramRawFile;
     sticker?: TelegramRawFile;
     photo?: TelegramRawPhotoSize[];
+    /** Populated by Telegram when the sender used the "Reply" UI on a
+     *  prior message. Only a small subset of fields is actually relayed
+     *  through to the agent — see {@link extractReplyTo}. */
+    reply_to_message?: TelegramRawReplyToMessage;
   };
 }
 
@@ -503,6 +541,63 @@ function synthesizeFileName(
   mimeType: string | undefined,
 ): string {
   return `${msgId}-${kind}${extensionFromMime(mimeType)}`;
+}
+
+/** Max chars of quoted text we forward into the agent prompt. Long
+ *  enough to disambiguate, short enough not to bloat the context when a
+ *  user replies to a wall of earlier text. */
+export const REPLY_TO_SNIPPET_MAX = 280;
+
+/**
+ * Pull the subset of `reply_to_message` we want to forward into the
+ * agent's user-message envelope. Returns `undefined` when the raw field
+ * is missing or the quoted message has no `message_id` we can latch
+ * onto. We prefer `text`; if absent (media reply), fall back to
+ * `caption`; if still absent, the snippet is the empty string and only
+ * the message id + bot flag are forwarded — still enough for the agent
+ * to tell "user replied to message N from me" from "user replied to a
+ * media message they sent earlier".
+ *
+ * Exported for testing.
+ */
+export function extractReplyTo(
+  raw: TelegramRawReplyToMessage | undefined,
+): TelegramReplyTo | undefined {
+  if (!raw || typeof raw.message_id !== "number") return undefined;
+  const source =
+    (typeof raw.text === "string" && raw.text.length > 0
+      ? raw.text
+      : typeof raw.caption === "string"
+        ? raw.caption
+        : "") ?? "";
+  const truncated =
+    source.length > REPLY_TO_SNIPPET_MAX
+      ? `${source.slice(0, REPLY_TO_SNIPPET_MAX)}…`
+      : source;
+  return {
+    messageId: raw.message_id,
+    text: truncated,
+    fromBot: Boolean(raw.from?.is_bot),
+  };
+}
+
+/**
+ * Render a single bracketed line describing the message the user
+ * tapped "Reply" on. Mirrors the `[attached: <path>]` convention so the
+ * agent reads it as a structured envelope marker, not as free-form
+ * prose from the user. Exported for testing.
+ */
+export function formatReplyToContext(replyTo: TelegramReplyTo): string {
+  const who = replyTo.fromBot
+    ? "your earlier message"
+    : "user's earlier message";
+  if (replyTo.text.length === 0) {
+    return `[in reply to ${who} (no text content)]`;
+  }
+  // Collapse whitespace so a multi-line quoted message doesn't break
+  // the single-line envelope marker shape.
+  const snippet = replyTo.text.replace(/\s+/g, " ").trim();
+  return `[in reply to ${who}: "${snippet}"]`;
 }
 
 /**
@@ -586,6 +681,11 @@ export function parseGetUpdatesResult(
       continue;
     }
 
+    // `reply_to_message` is parsed once and attached to whichever
+    // envelope we end up pushing — it's orthogonal to text vs voice vs
+    // attachment, but all three paths benefit from carrying it through.
+    const replyTo = extractReplyTo(msg.reply_to_message);
+
     // Attachments take priority over plain text, but if BOTH text and an
     // attachment are present (rare; Telegram normally uses `caption` not
     // `text` for media), use text as the caption.
@@ -605,6 +705,7 @@ export function parseGetUpdatesResult(
         text: "", // filled by processChatMessage after download
         caption: captionFromMedia ?? captionFromText,
         attachment,
+        ...(replyTo ? { replyTo } : {}),
       });
       continue;
     }
@@ -615,6 +716,7 @@ export function parseGetUpdatesResult(
         fromUserId: msg.from.id,
         fromUsername: msg.from.username,
         text: msg.text,
+        ...(replyTo ? { replyTo } : {}),
       });
       continue;
     }
@@ -630,6 +732,7 @@ export function parseGetUpdatesResult(
           mimeType: msg.voice.mime_type ?? "audio/ogg",
           durationS: msg.voice.duration ?? 0,
         },
+        ...(replyTo ? { replyTo } : {}),
       });
     }
   }
@@ -1001,6 +1104,15 @@ async function processChatMessage(
         ? false
         : isVoice;
   const willReplyWithVoice = wantsVoiceReply && ttsSupported(input.config);
+
+  // Forward `reply_to_message` context AFTER modality detection so a
+  // quoted "send a voice note" can't flip routing for a fresh "merge"
+  // reply. We mutate `msg.text` so both the harness call and the
+  // interrupted-pair persistence (further down) see the same envelope.
+  if (msg.replyTo) {
+    const prefix = formatReplyToContext(msg.replyTo);
+    msg.text = msg.text.length > 0 ? `${prefix}\n\n${msg.text}` : prefix;
+  }
   const sendStatus = () =>
     willReplyWithVoice
       ? input.transport.sendRecording(msg.chatId)

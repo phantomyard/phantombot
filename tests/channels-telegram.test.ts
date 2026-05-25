@@ -24,6 +24,9 @@ import {
   type TelegramMessage,
   type TelegramTransport,
   runTelegramServer,
+  extractReplyTo,
+  formatReplyToContext,
+  REPLY_TO_SNIPPET_MAX,
 } from "../src/channels/telegram.ts";
 import type { Config } from "../src/config.ts";
 import type {
@@ -269,6 +272,189 @@ describe("parseGetUpdatesResult", () => {
     );
     expect(r.updates[0]?.voice?.fileId).toBe("voice-1");
     expect(r.updates[0]?.attachment).toBeUndefined();
+  });
+
+  test("forwards reply_to_message on plain-text replies", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 400,
+          message: {
+            message_id: 12,
+            chat: { id: 1 },
+            from: { id: 42 },
+            text: "merge",
+            reply_to_message: {
+              message_id: 7,
+              text: "Should I merge the PR?",
+              from: { id: 99, is_bot: true, username: "phantom_bot" },
+            },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.replyTo).toEqual({
+      messageId: 7,
+      text: "Should I merge the PR?",
+      fromBot: true,
+    });
+  });
+
+  test("forwards reply_to_message on attachment replies", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 401,
+          message: {
+            message_id: 13,
+            chat: { id: 1 },
+            from: { id: 42 },
+            caption: "see this",
+            document: { file_id: "doc-1", file_name: "x.pdf" },
+            reply_to_message: {
+              message_id: 8,
+              text: "the report",
+              from: { id: 42, is_bot: false },
+            },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.replyTo).toMatchObject({
+      messageId: 8,
+      fromBot: false,
+    });
+    expect(r.updates[0]?.attachment?.fileId).toBe("doc-1");
+  });
+
+  test("forwards reply_to_message on voice replies", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 402,
+          message: {
+            chat: { id: 1 },
+            from: { id: 42 },
+            voice: { file_id: "voice-2", duration: 2, mime_type: "audio/ogg" },
+            reply_to_message: {
+              message_id: 9,
+              text: "earlier turn",
+              from: { id: 99, is_bot: true },
+            },
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.replyTo?.messageId).toBe(9);
+    expect(r.updates[0]?.voice?.fileId).toBe("voice-2");
+  });
+
+  test("omits replyTo when reply_to_message is absent", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 403,
+          message: {
+            chat: { id: 1 },
+            from: { id: 42 },
+            text: "hi",
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.replyTo).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractReplyTo / formatReplyToContext
+// ---------------------------------------------------------------------------
+
+describe("extractReplyTo", () => {
+  test("returns undefined when input is missing", () => {
+    expect(extractReplyTo(undefined)).toBeUndefined();
+  });
+
+  test("returns undefined when message_id is missing", () => {
+    expect(extractReplyTo({ text: "no id" })).toBeUndefined();
+  });
+
+  test("prefers text over caption", () => {
+    const r = extractReplyTo({
+      message_id: 1,
+      text: "the text",
+      caption: "the caption",
+      from: { id: 99, is_bot: true },
+    });
+    expect(r?.text).toBe("the text");
+    expect(r?.fromBot).toBe(true);
+  });
+
+  test("falls back to caption when text is missing", () => {
+    const r = extractReplyTo({
+      message_id: 2,
+      caption: "the caption",
+      from: { id: 42, is_bot: false },
+    });
+    expect(r?.text).toBe("the caption");
+    expect(r?.fromBot).toBe(false);
+  });
+
+  test("emits empty text snippet when quoted message had no text/caption", () => {
+    const r = extractReplyTo({
+      message_id: 3,
+      from: { id: 42, is_bot: false },
+    });
+    expect(r).toEqual({ messageId: 3, text: "", fromBot: false });
+  });
+
+  test("truncates snippets longer than REPLY_TO_SNIPPET_MAX", () => {
+    const long = "x".repeat(REPLY_TO_SNIPPET_MAX + 50);
+    const r = extractReplyTo({ message_id: 4, text: long });
+    expect(r?.text.length).toBe(REPLY_TO_SNIPPET_MAX + 1); // ellipsis
+    expect(r?.text.endsWith("…")).toBe(true);
+  });
+});
+
+describe("formatReplyToContext", () => {
+  test("renders bot-quoted with the bot wording", () => {
+    expect(
+      formatReplyToContext({
+        messageId: 1,
+        text: "Should I merge?",
+        fromBot: true,
+      }),
+    ).toBe('[in reply to your earlier message: "Should I merge?"]');
+  });
+
+  test("renders user-quoted with the user wording", () => {
+    expect(
+      formatReplyToContext({
+        messageId: 2,
+        text: "I said this earlier",
+        fromBot: false,
+      }),
+    ).toBe('[in reply to user\'s earlier message: "I said this earlier"]');
+  });
+
+  test("collapses whitespace so multi-line quotes stay single-line", () => {
+    expect(
+      formatReplyToContext({
+        messageId: 3,
+        text: "line one\n\nline two",
+        fromBot: true,
+      }),
+    ).toBe('[in reply to your earlier message: "line one line two"]');
+  });
+
+  test("uses the no-content variant when snippet is empty", () => {
+    expect(
+      formatReplyToContext({ messageId: 4, text: "", fromBot: false }),
+    ).toBe("[in reply to user's earlier message (no text content)]");
   });
 });
 
@@ -716,6 +902,45 @@ describe("runTelegramServer dispatch", () => {
     const b = await memory.recentTurns("phantom", "telegram:200", 10);
     expect(a.map((t) => t.text)).toEqual(["from A", "ok"]);
     expect(b.map((t) => t.text)).toEqual(["from B", "ok"]);
+  });
+
+  test("forwards reply_to_message context into the harness user message", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 7,
+      chatId: 1001,
+      fromUserId: 42,
+      fromUsername: "alice",
+      text: "merge",
+      replyTo: {
+        messageId: 5,
+        text: "Should I merge the PR?",
+        fromBot: true,
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "merging" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(harness.lastRequest?.userMessage).toBe(
+      '[in reply to your earlier message: "Should I merge the PR?"]\n\nmerge',
+    );
+    // Persisted user turn carries the same envelope so future turns
+    // retain the disambiguation, not just the bare "merge".
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored[0]).toEqual({
+      role: "user",
+      text: '[in reply to your earlier message: "Should I merge the PR?"]\n\nmerge',
+    });
   });
 
   test("on harness error sends an error message and does not persist", async () => {
