@@ -143,7 +143,10 @@ export class ClaudeHarness implements Harness {
 
     try {
       for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        killer.touch();
+        // NB: do NOT touch() here. The idle timer must measure time since
+        // last *productive* output, not since last raw chunk — otherwise
+        // synthetic heartbeats (streamed thinking blocks etc.) keep
+        // postponing the idle kill on a wedged turn. See issue #123.
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -155,11 +158,15 @@ export class ClaudeHarness implements Harness {
             parsed = JSON.parse(trimmed);
           } catch {
             // Not stream-json — surface as out-of-band progress note.
+            killer.touch(); // non-JSON line is real output
             yield { type: "progress", note: trimmed };
             continue;
           }
           const c = parseStreamJson(parsed);
           if (c) {
+            // Only reset the idle window on productive chunks; heartbeats
+            // keep the UI typing indicator alive but must not extend idle.
+            if (c.type !== "heartbeat") killer.touch();
             if (c.type === "text") finalText += c.text;
             yield c;
           }
