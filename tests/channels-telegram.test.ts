@@ -428,7 +428,7 @@ describe("formatReplyToContext", () => {
         text: "Should I merge?",
         fromBot: true,
       }),
-    ).toBe('[in reply to your earlier message: "Should I merge?"]');
+    ).toBe('[in reply to your earlier message #1: "Should I merge?"]');
   });
 
   test("renders user-quoted with the user wording", () => {
@@ -438,7 +438,7 @@ describe("formatReplyToContext", () => {
         text: "I said this earlier",
         fromBot: false,
       }),
-    ).toBe('[in reply to user\'s earlier message: "I said this earlier"]');
+    ).toBe('[in reply to user\'s earlier message #2: "I said this earlier"]');
   });
 
   test("collapses whitespace so multi-line quotes stay single-line", () => {
@@ -448,13 +448,32 @@ describe("formatReplyToContext", () => {
         text: "line one\n\nline two",
         fromBot: true,
       }),
-    ).toBe('[in reply to your earlier message: "line one line two"]');
+    ).toBe('[in reply to your earlier message #3: "line one line two"]');
   });
 
   test("uses the no-content variant when snippet is empty", () => {
     expect(
       formatReplyToContext({ messageId: 4, text: "", fromBot: false }),
-    ).toBe("[in reply to user's earlier message (no text content)]");
+    ).toBe("[in reply to user's earlier message #4 (no text content)]");
+  });
+
+  test("disambiguates two no-text replies by messageId", () => {
+    // Regression: before #N interpolation, media/sticker/voice replies all
+    // rendered as identical "[in reply to ... (no text content)]" envelopes,
+    // so the agent couldn't tell two such replies apart.
+    const a = formatReplyToContext({
+      messageId: 11,
+      text: "",
+      fromBot: true,
+    });
+    const b = formatReplyToContext({
+      messageId: 22,
+      text: "",
+      fromBot: true,
+    });
+    expect(a).toBe("[in reply to your earlier message #11 (no text content)]");
+    expect(b).toBe("[in reply to your earlier message #22 (no text content)]");
+    expect(a).not.toBe(b);
   });
 });
 
@@ -932,14 +951,54 @@ describe("runTelegramServer dispatch", () => {
     });
 
     expect(harness.lastRequest?.userMessage).toBe(
-      '[in reply to your earlier message: "Should I merge the PR?"]\n\nmerge',
+      '[in reply to your earlier message #5: "Should I merge the PR?"]\n\nmerge',
     );
     // Persisted user turn carries the same envelope so future turns
     // retain the disambiguation, not just the bare "merge".
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored[0]).toEqual({
       role: "user",
-      text: '[in reply to your earlier message: "Should I merge the PR?"]\n\nmerge',
+      text: '[in reply to your earlier message #5: "Should I merge the PR?"]\n\nmerge',
+    });
+  });
+
+  test("forwards reply_to_message envelope for no-text/media replies", async () => {
+    const transport = new FakeTransport();
+    // User replied to a sticker/voice/photo the bot sent earlier — the
+    // quoted message has no text and no caption, so only the messageId
+    // distinguishes it from any other no-text reply.
+    transport.pendingUpdates.push({
+      updateId: 8,
+      chatId: 1001,
+      fromUserId: 42,
+      fromUsername: "alice",
+      text: "got it",
+      replyTo: {
+        messageId: 9,
+        text: "",
+        fromBot: true,
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(harness.lastRequest?.userMessage).toBe(
+      "[in reply to your earlier message #9 (no text content)]\n\ngot it",
+    );
+    const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
+    expect(stored[0]).toEqual({
+      role: "user",
+      text: "[in reply to your earlier message #9 (no text content)]\n\ngot it",
     });
   });
 

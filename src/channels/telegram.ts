@@ -565,11 +565,11 @@ export function extractReplyTo(
 ): TelegramReplyTo | undefined {
   if (!raw || typeof raw.message_id !== "number") return undefined;
   const source =
-    (typeof raw.text === "string" && raw.text.length > 0
+    typeof raw.text === "string" && raw.text.length > 0
       ? raw.text
       : typeof raw.caption === "string"
         ? raw.caption
-        : "") ?? "";
+        : "";
   const truncated =
     source.length > REPLY_TO_SNIPPET_MAX
       ? `${source.slice(0, REPLY_TO_SNIPPET_MAX)}…`
@@ -589,8 +589,8 @@ export function extractReplyTo(
  */
 export function formatReplyToContext(replyTo: TelegramReplyTo): string {
   const who = replyTo.fromBot
-    ? "your earlier message"
-    : "user's earlier message";
+    ? `your earlier message #${replyTo.messageId}`
+    : `user's earlier message #${replyTo.messageId}`;
   if (replyTo.text.length === 0) {
     return `[in reply to ${who} (no text content)]`;
   }
