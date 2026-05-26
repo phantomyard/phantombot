@@ -1,11 +1,18 @@
 #!/bin/bash
 # Fake codex CLI used by tests/harnesses-codex.test.ts.
 # Modes via FAKE_CODEX_MODE:
-#   normal   -> one agent message + turn.completed, exit 0
-#   error    -> stderr + exit 1
-#   notfound -> exit 127
-#   hang     -> sleep forever
-#   argv     -> echo argv in an agent message
+#   normal     -> one agent message + turn.completed, exit 0
+#   error      -> stderr + exit 1
+#   notfound   -> exit 127
+#   hang       -> sleep forever
+#   argv       -> echo argv in an agent message
+#   heartbeats -> stream turn.started heartbeats spaced under the idle
+#                 window for ~3s, then a late agent_message + turn.completed.
+#                 Used to prove heartbeats do NOT reset the idle timer: the
+#                 harness must idle-kill long before the late finish lands.
+#   productive -> stream agent_message text spaced under the idle window,
+#                 then turn.completed. Used to prove productive output DOES
+#                 keep resetting the idle timer, so the turn finishes cleanly.
 
 mode="${FAKE_CODEX_MODE:-normal}"
 
@@ -29,6 +36,24 @@ case "$mode" in
     ;;
   hang)
     exec sleep 3600
+    ;;
+  heartbeats)
+    printf '%s\n' '{"type":"turn.started"}'
+    for i in $(seq 1 15); do
+      printf '%s\n' '{"type":"item.completed","item":{"id":"hb'"$i"'","type":"reasoning","text":"thinking"}}'
+      sleep 0.2
+    done
+    printf '%s\n' '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"late finish"}}'
+    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+    exit 0
+    ;;
+  productive)
+    for i in $(seq 1 6); do
+      printf '%s\n' "{\"type\":\"item.completed\",\"item\":{\"id\":\"i$i\",\"type\":\"agent_message\",\"text\":\"chunk$i \"}}"
+      sleep 0.2
+    done
+    printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":6}}'
+    exit 0
     ;;
   argv)
     payload="$*"
