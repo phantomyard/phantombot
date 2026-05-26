@@ -114,6 +114,49 @@ describe("CodexHarness.invoke", () => {
     expect(err.error).toContain("timed out");
   });
 
+  // Regression for #123: heartbeats (streamed reasoning) must NOT reset the
+  // idle timer. The fixture emits heartbeats spaced under the idle window for
+  // ~3s before a late agent_message. With the pre-fix touch()-on-every-chunk
+  // behaviour those heartbeats kept postponing the idle kill, so the wedged
+  // turn ran to completion. With the fix the idle timer fires regardless of
+  // heartbeats, so we get an idle error and never reach the late finish.
+  test("repeated heartbeats do not reset idle -> idle-killed before finish", async () => {
+    process.env.FAKE_CODEX_MODE = "heartbeats";
+    const chunks = await collect(
+      mkHarness().invoke(
+        newRequest({ idleTimeoutMs: 800, hardTimeoutMs: 10_000 }),
+      ),
+    );
+    // Heartbeats really did stream through (otherwise the test is vacuous)...
+    expect(chunks.some((c) => c.type === "heartbeat")).toBe(true);
+    // ...yet the turn was idle-killed before the late agent_message landed.
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    expect(
+      chunks.some((c) => c.type === "text" && c.text.includes("late finish")),
+    ).toBe(false);
+    const err = chunks.find((c) => c.type === "error");
+    if (err?.type !== "error") throw new Error("expected idle error chunk");
+    expect(err.error).toContain("no output");
+    expect(err.recoverable).toBe(true);
+  });
+
+  // Counterpart to the heartbeat test: productive text spaced under the idle
+  // window must keep resetting the timer, so a turn that streams steadily for
+  // longer than idleTimeoutMs still completes cleanly rather than idle-dying.
+  test("steady productive output keeps resetting idle -> completes", async () => {
+    process.env.FAKE_CODEX_MODE = "productive";
+    const chunks = await collect(
+      mkHarness().invoke(
+        newRequest({ idleTimeoutMs: 800, hardTimeoutMs: 10_000 }),
+      ),
+    );
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    const done = chunks.find((c) => c.type === "done");
+    if (done?.type !== "done") throw new Error("expected done chunk");
+    expect(done.finalText).toContain("chunk1");
+    expect(done.finalText).toContain("chunk6");
+  });
+
   test("argv includes injected memory override flags", async () => {
     process.env.FAKE_CODEX_MODE = "argv";
     const chunks = await collect(mkHarness("gpt-5.3-codex").invoke(newRequest()));
