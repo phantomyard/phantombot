@@ -183,6 +183,7 @@ describe("pending-update marker", () => {
       targetVersion: "1.0.99",
       targetTag: "v1.0.99",
       chatId: 42,
+      persona: "miles",
       previousVersion: "1.0.42",
       writtenAt: "2026-05-11T09:00:00.000Z",
     };
@@ -318,6 +319,7 @@ describe("runUpdateFlow", () => {
     expect(marker?.targetVersion).toBe("1.0.99");
     expect(marker?.targetTag).toBe("v1.0.99");
     expect(marker?.chatId).toBe(42);
+    expect(marker?.persona).toBeUndefined();
     expect(marker?.previousVersion).toBe("1.0.42");
     // runUpdate was invoked with force:true, restart:false (we control
     // the restart ourselves so it can fire AFTER the reply lands).
@@ -330,6 +332,25 @@ describe("runUpdateFlow", () => {
     // Invoke it and verify it routes to the injected ServiceControl.
     await r.restart!();
     expect(calls).toContain("restart");
+  });
+
+  test("update available from persona listener → stores persona in marker", async () => {
+    const r = await runUpdateFlow({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      chatId: 42,
+      persona: "miles",
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: fakeSvc().svc,
+      runUpdateImpl: fakeRunUpdate(0),
+      pendingPath,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    expect(r.reply).toContain("installed v1.0.99");
+    const marker = await readPendingUpdate(pendingPath);
+    expect(marker?.persona).toBe("miles");
   });
 
   test("update available but runUpdate exits non-zero → marker cleared, error reply", async () => {
@@ -730,6 +751,51 @@ describe("notifyPostRestartIfPending", () => {
     expect(r.status).toBe("success_notified");
     // Broadcast to adminAccount.allowedUserIds, NOT no-op.
     expect(transport.sent.map((s) => s.chatId).sort()).toEqual([42, 99]);
+    expect(await readPendingUpdate(pendingPath)).toBeUndefined();
+  });
+
+  test("hybrid marker with persona → notify uses persona account, not default account", async () => {
+    const cfg = baseConfig();
+    cfg.channels.telegram = {
+      token: "default-tok",
+      pollTimeoutS: 30,
+      allowedUserIds: [1, 2],
+    };
+    cfg.channels.telegramPersonas = {
+      miles: {
+        token: "miles-tok",
+        pollTimeoutS: 30,
+        allowedUserIds: [42, 99],
+      },
+    };
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        chatId: 4242,
+        persona: "miles",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-05-11T00:00:00Z",
+      },
+      pendingPath,
+    );
+
+    const createdForTokens: string[] = [];
+    const transport = new FakeTransport();
+    const r = await notifyPostRestartIfPending({
+      config: cfg,
+      currentVersion: "1.0.99",
+      pendingPath,
+      adminAccount: cfg.channels.telegram,
+      createTransport: (account) => {
+        createdForTokens.push(account.token);
+        return transport;
+      },
+    });
+
+    expect(r.status).toBe("success_notified");
+    expect(createdForTokens).toEqual(["miles-tok"]);
+    expect(transport.sent.map((s) => s.chatId)).toEqual([4242]);
     expect(await readPendingUpdate(pendingPath)).toBeUndefined();
   });
 

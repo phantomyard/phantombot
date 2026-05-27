@@ -195,17 +195,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
 
   const memory = await openMemoryStore(config.memoryDbPath);
 
-  // The post-restart-notify + startup-doctor hooks operate against the
-  // DEFAULT persona's bot. That's intentional — they're administrative
-  // signals to the operator, and the operator is the same human across
-  // all personas, so picking one channel keeps them from getting four
-  // copies of the same notification. Falls back to the first listener
-  // when no default account is configured.
+  // The post-restart-notify hook uses the persona stored in a pending
+  // `/update` marker when present, and falls back to this admin listener
+  // for legacy markers. Prefer the default listener for that fallback;
+  // use the first listener when no default account is configured.
   // Non-null: we returned above if plan.listeners.length === 0.
   const adminListener: ListenerSpec =
     plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0]!;
-  const adminTransport = new HttpTelegramTransport(adminListener.account.token);
-
   // Post-restart check: if `/update` wrote a pending-update marker before
   // we got SIGTERMed, surface the result to the chat that triggered it.
   // Runs once at startup; if no marker exists this is a quick no-op stat.
@@ -215,7 +211,6 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     const r = await notifyPostRestartIfPending({
       config,
       currentVersion: VERSION,
-      transport: adminTransport,
       adminAccount: adminListener.account,
     });
     if (r.status === "success_notified" || r.status === "failure_notified") {
@@ -278,13 +273,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         agentDir: l.agentDir,
         persona: l.persona,
         account: l.account,
-        transport:
-          // Reuse the admin transport for the admin listener — the
-          // post-restart notify already opened it. Other listeners
-          // get their own.
-          l === adminListener
-            ? adminTransport
-            : new HttpTelegramTransport(l.account.token),
+        transport: new HttpTelegramTransport(l.account.token),
         signal: ac.signal,
         out,
         err,

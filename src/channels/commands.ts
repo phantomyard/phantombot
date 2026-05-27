@@ -169,12 +169,14 @@ async function handleUpdate(
   }
   log.info("commands: /update invoked", {
     chatId: ctx.chatId,
+    persona: ctx.persona,
     currentVersion: VERSION,
   });
   const r = await runUpdateFlow({
     config: ctx.config,
     currentVersion: VERSION,
     chatId: ctx.chatId,
+    persona: ctx.persona,
   });
   return { reply: r.reply, afterSend: r.restart };
 }
@@ -368,4 +370,3 @@ export function nominalContextWindow(harnessId: string): number {
       return 128_000;
   }
 }
-

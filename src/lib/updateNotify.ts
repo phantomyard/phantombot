@@ -78,6 +78,12 @@ export interface PendingUpdate {
    */
   chatId?: number;
   /**
+   * Persona whose Telegram bot handled `/update`. Used after restart to
+   * send the confirmation through the same bot in hybrid default+persona
+   * configs. Optional so markers written by older versions still work.
+   */
+  persona?: string;
+  /**
    * Version we were on before the update. Stored so we can render
    * "v1.0.42 → v1.0.99" on success and distinguish a real upgrade from
    * a "we were already current" no-op.
@@ -119,7 +125,8 @@ export async function readPendingUpdate(
       typeof parsed?.targetVersion !== "string" ||
       typeof parsed?.targetTag !== "string" ||
       typeof parsed?.previousVersion !== "string" ||
-      typeof parsed?.writtenAt !== "string"
+      typeof parsed?.writtenAt !== "string" ||
+      (parsed.persona !== undefined && typeof parsed.persona !== "string")
     ) {
       log.warn("updateNotify: pending-update marker missing required fields", {
         path,
@@ -193,6 +200,8 @@ export interface RunUpdateFlowInput {
    * post-restart notify lands in the same DM the request came from.
    */
   chatId: number;
+  /** Persona whose Telegram listener handled `/update`. */
+  persona?: string;
   fetchImpl?: typeof fetch;
   serviceControl?: ServiceControl;
   /** Test seam — defaults to the real `runUpdate` CLI handler. */
@@ -275,6 +284,7 @@ export async function runUpdateFlow(
       targetVersion: release.version,
       targetTag: release.tag,
       chatId: input.chatId,
+      persona: input.persona,
       previousVersion: input.currentVersion,
       writtenAt: new Date().toISOString(),
     },
@@ -460,6 +470,7 @@ export interface NotifyPostRestartInput {
   config: Config;
   currentVersion: string;
   transport?: TelegramTransport;
+  createTransport?: (account: TelegramAccount) => TelegramTransport;
   pendingPath?: string;
   /**
    * Account to use for the post-restart notify when there's no default
@@ -500,10 +511,16 @@ export async function notifyPostRestartIfPending(
   const marker = await readPendingUpdate(input.pendingPath);
   if (!marker) return { status: "no_marker" };
 
-  // Pick the account that drives this notify. Explicit adminAccount wins
-  // (personas-only setups have no default block); fall back to the
-  // default so the legacy single-bot path keeps working.
-  const adminAccount = input.adminAccount ?? input.config.channels.telegram;
+  // Pick the account that drives this notify. New markers include the
+  // persona that handled `/update`, so hybrid default+persona configs can
+  // reply through that same bot. Older markers have no persona and fall
+  // back to the admin/default behavior.
+  const adminAccount =
+    (marker.persona
+      ? input.config.channels.telegramPersonas?.[marker.persona]
+      : undefined) ??
+    input.adminAccount ??
+    input.config.channels.telegram;
   if (!adminAccount) {
     // Marker exists but Telegram isn't configured — just clear it. No
     // way to notify; the user will see the version change on their next
@@ -517,7 +534,9 @@ export async function notifyPostRestartIfPending(
   }
 
   const transport =
-    input.transport ?? new HttpTelegramTransport(adminAccount.token);
+    input.transport ??
+    input.createTransport?.(adminAccount) ??
+    new HttpTelegramTransport(adminAccount.token);
 
   const success = marker.targetVersion === input.currentVersion;
   const message = success
