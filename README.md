@@ -188,27 +188,37 @@ mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 
 ## Personas
 
-> **Heads up — single persona at runtime.** This bit surprises people, including the author once.
+> **Personas at runtime.** One process, one default persona, optionally several persona-bound Telegram bots fanned out from the same process.
 
 A persona is a directory of markdown files (`BOOT.md`, `MEMORY.md`, `tools.md`, etc.). You can have **many** persona directories on disk — each `phantombot persona` (or `--import`) adds one. They all live under `~/.local/share/phantombot/personas/<name>/`.
 
-But **only one persona is active at any time**:
+The default persona (read from `state.json` / `config.toml`) is the one bound to the single `[channels.telegram]` block — that's the bot used by `phantombot ask`, post-update notifies, and the heartbeat. If that's all you configure, you get the classic one-bot-one-persona setup.
 
-- `phantombot run` reads `default_persona` from `state.json` / `config.toml`, looks up that one directory, and binds the Telegram listener to it.
-- A `runLock` (`src/lib/runLock.ts`) prevents two `phantombot run` processes from running on the same box, so even spawning a second one for a different persona is blocked.
-- The Telegram channel has one bot token (one slot in `config.toml`), so even without the runLock you can't have two personas answering the same chat.
+You can **additionally** bind extra personas to their own Telegram bots by adding `[channels.telegram.personas.<name>]` blocks:
 
-What you **can** do: switch personas. Memory is partitioned by persona, so switching is one command and each persona keeps its own private history forever:
+```toml
+[channels.telegram]
+token = "111:default-bot"
+allowed_user_ids = [123]
+
+[channels.telegram.personas.miles]
+token = "222:miles-bot"
+allowed_user_ids = [123]
+
+[channels.telegram.personas.desiree]
+token = "333:desiree-bot"
+allowed_user_ids = [123]
+```
+
+`phantombot run` then spawns one long-poll listener per entry, all sharing one process, one memory store (persona-partitioned, as always), and one run-lock. Each persona needs its own bot from @BotFather — reusing a token across listeners is refused at startup because Telegram serializes long-poll on the bot.
+
+Switching the *default* persona is still one command — `phantombot persona <name>` — and only affects which persona answers the `[channels.telegram]` bot. The persona-bound entries don't move.
 
 ```bash
 phantombot persona --import ~/clawd/agents/robbie --as robbie
-phantombot persona robbie                    # switch (writes default_persona to state.json)
-systemctl --user restart phantombot          # robbie now answers Telegram
-
-phantombot persona phantom                   # later — switch back; phantom resumes with phantom's memory
+phantombot persona robbie                    # makes 'robbie' the default
+systemctl --user restart phantombot
 ```
-
-Two personas answering simultaneously (different bots, separate processes) isn't supported in v1 and would be a real architectural change.
 
 ---
 

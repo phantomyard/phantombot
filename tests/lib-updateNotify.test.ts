@@ -700,4 +700,71 @@ describe("notifyPostRestartIfPending", () => {
     );
     expect(stillThere).toContain("{not json");
   });
+
+  test("personas-only setup (no default block) → adminAccount drives notify, status = success_notified", async () => {
+    // Simulates `run.ts` on a personas-only config: no
+    // `[channels.telegram]`, but the caller passes the admin listener's
+    // account so the post-restart message still goes out.
+    const cfg = baseConfig();
+    cfg.channels.telegram = undefined;
+    cfg.channels.telegramPersonas = {
+      miles: { token: "miles-tok", pollTimeoutS: 30, allowedUserIds: [42, 99] },
+    };
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-05-11T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakeTransport();
+    const r = await notifyPostRestartIfPending({
+      config: cfg,
+      currentVersion: "1.0.99",
+      transport,
+      pendingPath,
+      adminAccount: cfg.channels.telegramPersonas.miles,
+    });
+    expect(r.status).toBe("success_notified");
+    // Broadcast to adminAccount.allowedUserIds, NOT no-op.
+    expect(transport.sent.map((s) => s.chatId).sort()).toEqual([42, 99]);
+    expect(await readPendingUpdate(pendingPath)).toBeUndefined();
+  });
+
+  test("adminAccount wins over config.channels.telegram for recipients", async () => {
+    // Hybrid config (both default + personas) should still let the
+    // caller pick which account drives recipients. Guards against a
+    // future refactor accidentally reading `tg.allowedUserIds`.
+    const cfg = baseConfig();
+    cfg.channels.telegram = {
+      token: "default-tok",
+      pollTimeoutS: 30,
+      allowedUserIds: [1, 2],
+    };
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-05-11T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakeTransport();
+    const r = await notifyPostRestartIfPending({
+      config: cfg,
+      currentVersion: "1.0.99",
+      transport,
+      pendingPath,
+      adminAccount: {
+        token: "admin-tok",
+        pollTimeoutS: 30,
+        allowedUserIds: [777],
+      },
+    });
+    expect(r.status).toBe("success_notified");
+    expect(transport.sent.map((s) => s.chatId)).toEqual([777]);
+  });
 });

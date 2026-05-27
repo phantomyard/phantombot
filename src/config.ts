@@ -55,6 +55,20 @@ function legacyTurnTimeoutMs(
   return undefined;
 }
 
+/**
+ * One Telegram bot account: token + per-bot poll/allowlist tuning.
+ * The default account in `channels.telegram` binds to
+ * `config.defaultPersona`. Entries in `channels.telegramPersonas`
+ * each bind to the persona named by their map key.
+ */
+export interface TelegramAccount {
+  token: string;
+  /** Long-poll timeout in seconds (1..50). Default 30. */
+  pollTimeoutS: number;
+  /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
+  allowedUserIds: number[];
+}
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
@@ -87,13 +101,15 @@ export interface Config {
   };
 
   channels: {
-    telegram?: {
-      token: string;
-      /** Long-poll timeout in seconds (1..50). Default 30. */
-      pollTimeoutS: number;
-      /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
-      allowedUserIds: number[];
-    };
+    telegram?: TelegramAccount;
+    /**
+     * Optional additional Telegram bots, keyed by persona name. Each
+     * entry spawns its own listener bound to the named persona, so the
+     * same host can run several persona-bound bots from one process.
+     * Backward compatible: configs without `[channels.telegram.personas]`
+     * resolve to undefined and behave exactly as before.
+     */
+    telegramPersonas?: Record<string, TelegramAccount>;
   };
 
   embeddings: {
@@ -248,6 +264,7 @@ export async function loadConfig(): Promise<Config> {
 
     channels: {
       telegram: buildTelegramConfig(tomlTelegram),
+      telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
     },
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
@@ -359,6 +376,76 @@ function buildTelegramConfig(
   const allowedUserIds = allowedFromEnv ?? allowedFromToml ?? [];
 
   return { token, pollTimeoutS, allowedUserIds };
+}
+
+/**
+ * Map a persona name to its env-var suffix. Uppercased, with anything
+ * outside [A-Z0-9] replaced by `_` so a persona like "my-bot.test"
+ * resolves to `TELEGRAM_BOT_TOKEN_MY_BOT_TEST`. Matches conventional
+ * shell-safe env-var naming.
+ */
+export function personaEnvSuffix(personaName: string): string {
+  // Empty name is unreachable in practice (TOML can't express
+  // `[channels.telegram.personas.]`) but guard anyway so we never
+  // construct a dangling `TELEGRAM_BOT_TOKEN_` lookup.
+  if (!personaName) {
+    throw new Error("personaEnvSuffix: persona name must be non-empty");
+  }
+  return personaName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+/**
+ * Parse `[channels.telegram.personas.<name>]` blocks into a
+ * persona → TelegramAccount map. Entries without a token are dropped
+ * with a warning (a half-configured bot would just crash at startup).
+ * Returns undefined when no per-persona bots are configured so the
+ * field is genuinely optional on the resolved Config.
+ *
+ * Tokens may come from either TOML (`token = "..."`) or the environment
+ * (`TELEGRAM_BOT_TOKEN_<PERSONA_UPPERCASE>` — same convention you'd
+ * expect from a 12-factor app, and matches the default account's
+ * `TELEGRAM_BOT_TOKEN` env var). Env wins over TOML so operators can
+ * pin tokens in systemd unit files / .env without rewriting the
+ * checked-in config.
+ */
+function buildTelegramPersonasConfig(
+  tomlTelegram: Record<string, unknown>,
+): Record<string, TelegramAccount> | undefined {
+  const personas = tomlTelegram.personas;
+  if (!personas || typeof personas !== "object" || Array.isArray(personas)) {
+    return undefined;
+  }
+  const out: Record<string, TelegramAccount> = {};
+  for (const [personaName, raw] of Object.entries(
+    personas as Record<string, unknown>,
+  )) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    const envSuffix = personaEnvSuffix(personaName);
+    const tokenFromEnv = process.env[`TELEGRAM_BOT_TOKEN_${envSuffix}`];
+    const token = tokenFromEnv ?? asString(entry.token);
+    if (!token) {
+      log.warn(
+        `config: channels.telegram.personas.${personaName} has no token — skipping (set TELEGRAM_BOT_TOKEN_${envSuffix} or token = "...")`,
+      );
+      continue;
+    }
+    const allowedFromEnv = process.env[
+      `PHANTOMBOT_TELEGRAM_ALLOWED_USERS_${envSuffix}`
+    ]
+      ?.split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n));
+    const pollTimeoutS = clampPollTimeout(
+      asInt(process.env[`PHANTOMBOT_TELEGRAM_POLL_S_${envSuffix}`]) ??
+        asInt(entry.poll_timeout_s) ??
+        30,
+    );
+    const allowedUserIds =
+      allowedFromEnv ?? asIntArray(entry.allowed_user_ids) ?? [];
+    out[personaName] = { token, pollTimeoutS, allowedUserIds };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function clampPollTimeout(s: number): number {

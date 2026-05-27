@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, personaDir } from "../src/config.ts";
+import { loadConfig, personaDir, personaEnvSuffix } from "../src/config.ts";
 
 const SAVED_ENV: Record<string, string | undefined> = {};
 const ENV_KEYS = [
@@ -28,6 +28,18 @@ const ENV_KEYS = [
   "PHANTOMBOT_CODEX_MODEL",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
+  // Per-persona Telegram env vars touched by the persona-bound bots
+  // tests below. Cleared per-test so a developer's real shell env
+  // can't leak in.
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_BOT_TOKEN_MILES",
+  "TELEGRAM_BOT_TOKEN_DESIREE",
+  "TELEGRAM_BOT_TOKEN_BROKEN",
+  "TELEGRAM_BOT_TOKEN_MY_BOT_TEST",
+  "PHANTOMBOT_TELEGRAM_ALLOWED_USERS",
+  "PHANTOMBOT_TELEGRAM_ALLOWED_USERS_MILES",
+  "PHANTOMBOT_TELEGRAM_POLL_S",
+  "PHANTOMBOT_TELEGRAM_POLL_S_MILES",
 ];
 
 let workdir: string;
@@ -167,5 +179,155 @@ describe("personaDir", () => {
     process.env.PHANTOMBOT_PERSONAS_DIR = "/tmp/personas";
     const c = await loadConfig();
     expect(personaDir(c, "robbie")).toBe("/tmp/personas/robbie");
+  });
+});
+
+describe("loadConfig — telegramPersonas", () => {
+  async function writeToml(toml: string): Promise<void> {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), toml, "utf8");
+  }
+
+  test("undefined when no personas block present", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "abc"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram?.token).toBe("abc");
+    expect(c.channels.telegramPersonas).toBeUndefined();
+  });
+
+  test("parses persona-bound bots from [channels.telegram.personas.<name>]", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "default-token"
+allowed_user_ids = [1]
+
+[channels.telegram.personas.miles]
+token = "miles-token"
+allowed_user_ids = [2, 3]
+poll_timeout_s = 25
+
+[channels.telegram.personas.desiree]
+token = "desiree-token"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram?.token).toBe("default-token");
+    expect(c.channels.telegramPersonas).toBeDefined();
+    expect(c.channels.telegramPersonas!.miles).toEqual({
+      token: "miles-token",
+      pollTimeoutS: 25,
+      allowedUserIds: [2, 3],
+    });
+    expect(c.channels.telegramPersonas!.desiree).toEqual({
+      token: "desiree-token",
+      pollTimeoutS: 30,
+      allowedUserIds: [],
+    });
+  });
+
+  test("works without a default [channels.telegram] block", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+token = "miles-token"
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegram).toBeUndefined();
+    expect(c.channels.telegramPersonas!.miles!.token).toBe("miles-token");
+  });
+
+  test("skips persona entries without a token", async () => {
+    await writeToml(`
+[channels.telegram]
+token = "default-token"
+
+[channels.telegram.personas.miles]
+token = "miles-token"
+
+[channels.telegram.personas.broken]
+allowed_user_ids = [9]
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles).toBeDefined();
+    expect(c.channels.telegramPersonas!.broken).toBeUndefined();
+  });
+
+  test("clamps poll_timeout_s into [1,50]", async () => {
+    await writeToml(`
+[channels.telegram.personas.tooBig]
+token = "a"
+poll_timeout_s = 9999
+
+[channels.telegram.personas.tooSmall]
+token = "b"
+poll_timeout_s = 0
+`);
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.tooBig!.pollTimeoutS).toBe(50);
+    expect(c.channels.telegramPersonas!.tooSmall!.pollTimeoutS).toBe(1);
+  });
+
+  test("TELEGRAM_BOT_TOKEN_<PERSONA> env wins over toml token", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+token = "from-toml"
+`);
+    process.env.TELEGRAM_BOT_TOKEN_MILES = "from-env";
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles!.token).toBe("from-env");
+  });
+
+  test("TELEGRAM_BOT_TOKEN_<PERSONA> env lets you omit token from toml entirely", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+allowed_user_ids = [7]
+`);
+    process.env.TELEGRAM_BOT_TOKEN_MILES = "env-only";
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles).toEqual({
+      token: "env-only",
+      pollTimeoutS: 30,
+      allowedUserIds: [7],
+    });
+  });
+
+  test("PHANTOMBOT_TELEGRAM_ALLOWED_USERS_<PERSONA> overrides toml allow-list", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+token = "t"
+allowed_user_ids = [1, 2]
+`);
+    process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS_MILES = "10, 20 , 30";
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles!.allowedUserIds).toEqual([
+      10, 20, 30,
+    ]);
+  });
+
+  test("PHANTOMBOT_TELEGRAM_POLL_S_<PERSONA> overrides toml poll_timeout_s", async () => {
+    await writeToml(`
+[channels.telegram.personas.miles]
+token = "t"
+poll_timeout_s = 10
+`);
+    process.env.PHANTOMBOT_TELEGRAM_POLL_S_MILES = "45";
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!.miles!.pollTimeoutS).toBe(45);
+  });
+
+  test("persona name with non-alphanumeric chars maps to underscore-safe env var", async () => {
+    // "my-bot.test" → "MY_BOT_TEST" — matches what users would write in
+    // a systemd unit or .env without surprise.
+    expect(personaEnvSuffix("my-bot.test")).toBe("MY_BOT_TEST");
+    await writeToml(`
+[channels.telegram.personas."my-bot.test"]
+`);
+    process.env.TELEGRAM_BOT_TOKEN_MY_BOT_TEST = "env-token";
+    const c = await loadConfig();
+    expect(c.channels.telegramPersonas!["my-bot.test"]!.token).toBe(
+      "env-token",
+    );
   });
 });

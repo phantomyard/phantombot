@@ -33,7 +33,11 @@ import {
   HttpTelegramTransport,
   type TelegramTransport,
 } from "../channels/telegram.ts";
-import { type Config, xdgConfigHome } from "../config.ts";
+import {
+  type Config,
+  type TelegramAccount,
+  xdgConfigHome,
+} from "../config.ts";
 import { runUpdate } from "../cli/update.ts";
 import {
   detectSupportedTarget,
@@ -457,6 +461,13 @@ export interface NotifyPostRestartInput {
   currentVersion: string;
   transport?: TelegramTransport;
   pendingPath?: string;
+  /**
+   * Account to use for the post-restart notify when there's no default
+   * `[channels.telegram]` block (personas-only setup). Caller passes the
+   * admin listener's account here. When omitted, falls back to
+   * `config.channels.telegram` (legacy behavior).
+   */
+  adminAccount?: TelegramAccount;
 }
 
 export interface NotifyPostRestartResult {
@@ -489,8 +500,11 @@ export async function notifyPostRestartIfPending(
   const marker = await readPendingUpdate(input.pendingPath);
   if (!marker) return { status: "no_marker" };
 
-  const tg = input.config.channels.telegram;
-  if (!tg) {
+  // Pick the account that drives this notify. Explicit adminAccount wins
+  // (personas-only setups have no default block); fall back to the
+  // default so the legacy single-bot path keeps working.
+  const adminAccount = input.adminAccount ?? input.config.channels.telegram;
+  if (!adminAccount) {
     // Marker exists but Telegram isn't configured — just clear it. No
     // way to notify; the user will see the version change on their next
     // CLI call.
@@ -502,7 +516,8 @@ export async function notifyPostRestartIfPending(
     return { status: "no_telegram", marker };
   }
 
-  const transport = input.transport ?? new HttpTelegramTransport(tg.token);
+  const transport =
+    input.transport ?? new HttpTelegramTransport(adminAccount.token);
 
   const success = marker.targetVersion === input.currentVersion;
   const message = success
@@ -514,7 +529,9 @@ export async function notifyPostRestartIfPending(
   // broadcasting to allowed_user_ids when the marker came from a non-
   // chat path (e.g. heartbeat-triggered, future feature).
   const recipients =
-    typeof marker.chatId === "number" ? [marker.chatId] : tg.allowedUserIds;
+    typeof marker.chatId === "number"
+      ? [marker.chatId]
+      : adminAccount.allowedUserIds;
 
   for (const chatId of recipients) {
     try {
