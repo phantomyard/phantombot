@@ -394,6 +394,37 @@ The nightly runs as **five idempotent stages** — `essence` → `promote` → `
 
 `phantombot doctor` reads `.nightly-state.json`, `.nightly-progress.json` and `capture_log`, and reports — then auto-repairs — memory-subsystem problems: a nightly that never ran, errored, or is >24h stale; a partial checkpoint left behind; or a "dry day" (≥20 real user turns with zero captures). When repair is warranted it spawns a detached `phantombot nightly --resume`. The `run` startup catch-up routes through the same logic, so a box powered off overnight self-heals on next boot.
 
+### Semantic search (optional)
+
+Memory search has two modes. **Keyword search (FTS5/BM25)** is always on, needs no setup, and matches on the actual words in a note. **Semantic (vector) search** is an *optional* enhancement: it embeds your text into vectors so search can match on **meaning**, not just exact words — e.g. asking "how do I pay tax" can surface a note titled "VAT filing steps" even though they share no keywords.
+
+**Why it's nice.** Phantombot retrieves relevant memories automatically on every turn (the auto-retrieval "instinct" layer) and indexes past conversation turns so older context can resurface. With embeddings on, that retrieval runs as **hybrid** (keyword + semantic) and finds conceptually-related memories the keyword half would miss. It's what makes recall feel like instinct rather than grep.
+
+**Why it's optional.** Everything works without it. With no embedding key configured, the provider resolves to `none`, search degrades cleanly to keyword-only, and **nothing errors** — auto-retrieval still runs, just on FTS. Most users never need to touch this. It is an enhancement, not a requirement.
+
+**How to tell which mode you're in.** `phantombot doctor` prints an informational `embeddings:` line (semantic ON, or off with keyword search active), and `phantombot run` prints a one-line heads-up at startup when semantic search is off. Neither is a warning — off is a valid, fully-working state.
+
+**How to enable it.** Easiest is the interactive TUI, which validates your key before saving:
+
+```bash
+phantombot embedding          # pick Gemini, paste an API key (or pick "none")
+phantombot memory index --rebuild   # backfill embeddings for existing notes
+```
+
+The `phantombot init` setup wizard also offers this as an optional step. You can equally set it by hand — either `PHANTOMBOT_GEMINI_API_KEY` in the environment, or an `[embeddings]` block in `config.toml`:
+
+```toml
+[embeddings]
+provider = "gemini"
+
+[embeddings.gemini]
+api_key = "AIza…"            # https://aistudio.google.com/app/apikey
+model   = "gemini-embedding-001"
+dims    = 1536
+```
+
+Get a key at <https://aistudio.google.com/app/apikey>. The default model is free up to ~1500 requests/day on Gemini's free tier, and the nightly cycle only re-embeds changed notes, so steady-state usage is tiny. To turn it back off, run `phantombot embedding` and pick **none** (your key is preserved in `config.toml` so re-enabling doesn't require re-validating).
+
 ---
 
 ## OpenClaw persona import

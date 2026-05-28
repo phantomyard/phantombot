@@ -94,6 +94,19 @@ export interface DoctorReport {
     dry_day: boolean;
   };
   /**
+   * Embeddings / semantic-search status. Purely INFORMATIONAL — this never
+   * feeds `repair_needed` or the exit code. Embeddings are optional: with no
+   * provider, memory search still works on keyword (FTS5/BM25) matching. We
+   * surface the easy-to-miss "running keyword-only" state so an operator can
+   * SEE that vector search is off (and how to turn it on) without it ever
+   * looking like a fault.
+   */
+  embeddings: {
+    provider: "gemini" | "none";
+    /** gemini provider AND a key present = vector/semantic search is live. */
+    semantic_search: boolean;
+  };
+  /**
    * Linux-only — undefined on macOS and dev hosts without a user-systemd
    * bus. When present, lists which unit files are missing from disk, which
    * present-but-stale unit files have drifted from the running binary's
@@ -263,6 +276,13 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
 
+  // Embeddings status — informational only. Vector search is live only when
+  // the provider is gemini AND a key is actually present; everything else
+  // (provider "none", or "gemini" with an empty key) means keyword-only.
+  const embProvider = config.embeddings.provider;
+  const semanticSearch =
+    embProvider === "gemini" && !!config.embeddings.gemini?.apiKey;
+
   const { needed, reason } = decideRepair(state, progress, ageHours);
 
   let repairTriggered = false;
@@ -349,6 +369,10 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       captures,
       dry_day: dryDay,
     },
+    embeddings: {
+      provider: embProvider,
+      semantic_search: semanticSearch,
+    },
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
     repair_needed: needed,
@@ -386,6 +410,15 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       `user turn(s) in the last ${report.capture.window_hours}h` +
       (dryDay ? " — DRY DAY: turns but no captures" : "") +
       "\n",
+  );
+  // Embeddings line is deliberately neutral — no ok/WARN marker, never an
+  // exit-code input. Vector search is an optional enhancement, not a
+  // requirement; absence is a valid, fully-working configuration.
+  out.write(
+    semanticSearch
+      ? `  embeddings: semantic (vector) search ON — provider '${embProvider}'\n`
+      : "  embeddings: semantic (vector) search off — keyword (BM25) search " +
+        "active. Optional: enable with `phantombot embedding`\n",
   );
   if (needed) {
     out.write(`  repair: ${reason}\n`);

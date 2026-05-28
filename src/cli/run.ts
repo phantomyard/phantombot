@@ -239,6 +239,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }\n`,
     );
   }
+  // Gentle, one-time heads-up that semantic search is off. Embeddings are
+  // optional — memory still works on keyword (BM25) search — so this is an
+  // informational line, not a warning, and never blocks startup.
+  const semanticSearch =
+    config.embeddings?.provider === "gemini" &&
+    !!config.embeddings?.gemini?.apiKey;
+  if (!semanticSearch) {
+    out.write(
+      "  memory: semantic (vector) search OFF — keyword search active. " +
+        "Optional: run `phantombot embedding` to enable.\n",
+    );
+  }
   out.write("Ctrl-C to stop.\n");
 
   // Startup catch-up: `doctor` checks for a stale, failed, or partially

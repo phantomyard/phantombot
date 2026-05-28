@@ -584,3 +584,101 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
     expect(receivedStale).toEqual(["phantombot-tick.timer"]);
   });
 });
+
+describe("runDoctor embeddings status line", () => {
+  // The embeddings line is purely informational: it tells the operator
+  // whether semantic (vector) search is live, but absence is a valid,
+  // fully-working config — so it must NEVER turn into a WARN or change
+  // the exit code. These tests pin both the wording and that invariant.
+
+  test("provider 'none' → neutral 'off' line, exit stays 0", async () => {
+    // config fixture defaults to embeddings.provider = "none".
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain(
+      "embeddings: semantic (vector) search off — keyword (BM25) search active",
+    );
+    expect(out.text).toContain("phantombot embedding");
+    // Crucially, NOT a WARN — the marker must never appear on this line.
+    expect(out.text).not.toContain("embeddings: WARN");
+  });
+
+  test("gemini provider with key → 'ON' line", async () => {
+    config.embeddings = {
+      provider: "gemini",
+      gemini: {
+        apiKey: "AIzaTEST123",
+        model: "gemini-embedding-001",
+        dims: 1536,
+      },
+    };
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain(
+      "embeddings: semantic (vector) search ON — provider 'gemini'",
+    );
+  });
+
+  test("gemini provider but EMPTY key → still reported off", async () => {
+    // Provider says gemini but no usable key = keyword-only in practice.
+    config.embeddings = {
+      provider: "gemini",
+      gemini: { apiKey: "", model: "gemini-embedding-001", dims: 1536 },
+    };
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({ config, out, checkSystemd: false, checkTimers: false });
+    expect(out.text).toContain("semantic (vector) search off");
+  });
+
+  test("json mode includes the embeddings block", async () => {
+    config.embeddings = {
+      provider: "gemini",
+      gemini: {
+        apiKey: "AIzaTEST123",
+        model: "gemini-embedding-001",
+        dims: 1536,
+      },
+    };
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      json: true,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+    });
+    const report = JSON.parse(out.text);
+    expect(report.embeddings).toEqual({
+      provider: "gemini",
+      semantic_search: true,
+    });
+  });
+});
