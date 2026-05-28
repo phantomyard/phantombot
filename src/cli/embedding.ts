@@ -59,11 +59,22 @@ interface RunInput {
   config?: Config;
   validate?: (key: string) => Promise<EmbedResult>;
   serviceControl?: ServiceControl;
+  /**
+   * When true, this runs as a sub-step of another wizard (e.g.
+   * `phantombot init`) rather than standalone. Two effects:
+   *   - suppresses the standalone intro/outro and the "Existing config"
+   *     note (the parent owns the framing; a nested clack intro renders a
+   *     stray bracket), and
+   *   - skips the post-save restart prompt (the parent installs/starts the
+   *     service afterwards, so there is nothing running to restart yet).
+   */
+  embedded?: boolean;
 }
 
 export async function runEmbedding(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const svc = input.serviceControl ?? defaultServiceControl();
+  const embedded = input.embedded ?? false;
   const validate =
     input.validate ??
     ((key: string) =>
@@ -72,10 +83,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
         dims: DEFAULT_DIMS,
       }));
 
-  p.intro("Configure embeddings");
+  if (!embedded) p.intro("Configure embeddings");
 
   const existing = config.embeddings;
-  if (existing.provider === "gemini" && existing.gemini?.apiKey) {
+  if (!embedded && existing.provider === "gemini" && existing.gemini?.apiKey) {
     p.note(
       `provider:  gemini\n` +
         `model:     ${existing.gemini.model}\n` +
@@ -83,7 +94,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
         `api key:   ${maskKey(existing.gemini.apiKey)}`,
       "Existing config",
     );
-  } else if (existing.provider === "none") {
+  } else if (!embedded && existing.provider === "none") {
     p.note(`provider:  none (FTS5/BM25 search only)`, "Existing config");
   }
 
@@ -114,8 +125,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       `provider set to "none"\nsearch will use FTS5/BM25 only`,
       "Saved",
     );
-    await maybePromptRestart(svc);
-    p.outro("done");
+    if (!embedded) {
+      await maybePromptRestart(svc);
+      p.outro("done");
+    }
     return 0;
   }
 
@@ -157,8 +170,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     "Saved",
   );
 
-  await maybePromptRestart(svc);
-  p.outro("done");
+  if (!embedded) {
+    await maybePromptRestart(svc);
+    p.outro("done");
+  }
   return 0;
 }
 

@@ -13,6 +13,11 @@ import { loadConfig } from "../src/config.ts";
 let workdir: string;
 let configPath: string;
 const SAVED_CONFIG = process.env.PHANTOMBOT_CONFIG;
+// Isolate from the ambient environment: loadConfig() prefers a real
+// PHANTOMBOT_GEMINI_API_KEY over the toml api_key, so a key present in the
+// shell (e.g. on a live phantombot box) would otherwise leak into these
+// config-roundtrip tests and fail them. Clear it per-test, restore after.
+let savedGeminiKey: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-emb-"));
@@ -20,11 +25,15 @@ beforeEach(async () => {
   process.env.PHANTOMBOT_CONFIG = configPath;
   process.env.XDG_CONFIG_HOME = join(workdir, "xdg-config");
   process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
+  savedGeminiKey = process.env.PHANTOMBOT_GEMINI_API_KEY;
+  delete process.env.PHANTOMBOT_GEMINI_API_KEY;
 });
 
 afterEach(async () => {
   if (SAVED_CONFIG === undefined) delete process.env.PHANTOMBOT_CONFIG;
   else process.env.PHANTOMBOT_CONFIG = SAVED_CONFIG;
+  if (savedGeminiKey === undefined) delete process.env.PHANTOMBOT_GEMINI_API_KEY;
+  else process.env.PHANTOMBOT_GEMINI_API_KEY = savedGeminiKey;
   await rm(workdir, { recursive: true, force: true });
 });
 

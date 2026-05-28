@@ -11,6 +11,7 @@ import {
   type HarnessId,
   runHarness,
 } from "./harness.ts";
+import { runEmbedding } from "./embedding.ts";
 import { runInstall } from "./install.ts";
 import { runPersona } from "./persona.ts";
 import { runTelegram } from "./telegram.ts";
@@ -84,11 +85,12 @@ export default defineCommand({
     p.intro("Welcome to Phantombot");
 
     p.note(
-      "This wizard will guide you through 4 quick steps to get your agent running:\n" +
+      "This wizard will guide you through a few quick steps to get your agent running:\n" +
       "  1. Pick your AI harness (claude, pi, gemini, or codex)\n" +
       "  2. Create a persona (identity & memory)\n" +
       "  3. Connect to Telegram\n" +
-      "  4. Install as a background service",
+      "  4. Enable semantic memory search (optional)\n" +
+      "  5. Install as a background service",
       "Setup Flow"
     );
 
@@ -153,7 +155,37 @@ export default defineCommand({
       return;
     }
 
-    // 4. Install
+    // 4. Optional: semantic memory search.
+    // Gated behind its own confirm (default OFF) so it never blocks a quick
+    // install — memory search works out of the box on keyword (FTS5/BM25)
+    // matching. This step exists purely to *expose* the option during setup;
+    // skipping it is a fully-supported, fully-working configuration.
+    // Like the install step below, it's a separate skippable confirmation
+    // rather than part of runInitFlow. We call runEmbedding in `embedded`
+    // mode so it doesn't render its own intro/outro (a nested clack intro
+    // prints a stray bracket) or prompt for a service restart (the service
+    // isn't installed until the next step). Its return is intentionally
+    // non-fatal: embeddings are optional, so a skip or a key-validation
+    // failure must never abort the wizard before install.
+    p.log.step("Semantic Memory Search (optional)");
+    p.note(
+      "Phantombot's memory search works out of the box using keyword matching.\n" +
+      "Adding an embeddings provider also enables SEMANTIC search — finding\n" +
+      "memories by meaning, not just exact words (e.g. \"how do I pay tax\"\n" +
+      "matches a note titled \"VAT filing steps\"). It's optional and free for\n" +
+      "typical use on Gemini's free tier. You can always enable it later with\n" +
+      "`phantombot embedding`.",
+      "What this improves"
+    );
+    const wantEmbeddings = await p.confirm({
+      message: "Set up semantic search now? (optional)",
+      initialValue: false,
+    });
+    if (!p.isCancel(wantEmbeddings) && wantEmbeddings) {
+      await runEmbedding({ embedded: true });
+    }
+
+    // 5. Install
     // Use a step marker, not a second p.intro — clack renders one
     // open / one close bracket per flow, and a second intro mid-flow
     // produces a stray opening bracket in the rendered TUI.
