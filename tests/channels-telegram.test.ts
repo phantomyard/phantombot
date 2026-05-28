@@ -615,6 +615,13 @@ const baseConfig = (
       ...overrides,
     },
   },
+  telegramStreaming: {
+    narrationFlushMs: 4500,
+    bubbleMaxSentences: 4,
+    bubbleMaxChars: 700,
+    bubbleDelayMs: 0,
+    voiceMaxSentences: 3,
+  },
   embeddings: { provider: "none" },
   voice: { provider: "none" },
 });
@@ -1532,14 +1539,13 @@ describe("runTelegramServer system-prompt suffixes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Pre-tool narration: flush buffered prose as a separate Telegram message
-// before each tool call so the user sees "Checking your inboxes…" land
-// during the silent tool-run window instead of stapled to the back of the
-// final answer. Voice-out skips chunked flushing.
+// Progress/final streaming: pre-tool narration is classified at tool
+// boundaries but only sent on a timer, while final answers are split into
+// markdown-safe bubbles.
 // ---------------------------------------------------------------------------
 
 describe("runTelegramServer narration flush (text-out)", () => {
-  test("text → progress → text → done sends two messages: narration first, answer second", async () => {
+  test("short text → progress → text → done drops unsent narration and sends answer", async () => {
     class NarrationHarness implements Harness {
       readonly id = "narration";
       async available(): Promise<boolean> {
@@ -1575,14 +1581,12 @@ describe("runTelegramServer narration flush (text-out)", () => {
     });
 
     expect(transport.sent.map((s) => s.text)).toEqual([
-      "Checking your inboxes…",
       "Found 3 threads from Turtle Crossing.",
     ]);
-    // Both bubbles land in the right chat.
     expect(transport.sent.every((s) => s.chatId === 1001)).toBe(true);
   });
 
-  test("multi-tool turn: one narration bubble per tool, then the final answer", async () => {
+  test("multi-tool turn: narration coalesces instead of sending one bubble per tool", async () => {
     class MultiToolHarness implements Harness {
       readonly id = "multitool";
       async available(): Promise<boolean> {
@@ -1623,9 +1627,85 @@ describe("runTelegramServer narration flush (text-out)", () => {
     });
 
     expect(transport.sent.map((s) => s.text)).toEqual([
-      "Checking your calendar…",
-      "Now scanning your inboxes…",
       "Calendar is clear; you have 2 unread emails.",
+    ]);
+  });
+
+  test("long tool gap flushes coalesced narration on the timer", async () => {
+    class SlowToolHarness implements Harness {
+      readonly id = "slow-tool";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        yield { type: "text", text: "Checking your calendar…" };
+        yield { type: "progress", note: "tool: gog calendar-list" };
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        yield { type: "done", finalText: "Checking your calendar…" };
+      }
+    }
+
+    const cfg = baseConfig();
+    cfg.telegramStreaming!.narrationFlushMs = 5;
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "check calendar",
+    });
+    await runTelegramServer({
+      config: cfg,
+      memory,
+      harnesses: [new SlowToolHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+      typingThrottleMs: 0,
+    });
+
+    expect(transport.sent.map((s) => s.text)).toEqual([
+      "Checking your calendar…",
+    ]);
+  });
+
+  test("final answer splits progressively into smaller sentence bubbles", async () => {
+    class LongAnswerHarness implements Harness {
+      readonly id = "long-answer";
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+        const reply = "One. Two. Three. Four. Five.";
+        yield { type: "text", text: reply };
+        yield { type: "done", finalText: reply };
+      }
+    }
+
+    const cfg = baseConfig();
+    cfg.telegramStreaming!.bubbleMaxSentences = 2;
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "explain",
+    });
+    await runTelegramServer({
+      config: cfg,
+      memory,
+      harnesses: [new LongAnswerHarness()],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.sent.map((s) => s.text)).toEqual([
+      "One. Two. ",
+      "Three. Four. ",
+      "Five.",
     ]);
   });
 
@@ -1702,11 +1782,10 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    // No empty/whitespace narration bubble; the full reply lands as
-    // one message. The leading whitespace was never flushed, so the
-    // prefix-match path doesn't trigger and we send `fullReply` whole.
+    // No empty/whitespace narration bubble. The whitespace before the
+    // tool is classified as progress text and removed from the final.
     expect(transport.sent).toHaveLength(1);
-    expect(transport.sent[0]!.text).toBe("  \n real answer");
+    expect(transport.sent[0]!.text).toBe("real answer");
   });
 
   test("flushed prefix matches finalText: post-tool message is the suffix only (no duplication)", async () => {
@@ -1744,10 +1823,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    expect(transport.sent.map((s) => s.text)).toEqual([
-      "Looking that up…\n",
-      "It's 42.",
-    ]);
+    expect(transport.sent.map((s) => s.text)).toEqual(["It's 42."]);
   });
 
   test("harness reformats final reply: send full final, accept duplication over truncation", async () => {
@@ -1786,13 +1862,9 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    // First bubble: the narration we flushed before the tool fired.
-    // Second bubble: the full reformatted final, NOT a sliced suffix
-    // (because the prefix didn't match). User sees a duplicated word
-    // — acceptable. Truncating would be worse.
-    expect(transport.sent).toHaveLength(2);
-    expect(transport.sent[0]!.text).toBe("Checking…");
-    expect(transport.sent[1]!.text).toBe("Result: X (after a check).");
+    // The narration was not on screen yet, so only the reformatted final lands.
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toBe("Result: X (after a check).");
   });
 
   test("narration flushed but model emits nothing further: no '(no reply)' tacked on", async () => {
@@ -1828,14 +1900,13 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    // Just the narration bubble. No "(no reply)" follow-up.
-    expect(transport.sent.map((s) => s.text)).toEqual(["Checking…"]);
+    // The progress text never reached the timer, and no "(no reply)" follows.
+    expect(transport.sent.map((s) => s.text)).toEqual([]);
   });
 
-  test("error after a flushed narration bubble: error message follows the narration", async () => {
-    // Narration landed, then the tool blew up. The error diagnostic
-    // still has to surface — we suppress "(no reply)" specifically,
-    // not real errors.
+  test("error after short narration: error message still surfaces", async () => {
+    // Narration may or may not have reached the timer before the tool
+    // blows up. The error diagnostic still has to surface.
     class ErrorAfterToolHarness implements Harness {
       readonly id = "error-after-tool";
       async available(): Promise<boolean> {
@@ -1865,10 +1936,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    expect(transport.sent.map((s) => s.text)).toEqual([
-      "Checking…",
-      "(error: boom)",
-    ]);
+    expect(transport.sent.map((s) => s.text)).toEqual(["(error: boom)"]);
   });
 });
 
@@ -1893,10 +1961,9 @@ describe("runTelegramServer narration flush (voice-out)", () => {
     };
   }
 
-  test("voice-in/voice-out: progress chunks do NOT flush text bubbles; full reply synthesized at end", async () => {
-    // Voice replies are one synthesized clip — chunked text flushes
-    // would just bloat the audio AND leak text into a voice-only
-    // conversation. The flush function is gated off for voice.
+  test("voice-in/voice-out: progress chunks do NOT flush text bubbles; reply is synthesized", async () => {
+    // Voice replies synthesize after the full reply is known; progress
+    // text bubbles would leak text into a voice-only conversation.
     const originalFetch = globalThis.fetch;
     let ttsBodyText: string | undefined;
     (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
@@ -1958,8 +2025,7 @@ describe("runTelegramServer narration flush (voice-out)", () => {
 
       // No text bubbles emitted — voice-out path stays silent on text.
       expect(transport.sent).toEqual([]);
-      // One voice clip went out with the FULL reply (not just the
-      // suffix), since the voice path ignores `flushedReply`.
+      // One voice clip went out with the FULL reply (not just the suffix).
       expect(transport.voiceSent).toHaveLength(1);
       expect(ttsBodyText).toBe("Checking…Done.");
     } finally {

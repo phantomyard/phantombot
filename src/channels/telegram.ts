@@ -6,21 +6,15 @@
  * memory uses conversation key `telegram:<chatId>` so DMs and groups are
  * isolated from the CLI's `cli:default` history.
  *
- * Streaming: we send `sendChatAction(typing)` at the start of each turn,
- * refresh it on every harness chunk, and — for text-out turns — flush
- * any buffered prose as a separate Telegram message right before each
- * tool call (signalled by a `progress` chunk). That makes one-line
- * narrations like "Checking your inboxes…" land *before* the silent
- * tool-run window instead of arriving stapled to the back of the final
- * answer. Voice-out skips chunked flushing — voice is one synthesized
- * clip at the end, mid-turn flushes would just bloat the audio.
+ * Streaming: we send `sendChatAction(typing)` at the start of each turn
+ * and refresh it on every harness chunk. Text before a tool call is
+ * classified as progress narration, but it is posted only on a timer so
+ * many tool calls coalesce into one bubble. Final answers stream through
+ * a markdown-aware segmenter that cuts into smaller Telegram bubbles at
+ * sentence/char boundaries without splitting code fences or tables.
  *
- * Gemini-cli models often go straight to tool calls without narration.
- * For that case: we run a background typing-indicator refresh timer
- * during tool execution (the status bar keeps showing "typing…" or
- * "recording voice…" — no canned chat messages), and flush accumulated
- * text on post-tool heartbeat events so replies stream progressively
- * instead of arriving as one blob at turn-end.
+ * Voice-out skips text streaming; after the full reply is known, it is
+ * split into short voice clips.
  *
  * Token-by-token live edits would be nicer still but Telegram
  * rate-limits edits at ~1/sec — not worth the complexity.
@@ -32,7 +26,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import { type Config, xdgDataHome } from "../config.ts";
+import {
+  DEFAULT_TELEGRAM_STREAMING,
+  type Config,
+  xdgDataHome,
+} from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
   type AudioSupport,
@@ -54,6 +52,10 @@ import {
   handleSlashCommand,
 } from "./commands.ts";
 import { markdownToTelegramHtml } from "./telegramFormat.ts";
+import {
+  splitIntoSegments,
+  StreamSegmenter,
+} from "./streamSegmenter.ts";
 
 /**
  * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
@@ -418,6 +420,10 @@ function abortReasonString(reason: unknown): string {
   if (typeof reason === "string") return reason;
   if (reason instanceof Error) return reason.message;
   return "aborted";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface TelegramRawFile {
@@ -1129,6 +1135,11 @@ async function processChatMessage(
     willReplyWithVoice
       ? input.transport.sendRecording(msg.chatId)
       : input.transport.sendTyping(msg.chatId);
+  const streaming = input.config.telegramStreaming ?? DEFAULT_TELEGRAM_STREAMING;
+  const segmenterOptions = {
+    maxSentences: streaming.bubbleMaxSentences,
+    maxChars: streaming.bubbleMaxChars,
+  };
 
   // Indicator policy: refresh on EVERY harness chunk (text, heartbeat,
   // progress). When chunks stop, the indicator naturally expires after
@@ -1158,8 +1169,9 @@ async function processChatMessage(
   const startToolRefresh = () => {
     if (toolRefreshTimer) return; // already running
     toolRefreshTimer = setInterval(() => {
-      void sendStatus();
-    }, 4000);
+      refreshIndicator();
+      void flushNarration();
+    }, Math.min(1000, streaming.narrationFlushMs));
   };
   const stopToolRefresh = () => {
     if (toolRefreshTimer) {
@@ -1180,57 +1192,82 @@ async function processChatMessage(
   };
   activeTurns.set(msg.chatId, turnHandle);
 
-  // Streaming-narration accumulators. The text-out path flushes
-  // buffered prose as a separate Telegram message right before each
-  // tool call (signalled by a `progress` chunk), so the user sees
-  // "Checking your inboxes…" land *before* the silent tool-run window.
-  // Without this, the entire turn batches into one bubble at the end
-  // and narration is invisible.
+  // Streaming accumulators.
   //
-  //   streamedReply  — running sum of `text` chunks seen so far
-  //   flushedReply   — what's already been sent as narration bubbles;
-  //                    a prefix of streamedReply (and, in the happy
-  //                    path, of the final reply too)
-  //   finalReply     — set on the `done` chunk; authoritative full
-  //                    text the harness wants delivered
+  //   streamedReply       — running sum of `text` chunks seen so far
+  //   consumedReplyChars  — prefix length already delivered as final text OR
+  //                         classified as narration and intentionally removed
+  //                         from the final answer
+  //   narrationBuffer     — classified progress text waiting for the timed
+  //                         progress flush, coalesced across tool calls
+  //   finalSegmenter      — markdown-aware live splitter for candidate final
+  //                         answer text
+  //   finalReply          — set on the `done` chunk; authoritative full text
   //
-  // Voice-out skips flushing entirely — voice is one synthesized clip
-  // at the end, so mid-turn flushes would just bloat the audio.
+  // Voice-out skips text streaming entirely; it is split into short voice
+  // clips after the full reply is known.
   let streamedReply = "";
-  let flushedReply = "";
+  let consumedReplyChars = 0;
+  let narrationBuffer = "";
+  let narrationBubblesSent = 0;
+  let finalSegmenter = new StreamSegmenter(segmenterOptions);
+  let finalCandidateText = "";
+  let finalCandidateSentChars = 0;
+  let finalBubblesSent = 0;
   let finalReply: string | undefined;
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
-  // Gemini-cli streaming UX: track whether we're past the first tool
-  // call (so we know when heartbeat events signal post-tool reply
-  // streaming), and throttle heartbeat-triggered text flushes so
-  // replies stream progressively instead of arriving as one blob.
-  let pastFirstTool = false;
-  let lastHeartbeatFlushAt = 0;
+  let lastNarrationFlushAt = Date.now();
 
-  // Flush whatever's buffered since the last flush as a narration
-  // bubble. No-ops in voice-out (we synthesize once at the end) and
-  // when there's nothing meaningful to send (whitespace-only). Logs
-  // and swallows send failures rather than aborting the turn — a
-  // dropped narration bubble is a cosmetic loss, not a correctness
-  // one.
-  const flushNarration = async () => {
-    if (willReplyWithVoice) return;
-    const pending = streamedReply.slice(flushedReply.length);
-    if (pending.trim().length === 0) return;
-    flushedReply = streamedReply;
+  const sendTextSegment = async (
+    text: string,
+    kind: "narration" | "final" | "error",
+  ) => {
+    if (text.trim().length === 0) return;
     try {
-      await input.transport.sendMessage(msg.chatId, pending);
+      await input.transport.sendMessage(msg.chatId, text);
+      if (kind === "narration") narrationBubblesSent++;
+      if (kind === "final") finalBubblesSent++;
     } catch (e) {
-      log.warn("telegram: narration flush failed", {
+      log.warn(`telegram: ${kind} send failed`, {
         error: (e as Error).message,
         chatId: msg.chatId,
       });
     }
-    // Sending a real message replaces the typing indicator — re-arm
-    // it so the user sees we're still working on the next step.
     refreshIndicator();
+  };
+
+  const sendFinalSegments = async (text: string) => {
+    const segments = splitIntoSegments(text, segmenterOptions);
+    for (let i = 0; i < segments.length; i++) {
+      await sendTextSegment(segments[i]!, "final");
+      if (i < segments.length - 1 && streaming.bubbleDelayMs > 0) {
+        await sleep(streaming.bubbleDelayMs);
+      }
+    }
+  };
+
+  const resetFinalCandidate = () => {
+    finalSegmenter = new StreamSegmenter(segmenterOptions);
+    finalCandidateText = "";
+    finalCandidateSentChars = 0;
+  };
+
+  // Flush coalesced progress narration on a clock, not on every tool
+  // boundary. Tool boundaries classify preceding text as narration; this
+  // timer decides when, if ever, that narration becomes a progress bubble.
+  const flushNarration = async (force = false) => {
+    if (willReplyWithVoice) return;
+    if (narrationBuffer.trim().length === 0) return;
+    const now = Date.now();
+    if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {
+      return;
+    }
+    const pending = narrationBuffer;
+    narrationBuffer = "";
+    lastNarrationFlushAt = now;
+    await sendTextSegment(pending, "narration");
   };
 
   // Mechanical capture nudge: every CAPTURE_NUDGE_INTERVAL user turns
@@ -1298,9 +1335,9 @@ async function processChatMessage(
       // Pre-tool narration: ON for text-out (the user sees streamed
       // text as it lands, so a "checking your calendar..." sentence
       // before a tool call usefully fills the silence). OFF for
-      // voice-out: the reply is synthesized as one clip at the end,
-      // so narration would just lengthen the spoken output without
-      // helping with perceived latency. VOICE_REPLY_INSTRUCTION
+      // voice-out: the reply is synthesized after the full response is
+      // known, so narration would just lengthen the spoken output
+      // without helping with perceived latency. VOICE_REPLY_INSTRUCTION
       // already forbids work narration too, so off is consistent.
       toolNarration: !willReplyWithVoice,
     })) {
@@ -1308,40 +1345,28 @@ async function processChatMessage(
         streamedReply += chunk.text;
         stopToolRefresh();
         refreshIndicator();
+        if (!willReplyWithVoice) {
+          finalCandidateText += chunk.text;
+          const { segments } = finalSegmenter.push(chunk.text);
+          for (const segment of segments) {
+            await sendTextSegment(segment, "final");
+            consumedReplyChars += segment.length;
+            finalCandidateSentChars += segment.length;
+            if (streaming.bubbleDelayMs > 0) {
+              await sleep(streaming.bubbleDelayMs);
+            }
+          }
+        }
       }
       if (chunk.type === "heartbeat") {
         // Tool completed (or model is thinking) — stop the background
         // tool-refresh timer and show the indicator naturally.
         stopToolRefresh();
         refreshIndicator();
-        // After the first tool call, heartbeat events signal the model
-        // has started streaming its post-tool reply. Flush accumulated
-        // text so gemini-cli users see replies progressively instead of
-        // waiting for the entire turn to finish. Throttled to avoid
-        // sending a new message on every heartbeat/token pair.
-        if (pastFirstTool) {
-          const now = Date.now();
-          if (now - lastHeartbeatFlushAt >= 1500) {
-            const pending = streamedReply.slice(flushedReply.length);
-            if (pending.trim().length > 0) {
-              flushedReply = streamedReply;
-              try {
-                await input.transport.sendMessage(msg.chatId, pending);
-                lastHeartbeatFlushAt = now;
-              } catch (e) {
-                log.warn("telegram: heartbeat flush failed", {
-                  error: (e as Error).message,
-                  chatId: msg.chatId,
-                });
-              }
-              refreshIndicator();
-            }
-          }
-        }
+        await flushNarration();
       }
       if (chunk.type === "progress") {
         progressCount++;
-        pastFirstTool = true;
         // Stash the latest progress note on the active-turn handle so
         // /status can show "currently: <tool>" in real time.
         turnHandle.lastProgressNote = chunk.note.slice(0, 500);
@@ -1349,16 +1374,20 @@ async function processChatMessage(
           chatId: msg.chatId,
           note: chunk.note.slice(0, 200),
         });
-        // A tool is about to run — flush whatever narration the model
-        // emitted before this point so the user sees it during the
-        // silence. (Inside the loop so multi-tool turns get one
-        // bubble per tool, not one wall at the end.)
-        // flushNarration() re-arms the typing indicator after sending,
-        // so we don't need to call refreshIndicator() again here.
-        const pendingBeforeTool = streamedReply.slice(flushedReply.length);
-        if (pendingBeforeTool.trim().length > 0) {
-          await flushNarration();
+        // A tool is about to run. The text emitted since the previous
+        // boundary was progress narration unless it already crossed the
+        // markdown-aware final-answer splitter and got sent as a readable
+        // final bubble. Buffer the unsent remainder for the timed progress
+        // flush, then consume it so it is not duplicated in finalText.
+        const unsentCandidate = finalCandidateText.slice(
+          finalCandidateSentChars,
+        );
+        if (unsentCandidate.trim().length > 0) {
+          narrationBuffer += unsentCandidate;
         }
+        consumedReplyChars = streamedReply.length;
+        resetFinalCandidate();
+        await flushNarration();
         // Start a background timer to keep the typing/recording
         // indicator visible during tool execution. Without this,
         // gemini-cli's multi-minute tool runs cause Telegram's
@@ -1438,26 +1467,25 @@ async function processChatMessage(
   // (which may have been reformatted), fall back to whatever streamed.
   const fullReply = finalReply ?? streamedReply;
 
-  // Compute what to send in the FINAL bubble (post-tool answer):
+  // Compute what still needs to be sent after live streaming:
   //   - error: surface the diagnostic
-  //   - flushed prefix matches: send only the suffix (the part of the
-  //     answer the user hasn't seen yet)
-  //   - flushed prefix doesn't match (harness reformatted): send the
-  //     full reply. We accept some duplication of the narration text
-  //     over silently truncating the answer.
-  //   - nothing came back AND nothing was flushed: "(no reply)"
-  //   - nothing came back BUT we flushed: stay silent (the narration
-  //     bubbles are the user-visible reply)
+  //   - consumed prefix matches: send only the suffix (the part the user
+  //     hasn't seen yet, after live final bubbles and classified narration)
+  //   - consumed prefix doesn't match (harness reformatted): send the
+  //     full reply. We accept some duplication over silently truncating.
+  //   - nothing came back AND nothing visible was sent: "(no reply)"
+  //   - nothing came back BUT progress/final bubbles landed: stay silent
   let outText: string;
   if (errored) {
     outText = `(error: ${errored})`;
   } else if (fullReply.length === 0) {
-    outText = flushedReply.length > 0 ? "" : "(no reply)";
+    outText =
+      narrationBubblesSent > 0 || finalBubblesSent > 0 ? "" : "(no reply)";
   } else if (
-    flushedReply.length > 0 &&
-    fullReply.startsWith(flushedReply)
+    consumedReplyChars > 0 &&
+    fullReply.startsWith(streamedReply.slice(0, consumedReplyChars))
   ) {
-    outText = fullReply.slice(flushedReply.length);
+    outText = fullReply.slice(consumedReplyChars);
   } else {
     outText = fullReply;
   }
@@ -1467,36 +1495,42 @@ async function processChatMessage(
   // so Telegram pushes a notification — important when the user kicked
   // off a long job and walked away from the chat.
   //
-  // Voice-out always synthesizes the *full* reply (ignoring the chunked
-  // outText), since flushNarration is a no-op for voice and the user
-  // expects one coherent audio clip.
+  // Voice-out synthesizes the full reply, split into short clips. Text
+  // streaming is disabled for voice, so there is nothing to dedupe.
   let sentAsVoice = false;
   try {
     if (willReplyWithVoice && !errored && fullReply.length > 0) {
-      const r = await synthesize(input.config, fullReply);
-      if (r.ok) {
-        await input.transport.sendVoice(
-          msg.chatId,
-          r.audio.data,
-          r.audio.mime,
-        );
-        sentAsVoice = true;
-      } else {
-        log.warn("telegram: TTS failed; falling back to text", {
-          error: r.error,
-        });
-        // TTS failure fallback: send the full reply as text (not the
-        // prefix-trimmed outText) since we never flushed narration on
-        // the voice path — there's nothing to dedupe against.
-        await input.transport.sendMessage(msg.chatId, fullReply);
+      const voiceSegments = splitIntoSegments(fullReply, {
+        maxSentences: streaming.voiceMaxSentences,
+        maxChars: streaming.bubbleMaxChars,
+      });
+      for (const segment of voiceSegments) {
+        const r = await synthesize(input.config, segment);
+        if (r.ok) {
+          await input.transport.sendVoice(
+            msg.chatId,
+            r.audio.data,
+            r.audio.mime,
+          );
+          sentAsVoice = true;
+        } else {
+          log.warn("telegram: TTS failed; falling back to text", {
+            error: r.error,
+          });
+          await sendFinalSegments(fullReply);
+          sentAsVoice = false;
+          break;
+        }
       }
     } else if (outText.length > 0) {
-      // Empty outText is intentional silence: we already flushed the
-      // narration bubbles and the harness produced nothing further
-      // (and there's no error to surface). Skipping the send avoids
-      // a stray "(no reply)" tacked onto the end of a perfectly
-      // delivered turn.
-      await input.transport.sendMessage(msg.chatId, outText);
+      // Empty outText is intentional silence: streaming/progress bubbles
+      // already delivered all useful output. Otherwise, split the remaining
+      // final reply into markdown-safe Telegram bubbles.
+      if (errored) {
+        await sendTextSegment(outText, "error");
+      } else {
+        await sendFinalSegments(outText);
+      }
     }
   } catch (e) {
     log.error("telegram: send failed", {
@@ -1509,7 +1543,9 @@ async function processChatMessage(
     chatId: msg.chatId,
     durationMs: Date.now() - startedAt,
     replyChars: outText.length,
-    flushedChars: flushedReply.length,
+    consumedReplyChars,
+    narrationBubbles: narrationBubblesSent,
+    finalBubbles: finalBubblesSent,
     progressEvents: progressCount,
     harness: chosenHarness ?? (errored ? "(error)" : "(unknown)"),
     modality: sentAsVoice ? "voice" : "text",

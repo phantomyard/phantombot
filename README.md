@@ -222,6 +222,30 @@ systemctl --user restart phantombot
 
 ---
 
+## Telegram reply pacing
+
+Telegram replies are paced for phone-sized chats:
+
+- progress narration is coalesced on a timer instead of posted once per tool call
+- final text is split into smaller bubbles at sentence/character boundaries
+- markdown blocks such as tables and code fences are kept intact where possible
+- voice replies are split into short voice notes
+
+Defaults are conservative, but you can tune them:
+
+```toml
+[channels.telegram.streaming]
+narration_flush_ms = 4500
+bubble_max_sentences = 4
+bubble_max_chars = 700
+bubble_delay_ms = 800
+voice_max_sentences = 3
+```
+
+Environment overrides use the same names in screaming snake case, for example `PHANTOMBOT_TELEGRAM_BUBBLE_MAX_CHARS=900`.
+
+---
+
 ## Voice replies in Telegram
 
 When a Telegram voice message comes in (and the configured provider can do TTS), phantombot transcribes via STT, runs the harness, and synthesizes the reply as a voice note. **For these voice-in/voice-out turns only**, phantombot appends a one-paragraph brevity directive to the system prompt — telling the model to keep the reply to 1-3 sentences (~30 seconds of speech, ≈100 tokens), drop work narration ("Let me check…"), and skip markdown the TTS would read awkwardly.

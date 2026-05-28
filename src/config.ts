@@ -118,6 +118,27 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   turnIndexing: DEFAULT_TURN_INDEXING,
 };
 
+export interface TelegramStreamingSettings {
+  /** Coalesce progress narration bubbles to at most this cadence. */
+  narrationFlushMs: number;
+  /** Cut final text bubbles after this many sentences when markdown-safe. */
+  bubbleMaxSentences: number;
+  /** Cut final text bubbles after roughly this many chars when markdown-safe. */
+  bubbleMaxChars: number;
+  /** Pause between final bubbles so Telegram renders them as readable bursts. */
+  bubbleDelayMs: number;
+  /** Split voice replies into short notes by sentence count. */
+  voiceMaxSentences: number;
+}
+
+export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
+  narrationFlushMs: 4500,
+  bubbleMaxSentences: 4,
+  bubbleMaxChars: 700,
+  bubbleDelayMs: 800,
+  voiceMaxSentences: 3,
+};
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
@@ -160,6 +181,8 @@ export interface Config {
      */
     telegramPersonas?: Record<string, TelegramAccount>;
   };
+
+  telegramStreaming?: TelegramStreamingSettings;
 
   embeddings: {
     /** "gemini" | "none". "none" = FTS5-only search. */
@@ -332,11 +355,56 @@ export async function loadConfig(): Promise<Config> {
       telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
     },
 
+    telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
+
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
 
     voice: buildVoiceConfig(tomlVoice),
+  };
+}
+
+function buildTelegramStreamingConfig(
+  tomlTelegram: Record<string, unknown>,
+): TelegramStreamingSettings {
+  const tomlStreaming = (tomlTelegram.streaming ?? {}) as Record<string, unknown>;
+  return {
+    narrationFlushMs: clampInt(
+      asInt(process.env.PHANTOMBOT_TELEGRAM_NARRATION_FLUSH_MS) ??
+        asInt(tomlStreaming.narration_flush_ms) ??
+        DEFAULT_TELEGRAM_STREAMING.narrationFlushMs,
+      500,
+      30_000,
+    ),
+    bubbleMaxSentences: clampInt(
+      asInt(process.env.PHANTOMBOT_TELEGRAM_BUBBLE_MAX_SENTENCES) ??
+        asInt(tomlStreaming.bubble_max_sentences) ??
+        DEFAULT_TELEGRAM_STREAMING.bubbleMaxSentences,
+      1,
+      20,
+    ),
+    bubbleMaxChars: clampInt(
+      asInt(process.env.PHANTOMBOT_TELEGRAM_BUBBLE_MAX_CHARS) ??
+        asInt(tomlStreaming.bubble_max_chars) ??
+        DEFAULT_TELEGRAM_STREAMING.bubbleMaxChars,
+      100,
+      3500,
+    ),
+    bubbleDelayMs: clampInt(
+      asInt(process.env.PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS) ??
+        asInt(tomlStreaming.bubble_delay_ms) ??
+        DEFAULT_TELEGRAM_STREAMING.bubbleDelayMs,
+      0,
+      10_000,
+    ),
+    voiceMaxSentences: clampInt(
+      asInt(process.env.PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES) ??
+        asInt(tomlStreaming.voice_max_sentences) ??
+        DEFAULT_TELEGRAM_STREAMING.voiceMaxSentences,
+      1,
+      20,
+    ),
   };
 }
 
@@ -582,6 +650,11 @@ function buildTelegramPersonasConfig(
 function clampPollTimeout(s: number): number {
   if (!Number.isFinite(s)) return 30;
   return Math.max(1, Math.min(50, Math.floor(s)));
+}
+
+function clampInt(n: number, min: number, max: number): number {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 function asIntArray(v: unknown): number[] | undefined {

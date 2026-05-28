@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_RETRIEVAL,
+  DEFAULT_TELEGRAM_STREAMING,
   DEFAULT_TURN_INDEXING,
   loadConfig,
   memoryIndexPath,
@@ -54,6 +55,11 @@ const ENV_KEYS = [
   "PHANTOMBOT_TELEGRAM_ALLOWED_USERS_MILES",
   "PHANTOMBOT_TELEGRAM_POLL_S",
   "PHANTOMBOT_TELEGRAM_POLL_S_MILES",
+  "PHANTOMBOT_TELEGRAM_NARRATION_FLUSH_MS",
+  "PHANTOMBOT_TELEGRAM_BUBBLE_MAX_SENTENCES",
+  "PHANTOMBOT_TELEGRAM_BUBBLE_MAX_CHARS",
+  "PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS",
+  "PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES",
 ];
 
 let workdir: string;
@@ -98,6 +104,7 @@ describe("loadConfig — defaults (no file)", () => {
       bin: "codex",
       model: "",
     });
+    expect(c.telegramStreaming).toEqual(DEFAULT_TELEGRAM_STREAMING);
   });
 
   test("XDG paths resolve to ~/.config and ~/.local/share by default", async () => {
@@ -151,6 +158,56 @@ model = "gpt-5.3-codex"
     expect(c.harnesses.codex!.bin).toBe("/opt/codex/codex");
     expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");
   });
+
+  test("reads Telegram streaming knobs from [channels.telegram.streaming]", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[channels.telegram.streaming]
+narration_flush_ms = 3000
+bubble_max_sentences = 3
+bubble_max_chars = 500
+bubble_delay_ms = 250
+voice_max_sentences = 2
+`,
+      "utf8",
+    );
+
+    const c = await loadConfig();
+    expect(c.telegramStreaming).toEqual({
+      narrationFlushMs: 3000,
+      bubbleMaxSentences: 3,
+      bubbleMaxChars: 500,
+      bubbleDelayMs: 250,
+      voiceMaxSentences: 2,
+    });
+  });
+
+  test("clamps Telegram streaming knobs to sane bounds", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[channels.telegram.streaming]
+narration_flush_ms = 1
+bubble_max_sentences = 0
+bubble_max_chars = 50
+bubble_delay_ms = 99999
+voice_max_sentences = 99
+`,
+      "utf8",
+    );
+
+    const c = await loadConfig();
+    expect(c.telegramStreaming).toEqual({
+      narrationFlushMs: 500,
+      bubbleMaxSentences: 1,
+      bubbleMaxChars: 100,
+      bubbleDelayMs: 10_000,
+      voiceMaxSentences: 20,
+    });
+  });
 });
 
 describe("loadConfig — env overrides", () => {
@@ -176,6 +233,37 @@ model = "from-toml"
     process.env.PHANTOMBOT_HARNESS_CHAIN = "claude, pi";
     const c = await loadConfig();
     expect(c.harnesses.chain).toEqual(["claude", "pi"]);
+  });
+
+  test("Telegram streaming env vars override TOML", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[channels.telegram.streaming]
+narration_flush_ms = 3000
+bubble_max_sentences = 3
+bubble_max_chars = 500
+bubble_delay_ms = 250
+voice_max_sentences = 2
+`,
+      "utf8",
+    );
+
+    process.env.PHANTOMBOT_TELEGRAM_NARRATION_FLUSH_MS = "6000";
+    process.env.PHANTOMBOT_TELEGRAM_BUBBLE_MAX_SENTENCES = "5";
+    process.env.PHANTOMBOT_TELEGRAM_BUBBLE_MAX_CHARS = "900";
+    process.env.PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS = "100";
+    process.env.PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES = "4";
+
+    const c = await loadConfig();
+    expect(c.telegramStreaming).toEqual({
+      narrationFlushMs: 6000,
+      bubbleMaxSentences: 5,
+      bubbleMaxChars: 900,
+      bubbleDelayMs: 100,
+      voiceMaxSentences: 4,
+    });
   });
 
   test("PHANTOMBOT_CONFIG overrides the config file path", async () => {
