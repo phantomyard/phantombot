@@ -88,6 +88,23 @@ export interface TurnInput {
   toolNarration?: boolean;
   /** External abort signal from channel layer (e.g. /stop command). Propagated to harnesses. */
   signal?: AbortSignal;
+  /**
+   * Optional turn-time auto-retrieval. When provided, runTurn calls it with
+   * the incoming user message before building the system prompt and injects
+   * whatever it returns into the "Retrieved context for this turn" slot —
+   * the instinct layer that surfaces relevant memory/kb without the agent
+   * having to search by hand.
+   *
+   * Built by `orchestrator/retrieval.ts#makeRetriever`. Contracted to never
+   * throw (it swallows its own failures and returns undefined); runTurn
+   * still guards defensively so a misbehaving retriever can't break a turn.
+   *
+   * Omitted by system turns (tick, nightly) so their prompts stay clean.
+   */
+  retrieve?: (
+    query: string,
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -101,6 +118,19 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         input.historyLimit ?? 20,
       );
 
+  // Instinct layer: pull relevant memory/kb for this message and inject it
+  // into the prompt's "Retrieved context" slot. Belt-and-suspenders try/catch
+  // — the retriever already swallows its own errors, but a turn must never
+  // die on retrieval.
+  let retrievedMemory: string | undefined;
+  if (input.retrieve) {
+    try {
+      retrievedMemory = await input.retrieve(input.userMessage, input.signal);
+    } catch {
+      retrievedMemory = undefined;
+    }
+  }
+
   const baseSystemPrompt = buildSystemPrompt(
     persona,
     {
@@ -108,7 +138,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       conversationId: input.conversation,
       timestamp: new Date(),
     },
-    undefined, // vector-search retrieval reserved for a later phase
+    retrievedMemory,
   );
   // Channel-layer overlays in append order:
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's

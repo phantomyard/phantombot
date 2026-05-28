@@ -26,24 +26,18 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  memoryIndexPath,
+  personaDir,
+} from "../config.ts";
 import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import { TAG_TO_DRAWER } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
 import { openMemoryStore } from "../memory/store.ts";
-
-function indexPath(_config: Config, persona: string): string {
-  // One index file per persona — easier to rebuild a single persona without
-  // touching others, and easier to reason about scope.
-  return join(
-    process.env.XDG_DATA_HOME || join(process.env.HOME ?? "", ".local/share"),
-    "phantombot",
-    "memory-index",
-    `${persona}.sqlite`,
-  );
-}
 
 function resolvePersonaDir(config: Config, persona?: string): {
   persona: string;
@@ -94,7 +88,7 @@ export async function runMemorySearch(
     return 2;
   }
 
-  const ix = await MemoryIndex.open(input.indexPath ?? indexPath(config, persona));
+  const ix = await MemoryIndex.open(input.indexPath ?? memoryIndexPath(persona));
   try {
     await ix.refreshStale(dir);
 
@@ -241,7 +235,7 @@ export async function runMemoryIndex(
     return 2;
   }
 
-  const ix = await MemoryIndex.open(input.indexPath ?? indexPath(config, persona));
+  const ix = await MemoryIndex.open(input.indexPath ?? memoryIndexPath(persona));
   try {
     const ftsResult = input.rebuild
       ? { ...(await ix.rebuild(dir)), removed: 0 }

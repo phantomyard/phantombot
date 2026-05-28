@@ -9,7 +9,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, personaDir, personaEnvSuffix } from "../src/config.ts";
+import {
+  DEFAULT_RETRIEVAL,
+  loadConfig,
+  memoryIndexPath,
+  personaDir,
+  personaEnvSuffix,
+} from "../src/config.ts";
 
 const SAVED_ENV: Record<string, string | undefined> = {};
 const ENV_KEYS = [
@@ -26,6 +32,10 @@ const ENV_KEYS = [
   "PHANTOMBOT_PI_MAX_PAYLOAD",
   "PHANTOMBOT_CODEX_BIN",
   "PHANTOMBOT_CODEX_MODEL",
+  "PHANTOMBOT_RETRIEVAL_ENABLED",
+  "PHANTOMBOT_RETRIEVAL_LIMIT",
+  "PHANTOMBOT_RETRIEVAL_MAX_TOKENS",
+  "PHANTOMBOT_RETRIEVAL_MIN_SCORE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
   // Per-persona Telegram env vars touched by the persona-bound bots
@@ -328,6 +338,81 @@ poll_timeout_s = 10
     const c = await loadConfig();
     expect(c.channels.telegramPersonas!["my-bot.test"]!.token).toBe(
       "env-token",
+    );
+  });
+});
+
+describe("loadConfig — retrieval", () => {
+  async function writeToml(toml: string): Promise<void> {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), toml, "utf8");
+  }
+
+  test("defaults when no config file exists", async () => {
+    const c = await loadConfig();
+    expect(c.retrieval).toEqual(DEFAULT_RETRIEVAL);
+  });
+
+  test("TOML [retrieval] overrides defaults", async () => {
+    await writeToml(`
+[retrieval]
+enabled = false
+limit = 8
+max_tokens = 3000
+min_score = 0.25
+`);
+    const c = await loadConfig();
+    expect(c.retrieval).toEqual({
+      enabled: false,
+      limit: 8,
+      maxTokens: 3000,
+      minScore: 0.25,
+    });
+  });
+
+  test("env vars override TOML", async () => {
+    await writeToml(`
+[retrieval]
+enabled = true
+limit = 5
+`);
+    process.env.PHANTOMBOT_RETRIEVAL_ENABLED = "false";
+    process.env.PHANTOMBOT_RETRIEVAL_LIMIT = "12";
+    process.env.PHANTOMBOT_RETRIEVAL_MAX_TOKENS = "2200";
+    process.env.PHANTOMBOT_RETRIEVAL_MIN_SCORE = "0.4";
+    const c = await loadConfig();
+    expect(c.retrieval).toEqual({
+      enabled: false,
+      limit: 12,
+      maxTokens: 2200,
+      minScore: 0.4,
+    });
+  });
+
+  test("limit is clamped to 1..50", async () => {
+    process.env.PHANTOMBOT_RETRIEVAL_LIMIT = "999";
+    expect((await loadConfig()).retrieval!.limit).toBe(50);
+    process.env.PHANTOMBOT_RETRIEVAL_LIMIT = "0";
+    expect((await loadConfig()).retrieval!.limit).toBe(1);
+  });
+
+  test("maxTokens floors at 0 (negative disables injection)", async () => {
+    process.env.PHANTOMBOT_RETRIEVAL_MAX_TOKENS = "-100";
+    expect((await loadConfig()).retrieval!.maxTokens).toBe(0);
+  });
+
+  test("accepts 1/0/yes/no style booleans for enabled", async () => {
+    process.env.PHANTOMBOT_RETRIEVAL_ENABLED = "0";
+    expect((await loadConfig()).retrieval!.enabled).toBe(false);
+    process.env.PHANTOMBOT_RETRIEVAL_ENABLED = "yes";
+    expect((await loadConfig()).retrieval!.enabled).toBe(true);
+  });
+
+  test("memoryIndexPath resolves under XDG_DATA_HOME", () => {
+    // beforeEach sets XDG_DATA_HOME to <workdir>/data.
+    expect(memoryIndexPath("phantom")).toBe(
+      join(workdir, "data", "phantombot", "memory-index", "phantom.sqlite"),
     );
   });
 });
