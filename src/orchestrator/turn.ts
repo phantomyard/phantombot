@@ -32,6 +32,8 @@ import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { MemoryStore } from "../memory/store.ts";
 
+export const DEFAULT_HISTORY_LIMIT = 30;
+
 export interface TurnInput {
   /** Persona name — used for memory scoping and log clarity. */
   persona: string;
@@ -59,7 +61,7 @@ export interface TurnInput {
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
   hardTimeoutMs: number;
-  /** Number of prior turns to load. Default 20. */
+  /** Number of prior turns to load. Default 30. */
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
   noHistory?: boolean;
@@ -105,6 +107,11 @@ export interface TurnInput {
     query: string,
     signal?: AbortSignal,
   ) => Promise<string | undefined>;
+  /**
+   * Optional post-persist hook. Used by the conversation-turn indexer to
+   * backfill searchable old turns on a cadence. Must never break a turn.
+   */
+  indexTurns?: () => Promise<void>;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -115,7 +122,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     : await input.memory.recentTurns(
         input.persona,
         input.conversation,
-        input.historyLimit ?? 20,
+        input.historyLimit ?? DEFAULT_HISTORY_LIMIT,
       );
 
   // Instinct layer: pull relevant memory/kb for this message and inject it
@@ -190,5 +197,12 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       role: "assistant",
       text: finalText,
     });
+    if (input.indexTurns) {
+      try {
+        await input.indexTurns();
+      } catch {
+        // Derived indexing must never turn a successful reply into an error.
+      }
+    }
   }
 }

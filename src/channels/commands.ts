@@ -20,14 +20,16 @@
  *     so the LLM can interpret it (some personas use `/remember`, etc.).
  */
 
-import type { Config } from "../config.ts";
+import { memoryIndexPath, type Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
+import { MemoryIndex } from "../lib/memoryIndex.ts";
 import { defaultServiceControl } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
 import type { MemoryStore } from "../memory/store.ts";
+import { DEFAULT_HISTORY_LIMIT } from "../orchestrator/turn.ts";
 import { VERSION } from "../version.ts";
 
 export interface ActiveTurnHandle {
@@ -240,11 +242,30 @@ async function handleReset(
     ctx.persona,
     ctx.conversation,
   );
+  let removedIndexedTurns = false;
+  if (ctx.config?.retrieval?.turnIndexing.enabled) {
+    let ix: MemoryIndex | undefined;
+    try {
+      ix = await MemoryIndex.open(memoryIndexPath(ctx.persona));
+      ix.deleteConversationTurns(ctx.persona, ctx.conversation);
+      removedIndexedTurns = true;
+    } catch (e) {
+      log.warn("commands: /reset failed to clear turn index", {
+        chatId: ctx.chatId,
+        persona: ctx.persona,
+        conversation: ctx.conversation,
+        error: (e as Error).message,
+      });
+    } finally {
+      ix?.close();
+    }
+  }
   log.info("commands: /reset", {
     chatId: ctx.chatId,
     persona: ctx.persona,
     conversation: ctx.conversation,
     deletedTurns: removed,
+    removedIndexedTurns,
     abortedActiveTurn: Boolean(ctx.activeTurn),
   });
   const noun = removed === 1 ? "turn" : "turns";
@@ -260,14 +281,14 @@ async function handleStatus(
   const primary = ctx.harnesses[0]?.id ?? "(none)";
   const chain = ctx.harnesses.map((h) => h.id).join(" → ") || "(none)";
 
-  // Rough context estimate: total chars across the last 20 turns, divided
+  // Rough context estimate: total chars across the rolling history turns, divided
   // by 4 (the standard chars-per-token heuristic). Doesn't include the
   // system prompt, which is ~stable across turns. Off by ~10-30% from a
   // real tokenizer reading — fine for "is the context filling up" UX.
   const recent = await ctx.memory.recentTurns(
     ctx.persona,
     ctx.conversation,
-    20,
+    DEFAULT_HISTORY_LIMIT,
   );
   const historyChars = recent.reduce((a, t) => a + t.text.length, 0);
   const approxTokens = Math.round(historyChars / 4);
@@ -295,7 +316,7 @@ async function handleStatus(
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
       `uptime:  ${formatElapsedSeconds(uptimeS)}\n` +
-      `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last 20 turns)\n` +
+      `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last ${DEFAULT_HISTORY_LIMIT} turns)\n` +
       `active:  ${active}` +
       runningLine,
   };

@@ -1,11 +1,14 @@
 /**
- * SQLite FTS5 index over a persona's memory/ and kb/ directories.
+ * SQLite FTS5 index over a persona's memory/ and kb/ directories, plus
+ * derived conversation-turn rows.
  *
  * One file per persona at <dataDir>/memory-index.sqlite, holding:
  *   - notes      FTS5 virtual table (BM25-ranked content search)
  *   - files      mtime + size cache for stale detection on incremental rebuild
  *   - note_embeddings   (reserved — populated in phase 25, schema here so we
  *                       don't have to migrate later)
+ *   - turn_docs / turn_embeddings / turn_index_state
+ *                       (derived conversation continuity index)
  *
  * Updates: any phantombot memory search call does a quick stale-check
  * (compare on-disk mtime with the index's recorded mtime per file) and
@@ -21,8 +24,9 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import type { Turn } from "../memory/store.ts";
 
-export type Scope = "memory" | "kb";
+export type Scope = "memory" | "kb" | "turns";
 
 export interface IndexedFile {
   path: string; // relative to personaDir
@@ -48,6 +52,14 @@ export interface StoredEmbedding {
   chunkIdx: number;
   vec: Float32Array;
   textSha: string;
+}
+
+export interface TurnIndexState {
+  persona: string;
+  conversation: string;
+  lastTurnId: number;
+  userTurnsIndexed: number;
+  indexedAt: string;
 }
 
 /** Brute-force cosine similarity. Both vectors must be the same length. */
@@ -111,6 +123,33 @@ CREATE TABLE IF NOT EXISTS note_embeddings (
   PRIMARY KEY (path, chunk_idx)
 );
 CREATE INDEX IF NOT EXISTS idx_note_embeddings_sha ON note_embeddings(text_sha);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS turn_docs USING fts5(
+  path UNINDEXED,
+  persona UNINDEXED,
+  conversation UNINDEXED,
+  role UNINDEXED,
+  turn_id UNINDEXED,
+  content,
+  tokenize = 'porter unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS turn_embeddings (
+  path         TEXT PRIMARY KEY,
+  vec          BLOB NOT NULL,
+  text_sha     TEXT NOT NULL,
+  embedded_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_turn_embeddings_sha ON turn_embeddings(text_sha);
+
+CREATE TABLE IF NOT EXISTS turn_index_state (
+  persona            TEXT NOT NULL,
+  conversation       TEXT NOT NULL,
+  last_turn_id       INTEGER NOT NULL,
+  user_turns_indexed INTEGER NOT NULL,
+  indexed_at         TEXT NOT NULL,
+  PRIMARY KEY (persona, conversation)
+);
 `;
 
 export class MemoryIndex {
@@ -210,6 +249,109 @@ export class MemoryIndex {
       .run(path, chunkIdx, buf, textSha, new Date().toISOString());
   }
 
+  upsertTurn(turn: Turn, vec?: Float32Array, textSha?: string): void {
+    const path = turnPath(turn);
+    this.deleteTurnPath(path);
+    this.db
+      .prepare(
+        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, content) " +
+          "VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        path,
+        turn.persona,
+        turn.conversation,
+        turn.role,
+        turn.id,
+        renderTurnForIndex(turn),
+      );
+
+    if (vec && textSha) {
+      const buf = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO turn_embeddings " +
+            "(path, vec, text_sha, embedded_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(path, buf, textSha, new Date().toISOString());
+    }
+  }
+
+  turnEmbeddingSha(path: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT text_sha FROM turn_embeddings WHERE path = ?")
+      .get(path) as { text_sha?: string } | null;
+    return row?.text_sha;
+  }
+
+  turnIndexState(
+    persona: string,
+    conversation: string,
+  ): TurnIndexState | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT persona, conversation, last_turn_id, user_turns_indexed, indexed_at
+         FROM turn_index_state
+         WHERE persona = ? AND conversation = ?`,
+      )
+      .get(persona, conversation) as
+      | {
+          persona: string;
+          conversation: string;
+          last_turn_id: number;
+          user_turns_indexed: number;
+          indexed_at: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      persona: row.persona,
+      conversation: row.conversation,
+      lastTurnId: row.last_turn_id,
+      userTurnsIndexed: row.user_turns_indexed,
+      indexedAt: row.indexed_at,
+    };
+  }
+
+  updateTurnIndexState(
+    persona: string,
+    conversation: string,
+    lastTurnId: number,
+    userTurnsIndexed: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO turn_index_state
+           (persona, conversation, last_turn_id, user_turns_indexed, indexed_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(persona, conversation) DO UPDATE SET
+           last_turn_id = excluded.last_turn_id,
+           user_turns_indexed = excluded.user_turns_indexed,
+           indexed_at = excluded.indexed_at`,
+      )
+      .run(
+        persona,
+        conversation,
+        Math.max(0, Math.floor(lastTurnId)),
+        Math.max(0, Math.floor(userTurnsIndexed)),
+        new Date().toISOString(),
+      );
+  }
+
+  deleteConversationTurns(persona: string, conversation: string): void {
+    const rows = this.db
+      .query(
+        "SELECT path FROM turn_docs WHERE persona = ? AND conversation = ?",
+      )
+      .all(persona, conversation) as Array<{ path: string }>;
+    for (const row of rows) this.deleteTurnPath(row.path);
+    this.db
+      .prepare(
+        "DELETE FROM turn_index_state WHERE persona = ? AND conversation = ?",
+      )
+      .run(persona, conversation);
+  }
+
   /** Return the recorded text_sha for a (path, chunk_idx) or undefined. */
   embeddingSha(path: string, chunkIdx: number): string | undefined {
     const row = this.db
@@ -222,7 +364,7 @@ export class MemoryIndex {
 
   /** Walk every stored embedding. Loads all into memory — fine up to ~50K rows. */
   allEmbeddings(): StoredEmbedding[] {
-    const rows = this.db
+    const noteRows = this.db
       .query(
         "SELECT path, chunk_idx, vec, text_sha FROM note_embeddings",
       )
@@ -232,20 +374,41 @@ export class MemoryIndex {
       vec: Buffer | Uint8Array;
       text_sha: string;
     }>;
-    return rows.map((r) => ({
+    const turnRows = this.db
+      .query("SELECT path, vec, text_sha FROM turn_embeddings")
+      .all() as Array<{
+      path: string;
+      vec: Buffer | Uint8Array;
+      text_sha: string;
+    }>;
+    return [
+      ...noteRows.map((r) => ({
       path: r.path,
       chunkIdx: r.chunk_idx,
       vec: blobToFloat32(r.vec),
       textSha: r.text_sha,
-    }));
+      })),
+      ...turnRows.map((r) => ({
+        path: r.path,
+        chunkIdx: 0,
+        vec: blobToFloat32(r.vec),
+        textSha: r.text_sha,
+      })),
+    ];
   }
 
   embeddingCount(): number {
-    return (
+    const notes = (
       this.db
         .prepare("SELECT COUNT(*) AS c FROM note_embeddings")
         .get() as { c: number }
     ).c;
+    const turns = (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM turn_embeddings")
+        .get() as { c: number }
+    ).c;
+    return notes + turns;
   }
 
   // -------------------------------------------------------------
@@ -262,7 +425,7 @@ export class MemoryIndex {
 
     const ftsQuery = sanitizeFtsQuery(query);
 
-    const rows =
+    const noteRows =
       scope === "all"
         ? (this.db
             .query(
@@ -291,14 +454,40 @@ export class MemoryIndex {
             snip: string;
           }>);
 
-    return rows.map((r) => ({
+    const turnRows =
+      scope === "all" || scope === "turns"
+        ? (this.db
+            .query(
+              "SELECT path, bm25(turn_docs) AS rank, " +
+                "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
+                "FROM turn_docs WHERE content MATCH ? " +
+                "ORDER BY rank LIMIT ?",
+            )
+            .all(ftsQuery, limit) as Array<{
+            path: string;
+            rank: number;
+            snip: string;
+          }>)
+        : [];
+
+    return [
+      ...noteRows.map((r) => ({
       path: r.path,
       scope: r.scope,
       // bm25() in FTS5 is "lower is better"; flip the sign so callers can
       // sort/threshold consistently with cosine sim later (higher = better).
       ftsScore: -r.rank,
       snippet: r.snip,
-    }));
+      })),
+      ...turnRows.map((r) => ({
+        path: r.path,
+        scope: "turns" as const,
+        ftsScore: -r.rank,
+        snippet: r.snip,
+      })),
+    ]
+      .sort((a, b) => (b.ftsScore ?? 0) - (a.ftsScore ?? 0))
+      .slice(0, limit);
   }
 
   /**
@@ -324,14 +513,21 @@ export class MemoryIndex {
       if (cur === undefined || s > cur) vecScores.set(emb.path, s);
     }
 
-    // Filter by scope by joining with the FTS files table — embeddings
-    // table has no scope column, so we look up scope from `files`.
+    // Filter by scope by joining with the metadata tables — embeddings
+    // tables have no scope column, so we look up each path.
     let allowedPaths: Set<string> | undefined;
     if (opts.scope && opts.scope !== "all") {
-      const rows = this.db
-        .query("SELECT path FROM files WHERE scope = ?")
-        .all(opts.scope) as Array<{ path: string }>;
-      allowedPaths = new Set(rows.map((r) => r.path));
+      if (opts.scope === "turns") {
+        const rows = this.db
+          .query("SELECT path FROM turn_docs")
+          .all() as Array<{ path: string }>;
+        allowedPaths = new Set(rows.map((r) => r.path));
+      } else {
+        const rows = this.db
+          .query("SELECT path FROM files WHERE scope = ?")
+          .all(opts.scope) as Array<{ path: string }>;
+        allowedPaths = new Set(rows.map((r) => r.path));
+      }
       for (const path of [...vecScores.keys()]) {
         if (!allowedPaths.has(path)) vecScores.delete(path);
       }
@@ -356,24 +552,33 @@ export class MemoryIndex {
         const scope =
           ftsHit?.scope ??
           this.lookupScope(path) ??
-          ("kb" as Scope); // best guess
+          (path.startsWith("turns/") ? "turns" : ("kb" as Scope)); // best guess
         return {
           path,
           scope,
           ftsScore: ftsHit?.ftsScore,
           vecScore: vecScores.get(path),
           rrfScore,
-          snippet: ftsHit?.snippet ?? "",
+          snippet: ftsHit?.snippet ?? this.snippetForPath(path),
         };
       });
     return merged;
   }
 
   private lookupScope(path: string): Scope | undefined {
+    if (path.startsWith("turns/")) return "turns";
     const row = this.db
       .prepare("SELECT scope FROM files WHERE path = ?")
       .get(path) as { scope?: Scope } | null;
     return row?.scope;
+  }
+
+  private snippetForPath(path: string): string {
+    const table = path.startsWith("turns/") ? "turn_docs" : "notes";
+    const row = this.db
+      .prepare(`SELECT content FROM ${table} WHERE path = ? LIMIT 1`)
+      .get(path) as { content?: string } | null;
+    return (row?.content ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
   }
 
   private deletePath(path: string): void {
@@ -382,6 +587,11 @@ export class MemoryIndex {
     this.db
       .prepare("DELETE FROM note_embeddings WHERE path = ?")
       .run(path);
+  }
+
+  private deleteTurnPath(path: string): void {
+    this.db.prepare("DELETE FROM turn_docs WHERE path = ?").run(path);
+    this.db.prepare("DELETE FROM turn_embeddings WHERE path = ?").run(path);
   }
 }
 
@@ -401,6 +611,18 @@ export function walkMarkdown(personaDir: string): IndexedFile[] {
     walk(root, root, scope, out);
   }
   return out;
+}
+
+export function turnPath(
+  turn: Pick<Turn, "persona" | "conversation" | "id">,
+): string {
+  return `turns/${turn.persona}/${encodeURIComponent(turn.conversation)}/${turn.id}`;
+}
+
+export function renderTurnForIndex(
+  turn: Pick<Turn, "role" | "text" | "createdAt">,
+): string {
+  return `[${turn.role} ${turn.createdAt.toISOString()}]\n${turn.text}`;
 }
 
 function walk(

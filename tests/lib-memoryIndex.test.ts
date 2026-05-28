@@ -9,8 +9,10 @@ import { join } from "node:path";
 import {
   MemoryIndex,
   sanitizeFtsQuery,
+  turnPath,
   walkMarkdown,
 } from "../src/lib/memoryIndex.ts";
+import type { Turn } from "../src/memory/store.ts";
 
 let workdir: string;
 let personaDir: string;
@@ -146,6 +148,61 @@ describe("MemoryIndex.search", () => {
     await note("kb/concepts/A.md", "anything");
     await ix.refreshStale(personaDir);
     expect(ix.search("   ")).toEqual([]);
+  });
+
+  test("searches indexed conversation turns alongside memory files", async () => {
+    const turn: Turn = {
+      id: 42,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "The Vesuvius pension tracing email came from Isio.",
+      createdAt: new Date("2026-05-28T06:00:00Z"),
+    };
+    ix.upsertTurn(turn);
+
+    const hits = ix.search("Vesuvius pension", { scope: "all" });
+    expect(hits[0]?.scope).toBe("turns");
+    expect(hits[0]?.path).toBe(turnPath(turn));
+    expect(hits[0]?.snippet).toContain("Vesuvius");
+  });
+
+  test("scope=turns returns only indexed conversation turns", async () => {
+    await note("memory/decisions.md", "Vesuvius memory note");
+    await ix.refreshStale(personaDir);
+    ix.upsertTurn({
+      id: 7,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "assistant",
+      text: "Vesuvius turn note",
+      createdAt: new Date("2026-05-28T06:00:00Z"),
+    });
+
+    const hits = ix.search("Vesuvius", { scope: "turns" });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.scope).toBe("turns");
+    expect(hits[0]?.path).toContain("/7");
+  });
+
+  test("deleteConversationTurns removes turn docs, embeddings, and state", () => {
+    const turn: Turn = {
+      id: 9,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "reset-sensitive turn",
+      createdAt: new Date("2026-05-28T06:00:00Z"),
+    };
+    const vec = new Float32Array([1, 0, 0]);
+    ix.upsertTurn(turn, vec, "sha");
+    ix.updateTurnIndexState("phantom", "telegram:1001", 9, 20);
+
+    ix.deleteConversationTurns("phantom", "telegram:1001");
+
+    expect(ix.search("reset-sensitive", { scope: "turns" })).toEqual([]);
+    expect(ix.embeddingCount()).toBe(0);
+    expect(ix.turnIndexState("phantom", "telegram:1001")).toBeUndefined();
   });
 });
 

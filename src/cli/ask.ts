@@ -36,6 +36,7 @@ import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
+import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 
 export interface RunAskInput {
   /** The user prompt. Required. */
@@ -111,10 +112,11 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   let streamedText = "";
   let harnessFinal = "";
   let succeeded = false;
+  const conversation = input.conversation ?? "cli:ask";
   try {
     for await (const chunk of runTurn({
       persona,
-      conversation: input.conversation ?? "cli:ask",
+      conversation,
       userMessage: prompt,
       agentDir,
       harnesses,
@@ -127,6 +129,9 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       // typically scripted/programmatic — skip the embed round-trip there.
       retrieve: input.history
         ? makeRetriever(config, persona, agentDir)
+        : undefined,
+      indexTurns: input.history
+        ? makeTurnIndexer(config, persona, conversation, memory)
         : undefined,
       // Streaming consumers benefit from pre-tool narration: the
       // assistant's intent sentence flushes to stdout before the

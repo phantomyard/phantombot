@@ -110,6 +110,28 @@ describe("MemoryStore.recentTurnsForDisplay", () => {
   });
 });
 
+describe("MemoryStore.turnsAfterId / countUserTurns", () => {
+  test("returns full rows after a known id within one conversation", async () => {
+    await append("phantom", "cli:default", "user", "first");
+    const rows = await store.recentTurnsForDisplay("phantom", 10);
+    const firstId = rows[0]!.id;
+    await append("phantom", "cli:default", "assistant", "second");
+    await append("phantom", "telegram:42", "user", "other conversation");
+
+    const after = await store.turnsAfterId("phantom", "cli:default", firstId);
+    expect(after.map((t) => t.text)).toEqual(["second"]);
+  });
+
+  test("countUserTurns counts only user rows in the requested conversation", async () => {
+    await append("phantom", "cli:default", "user", "u1");
+    await append("phantom", "cli:default", "assistant", "a1");
+    await append("phantom", "cli:default", "user", "u2");
+    await append("phantom", "telegram:42", "user", "other");
+
+    expect(await store.countUserTurns("phantom", "cli:default")).toBe(2);
+  });
+});
+
 describe("MemoryStore.close", () => {
   test("close is idempotent — calling twice does not throw", async () => {
     await store.close();

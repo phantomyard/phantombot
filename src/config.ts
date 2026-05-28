@@ -69,6 +69,20 @@ export interface TelegramAccount {
   allowedUserIds: number[];
 }
 
+export interface TurnIndexingSettings {
+  enabled: boolean;
+  /** Trigger when at least this many new user turns have accrued. */
+  interval: number;
+  /** Max raw turn rows read from memory in one SQLite page. */
+  batchSize: number;
+}
+
+export const DEFAULT_TURN_INDEXING: TurnIndexingSettings = {
+  enabled: true,
+  interval: 20,
+  batchSize: 200,
+};
+
 /**
  * Auto-retrieval settings. When enabled, each interactive turn embeds the
  * incoming user message, hybrid-searches the persona's memory/ + kb/ index,
@@ -92,6 +106,8 @@ export interface RetrievalSettings {
    * floor (include anything the index matched). Raise to suppress weak hits.
    */
   minScore: number;
+  /** Derived index over raw conversation turns, searched alongside memory/kb. */
+  turnIndexing: TurnIndexingSettings;
 }
 
 export const DEFAULT_RETRIEVAL: RetrievalSettings = {
@@ -99,6 +115,7 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   limit: 5,
   maxTokens: 1500,
   minScore: 0,
+  turnIndexing: DEFAULT_TURN_INDEXING,
 };
 
 export interface Config {
@@ -200,6 +217,10 @@ export async function loadConfig(): Promise<Config> {
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
   const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
+  const tomlTurnIndexing = (tomlRetrieval.turn_indexing ?? {}) as Record<
+    string,
+    unknown
+  >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
 
   return {
@@ -313,7 +334,7 @@ export async function loadConfig(): Promise<Config> {
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
-    retrieval: buildRetrievalConfig(tomlRetrieval),
+    retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
 
     voice: buildVoiceConfig(tomlVoice),
   };
@@ -327,6 +348,7 @@ export async function loadConfig(): Promise<Config> {
  */
 function buildRetrievalConfig(
   tomlRetrieval: Record<string, unknown>,
+  tomlTurnIndexing: Record<string, unknown>,
 ): RetrievalSettings {
   const enabled =
     asBool(process.env.PHANTOMBOT_RETRIEVAL_ENABLED) ??
@@ -356,6 +378,29 @@ function buildRetrievalConfig(
     // legitimately want a large budget, the per-turn hit count caps it anyway.
     maxTokens: Math.max(0, maxTokens),
     minScore,
+    turnIndexing: buildTurnIndexingConfig(tomlTurnIndexing),
+  };
+}
+
+function buildTurnIndexingConfig(
+  tomlTurnIndexing: Record<string, unknown>,
+): TurnIndexingSettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED) ??
+    asBool(tomlTurnIndexing.enabled) ??
+    DEFAULT_TURN_INDEXING.enabled;
+  const interval =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL) ??
+    asInt(tomlTurnIndexing.interval) ??
+    DEFAULT_TURN_INDEXING.interval;
+  const batchSize =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE) ??
+    asInt(tomlTurnIndexing.batch_size) ??
+    DEFAULT_TURN_INDEXING.batchSize;
+  return {
+    enabled,
+    interval: Math.max(1, Math.min(10_000, interval)),
+    batchSize: Math.max(1, Math.min(5_000, batchSize)),
   };
 }
 

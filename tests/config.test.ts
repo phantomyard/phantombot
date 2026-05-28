@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_RETRIEVAL,
+  DEFAULT_TURN_INDEXING,
   loadConfig,
   memoryIndexPath,
   personaDir,
@@ -36,6 +37,9 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_LIMIT",
   "PHANTOMBOT_RETRIEVAL_MAX_TOKENS",
   "PHANTOMBOT_RETRIEVAL_MIN_SCORE",
+  "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED",
+  "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL",
+  "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
   // Per-persona Telegram env vars touched by the persona-bound bots
@@ -368,6 +372,7 @@ min_score = 0.25
       limit: 8,
       maxTokens: 3000,
       minScore: 0.25,
+      turnIndexing: DEFAULT_TURN_INDEXING,
     });
   });
 
@@ -387,6 +392,40 @@ limit = 5
       limit: 12,
       maxTokens: 2200,
       minScore: 0.4,
+      turnIndexing: DEFAULT_TURN_INDEXING,
+    });
+  });
+
+  test("TOML [retrieval.turn_indexing] overrides defaults", async () => {
+    await writeToml(`
+[retrieval.turn_indexing]
+enabled = false
+interval = 30
+batch_size = 400
+`);
+    const c = await loadConfig();
+    expect(c.retrieval!.turnIndexing).toEqual({
+      enabled: false,
+      interval: 30,
+      batchSize: 400,
+    });
+  });
+
+  test("turn-index env vars override TOML", async () => {
+    await writeToml(`
+[retrieval.turn_indexing]
+enabled = false
+interval = 30
+batch_size = 400
+`);
+    process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED = "true";
+    process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL = "20";
+    process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE = "50";
+    const c = await loadConfig();
+    expect(c.retrieval!.turnIndexing).toEqual({
+      enabled: true,
+      interval: 20,
+      batchSize: 50,
     });
   });
 

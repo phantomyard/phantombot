@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { runTurn } from "../src/orchestrator/turn.ts";
+import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
 import {
   type MemoryStore,
   openMemoryStore,
@@ -90,6 +90,28 @@ describe("runTurn — successful path", () => {
       { role: "user", text: "hello" },
       { role: "assistant", text: "hi there" },
     ]);
+  });
+
+  test("runs post-persist turn index hook after a successful turn", async () => {
+    let sawPersistedTurns = 0;
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "reply" },
+    ]);
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hello",
+        harnesses: [harness],
+        indexTurns: async () => {
+          sawPersistedTurns = (
+            await memory.recentTurns("phantom", "cli:default", 10)
+          ).length;
+        },
+      }),
+    );
+
+    expect(sawPersistedTurns).toBe(2);
   });
 
   test("workingDir defaults to the running user's home dir (gemini sandbox spans the whole user account)", async () => {
@@ -481,6 +503,37 @@ describe("runTurn — auto-retrieval (line-111 instinct)", () => {
 });
 
 describe("runTurn — historyLimit", () => {
+  test("defaults to the 30-turn rolling window", async () => {
+    for (let i = 1; i <= DEFAULT_HISTORY_LIMIT + 5; i++) {
+      await memory.appendTurn({
+        persona: "phantom",
+        conversation: "cli:default",
+        role: "user",
+        text: `msg ${i}`,
+      });
+    }
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "now",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(captured?.history).toHaveLength(DEFAULT_HISTORY_LIMIT);
+    expect(captured?.history[0]?.text).toBe("msg 6");
+    expect(captured?.history.at(-1)?.text).toBe("msg 35");
+  });
+
   test("respects historyLimit when loading prior turns", async () => {
     for (let i = 1; i <= 5; i++) {
       await memory.appendTurn({

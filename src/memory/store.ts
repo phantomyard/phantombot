@@ -14,9 +14,9 @@
  * CLI invocations share one conversation per persona. Per-channel scoping
  * (telegram:1234, signal:abc) is reserved for a future channels phase.
  *
- * Vector / FTS retrieval is deferred — the interface intentionally has no
- * vectorSearch() method. When/if added, prefer SQLite FTS5 (built into
- * the bun:sqlite-bundled sqlite) before reaching for sqlite-vec.
+ * Search indexing lives in lib/memoryIndex.ts. This store remains the source
+ * of truth for raw turns; indexers read from here and maintain their own
+ * derived FTS/vector rows.
  */
 
 import { Database } from "bun:sqlite";
@@ -59,6 +59,15 @@ export interface MemoryStore {
   ): Promise<Array<{ role: Role; text: string }>>;
   /** Most recent N turns across all conversations for one persona, full rows, oldest first. */
   recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]>;
+  /** Full turn rows after a known id within one conversation, oldest first. */
+  turnsAfterId(
+    persona: string,
+    conversation: string,
+    afterId: number,
+    limit?: number,
+  ): Promise<Turn[]>;
+  /** Count user turns in a conversation. Used by predictable indexing triggers. */
+  countUserTurns(persona: string, conversation: string): Promise<number>;
   /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
@@ -137,9 +146,11 @@ class SqliteMemoryStore implements MemoryStore {
   private appendStmt;
   private recentStmt;
   private recentDisplayStmt;
+  private turnsAfterIdStmt;
   private deleteStmt;
   private appendCaptureStmt;
   private lastCaptureStmt;
+  private countUserTurnsStmt;
   private countTurnsSinceStmt;
   private countCapturesSinceStmt;
   private closed = false;
@@ -168,6 +179,13 @@ class SqliteMemoryStore implements MemoryStore {
          LIMIT ?
        ) ORDER BY created_at ASC, id ASC`,
     );
+    this.turnsAfterIdStmt = db.prepare(
+      `SELECT id, persona, conversation, role, text, created_at
+       FROM turns
+       WHERE persona = ? AND conversation = ? AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    );
     this.deleteStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ?",
     );
@@ -178,6 +196,10 @@ class SqliteMemoryStore implements MemoryStore {
       `SELECT created_at FROM capture_log
        WHERE persona = ? AND conversation = ?
        ORDER BY created_at DESC, id DESC LIMIT 1`,
+    );
+    this.countUserTurnsStmt = db.prepare(
+      `SELECT COUNT(*) AS n FROM turns
+       WHERE persona = ? AND conversation = ? AND role = 'user'`,
     );
     this.countTurnsSinceStmt = db.prepare(
       `SELECT COUNT(*) AS n FROM turns
@@ -213,14 +235,29 @@ class SqliteMemoryStore implements MemoryStore {
 
   async recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]> {
     const rows = this.recentDisplayStmt.all(persona, n) as RawDisplayRow[];
-    return rows.map((r) => ({
-      id: r.id,
-      persona: r.persona,
-      conversation: r.conversation,
-      role: r.role,
-      text: r.text,
-      createdAt: new Date(r.created_at),
-    }));
+    return mapDisplayRows(rows);
+  }
+
+  async turnsAfterId(
+    persona: string,
+    conversation: string,
+    afterId: number,
+    limit = 1000,
+  ): Promise<Turn[]> {
+    const rows = this.turnsAfterIdStmt.all(
+      persona,
+      conversation,
+      Math.max(0, Math.floor(afterId)),
+      Math.max(1, Math.floor(limit)),
+    ) as RawDisplayRow[];
+    return mapDisplayRows(rows);
+  }
+
+  async countUserTurns(persona: string, conversation: string): Promise<number> {
+    const row = this.countUserTurnsStmt.get(persona, conversation) as {
+      n: number;
+    };
+    return row.n;
   }
 
   async appendCapture(input: AppendCaptureInput): Promise<void> {
@@ -291,6 +328,17 @@ class SqliteMemoryStore implements MemoryStore {
     const result = this.deleteStmt.run(persona, conversation);
     return result.changes;
   }
+}
+
+function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
+  return rows.map((r) => ({
+    id: r.id,
+    persona: r.persona,
+    conversation: r.conversation,
+    role: r.role,
+    text: r.text,
+    createdAt: new Date(r.created_at),
+  }));
 }
 
 export async function openMemoryStore(path: string): Promise<MemoryStore> {
