@@ -417,7 +417,18 @@ export class MemoryIndex {
 
   search(
     query: string,
-    opts: { scope?: Scope | "all"; limit?: number } = {},
+    opts: {
+      scope?: Scope | "all";
+      limit?: number;
+      /**
+       * When set, conversation-turn rows are restricted to this conversation.
+       * memory/ + kb/ notes stay global to the persona regardless. Omitted →
+       * turns are searched across all conversations (the CLI `memory search`
+       * behaviour); the auto-retrieval hot path always passes it so chat A
+       * never surfaces chat B's turns. (Kai's review on PR #132.)
+       */
+      conversation?: string;
+    } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
     const scope = opts.scope ?? "all";
@@ -456,18 +467,31 @@ export class MemoryIndex {
 
     const turnRows =
       scope === "all" || scope === "turns"
-        ? (this.db
-            .query(
-              "SELECT path, bm25(turn_docs) AS rank, " +
-                "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
-                "FROM turn_docs WHERE content MATCH ? " +
-                "ORDER BY rank LIMIT ?",
-            )
-            .all(ftsQuery, limit) as Array<{
-            path: string;
-            rank: number;
-            snip: string;
-          }>)
+        ? opts.conversation !== undefined
+          ? (this.db
+              .query(
+                "SELECT path, bm25(turn_docs) AS rank, " +
+                  "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
+                  "FROM turn_docs WHERE content MATCH ? AND conversation = ? " +
+                  "ORDER BY rank LIMIT ?",
+              )
+              .all(ftsQuery, opts.conversation, limit) as Array<{
+              path: string;
+              rank: number;
+              snip: string;
+            }>)
+          : (this.db
+              .query(
+                "SELECT path, bm25(turn_docs) AS rank, " +
+                  "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
+                  "FROM turn_docs WHERE content MATCH ? " +
+                  "ORDER BY rank LIMIT ?",
+              )
+              .all(ftsQuery, limit) as Array<{
+              path: string;
+              rank: number;
+              snip: string;
+            }>)
         : [];
 
     return [
@@ -497,10 +521,19 @@ export class MemoryIndex {
   hybridSearch(
     query: string,
     queryVec: Float32Array | undefined,
-    opts: { scope?: Scope | "all"; limit?: number } = {},
+    opts: {
+      scope?: Scope | "all";
+      limit?: number;
+      /** See `search()` — scopes conversation-turn rows to one conversation. */
+      conversation?: string;
+    } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
-    const ftsHits = this.search(query, { scope: opts.scope, limit: 25 });
+    const ftsHits = this.search(query, {
+      scope: opts.scope,
+      limit: 25,
+      conversation: opts.conversation,
+    });
 
     if (!queryVec || queryVec.length === 0) return ftsHits.slice(0, limit);
 
@@ -513,20 +546,40 @@ export class MemoryIndex {
       if (cur === undefined || s > cur) vecScores.set(emb.path, s);
     }
 
-    // Filter by scope by joining with the metadata tables — embeddings
-    // tables have no scope column, so we look up each path.
-    let allowedPaths: Set<string> | undefined;
-    if (opts.scope && opts.scope !== "all") {
-      if (opts.scope === "turns") {
-        const rows = this.db
-          .query("SELECT path FROM turn_docs")
-          .all() as Array<{ path: string }>;
-        allowedPaths = new Set(rows.map((r) => r.path));
-      } else {
-        const rows = this.db
+    // Filter vector hits by scope by joining with the metadata tables —
+    // embeddings tables have no scope column, so we look up each path.
+    //
+    // memory/ + kb/ notes stay GLOBAL to the persona (shared knowledge), but
+    // conversation-turn rows are scoped to opts.conversation when given, so
+    // chat A never surfaces chat B's turns through the vector path. This
+    // mirrors the FTS scoping in search(). (Kai's review on PR #132.)
+    const searchScope = opts.scope ?? "all";
+    const conversation = opts.conversation;
+    if (searchScope !== "all" || conversation !== undefined) {
+      const allowedPaths = new Set<string>();
+      // Notes (memory/kb): allowed by scope, never filtered by conversation.
+      if (searchScope === "all") {
+        for (const r of this.db
+          .query("SELECT path FROM files")
+          .all() as Array<{ path: string }>)
+          allowedPaths.add(r.path);
+      } else if (searchScope === "memory" || searchScope === "kb") {
+        for (const r of this.db
           .query("SELECT path FROM files WHERE scope = ?")
-          .all(opts.scope) as Array<{ path: string }>;
-        allowedPaths = new Set(rows.map((r) => r.path));
+          .all(searchScope) as Array<{ path: string }>)
+          allowedPaths.add(r.path);
+      }
+      // Conversation turns: scoped to the current conversation when provided.
+      if (searchScope === "all" || searchScope === "turns") {
+        const turnRows =
+          conversation !== undefined
+            ? (this.db
+                .query("SELECT path FROM turn_docs WHERE conversation = ?")
+                .all(conversation) as Array<{ path: string }>)
+            : (this.db
+                .query("SELECT path FROM turn_docs")
+                .all() as Array<{ path: string }>);
+        for (const r of turnRows) allowedPaths.add(r.path);
       }
       for (const path of [...vecScores.keys()]) {
         if (!allowedPaths.has(path)) vecScores.delete(path);

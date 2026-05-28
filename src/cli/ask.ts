@@ -128,7 +128,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       // conversational asks (history on). One-shot, no-history asks are
       // typically scripted/programmatic — skip the embed round-trip there.
       retrieve: input.history
-        ? makeRetriever(config, persona, agentDir)
+        ? makeRetriever(config, persona, agentDir, conversation)
         : undefined,
       indexTurns: input.history
         ? makeTurnIndexer(config, persona, conversation, memory)

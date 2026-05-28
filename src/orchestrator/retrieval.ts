@@ -48,6 +48,13 @@ export interface RetrieveContextOptions {
   /** Embeddings config — drives whether we hybrid-search or fall back to FTS. */
   embeddings: Config["embeddings"];
   settings: RetrievalSettings;
+  /**
+   * Current conversation id. Scopes indexed conversation-turn hits to THIS
+   * conversation so retrieval never bleeds another chat's turns into the
+   * prompt. memory/ + kb/ stay global. Omit to search turns across all
+   * conversations (not what the per-turn hot path wants). (Kai's review, PR #132.)
+   */
+  conversation?: string;
   signal?: AbortSignal;
   /** Injectable fetch for tests (passed through to geminiEmbed). */
   fetchImpl?: typeof fetch;
@@ -97,8 +104,13 @@ export async function retrieveContext(
       ? ix.hybridSearch(query, queryVec, {
           scope: "all",
           limit: opts.settings.limit,
+          conversation: opts.conversation,
         })
-      : ix.search(query, { scope: "all", limit: opts.settings.limit });
+      : ix.search(query, {
+          scope: "all",
+          limit: opts.settings.limit,
+          conversation: opts.conversation,
+        });
 
     return formatRetrieved(hits, opts.settings);
   } catch (e) {
@@ -172,11 +184,17 @@ export function formatRetrieved(
  * retrieval is disabled. Callers pass the result straight to
  * `runTurn({ retrieve })`; an undefined retriever means runTurn skips
  * retrieval entirely (the path system turns like tick/nightly always take).
+ *
+ * `conversation` binds the retriever to the current conversation so indexed
+ * turn hits are scoped to it — required, because forgetting to scope is
+ * exactly the cross-conversation leak Kai caught on PR #132. memory/ + kb/
+ * remain global to the persona.
  */
 export function makeRetriever(
   config: Config,
   persona: string,
   agentDir: string,
+  conversation: string,
 ): Retriever | undefined {
   const settings = config.retrieval;
   // Undefined settings (ad-hoc Config) or explicitly disabled → no retriever.
@@ -189,6 +207,7 @@ export function makeRetriever(
       indexPath,
       embeddings: config.embeddings,
       settings,
+      conversation,
       signal,
     });
 }

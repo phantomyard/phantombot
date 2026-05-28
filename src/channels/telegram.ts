@@ -1262,7 +1262,12 @@ async function processChatMessage(
       // Instinct layer: auto-retrieve relevant memory/kb for this message.
       // makeRetriever returns undefined when retrieval is disabled in
       // config, in which case runTurn skips it entirely.
-      retrieve: makeRetriever(input.config, input.persona, input.agentDir),
+      retrieve: makeRetriever(
+        input.config,
+        input.persona,
+        input.agentDir,
+        conversationKey,
+      ),
       indexTurns: makeTurnIndexer(
         input.config,
         input.persona,

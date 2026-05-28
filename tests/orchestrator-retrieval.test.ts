@@ -224,6 +224,46 @@ describe("retrieveContext", () => {
     expect(out!).toContain("Inverter.md");
   });
 
+  test("scopes indexed turns to the current conversation (no cross-chat bleed)", async () => {
+    // Seed two conversations' turns into the on-disk index, then retrieve
+    // for conversation AAA. The BBB turn must never surface. (Kai, PR #132.)
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "telegram:AAA",
+      role: "user",
+      text: "The private figure we discussed in chat AAA was 12345.",
+      createdAt: new Date("2026-05-28T06:00:00Z"),
+    });
+    ix.upsertTurn({
+      id: 2,
+      persona: "phantom",
+      conversation: "telegram:BBB",
+      role: "user",
+      text: "The private figure we discussed in chat BBB was 67890.",
+      createdAt: new Date("2026-05-28T06:01:00Z"),
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      query: "private figure we discussed",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "telegram:AAA",
+    });
+    expect(out).toBeDefined();
+    // The current conversation's turn surfaces (path encodes "AAA")...
+    expect(out!).toContain("AAA");
+    // ...and the other chat is wholly absent: neither its path nor its
+    // private content (67890) can leak in. That's the bug Kai caught.
+    expect(out!).not.toContain("BBB");
+    expect(out!).not.toContain("67890");
+  });
+
   test("hybrid falls back to FTS when the embed call fails", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
@@ -266,17 +306,29 @@ describe("makeRetriever", () => {
     }) as unknown as Config;
 
   test("returns undefined when retrieval is absent on the config", () => {
-    expect(makeRetriever(baseConfig(undefined), "phantom", "/tmp/x")).toBeUndefined();
+    expect(
+      makeRetriever(baseConfig(undefined), "phantom", "/tmp/x", "telegram:1"),
+    ).toBeUndefined();
   });
 
   test("returns undefined when retrieval is disabled", () => {
     expect(
-      makeRetriever(baseConfig({ ...DEFAULT_RETRIEVAL, enabled: false }), "phantom", "/tmp/x"),
+      makeRetriever(
+        baseConfig({ ...DEFAULT_RETRIEVAL, enabled: false }),
+        "phantom",
+        "/tmp/x",
+        "telegram:1",
+      ),
     ).toBeUndefined();
   });
 
   test("returns a callable retriever when enabled", () => {
-    const r = makeRetriever(baseConfig({ ...DEFAULT_RETRIEVAL, enabled: true }), "phantom", "/tmp/x");
+    const r = makeRetriever(
+      baseConfig({ ...DEFAULT_RETRIEVAL, enabled: true }),
+      "phantom",
+      "/tmp/x",
+      "telegram:1",
+    );
     expect(typeof r).toBe("function");
   });
 });
