@@ -377,6 +377,109 @@ describe("runTurn — fallback chain", () => {
   });
 });
 
+describe("runTurn — auto-retrieval (line-111 instinct)", () => {
+  test("no retrieve fn → no 'Retrieved context' section (backward compatible)", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+  });
+
+  test("retrieve fn result is injected under the 'Retrieved context' slot", async () => {
+    let captured: HarnessRequest | undefined;
+    let seenQuery: string | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "what inverter did we pick?",
+        harnesses: [harness],
+        retrieve: async (query) => {
+          seenQuery = query;
+          return "## memory/decisions.md\nWe chose the deye inverter.";
+        },
+      }),
+    );
+
+    // Called with the user message.
+    expect(seenQuery).toBe("what inverter did we pick?");
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("# Retrieved context for this turn");
+    expect(prompt).toContain("We chose the deye inverter.");
+  });
+
+  test("retrieve returning undefined → no 'Retrieved context' section", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        retrieve: async () => undefined,
+      }),
+    );
+
+    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+  });
+
+  test("a throwing retriever is swallowed — the turn still completes", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "text", text: "answer" }, { type: "done", finalText: "answer" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    const chunks = await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [harness],
+        retrieve: async () => {
+          throw new Error("retriever blew up");
+        },
+      }),
+    );
+
+    // Turn proceeds normally; no retrieved context; reply persisted.
+    expect(chunks.map((c) => c.type)).toEqual(["text", "done"]);
+    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+    const stored = await memory.recentTurns("phantom", "cli:default", 10);
+    expect(stored[1]?.text).toBe("answer");
+  });
+});
+
 describe("runTurn — historyLimit", () => {
   test("respects historyLimit when loading prior turns", async () => {
     for (let i = 1; i <= 5; i++) {

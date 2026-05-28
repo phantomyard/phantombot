@@ -69,6 +69,38 @@ export interface TelegramAccount {
   allowedUserIds: number[];
 }
 
+/**
+ * Auto-retrieval settings. When enabled, each interactive turn embeds the
+ * incoming user message, hybrid-searches the persona's memory/ + kb/ index,
+ * and injects the top hits into the system prompt's "Retrieved context"
+ * slot — so relevant standing knowledge surfaces without the agent having
+ * to consciously run `phantombot memory search`. Degrades to FTS-only when
+ * embeddings aren't configured, and never blocks a turn on failure.
+ */
+export interface RetrievalSettings {
+  /** Master switch. When false, no retrieval is attempted on any turn. */
+  enabled: boolean;
+  /** Max number of hits to inject. */
+  limit: number;
+  /**
+   * Approximate token budget for the injected block. Hits are added
+   * newest-best-first until the budget is hit (chars ≈ tokens × 4).
+   */
+  maxTokens: number;
+  /**
+   * Minimum hit score (RRF when hybrid, FTS otherwise) to include. 0 = no
+   * floor (include anything the index matched). Raise to suppress weak hits.
+   */
+  minScore: number;
+}
+
+export const DEFAULT_RETRIEVAL: RetrievalSettings = {
+  enabled: true,
+  limit: 5,
+  maxTokens: 1500,
+  minScore: 0,
+};
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
@@ -122,6 +154,17 @@ export interface Config {
     };
   };
 
+  /**
+   * Auto-retrieval (line-111 instinct). See RetrievalSettings.
+   *
+   * Optional on the type so ad-hoc Config constructors (tests, scripts)
+   * needn't spell it out — `loadConfig` ALWAYS populates it, so production
+   * code can rely on it being present. When absent (or `enabled: false`),
+   * `makeRetriever` returns undefined and no retrieval is attempted: the
+   * safe, side-effect-free default.
+   */
+  retrieval?: RetrievalSettings;
+
   voice: import("./lib/voice.ts").VoiceConfig;
 }
 
@@ -156,6 +199,7 @@ export async function loadConfig(): Promise<Config> {
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
+  const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
 
   return {
@@ -269,7 +313,49 @@ export async function loadConfig(): Promise<Config> {
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
+    retrieval: buildRetrievalConfig(tomlRetrieval),
+
     voice: buildVoiceConfig(tomlVoice),
+  };
+}
+
+/**
+ * Resolve auto-retrieval settings. Env wins over TOML wins over defaults,
+ * same precedence as everything else. Values are clamped to sane ranges so
+ * a fat-fingered config can't, say, blow the token budget to infinity or
+ * ask for a negative number of hits.
+ */
+function buildRetrievalConfig(
+  tomlRetrieval: Record<string, unknown>,
+): RetrievalSettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_ENABLED) ??
+    asBool(tomlRetrieval.enabled) ??
+    DEFAULT_RETRIEVAL.enabled;
+
+  const limit =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_LIMIT) ??
+    asInt(tomlRetrieval.limit) ??
+    DEFAULT_RETRIEVAL.limit;
+
+  const maxTokens =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_MAX_TOKENS) ??
+    asInt(tomlRetrieval.max_tokens) ??
+    DEFAULT_RETRIEVAL.maxTokens;
+
+  const minScore =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_MIN_SCORE) ??
+    asNumber(tomlRetrieval.min_score) ??
+    DEFAULT_RETRIEVAL.minScore;
+
+  return {
+    enabled,
+    // 1..50 mirrors MemoryIndex.search's own clamp; 0 hits would be pointless.
+    limit: Math.max(1, Math.min(50, limit)),
+    // Floor at 0 (disables injection); no hard ceiling — operators may
+    // legitimately want a large budget, the per-turn hit count caps it anyway.
+    maxTokens: Math.max(0, maxTokens),
+    minScore,
   };
 }
 
@@ -468,6 +554,16 @@ export function personaDir(config: Config, name: string): string {
   return join(config.personasDir, name);
 }
 
+/**
+ * Path to the per-persona FTS5 + embeddings index. One file per persona so a
+ * single persona can be rebuilt without touching others. Shared by
+ * `phantombot memory ...` and the turn-time auto-retrieval so both read and
+ * write the same index file.
+ */
+export function memoryIndexPath(persona: string): string {
+  return join(xdgDataHome(), "phantombot", "memory-index", `${persona}.sqlite`);
+}
+
 async function tryReadToml(path: string): Promise<Record<string, unknown>> {
   try {
     const content = await readFile(path, "utf8");
@@ -494,4 +590,19 @@ function asInt(v: unknown): number | undefined {
 function asStringArray(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   return v.every((x) => typeof x === "string") ? (v as string[]) : undefined;
+}
+
+/**
+ * Parse a boolean from TOML (native bool) or env/string ("1"/"true"/"yes"/
+ * "on" → true; "0"/"false"/"no"/"off" → false). Returns undefined for
+ * anything unrecognized so the caller can fall through to its default.
+ */
+function asBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(s)) return true;
+    if (["0", "false", "no", "off"].includes(s)) return false;
+  }
+  return undefined;
 }

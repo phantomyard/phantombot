@@ -35,6 +35,7 @@ import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { makeRetriever } from "../orchestrator/retrieval.ts";
 
 export interface RunAskInput {
   /** The user prompt. Required. */
@@ -121,6 +122,12 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       noHistory: !input.history,
+      // Instinct layer: auto-retrieve relevant memory/kb, but only for
+      // conversational asks (history on). One-shot, no-history asks are
+      // typically scripted/programmatic — skip the embed round-trip there.
+      retrieve: input.history
+        ? makeRetriever(config, persona, agentDir)
+        : undefined,
       // Streaming consumers benefit from pre-tool narration: the
       // assistant's intent sentence flushes to stdout before the
       // tool's silence begins. Non-streaming consumers see the whole

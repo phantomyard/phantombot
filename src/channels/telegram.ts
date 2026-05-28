@@ -47,6 +47,7 @@ import { log } from "../lib/logger.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { makeRetriever } from "../orchestrator/retrieval.ts";
 import {
   type ActiveTurnHandle,
   handleSlashCommand,
@@ -1257,6 +1258,10 @@ async function processChatMessage(
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
       signal: controller.signal,
+      // Instinct layer: auto-retrieve relevant memory/kb for this message.
+      // makeRetriever returns undefined when retrieval is disabled in
+      // config, in which case runTurn skips it entirely.
+      retrieve: makeRetriever(input.config, input.persona, input.agentDir),
       // Channel-layer prompt suffix:
       //   - Always: TELEGRAM_REPLY_INSTRUCTION — short conversational
       //     replies + plan-then-confirm before long jobs (git/build/
