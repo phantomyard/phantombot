@@ -1351,7 +1351,11 @@ export async function runTelegramServer(
         }
 
         // Enqueue onto this chat's serial chain.
-        const prev = chatChains.get(msg.chatId) ?? Promise.resolve();
+        // Convert prior rejection to resolution so a thrown
+        // processChatMessage doesn't wedge the per-chat queue (GitHub #135).
+        const prev = (chatChains.get(msg.chatId) ?? Promise.resolve()).catch(
+          () => {},
+        );
         const next = prev.then(() =>
           processChatMessage(msg, {
             input,
@@ -1441,27 +1445,50 @@ async function processChatMessage(
       const file = await input.transport.downloadFile(msg.voice.fileId);
       const r = await transcribe(input.config, file.data, file.mime);
       if (!r.ok) {
-        log.error("telegram: STT failed", { error: r.error });
-        await input.transport.sendMessage(
-          msg.chatId,
-          `(voice transcription failed: ${r.error})`,
-        );
+        log.error("telegram: STT failed", {
+          error: r.error,
+          persona: input.persona,
+          chatId: msg.chatId,
+        });
+        try {
+          await input.transport.sendMessage(
+            msg.chatId,
+            "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
+          );
+        } catch (sendErr) {
+          log.warn("telegram: STT failure notice send failed", {
+            error: (sendErr as Error).message,
+            chatId: msg.chatId,
+          });
+        }
         return;
       }
       msg.text = r.text;
       log.info("telegram: STT ok", {
         chatId: msg.chatId,
+        persona: input.persona,
         transcriptChars: r.text.length,
       });
     } catch (e) {
-      log.error("telegram: voice download failed", {
+      log.error("telegram: STT pipeline error", {
         error: (e as Error).message,
+        persona: input.persona,
+        chatId: msg.chatId,
       });
-      await input.transport.sendMessage(
-        msg.chatId,
-        `(couldn't download your voice message: ${(e as Error).message})`,
-      );
+      try {
+        await input.transport.sendMessage(
+          msg.chatId,
+          "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
+        );
+      } catch (sendErr) {
+        log.warn("telegram: STT failure notice send failed", {
+          error: (sendErr as Error).message,
+          chatId: msg.chatId,
+        });
+      }
       return;
+    } finally {
+      // Seam for future per-chat STT lock release (GitHub #135).
     }
   }
 
