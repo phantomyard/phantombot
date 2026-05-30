@@ -2,7 +2,7 @@
 
 Giving the harness a Soul. The harness can do its own tools — let it. A personality-first chat agent for Telegram, built for minimalist, high-torque agency.
 
-Phantombot extends **[Pi](https://pi.dev)** — the terminal-based coding agent from Earendil Works — onto Telegram, and uses **Claude Code** or **Google Gemini CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude and Gemini are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
+Phantombot extends **[Pi](https://pi.dev)** — the terminal-based coding agent from Earendil Works — onto Telegram, and uses **Claude Code**, **Google Gemini CLI**, or **OpenAI Codex CLI** as drop-in alternatives or fallbacks when Pi isn't the right fit. **Pi is the recommended primary; Claude, Gemini, and Codex are first-class but think of them as backup, not the default.** The harness runs its own tool loop; phantombot does identity, memory, channel, scheduling, and self-update.
 
 Grab Pi from <https://pi.dev> — `curl -fsSL https://pi.dev/install.sh | sh` — before configuring phantombot.
 
@@ -57,6 +57,7 @@ Phantombot doesn't bundle an AI model — it delegates to one you already have i
 - **Pi** *(recommended primary)* — get it from [pi.dev](https://pi.dev) with `curl -fsSL https://pi.dev/install.sh | sh`, then run `pi` once to authenticate.
 - **Claude Code** — `npm install -g @anthropic-ai/claude-code`, then `claude /login` for OAuth.
 - **Gemini CLI** — install Google's Gemini CLI, then `gemini` and follow the `/auth` flow (or set `GEMINI_API_KEY` in `~/.env`).
+- **OpenAI Codex CLI** — install Codex, then authenticate with `codex login` (ChatGPT sign-in) or set `OPENAI_API_KEY` in `~/.env`. Phantombot drives it via `codex exec --json` in ephemeral mode, so your persona + memory stay authoritative.
 
 **Primary vs. fallback:** The primary handles every turn by default. If it fails (auth expiry, rate limit, transient error), phantombot automatically tries the fallback. Pi as primary + Claude as fallback is the recommended combo — you get Pi's speed and personality day-to-day, with Claude catching errors seamlessly.
 
@@ -67,10 +68,13 @@ phantombot persona   # TUI — create or import (OpenClaw works) your first pers
 phantombot harness   # TUI — picks up installed harnesses; choose primary + fallback
 phantombot telegram  # paste your @BotFather bot token + allowlisted user IDs
 phantombot voice     # (optional) pick TTS/STT provider for voice messages
+phantombot embedding # (recommended) turn on semantic memory — see callout below
 
 phantombot run       # foreground — Ctrl-C to stop.
 phantombot install   # install as a systemd --user service (survives logout)
 ```
+
+> **💡 Recommended: turn on semantic memory.** Out of the box, memory search is **keyword-only** — it matches the literal words in a note. Add a free Gemini embeddings key and search also matches on *meaning*: asking *"how do I pay tax"* surfaces your *"VAT filing steps"* note even though they share no words. Phantombot retrieves relevant memories automatically on every turn, so this is what makes the agent's recall feel like instinct instead of grep. It's one command — `phantombot embedding` (paste a key from <https://aistudio.google.com/app/apikey>) — and **everything still works without it**, degrading cleanly to keyword search. Early installs predate this feature, so many setups never enabled it and are missing the upgrade. Full setup + the free-tier limits are in [Memory → Semantic search](#semantic-search-optional).
 
 The script:
 
@@ -107,6 +111,7 @@ Updates download to `${binPath}.update.tmp`, SHA256-verify, atomically rename ov
   - **[Pi](https://pi.dev)** *(recommended primary)* — install via `curl -fsSL https://pi.dev/install.sh | sh`, then `pi` configured per its own setup
   - **Claude Code** — `claude /login` (OAuth on host; phantombot filters `ANTHROPIC_API_KEY` so OAuth is the path)
   - **Google Gemini CLI** — `gemini` then OAuth via the in-app `/auth`, OR set `GEMINI_API_KEY` in `~/.env`
+  - **OpenAI Codex CLI** — `codex login` (ChatGPT sign-in), OR set `OPENAI_API_KEY` in `~/.env`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Linux (`systemd --user` for the service install path; the binary itself is portable across Linux distros)
 
@@ -148,7 +153,7 @@ mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 | `phantombot persona <name>` | Switch default persona to `<name>` |
 | `phantombot persona --import <dir> [--as <n>]` | Non-interactive import (OpenClaw or phantombot-shaped) |
 | `phantombot telegram` | Configure the Telegram channel (token + allowed users) |
-| `phantombot harness` | Pick primary + fallback harnesses (pi / claude / gemini) |
+| `phantombot harness` | Pick primary + fallback harnesses (pi / claude / gemini / codex) |
 | `phantombot voice` | Pick TTS/STT provider (ElevenLabs / OpenAI / Azure Edge) |
 | `phantombot embedding` | (Optional) configure Gemini embeddings for memory search |
 
@@ -337,7 +342,7 @@ phantombot run                    # the only long-running command
    ┌───────┼─────────────────┐
    ▼       ▼                 ▼
 load     load history    run harness chain
-persona  (bun:sqlite)    (pi → claude → gemini)
+persona  (bun:sqlite)    (pi → claude → gemini → codex)
                               │
                               ▼
                   spawn `pi --print --mode json …`
@@ -497,7 +502,7 @@ phantombot/
 │   ├── orchestrator/              # turn coordinator + harness fallback chain
 │   ├── channels/telegram.ts       # Telegram adapter (HTTP + long-poll)
 │   ├── cli/                       # one file per Citty subcommand
-│   ├── harnesses/                 # pi + claude + gemini wrappers
+│   ├── harnesses/                 # pi + claude + gemini + codex wrappers
 │   └── lib/                       # logger, IO, configWriter, systemd, audio,
 │                                  # tasks, cronSchedule, binaryUpdate, githubReleases…
 ├── agents/phantom/                # placeholder persona used by tests
