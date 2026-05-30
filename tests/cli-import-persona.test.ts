@@ -40,9 +40,16 @@ class CaptureStream {
 let workdir: string;
 let source: string;
 let config: Config;
+// Suite-wide state isolation. runImportPersona → adoptAsDefaultIfMissing →
+// saveState() writes the live state.json unless PHANTOMBOT_STATE is redirected.
+// This is the exact leak that poisoned Kai's persona (→ "robbie") whenever the
+// suite was run on his box. Isolate EVERY test, not just the auto-adopt block.
+let savedStateEnv: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-imp-"));
+  savedStateEnv = process.env.PHANTOMBOT_STATE;
+  process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
   source = join(workdir, "openclaw-agent");
   await mkdir(source, { recursive: true });
   await writeFile(join(source, "BOOT.md"), "# id");
@@ -66,6 +73,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (savedStateEnv === undefined) delete process.env.PHANTOMBOT_STATE;
+  else process.env.PHANTOMBOT_STATE = savedStateEnv;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -232,19 +241,9 @@ describe("runImportPersona — telegram sniff", () => {
 });
 
 describe("runImportPersona — auto-adopt as default", () => {
-  let savedStateEnv: string | undefined;
-  let stateFile: string;
-
-  beforeEach(async () => {
-    savedStateEnv = process.env.PHANTOMBOT_STATE;
-    stateFile = join(workdir, "state.json");
-    process.env.PHANTOMBOT_STATE = stateFile;
-  });
-
-  afterEach(() => {
-    if (savedStateEnv === undefined) delete process.env.PHANTOMBOT_STATE;
-    else process.env.PHANTOMBOT_STATE = savedStateEnv;
-  });
+  // State isolation is now suite-wide (see top-level beforeEach/afterEach):
+  // PHANTOMBOT_STATE → workdir/state.json for every test.
+  const stateFile = () => join(workdir, "state.json");
 
   test("first import on fresh box: adopts imported name as default_persona", async () => {
     // Fresh state — no personas/phantom/ exists. The configured default
@@ -262,7 +261,7 @@ describe("runImportPersona — auto-adopt as default", () => {
     });
     expect(code).toBe(0);
     expect(out.text).toContain("adopted 'robbie' as default_persona");
-    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    const state = JSON.parse(await readFile(stateFile(), "utf8"));
     expect(state.default_persona).toBe("robbie");
   });
 
@@ -288,6 +287,6 @@ describe("runImportPersona — auto-adopt as default", () => {
     expect(code).toBe(0);
     expect(out.text).not.toContain("adopted");
     // No state file written.
-    await expect(readFile(stateFile, "utf8")).rejects.toThrow();
+    await expect(readFile(stateFile(), "utf8")).rejects.toThrow();
   });
 });
