@@ -35,11 +35,29 @@ export async function loadState(): Promise<State> {
   }
 }
 
+/**
+ * Best-effort read of the current state, used only to compute the old→new
+ * delta for the audit log. A corrupt/unreadable state.json must NOT block a
+ * repair write (persona/config commands exist precisely to overwrite a bad
+ * file), so any failure here resolves to an empty state.
+ */
+async function loadStateForAudit(): Promise<State> {
+  try {
+    return await loadState();
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Audit log lives next to the state file it tracks, so pointing
+ * PHANTOMBOT_STATE at a tmp path (as the test suite does) also redirects the
+ * audit log there instead of polluting the live data dir. An explicit
+ * PHANTOMBOT_STATE_AUDIT still wins if set.
+ */
 export function auditPath(): string {
-  return (
-    process.env.PHANTOMBOT_STATE_AUDIT ??
-    join(xdgDataHome(), "phantombot", "state-audit.log")
-  );
+  if (process.env.PHANTOMBOT_STATE_AUDIT) return process.env.PHANTOMBOT_STATE_AUDIT;
+  return join(dirname(statePath()), "state-audit.log");
 }
 
 /**
@@ -79,7 +97,7 @@ async function auditPersonaChange(prev: State, next: State): Promise<void> {
 
 export async function saveState(state: State): Promise<string> {
   const path = statePath();
-  const prev = await loadState();
+  const prev = await loadStateForAudit();
   await auditPersonaChange(prev, state);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(state, null, 2) + "\n", "utf8");
