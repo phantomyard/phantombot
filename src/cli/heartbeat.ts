@@ -6,14 +6,15 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { currentPlatform } from "../lib/platform.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import {
   BunSystemctlRunner,
   buildSystemctlEnv,
@@ -54,10 +55,21 @@ export async function runHeartbeatCli(
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
-  const dir = personaDir(config, persona);
+  let persona = input.persona ?? config.defaultPersona;
+  let dir = personaDir(config, persona);
 
-  if (!existsSync(dir)) {
+  if (!hasPersonaIdentity(dir)) {
+    if (!input.persona) {
+      const healed = await healDefaultPersonaIfBroken(config, err);
+      if (healed) {
+        persona = healed;
+        config.defaultPersona = healed;
+        dir = personaDir(config, persona);
+      }
+    }
+  }
+
+  if (!hasPersonaIdentity(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
   }

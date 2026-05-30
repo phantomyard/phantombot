@@ -100,7 +100,9 @@ describe("runPersona arg validation", () => {
 describe("runSwitchPersona", () => {
   test("missing persona dir → exit 1 with available list", async () => {
     await mkdir(join(personasDir, "phantom"), { recursive: true });
+    await writeFile(join(personasDir, "phantom", "BOOT.md"), "# Phantom");
     await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(join(personasDir, "robbie", "BOOT.md"), "# Robbie");
     const err = new CaptureStream();
     const code = await runSwitchPersona({
       name: "missing",
@@ -130,6 +132,7 @@ describe("runSwitchPersona", () => {
 
   test("happy path: writes default_persona to state.json", async () => {
     await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(join(personasDir, "robbie", "BOOT.md"), "# Robbie");
     const out = new CaptureStream();
     const code = await runSwitchPersona({
       name: "robbie",
@@ -148,6 +151,7 @@ describe("runSwitchPersona", () => {
 
   test("already-current → no-op exit 0, no state write", async () => {
     await mkdir(join(personasDir, "phantom"), { recursive: true });
+    await writeFile(join(personasDir, "phantom", "BOOT.md"), "# Phantom");
     // Pre-write state with phantom as default.
     await writeFile(
       process.env.PHANTOMBOT_STATE!,
@@ -170,6 +174,7 @@ describe("runSwitchPersona", () => {
 describe("runPersona dispatch", () => {
   test("positional <name> routes to runSwitchPersona", async () => {
     await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(join(personasDir, "robbie", "BOOT.md"), "# Robbie");
     const out = new CaptureStream();
     const code = await runPersona({
       name: "robbie",

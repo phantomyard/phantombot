@@ -35,6 +35,7 @@ import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { loadState, saveState } from "../state.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import { runCreatePersona } from "./create-persona.ts";
 import { runImportPersona } from "./import-persona.ts";
 import { maybePromptRestart } from "./harness.ts";
@@ -117,7 +118,7 @@ export async function runSwitchPersona(
   const config = input.config ?? (await loadConfig());
 
   const targetDir = personaDir(config, input.name);
-  if (!existsSync(targetDir)) {
+  if (!hasPersonaIdentity(targetDir)) {
     const available = listExistingPersonas(config);
     err.write(
       `persona '${input.name}' not found at ${targetDir}\n` +
@@ -259,7 +260,7 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
 
 /**
  * Read the personas directory and return the names of subdirectories
- * (each subdir = one persona). Returns [] if the personas dir doesn't
+ * that contain an identity file. Returns [] if the personas dir doesn't
  * exist yet — fresh installs have no personas.
  *
  * Non-ENOENT read failures (EACCES, EIO, etc.) still return [] so the
@@ -272,6 +273,7 @@ export function listExistingPersonas(config: Config): string[] {
     return readdirSync(config.personasDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
+      .filter((name) => hasPersonaIdentity(personaDir(config, name)))
       .sort();
   } catch (e) {
     log.warn("persona: failed to read personas dir", {

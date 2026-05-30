@@ -27,7 +27,6 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync } from "node:fs";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
@@ -35,6 +34,7 @@ import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 
@@ -80,7 +80,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
   const agentDir = personaDir(config, persona);
-  if (!existsSync(agentDir)) {
+  if (!hasPersonaIdentity(agentDir)) {
     err.write(
       `phantombot ask: persona '${persona}' not found at ${agentDir}\n`,
     );

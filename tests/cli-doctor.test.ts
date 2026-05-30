@@ -24,6 +24,7 @@ beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-doctor-"));
   personaMemoryDir = join(workdir, "personas", "phantom", "memory");
   await mkdir(personaMemoryDir, { recursive: true });
+  await writeFile(join(workdir, "personas", "phantom", "BOOT.md"), "# Phantom");
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 600_000,

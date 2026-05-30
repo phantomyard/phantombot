@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,8 +63,9 @@ afterEach(async () => {
 });
 
 describe("healDefaultPersonaIfBroken", () => {
-  test("returns the current default when it exists on disk", async () => {
+  test("returns the current default when it has an identity file", async () => {
     await mkdir(join(personasDir, "phantom"), { recursive: true });
+    await writeFile(join(personasDir, "phantom", "BOOT.md"), "# Phantom");
     const config = makeConfig(personasDir, "phantom");
     const healed = await healDefaultPersonaIfBroken(config);
     expect(healed).toBe("phantom");
@@ -78,6 +79,7 @@ describe("healDefaultPersonaIfBroken", () => {
 
   test("heals to the only persona on disk", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
     const config = makeConfig(personasDir, "ghostfixture");
     const out = new CaptureStream();
     const healed = await healDefaultPersonaIfBroken(config, out);
@@ -91,7 +93,9 @@ describe("healDefaultPersonaIfBroken", () => {
 
   test("picks first alphabetically when no name match exists", async () => {
     await mkdir(join(personasDir, "lena"), { recursive: true });
+    await writeFile(join(personasDir, "lena", "BOOT.md"), "# Lena");
     await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
     const config = makeConfig(personasDir, "ghostfixture");
     const healed = await healDefaultPersonaIfBroken(config);
     // Sorted: "kai", "lena" → picks "kai"
@@ -100,7 +104,9 @@ describe("healDefaultPersonaIfBroken", () => {
 
   test("prefers case-insensitive name match over first alphabetical", async () => {
     await mkdir(join(personasDir, "Ghostfixture"), { recursive: true });
+    await writeFile(join(personasDir, "Ghostfixture", "BOOT.md"), "# Ghost");
     await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
     const config = makeConfig(personasDir, "ghostfixture");
     const healed = await healDefaultPersonaIfBroken(config);
     expect(healed).toBe("Ghostfixture");
@@ -112,11 +118,26 @@ describe("healDefaultPersonaIfBroken", () => {
     const healed = await healDefaultPersonaIfBroken(config);
     expect(healed).toBeNull();
   });
+
+  test("heals away from an empty default directory to a valid persona", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
+    const config = makeConfig(personasDir, "robbie");
+    const out = new CaptureStream();
+
+    const healed = await healDefaultPersonaIfBroken(config, out);
+
+    expect(healed).toBe("kai");
+    expect(out.text).toContain("robbie' → 'kai'");
+    expect((await loadState()).default_persona).toBe("kai");
+  });
 });
 
 describe("adoptAsDefaultIfMissing", () => {
   test("no-ops when default already exists on disk", async () => {
     await mkdir(join(personasDir, "phantom"), { recursive: true });
+    await writeFile(join(personasDir, "phantom", "BOOT.md"), "# Phantom");
     const config = makeConfig(personasDir, "phantom");
     const changed = await adoptAsDefaultIfMissing(config, "kai");
     expect(changed).toBe(false);
@@ -124,6 +145,7 @@ describe("adoptAsDefaultIfMissing", () => {
 
   test("adopts the given name when default is missing", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
     const config = makeConfig(personasDir, "ghostfixture");
     const out = new CaptureStream();
     const changed = await adoptAsDefaultIfMissing(config, "kai", out);
@@ -132,5 +154,17 @@ describe("adoptAsDefaultIfMissing", () => {
 
     const state = await loadState();
     expect(state.default_persona).toBe("kai");
+  });
+
+  test("adopts the given name when default dir exists but has no identity", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await writeFile(join(personasDir, "kai", "BOOT.md"), "# Kai");
+    const config = makeConfig(personasDir, "robbie");
+
+    const changed = await adoptAsDefaultIfMissing(config, "kai");
+
+    expect(changed).toBe(true);
+    expect((await loadState()).default_persona).toBe("kai");
   });
 });

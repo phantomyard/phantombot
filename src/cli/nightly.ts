@@ -32,6 +32,8 @@ import { CodexHarness } from "../harnesses/codex.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import {
   buildNightlyPromptForPersona,
   buildNightlyStagePrompt,
@@ -112,9 +114,17 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
 
   const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
-  const dir = personaDir(config, persona);
-  if (!existsSync(dir)) {
+  let persona = input.persona ?? config.defaultPersona;
+  let dir = personaDir(config, persona);
+  if (!hasPersonaIdentity(dir) && !input.persona) {
+    const healed = await healDefaultPersonaIfBroken(config, err);
+    if (healed) {
+      persona = healed;
+      config.defaultPersona = healed;
+      dir = personaDir(config, persona);
+    }
+  }
+  if (!hasPersonaIdentity(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
   }

@@ -124,6 +124,37 @@ describe("runRun — early exits", () => {
     expect(err.text).toContain("phantombot harness");
   });
 
+  test("heals when default dir exists but has no identity file", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "robbie"), { recursive: true });
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(join(workdir, "personas", "kai", "BOOT.md"), "# Kai");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        defaultPersona: "robbie",
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: {
+          telegram: {
+            token: "abc",
+            pollTimeoutS: 30,
+            allowedUserIds: [],
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+
+    expect(code).toBe(2);
+    expect(err.text).toContain("robbie' → 'kai'");
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).not.toContain("No identity file");
+  });
+
   test("returns 2 when harness chain is empty", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
@@ -278,7 +309,7 @@ describe("runRun — multi-persona telegram", () => {
     expect(code).toBe(2); // empty harness chain (planner did NOT fatal)
     expect(err.text).toContain("phantombot harness");
     expect(err.text).toContain("personas.miles");
-    expect(err.text).toContain("no agent dir");
+    expect(err.text).toContain("no valid persona identity");
   });
 
   test("fatal when default + persona share the same token", async () => {

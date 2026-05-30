@@ -29,6 +29,7 @@ beforeEach(async () => {
   await mkdir(join(workdir, "personas", "phantom", "kb"), {
     recursive: true,
   });
+  await writeFile(join(workdir, "personas", "phantom", "BOOT.md"), "# Phantom");
   process.env.XDG_DATA_HOME = workdir;
   // Redirect the timer-fired marker path so heartbeat writes into the
   // test workdir, not the developer's real ~/.local/state/.

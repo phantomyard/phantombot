@@ -7,7 +7,6 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync } from "node:fs";
 
 import {
   HttpTelegramTransport,
@@ -23,6 +22,7 @@ import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
   acquireRunLock,
@@ -72,7 +72,7 @@ export function planListeners(
 
   if (config.channels.telegram) {
     const agentDir = personaDir(config, defaultPersona);
-    if (existsSync(agentDir)) {
+    if (hasPersonaIdentity(agentDir)) {
       listeners.push({
         persona: defaultPersona,
         agentDir,
@@ -90,9 +90,9 @@ export function planListeners(
     config.channels.telegramPersonas ?? {},
   )) {
     const agentDir = personaDir(config, persona);
-    if (!existsSync(agentDir)) {
+    if (!hasPersonaIdentity(agentDir)) {
       err.write(
-        `warning: channels.telegram.personas.${persona} references persona '${persona}' but no agent dir at ${agentDir} — skipping\n`,
+        `warning: channels.telegram.personas.${persona} references persona '${persona}' but no valid persona identity at ${agentDir} — skipping\n`,
       );
       continue;
     }
@@ -146,7 +146,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   let defaultPersona = config.defaultPersona;
   if (hasDefault) {
     const agentDir = personaDir(config, defaultPersona);
-    if (!existsSync(agentDir)) {
+    if (!hasPersonaIdentity(agentDir)) {
       const healed = await healDefaultPersonaIfBroken(config, err);
       if (healed) {
         defaultPersona = healed;

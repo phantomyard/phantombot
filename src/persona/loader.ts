@@ -21,6 +21,7 @@
  * agentDir, so e.g. claude can `Read` arbitrary files there.
  */
 
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -51,6 +52,10 @@ export class PersonaNotFoundError extends Error {
     );
     this.name = "PersonaNotFoundError";
   }
+}
+
+export function hasPersonaIdentity(agentDir: string): boolean {
+  return IDENTITY_FILES.some((name) => existsSync(join(agentDir, name)));
 }
 
 export async function loadPersona(agentDir: string): Promise<PersonaFiles> {

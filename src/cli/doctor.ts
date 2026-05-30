@@ -33,6 +33,7 @@ import {
   type NightlyProgress,
   type NightlyState,
 } from "../lib/nightly.ts";
+import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import {
   BunSystemctlRunner,
@@ -61,6 +62,7 @@ import {
   type TimerLastFired,
 } from "../lib/timerHealth.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 
 /** Window for the capture-health check: a "dry day" is judged over 24h. */
 const CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -244,9 +246,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const repair = input.repair ?? true;
 
   const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
-  const dir = personaDir(config, persona);
-  if (!existsSync(dir)) {
+  let persona = input.persona ?? config.defaultPersona;
+  let dir = personaDir(config, persona);
+  if (!hasPersonaIdentity(dir) && !input.persona) {
+    const healed = await healDefaultPersonaIfBroken(config, err);
+    if (healed) {
+      persona = healed;
+      config.defaultPersona = healed;
+      dir = personaDir(config, persona);
+    }
+  }
+  if (!hasPersonaIdentity(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
   }

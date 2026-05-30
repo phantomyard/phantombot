@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runNightly } from "../src/cli/nightly.ts";
@@ -22,6 +22,7 @@ let config: Config;
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-ngcli-"));
   await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
+  await writeFile(join(workdir, "personas", "phantom", "BOOT.md"), "# Phantom");
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000,

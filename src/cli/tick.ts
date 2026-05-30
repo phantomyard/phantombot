@@ -29,7 +29,6 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
@@ -45,6 +44,7 @@ import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 
 export function defaultTickLockPath(): string {
   return join(xdgStateHome(), "phantombot", "tick.lock");
@@ -126,7 +126,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       });
 
       const agentDir = personaDir(config, task.persona);
-      if (!existsSync(agentDir)) {
+      if (!hasPersonaIdentity(agentDir)) {
         log.error("tick: persona dir missing — skipping task", {
           id: task.id,
           persona: task.persona,

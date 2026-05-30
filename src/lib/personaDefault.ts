@@ -13,6 +13,7 @@
 import { existsSync, readdirSync } from "node:fs";
 
 import { type Config, personaDir } from "../config.ts";
+import { hasPersonaIdentity } from "../persona/loader.ts";
 import { loadState, saveState } from "../state.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
@@ -30,7 +31,7 @@ export async function adoptAsDefaultIfMissing(
   out?: WriteSink,
 ): Promise<boolean> {
   const currentDefaultDir = personaDir(config, config.defaultPersona);
-  if (existsSync(currentDefaultDir)) return false;
+  if (hasPersonaIdentity(currentDefaultDir)) return false;
   const state = await loadState();
   state.default_persona = name;
   await saveState(state);
@@ -42,8 +43,8 @@ export async function adoptAsDefaultIfMissing(
 
 /**
  * Startup safety net: if the resolved `defaultPersona` doesn't exist on
- * disk, scan the personas directory for a valid replacement, write it to
- * state.json, and return the healed name.
+ * disk or has no identity file, scan the personas directory for a valid
+ * replacement, write it to state.json, and return the healed name.
  *
  * Without this, a corrupted `state.json` (e.g. pointing at a persona
  * that was never created on this host, or one that was deleted) causes
@@ -51,7 +52,7 @@ export async function adoptAsDefaultIfMissing(
  * `phantombot persona` to switch back.
  *
  * Strategy:
- *   1. If the resolved default exists on disk → return it (no-op).
+ *   1. If the resolved default is a valid persona → return it (no-op).
  *   2. Scan the personas dir. If empty → return null (caller bails).
  *   3. If exactly one persona exists → adopt it.
  *   4. If multiple exist → try the one with the same name as the broken
@@ -65,7 +66,7 @@ export async function healDefaultPersonaIfBroken(
   out?: WriteSink,
 ): Promise<string | null> {
   const currentDefaultDir = personaDir(config, config.defaultPersona);
-  if (existsSync(currentDefaultDir)) return config.defaultPersona;
+  if (hasPersonaIdentity(currentDefaultDir)) return config.defaultPersona;
 
   const existing = listPersonaDirs(config);
   if (existing.length === 0) return null;
@@ -97,6 +98,7 @@ export function listPersonaDirs(config: Config): string[] {
     return readdirSync(config.personasDir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
+      .filter((name) => hasPersonaIdentity(personaDir(config, name)))
       .sort();
   } catch (e) {
     log.warn("personaDefault: failed to read personas dir", {
