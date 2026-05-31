@@ -107,7 +107,7 @@ class FakeTransport implements TelegramTransport {
     return { data: this.fakeFileBytes, mime: "audio/ogg" };
   }
   /** Username returned by getMe — drives group @mention stripping. */
-  botUsername = "robbie_agh_bot";
+  botUsername = "nim_test_bot";
   /** Each setMyCommands call's payload, for assertions. */
   registeredCommands: Array<Array<{ command: string; description: string }>> =
     [];
@@ -1059,23 +1059,23 @@ describe("runTelegramServer dispatch", () => {
 
 describe("stripBotMention", () => {
   test("strips a leading @username mention", () => {
-    expect(stripBotMention("@robbie_agh_bot hello there", "robbie_agh_bot")).toBe(
+    expect(stripBotMention("@nim_test_bot hello there", "nim_test_bot")).toBe(
       "hello there",
     );
   });
 
   test("is case-insensitive on the username", () => {
-    expect(stripBotMention("@Robbie_AGH_Bot hi", "robbie_agh_bot")).toBe("hi");
+    expect(stripBotMention("@Nim_Test_Bot hi", "nim_test_bot")).toBe("hi");
   });
 
   test("strips a mid-string mention and collapses whitespace", () => {
     expect(
-      stripBotMention("hey @robbie_agh_bot deploy now", "robbie_agh_bot"),
+      stripBotMention("hey @nim_test_bot deploy now", "nim_test_bot"),
     ).toBe("hey deploy now");
   });
 
   test("leaves the text untouched when the mention is absent", () => {
-    expect(stripBotMention("just a normal message", "robbie_agh_bot")).toBe(
+    expect(stripBotMention("just a normal message", "nim_test_bot")).toBe(
       "just a normal message",
     );
   });
@@ -1083,13 +1083,13 @@ describe("stripBotMention", () => {
   test("does not strip a username that is a substring of a larger token", () => {
     // word-boundary guard: an email-like token is not a Telegram mention.
     expect(
-      stripBotMention("mail x@robbie_agh_bottle.com", "robbie_agh_bot"),
-    ).toBe("mail x@robbie_agh_bottle.com");
+      stripBotMention("mail x@nim_test_bottle.com", "nim_test_bot"),
+    ).toBe("mail x@nim_test_bottle.com");
   });
 
   test("no-ops when the username is unknown", () => {
-    expect(stripBotMention("@robbie_agh_bot hi", undefined)).toBe(
-      "@robbie_agh_bot hi",
+    expect(stripBotMention("@nim_test_bot hi", undefined)).toBe(
+      "@nim_test_bot hi",
     );
   });
 });
@@ -1117,7 +1117,7 @@ describe("parseGetUpdatesResult chatType", () => {
           message: {
             chat: { id: -100, type: "supergroup" },
             from: { id: 42 },
-            text: "@robbie_agh_bot hi",
+            text: "@nim_test_bot hi",
           },
         },
       ],
@@ -1136,57 +1136,57 @@ describe("parseGetUpdatesResult chatType", () => {
 });
 
 describe("matchPersonaNames", () => {
-  const names = ["robbie", "lena", "kai"];
+  const names = ["nim", "pax", "vor"];
   test("matches a bare name case-insensitively", () => {
-    expect(matchPersonaNames("Lena, what do you think?", names)).toEqual([
-      "lena",
+    expect(matchPersonaNames("Pax, what do you think?", names)).toEqual([
+      "pax",
     ]);
   });
   test("matches a name inside a bot @username (underscore boundary)", () => {
-    expect(matchPersonaNames("@robbie_agh_bot deploy", names)).toEqual([
-      "robbie",
+    expect(matchPersonaNames("@nim_test_bot deploy", names)).toEqual([
+      "nim",
     ]);
   });
   test("returns every distinct name present, in list order", () => {
-    expect(matchPersonaNames("kai and robbie, jump in", names)).toEqual([
-      "robbie",
-      "kai",
+    expect(matchPersonaNames("vor and nim, jump in", names)).toEqual([
+      "nim",
+      "vor",
     ]);
   });
   test("does NOT match a name embedded in a longer word", () => {
-    expect(matchPersonaNames("the robbiee variant", names)).toEqual([]);
-    expect(matchPersonaNames("scrobbie", names)).toEqual([]);
+    expect(matchPersonaNames("the nime variant", names)).toEqual([]);
+    expect(matchPersonaNames("scnim", names)).toEqual([]);
   });
   test("empty text or empty list yields no matches", () => {
     expect(matchPersonaNames("", names)).toEqual([]);
-    expect(matchPersonaNames("robbie", [])).toEqual([]);
+    expect(matchPersonaNames("nim", [])).toEqual([]);
   });
 });
 
 describe("decideGroupReply", () => {
   test("my name present → I reply, I become last-addressed", () => {
     expect(
-      decideGroupReply({ self: "robbie", matched: ["robbie"], lastAddressed: [] }),
-    ).toEqual({ reply: true, nextLastAddressed: ["robbie"] });
+      decideGroupReply({ self: "nim", matched: ["nim"], lastAddressed: [] }),
+    ).toEqual({ reply: true, nextLastAddressed: ["nim"] });
   });
   test("another bot named → I stay quiet, they become last-addressed", () => {
     expect(
-      decideGroupReply({ self: "robbie", matched: ["kai"], lastAddressed: ["robbie"] }),
-    ).toEqual({ reply: false, nextLastAddressed: ["kai"] });
+      decideGroupReply({ self: "nim", matched: ["vor"], lastAddressed: ["nim"] }),
+    ).toEqual({ reply: false, nextLastAddressed: ["vor"] });
   });
   test("no name + I was last addressed → I reply, set unchanged", () => {
     expect(
-      decideGroupReply({ self: "robbie", matched: [], lastAddressed: ["robbie"] }),
-    ).toEqual({ reply: true, nextLastAddressed: ["robbie"] });
+      decideGroupReply({ self: "nim", matched: [], lastAddressed: ["nim"] }),
+    ).toEqual({ reply: true, nextLastAddressed: ["nim"] });
   });
   test("no name + someone else was last addressed → I stay quiet", () => {
     expect(
-      decideGroupReply({ self: "robbie", matched: [], lastAddressed: ["kai"] }),
-    ).toEqual({ reply: false, nextLastAddressed: ["kai"] });
+      decideGroupReply({ self: "nim", matched: [], lastAddressed: ["vor"] }),
+    ).toEqual({ reply: false, nextLastAddressed: ["vor"] });
   });
   test("no name + brand-new chat (nobody addressed) → silence", () => {
     expect(
-      decideGroupReply({ self: "robbie", matched: [], lastAddressed: [] }),
+      decideGroupReply({ self: "nim", matched: [], lastAddressed: [] }),
     ).toEqual({ reply: false, nextLastAddressed: [] });
   });
 });
@@ -1194,11 +1194,11 @@ describe("decideGroupReply", () => {
 describe("formatGroupContext", () => {
   test("renders buffered messages as a labelled preamble", () => {
     const out = formatGroupContext([
-      { from: "@andrew", text: "topic A is tricky" },
-      { from: "@andrew", text: "what about edge cases" },
+      { from: "@tester", text: "topic A is tricky" },
+      { from: "@tester", text: "what about edge cases" },
     ]);
-    expect(out).toContain("@andrew: topic A is tricky");
-    expect(out).toContain("@andrew: what about edge cases");
+    expect(out).toContain("@tester: topic A is tricky");
+    expect(out).toContain("@tester: what about edge cases");
     expect(out.startsWith("[Recent group messages")).toBe(true);
   });
   test("empty buffer → empty string", () => {
@@ -1213,9 +1213,9 @@ describe("runTelegramServer group addressing", () => {
       updateId: 1,
       chatId: -1001,
       fromUserId: 42,
-      fromUsername: "andrew",
+      fromUsername: "tester",
       chatType: "supergroup",
-      text: "@robbie_agh_bot deploy the thing",
+      text: "@nim_test_bot deploy the thing",
     });
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "on it" },
@@ -1240,7 +1240,7 @@ describe("runTelegramServer group addressing", () => {
       chatId: 1001,
       fromUserId: 42,
       chatType: "private",
-      text: "@robbie_agh_bot hi",
+      text: "@nim_test_bot hi",
     });
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "hi" },
@@ -1254,7 +1254,7 @@ describe("runTelegramServer group addressing", () => {
       transport,
       oneShot: true,
     });
-    expect(harness.lastRequest?.userMessage).toBe("@robbie_agh_bot hi");
+    expect(harness.lastRequest?.userMessage).toBe("@nim_test_bot hi");
   });
 
   test("registers the real command menu at startup", async () => {
@@ -1286,19 +1286,19 @@ describe("runTelegramServer group addressing", () => {
       updateId: 1,
       chatId: -1001,
       fromUserId: 42,
-      fromUsername: "andrew",
+      fromUsername: "tester",
       chatType: "supergroup",
-      text: "robbie, status?",
+      text: "nim, status?",
     });
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "all good" },
     ]);
     await runTelegramServer({
-      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "robbie",
+      persona: "nim",
       transport,
       oneShot: true,
     });
@@ -1312,19 +1312,19 @@ describe("runTelegramServer group addressing", () => {
       updateId: 1,
       chatId: -1001,
       fromUserId: 42,
-      fromUsername: "andrew",
+      fromUsername: "tester",
       chatType: "supergroup",
-      text: "kai, status?",
+      text: "vor, status?",
     });
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "all good" },
     ]);
     await runTelegramServer({
-      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "robbie",
+      persona: "nim",
       transport,
       oneShot: true,
     });
@@ -1338,7 +1338,7 @@ describe("runTelegramServer group addressing", () => {
       updateId: 1,
       chatId: -1001,
       fromUserId: 42,
-      fromUsername: "andrew",
+      fromUsername: "tester",
       chatType: "supergroup",
       text: "anyone around?",
     });
@@ -1346,11 +1346,11 @@ describe("runTelegramServer group addressing", () => {
       { type: "done", finalText: "hi" },
     ]);
     await runTelegramServer({
-      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "robbie",
+      persona: "nim",
       transport,
       oneShot: true,
     });
@@ -1365,15 +1365,15 @@ describe("runTelegramServer group addressing", () => {
         updateId: 1,
         chatId: -1001,
         fromUserId: 42,
-        fromUsername: "andrew",
+        fromUsername: "tester",
         chatType: "supergroup",
-        text: "robbie, let's talk topic A",
+        text: "nim, let's talk topic A",
       },
       {
         updateId: 2,
         chatId: -1001,
         fromUserId: 42,
-        fromUsername: "andrew",
+        fromUsername: "tester",
         chatType: "supergroup",
         text: "and what about the edge cases?",
       },
@@ -1382,11 +1382,11 @@ describe("runTelegramServer group addressing", () => {
       { type: "done", finalText: "ok" },
     ]);
     await runTelegramServer({
-      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "robbie",
+      persona: "nim",
       transport,
       oneShot: true,
     });
@@ -1401,41 +1401,41 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push(
       {
-        // Addressed to kai — robbie observes but stays silent.
+        // Addressed to vor — nim observes but stays silent.
         updateId: 1,
         chatId: -1001,
         fromUserId: 42,
-        fromUsername: "andrew",
+        fromUsername: "tester",
         chatType: "supergroup",
-        text: "kai, my take on topic A is X",
+        text: "vor, my take on topic A is X",
       },
       {
-        // Now robbie is addressed — should receive the kai-directed line
+        // Now nim is addressed — should receive the vor-directed line
         // as context.
         updateId: 2,
         chatId: -1001,
         fromUserId: 42,
-        fromUsername: "andrew",
+        fromUsername: "tester",
         chatType: "supergroup",
-        text: "robbie, what do you think of that?",
+        text: "nim, what do you think of that?",
       },
     );
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "here's my view" },
     ]);
     await runTelegramServer({
-      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "robbie",
+      persona: "nim",
       transport,
       oneShot: true,
     });
     expect(harness.invocations).toBe(1);
     const sent = harness.lastRequest?.userMessage ?? "";
     expect(sent).toContain("my take on topic A is X");
-    expect(sent).toContain("robbie, what do you think of that?");
+    expect(sent).toContain("nim, what do you think of that?");
   });
 });
 
