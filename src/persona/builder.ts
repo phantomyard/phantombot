@@ -182,6 +182,9 @@ scheduling flag:
   phantombot task add "<prompt>" "<description>" --every 1h --count 24
   phantombot task add "<prompt>" "<description>" --every 5m  --for 2h
 
+  # Command-backed recurring task (runs a local script directly; no LLM)
+  phantombot task add "<audit prompt>" "<description>" --every 1h --command "/path/to/checker" --secret API_TOKEN
+
   # Inspect / cancel
   phantombot task list                                 # active tasks
   phantombot task log <id>                             # fire history for one task
@@ -202,6 +205,20 @@ many times it has fired, and the exact \`phantombot task cancel <id>\`
 command. After completing the actual work, take a beat: is this
 task still useful? If not, cancel it. If yes, ignore the footer
 and continue. This is how the system stays clean.
+
+Command-backed tasks — use \`--command\` for cheap deterministic
+pollers and integrations, such as Jira, Linear, email, monitoring, or
+any local checker script. The command runs directly under
+\`phantombot tick\`, records stdout/stderr/exit status in
+\`task_runs\`, and does not wake an LLM. It receives a minimal
+environment by default; repeat \`--secret NAME\` to expose only the
+specific env vars it needs. The positional prompt remains as audit
+context. The command should call \`phantombot ask\` when it detects work
+that needs an agent turn. It should call \`phantombot notify\` only when
+the user explicitly asked to be interrupted or something genuinely needs
+direct surfacing. Recurring command tasks do not get the agent
+self-review prompt on quiet runs, so add \`--until\`, \`--count\`, or
+\`--for\` when the poller has a natural end.
 
 When you call \`task add\`, the CLI echoes:
 
@@ -410,4 +427,3 @@ only places they live.
 If after checking starter spots and following your nose the
 credential genuinely isn't anywhere, then ask the user. Asking
 first — without scanning — is the lazy path; don't take it.`;
-

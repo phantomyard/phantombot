@@ -65,6 +65,14 @@ describe("buildSystemPrompt — scheduling tools section", () => {
     expect(SCHEDULING_TOOLS_SECTION).toContain('"<prompt>" "<description>"');
   });
 
+  test("documents command-backed tasks as no-LLM generic pollers", () => {
+    expect(SCHEDULING_TOOLS_SECTION).toContain("--command");
+    expect(SCHEDULING_TOOLS_SECTION).toContain("does not wake an LLM");
+    expect(SCHEDULING_TOOLS_SECTION).toContain("Jira");
+    expect(SCHEDULING_TOOLS_SECTION).toContain("Linear");
+    expect(SCHEDULING_TOOLS_SECTION).toContain("phantombot notify");
+  });
+
   test("documents the proof-of-creation echo contract", () => {
     // The CLI echoes "task <id> scheduled" — the persona must repeat
     // that verbatim. This is the audit trail that defeats hallucinated

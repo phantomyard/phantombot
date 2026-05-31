@@ -152,6 +152,97 @@ describe("runTaskAdd", () => {
     const t = store.get(1)!;
     expect(t.expiresAt?.toISOString()).toBe("2026-06-01T00:00:00.000Z");
   });
+
+  test("--command stores a direct command task", async () => {
+    const out = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "command poll",
+      command: "/usr/local/bin/check-notifications",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("hygiene:");
+    const t = store.get(1)!;
+    expect(t.command).toBe("/usr/local/bin/check-notifications");
+    expect(t.commandSecrets).toEqual([]);
+    const showOut = new CaptureStream();
+    await runTaskShow({ config, store, id: 1, out: showOut });
+    expect(showOut.text).toContain("--- command ---");
+    expect(showOut.text).toContain("/usr/local/bin/check-notifications");
+  });
+
+  test("--secret stores command env allowlist", async () => {
+    const out = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "command poll",
+      command: "/usr/local/bin/check-notifications",
+      commandSecrets: ["JIRA_API_KEY", " JIRA_API_KEY ", "LINEAR_API_KEY"],
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    const t = store.get(1)!;
+    expect(t.commandSecrets).toEqual(["JIRA_API_KEY", "LINEAR_API_KEY"]);
+    const showOut = new CaptureStream();
+    await runTaskShow({ config, store, id: 1, out: showOut });
+    expect(showOut.text).toContain("secrets:      JIRA_API_KEY, LINEAR_API_KEY");
+  });
+
+  test("--secret requires --command and valid env names", async () => {
+    const errNoCommand = new CaptureStream();
+    const codeNoCommand = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "bad poll",
+      commandSecrets: ["JIRA_API_KEY"],
+      out: new CaptureStream(),
+      err: errNoCommand,
+    });
+    expect(codeNoCommand).toBe(2);
+    expect(errNoCommand.text).toContain("--secret requires --command");
+
+    const errBadName = new CaptureStream();
+    const codeBadName = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "bad poll",
+      command: "/usr/local/bin/check-notifications",
+      commandSecrets: ["not-a-var"],
+      out: new CaptureStream(),
+      err: errBadName,
+    });
+    expect(codeBadName).toBe(2);
+    expect(errBadName.text).toContain("invalid --secret name");
+  });
+
+  test("--command rejects empty commands", async () => {
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "command poll",
+      command: "   ",
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("--command cannot be empty");
+  });
 });
 
 describe("runTaskList", () => {
