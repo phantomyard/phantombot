@@ -388,7 +388,7 @@ prepends those messages as context:
 Robbie, what do you think?
 ```
 
-The buffer is capped at 20 messages per group chat and is not persisted across
+The buffer is capped at 100 messages per group chat and is not persisted across
 process restarts.
 
 ### Bot-To-Bot Limitations

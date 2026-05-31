@@ -861,7 +861,7 @@ interface GroupChatState {
 }
 
 /** Cap on buffered human messages retained per group chat. */
-export const GROUP_BUFFER_MAX = 20;
+export const GROUP_BUFFER_MAX = 100;
 
 /**
  * Pure parser exposed for testing. Consumes Telegram getUpdates result
