@@ -358,7 +358,6 @@ Phantombot's group routing is local and deterministic:
 - If a human message names another bot, this bot stays silent.
 - If a human follow-up names nobody, the last-addressed bot continues.
 - If a brand-new group thread names nobody, all bots stay silent.
-- A bot's own `@username` also counts as addressing that bot.
 
 Examples:
 
@@ -371,6 +370,25 @@ Examples:
 
 The bot strips its own `@username` before sending the message to the harness,
 so the assistant sees the user's actual request rather than addressing noise.
+
+#### Routing uses only shared signals — name your bots accordingly
+
+Routing is decided **purely from the persona-name list every bot shares**, never
+from a bot's own Telegram `@username` (which the other bots can't see). If one
+bot routed on a signal its peers couldn't observe, the bots' "last addressed"
+state would drift apart — the mentioned bot would switch while the others kept a
+previously-sticky bot answering, so two bots would reply and keep replying to
+every no-name follow-up.
+
+A native `@username` mention still routes correctly **when the persona name is
+embedded in the username** — `robbie` inside `@robbie_agh_bot` matches on letter
+boundaries, and because that match comes from the shared name list, every bot
+agrees on it. So give each bot a username that contains its persona name (the
+normal case). A bot whose username does *not* contain its persona name can only
+be addressed by name in the text, not by a bare `@username`.
+
+A bot that is *not* addressed stays completely silent — it produces no reply and
+no `(no reply)` placeholder bubble. Silence in a group is normal, not an error.
 
 ### Context Catch-Up
 

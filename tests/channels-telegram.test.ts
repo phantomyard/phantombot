@@ -1220,12 +1220,16 @@ describe("runTelegramServer group addressing", () => {
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "on it" },
     ]);
+    // Persona "nim" — its name is embedded in the @username "nim_test_bot",
+    // so the shared name matcher routes the @mention to this bot (the only
+    // routing path: a bot never decides from its own getMe username, which
+    // peers can't see). The mention is then stripped before dispatch.
     await runTelegramServer({
-      config: baseConfig(),
+      config: baseConfig({ groupPersonaNames: ["nim"] }),
       memory,
       harnesses: [harness],
       agentDir,
-      persona: "phantom",
+      persona: "nim",
       transport,
       oneShot: true,
     });
@@ -1436,6 +1440,72 @@ describe("runTelegramServer group addressing", () => {
     const sent = harness.lastRequest?.userMessage ?? "";
     expect(sent).toContain("my take on topic A is X");
     expect(sent).toContain("nim, what do you think of that?");
+  });
+
+  test("group: a self-only @username (persona name not embedded) does NOT route — no divergence", async () => {
+    // Regression for the sticky-routing bug: routing must come ONLY from the
+    // shared persona-name signal every bot sees, never from a bot's own getMe
+    // @username. Here persona "phantom" is NOT embedded in the bot's username
+    // "nim_test_bot", so an @username-only mention carries no name the matcher
+    // can see. With nobody ever addressed, the bot stays silent rather than
+    // folding its own username in (which would have made its lastAddressed
+    // diverge from its peers'). Address by name, or use a username that embeds
+    // the persona name, to route.
+    const transport = new FakeTransport();
+    transport.botUsername = "nim_test_bot";
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "tester",
+      chatType: "supergroup",
+      text: "@nim_test_bot are you there?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not send" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["phantom", "pax", "vor"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toEqual([]);
+  });
+
+  test("group: empty reply renders no '(no reply)' bubble", async () => {
+    // Even when this bot IS addressed and runs a turn, an empty reply must
+    // not surface the "(no reply)" placeholder in a group — that silence is
+    // legitimate and a visible bubble is noise. (DMs keep the placeholder.)
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "tester",
+      chatType: "supergroup",
+      text: "nim, you there?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["nim", "pax", "vor"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      oneShot: true,
+    });
+    // The bot was addressed, so it ran a turn…
+    expect(harness.invocations).toBe(1);
+    // …but the empty result produced no message at all.
+    expect(transport.sent).toEqual([]);
   });
 });
 

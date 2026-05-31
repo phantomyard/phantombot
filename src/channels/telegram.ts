@@ -1045,11 +1045,13 @@ export async function runTelegramServer(
   // Per-chat group routing state (last-addressed bot + recent-message
   // buffer). Only touched for group/supergroup chats; DMs never key in.
   const groupChats = new Map<number, GroupChatState>();
-  // This bot's own addressing name in groups. The persona name is the
-  // canonical token (matches the configured group_persona_names list);
-  // if getMe succeeded we also accept the bare @username stem so a literal
-  // "@robbie_agh_bot" still counts as addressing even when the persona name
-  // differs from the bot username.
+  // This bot's own addressing token in groups is its persona name, which
+  // must appear in the configured group_persona_names list (shared verbatim
+  // across every bot in the group). Native @mentions route through the same
+  // name matcher because a persona name embedded in the @username — "robbie"
+  // in "@robbie_agh_bot" — matches on letter boundaries. The getMe @username
+  // (botUsername, below) is used ONLY to strip the mention from dispatched
+  // text, never for routing, so all bots decide from the same shared signal.
   const selfName = input.persona;
   const groupPersonaNames = (() => {
     const configured = tg.groupPersonaNames ?? [];
@@ -1215,24 +1217,21 @@ export async function runTelegramServer(
           const matchText = [msg.text, msg.caption]
             .filter((s): s is string => Boolean(s && s.length > 0))
             .join(" ");
+          // Routing is driven ONLY by the shared, identically-configured
+          // persona-name list — never by this bot's own @username, which the
+          // other bots cannot see. Letting a self-only username match change
+          // the decision diverges state across bots: the addressed bot would
+          // flip its lastAddressed while everyone else kept theirs, so a
+          // previously-sticky bot keeps answering too and both answer every
+          // no-name follow-up. The name matcher already catches @mentions
+          // whose username embeds the persona name — "robbie" inside
+          // "@robbie_agh_bot" matches on letter boundaries — so usernames
+          // that follow that convention route correctly AND consistently for
+          // every bot. (See the groupPersonaNames docs in config.ts.)
           const matched = matchPersonaNames(matchText, groupPersonaNames);
-          // Being @mentioned by our own bot username also counts as being
-          // addressed, even when the persona name isn't a substring of the
-          // username. Fold it into the matched set AS our persona name so
-          // the shared, name-based routing treats it uniformly (and other
-          // bots — which can't know our @username — still agree via the
-          // persona-name match they DO see).
-          const selfViaUsername = botUsername
-            ? matchPersonaNames(matchText, [botUsername]).length > 0
-            : false;
-          const effectiveMatched =
-            selfViaUsername &&
-            !matched.some((n) => n.toLowerCase() === selfName.toLowerCase())
-              ? [...matched, selfName]
-              : matched;
           const decision = decideGroupReply({
             self: selfName,
-            matched: effectiveMatched,
+            matched,
             lastAddressed: state.lastAddressed,
           });
           state.lastAddressed = decision.nextLastAddressed;
@@ -1868,8 +1867,18 @@ async function processChatMessage(
   if (errored) {
     outText = `(error: ${errored})`;
   } else if (fullReply.length === 0) {
+    // Empty reply: in a DM the "(no reply)" placeholder is a useful signal
+    // that the turn produced nothing. In a GROUP it's pure noise — a bot
+    // legitimately stays silent for messages aimed at someone else (or when
+    // the persona simply chooses not to speak), and rendering "(no reply)"
+    // turns that silence into a visible bubble. Suppress it in groups, belt-
+    // and-braces with the routing gate that already skips most such turns.
+    const isGroupChat =
+      msg.chatType === "group" || msg.chatType === "supergroup";
     outText =
-      narrationBubblesSent > 0 || finalBubblesSent > 0 ? "" : "(no reply)";
+      narrationBubblesSent > 0 || finalBubblesSent > 0 || isGroupChat
+        ? ""
+        : "(no reply)";
   } else if (
     consumedReplyChars > 0 &&
     fullReply.startsWith(streamedReply.slice(0, consumedReplyChars))
