@@ -2698,6 +2698,96 @@ describe("runTelegramServer slash commands", () => {
     expect(transport.sent[0]!.text).toContain("/status");
   });
 
+  test("group: /cmd@otherbot is ignored — a state-changing command doesn't fan out to every bot", async () => {
+    // Privacy-off groups deliver every slash command to every bot. A
+    // /reset addressed to another bot must NOT clear this bot's history.
+    await memory.appendTurn({
+      persona: "nim",
+      conversation: "telegram:-1001",
+      role: "user",
+      text: "keep me",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "tester",
+      chatType: "supergroup",
+      text: "/reset@pax_test_bot",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["nim", "pax"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toEqual([]);
+    expect(
+      await memory.recentTurns("nim", "telegram:-1001", 10),
+    ).toEqual([{ role: "user", text: "keep me" }]);
+  });
+
+  test("group: untargeted /cmd with no sticky speaker is ignored", async () => {
+    // Bare /status in a group where nobody is sticky yet → stay silent so
+    // we don't get N identical /status replies. User can target /status@bot.
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "tester",
+      chatType: "supergroup",
+      text: "/status",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["nim", "pax"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.sent).toEqual([]);
+  });
+
+  test("group: /cmd@thisbot is handled by this bot", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "tester",
+      chatType: "supergroup",
+      text: "/status@nim_test_bot",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["nim", "pax"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "nim",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0); // /status is channel-handled
+    expect(transport.sent).toHaveLength(1);
+  });
+
   test("/reset clears prior history for this chat (and only this chat)", async () => {
     await memory.appendTurn({
       persona: "phantom",

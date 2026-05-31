@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   handleSlashCommand,
   nominalContextWindow,
+  slashCommandTarget,
   type ActiveTurnHandle,
   type SlashCommandContext,
 } from "../src/channels/commands.ts";
@@ -83,6 +84,54 @@ describe("handleSlashCommand recognition", () => {
   test("tolerates leading/trailing whitespace", async () => {
     const r = await handleSlashCommand("   /help   ", ctx());
     expect(r).not.toBeNull();
+  });
+
+  test("ignores /cmd@OtherBot — a command addressed to a different bot isn't ours", async () => {
+    // Without botUsername validation this would strip the suffix and run on
+    // every bot in a privacy-off group. With our own username known and the
+    // target naming someone else, we fall through (return null).
+    const r = await handleSlashCommand(
+      "/status@kai_agh_bot",
+      ctx({ botUsername: "robbie_agh_bot" }),
+    );
+    expect(r).toBeNull();
+  });
+
+  test("handles /cmd@thisbot when the suffix names us", async () => {
+    const r = await handleSlashCommand(
+      "/help@robbie_agh_bot",
+      ctx({ botUsername: "robbie_agh_bot" }),
+    );
+    expect(r).not.toBeNull();
+    expect(r!.reply).toContain("/stop");
+  });
+
+  test("@suffix matching is case-insensitive on the username", async () => {
+    const r = await handleSlashCommand(
+      "/help@Robbie_AGH_Bot",
+      ctx({ botUsername: "robbie_agh_bot" }),
+    );
+    expect(r).not.toBeNull();
+  });
+
+  test("without botUsername known, keeps legacy behavior (strips any @suffix)", async () => {
+    const r = await handleSlashCommand("/help@whoever", ctx());
+    expect(r).not.toBeNull();
+  });
+});
+
+describe("slashCommandTarget", () => {
+  test("extracts the @target from the command head", () => {
+    expect(slashCommandTarget("/status@kai_agh_bot foo")).toBe("kai_agh_bot");
+  });
+  test("returns undefined when there is no @suffix", () => {
+    expect(slashCommandTarget("/status foo")).toBeUndefined();
+  });
+  test("returns undefined for an empty target", () => {
+    expect(slashCommandTarget("/status@")).toBeUndefined();
+  });
+  test("only looks at the first token, not later args", () => {
+    expect(slashCommandTarget("/say hi@example.com")).toBeUndefined();
   });
 });
 

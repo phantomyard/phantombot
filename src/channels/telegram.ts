@@ -50,6 +50,7 @@ import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
   type ActiveTurnHandle,
   handleSlashCommand,
+  slashCommandTarget,
   TELEGRAM_BOT_COMMANDS,
 } from "./commands.ts";
 import { telegramGetMe } from "../lib/telegramApi.ts";
@@ -1150,11 +1151,53 @@ export async function runTelegramServer(
           captionLength: msg.caption?.length,
         });
 
+        const isGroupChat =
+          msg.chatType === "group" || msg.chatType === "supergroup";
+
         // Slash commands: handled INLINE so they bypass the per-chat queue
         // and any in-flight turn. Voice messages are never slash commands
         // (the body is empty until STT runs, by which point we've already
         // committed to the LLM path).
         if (!isVoice && msg.text.startsWith("/")) {
+          // Group addressing applies to slash commands too. With privacy
+          // mode off, EVERY bot in the group receives the command, so an
+          // ungated /reset, /stop, /restart would fan out and act on every
+          // bot at once. Decide eligibility the same way we gate normal
+          // messages, but using the slash-specific `@BotName` target:
+          //   - `/cmd@thisbot`   → only this bot acts.
+          //   - `/cmd@otherbot`  → another bot's command; stay silent.
+          //   - `/cmd` (no @)    → only the bot the thread is currently
+          //                        with acts (sticky). If nobody is sticky
+          //                        yet, stay silent — the user can target a
+          //                        bot explicitly with `/cmd@botname`.
+          // (DMs skip all of this; isGroupChat is false there.)
+          if (isGroupChat) {
+            const target = slashCommandTarget(msg.text);
+            if (target) {
+              if (
+                !botUsername ||
+                target.toLowerCase() !== botUsername.toLowerCase()
+              ) {
+                log.info("telegram: slash for another bot — ignoring", {
+                  chatId: msg.chatId,
+                  persona: input.persona,
+                  target,
+                });
+                continue;
+              }
+            } else {
+              const sticky = (
+                groupChats.get(msg.chatId)?.lastAddressed ?? []
+              ).some((n) => n.toLowerCase() === selfName.toLowerCase());
+              if (!sticky) {
+                log.info("telegram: untargeted group slash, not sticky — ignoring", {
+                  chatId: msg.chatId,
+                  persona: input.persona,
+                });
+                continue;
+              }
+            }
+          }
           const result = await handleSlashCommand(msg.text, {
             chatId: msg.chatId,
             persona: input.persona,
@@ -1165,6 +1208,7 @@ export async function runTelegramServer(
             activeTurn: activeTurns.get(msg.chatId),
             config: input.config,
             serviceControl: input.serviceControl,
+            botUsername,
           });
           if (result) {
             try {
@@ -1207,8 +1251,6 @@ export async function runTelegramServer(
         // with. Messages aimed at another bot are still buffered (for later
         // context) but produce no reply. DMs skip this entirely.
         let groupContext: string | undefined;
-        const isGroupChat =
-          msg.chatType === "group" || msg.chatType === "supergroup";
         if (isGroupChat) {
           const state = groupChats.get(msg.chatId) ?? {
             lastAddressed: [],

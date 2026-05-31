@@ -78,6 +78,13 @@ export interface SlashCommandContext {
    * runUpdateFlow.
    */
   serviceControl?: ServiceControl;
+  /**
+   * This bot's own @username (from startup getMe). Used to validate the
+   * `/cmd@BotName` suffix in groups: a command explicitly targeted at a
+   * different bot must NOT be handled here. Undefined if getMe failed or
+   * in contexts (DMs, tests) where targeting is irrelevant.
+   */
+  botUsername?: string;
 }
 
 export interface SlashCommandResult {
@@ -131,11 +138,37 @@ const HELP =
   );
 
 /**
+ * Extract the `@BotName` target from a slash command head, if present.
+ *
+ *   "/status@kai_agh_bot foo" → "kai_agh_bot"
+ *   "/status foo"             → undefined
+ *   "/status@"                → undefined (empty target)
+ *
+ * Telegram lets a user disambiguate which bot a command is for by
+ * appending `@<bot-username>`. Exported for the channel's group gate and
+ * for testing.
+ */
+export function slashCommandTarget(text: string): string | undefined {
+  const head = text.trim().split(/\s+/)[0] ?? "";
+  const at = head.indexOf("@");
+  if (at < 0) return undefined;
+  const target = head.slice(at + 1);
+  return target.length > 0 ? target : undefined;
+}
+
+/**
  * Parse + dispatch a slash command.
  *
  * Returns null if `text` is not a slash command we own — caller falls
  * through to the LLM for that message. Returns a SlashCommandResult when
  * the command is handled (recognized or refused).
+ *
+ * Group targeting: a `/cmd@BotName` whose `@BotName` names a *different*
+ * bot than this one returns null (we don't own it). Without this check a
+ * state-changing command like `/reset@otherbot` would be executed by
+ * every bot in the group, not just the addressed one. The check is only
+ * applied when `ctx.botUsername` is known; otherwise we keep the legacy
+ * behavior of stripping the suffix and handling the command.
  */
 export async function handleSlashCommand(
   text: string,
@@ -144,8 +177,19 @@ export async function handleSlashCommand(
   const trimmed = text.trim();
   if (!trimmed.startsWith("/")) return null;
 
-  // Telegram convention in groups: `/cmd@BotName arg1 arg2`. Strip the
-  // @suffix so the command matches whether the bot was @-mentioned or not.
+  // Telegram convention in groups: `/cmd@BotName arg1 arg2`. If the
+  // @suffix names a different bot, this command isn't ours — fall through.
+  const target = slashCommandTarget(trimmed);
+  if (
+    target &&
+    ctx.botUsername &&
+    target.toLowerCase() !== ctx.botUsername.toLowerCase()
+  ) {
+    return null;
+  }
+
+  // Strip the @suffix so the command matches whether the bot was
+  // @-mentioned or not.
   const parts = trimmed.split(/\s+/);
   const head = parts[0]!;
   const cmd = head.split("@")[0]!.toLowerCase();
