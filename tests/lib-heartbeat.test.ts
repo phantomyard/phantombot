@@ -232,6 +232,7 @@ describe("runHeartbeat update check hook", () => {
     const ASSET = `phantombot-${tag}-linux-x64`;
     const body = {
       tag_name: tag,
+      published_at: "2026-04-28T00:00:00Z",
       body: "test",
       assets: [
         { name: ASSET, browser_download_url: "x", size: 1 },

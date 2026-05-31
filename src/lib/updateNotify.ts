@@ -12,8 +12,8 @@
  *      because by the time the new binary is live the old one is gone.
  *
  *   2. Heartbeat update check. The 30-minute heartbeat hits GitHub for the
- *      latest release; if newer than current, sends ONE Telegram message
- *      pointing the user at `/update`. Deduped via
+ *      latest release; if newer than current and at least 72 hours old,
+ *      sends ONE Telegram message pointing the user at `/update`. Deduped via
  *      ~/.config/phantombot/.last-update-notified so a user who's
  *      seen-but-not-yet-installed v1.0.99 isn't pinged every half hour.
  *
@@ -60,6 +60,8 @@ export function pendingUpdatePath(): string {
 export function lastNotifiedPath(): string {
   return join(xdgConfigHome(), "phantombot", ".last-update-notified");
 }
+
+export const AUTO_UPDATE_NOTIFY_DELAY_MS = 72 * 60 * 60 * 1000;
 
 /* -------------------------------------------------------------------------- *
  * Pending-update marker
@@ -162,12 +164,41 @@ export async function clearPendingUpdate(
  * Last-notified dedup file
  * -------------------------------------------------------------------------- */
 
-export async function readLastNotified(
-  path: string = lastNotifiedPath(),
-): Promise<string | undefined> {
+interface LastNotifiedState {
+  version: string;
+  firstSeenAt: string;
+  notifiedAt?: string;
+}
+
+function parseLastNotifiedState(text: string): LastNotifiedState | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (!trimmed.startsWith("{")) {
+    // Back-compat for the old plain-version dedup file. Treat it as already
+    // notified so existing installs do not get re-pinged after upgrading.
+    const legacyTime = new Date(0).toISOString();
+    return { version: trimmed, firstSeenAt: legacyTime, notifiedAt: legacyTime };
+  }
   try {
-    const text = (await readFile(path, "utf8")).trim();
-    return text.length > 0 ? text : undefined;
+    const parsed = JSON.parse(trimmed) as Partial<LastNotifiedState>;
+    if (
+      typeof parsed.version !== "string" ||
+      typeof parsed.firstSeenAt !== "string" ||
+      (parsed.notifiedAt !== undefined && typeof parsed.notifiedAt !== "string")
+    ) {
+      return undefined;
+    }
+    return parsed as LastNotifiedState;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readLastNotifiedState(
+  path: string = lastNotifiedPath(),
+): Promise<LastNotifiedState | undefined> {
+  try {
+    return parseLastNotifiedState(await readFile(path, "utf8"));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     log.warn("updateNotify: failed to read last-notified", {
@@ -178,14 +209,32 @@ export async function readLastNotified(
   }
 }
 
-export async function writeLastNotified(
-  version: string,
+async function writeLastNotifiedState(
+  state: LastNotifiedState,
   path: string = lastNotifiedPath(),
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp`;
-  await writeFile(tmp, version, "utf8");
+  await writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
   await rename(tmp, path);
+}
+
+export async function readLastNotified(
+  path: string = lastNotifiedPath(),
+): Promise<string | undefined> {
+  const state = await readLastNotifiedState(path);
+  return state?.notifiedAt ? state.version : undefined;
+}
+
+export async function writeLastNotified(
+  version: string,
+  path: string = lastNotifiedPath(),
+): Promise<void> {
+  const now = new Date().toISOString();
+  await writeLastNotifiedState(
+    { version, firstSeenAt: now, notifiedAt: now },
+    path,
+  );
 }
 
 /* -------------------------------------------------------------------------- *
@@ -356,6 +405,7 @@ export async function runUpdateFlow(
 export interface CheckAndNotifyOnceInput {
   config: Config;
   currentVersion: string;
+  now?: Date;
   fetchImpl?: typeof fetch;
   transport?: TelegramTransport;
   lastNotifiedPath?: string;
@@ -365,12 +415,13 @@ export interface CheckAndNotifyOnceInput {
 
 export interface CheckAndNotifyOnceResult {
   /** "no_telegram" | "no_target" | "release_check_failed" | "already_current"
-   *  | "already_notified" | "no_allowed_users" | "notified" */
+   *  | "waiting_delay" | "already_notified" | "no_allowed_users" | "notified" */
   status:
     | "no_telegram"
     | "no_target"
     | "release_check_failed"
     | "already_current"
+    | "waiting_delay"
     | "already_notified"
     | "no_allowed_users"
     | "notified";
@@ -382,7 +433,9 @@ export interface CheckAndNotifyOnceResult {
 /**
  * Heartbeat-time update check. Idempotent: if the latest GitHub release
  * matches what we last notified about, this is a no-op — even across
- * restarts, because the last-notified version is on disk.
+ * restarts, because the last-notified version is on disk. New releases are
+ * held for 72 hours before the automatic Telegram heads-up; manual
+ * `phantombot update` and `/update` remain immediate.
  *
  * Failure modes are all logged and returned as a status string; we don't
  * throw, because a transient network blip mustn't take the heartbeat down.
@@ -409,14 +462,31 @@ export async function checkAndNotifyOnce(
     return { status: "release_check_failed", error: r.error };
   }
   const release = r.release;
+  const now = input.now ?? new Date();
 
   if (release.version === input.currentVersion) {
     return { status: "already_current", latestVersion: release.version };
   }
 
-  const lastNotified = await readLastNotified(input.lastNotifiedPath);
-  if (lastNotified === release.version) {
+  const state = await readLastNotifiedState(input.lastNotifiedPath);
+  if (state?.version === release.version && state.notifiedAt) {
     return { status: "already_notified", latestVersion: release.version };
+  }
+
+  const firstSeenAt =
+    (state?.version === release.version ? state.firstSeenAt : undefined) ??
+    release.publishedAt ??
+    now.toISOString();
+  const releaseAgeMs = now.getTime() - Date.parse(firstSeenAt);
+  if (
+    !Number.isFinite(releaseAgeMs) ||
+    releaseAgeMs < AUTO_UPDATE_NOTIFY_DELAY_MS
+  ) {
+    await writeLastNotifiedState(
+      { version: release.version, firstSeenAt },
+      input.lastNotifiedPath,
+    );
+    return { status: "waiting_delay", latestVersion: release.version };
   }
 
   if (tg.allowedUserIds.length === 0) {
@@ -448,7 +518,10 @@ export async function checkAndNotifyOnce(
   // Write the dedup marker even if some sends failed — otherwise a
   // partial-broadcast user gets re-notified forever. Better one missed
   // user than one re-pinged user.
-  await writeLastNotified(release.version, input.lastNotifiedPath);
+  await writeLastNotifiedState(
+    { version: release.version, firstSeenAt, notifiedAt: now.toISOString() },
+    input.lastNotifiedPath,
+  );
 
   log.info("updateNotify: heartbeat notified update available", {
     latestVersion: release.version,

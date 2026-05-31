@@ -103,6 +103,8 @@ phantombot update --force --restart     # cron-friendly: no prompts, restart aft
 
 Updates download to `${binPath}.update.tmp`, SHA256-verify, atomically rename over the live binary, and clean up after themselves — no `.bak` files left in your install dir.
 
+The heartbeat checks for new releases automatically, but waits 72 hours after a release before sending the Telegram `/update` heads-up. Manual `phantombot update` and `/update` are immediate.
+
 ---
 
 ## Prerequisites

@@ -69,6 +69,7 @@ function authAwareFetch(
 
 const SAMPLE_RELEASE = {
   tag_name: "v1.0.43",
+  published_at: "2026-05-01T00:00:00Z",
   body: "Automated release for PR #43.",
   assets: [
     {
@@ -108,6 +109,7 @@ describe("findLatestRelease", () => {
     if (!r.ok) return;
     expect(r.release.version).toBe("1.0.43");
     expect(r.release.tag).toBe("v1.0.43");
+    expect(r.release.publishedAt).toBe("2026-05-01T00:00:00Z");
     expect(r.release.binary.name).toBe("phantombot-v1.0.43-linux-x64");
     expect(r.release.binary.url).toBe(
       "https://example/phantombot-v1.0.43-linux-x64",

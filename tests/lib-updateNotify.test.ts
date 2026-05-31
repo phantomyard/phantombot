@@ -94,6 +94,7 @@ function fakeReleaseFetch(opts: {
   const status = opts.status ?? 200;
   const body = opts.releaseBody ?? {
     tag_name: "v1.0.99",
+    published_at: "2026-05-01T00:00:00Z",
     body: "test release",
     assets: [
       {
@@ -430,6 +431,7 @@ describe("checkAndNotifyOnce", () => {
     const r = await checkAndNotifyOnce({
       config: baseConfig(),
       currentVersion: "1.0.42",
+      now: new Date("2026-05-05T00:00:00Z"),
       fetchImpl: fakeReleaseFetch(),
       transport,
       lastNotifiedPath: lastNotifiedPathLocal,
@@ -442,6 +444,105 @@ describe("checkAndNotifyOnce", () => {
     expect(transport.sent.length).toBe(2);
     expect(transport.sent[0]!.text).toContain("v1.0.99");
     expect(transport.sent[0]!.text).toContain("/update");
+    expect(await readLastNotified(lastNotifiedPathLocal)).toBe("1.0.99");
+  });
+
+  test("update available but younger than 72 hours → records first seen without notifying", async () => {
+    const transport = new FakeTransport();
+    const r = await checkAndNotifyOnce({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      now: new Date("2026-05-02T00:00:00Z"),
+      fetchImpl: fakeReleaseFetch({
+        releaseBody: {
+          tag_name: "v1.0.99",
+          published_at: "2026-05-01T00:00:00Z",
+          body: "test release",
+          assets: [
+            {
+              name: ASSET,
+              browser_download_url: "https://example/" + ASSET,
+              size: NEW_BYTES.byteLength,
+            },
+            {
+              name: "SHA256SUMS",
+              browser_download_url: "https://example/SHA256SUMS",
+              size: 256,
+            },
+          ],
+        },
+      }),
+      transport,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    expect(r.status).toBe("waiting_delay");
+    expect(r.latestVersion).toBe("1.0.99");
+    expect(transport.sent.length).toBe(0);
+    expect(await readLastNotified(lastNotifiedPathLocal)).toBeUndefined();
+  });
+
+  test("same pending release notifies after the 72-hour delay", async () => {
+    const first = await checkAndNotifyOnce({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      now: new Date("2026-05-02T00:00:00Z"),
+      fetchImpl: fakeReleaseFetch({
+        releaseBody: {
+          tag_name: "v1.0.99",
+          body: "test release",
+          assets: [
+            {
+              name: ASSET,
+              browser_download_url: "https://example/" + ASSET,
+              size: NEW_BYTES.byteLength,
+            },
+            {
+              name: "SHA256SUMS",
+              browser_download_url: "https://example/SHA256SUMS",
+              size: 256,
+            },
+          ],
+        },
+      }),
+      transport: new FakeTransport(),
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    expect(first.status).toBe("waiting_delay");
+
+    const transport = new FakeTransport();
+    const second = await checkAndNotifyOnce({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      now: new Date("2026-05-05T00:00:01Z"),
+      fetchImpl: fakeReleaseFetch({
+        releaseBody: {
+          tag_name: "v1.0.99",
+          body: "test release",
+          assets: [
+            {
+              name: ASSET,
+              browser_download_url: "https://example/" + ASSET,
+              size: NEW_BYTES.byteLength,
+            },
+            {
+              name: "SHA256SUMS",
+              browser_download_url: "https://example/SHA256SUMS",
+              size: 256,
+            },
+          ],
+        },
+      }),
+      transport,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    expect(second.status).toBe("notified");
+    expect(transport.sent.length).toBe(2);
     expect(await readLastNotified(lastNotifiedPathLocal)).toBe("1.0.99");
   });
 

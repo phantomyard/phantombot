@@ -36,6 +36,8 @@ export interface LatestRelease {
   version: string;
   /** The full tag, e.g. "v1.0.43". */
   tag: string;
+  /** ISO timestamp GitHub published the release. */
+  publishedAt?: string;
   /** GitHub release body text (release notes). May be empty. */
   body: string;
   /** The binary asset for the requested arch. */
@@ -161,6 +163,8 @@ export async function findLatestRelease(opts: {
     release: {
       version,
       tag,
+      publishedAt:
+        typeof body.published_at === "string" ? body.published_at : undefined,
       body: typeof body.body === "string" ? body.body : "",
       binary: {
         name: binary.name,
@@ -230,6 +234,7 @@ function buildHeaders(withAuth: boolean): Record<string, string> {
 
 interface GithubReleaseResponse {
   tag_name?: string;
+  published_at?: string;
   body?: string;
   assets?: Array<{
     name: string;

@@ -67,7 +67,8 @@ export async function runHeartbeatCli(
     indexPath: indexPath(persona),
     // Pass config + version so the heartbeat can hit GitHub for new
     // releases and dispatch a one-time Telegram notification when a
-    // newer version is out. See src/lib/updateNotify.ts.
+    // newer version has aged past the auto-notify delay. See
+    // src/lib/updateNotify.ts.
     config,
     currentVersion: VERSION,
   });
