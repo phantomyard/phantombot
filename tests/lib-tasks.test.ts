@@ -68,6 +68,36 @@ describe("TaskStore.add", () => {
     if (!r.ok) return;
     expect(r.task.nextReviewAt.toISOString()).toBe("2026-05-02T09:31:00.000Z");
   });
+
+  test("commandSecrets default empty and persist when provided", () => {
+    const noSecrets = store.add({
+      persona: "phantom",
+      description: "plain command",
+      schedule: "0 * * * *",
+      prompt: "x",
+      command: "/usr/local/bin/poll",
+      now: NOW,
+    });
+    expect(noSecrets.ok).toBe(true);
+    if (!noSecrets.ok) return;
+    expect(noSecrets.task.commandSecrets).toEqual([]);
+
+    const withSecrets = store.add({
+      persona: "phantom",
+      description: "secret command",
+      schedule: "0 * * * *",
+      prompt: "x",
+      command: "/usr/local/bin/poll",
+      commandSecrets: ["JIRA_API_KEY", "LINEAR_API_KEY"],
+      now: NOW,
+    });
+    expect(withSecrets.ok).toBe(true);
+    if (!withSecrets.ok) return;
+    expect(store.get(withSecrets.id)!.commandSecrets).toEqual([
+      "JIRA_API_KEY",
+      "LINEAR_API_KEY",
+    ]);
+  });
 });
 
 describe("TaskStore.list / get", () => {

@@ -56,6 +56,8 @@ export interface Task {
   createdBy: string;
   /** Direct shell command task. Empty/null means normal harness prompt. */
   command?: string;
+  /** Env var names to expose to a command-backed task. */
+  commandSecrets: string[];
 }
 
 export interface TaskRunRow {
@@ -104,6 +106,8 @@ export interface TaskAddInput {
   createdBy?: string;
   /** Direct shell command to run instead of waking the harness. */
   command?: string;
+  /** Env var names to expose to a command-backed task. */
+  commandSecrets?: string[];
 }
 
 export type TaskAddResult =
@@ -129,7 +133,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   max_runs        INTEGER,
   silent          INTEGER NOT NULL DEFAULT 0,
   created_by      TEXT NOT NULL DEFAULT '',
-  command         TEXT
+  command         TEXT,
+  command_secrets TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -160,6 +165,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
   // v2 -> v3: command-backed tasks that do not wake an LLM harness
   `ALTER TABLE tasks ADD COLUMN command TEXT`,
+  // v3 -> v4: least-privilege env for command-backed tasks
+  `ALTER TABLE tasks ADD COLUMN command_secrets TEXT NOT NULL DEFAULT '[]'`,
 ];
 
 interface RawTaskRow {
@@ -181,6 +188,18 @@ interface RawTaskRow {
   silent: number;
   created_by: string;
   command?: string | null;
+  command_secrets?: string | null;
+}
+
+function parseCommandSecrets(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    return [];
+  }
 }
 
 function rowToTask(r: RawTaskRow): Task {
@@ -203,6 +222,7 @@ function rowToTask(r: RawTaskRow): Task {
     silent: r.silent === 1,
     createdBy: r.created_by,
     command: r.command ?? undefined,
+    commandSecrets: parseCommandSecrets(r.command_secrets),
   };
 }
 
@@ -216,21 +236,13 @@ export class TaskStore {
   }
 
   private applyMigrations(): void {
-    // Check which columns exist by querying a limited row.
-    try {
-      const row = this.db
-        .prepare("SELECT one_off, expires_at, max_runs, silent, created_by, command FROM tasks LIMIT 1")
-        .get() as Record<string, unknown> | null;
-      // If we got here without error, columns exist.
-      void row;
-    } catch {
-      // Columns missing — run migrations.
-      for (const sql of MIGRATIONS) {
-        try {
-          this.db.exec(sql);
-        } catch {
-          // Column already exists (idempotent).
-        }
+    // Run all migrations idempotently. SQLite reports duplicate columns
+    // when a database is already current; that is the desired no-op path.
+    for (const sql of MIGRATIONS) {
+      try {
+        this.db.exec(sql);
+      } catch {
+        // Column already exists (idempotent).
       }
     }
   }
@@ -273,8 +285,8 @@ export class TaskStore {
       `INSERT INTO tasks (
          persona, description, schedule, prompt,
          created_at, next_run_at, next_review_at, active,
-         one_off, expires_at, max_runs, silent, created_by, command
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+         one_off, expires_at, max_runs, silent, created_by, command, command_secrets
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const result = stmt.run(
       input.persona,
@@ -290,6 +302,7 @@ export class TaskStore {
       silent ? 1 : 0,
       createdBy,
       input.command ?? null,
+      JSON.stringify(input.commandSecrets ?? []),
     );
     const id = Number(result.lastInsertRowid);
     const task = this.get(id);
@@ -510,11 +523,11 @@ export class TaskStore {
       `INSERT INTO tasks (
          persona, description, schedule, prompt,
          created_at, next_run_at, next_review_at, active,
-         one_off, expires_at, max_runs, silent, created_by, command
+         one_off, expires_at, max_runs, silent, created_by, command, command_secrets
        ) VALUES (
          $persona, $description, $schedule, $prompt,
          $createdAt, $nextRunAt, $nextReviewAt, $active,
-         $oneOff, $expiresAt, $maxRuns, $silent, $createdBy, $command
+         $oneOff, $expiresAt, $maxRuns, $silent, $createdBy, $command, $commandSecrets
        )`,
     );
     const result = stmt.run({
@@ -535,6 +548,7 @@ export class TaskStore {
       $silent: 0,
       $createdBy: "selftest",
       $command: null,
+      $commandSecrets: "[]",
     });
     return { id: Number(result.lastInsertRowid), firesAt };
   }

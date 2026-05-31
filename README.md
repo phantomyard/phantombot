@@ -297,13 +297,19 @@ phantombot task add \
 
 ```bash
 phantombot task add \
-  "Poll Jira, Linear, email, or monitoring. Notify only for new actionable items." \
+  "Poll Jira, Linear, email, or monitoring. If there is new work for the agent, call phantombot ask. Notify the user only if explicitly requested." \
   "hourly external notification poll" \
   --every 1h \
-  --command "/usr/local/bin/check-agent-notifications"
+  --command "/usr/local/bin/check-agent-notifications" \
+  --secret JIRA_API_KEY \
+  --secret LINEAR_API_KEY
 ```
 
-The command runs with the same environment as Phantombot, from the persona directory, under the existing tick lock. `stdout`, `stderr`, exit status, and the next run are recorded in `task_runs`; command output is not sent to Telegram automatically. Use `phantombot notify` inside the script when there is genuinely something to surface.
+The command runs from the persona directory, under the existing tick lock, with a minimal environment (`PATH`, `HOME`, temp/XDG basics) plus only the env vars named by repeated `--secret NAME` flags. It does **not** inherit the full Phantombot env. `stdout`, `stderr`, exit status, and the next run are recorded in `task_runs`; command output is not sent to Telegram automatically.
+
+Use `phantombot ask` inside the script when the poller finds work that needs an agent/LLM turn. Use `phantombot notify` only when the user explicitly asked to be interrupted or the event genuinely needs direct surfacing.
+
+Recurring command tasks do not get the agent self-review prompt, because they do not wake an agent on quiet runs. Add `--until`, `--count`, or `--for` when the poller has a natural end; otherwise cancel it manually when it is no longer useful.
 
 Manage from anywhere: ask Phantom on Telegram *"list my scheduled tasks"* / *"cancel the email check"* — the agent runs `phantombot task list` / `phantombot task cancel <id>`. Or use the same CLI commands directly.
 

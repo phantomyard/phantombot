@@ -24,9 +24,12 @@
  *     script directly instead of waking an LLM harness.
  *   - The positional prompt is still required and kept as audit context,
  *     but tick executes the command and logs stdout/stderr/exit status.
+ *   - Commands receive a minimal environment by default. Use
+ *     --secret NAME to expose specific env vars to the command.
  *   - This is for cheap pollers and integrations (Jira, Linear, mail,
- *     monitoring, local scripts) that only call `phantombot notify` when
- *     there is genuinely something to surface.
+ *     monitoring, local scripts) that wake the agent or call
+ *     `phantombot notify` only when there is genuinely something to
+ *     surface.
  */
 
 import { defineCommand } from "citty";
@@ -73,6 +76,8 @@ export interface RunTaskAddInput {
   forceLongRunning?: boolean;
   /** --command — run a shell command directly instead of waking a harness. */
   command?: string;
+  /** --secret NAME — env var names to expose to a command task. */
+  commandSecrets?: string[];
   config?: Config;
   store?: TaskStore;
   out?: WriteSink;
@@ -102,6 +107,17 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
     if (input.command !== undefined && input.command.trim() === "") {
       err.write("--command cannot be empty.\n");
       return 2;
+    }
+    const commandSecrets = normalizeSecrets(input.commandSecrets ?? []);
+    if (commandSecrets.length > 0 && input.command === undefined) {
+      err.write("--secret requires --command.\n");
+      return 2;
+    }
+    for (const name of commandSecrets) {
+      if (!isEnvName(name)) {
+        err.write(`invalid --secret name: ${name}\n`);
+        return 2;
+      }
     }
 
     // Determine mode: one-off or recurring.
@@ -197,6 +213,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       maxRuns,
       silent: input.silent ?? false,
       command: input.command?.trim(),
+      commandSecrets,
       createdBy: "cli", // agent should set explicitly; fallback for humans
     });
 
@@ -227,7 +244,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       `  fires at:    ${formatLocal(t.nextRunAt)} (${t.nextRunAt.toISOString()})\n` +
       (t.oneOff
         ? `  type:        one-off\n`
-        : `  schedule:    ${t.schedule}\n  expiry:      ${describeExpiry(t)}\n`) +
+        : `  schedule:    ${t.schedule}\n  expiry:      ${describeExpiry(t, isCommandTask)}\n`) +
       (!t.oneOff && !hasExpiry && !isCommandTask
         ? `  hygiene:     no expiry — every fire will ask if it's still needed.\n` +
           `               cancel with: phantombot task cancel ${t.id}\n`
@@ -239,11 +256,22 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
   }
 }
 
-function describeExpiry(t: Task): string {
+function normalizeSecrets(values: string[]): string[] {
+  return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
+}
+
+function isEnvName(name: string): boolean {
+  return /^[A-Z_][A-Z0-9_]*$/i.test(name);
+}
+
+function describeExpiry(t: Task, isCommandTask = false): string {
   const parts: string[] = [];
   if (t.expiresAt) parts.push(`until ${formatLocal(t.expiresAt)}`);
   if (t.maxRuns !== undefined) parts.push(`${t.maxRuns} runs`);
-  return parts.join(" or ") || "none (runs forever — agent self-polices)";
+  if (parts.length > 0) return parts.join(" or ");
+  return isCommandTask
+    ? "none (runs forever — command tasks do not self-review)"
+    : "none (runs forever — agent self-polices)";
 }
 
 /**
@@ -449,6 +477,9 @@ function formatTaskFull(t: Task): string {
     (t.expiresAt ? `expires:      ${formatLocal(t.expiresAt)}\n` : "") +
     `reviews:      ${t.reviewCount}\n` +
     (t.command ? `--- command ---\n${t.command}\n` : "") +
+    (t.command && t.commandSecrets.length > 0
+      ? `secrets:      ${t.commandSecrets.join(", ")}\n`
+      : "") +
     `--- prompt ---\n${t.prompt}\n`
   );
 }
@@ -473,7 +504,7 @@ export default defineCommand({
       meta: {
         name: "add",
         description:
-          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every (e.g. --every 1h) runs forever unless you add --until, --count, or --for. Add --command to run a local checker directly instead of waking the harness.",
+          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every (e.g. --every 1h) runs forever unless you add --until, --count, or --for. Add --command to run a local checker directly instead of waking the harness. Examples: phantombot task add \"Check mail\" \"mail check\" --every 1h; phantombot task add \"Poll Jira\" \"jira poll\" --every 1h --command /usr/local/bin/jira-poll --secret JIRA_API_KEY.",
       },
       args: {
         prompt: {
@@ -532,7 +563,13 @@ export default defineCommand({
           type: "string",
           required: false,
           description:
-            "Run this shell command directly at fire time instead of invoking the harness. Use for cheap pollers/integrations; call `phantombot notify` from the command only when something is new.",
+            "Run this shell command directly at fire time instead of invoking the harness. Use for cheap pollers/integrations; call `phantombot ask` to wake the agent or `phantombot notify` only when something is new.",
+        },
+        secret: {
+          type: "string",
+          required: false,
+          description:
+            "Expose this env var to the command. Repeat for each secret; command tasks do not inherit the full Phantombot env.",
         },
         "force-long-running": {
           type: "boolean",
@@ -554,6 +591,7 @@ export default defineCommand({
           relFor: args.for as string | undefined,
           silent: args.silent as boolean,
           command: args.command as string | undefined,
+          commandSecrets: normalizeCliSecretArg(args.secret),
           forceLongRunning: args["force-long-running"] as boolean,
         });
       },
@@ -612,3 +650,9 @@ export default defineCommand({
     }),
   },
 });
+
+function normalizeCliSecretArg(value: unknown): string[] {
+  if (value === undefined || value === null || value === false) return [];
+  if (Array.isArray(value)) return value.map(String);
+  return [String(value)];
+}
