@@ -175,7 +175,8 @@ mkdir -p ~/.local/bin && cp dist/phantombot ~/.local/bin/
 | `phantombot env get / list / unset` | Read / list-names-only / remove |
 | `phantombot notify --message "…"` | Telegram text to all allowed users |
 | `phantombot notify --voice "…"` | Synthesize via configured TTS, send as voice note |
-| `phantombot task add --schedule "<cron>" --prompt "…" --description "…"` | Schedule a recurring agent task |
+| `phantombot task add "<prompt>" "<description>" --every 1h` | Schedule a recurring agent task |
+| `phantombot task add "<prompt>" "<description>" --every 1h --command "/path/to/script"` | Schedule a cheap local command without waking an LLM |
 | `phantombot task list / show <id> / cancel <id>` | Manage tasks |
 | `phantombot tick` | Fire any due tasks (called every minute by `phantombot-tick.timer`) |
 | `phantombot memory today / search / get / list / index` | Read/write the persona's memory + KB |
@@ -274,16 +275,16 @@ The agent can schedule recurring work for itself. You ask Phantom on Telegram: *
 
 ```bash
 phantombot task add \
-  --schedule "0 * * * *" \
-  --description "hourly email check" \
-  --prompt "Check my Gmail since the last run. If anything is important, call \`phantombot notify --message \"…\"\`. Reply NONE otherwise."
+  "Check my Gmail since the last run. If anything is important, call \`phantombot notify --message \"...\"\`. Reply NONE otherwise." \
+  "hourly email check" \
+  --every 1h
 ```
 
 `phantombot-tick.timer` fires every minute and calls `phantombot tick`, which:
 
 1. Reads tasks from `memory.sqlite` where `next_run_at <= now() AND active=1`.
-2. Spawns the harness with the stored prompt as the user message.
-3. The agent does its thing — including calling `phantombot notify` if the user should hear about it.
+2. Spawns the harness with the stored prompt as the user message, or runs the stored command directly for command-backed tasks.
+3. The agent or command does its thing — including calling `phantombot notify` if the user should hear about it.
 4. Records the run, recomputes `next_run_at` from the cron expression.
 
 **Notification is opt-in.** Tasks run silently by default. The agent only calls `phantombot notify` when something genuinely needs surfacing. *"Nothing important happened"* is a successful run.
@@ -291,6 +292,18 @@ phantombot task add \
 **Missed runs are skipped.** Box off for 5 hours, hourly task missed 5 fires? The next tick after boot runs it once, not five times. No avalanche.
 
 **Self-review prevents task accretion.** Every task has a `next_review_at` scaled to its cadence (hourly→14d, daily→30d, weekly→90d). When the date arrives, the next tick runs a review prompt — agent decides KEEP / STOP / MODIFY based on recent context. KEEP doubles the review interval. STOP deactivates and notifies you why.
+
+**Command-backed tasks are for cheap integrations.** If a task can be answered by a deterministic local script, add `--command` and keep the LLM asleep:
+
+```bash
+phantombot task add \
+  "Poll Jira, Linear, email, or monitoring. Notify only for new actionable items." \
+  "hourly external notification poll" \
+  --every 1h \
+  --command "/usr/local/bin/check-agent-notifications"
+```
+
+The command runs with the same environment as Phantombot, from the persona directory, under the existing tick lock. `stdout`, `stderr`, exit status, and the next run are recorded in `task_runs`; command output is not sent to Telegram automatically. Use `phantombot notify` inside the script when there is genuinely something to surface.
 
 Manage from anywhere: ask Phantom on Telegram *"list my scheduled tasks"* / *"cancel the email check"* — the agent runs `phantombot task list` / `phantombot task cancel <id>`. Or use the same CLI commands directly.
 

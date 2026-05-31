@@ -18,6 +18,15 @@
  *     (`phantombot task cancel <id>`) when not — see the hygiene footer in
  *     src/cli/tick.ts. Expiries remain available for tasks with a known
  *     end (e.g. "ping me every hour for the next 8 hours").
+ *
+ * Command-backed tasks:
+ *   - Add --command "<shell command>" when the fire should run a local
+ *     script directly instead of waking an LLM harness.
+ *   - The positional prompt is still required and kept as audit context,
+ *     but tick executes the command and logs stdout/stderr/exit status.
+ *   - This is for cheap pollers and integrations (Jira, Linear, mail,
+ *     monitoring, local scripts) that only call `phantombot notify` when
+ *     there is genuinely something to surface.
  */
 
 import { defineCommand } from "citty";
@@ -62,6 +71,8 @@ export interface RunTaskAddInput {
   silent?: boolean;
   /** --force-long-running — allow recurring > 90d */
   forceLongRunning?: boolean;
+  /** --command — run a shell command directly instead of waking a harness. */
+  command?: string;
   config?: Config;
   store?: TaskStore;
   out?: WriteSink;
@@ -86,6 +97,11 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
         "`phantombot notify` from inside the task prompt if you " +
         "want the user notified.\n",
       );
+    }
+
+    if (input.command !== undefined && input.command.trim() === "") {
+      err.write("--command cannot be empty.\n");
+      return 2;
     }
 
     // Determine mode: one-off or recurring.
@@ -180,6 +196,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       expiresAt,
       maxRuns,
       silent: input.silent ?? false,
+      command: input.command?.trim(),
       createdBy: "cli", // agent should set explicitly; fallback for humans
     });
 
@@ -203,6 +220,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
     // Mandatory echo — agent contract requires repeating this to user.
     const hasExpiry =
       t.expiresAt !== undefined || t.maxRuns !== undefined;
+    const isCommandTask = Boolean(t.command);
     out.write(
       `task ${t.id} scheduled\n` +
       `  description: ${t.description}\n` +
@@ -210,7 +228,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
       (t.oneOff
         ? `  type:        one-off\n`
         : `  schedule:    ${t.schedule}\n  expiry:      ${describeExpiry(t)}\n`) +
-      (!t.oneOff && !hasExpiry
+      (!t.oneOff && !hasExpiry && !isCommandTask
         ? `  hygiene:     no expiry — every fire will ask if it's still needed.\n` +
           `               cancel with: phantombot task cancel ${t.id}\n`
         : ""),
@@ -406,9 +424,10 @@ export async function runTaskSelftest(
 function formatTaskOneLine(t: Task): string {
   const flag = t.active ? "" : " [inactive]";
   const type = t.oneOff ? "once" : "recur";
+  const mode = t.command ? " command" : "";
   return (
     `[${t.id}] ${t.description}${flag}` +
-    `  type=${type}  next=${formatLocal(t.nextRunAt)}  runs=${t.runCount}` +
+    `  type=${type}${mode}  next=${formatLocal(t.nextRunAt)}  runs=${t.runCount}` +
     (t.schedule ? `  schedule=${t.schedule}` : "")
   );
 }
@@ -429,6 +448,7 @@ function formatTaskFull(t: Task): string {
     `next review:  ${formatLocal(t.nextReviewAt)}\n` +
     (t.expiresAt ? `expires:      ${formatLocal(t.expiresAt)}\n` : "") +
     `reviews:      ${t.reviewCount}\n` +
+    (t.command ? `--- command ---\n${t.command}\n` : "") +
     `--- prompt ---\n${t.prompt}\n`
   );
 }
@@ -453,7 +473,7 @@ export default defineCommand({
       meta: {
         name: "add",
         description:
-          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every (e.g. --every 1h) runs forever unless you add --until, --count, or --for. The agent is asked at every fire whether the task is still needed.",
+          "Add a task. One-off by default (--in 10m or --at <time>). Recurring with --every (e.g. --every 1h) runs forever unless you add --until, --count, or --for. Add --command to run a local checker directly instead of waking the harness.",
       },
       args: {
         prompt: {
@@ -508,6 +528,12 @@ export default defineCommand({
             "DEPRECATED — no-op. Scheduled task fires are silent by default; use `phantombot notify` inside the task prompt to surface anything to the user.",
           default: false,
         },
+        command: {
+          type: "string",
+          required: false,
+          description:
+            "Run this shell command directly at fire time instead of invoking the harness. Use for cheap pollers/integrations; call `phantombot notify` from the command only when something is new.",
+        },
         "force-long-running": {
           type: "boolean",
           required: false,
@@ -527,6 +553,7 @@ export default defineCommand({
           count: args.count ? Number(args.count) : undefined,
           relFor: args.for as string | undefined,
           silent: args.silent as boolean,
+          command: args.command as string | undefined,
           forceLongRunning: args["force-long-running"] as boolean,
         });
       },

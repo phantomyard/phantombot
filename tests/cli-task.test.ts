@@ -152,6 +152,44 @@ describe("runTaskAdd", () => {
     const t = store.get(1)!;
     expect(t.expiresAt?.toISOString()).toBe("2026-06-01T00:00:00.000Z");
   });
+
+  test("--command stores a direct command task", async () => {
+    const out = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "command poll",
+      command: "/usr/local/bin/check-notifications",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("hygiene:");
+    const t = store.get(1)!;
+    expect(t.command).toBe("/usr/local/bin/check-notifications");
+    const showOut = new CaptureStream();
+    await runTaskShow({ config, store, id: 1, out: showOut });
+    expect(showOut.text).toContain("--- command ---");
+    expect(showOut.text).toContain("/usr/local/bin/check-notifications");
+  });
+
+  test("--command rejects empty commands", async () => {
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      every: "1h",
+      prompt: "poll external systems",
+      description: "command poll",
+      command: "   ",
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("--command cannot be empty");
+  });
 });
 
 describe("runTaskList", () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runTick } from "../src/cli/tick.ts";
@@ -148,6 +148,75 @@ describe("runTick — no-op cases", () => {
 });
 
 describe("runTick — normal task fire", () => {
+  test("command-backed due task runs without invoking any harness", async () => {
+    const markerPath = join(workdir, "command-ran.txt");
+    const created = store.add({
+      persona: "phantom",
+      description: "command poll",
+      schedule: "0 * * * *",
+      prompt: "audit context only",
+      command: `printf ok > ${markerPath}`,
+      reviewIntervalMs: 1,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(code).toBe(0);
+    expect(harness.invocations).toBe(0);
+    expect(await readFile(markerPath, "utf8")).toBe("ok");
+    const t = store.get(created.id)!;
+    expect(t.runCount).toBe(1);
+    expect(t.active).toBe(true);
+    const runs = store.taskRuns(created.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("ok");
+  });
+
+  test("command-backed task failure is logged and still advances", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "failing command poll",
+      schedule: "0 * * * *",
+      prompt: "audit context only",
+      command: "printf failed >&2; exit 7",
+      reviewIntervalMs: 1,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(code).toBe(0);
+    expect(harness.invocations).toBe(0);
+    const t = store.get(created.id)!;
+    expect(t.runCount).toBe(1);
+    expect(t.nextRunAt.toISOString()).toBe("2026-05-02T11:00:00.000Z");
+    const runs = store.taskRuns(created.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.status).toBe("error");
+    expect(runs[0]!.exitCode).toBe(7);
+    expect(runs[0]!.outputExcerpt).toContain("command exited 7");
+    expect(runs[0]!.outputExcerpt).toContain("failed");
+  });
+
   test("due task runs with its prompt; recordRun advances next_run_at", async () => {
     const created = store.add({
       persona: "phantom",

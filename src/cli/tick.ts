@@ -1,11 +1,12 @@
 /**
  * `phantombot tick` — fired every minute by phantombot-tick.timer.
  *
- * Reads tasks where next_run_at <= now() AND active=1, runs each through
- * the harness chain, and either:
+ * Reads tasks where next_run_at <= now() AND active=1, and either:
  *   - runs the task's normal prompt (the agent owns whether to surface
  *     anything to the user; tick itself is silent), then advances
  *     next_run_at;
+ *   - runs a command-backed task directly, logging stdout/stderr and exit
+ *     status without constructing a harness;
  *   - or, if next_review_at <= now(), runs the SELF-REVIEW prompt that
  *     asks the agent KEEP / STOP, and updates the task accordingly.
  *
@@ -31,6 +32,7 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
@@ -89,14 +91,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   const taskStore =
     input.taskStore ?? (await openTaskStore(config.memoryDbPath));
   const memory = input.memory ?? (await openMemoryStore(config.memoryDbPath));
-  const harnesses = input.harnesses ?? buildHarnessChain(config, err);
-  if (harnesses.length === 0) {
-    err.write("tick: no harnesses configured; skipping\n");
-    if (!input.taskStore) taskStore.close();
-    if (!input.memory) await memory.close();
-    lock.release();
-    return 1;
-  }
+  let harnesses = input.harnesses;
 
   try {
     // Expire any tasks past their expires_at before processing due.
@@ -110,7 +105,8 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     log.info("tick: running due tasks", { count: due.length });
 
     for (const task of due) {
-      const isReview = task.nextReviewAt.getTime() <= now.getTime();
+      const isCommandTask = task.command !== undefined && task.command.trim() !== "";
+      const isReview = !isCommandTask && task.nextReviewAt.getTime() <= now.getTime();
       const promptText = isReview
         ? buildReviewPrompt(task)
         : appendHygieneFooter(task);
@@ -137,22 +133,40 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
 
       let finalText = "";
       let runError: string | undefined;
+      let exitCode = 0;
       try {
-        for await (const chunk of runTurn({
-          persona: task.persona,
-          conversation,
-          userMessage: promptText,
-          agentDir,
-          harnesses,
-          memory,
-          idleTimeoutMs: config.harnessIdleTimeoutMs,
-          hardTimeoutMs: config.harnessHardTimeoutMs,
-        })) {
-          if (chunk.type === "text") finalText += chunk.text;
-          if (chunk.type === "done") finalText = chunk.finalText;
+        if (isCommandTask) {
+          const result = await runCommandTask(task.command!, {
+            timeoutMs: config.harnessHardTimeoutMs,
+            cwd: agentDir,
+          });
+          finalText = result.output;
+          exitCode = result.exitCode;
+          if (result.exitCode !== 0) {
+            runError = `command exited ${result.exitCode}`;
+          }
+        } else {
+          harnesses ??= buildHarnessChain(config, err);
+          if (harnesses.length === 0) {
+            throw new Error("no harnesses configured");
+          }
+          for await (const chunk of runTurn({
+            persona: task.persona,
+            conversation,
+            userMessage: promptText,
+            agentDir,
+            harnesses,
+            memory,
+            idleTimeoutMs: config.harnessIdleTimeoutMs,
+            hardTimeoutMs: config.harnessHardTimeoutMs,
+          })) {
+            if (chunk.type === "text") finalText += chunk.text;
+            if (chunk.type === "done") finalText = chunk.finalText;
+          }
         }
       } catch (e) {
         runError = (e as Error).message;
+        exitCode = 1;
         log.error("tick: task threw", {
           id: task.id,
           error: runError,
@@ -161,10 +175,9 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
 
       // Log the fire to task_runs for auditability.
       const outputExcerpt = runError
-        ? `ERROR: ${runError}`.slice(0, 500)
+        ? `ERROR: ${runError}${finalText ? `\n${finalText}` : ""}`.slice(0, 500)
         : finalText.slice(0, 500);
       const status = runError ? "error" : "ok";
-      const exitCode = runError ? 1 : 0;
 
       // Quiet-by-default: tick never auto-posts the harness reply to
       // Telegram. The agent calls `phantombot notify` from inside the
@@ -203,6 +216,52 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     if (!input.memory) await memory.close();
     lock.release();
   }
+}
+
+async function runCommandTask(
+  command: string,
+  opts: { timeoutMs: number; cwd: string },
+): Promise<{ exitCode: number; output: string }> {
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: { exitCode: number; output: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const child = spawn(command, {
+      shell: true,
+      cwd: opts.cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const append = (chunk: Buffer) => {
+      output = (output + chunk.toString()).slice(-4000);
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      output = (output + "\nERROR: command timed out").slice(-4000);
+      finish({ exitCode: 124, output });
+    }, opts.timeoutMs);
+    child.on("close", (code, signal) => {
+      if (signal) {
+        finish({
+          exitCode: 128,
+          output: (output + `\nterminated by ${signal}`).slice(-4000),
+        });
+      } else {
+        finish({ exitCode: code ?? 0, output });
+      }
+    });
+    child.on("error", (e) => {
+      finish({ exitCode: 1, output: e.message });
+    });
+  });
 }
 
 /**

@@ -54,6 +54,8 @@ export interface Task {
   silent: boolean;
   /** Conversation/channel that created this task (for daily-file audit). */
   createdBy: string;
+  /** Direct shell command task. Empty/null means normal harness prompt. */
+  command?: string;
 }
 
 export interface TaskRunRow {
@@ -100,6 +102,8 @@ export interface TaskAddInput {
   silent?: boolean;
   /** Channel/conversation that created this task. */
   createdBy?: string;
+  /** Direct shell command to run instead of waking the harness. */
+  command?: string;
 }
 
 export type TaskAddResult =
@@ -124,7 +128,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   expires_at      TEXT,
   max_runs        INTEGER,
   silent          INTEGER NOT NULL DEFAULT 0,
-  created_by      TEXT NOT NULL DEFAULT ''
+  created_by      TEXT NOT NULL DEFAULT '',
+  command         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -153,6 +158,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN max_runs INTEGER`,
   `ALTER TABLE tasks ADD COLUMN silent INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`,
+  // v2 -> v3: command-backed tasks that do not wake an LLM harness
+  `ALTER TABLE tasks ADD COLUMN command TEXT`,
 ];
 
 interface RawTaskRow {
@@ -173,6 +180,7 @@ interface RawTaskRow {
   max_runs: number | null;
   silent: number;
   created_by: string;
+  command?: string | null;
 }
 
 function rowToTask(r: RawTaskRow): Task {
@@ -194,6 +202,7 @@ function rowToTask(r: RawTaskRow): Task {
     maxRuns: r.max_runs ?? undefined,
     silent: r.silent === 1,
     createdBy: r.created_by,
+    command: r.command ?? undefined,
   };
 }
 
@@ -210,7 +219,7 @@ export class TaskStore {
     // Check which columns exist by querying a limited row.
     try {
       const row = this.db
-        .prepare("SELECT one_off, expires_at, max_runs, silent, created_by FROM tasks LIMIT 1")
+        .prepare("SELECT one_off, expires_at, max_runs, silent, created_by, command FROM tasks LIMIT 1")
         .get() as Record<string, unknown> | null;
       // If we got here without error, columns exist.
       void row;
@@ -264,8 +273,8 @@ export class TaskStore {
       `INSERT INTO tasks (
          persona, description, schedule, prompt,
          created_at, next_run_at, next_review_at, active,
-         one_off, expires_at, max_runs, silent, created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+         one_off, expires_at, max_runs, silent, created_by, command
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     );
     const result = stmt.run(
       input.persona,
@@ -280,6 +289,7 @@ export class TaskStore {
       input.maxRuns ?? null,
       silent ? 1 : 0,
       createdBy,
+      input.command ?? null,
     );
     const id = Number(result.lastInsertRowid);
     const task = this.get(id);
@@ -500,11 +510,11 @@ export class TaskStore {
       `INSERT INTO tasks (
          persona, description, schedule, prompt,
          created_at, next_run_at, next_review_at, active,
-         one_off, expires_at, max_runs, silent, created_by
+         one_off, expires_at, max_runs, silent, created_by, command
        ) VALUES (
          $persona, $description, $schedule, $prompt,
          $createdAt, $nextRunAt, $nextReviewAt, $active,
-         $oneOff, $expiresAt, $maxRuns, $silent, $createdBy
+         $oneOff, $expiresAt, $maxRuns, $silent, $createdBy, $command
        )`,
     );
     const result = stmt.run({
@@ -524,6 +534,7 @@ export class TaskStore {
       $maxRuns: null,
       $silent: 0,
       $createdBy: "selftest",
+      $command: null,
     });
     return { id: Number(result.lastInsertRowid), firesAt };
   }
