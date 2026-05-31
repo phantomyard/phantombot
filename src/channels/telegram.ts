@@ -50,7 +50,9 @@ import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
   type ActiveTurnHandle,
   handleSlashCommand,
+  TELEGRAM_BOT_COMMANDS,
 } from "./commands.ts";
+import { telegramGetMe } from "../lib/telegramApi.ts";
 import { markdownToTelegramHtml } from "./telegramFormat.ts";
 import {
   splitIntoSegments,
@@ -152,6 +154,12 @@ export interface TelegramMessage {
   chatId: number;
   fromUserId: number;
   fromUsername?: string;
+  /** Telegram chat type: "private" for DMs, "group"/"supergroup" for
+   *  group chats, "channel" for channels. Drives group-only behaviour
+   *  like stripping the bot's @username mention from the text. Absent
+   *  when Telegram didn't include it (older/odd payloads) — callers treat
+   *  the absence as "not a group" (i.e. no mention stripping). */
+  chatType?: "private" | "group" | "supergroup" | "channel";
   /** For text messages — the text. For voice messages — empty string until
    *  STT runs. For attachment-only messages — empty until processChatMessage
    *  rewrites it to "<caption>\n\n[attached: <path>]". */
@@ -209,6 +217,22 @@ export interface TelegramTransport {
   sendRecording(chatId: number): Promise<void>;
   /** Download a file by Telegram file_id; returns audio bytes + content-type. */
   downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
+  /**
+   * Fetch the bot's own identity. Used once at startup to learn the
+   * bot's @username so group messages that mention it can have the
+   * mention stripped before dispatch. Optional so lightweight test
+   * transports don't have to implement it — callers guard with `?.`.
+   */
+  getMe?(): Promise<{ ok: true; username: string } | { ok: false }>;
+  /**
+   * Register the bot's slash-command menu with Telegram (the `/`
+   * typeahead). Called once at startup to OVERWRITE any commands a human
+   * set in BotFather — including ghost commands phantombot has no handler
+   * for. Optional for the same reason as getMe.
+   */
+  setMyCommands?(
+    commands: Array<{ command: string; description: string }>,
+  ): Promise<void>;
 }
 
 /**
@@ -401,6 +425,34 @@ export class HttpTelegramTransport implements TelegramTransport {
       file.headers.get("content-type") ?? guessMimeFromPath(metaBody.result.file_path);
     return { data, mime };
   }
+
+  async getMe(): Promise<{ ok: true; username: string } | { ok: false }> {
+    const r = await telegramGetMe(this.token);
+    return r.ok ? { ok: true, username: r.username } : { ok: false };
+  }
+
+  async setMyCommands(
+    commands: Array<{ command: string; description: string }>,
+  ): Promise<void> {
+    const url = `https://api.telegram.org/bot${this.token}/setMyCommands`;
+    // No `scope` → Telegram's default scope (BotCommandScopeDefault),
+    // which is the one BotFather's manual /setcommands writes to. Passing
+    // our full list here replaces whatever was there, so ghost commands
+    // vanish from the `/` menu in both DMs and groups.
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands }),
+    }).catch((e) => {
+      log.warn("telegram: setMyCommands fetch failed", {
+        error: (e as Error).message,
+      });
+      return undefined;
+    });
+    if (res && !res.ok) {
+      log.warn("telegram: setMyCommands non-OK", { status: res.status });
+    }
+  }
 }
 
 function guessMimeFromPath(path: string): string {
@@ -451,7 +503,7 @@ interface TelegramRawUpdate {
   update_id?: number;
   message?: {
     message_id?: number;
-    chat?: { id?: number };
+    chat?: { id?: number; type?: string };
     from?: { id?: number; username?: string };
     text?: string;
     caption?: string;
@@ -666,6 +718,60 @@ export function extensionFromMime(mime: string | undefined): string {
 }
 
 /**
+ * Narrow Telegram's free-string `chat.type` to the set we model. Unknown
+ * / missing values return undefined, which downstream code treats as
+ * "not a group" — the safe default (no mention stripping). Exported for
+ * testing.
+ */
+export function normalizeChatType(
+  raw: string | undefined,
+): TelegramMessage["chatType"] | undefined {
+  switch (raw) {
+    case "private":
+    case "group":
+    case "supergroup":
+    case "channel":
+      return raw;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Strip the bot's own `@username` mention from a group message so the
+ * harness sees the user's actual words, not the addressing noise. With
+ * Telegram privacy mode ON, the ONLY way a group message reaches the bot
+ * (short of a slash command or a reply) is by mentioning its @username —
+ * so the literal "@robbie_agh_bot " is present in essentially every group
+ * turn and would otherwise pollute the prompt.
+ *
+ * Removes every standalone, case-insensitive occurrence of `@username`
+ * (Telegram usernames are case-insensitive), then collapses the
+ * whitespace the removal leaves behind. A mention glued to other word
+ * characters (e.g. an email-like "x@usernamey") is NOT a Telegram mention
+ * and is left untouched via the word-boundary guards.
+ *
+ * No-ops when `username` is unknown (getMe failed at startup) or the text
+ * doesn't contain the mention. Exported for testing.
+ */
+export function stripBotMention(
+  text: string,
+  username: string | undefined,
+): string {
+  if (!username || text.length === 0) return text;
+  // Escape any regex-special chars in the username (usernames are
+  // [A-Za-z0-9_] so this is belt-and-braces) and match it only when
+  // preceded by start/whitespace and followed by end/whitespace/punct —
+  // i.e. a real standalone mention, not a substring of a larger token.
+  const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(^|\\s)@${escaped}\\b`, "gi");
+  const stripped = text.replace(re, "$1");
+  // Collapse the doubled whitespace a mid-string removal can leave, and
+  // trim the edges. Keep internal single spaces/newlines otherwise intact.
+  return stripped.replace(/[ \t]{2,}/g, " ").trim();
+}
+
+/**
  * Pure parser exposed for testing. Consumes Telegram getUpdates result
  * objects and returns the messages we care about — text or voice.
  */
@@ -694,6 +800,10 @@ export function parseGetUpdatesResult(
     // attachment, but all three paths benefit from carrying it through.
     const replyTo = extractReplyTo(msg.reply_to_message);
 
+    // Chat type drives group-only behaviour (mention stripping). Parsed
+    // once and spread into whichever envelope we push, like replyTo.
+    const chatType = normalizeChatType(msg.chat?.type);
+
     // Attachments take priority over plain text, but if BOTH text and an
     // attachment are present (rare; Telegram normally uses `caption` not
     // `text` for media), use text as the caption.
@@ -714,6 +824,7 @@ export function parseGetUpdatesResult(
         caption: captionFromMedia ?? captionFromText,
         attachment,
         ...(replyTo ? { replyTo } : {}),
+        ...(chatType ? { chatType } : {}),
       });
       continue;
     }
@@ -725,6 +836,7 @@ export function parseGetUpdatesResult(
         fromUsername: msg.from.username,
         text: msg.text,
         ...(replyTo ? { replyTo } : {}),
+        ...(chatType ? { chatType } : {}),
       });
       continue;
     }
@@ -741,6 +853,7 @@ export function parseGetUpdatesResult(
           durationS: msg.voice.duration ?? 0,
         },
         ...(replyTo ? { replyTo } : {}),
+        ...(chatType ? { chatType } : {}),
       });
     }
   }
@@ -841,6 +954,42 @@ export async function runTelegramServer(
     log.warn(
       "telegram: no allowed_user_ids configured — anyone who DMs the bot is answered",
     );
+  }
+
+  // One-time startup handshake (best-effort, never blocks the loop):
+  //   1. getMe → learn our own @username so group messages that address
+  //      us by mention can have the "@bot" stripped before dispatch.
+  //   2. setMyCommands → register the real command menu, overwriting any
+  //      ghost commands a human left in BotFather (e.g. /activation).
+  // Both are wrapped so a transient Telegram hiccup at boot can't keep
+  // the listener out of its poll loop.
+  let botUsername: string | undefined;
+  try {
+    const me = await input.transport.getMe?.();
+    if (me?.ok) {
+      botUsername = me.username;
+      log.info("telegram: identified self", {
+        username: botUsername,
+        persona: input.persona,
+      });
+    }
+  } catch (e) {
+    log.warn("telegram: getMe failed at startup", {
+      error: (e as Error).message,
+    });
+  }
+  try {
+    if (input.transport.setMyCommands) {
+      await input.transport.setMyCommands(TELEGRAM_BOT_COMMANDS);
+      log.info("telegram: registered command menu", {
+        count: TELEGRAM_BOT_COMMANDS.length,
+        persona: input.persona,
+      });
+    }
+  } catch (e) {
+    log.warn("telegram: setMyCommands failed at startup", {
+      error: (e as Error).message,
+    });
   }
 
   let offset = 0;
@@ -964,6 +1113,7 @@ export async function runTelegramServer(
             input,
             harnesses,
             activeTurns,
+            botUsername,
           }),
         );
         // Detach completed entries so the maps don't leak.
@@ -997,11 +1147,35 @@ async function processChatMessage(
     input: RunTelegramServerInput;
     harnesses: Harness[];
     activeTurns: Map<number, ActiveTurnHandle>;
+    /** Our own @username (from startup getMe), used to strip the
+     *  addressing mention from group messages. Undefined if getMe
+     *  failed — stripping then no-ops. */
+    botUsername?: string;
   },
 ): Promise<void> {
   const { input, harnesses, activeTurns } = ctx;
   const startedAt = Date.now();
   const isVoice = Boolean(msg.voice);
+
+  // Group addressing: in a group/supergroup the only way a message
+  // reaches us under Telegram privacy mode is by mentioning our
+  // @username (or replying to us). Strip that mention so the harness
+  // sees the user's actual words — "@robbie_agh_bot deploy now" becomes
+  // "deploy now". Applied to both the text and any media caption, before
+  // STT/attachment handling rewrites msg.text. DMs are never touched
+  // (you don't @-address a bot in its own DM), and with privacy OFF the
+  // strip is still correct for the mentions that do carry it.
+  if (
+    (msg.chatType === "group" || msg.chatType === "supergroup") &&
+    ctx.botUsername
+  ) {
+    if (msg.text.length > 0) {
+      msg.text = stripBotMention(msg.text, ctx.botUsername);
+    }
+    if (msg.caption) {
+      msg.caption = stripBotMention(msg.caption, ctx.botUsername);
+    }
+  }
 
   // For voice messages: download → transcribe → use the transcript as
   // the user message before invoking the harness.

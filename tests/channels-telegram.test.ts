@@ -27,7 +27,10 @@ import {
   extractReplyTo,
   formatReplyToContext,
   REPLY_TO_SNIPPET_MAX,
+  stripBotMention,
+  normalizeChatType,
 } from "../src/channels/telegram.ts";
+import { TELEGRAM_BOT_COMMANDS } from "../src/channels/commands.ts";
 import type { Config } from "../src/config.ts";
 import type {
   Harness,
@@ -99,6 +102,19 @@ class FakeTransport implements TelegramTransport {
     if (override instanceof Error) throw override;
     if (override) return override;
     return { data: this.fakeFileBytes, mime: "audio/ogg" };
+  }
+  /** Username returned by getMe — drives group @mention stripping. */
+  botUsername = "robbie_agh_bot";
+  /** Each setMyCommands call's payload, for assertions. */
+  registeredCommands: Array<Array<{ command: string; description: string }>> =
+    [];
+  async getMe(): Promise<{ ok: true; username: string } | { ok: false }> {
+    return { ok: true, username: this.botUsername };
+  }
+  async setMyCommands(
+    commands: Array<{ command: string; description: string }>,
+  ): Promise<void> {
+    this.registeredCommands.push(commands);
   }
 }
 
@@ -1031,6 +1047,163 @@ describe("runTelegramServer dispatch", () => {
     });
     expect(transport.sent).toEqual([{ chatId: 1001, text: "(error: boom)" }]);
     expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Group @mention handling + command-menu registration
+// ---------------------------------------------------------------------------
+
+describe("stripBotMention", () => {
+  test("strips a leading @username mention", () => {
+    expect(stripBotMention("@robbie_agh_bot hello there", "robbie_agh_bot")).toBe(
+      "hello there",
+    );
+  });
+
+  test("is case-insensitive on the username", () => {
+    expect(stripBotMention("@Robbie_AGH_Bot hi", "robbie_agh_bot")).toBe("hi");
+  });
+
+  test("strips a mid-string mention and collapses whitespace", () => {
+    expect(
+      stripBotMention("hey @robbie_agh_bot deploy now", "robbie_agh_bot"),
+    ).toBe("hey deploy now");
+  });
+
+  test("leaves the text untouched when the mention is absent", () => {
+    expect(stripBotMention("just a normal message", "robbie_agh_bot")).toBe(
+      "just a normal message",
+    );
+  });
+
+  test("does not strip a username that is a substring of a larger token", () => {
+    // word-boundary guard: an email-like token is not a Telegram mention.
+    expect(
+      stripBotMention("mail x@robbie_agh_bottle.com", "robbie_agh_bot"),
+    ).toBe("mail x@robbie_agh_bottle.com");
+  });
+
+  test("no-ops when the username is unknown", () => {
+    expect(stripBotMention("@robbie_agh_bot hi", undefined)).toBe(
+      "@robbie_agh_bot hi",
+    );
+  });
+});
+
+describe("normalizeChatType", () => {
+  test("passes through known chat types", () => {
+    expect(normalizeChatType("private")).toBe("private");
+    expect(normalizeChatType("group")).toBe("group");
+    expect(normalizeChatType("supergroup")).toBe("supergroup");
+    expect(normalizeChatType("channel")).toBe("channel");
+  });
+
+  test("returns undefined for unknown or missing types", () => {
+    expect(normalizeChatType("weird")).toBeUndefined();
+    expect(normalizeChatType(undefined)).toBeUndefined();
+  });
+});
+
+describe("parseGetUpdatesResult chatType", () => {
+  test("carries chat.type through as chatType", () => {
+    const r = parseGetUpdatesResult(
+      [
+        {
+          update_id: 1,
+          message: {
+            chat: { id: -100, type: "supergroup" },
+            from: { id: 42 },
+            text: "@robbie_agh_bot hi",
+          },
+        },
+      ],
+      0,
+    );
+    expect(r.updates[0]?.chatType).toBe("supergroup");
+  });
+
+  test("omits chatType when chat.type is absent", () => {
+    const r = parseGetUpdatesResult(
+      [{ update_id: 1, message: { chat: { id: 1 }, from: { id: 42 }, text: "hi" } }],
+      0,
+    );
+    expect(r.updates[0]).not.toHaveProperty("chatType");
+  });
+});
+
+describe("runTelegramServer group addressing", () => {
+  test("strips the bot @mention from a group message before dispatch", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "andrew",
+      chatType: "supergroup",
+      text: "@robbie_agh_bot deploy the thing",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "on it" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    // The harness sees the user's words without the addressing noise.
+    expect(harness.lastRequest?.userMessage).toBe("deploy the thing");
+  });
+
+  test("leaves DM text untouched even if it contains an @mention", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      chatType: "private",
+      text: "@robbie_agh_bot hi",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hi" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.lastRequest?.userMessage).toBe("@robbie_agh_bot hi");
+  });
+
+  test("registers the real command menu at startup", async () => {
+    const transport = new FakeTransport();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "x" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.registeredCommands.length).toBeGreaterThanOrEqual(1);
+    expect(transport.registeredCommands[0]).toEqual(TELEGRAM_BOT_COMMANDS);
+    // Sanity: the menu has no ghost commands — every entry maps to a real
+    // handler name.
+    const names = TELEGRAM_BOT_COMMANDS.map((c) => c.command);
+    expect(names).toContain("status");
+    expect(names).not.toContain("activation");
   });
 });
 

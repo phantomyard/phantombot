@@ -95,15 +95,40 @@ export interface SlashCommandResult {
   afterSend?: () => Promise<void>;
 }
 
+/**
+ * The canonical list of slash commands phantombot actually implements.
+ *
+ * Single source of truth for two consumers:
+ *   1. {@link HELP} — the `/help` reply text (derived below).
+ *   2. The Telegram `setMyCommands` registration at channel startup,
+ *      which OVERWRITES whatever is in the bot's command menu — including
+ *      "ghost" commands a human added in BotFather (e.g. `/activation`)
+ *      that phantombot has no handler for. Without this, the `/` typeahead
+ *      in Telegram advertises commands that silently fall through to the
+ *      LLM, which is exactly the confusing behaviour we want to kill.
+ *
+ * `command` is the bare name (no leading slash) per the Bot API. Keep
+ * descriptions short — Telegram renders them inline in the menu and caps
+ * them at 256 chars.
+ */
+export const TELEGRAM_BOT_COMMANDS: Array<{
+  command: string;
+  description: string;
+}> = [
+  { command: "stop", description: "Abort the current turn" },
+  { command: "reset", description: "Clear this chat's history" },
+  { command: "status", description: "Show harness, uptime, context usage" },
+  { command: "harness", description: "List or switch the active harness" },
+  { command: "update", description: "Install the latest phantombot release" },
+  { command: "restart", description: "Restart the phantombot service" },
+  { command: "help", description: "Show this command list" },
+];
+
 const HELP =
   `available commands:\n` +
-  `/stop     — abort the current turn\n` +
-  `/reset    — clear this chat's history\n` +
-  `/status   — show harness, uptime, context usage\n` +
-  `/harness  — list or switch the active harness (e.g. /harness pi)\n` +
-  `/update   — install the latest phantombot release if newer than this build\n` +
-  `/restart  — restart the phantombot service\n` +
-  `/help     — this list`;
+  TELEGRAM_BOT_COMMANDS.map((c) => `/${c.command} — ${c.description}`).join(
+    "\n",
+  );
 
 /**
  * Parse + dispatch a slash command.
