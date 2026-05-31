@@ -29,6 +29,9 @@ import {
   REPLY_TO_SNIPPET_MAX,
   stripBotMention,
   normalizeChatType,
+  matchPersonaNames,
+  decideGroupReply,
+  formatGroupContext,
 } from "../src/channels/telegram.ts";
 import { TELEGRAM_BOT_COMMANDS } from "../src/channels/commands.ts";
 import type { Config } from "../src/config.ts";
@@ -1132,6 +1135,77 @@ describe("parseGetUpdatesResult chatType", () => {
   });
 });
 
+describe("matchPersonaNames", () => {
+  const names = ["robbie", "lena", "kai"];
+  test("matches a bare name case-insensitively", () => {
+    expect(matchPersonaNames("Lena, what do you think?", names)).toEqual([
+      "lena",
+    ]);
+  });
+  test("matches a name inside a bot @username (underscore boundary)", () => {
+    expect(matchPersonaNames("@robbie_agh_bot deploy", names)).toEqual([
+      "robbie",
+    ]);
+  });
+  test("returns every distinct name present, in list order", () => {
+    expect(matchPersonaNames("kai and robbie, jump in", names)).toEqual([
+      "robbie",
+      "kai",
+    ]);
+  });
+  test("does NOT match a name embedded in a longer word", () => {
+    expect(matchPersonaNames("the robbiee variant", names)).toEqual([]);
+    expect(matchPersonaNames("scrobbie", names)).toEqual([]);
+  });
+  test("empty text or empty list yields no matches", () => {
+    expect(matchPersonaNames("", names)).toEqual([]);
+    expect(matchPersonaNames("robbie", [])).toEqual([]);
+  });
+});
+
+describe("decideGroupReply", () => {
+  test("my name present → I reply, I become last-addressed", () => {
+    expect(
+      decideGroupReply({ self: "robbie", matched: ["robbie"], lastAddressed: [] }),
+    ).toEqual({ reply: true, nextLastAddressed: ["robbie"] });
+  });
+  test("another bot named → I stay quiet, they become last-addressed", () => {
+    expect(
+      decideGroupReply({ self: "robbie", matched: ["kai"], lastAddressed: ["robbie"] }),
+    ).toEqual({ reply: false, nextLastAddressed: ["kai"] });
+  });
+  test("no name + I was last addressed → I reply, set unchanged", () => {
+    expect(
+      decideGroupReply({ self: "robbie", matched: [], lastAddressed: ["robbie"] }),
+    ).toEqual({ reply: true, nextLastAddressed: ["robbie"] });
+  });
+  test("no name + someone else was last addressed → I stay quiet", () => {
+    expect(
+      decideGroupReply({ self: "robbie", matched: [], lastAddressed: ["kai"] }),
+    ).toEqual({ reply: false, nextLastAddressed: ["kai"] });
+  });
+  test("no name + brand-new chat (nobody addressed) → silence", () => {
+    expect(
+      decideGroupReply({ self: "robbie", matched: [], lastAddressed: [] }),
+    ).toEqual({ reply: false, nextLastAddressed: [] });
+  });
+});
+
+describe("formatGroupContext", () => {
+  test("renders buffered messages as a labelled preamble", () => {
+    const out = formatGroupContext([
+      { from: "@andrew", text: "topic A is tricky" },
+      { from: "@andrew", text: "what about edge cases" },
+    ]);
+    expect(out).toContain("@andrew: topic A is tricky");
+    expect(out).toContain("@andrew: what about edge cases");
+    expect(out.startsWith("[Recent group messages")).toBe(true);
+  });
+  test("empty buffer → empty string", () => {
+    expect(formatGroupContext([])).toBe("");
+  });
+});
+
 describe("runTelegramServer group addressing", () => {
   test("strips the bot @mention from a group message before dispatch", async () => {
     const transport = new FakeTransport();
@@ -1204,6 +1278,164 @@ describe("runTelegramServer group addressing", () => {
     const names = TELEGRAM_BOT_COMMANDS.map((c) => c.command);
     expect(names).toContain("status");
     expect(names).not.toContain("activation");
+  });
+
+  test("group: replies when addressed by name", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "andrew",
+      chatType: "supergroup",
+      text: "robbie, status?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "all good" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "robbie",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(1);
+    expect(transport.sent.map((s) => s.text)).toContain("all good");
+  });
+
+  test("group: stays silent when another bot is named", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "andrew",
+      chatType: "supergroup",
+      text: "kai, status?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "all good" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "robbie",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toEqual([]);
+  });
+
+  test("group: brand-new chat with no name → silence", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: -1001,
+      fromUserId: 42,
+      fromUsername: "andrew",
+      chatType: "supergroup",
+      text: "anyone around?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hi" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "robbie",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toEqual([]);
+  });
+
+  test("group: sticky thread — keeps replying to no-name follow-ups, and forwards observed context", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push(
+      {
+        updateId: 1,
+        chatId: -1001,
+        fromUserId: 42,
+        fromUsername: "andrew",
+        chatType: "supergroup",
+        text: "robbie, let's talk topic A",
+      },
+      {
+        updateId: 2,
+        chatId: -1001,
+        fromUserId: 42,
+        fromUsername: "andrew",
+        chatType: "supergroup",
+        text: "and what about the edge cases?",
+      },
+    );
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "robbie",
+      transport,
+      oneShot: true,
+    });
+    // Both messages answered: the named one and the no-name follow-up.
+    expect(harness.invocations).toBe(2);
+    // Last turn's user text is the follow-up (no stale context preamble,
+    // because the prior message was already delivered as its own turn).
+    expect(harness.lastRequest?.userMessage).toBe("and what about the edge cases?");
+  });
+
+  test("group: a bot catches up on context it observed but didn't answer", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push(
+      {
+        // Addressed to kai — robbie observes but stays silent.
+        updateId: 1,
+        chatId: -1001,
+        fromUserId: 42,
+        fromUsername: "andrew",
+        chatType: "supergroup",
+        text: "kai, my take on topic A is X",
+      },
+      {
+        // Now robbie is addressed — should receive the kai-directed line
+        // as context.
+        updateId: 2,
+        chatId: -1001,
+        fromUserId: 42,
+        fromUsername: "andrew",
+        chatType: "supergroup",
+        text: "robbie, what do you think of that?",
+      },
+    );
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "here's my view" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig({ groupPersonaNames: ["robbie", "lena", "kai"] }),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "robbie",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(1);
+    const sent = harness.lastRequest?.userMessage ?? "";
+    expect(sent).toContain("my take on topic A is X");
+    expect(sent).toContain("robbie, what do you think of that?");
   });
 });
 

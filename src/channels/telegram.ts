@@ -772,6 +772,98 @@ export function stripBotMention(
 }
 
 /**
+ * Find which of `names` are addressed in `text`. A name matches
+ * case-insensitively when bounded by non-letters, so "robbie" matches
+ * inside "@robbie_agh_bot", "Robbie," or "robbie!" but NOT "robbiee" or
+ * "scrobbie". Returns the matched names in the order they appear in
+ * `names` (deduped, original casing preserved). Exported for testing.
+ */
+export function matchPersonaNames(text: string, names: string[]): string[] {
+  if (text.length === 0 || names.length === 0) return [];
+  const out: string[] = [];
+  for (const name of names) {
+    if (name.length === 0 || out.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      continue;
+    }
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Letter boundaries (not \b, which treats "_" as a word char and so
+    // would fail to match "robbie" inside "robbie_agh_bot").
+    const re = new RegExp(`(?<![a-z])${escaped}(?![a-z])`, "i");
+    if (re.test(text)) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Decide whether THIS bot (persona `self`) should reply to a group message,
+ * and what the chat's "last addressed" set becomes afterwards.
+ *
+ * Rules (all computed locally — Telegram never shows a bot another bot's
+ * messages, so this must work from the human message stream alone, which
+ * every bot in the group sees identically):
+ *   - One or more persona names are in the message → those bots are now
+ *     "addressed". I reply iff my own name is among them. Multiple names →
+ *     each named bot replies independently.
+ *   - No persona name at all → the message continues the current thread, so
+ *     only the bot(s) addressed last reply. I reply iff I'm in lastAddressed.
+ *   - No name AND nobody has ever been addressed (lastAddressed empty) →
+ *     silence, full stop.
+ *
+ * Exported for testing.
+ */
+export function decideGroupReply(input: {
+  self: string;
+  matched: string[];
+  lastAddressed: string[];
+}): { reply: boolean; nextLastAddressed: string[] } {
+  const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  if (input.matched.length > 0) {
+    return {
+      reply: input.matched.some((n) => eq(n, input.self)),
+      nextLastAddressed: input.matched,
+    };
+  }
+  return {
+    reply: input.lastAddressed.some((n) => eq(n, input.self)),
+    nextLastAddressed: input.lastAddressed,
+  };
+}
+
+/**
+ * Render the human messages a bot OBSERVED but didn't reply to (because they
+ * were aimed at another bot or were thread chatter) into a context preamble.
+ * Privacy-OFF means every bot sees every human message, so this is how a bot
+ * catches up on the conversation it stayed quiet through before it's finally
+ * addressed. Returns "" when there's nothing buffered. Exported for testing.
+ */
+export function formatGroupContext(
+  entries: { from: string; text: string }[],
+): string {
+  const lines = entries
+    .map((e) => `${e.from}: ${e.text}`.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return "";
+  return [
+    "[Recent group messages you saw but didn't reply to, for context:",
+    ...lines,
+    "]",
+  ].join("\n");
+}
+
+/** In-memory per-chat group routing state. Lives for the process lifetime;
+ *  intentionally not persisted (it's cheap to rebuild from the live stream
+ *  and bounded to GROUP_BUFFER_MAX entries per chat). */
+interface GroupChatState {
+  /** Persona names addressed by the most recent name-bearing message. */
+  lastAddressed: string[];
+  /** Rolling buffer of recent human messages for context catch-up. */
+  buffer: { from: string; text: string; delivered: boolean }[];
+}
+
+/** Cap on buffered human messages retained per group chat. */
+export const GROUP_BUFFER_MAX = 20;
+
+/**
  * Pure parser exposed for testing. Consumes Telegram getUpdates result
  * objects and returns the messages we care about — text or voice.
  */
@@ -950,6 +1042,26 @@ export async function runTelegramServer(
   // Set of every in-flight worker promise — drained at shutdown / oneShot.
   const inFlight = new Set<Promise<void>>();
 
+  // Per-chat group routing state (last-addressed bot + recent-message
+  // buffer). Only touched for group/supergroup chats; DMs never key in.
+  const groupChats = new Map<number, GroupChatState>();
+  // This bot's own addressing name in groups. The persona name is the
+  // canonical token (matches the configured group_persona_names list);
+  // if getMe succeeded we also accept the bare @username stem so a literal
+  // "@robbie_agh_bot" still counts as addressing even when the persona name
+  // differs from the bot username.
+  const selfName = input.persona;
+  const groupPersonaNames = (() => {
+    const configured = tg.groupPersonaNames ?? [];
+    // Always include our own persona name so a single-bot group works with
+    // zero config; dedup case-insensitively, preserve configured order.
+    const merged = [...configured];
+    if (!merged.some((n) => n.toLowerCase() === selfName.toLowerCase())) {
+      merged.push(selfName);
+    }
+    return merged;
+  })();
+
   if (allowedSet.size === 0) {
     log.warn(
       "telegram: no allowed_user_ids configured — anyone who DMs the bot is answered",
@@ -1087,6 +1199,96 @@ export async function runTelegramServer(
           // Unrecognized /command — fall through to the LLM.
         }
 
+        // Group reply gate. In a group/supergroup, privacy mode is OFF so
+        // we receive every human message — but we must only SPEAK when
+        // addressed (by name) or when we're the bot the thread is currently
+        // with. Messages aimed at another bot are still buffered (for later
+        // context) but produce no reply. DMs skip this entirely.
+        let groupContext: string | undefined;
+        const isGroupChat =
+          msg.chatType === "group" || msg.chatType === "supergroup";
+        if (isGroupChat) {
+          const state = groupChats.get(msg.chatId) ?? {
+            lastAddressed: [],
+            buffer: [],
+          };
+          const matchText = [msg.text, msg.caption]
+            .filter((s): s is string => Boolean(s && s.length > 0))
+            .join(" ");
+          const matched = matchPersonaNames(matchText, groupPersonaNames);
+          // Being @mentioned by our own bot username also counts as being
+          // addressed, even when the persona name isn't a substring of the
+          // username. Fold it into the matched set AS our persona name so
+          // the shared, name-based routing treats it uniformly (and other
+          // bots — which can't know our @username — still agree via the
+          // persona-name match they DO see).
+          const selfViaUsername = botUsername
+            ? matchPersonaNames(matchText, [botUsername]).length > 0
+            : false;
+          const effectiveMatched =
+            selfViaUsername &&
+            !matched.some((n) => n.toLowerCase() === selfName.toLowerCase())
+              ? [...matched, selfName]
+              : matched;
+          const decision = decideGroupReply({
+            self: selfName,
+            matched: effectiveMatched,
+            lastAddressed: state.lastAddressed,
+          });
+          state.lastAddressed = decision.nextLastAddressed;
+
+          // What to retain in the rolling buffer for context catch-up.
+          // Text messages keep their words; voice/attachments keep a label
+          // so the thread reads coherently even where we have no transcript.
+          const bufText =
+            msg.text.trim().length > 0
+              ? msg.text.trim()
+              : (msg.caption?.trim() ||
+                (msg.voice
+                  ? "[voice message]"
+                  : msg.attachment
+                    ? `[${msg.attachment.kind}]`
+                    : ""));
+          const fromLabel = msg.fromUsername
+            ? `@${msg.fromUsername}`
+            : String(msg.fromUserId);
+
+          if (!decision.reply) {
+            if (bufText.length > 0) {
+              state.buffer.push({
+                from: fromLabel,
+                text: bufText,
+                delivered: false,
+              });
+            }
+            while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+            groupChats.set(msg.chatId, state);
+            log.info("telegram: group message not for this bot — staying quiet", {
+              chatId: msg.chatId,
+              persona: input.persona,
+              matched,
+              lastAddressed: state.lastAddressed,
+            });
+            continue;
+          }
+
+          // We're replying: hand the harness any messages we observed but
+          // never answered as a context preamble, then mark the buffer
+          // delivered and record this turn.
+          const undelivered = state.buffer.filter((e) => !e.delivered);
+          groupContext = formatGroupContext(undelivered) || undefined;
+          for (const e of state.buffer) e.delivered = true;
+          if (bufText.length > 0) {
+            state.buffer.push({
+              from: fromLabel,
+              text: bufText,
+              delivered: true,
+            });
+          }
+          while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+          groupChats.set(msg.chatId, state);
+        }
+
         // Regular message. If a turn is already in flight for this
         // chat, abort it — the user typing again means "pay attention
         // to this instead." The aborted turn returns silently via the
@@ -1114,6 +1316,7 @@ export async function runTelegramServer(
             harnesses,
             activeTurns,
             botUsername,
+            groupContext,
           }),
         );
         // Detach completed entries so the maps don't leak.
@@ -1151,6 +1354,10 @@ async function processChatMessage(
      *  addressing mention from group messages. Undefined if getMe
      *  failed — stripping then no-ops. */
     botUsername?: string;
+    /** Recent group messages this bot observed but didn't answer,
+     *  pre-rendered as a context preamble. Prepended to the user text so
+     *  the harness has the thread it stayed quiet through. */
+    groupContext?: string;
   },
 ): Promise<void> {
   const { input, harnesses, activeTurns } = ctx;
@@ -1304,6 +1511,14 @@ async function processChatMessage(
   if (msg.replyTo) {
     const prefix = formatReplyToContext(msg.replyTo);
     msg.text = msg.text.length > 0 ? `${prefix}\n\n${msg.text}` : prefix;
+  }
+  // Group catch-up context goes at the very top, above any reply-quote, so
+  // the harness reads the room before the specific turn it's answering.
+  if (ctx.groupContext) {
+    msg.text =
+      msg.text.length > 0
+        ? `${ctx.groupContext}\n\n${msg.text}`
+        : ctx.groupContext;
   }
   const sendStatus = () =>
     willReplyWithVoice

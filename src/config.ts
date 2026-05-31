@@ -67,6 +67,20 @@ export interface TelegramAccount {
   pollTimeoutS: number;
   /** If non-empty, only these Telegram numeric user IDs can talk to the bot. */
   allowedUserIds: number[];
+  /**
+   * Persona names that act as addressing tokens in group chats — typically
+   * EVERY bot sharing a group (e.g. ["robbie", "lena", "kai"]). Used by the
+   * group reply gate: a bot replies when its OWN persona name appears, and a
+   * no-name message is routed to whichever bot was addressed last. Every bot
+   * needs the full list so it can tell "someone else was named" (go quiet)
+   * from "nobody was named" (the last-addressed bot continues). Empty =
+   * gate falls back to matching only this bot's own persona name, which still
+   * works in a single-bot group but can't track hand-offs between bots.
+   * Matched case-insensitively on letter boundaries (so "robbie" matches in
+   * "@robbie_agh_bot" and "Robbie," but not "robbiee"). Optional: omitted /
+   * undefined behaves the same as an empty list.
+   */
+  groupPersonaNames?: string[];
 }
 
 export interface TurnIndexingSettings {
@@ -574,7 +588,26 @@ function buildTelegramConfig(
   const allowedFromToml = asIntArray(tomlTelegram.allowed_user_ids);
   const allowedUserIds = allowedFromEnv ?? allowedFromToml ?? [];
 
-  return { token, pollTimeoutS, allowedUserIds };
+  const groupPersonaNames =
+    parseGroupPersonaNames(process.env.PHANTOMBOT_TELEGRAM_GROUP_PERSONAS) ??
+    asStringArray(tomlTelegram.group_persona_names) ??
+    [];
+
+  return { token, pollTimeoutS, allowedUserIds, groupPersonaNames };
+}
+
+/**
+ * Parse a comma-separated `PHANTOMBOT_TELEGRAM_GROUP_PERSONAS` env value into
+ * a trimmed, non-empty string list. Returns undefined when unset so callers
+ * can fall through to the TOML value.
+ */
+function parseGroupPersonaNames(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) return undefined;
+  const names = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return names.length > 0 ? names : undefined;
 }
 
 /**
@@ -642,7 +675,18 @@ function buildTelegramPersonasConfig(
     );
     const allowedUserIds =
       allowedFromEnv ?? asIntArray(entry.allowed_user_ids) ?? [];
-    out[personaName] = { token, pollTimeoutS, allowedUserIds };
+    const groupPersonaNames =
+      parseGroupPersonaNames(
+        process.env[`PHANTOMBOT_TELEGRAM_GROUP_PERSONAS_${envSuffix}`],
+      ) ??
+      asStringArray(entry.group_persona_names) ??
+      [];
+    out[personaName] = {
+      token,
+      pollTimeoutS,
+      allowedUserIds,
+      groupPersonaNames,
+    };
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
