@@ -322,11 +322,13 @@ token = "desiree-token"
       token: "miles-token",
       pollTimeoutS: 25,
       allowedUserIds: [2, 3],
+      groupPersonaNames: [],
     });
     expect(c.channels.telegramPersonas!.desiree).toEqual({
       token: "desiree-token",
       pollTimeoutS: 30,
       allowedUserIds: [],
+      groupPersonaNames: [],
     });
   });
 
@@ -392,6 +394,7 @@ allowed_user_ids = [7]
       token: "env-only",
       pollTimeoutS: 30,
       allowedUserIds: [7],
+      groupPersonaNames: [],
     });
   });
 
