@@ -45,6 +45,7 @@ import { log } from "../lib/logger.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { generateRecoveryReply } from "../orchestrator/recovery.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
 import {
@@ -1893,21 +1894,48 @@ async function processChatMessage(
     return;
   }
 
-  // The authoritative full reply: prefer the harness's `done.finalText`
-  // (which may have been reformatted), fall back to whatever streamed.
-  const fullReply = finalReply ?? streamedReply;
+  // The harness chain failed with a (recoverable) diagnostic — almost
+  // always a wedged tool call tripping the idle timeout. We NEVER show the
+  // raw internal string: it's English-only and reads like a crash. Instead
+  // re-prompt the chain ONCE for a short, language-matched human reply
+  // ("hit a snag, mind trying again?") and deliver that like any normal
+  // message. If even the recovery turn can't produce text, we stay silent —
+  // the diagnostic is already in the journal.
+  let recoveryText: string | undefined;
+  if (errored) {
+    log.error("telegram: turn failed; generating recovery reply", {
+      chatId: msg.chatId,
+      error: errored,
+    });
+    recoveryText = await generateRecoveryReply({
+      harnesses,
+      userMessage: msg.text,
+      personaName: input.persona,
+      signal: controller.signal,
+    });
+  }
+  // True only when the turn failed AND recovery couldn't produce anything.
+  // `errored` itself is left intact so the telemetry below still records
+  // that the underlying turn failed.
+  const unrecoverable = !!errored && !recoveryText;
+
+  // The authoritative full reply: a recovery message if we made one, else
+  // the harness's done.finalText (possibly reformatted), else whatever
+  // streamed live.
+  const fullReply = recoveryText ?? finalReply ?? streamedReply;
 
   // Compute what still needs to be sent after live streaming:
-  //   - error: surface the diagnostic
+  //   - unrecoverable failure: stay silent (diagnostic is logged, never shown)
   //   - consumed prefix matches: send only the suffix (the part the user
   //     hasn't seen yet, after live final bubbles and classified narration)
-  //   - consumed prefix doesn't match (harness reformatted): send the
-  //     full reply. We accept some duplication over silently truncating.
+  //   - consumed prefix doesn't match (harness reformatted, or a recovery
+  //     reply unrelated to the streamed text): send the full reply. We
+  //     accept some duplication over silently truncating.
   //   - nothing came back AND nothing visible was sent: "(no reply)"
   //   - nothing came back BUT progress/final bubbles landed: stay silent
   let outText: string;
-  if (errored) {
-    outText = `(error: ${errored})`;
+  if (unrecoverable) {
+    outText = "";
   } else if (fullReply.length === 0) {
     // Empty reply: in a DM the "(no reply)" placeholder is a useful signal
     // that the turn produced nothing. In a GROUP it's pure noise — a bot
@@ -1930,16 +1958,16 @@ async function processChatMessage(
     outText = fullReply;
   }
 
-  // Voice in → voice out (when TTS is configured AND no error).
-  // Text in → text out, always. The reply lands as a fresh message,
-  // so Telegram pushes a notification — important when the user kicked
-  // off a long job and walked away from the chat.
+  // Voice in → voice out (when TTS is configured AND we have something to
+  // say — including a recovery reply). Text in → text out, always. The
+  // reply lands as a fresh message, so Telegram pushes a notification —
+  // important when the user kicked off a long job and walked away.
   //
   // Voice-out synthesizes the full reply, split into short clips. Text
   // streaming is disabled for voice, so there is nothing to dedupe.
   let sentAsVoice = false;
   try {
-    if (willReplyWithVoice && !errored && fullReply.length > 0) {
+    if (willReplyWithVoice && !unrecoverable && fullReply.length > 0) {
       const voiceSegments = splitIntoSegments(fullReply, {
         maxSentences: streaming.voiceMaxSentences,
         maxChars: streaming.bubbleMaxChars,
@@ -1964,13 +1992,11 @@ async function processChatMessage(
       }
     } else if (outText.length > 0) {
       // Empty outText is intentional silence: streaming/progress bubbles
-      // already delivered all useful output. Otherwise, split the remaining
-      // final reply into markdown-safe Telegram bubbles.
-      if (errored) {
-        await sendTextSegment(outText, "error");
-      } else {
-        await sendFinalSegments(outText);
-      }
+      // already delivered all useful output, or the turn failed
+      // unrecoverably (diagnostic logged, nothing shown). Otherwise, split
+      // the remaining final reply — a normal answer or a recovery message —
+      // into markdown-safe Telegram bubbles.
+      await sendFinalSegments(outText);
     }
   } catch (e) {
     log.error("telegram: send failed", {
@@ -1992,6 +2018,9 @@ async function processChatMessage(
     inputModality: isVoice ? "voice" : "text",
     modalityOverride: modalityOverride ?? "none",
     ok: !errored,
+    // Turn failed at the harness level but a language-matched recovery
+    // reply was generated and delivered instead of a raw diagnostic.
+    recovered: !!errored && !unrecoverable,
   });
 }
 

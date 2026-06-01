@@ -1028,7 +1028,7 @@ describe("runTelegramServer dispatch", () => {
     });
   });
 
-  test("on harness error sends an error message and does not persist", async () => {
+  test("on unrecoverable harness error: never shows the raw diagnostic, does not persist", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
@@ -1036,6 +1036,8 @@ describe("runTelegramServer dispatch", () => {
       fromUserId: 42,
       text: "hi",
     });
+    // This harness fails on every invoke, so the recovery re-prompt fails
+    // too. The user must NOT see the internal "boom" string; we stay silent.
     const harness = new ScriptedHarness("fake", [
       { type: "error", error: "boom", recoverable: false },
     ]);
@@ -1048,7 +1050,64 @@ describe("runTelegramServer dispatch", () => {
       transport,
       oneShot: true,
     });
-    expect(transport.sent).toEqual([{ chatId: 1001, text: "(error: boom)" }]);
+    expect(transport.sent).toEqual([]);
+    expect(
+      transport.sent.some((s) => /boom|error|timed out/i.test(s.text)),
+    ).toBe(false);
+    expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
+  });
+
+  test("on harness failure: surfaces a language-matched recovery reply, not the raw error", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      chatId: 1001,
+      fromUserId: 42,
+      text: "hola, ¿cómo estás?",
+    });
+    // First invoke (the real turn) fails; the recovery re-prompt is a
+    // second invoke that succeeds with a human reply. A stateful harness
+    // models exactly that.
+    let calls = 0;
+    const harness: Harness = {
+      id: "flaky",
+      available: async () => true,
+      async *invoke() {
+        calls++;
+        if (calls === 1) {
+          yield {
+            type: "error",
+            error: "flaky timed out after 300000ms",
+            recoverable: true,
+          };
+          return;
+        }
+        yield { type: "text", text: "¡Uy, me atasqué! ¿Lo intentamos otra vez?" };
+        yield {
+          type: "done",
+          finalText: "¡Uy, me atasqué! ¿Lo intentamos otra vez?",
+        };
+      },
+    };
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(calls).toBe(2);
+    expect(transport.sent).toEqual([
+      { chatId: 1001, text: "¡Uy, me atasqué! ¿Lo intentamos otra vez?" },
+    ]);
+    // The raw diagnostic is never shown.
+    expect(transport.sent.some((s) => /timed out|error:/i.test(s.text))).toBe(
+      false,
+    );
+    // A failed-but-recovered turn still leaves no history (the original
+    // question went unanswered, so the user can retry cleanly).
     expect(await memory.recentTurns("phantom", "telegram:1001", 10)).toEqual([]);
   });
 });
@@ -2379,9 +2438,11 @@ describe("runTelegramServer narration flush (text-out)", () => {
     expect(transport.sent.map((s) => s.text)).toEqual([]);
   });
 
-  test("error after short narration: error message still surfaces", async () => {
+  test("error after short narration: raw diagnostic is never surfaced", async () => {
     // Narration may or may not have reached the timer before the tool
-    // blows up. The error diagnostic still has to surface.
+    // blows up. Either way the raw internal diagnostic must NOT reach the
+    // user — the recovery re-prompt fails too here (same scripted harness),
+    // so the turn stays silent rather than printing "(error: boom)".
     class ErrorAfterToolHarness implements Harness {
       readonly id = "error-after-tool";
       async available(): Promise<boolean> {
@@ -2411,7 +2472,9 @@ describe("runTelegramServer narration flush (text-out)", () => {
       oneShot: true,
     });
 
-    expect(transport.sent.map((s) => s.text)).toEqual(["(error: boom)"]);
+    expect(
+      transport.sent.some((s) => /boom|error:/i.test(s.text)),
+    ).toBe(false);
   });
 });
 
