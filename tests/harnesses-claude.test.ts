@@ -110,9 +110,14 @@ describe("parseStreamJson", () => {
     expect(c).toEqual({ type: "text", text: "hello world" });
   });
 
-  test("returns undefined for non-assistant events", () => {
+  test("returns undefined for non-assistant events without tool results", () => {
     expect(parseStreamJson({ type: "system" })).toBeUndefined();
-    expect(parseStreamJson({ type: "user" })).toBeUndefined();
+    expect(
+      parseStreamJson({
+        type: "user",
+        message: { content: [{ type: "text", text: "not surfaced" }] },
+      }),
+    ).toBeUndefined();
     expect(parseStreamJson({ type: "result" })).toBeUndefined();
   });
 
@@ -137,6 +142,16 @@ describe("parseStreamJson", () => {
   test("heartbeat for tool_result blocks (no flush)", () => {
     const c = parseStreamJson({
       type: "assistant",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "abc", content: "done" }],
+      },
+    });
+    expect(c).toEqual({ type: "heartbeat" });
+  });
+
+  test("heartbeat for user-side tool_result blocks so idle latch clears", () => {
+    const c = parseStreamJson({
+      type: "user",
       message: {
         content: [{ type: "tool_result", tool_use_id: "abc", content: "done" }],
       },
@@ -266,6 +281,20 @@ describe("ClaudeHarness.invoke (subprocess)", () => {
       type: "error",
       recoverable: true,
       error: expect.stringContaining("timed out"),
+    });
+  });
+
+  test("user-side tool_result clears tool latch so post-tool thinking can keep the turn alive", async () => {
+    process.env.FAKE_CLAUDE_MODE = "posttool_thinking";
+    const chunks = await collect(
+      mkHarness().invoke(newRequest({ idleTimeoutMs: 700, hardTimeoutMs: 5_000 })),
+    );
+
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    expect(chunks).toContainEqual({ type: "text", text: "finished" });
+    expect(chunks.at(-1)).toMatchObject({
+      type: "done",
+      finalText: "finished",
     });
   });
 });

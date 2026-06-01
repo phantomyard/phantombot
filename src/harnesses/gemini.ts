@@ -41,6 +41,7 @@ import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
+  type HarnessActivity,
   killCauseToErrorChunk,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
@@ -210,15 +211,13 @@ export class GeminiHarness implements Harness {
             log.debug("gemini: non-JSON stdout line", {
               line: trimmed.slice(0, 200),
             });
-            killer.touch(); // non-JSON line is real output
+            killer.touch("productive"); // non-JSON line is real output
             yield { type: "progress", note: trimmed.slice(0, 200) };
             continue;
           }
           const c = parseGeminiEvent(parsed);
           if (!c) continue;
-          // Only reset the idle window on productive chunks; heartbeats
-          // keep the UI typing indicator alive but must not extend idle.
-          if (c.type !== "heartbeat") killer.touch();
+          killer.touch(geminiActivity(parsed, c));
           if (c.type === "text") finalText += c.text;
           if (c.type === "done") {
             // gemini's `result` event carries the authoritative stats.
@@ -235,8 +234,10 @@ export class GeminiHarness implements Harness {
       const tail = buffer.trim();
       if (tail) {
         try {
-          const c = parseGeminiEvent(JSON.parse(tail));
+          const parsed = JSON.parse(tail);
+          const c = parseGeminiEvent(parsed);
           if (c) {
+            killer.touch(geminiActivity(parsed, c));
             if (c.type === "text") finalText += c.text;
             if (c.type === "done") resultMeta = c.meta;
             else yield c;
@@ -368,6 +369,20 @@ export function parseGeminiEvent(parsed: unknown): HarnessChunk | undefined {
   }
 
   return undefined;
+}
+
+function geminiActivity(
+  parsed: unknown,
+  chunk: HarnessChunk,
+): HarnessActivity {
+  if (chunk.type === "text" || chunk.type === "done") return "productive";
+  if (typeof parsed !== "object" || parsed === null) {
+    return chunk.type === "heartbeat" ? "model" : "productive";
+  }
+  const type = (parsed as Record<string, unknown>).type;
+  if (type === "tool_use") return "tool";
+  if (type === "tool_result") return "productive";
+  return chunk.type === "heartbeat" ? "model" : "productive";
 }
 
 /**

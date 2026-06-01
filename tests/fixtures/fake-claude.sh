@@ -12,6 +12,9 @@
 #   hang     — sleep forever (used for the timeout test)
 #   argv     — emit argv as a single assistant text event (so the test can
 #              inspect what flags the harness passed), then exit 0
+#   posttool_thinking — tool_use -> user tool_result -> spaced thinking
+#              heartbeats -> final text. Proves user-side tool_result clears
+#              the tool-running idle latch.
 
 mode="${FAKE_CLAUDE_MODE:-normal}"
 
@@ -48,6 +51,19 @@ case "$mode" in
     payload="${payload//\\/\\\\}"
     payload="${payload//\"/\\\"}"
     printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"${payload}\"}]}}"
+    printf '%s\n' '{"type":"result"}'
+    exit 0
+    ;;
+  posttool_thinking)
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}'
+    sleep 0.1
+    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"abc","content":"done"}]}}'
+    sleep 0.45
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"still working"}]}}'
+    sleep 0.45
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"still working"}]}}'
+    sleep 0.45
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"finished"}]}}'
     printf '%s\n' '{"type":"result"}'
     exit 0
     ;;

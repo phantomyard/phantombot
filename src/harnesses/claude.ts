@@ -51,6 +51,7 @@ import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
+  type HarnessActivity,
   killCauseToErrorChunk,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
@@ -158,15 +159,13 @@ export class ClaudeHarness implements Harness {
             parsed = JSON.parse(trimmed);
           } catch {
             // Not stream-json — surface as out-of-band progress note.
-            killer.touch(); // non-JSON line is real output
+            killer.touch("productive"); // non-JSON line is real output
             yield { type: "progress", note: trimmed };
             continue;
           }
           const c = parseStreamJson(parsed);
           if (c) {
-            // Only reset the idle window on productive chunks; heartbeats
-            // keep the UI typing indicator alive but must not extend idle.
-            if (c.type !== "heartbeat") killer.touch();
+            killer.touch(claudeActivity(parsed, c));
             if (c.type === "text") finalText += c.text;
             yield c;
           }
@@ -315,6 +314,9 @@ export function renderStdinPayload(req: HarnessRequest): string {
  * informally: each line has a `type` (system / user / assistant / result)
  * and a `message` payload. The assistant content is an array of blocks
  * with their own `type`: `text`, `thinking`, `tool_use`, `tool_result`.
+ * Claude reports tool results in user-typed messages; we surface those as
+ * heartbeats too so the timeout coordinator can clear the tool-running latch
+ * without flushing user-visible narration.
  *
  * Channel layers want three distinct signals from us:
  *   - `text` blocks → user-visible reply (concatenate, surface verbatim).
@@ -337,12 +339,20 @@ export function renderStdinPayload(req: HarnessRequest): string {
 export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
-  if (obj.type !== "assistant") return undefined;
 
   const message = obj.message as Record<string, unknown> | undefined;
   if (!message) return undefined;
   const content = message.content;
   if (!Array.isArray(content)) return undefined;
+
+  if (obj.type !== "assistant") {
+    return content.some((part) => {
+      if (typeof part !== "object" || part === null) return false;
+      return (part as Record<string, unknown>).type === "tool_result";
+    })
+      ? { type: "heartbeat" }
+      : undefined;
+  }
 
   let text = "";
   let toolName: string | undefined;
@@ -363,6 +373,32 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (toolName) return { type: "progress", note: `tool: ${toolName}` };
   if (sawOtherNonText) return { type: "heartbeat" };
   return undefined;
+}
+
+function claudeActivity(
+  parsed: unknown,
+  chunk: HarnessChunk,
+): HarnessActivity {
+  if (chunk.type === "text" || chunk.type === "done") return "productive";
+  if (typeof parsed !== "object" || parsed === null) {
+    return chunk.type === "heartbeat" ? "model" : "productive";
+  }
+  const obj = parsed as Record<string, unknown>;
+  const message = obj.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (Array.isArray(content)) {
+    let hasToolUse = false;
+    let hasToolResult = false;
+    for (const part of content) {
+      if (typeof part !== "object" || part === null) continue;
+      const type = (part as Record<string, unknown>).type;
+      hasToolUse ||= type === "tool_use";
+      hasToolResult ||= type === "tool_result";
+    }
+    if (hasToolUse) return "tool";
+    if (hasToolResult) return "productive";
+  }
+  return chunk.type === "heartbeat" ? "model" : "productive";
 }
 
 async function consumeStderr(

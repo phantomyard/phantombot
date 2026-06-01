@@ -4,7 +4,7 @@
  * Every harness (claude/gemini/pi) needs the same machinery:
  *
  *   - spawn the binary in a fresh process group (so grandchildren die too)
- *   - run an idle timer that resets on every chunk from stdout
+ *   - run an idle timer that resets on useful activity from stdout
  *   - run a hard wall-clock timer that never resets
  *   - listen for an external AbortSignal (the user typed /stop)
  *   - on any of those firing, SIGTERM → 5s grace → SIGKILL the whole group
@@ -21,7 +21,7 @@
  *   });
  *   try {
  *     for await (const chunk of proc.stdout) {
- *       runner.touch();   // resets idle timer
+ *       runner.touch("productive"); // resets idle timer
  *       // ...emit chunks...
  *     }
  *   } finally {
@@ -35,6 +35,7 @@ import { killProcessGroup } from "./processGroup.ts";
 import { log } from "./logger.ts";
 
 export type KillCause = "timeout" | "idle" | "aborted" | undefined;
+export type HarnessActivity = "model" | "tool" | "productive";
 
 export interface KillCoordinatorOpts {
   proc: Subprocess<
@@ -55,8 +56,15 @@ export interface KillCoordinatorOpts {
 }
 
 export interface KillCoordinator {
-  /** Reset the idle timer. Call after every emitted chunk. */
-  touch(): void;
+  /**
+   * Record subprocess activity.
+   *
+   * - productive: visible text, completed tool output, non-JSON stdout, done
+   * - model: model-side thinking/progress while no tool is known to be running
+   * - tool: tool invocation/start; later generic model heartbeats do not extend
+   *   the idle window until productive output arrives
+   */
+  touch(activity?: HarnessActivity): void;
   /** Stop all timers and detach signal listener. Idempotent. */
   dispose(): Promise<void>;
   /** Why the process was killed, if it was. undefined = exited normally. */
@@ -69,6 +77,7 @@ export function createKillCoordinator(
   const graceMs = opts.graceMs ?? 5000;
   let cause: KillCause;
   let disposed = false;
+  let toolRunning = false;
 
   const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
     if (cause || disposed) return;
@@ -101,8 +110,15 @@ export function createKillCoordinator(
   }
 
   return {
-    touch(): void {
+    touch(activity: HarnessActivity = "productive"): void {
       if (cause || disposed) return;
+      if (activity === "tool") {
+        toolRunning = true;
+      } else if (activity === "productive") {
+        toolRunning = false;
+      } else if (toolRunning) {
+        return;
+      }
       clearTimeout(idleTimer);
       idleTimer = setTimeout(
         () => triggerKill("idle"),
