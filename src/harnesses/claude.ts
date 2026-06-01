@@ -314,6 +314,9 @@ export function renderStdinPayload(req: HarnessRequest): string {
  * informally: each line has a `type` (system / user / assistant / result)
  * and a `message` payload. The assistant content is an array of blocks
  * with their own `type`: `text`, `thinking`, `tool_use`, `tool_result`.
+ * Claude reports tool results in user-typed messages; we surface those as
+ * heartbeats too so the timeout coordinator can clear the tool-running latch
+ * without flushing user-visible narration.
  *
  * Channel layers want three distinct signals from us:
  *   - `text` blocks → user-visible reply (concatenate, surface verbatim).
@@ -336,12 +339,20 @@ export function renderStdinPayload(req: HarnessRequest): string {
 export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
-  if (obj.type !== "assistant") return undefined;
 
   const message = obj.message as Record<string, unknown> | undefined;
   if (!message) return undefined;
   const content = message.content;
   if (!Array.isArray(content)) return undefined;
+
+  if (obj.type !== "assistant") {
+    return content.some((part) => {
+      if (typeof part !== "object" || part === null) return false;
+      return (part as Record<string, unknown>).type === "tool_result";
+    })
+      ? { type: "heartbeat" }
+      : undefined;
+  }
 
   let text = "";
   let toolName: string | undefined;

@@ -197,6 +197,8 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
     if (typeof it.type === "string" && it.type.includes("tool")) {
       return { type: "progress", note: "tool" };
     }
+    // Non-tool starts are still useful liveness signals while the model is
+    // preparing output, but they should not flush user-visible narration.
     return { type: "heartbeat" };
   }
   if (type === "item.completed") {
