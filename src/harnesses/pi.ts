@@ -27,6 +27,7 @@ import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
+  type HarnessActivity,
   killCauseToErrorChunk,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
@@ -130,15 +131,13 @@ export class PiHarness implements Harness {
           try {
             parsed = JSON.parse(trimmed);
           } catch {
-            killer.touch(); // non-JSON line is real output
+            killer.touch("productive"); // non-JSON line is real output
             yield { type: "progress", note: trimmed };
             continue;
           }
           const c = parsePiEvent(parsed);
           if (c) {
-            // Only reset the idle window on productive chunks; heartbeats
-            // keep the UI typing indicator alive but must not extend idle.
-            if (c.type !== "heartbeat") killer.touch();
+            killer.touch(piActivity(parsed, c));
             if (c.type === "text") finalText += c.text;
             yield c;
           }
@@ -272,6 +271,21 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   }
 
   return undefined;
+}
+
+function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
+  if (chunk.type === "text" || chunk.type === "done") return "productive";
+  if (typeof parsed !== "object" || parsed === null) {
+    return chunk.type === "heartbeat" ? "model" : "productive";
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.type === "tool_execution_start") return "tool";
+  const ame = obj.assistantMessageEvent;
+  if (isObject(ame) && typeof ame.type === "string") {
+    if (ame.type === "tool_use_end") return "productive";
+    if (ame.type.startsWith("tool_use")) return "tool";
+  }
+  return chunk.type === "heartbeat" ? "model" : "productive";
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

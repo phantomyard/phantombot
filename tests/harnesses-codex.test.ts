@@ -66,6 +66,13 @@ describe("parseCodexEvent", () => {
     expect(parseCodexEvent({ type: "turn.started" })).toEqual({ type: "heartbeat" });
   });
 
+  test("item.started tool -> progress", () => {
+    expect(parseCodexEvent({
+      type: "item.started",
+      item: { type: "tool_call", name: "shell" },
+    })).toEqual({ type: "progress", note: "tool" });
+  });
+
   test("turn.completed -> done-shaped stats carrier", () => {
     const c = parseCodexEvent({ type: "turn.completed", usage: { output_tokens: 2 } });
     expect(c?.type).toBe("done");
@@ -114,22 +121,33 @@ describe("CodexHarness.invoke", () => {
     expect(err.error).toContain("timed out");
   });
 
-  // Regression for #123: heartbeats (streamed reasoning) must NOT reset the
-  // idle timer. The fixture emits heartbeats spaced under the idle window for
-  // ~3s before a late agent_message. With the pre-fix touch()-on-every-chunk
-  // behaviour those heartbeats kept postponing the idle kill, so the wedged
-  // turn ran to completion. With the fix the idle timer fires regardless of
-  // heartbeats, so we get an idle error and never reach the late finish.
-  test("repeated heartbeats do not reset idle -> idle-killed before finish", async () => {
+  test("model heartbeats reset idle -> completes", async () => {
     process.env.FAKE_CODEX_MODE = "heartbeats";
     const chunks = await collect(
       mkHarness().invoke(
         newRequest({ idleTimeoutMs: 800, hardTimeoutMs: 10_000 }),
       ),
     );
-    // Heartbeats really did stream through (otherwise the test is vacuous)...
     expect(chunks.some((c) => c.type === "heartbeat")).toBe(true);
-    // ...yet the turn was idle-killed before the late agent_message landed.
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    const done = chunks.find((c) => c.type === "done");
+    if (done?.type !== "done") throw new Error("expected done chunk");
+    expect(done.finalText).toContain("late finish");
+  });
+
+  // Regression for #123: after a tool has started, generic heartbeat noise
+  // must NOT keep a stuck turn alive forever. The fixture emits heartbeats
+  // spaced under the idle window after the tool-start signal; the harness must
+  // idle-kill before the late agent_message lands.
+  test("tool-phase heartbeats do not reset idle -> idle-killed before finish", async () => {
+    process.env.FAKE_CODEX_MODE = "tool-heartbeats";
+    const chunks = await collect(
+      mkHarness().invoke(
+        newRequest({ idleTimeoutMs: 800, hardTimeoutMs: 10_000 }),
+      ),
+    );
+    expect(chunks.some((c) => c.type === "heartbeat")).toBe(true);
+    expect(chunks.some((c) => c.type === "progress")).toBe(true);
     expect(chunks.some((c) => c.type === "done")).toBe(false);
     expect(
       chunks.some((c) => c.type === "text" && c.text.includes("late finish")),

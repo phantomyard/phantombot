@@ -13,6 +13,7 @@ import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
+  type HarnessActivity,
   killCauseToErrorChunk,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
@@ -96,15 +97,13 @@ export class CodexHarness implements Harness {
           try {
             parsed = JSON.parse(trimmed);
           } catch {
-            killer.touch(); // non-JSON line is real output
+            killer.touch("productive"); // non-JSON line is real output
             yield { type: "progress", note: trimmed.slice(0, 200) };
             continue;
           }
           const c = parseCodexEvent(parsed);
           if (!c) continue;
-          // Only reset the idle window on productive chunks; heartbeats
-          // keep the UI typing indicator alive but must not extend idle.
-          if (c.type !== "heartbeat") killer.touch();
+          killer.touch(codexActivity(parsed, c));
           if (c.type === "text") finalText += c.text;
           if (c.type === "done") {
             usageMeta = c.meta;
@@ -191,6 +190,15 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
   const type = obj.type;
+  if (type === "item.started") {
+    const item = obj.item;
+    if (typeof item !== "object" || item === null) return undefined;
+    const it = item as Record<string, unknown>;
+    if (typeof it.type === "string" && it.type.includes("tool")) {
+      return { type: "progress", note: "tool" };
+    }
+    return { type: "heartbeat" };
+  }
   if (type === "item.completed") {
     const item = obj.item;
     if (typeof item !== "object" || item === null) return undefined;
@@ -212,6 +220,29 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
     return { type: "done", finalText: "", meta: undefined };
   }
   return undefined;
+}
+
+function codexActivity(
+  parsed: unknown,
+  chunk: HarnessChunk,
+): HarnessActivity {
+  if (chunk.type === "text" || chunk.type === "done") return "productive";
+  if (typeof parsed !== "object" || parsed === null) {
+    return chunk.type === "heartbeat" ? "model" : "productive";
+  }
+  const obj = parsed as Record<string, unknown>;
+  const item = obj.item;
+  const itemType =
+    typeof item === "object" && item !== null
+      ? (item as Record<string, unknown>).type
+      : undefined;
+  if (obj.type === "item.started" && typeof itemType === "string" && itemType.includes("tool")) {
+    return "tool";
+  }
+  if (obj.type === "item.completed" && typeof itemType === "string" && itemType.includes("tool")) {
+    return "productive";
+  }
+  return chunk.type === "heartbeat" ? "model" : "productive";
 }
 
 async function consumeStderr(
