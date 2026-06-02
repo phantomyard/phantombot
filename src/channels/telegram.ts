@@ -40,6 +40,7 @@ import {
   transcribe,
   ttsSupported,
 } from "../lib/audio.ts";
+import { DEFAULT_STT_TIMEOUT_MS } from "../lib/voice.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
@@ -1385,6 +1386,29 @@ export async function runTelegramServer(
   }
 }
 
+/** Thrown when the STT download+transcribe step exceeds its time budget. */
+class SttTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`STT step exceeded ${ms}ms budget`);
+    this.name = "SttTimeoutError";
+  }
+}
+
+/**
+ * Race `p` against a timer. If the timer wins, reject with SttTimeoutError so
+ * the caller's catch can recover and the per-chat queue advances (GitHub
+ * #135). We cannot cancel the underlying request — the transport exposes no
+ * AbortSignal — so the orphaned promise is left to settle on its own; the
+ * point is that the *queue* no longer waits on it.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SttTimeoutError(ms)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Process one (non-slash) message: STT if voice, run the harness chain,
  * send the reply. Stays self-contained so the polling loop can fire-and-
@@ -1441,9 +1465,18 @@ async function processChatMessage(
       );
       return;
     }
+    const fileId = msg.voice.fileId;
     try {
-      const file = await input.transport.downloadFile(msg.voice.fileId);
-      const r = await transcribe(input.config, file.data, file.mime);
+      // Bound the whole download+transcribe step. A hung request here would
+      // otherwise never settle, stalling every later message in this chat's
+      // serial queue forever — the wedge in GitHub #135.
+      const r = await withTimeout(
+        (async () => {
+          const file = await input.transport.downloadFile(fileId);
+          return transcribe(input.config, file.data, file.mime);
+        })(),
+        input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
+      );
       if (!r.ok) {
         log.error("telegram: STT failed", {
           error: r.error,
@@ -1487,8 +1520,6 @@ async function processChatMessage(
         });
       }
       return;
-    } finally {
-      // Seam for future per-chat STT lock release (GitHub #135).
     }
   }
 

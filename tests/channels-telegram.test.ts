@@ -1758,6 +1758,83 @@ describe("runTelegramServer voice round-trip", () => {
   });
 
   // ---------------------------------------------------------------------
+  // Regression: GitHub #135 — a stuck STT step must not wedge the chat.
+  // A voice note whose transcription HANGS must time out, surface a
+  // retype prompt, and crucially NOT block a later message in the same
+  // chat's serial queue. Before the timeout the hung promise never
+  // settled, so every subsequent message for that chat queued forever.
+  // ---------------------------------------------------------------------
+  test("STT hang times out, sends a retype prompt, and a later message in the same chat still reaches the harness (#135)", async () => {
+    const originalFetch = globalThis.fetch;
+    let whisperCalls = 0;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const u = String(url);
+      if (u.includes("audio/transcriptions")) {
+        whisperCalls++;
+        // Never settles — simulates a wedged STT backend. It must not
+        // reject (an unhandled rejection would mask the real assertion);
+        // the source-side timeout is what unblocks the queue.
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      // 1) voice note in chat 1001 whose transcription will hang.
+      transport.pendingUpdates.push({
+        updateId: 1,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "",
+        voice: { fileId: "stuck-voice", mimeType: "audio/ogg", durationS: 3 },
+      });
+      // 2) a later text message in the SAME chat — must still get through.
+      transport.pendingUpdates.push({
+        updateId: 2,
+        chatId: 1001,
+        fromUserId: 42,
+        text: "still here?",
+      });
+
+      const harness = new ScriptedHarness("fake", [
+        { type: "done", finalText: "yes, still here" },
+      ]);
+
+      // Short STT budget so the hang resolves fast in-test.
+      const cfg = withVoiceConfig();
+      cfg.voice = { ...cfg.voice, sttTimeoutMs: 50 };
+
+      await runTelegramServer({
+        config: cfg,
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+
+      // The hang was attempted...
+      expect(whisperCalls).toBe(1);
+      // ...the follow-up text reached the harness (queue was NOT wedged)...
+      expect(harness.invocations).toBe(1);
+      expect(harness.lastRequest?.userMessage).toBe("still here?");
+      // ...the user got a retype prompt for the failed voice note...
+      const sentTexts = transport.sent.map((s) => s.text);
+      expect(
+        sentTexts.some((t) => t.includes("processing that voice note")),
+      ).toBe(true);
+      // ...and the follow-up reply was delivered.
+      expect(sentTexts).toContain("yes, still here");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  // ---------------------------------------------------------------------
   // Per-message modality override — voice-in/text-in routing can be
   // flipped by an explicit directive in the message text. STT still
   // runs for voice-in so the directive in the transcript is visible.

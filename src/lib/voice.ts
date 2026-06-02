@@ -44,11 +44,25 @@ export interface AzureEdgeVoice {
   pitch: string;
 }
 
+/**
+ * Default bound on the voice download + transcribe step. A voice note is
+ * short, so the round trip should complete well within this. The cap exists
+ * so a hung STT request can't stall the per-chat queue forever (GitHub #135).
+ */
+export const DEFAULT_STT_TIMEOUT_MS = 60_000;
+
 export interface VoiceConfig {
   provider: VoiceProvider;
   elevenlabs?: ElevenLabsVoice;
   openai?: OpenAIVoice;
   azure_edge?: AzureEdgeVoice;
+  /**
+   * Upper bound (ms) on the combined download+transcribe step before it is
+   * abandoned so the per-chat queue can advance. When unset, callers fall
+   * back to DEFAULT_STT_TIMEOUT_MS; override via [voice] stt_timeout_ms in
+   * config.toml.
+   */
+  sttTimeoutMs?: number;
 }
 
 export const ENV_KEY_FOR_PROVIDER: Record<

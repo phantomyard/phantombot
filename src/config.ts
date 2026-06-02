@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { log } from "./lib/logger.ts";
+import { DEFAULT_STT_TIMEOUT_MS } from "./lib/voice.ts";
 import { loadState } from "./state.ts";
 
 /**
@@ -504,10 +505,14 @@ function buildVoiceConfig(
       | "none"
       | undefined) ?? "none";
 
+  const sttTimeoutMs =
+    asNumber(tomlVoice.stt_timeout_ms) ?? DEFAULT_STT_TIMEOUT_MS;
+
   if (provider === "elevenlabs") {
     const e = (tomlVoice.elevenlabs ?? {}) as Record<string, unknown>;
     return {
       provider: "elevenlabs",
+      sttTimeoutMs,
       elevenlabs: {
         voiceId: asString(e.voice_id) ?? "",
         modelId: asString(e.model_id) ?? "eleven_turbo_v2_5",
@@ -521,6 +526,7 @@ function buildVoiceConfig(
     const o = (tomlVoice.openai ?? {}) as Record<string, unknown>;
     return {
       provider: "openai",
+      sttTimeoutMs,
       openai: {
         model: asString(o.model) ?? "tts-1",
         voice: asString(o.voice) ?? "nova",
@@ -532,6 +538,7 @@ function buildVoiceConfig(
     const a = (tomlVoice.azure_edge ?? {}) as Record<string, unknown>;
     return {
       provider: "azure_edge",
+      sttTimeoutMs,
       azure_edge: {
         voice: asString(a.voice) ?? "en-US-JennyNeural",
         rate: asString(a.rate) ?? "+0%",
@@ -539,7 +546,7 @@ function buildVoiceConfig(
       },
     };
   }
-  return { provider: "none" };
+  return { provider: "none", sttTimeoutMs };
 }
 
 function asNumber(v: unknown): number | undefined {
