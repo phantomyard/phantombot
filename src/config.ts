@@ -273,15 +273,22 @@ export async function loadConfig(): Promise<Config> {
     // the OLD semantics for an unmodified legacy config we map
     // turn_timeout_s to BOTH ceilings: idle == hard == legacy value.
     // That way a `turn_timeout_s = 600` config still tolerates 10
-    // minutes of silence, the way it used to. New configs that want the
-    // safer 120s-idle behavior set harness_idle_timeout_s explicitly.
+    // minutes of silence, the way it used to. New configs that want a
+    // different idle window set harness_idle_timeout_s explicitly.
+    //
+    // Default is 300s (5 min). Modern agent turns legitimately go quiet
+    // for minutes at a time — a single tool call can fan out to many
+    // sub-agents, or run a long build/search — so the old 120s default
+    // killed genuinely-working turns as if they were wedged. 5 min sits
+    // well under the 60-min hard cap and gives real work room to breathe
+    // while still catching a truly stuck subprocess.
     harnessIdleTimeoutMs:
       asInt(process.env.PHANTOMBOT_HARNESS_IDLE_TIMEOUT_MS) ??
       (asInt(toml.harness_idle_timeout_s) !== undefined
         ? asInt(toml.harness_idle_timeout_s)! * 1000
         : undefined) ??
       legacyTurnTimeoutMs(toml) ??
-      120_000,
+      300_000,
 
     harnessHardTimeoutMs:
       asInt(process.env.PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS) ??

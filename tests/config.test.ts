@@ -88,7 +88,7 @@ describe("loadConfig — defaults (no file)", () => {
   test("returns built-in defaults when no config file exists", async () => {
     const c = await loadConfig();
     expect(c.defaultPersona).toBe("phantom");
-    expect(c.harnessIdleTimeoutMs).toBe(120_000);
+    expect(c.harnessIdleTimeoutMs).toBe(300_000);
     expect(c.harnessHardTimeoutMs).toBe(3_600_000);
     expect(c.harnesses.chain).toEqual(["claude"]);
     expect(c.harnesses.claude).toEqual({
