@@ -22,6 +22,7 @@ import { join } from "node:path";
 import {
   preloadEnvFiles,
   reloadEnvFiles,
+  withPersonaEnv,
 } from "../src/lib/envBootstrap.ts";
 
 let workdir: string;
@@ -311,5 +312,33 @@ describe("reloadEnvFiles — mtime stat cache", () => {
     await reloadEnvFiles({ files: [path], env, tracked, statCache });
     expect(env.FOO).toBe("resurrected");
     expect(statCache.get(path)!.parsed.FOO).toBe("resurrected");
+  });
+});
+
+describe("withPersonaEnv", () => {
+  test("sets PHANTOMBOT_PERSONA to the persona key", () => {
+    const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    const out = withPersonaEnv(base, "burt");
+    expect(out.PHANTOMBOT_PERSONA).toBe("burt");
+    expect(out.PATH).toBe("/usr/bin");
+  });
+
+  test("does not mutate the input env (copy-on-write)", () => {
+    const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    const out = withPersonaEnv(base, "robbie");
+    expect(out).not.toBe(base);
+    expect(base.PHANTOMBOT_PERSONA).toBeUndefined();
+  });
+
+  test("returns the base untouched when persona is undefined", () => {
+    const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    const out = withPersonaEnv(base, undefined);
+    expect(out).toBe(base);
+    expect(out.PHANTOMBOT_PERSONA).toBeUndefined();
+  });
+
+  test("returns the base untouched when persona is empty", () => {
+    const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+    expect(withPersonaEnv(base, "")).toBe(base);
   });
 });

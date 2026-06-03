@@ -22,6 +22,15 @@ export interface HarnessRequest {
   userMessage: string;
   /** Prior turns of this conversation, oldest first. May be empty. */
   history: HistoryTurn[];
+  /**
+   * Persona key for THIS turn (e.g. "burt"). Exposed to the subprocess as
+   * the `PHANTOMBOT_PERSONA` env var so tools can self-identify without a
+   * hardcoded name — this is the single source of truth for "which bot am
+   * I". Per-turn, not global: a host running multiple personas gets the
+   * right identity on every spawn. Optional — degraded paths (e.g. the
+   * no-tools recovery reply) may omit it.
+   */
+  persona?: string;
   /** Subprocess working directory. Defaults to the agent dir. */
   workingDir?: string;
   /**

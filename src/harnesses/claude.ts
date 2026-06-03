@@ -48,7 +48,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import { reloadEnvFiles } from "../lib/envBootstrap.ts";
+import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
   type HarnessActivity,
@@ -99,7 +99,7 @@ export class ClaudeHarness implements Harness {
 
     // OAuth-on-host: don't leak ANTHROPIC_API_KEY into the subprocess env,
     // so claude resolves credentials from ~/.claude/.credentials.json.
-    const env = filterAuthEnv(process.env);
+    const env = withPersonaEnv(filterAuthEnv(process.env), req.persona);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
