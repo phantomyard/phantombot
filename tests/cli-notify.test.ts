@@ -141,6 +141,54 @@ describe("runNotify text", () => {
   });
 });
 
+describe("runNotify persona routing", () => {
+  test("--persona routes to that persona's bot + allowlist", async () => {
+    const cfg = baseConfig();
+    cfg.channels.telegramPersonas = {
+      amanda: {
+        token: "amanda-token",
+        pollTimeoutS: 30,
+        allowedUserIds: [7],
+      },
+    };
+    const transport = new FakeTransport();
+    const out = new CaptureStream();
+    const code = await runNotify({
+      config: cfg,
+      transport,
+      persona: "amanda",
+      message: "amanda ping",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    // Only the persona's allowlist ([7]), not the default ([42, 99]).
+    expect(transport.sent).toEqual([{ chatId: 7, text: "amanda ping" }]);
+    expect(out.text).toContain("text=1");
+  });
+
+  test("unknown --persona → exit 2 with hint", async () => {
+    const cfg = baseConfig();
+    cfg.channels.telegramPersonas = {
+      amanda: { token: "t", pollTimeoutS: 30, allowedUserIds: [7] },
+    };
+    const err = new CaptureStream();
+    const code = await runNotify({
+      config: cfg,
+      transport: new FakeTransport(),
+      persona: "nobody",
+      message: "hi",
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain(
+      "no telegram bot configured for persona 'nobody'",
+    );
+    expect(err.text).toContain("amanda");
+  });
+});
+
 describe("runNotify voice", () => {
   test("voice without TTS provider → text-only fallback when --message also given", async () => {
     const cfg = baseConfig();
