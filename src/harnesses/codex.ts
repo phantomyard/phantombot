@@ -10,7 +10,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import { reloadEnvFiles } from "../lib/envBootstrap.ts";
+import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   createKillCoordinator,
   type HarnessActivity,
@@ -51,7 +51,7 @@ export class CodexHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: process.env,
+      env: withPersonaEnv(process.env, req.persona),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

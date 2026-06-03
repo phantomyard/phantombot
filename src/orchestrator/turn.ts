@@ -169,6 +169,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     systemPrompt,
     userMessage: input.userMessage,
     history,
+    persona: input.persona,
     workingDir: input.workingDir ?? homedir(),
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,

@@ -255,3 +255,21 @@ export async function reloadEnvFiles(
 
   return { updated, removed };
 }
+
+/**
+ * Return a copy of `base` with `PHANTOMBOT_PERSONA` set to the turn's persona
+ * key, so the spawned harness subprocess can self-identify (e.g. bot-inbox
+ * defaults its `--from` to it). Per-spawn and copy-on-write: we never mutate
+ * the caller's env (notably the global `process.env`). When `persona` is
+ * empty/undefined the base is returned untouched — degraded paths that don't
+ * carry a persona just don't get the var.
+ *
+ * One helper, shared by all four harnesses, so the var name can't drift.
+ */
+export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
+  base: T,
+  persona: string | undefined,
+): T {
+  if (!persona) return base;
+  return { ...base, PHANTOMBOT_PERSONA: persona };
+}
