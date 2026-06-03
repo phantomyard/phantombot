@@ -15,7 +15,14 @@
  * --voice    → synthesized via the configured TTS provider, sent via
  *              sendVoice as an OGG-Opus voice note. Same provider stack
  *              PR #30 added; same key-discovery rules.
- * Both flags can be combined to send text AND voice (two API calls).
+ * --persona  → route through the persona-bound bot defined in
+ *              `channels.telegram.personas.<name>` (its own token +
+ *              allowlist) instead of the default bot. Omitting it keeps
+ *              the prior behaviour: the default `channels.telegram` bot.
+ *              This is what lets a `tick`-fired notify land in the right
+ *              persona's chat — a tick has no inbound context, so without
+ *              this flag every notify falls to the one default bot.
+ * Both message/voice flags can be combined to send text AND voice (two API calls).
  */
 
 import { defineCommand } from "citty";
@@ -24,7 +31,7 @@ import {
   HttpTelegramTransport,
   type TelegramTransport,
 } from "../channels/telegram.ts";
-import { type Config, loadConfig } from "../config.ts";
+import { type Config, type TelegramAccount, loadConfig } from "../config.ts";
 import { synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -33,6 +40,11 @@ export interface RunNotifyInput {
   config?: Config;
   message?: string;
   voice?: string;
+  /**
+   * Route through a persona-bound bot from `channels.telegram.personas`.
+   * When omitted, the default `channels.telegram` bot is used.
+   */
+  persona?: string;
   /** Inject for testing. Default: HttpTelegramTransport with the configured token. */
   transport?: TelegramTransport;
   out?: WriteSink;
@@ -49,16 +61,39 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   }
 
   const config = input.config ?? (await loadConfig());
-  const tg = config.channels.telegram;
-  if (!tg) {
-    err.write(
-      "telegram is not configured — run `phantombot telegram` first.\n",
-    );
-    return 2;
+
+  // Resolve which Telegram bot account to send through. With --persona,
+  // pick the persona-bound account from `channels.telegram.personas`;
+  // otherwise fall back to the default `channels.telegram` account.
+  let tg: TelegramAccount | undefined;
+  if (input.persona) {
+    tg = config.channels.telegramPersonas?.[input.persona];
+    if (!tg) {
+      const known = Object.keys(config.channels.telegramPersonas ?? {});
+      const hint =
+        known.length > 0
+          ? `known personas: ${known.join(", ")}`
+          : "no persona bots are configured";
+      err.write(
+        `no telegram bot configured for persona '${input.persona}' — ${hint}. Add [channels.telegram.personas.${input.persona}] to your config, or omit --persona to use the default bot.\n`,
+      );
+      return 2;
+    }
+  } else {
+    tg = config.channels.telegram;
+    if (!tg) {
+      err.write(
+        "telegram is not configured — run `phantombot telegram` first.\n",
+      );
+      return 2;
+    }
   }
   if (tg.allowedUserIds.length === 0) {
+    const where = input.persona
+      ? `channels.telegram.personas.${input.persona}.allowed_user_ids`
+      : "channels.telegram.allowed_user_ids";
     err.write(
-      "channels.telegram.allowed_user_ids is empty — refusing to broadcast. Add at least one userId via `phantombot telegram`.\n",
+      `${where} is empty — refusing to broadcast. Add at least one userId via \`phantombot telegram\`.\n`,
     );
     return 2;
   }
@@ -150,11 +185,17 @@ export default defineCommand({
       description:
         "Text to synthesize via the configured TTS provider and send as a voice note.",
     },
+    persona: {
+      type: "string",
+      description:
+        "Route through the persona-bound bot in channels.telegram.personas.<name> (its own token + allowlist) instead of the default bot.",
+    },
   },
   async run({ args }) {
     process.exitCode = await runNotify({
       message: args.message as string | undefined,
       voice: args.voice as string | undefined,
+      persona: args.persona as string | undefined,
     });
   },
 });
