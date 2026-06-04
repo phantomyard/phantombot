@@ -232,6 +232,19 @@ describe("PiHarness.invoke (subprocess)", () => {
     expect(argv).not.toContain("--no-tools");
   });
 
+  test("pre-prompting trim flags ride along on every turn", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    // Startup network ops off (telemetry/update checks) — model call unaffected.
+    expect(argv).toContain("--offline");
+    // Ephemeral: phantombot owns conversation state.
+    expect(argv).toContain("--no-session");
+  });
+
   test("non-zero exit emits recoverable error", async () => {
     process.env.FAKE_PI_MODE = "error";
     const chunks = await collect(mkHarness().invoke(newRequest()));

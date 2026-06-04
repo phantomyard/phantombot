@@ -116,6 +116,29 @@ describe("CodexHarness.invoke", () => {
     expect(argv).not.toContain("read-only");
   });
 
+  test("a normal turn LOADS user config (no --ignore-user-config) so MCP connectors work, but keeps --ignore-rules", async () => {
+    process.env.FAKE_CODEX_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    // Workspace connectors live in ~/.codex/config.toml — must NOT be skipped.
+    expect(argv).not.toContain("--ignore-user-config");
+    // Persona stays authoritative: local rules/memory still ignored.
+    expect(argv).toContain("--ignore-rules");
+  });
+
+  test("the tool-less judge stays fully isolated (--ignore-user-config)", async () => {
+    process.env.FAKE_CODEX_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest({ toolsMode: "none" })));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--ignore-user-config");
+  });
+
   test("non-zero exit -> recoverable error", async () => {
     process.env.FAKE_CODEX_MODE = "error";
     const chunks = await collect(mkHarness().invoke(newRequest()));

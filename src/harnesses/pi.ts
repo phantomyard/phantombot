@@ -78,6 +78,18 @@ export class PiHarness implements Harness {
       "--print",
       "--mode", "json",
       "--system-prompt", req.systemPrompt,
+      // Pre-prompting trim:
+      //   --offline   Disables Pi's STARTUP network operations (telemetry,
+      //               update checks) only — NOT the model API call. The
+      //               OpenRouter model request still goes out, so the
+      //               (intentional) OpenRouter fallback is unaffected. Same as
+      //               PI_OFFLINE=1.
+      //   --no-session  Ephemeral: don't write a session file. Phantombot owns
+      //               conversation state, so Pi's own session store is dead
+      //               weight.
+      // We leave tools / skills / extensions ENABLED so connectors survive.
+      "--offline",
+      "--no-session",
     ];
     // Tool-less threat-judge mode. Per `pi --help`, `--no-tools` disables all
     // tools (built-in, extension, and custom) — true zero-tools, native flag,
