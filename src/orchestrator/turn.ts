@@ -31,6 +31,7 @@ import {
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { MemoryStore } from "../memory/store.ts";
+import type { ScreenVerdict } from "./screen.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
 
@@ -112,6 +113,40 @@ export interface TurnInput {
    * backfill searchable old turns on a cadence. Must never break a turn.
    */
   indexTurns?: () => Promise<void>;
+  /**
+   * Security-perimeter provenance bit. True ONLY when an authenticated
+   * allowed principal issued this turn (the Telegram channel sets it
+   * after the allowed-user check passes). Defaults false/undefined for
+   * every other entry point — `phantombot ask`, tick, nightly, voice —
+   * so the system FAILS CLOSED.
+   *
+   * Two effects:
+   *   1. It selects the SECURITY_PERIMETER prompt block (trusted = treat
+   *      input as commands; untrusted = treat input as data to triage).
+   *   2. It gates the threat screen below: trusted turns skip the screen
+   *      entirely (the principal is the gate); untrusted turns are
+   *      screened by the tool-less judge before any capable harness runs.
+   */
+  trusted?: boolean;
+  /**
+   * Optional threat screen for UNTRUSTED turns (built by
+   * orchestrator/screen.ts#makeScreener). Called with the incoming user
+   * message before the harness chain runs. If it returns a `hold`
+   * verdict, runTurn does NOT run the harness — the request has already
+   * been escalated to the principal (notify + audit happen inside the
+   * screener, in code, so a model can't fake them). A `pass` verdict
+   * lets the turn proceed normally and silently.
+   *
+   * Only consulted when `trusted !== true`. Trusted turns never screen.
+   * Contracted to never throw; runTurn still guards defensively and
+   * fails OPEN (proceeds) if the screen itself errors, so a judge/API
+   * outage degrades to "unscreened" rather than "app down" — see the
+   * design doc for why fail-open is the deliberate choice here.
+   */
+  screen?: (
+    content: string,
+    signal?: AbortSignal,
+  ) => Promise<ScreenVerdict | undefined>;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -125,10 +160,40 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         input.historyLimit ?? DEFAULT_HISTORY_LIMIT,
       );
 
+  // Threat screen — runs BEFORE retrieval (Blocker B). For an UNTRUSTED turn,
+  // the tool-less judge sees the content first; only a `pass` lets the turn go
+  // on to pull the principal's private memory/kb into a prompt. This ordering
+  // is the whole point: screening AFTER retrieval would let untrusted content
+  // ride into a memory-laden prompt before anyone judged it — a memory-exfil
+  // path where a low-scoring "summarise & reply" still leaks context. On a
+  // `hold` the screener has already notified the principal and recorded the
+  // audit IN CODE (a model can never fake "I escalated this"); we stop here
+  // and NO retrieval ever happens. Trusted turns skip the screen entirely (the
+  // authenticated principal is the gate). The screen contracts not to throw;
+  // the catch is belt-and-suspenders and fails OPEN so a judge outage degrades
+  // to "unscreened", never "app down".
+  if (input.trusted !== true && input.screen) {
+    let verdict: ScreenVerdict | undefined;
+    try {
+      verdict = await input.screen(input.userMessage, input.signal);
+    } catch {
+      verdict = undefined;
+    }
+    if (verdict?.action === "hold") {
+      const held =
+        verdict.heldMessage ??
+        "🔒 This request touched something sensitive, so I've paused it and asked Andrew to confirm. Nothing was done.";
+      yield { type: "text", text: held };
+      yield { type: "done", finalText: held, meta: { screenedHold: true } };
+      return;
+    }
+  }
+
   // Instinct layer: pull relevant memory/kb for this message and inject it
   // into the prompt's "Retrieved context" slot. Belt-and-suspenders try/catch
   // — the retriever already swallows its own errors, but a turn must never
-  // die on retrieval.
+  // die on retrieval. Reached only for trusted turns or untrusted turns that
+  // PASSED the screen above.
   let retrievedMemory: string | undefined;
   if (input.retrieve) {
     try {
@@ -144,6 +209,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       channel: "cli",
       conversationId: input.conversation,
       timestamp: new Date(),
+      trusted: input.trusted === true,
     },
     retrievedMemory,
   );

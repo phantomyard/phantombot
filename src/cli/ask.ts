@@ -37,6 +37,7 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
+import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 
 export interface RunAskInput {
   /** The user prompt. Required. */
@@ -62,6 +63,16 @@ export interface RunAskInput {
   config?: Config;
   memory?: MemoryStore;
   harnesses?: Harness[];
+  /**
+   * Override the threat screen (test injection). Production leaves this
+   * undefined and a real screener is built from the harness chain. Tests that
+   * exercise ask MECHANICS (not screening) inject a pass-through here so the
+   * fake harness isn't invoked twice (once as judge, once as the turn).
+   */
+  screen?: (
+    content: string,
+    signal?: AbortSignal,
+  ) => Promise<ScreenVerdict | undefined>;
   out?: WriteSink;
   err?: WriteSink;
   signal?: AbortSignal;
@@ -114,6 +125,14 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   let succeeded = false;
   const conversation = input.conversation ?? "cli:ask";
   try {
+    // Security perimeter: `phantombot ask` NEVER sets `trusted`. It is
+    // the entry point for untrusted callers — the email/Plane poller, the
+    // voice agent's relay, scripts, future apps — so it must fail closed.
+    // runTurn defaults `trusted` to false, so the content is screened by
+    // the tool-less threat judge (below) before any capable harness sees
+    // it. The ONLY trust origin is the Telegram adapter's allow-listed
+    // principal check. Do not add a `--trusted` flag here; that would be a
+    // perimeter bypass.
     for await (const chunk of runTurn({
       persona,
       conversation,
@@ -133,6 +152,14 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       indexTurns: input.history
         ? makeTurnIndexer(config, persona, conversation, memory)
         : undefined,
+      // Threat screen. `ask` is always untrusted, so every turn is judged
+      // by the tool-less classifier (running on the chain's claude harness)
+      // before the harness runs. runTurn only consults this when
+      // trusted !== true (always the case here). If the chain has no claude
+      // harness the screener fails open (unscreened) — same posture as a
+      // judge outage.
+      screen:
+        input.screen ?? makeScreener(config, persona, conversation, harnesses),
       // Streaming consumers benefit from pre-tool narration: the
       // assistant's intent sentence flushes to stdout before the
       // tool's silence begins. Non-streaming consumers see the whole

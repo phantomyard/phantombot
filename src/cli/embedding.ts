@@ -98,13 +98,31 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     p.note(`provider:  none (FTS5/BM25 search only)`, "Existing config");
   }
 
+  // The Gemini key powers semantic memory search AND the threat judge's
+  // semantic BRIEFING recall — the decisions/people/norms priors it reads to
+  // remember how you've ruled, who's legitimate, and what's routine. It does
+  // NOT power threat screening itself: the judge runs on your PRIMARY harness
+  // (whichever of claude/pi/gemini/codex) and is always active. Surface that
+  // so operators understand a "none" choice degrades recall to keyword-only,
+  // but never turns screening off.
+  p.note(
+    `A Gemini key powers two things:\n` +
+      `  • semantic (vector) memory search\n` +
+      `  • semantic recall of the threat judge's briefing\n` +
+      `    (prior rulings, known contacts, and norms)\n\n` +
+      `Recommended for production environments and additional security.\n` +
+      `Threat screening of untrusted input runs on your primary harness either\n` +
+      `way; without a key, the judge just recalls its briefing by keyword only.`,
+    "Why configure this",
+  );
+
   const provider = await p.select<"gemini" | "none" | "cancel">({
     message: "Provider",
     options: [
       {
         value: "gemini",
         label: `Gemini (${DEFAULT_MODEL}, ${DEFAULT_DIMS} dims)`,
-        hint: "free tier 1500 req/day, billing kicks in upstream",
+        hint: "semantic search + judge briefing recall · free tier 1500 req/day",
       },
       {
         value: "none",
@@ -122,7 +140,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   if (provider === "none") {
     await applyEmbeddingConfig(config.configPath, { provider: "none" });
     p.note(
-      `provider set to "none"\nsearch will use FTS5/BM25 only`,
+      `provider set to "none"\n` +
+        `search will use FTS5/BM25 only\n` +
+        `threat screening stays ACTIVE (runs on your primary harness); judge ` +
+        `briefing recall is keyword-only — semantic recall recommended for production`,
       "Saved",
     );
     if (!embedded) {

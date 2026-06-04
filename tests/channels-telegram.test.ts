@@ -630,7 +630,14 @@ const baseConfig = (
     telegram: {
       token: "fake-token",
       pollTimeoutS: 30,
-      allowedUserIds: [],
+      // Default to the realistic production posture: the principal (user 42,
+      // the sender in these tests) is allow-listed, so turns are TRUSTED and
+      // skip the threat screen. This keeps the mechanics tests focused on
+      // dispatch/groups/voice rather than re-invoking the fake harness as the
+      // screening judge. The untrusted/open-bot screening path is covered by
+      // the dedicated screen + judge unit tests. Tests that specifically need
+      // an open bot or a non-allow-listed sender override allowedUserIds.
+      allowedUserIds: [42],
       ...overrides,
     },
   },
@@ -3184,7 +3191,12 @@ describe("runTelegramServer slash commands", () => {
       { updateId: 2, chatId: 1001, fromUserId: 42, text: "hi" },
     );
     await runTelegramServer({
-      config: baseConfig(),
+      // Trusted principal: /harness is an admin command, and a trusted turn
+      // skips threat screening — so the only claude invocation we'd see would
+      // be the actual turn (which here routes to pi after the switch). Without
+      // this, the untrusted screen would invoke the claude judge and muddy the
+      // routing assertion below.
+      config: baseConfig({ allowedUserIds: [42] }),
       memory,
       harnesses: [claude, pi],
       agentDir,

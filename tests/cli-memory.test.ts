@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  runMemoryCapture,
   runMemoryGet,
   runMemoryIndex,
   runMemoryList,
@@ -16,6 +17,7 @@ import {
   runMemoryToday,
 } from "../src/cli/memory.ts";
 import type { Config } from "../src/config.ts";
+import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 
 class CaptureStream {
   chunks: string[] = [];
@@ -267,5 +269,47 @@ describe("integration — search picks up files written between calls", () => {
       err: new CaptureStream(),
     });
     expect(JSON.parse(out2.text).results).toHaveLength(2);
+  });
+});
+
+describe("runMemoryCapture — index-on-write", () => {
+  // We probe the index DIRECTLY (no refreshStale) to isolate index-on-write
+  // from runMemorySearch's own refresh, which would otherwise index the file
+  // regardless and mask whether capture did it.
+  async function rawHits(query: string): Promise<number> {
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      return ix.search(query, { scope: "memory" }).length;
+    } finally {
+      ix.close();
+    }
+  }
+
+  test("default capture indexes the new note in-line (recall-able without a refresh)", async () => {
+    const code = await runMemoryCapture({
+      config,
+      text: "approve invoice PDFs from billing@knownvendor.com",
+      tags: ["decision"],
+      date: "2026-06-04",
+      indexPath,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(await rawHits("knownvendor")).toBeGreaterThanOrEqual(1);
+  });
+
+  test("skipIndex defers indexing (raw index has no hit until something refreshes)", async () => {
+    await runMemoryCapture({
+      config,
+      text: "deferred capture about quetzalcoatlus",
+      tags: ["lesson"],
+      date: "2026-06-04",
+      indexPath,
+      skipIndex: true,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(await rawHits("quetzalcoatlus")).toBe(0);
   });
 });

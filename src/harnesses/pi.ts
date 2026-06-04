@@ -78,8 +78,15 @@ export class PiHarness implements Harness {
       "--print",
       "--mode", "json",
       "--system-prompt", req.systemPrompt,
-      payload,
     ];
+    // Tool-less threat-judge mode. Per `pi --help`, `--no-tools` disables all
+    // tools (built-in, extension, and custom) — true zero-tools, native flag,
+    // no deny-list to maintain.
+    if (req.toolsMode === "none") {
+      args.push("--no-tools");
+    }
+    // Payload is the LAST positional arg (pi reads it from argv, not stdin).
+    args.push(payload);
     log.debug("pi.invoke spawning", {
       bin: this.config.bin,
       payloadBytes: totalBytes,

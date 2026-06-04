@@ -85,7 +85,7 @@ export class ClaudeHarness implements Harness {
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    const args = this.buildArgs(req.systemPrompt);
+    const args = this.buildArgs(req.systemPrompt, req.toolsMode);
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -209,7 +209,10 @@ export class ClaudeHarness implements Harness {
     }
   }
 
-  private buildArgs(systemPrompt: string): string[] {
+  private buildArgs(
+    systemPrompt: string,
+    toolsMode?: "none",
+  ): string[] {
     const args = [
       "--print",
       "--output-format", "stream-json",
@@ -221,6 +224,15 @@ export class ClaudeHarness implements Harness {
     ];
     if (this.config.fallbackModel) {
       args.push("--fallback-model", this.config.fallbackModel);
+    }
+    // Tool-less threat-judge mode. Per `claude --help`, `--tools ""` (empty
+    // string) disables the ENTIRE built-in tool surface — a positive
+    // zero-tools grant, not an enumerated deny-list that rots as new tools
+    // ship. This is what makes "read, don't act" structural: a bare
+    // classifier completion has nothing to act with. (bypassPermissions above
+    // is moot when there are no tools to permit — belt and suspenders.)
+    if (toolsMode === "none") {
+      args.push("--tools", "");
     }
     // Per-invocation settings injection. Layers additively on top of the user's
     // own ~/.claude/settings.json — we don't touch that file, so an operator

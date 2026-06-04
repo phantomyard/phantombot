@@ -36,6 +36,7 @@ import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import { TAG_TO_DRAWER } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { log } from "../lib/logger.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
 import { openMemoryStore } from "../memory/store.ts";
 
@@ -295,6 +296,14 @@ export interface RunCaptureInput extends RunMemoryInput {
   date?: string;
   /** Override "now" for the line timestamp (testing). */
   now?: Date;
+  /**
+   * Skip the index-on-write step (tests, or callers that index themselves).
+   * Default false: every capture is indexed so it's recall-able immediately,
+   * without waiting for the 30-min heartbeat or the nightly pass.
+   */
+  skipIndex?: boolean;
+  /** Override the index path (testing). */
+  indexPath?: string;
 }
 
 /**
@@ -370,11 +379,59 @@ export async function runMemoryCapture(
     await store.close();
   }
 
+  // Index-on-write: make this capture recall-able NOW, not after the next
+  // heartbeat/nightly. Broadened scope — this fires for EVERY capture
+  // (decision, person, lesson, commitment), not just the security path —
+  // which is the more correct behaviour: same-session recall for all notes.
+  //
+  // Inline, not detached: runMemoryCapture is usually a one-shot CLI process
+  // that exits the moment it returns, so a fire-and-forget background task
+  // would be killed before it finished. It stays cheap because the refresh is
+  // incremental (only the changed daily file is touched) and embedding is
+  // content-hashed (only the one new chunk hits the network). Best-effort:
+  // an indexing failure NEVER fails the capture — the write already
+  // succeeded, and the heartbeat/nightly remain the backstop.
+  if (!input.skipIndex) {
+    await indexAfterCapture(config, persona, dir, input.indexPath);
+  }
+
   out.write(
     `memory capture: tags=${tags.join(",")} conv=${conversation} ` +
       `persona=${persona} ok\n`,
   );
   return 0;
+}
+
+/**
+ * Incrementally index a persona's memory dir right after a capture write.
+ * Refreshes the FTS index (instant, local — keyword recall works the same
+ * second) and, when embeddings are configured, embeds the new chunk
+ * (semantic recall). Never throws: any failure is logged and swallowed so
+ * the capture's success is unaffected. Exported for testing.
+ */
+export async function indexAfterCapture(
+  config: Config,
+  persona: string,
+  dir: string,
+  indexPathOverride?: string,
+): Promise<void> {
+  let ix: MemoryIndex | undefined;
+  try {
+    ix = await MemoryIndex.open(indexPathOverride ?? memoryIndexPath(persona));
+    // FTS first — local, fast, gives immediate keyword recall.
+    await ix.refreshStale(dir);
+    // Then the vector embed for the new chunk(s), if embeddings are set up.
+    // sha-skip means unchanged chunks cost nothing; a missing key just means
+    // FTS-only recall until the heartbeat runs the full job.
+    const embedder = defaultEmbedder(config);
+    if (embedder) {
+      await runEmbedJob({ personaDir: dir, index: ix, embedder });
+    }
+  } catch (e) {
+    log.warn(`memory capture: index-on-write failed (non-fatal): ${(e as Error).message}`);
+  } finally {
+    ix?.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +525,7 @@ const captureCmd = defineCommand({
   meta: {
     name: "capture",
     description:
-      "Append a tagged line to today's daily file and record the capture (decision | lesson | person | commitment).",
+      "Append a tagged line to today's daily file and record the capture (decision | lesson | person | commitment | norm).",
   },
   args: {
     text: {
@@ -479,7 +536,8 @@ const captureCmd = defineCommand({
     tag: {
       type: "string",
       description:
-        "Tag (decision | lesson | person | commitment). Repeatable for multi-tag.",
+        "Tag (decision | lesson | person | commitment | norm). Repeatable for multi-tag. " +
+        "`norm` records what is ROUTINE in Andrew's world — it briefs the threat judge so it doesn't cry wolf on normal operations.",
       required: true,
     },
     persona: { type: "string", description: "Persona name." },

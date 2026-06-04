@@ -342,6 +342,34 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).toContain("CronDelete");
     expect(texts).toContain("CronList");
   });
+
+  test("toolsMode 'none' (tool-less judge) passes claude's native --tools \"\" to disable all tools", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(
+      h.invoke(newRequest({ toolsMode: "none" })),
+    );
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // Native zero-tools flag present (empty value disables all tools per
+    // `claude --help`) — a positive grant, not an enumerated deny-list.
+    expect(texts).toContain("--tools");
+    // Baseline cron denials still ride along on --settings.
+    expect(texts).toContain("CronCreate");
+  });
+
+  test("a normal turn (no toolsMode) does NOT pass --tools", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).not.toContain("--tools");
+  });
 });
 
 describe("ClaudeHarness.available", () => {

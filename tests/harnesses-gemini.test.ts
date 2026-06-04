@@ -172,6 +172,33 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     return new GeminiHarness({ bin: FAKE_GEMINI, model: "" });
   }
 
+  test("toolsMode 'none' uses --approval-mode plan (read-only), NOT -y yolo", async () => {
+    process.env.FAKE_GEMINI_MODE = "echo-args";
+    const chunks = await collect(
+      harness().invoke(newRequest({ toolsMode: "none" })),
+    );
+    delete process.env.FAKE_GEMINI_MODE;
+    const argv = chunks
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(argv).toContain("--approval-mode");
+    expect(argv).toContain("plan");
+    expect(argv).not.toContain(" -y ");
+  });
+
+  test("a normal turn uses -y yolo, NOT plan mode", async () => {
+    process.env.FAKE_GEMINI_MODE = "echo-args";
+    const chunks = await collect(harness().invoke(newRequest()));
+    delete process.env.FAKE_GEMINI_MODE;
+    const argv = chunks
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(argv).toContain("-y");
+    expect(argv).not.toContain("--approval-mode");
+  });
+
   test("normal: stream-json events parsed; stdin + -p both reach the model; exit 0 → text + heartbeat + progress + done", async () => {
     process.env.FAKE_GEMINI_MODE = "normal";
     const chunks = await collect(

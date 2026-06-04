@@ -48,6 +48,32 @@ export interface HarnessRequest {
   hardTimeoutMs: number;
   /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
+  /**
+   * Tool capability mode for this invocation. Omitted = the harness's
+   * normal full-capability turn. `"none"` runs a capability-restricted
+   * completion for the tool-less threat judge (lib/threatJudge.ts): the
+   * judge reads untrusted content and returns a score, and must not be able
+   * to ACT on what it reads (its own host credentials would otherwise make a
+   * successful injection dangerous).
+   *
+   * Each harness maps `"none"` to its CLI's NATIVE capability-restriction
+   * flag — NOT a hand-maintained per-tool deny-list (which silently rots as
+   * new tools ship, the bug Kai flagged on the first cut):
+   *   - claude → `--tools ""`            (true zero-tools)
+   *   - pi     → `--no-tools`            (true zero-tools)
+   *   - gemini → `--approval-mode plan`  (read-only: may read, cannot act)
+   *   - codex  → `--sandbox read-only`   (read-only: may read, cannot act)
+   *
+   * claude/pi reach genuine zero-tools; gemini/codex reach read-only (they
+   * can read local files but cannot mutate state or reach the network to
+   * act). That residual is accepted (Andrew): the screener consumes only the
+   * judge's number and never executes anything it "decides", so read-only is
+   * a sufficient floor. CRITICAL: the judge runs on whichever harness is
+   * PRIMARY in the turn's chain — it never assumes a specific binary (e.g.
+   * claude) is installed. A user who installs only one of the four supported
+   * harnesses still gets screening on that one. Optional; normal turns omit.
+   */
+  toolsMode?: "none";
 }
 
 export type HarnessChunk =
