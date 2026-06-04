@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { homedir } from "node:os";
 
 import {
   judgeThreat,
@@ -168,6 +169,19 @@ describe("makeHarnessJudgeComplete", () => {
     expect(seen.req?.persona).toBeUndefined();
     // History is empty: the judge is an inert classifier, not a conversation.
     expect(seen.req?.history).toEqual([]);
+  });
+
+  it("spawns in an explicit cwd, never the ambient one (fail-open-on-EACCES fix)", async () => {
+    // The judge must NEVER inherit the ambient cwd: an inaccessible cwd makes
+    // the harness spawn EACCES, which would fail the screen OPEN. So an
+    // explicit workingDir is honoured, and an omitted one floors to homedir().
+    const explicit = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
+    await makeHarnessJudgeComplete(explicit.harness, 1000, 2000, "/tmp")("s", "u");
+    expect(explicit.seen.req?.workingDir).toBe("/tmp");
+
+    const floored = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
+    await makeHarnessJudgeComplete(floored.harness, 1000, 2000)("s", "u");
+    expect(floored.seen.req?.workingDir).toBe(homedir());
   });
 
   it("propagates a harness error chunk as a thrown error (screener fails open)", async () => {

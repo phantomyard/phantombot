@@ -53,6 +53,7 @@
  * human beat back in front of the spicy minority.
  */
 
+import { homedir } from "node:os";
 import type { Config } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 
@@ -259,12 +260,25 @@ export function pickJudgeHarness(harnesses: Harness[]): Harness | undefined {
  * restriction flag) with no persona — a capability-restricted classifier —
  * reusing the hardened harness spawn path (process-group kill, idle/hard
  * timeouts, abort, auth filtering).
+ *
+ * `workingDir` is the cwd the judge's subprocess spawns in. It MUST be an
+ * accessible directory: if the spawn inherits an ambient cwd the persona
+ * can't traverse (e.g. another user's mode-700 home), `posix_spawn` fails
+ * EACCES *before* exec — and the screener fails OPEN, silently disabling
+ * screening. That is exactly the class of failure this whole perimeter
+ * exists to prevent, so the judge NEVER relies on ambient cwd: callers pass
+ * the persona's own dir, and we floor it at `homedir()` (the running user's
+ * home, always traversable) — mirroring the executor's `?? homedir()`.
  */
 export function makeHarnessJudgeComplete(
   harness: Harness,
   idleTimeoutMs: number,
   hardTimeoutMs: number,
+  workingDir?: string,
 ): CompleteFn {
+  // Floor at the running user's home so the judge spawn never inherits an
+  // inaccessible ambient cwd (→ EACCES → silent fail-open).
+  const cwd = workingDir ?? homedir();
   return async (systemPrompt, userMessage, signal) => {
     const chunks: string[] = [];
     for await (const chunk of harness.invoke({
@@ -272,6 +286,7 @@ export function makeHarnessJudgeComplete(
       userMessage,
       history: [],
       // No persona: the judge is not Robbie, it is an inert classifier.
+      workingDir: cwd,
       idleTimeoutMs,
       hardTimeoutMs,
       toolsMode: "none",
@@ -292,11 +307,14 @@ export function makeHarnessJudgeComplete(
 /**
  * Convenience: build the judge transport from a turn's harness chain + config,
  * or undefined only if the chain is empty. `config` is accepted for symmetry /
- * future model selection; only the timeouts are read today.
+ * future model selection; only the timeouts are read today. `workingDir` is the
+ * accessible cwd the judge spawns in (see makeHarnessJudgeComplete) — pass the
+ * persona's own dir; it is floored at homedir() if omitted.
  */
 export function makeChainJudgeComplete(
   harnesses: Harness[],
   config: Pick<Config, "harnessIdleTimeoutMs" | "harnessHardTimeoutMs">,
+  workingDir?: string,
 ): CompleteFn | undefined {
   const harness = pickJudgeHarness(harnesses);
   if (!harness) return undefined;
@@ -304,5 +322,6 @@ export function makeChainJudgeComplete(
     harness,
     config.harnessIdleTimeoutMs,
     config.harnessHardTimeoutMs,
+    workingDir,
   );
 }

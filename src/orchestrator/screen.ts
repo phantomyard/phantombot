@@ -117,9 +117,9 @@ export function makeScreener(
   // this is unused today — kept for call-site symmetry with makeRetriever and
   // so a future conversation-scoped recall needs no signature change.
   _conversation: string,
-  // The turn's harness chain — the judge runs on the claude harness in it.
-  // No claude in the chain (e.g. a test fake chain) → screening fails open
-  // and spawns nothing.
+  // The turn's harness chain — the judge runs on the PRIMARY harness in it
+  // (chain[0], whichever binary the user configured). An empty chain (e.g. a
+  // test fake chain with no harness) → screening fails open and spawns nothing.
   harnesses: Harness[],
   deps: ScreenerDeps = {},
 ): (content: string, signal?: AbortSignal) => Promise<ScreenVerdict> {
@@ -128,12 +128,24 @@ export function makeScreener(
   const judge =
     deps.judge ??
     (() => {
-      const complete = makeChainJudgeComplete(harnesses, config);
+      // Spawn the judge in the persona's own dir, never the ambient cwd — an
+      // inaccessible cwd makes the harness spawn EACCES, which would fail the
+      // screen OPEN (silently unscreened). personaDir is owned by the running
+      // persona user; threatJudge floors it at homedir() as a backstop. Resolve
+      // defensively: a degenerate config must degrade to that floor, not throw
+      // on the screening path.
+      let judgeCwd: string | undefined;
+      try {
+        judgeCwd = personaDir(config, persona);
+      } catch {
+        judgeCwd = undefined; // → threatJudge floors at homedir()
+      }
+      const complete = makeChainJudgeComplete(harnesses, config, judgeCwd);
       if (!complete) {
-        // No claude harness available to screen with — fail open.
+        // No harness available to screen with (empty chain) — fail open.
         return async (): Promise<JudgeResult> => ({
           ok: false,
-          error: "no claude harness in chain for screening",
+          error: "no harness in chain for screening",
         });
       }
       return (content: string, priors: string, signal?: AbortSignal) =>
