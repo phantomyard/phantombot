@@ -251,15 +251,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         "Optional: run `phantombot embedding` to enable.\n",
     );
     // Threat screening itself does NOT depend on this key — the judge runs
-    // on the harness, which is always present, so untrusted input is screened
-    // regardless. What the key adds is decision RECALL: without embeddings the
-    // judge falls back to keyword-only recall of prior rulings (or none),
-    // which is a quality degrade, not a security hole. Recommended for
-    // production so the judge remembers what you've already approved.
+    // on your PRIMARY harness (whichever of claude/pi/gemini/codex), which is
+    // always present, so untrusted input is screened regardless. What the key
+    // adds is the judge's BRIEFING recall (decisions/people/norms): without
+    // embeddings the judge falls back to keyword-only recall (or none), which
+    // is a quality degrade, not a security hole. Recommended for production so
+    // the judge remembers what you've approved and what's routine.
     out.write(
-      "  security: threat screening ACTIVE (runs on the harness). Decision " +
-        "recall is keyword-only without a Gemini key — run `phantombot " +
-        "embedding` for semantic recall of prior rulings.\n",
+      "  security: threat screening ACTIVE (runs on your primary harness). " +
+        "Judge briefing recall is keyword-only without a Gemini key — run " +
+        "`phantombot embedding` for semantic recall of rulings/contacts/norms.\n",
     );
   }
   out.write("Ctrl-C to stop.\n");

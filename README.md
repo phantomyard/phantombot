@@ -554,12 +554,30 @@ Phantombot treats input by **origin**, not by content:
 ### Untrusted-Input Threat Screening
 
 Untrusted turns are passed to a **tool-less threat judge** before any capable
-harness sees them. The judge is a bare, capability-free completion **on the
-same harness the agent already uses** (Claude) — not a keyword engine and not
-a separate API key. Its only job is to *read* the incoming content and score
-it 0–100 for threat. Because it has **no tools**, it cannot act on what it
-reads, so a successful injection can at worst move the number — it can never
-make the judge *do* anything. The screener consumes only that number.
+harness sees them — and **before any of your private memory is pulled into a
+prompt** (screening runs ahead of memory retrieval, so an untrusted message
+can never ride into a memory-laden prompt before it has been judged). The
+judge is a bare, capability-restricted completion **on whichever harness you
+configured as primary** — Claude, Pi, Gemini, or Codex. It does **not** assume
+a particular CLI is installed: if you install only one of the four, screening
+still runs on that one. It is not a keyword engine and not a separate API key.
+Its only job is to *read* the incoming content and score it 0–100 for threat.
+The screener consumes only that number.
+
+Each harness runs the judge with its CLI's **native** capability-restriction
+flag, not a hand-maintained deny-list (which rots as new tools ship):
+
+| Harness | Judge mode | Floor |
+|---------|------------|-------|
+| Claude  | `--tools ""`            | true zero-tools |
+| Pi      | `--no-tools`            | true zero-tools |
+| Gemini  | `--approval-mode plan`  | read-only (may read, cannot act) |
+| Codex   | `--sandbox read-only`   | read-only (may read, cannot act) |
+
+Claude/Pi reach genuine zero-tools; Gemini/Codex reach read-only. Read-only is
+a sufficient floor because the screener consumes only the judge's number and
+never executes anything it "decides" — so even a fooled judge can at worst move
+the number, never *act*.
 
 Why an LLM and not a rule list: an attacker writes natural language, in any of
 a hundred languages, specifically to look benign. A keyword/verb table is
@@ -577,10 +595,22 @@ dangerous, not less.
   the agent discuss it on Telegram — the trusted channel — and *that*
   conversation is where the ruling is recorded.
 
-**Decision recall.** Before judging, the screener semantic-searches your
-decisions drawer for how you've ruled on similar matters before, and feeds
-those priors to the judge. A matching prior approval lowers scrutiny; recall
+**The judge's briefing.** A judge that knows nothing about your world flags
+*everything* — the cry-wolf failure mode. So before judging, the screener
+semantic-searches three drawers and feeds the judge a briefing:
+
+- **decisions** — how you've ruled on similar matters before;
+- **people** — known, legitimate senders/contacts;
+- **norms** — what is *routine* in your world (e.g. "the Plane dashboards
+  trigger deploys and DB migrations every day — routine, not an attack").
+
+This is **deliberately scoped to those three drawers, not a raw memory dump**:
+the judge doesn't need your finances or inbox to score a threat, and keeping
+them out means they never land in a judge log either. A matching prior
+approval, a known sender, or a documented norm lowers scrutiny; the briefing
 **never clears** it — a genuinely catastrophic request re-escalates regardless.
+The `norm` drawer is maintained by the nightly pass and is readable/correctable
+like any other, so *what the judge believes is normal* is auditable.
 
 **Who can record a ruling.** Only *you*, from a trusted turn. The judge writes
 nothing; the untrusted turn writes nothing. An attacker can therefore never
@@ -595,10 +625,11 @@ from the **fail-closed hold** above, which governs an escalated-but-unanswered
 request: that simply never runs.)
 
 > **Recommended for production environments.** Threat screening itself needs no
-> extra configuration — it runs on the harness, which is always present. A
-> Gemini key ([`phantombot embedding`](#semantic-search)) is only needed for
-> **semantic decision recall**; without it, recall falls back to keyword-only,
-> which is a quality degrade, not a security hole. Screening is **not** a wall —
+> extra configuration — it runs on your primary harness, which is always
+> present. A Gemini key ([`phantombot embedding`](#semantic-search)) only
+> sharpens the judge's **briefing recall** (decisions/people/norms): without it,
+> recall falls back to keyword-only, which is a quality degrade, not a security
+> hole — screening still runs. Screening is **not** a wall —
 > a sufficiently clever injection can still fool an LLM judge, just as it can
 > fool a human — but it filters the obvious majority and puts a human beat in
 > front of the rest.
