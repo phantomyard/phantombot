@@ -33,7 +33,7 @@ async function file(rel: string, content: string) {
 }
 
 describe("promoteTaggedLines", () => {
-  test("appends [decision] / [lesson] / [person] / [commitment] lines to the right drawers", async () => {
+  test("appends [decision] / [lesson] / [person] / [commitment] / [norm] lines to the right drawers", async () => {
     await file(
       "memory/2026-05-02.md",
       [
@@ -44,11 +44,12 @@ describe("promoteTaggedLines", () => {
         "[lesson] Bun.spawn doesn't see runtime process.env mutations",
         "[person] Andrew prefers blunt > polished",
         "[commitment] Ship phase 26 today",
+        "[norm] Plane dashboards trigger deploys & DB migrations daily — routine",
         "[unrelated] not a recognized tag — should be skipped",
       ].join("\n"),
     );
     // Empty drawer files (the scaffold would normally make them with placeholders)
-    for (const d of ["decisions.md", "lessons.md", "people.md", "commitments.md"]) {
+    for (const d of ["decisions.md", "lessons.md", "people.md", "commitments.md", "norms.md"]) {
       await file(`memory/${d}`, `# ${d}\n\n## (no entries yet)\n`);
     }
 
@@ -58,6 +59,7 @@ describe("promoteTaggedLines", () => {
       "memory/commitments.md",
       "memory/decisions.md",
       "memory/lessons.md",
+      "memory/norms.md",
       "memory/people.md",
     ]);
 
@@ -67,6 +69,13 @@ describe("promoteTaggedLines", () => {
     );
     expect(decisions).toContain("[decision] Switched to deepseek");
     expect(decisions).toContain("## 2026-05-02");
+
+    // The judge's worldview drawer gets the norm.
+    const norms = await readFile(
+      join(personaDir, "memory/norms.md"),
+      "utf8",
+    );
+    expect(norms).toContain("Plane dashboards trigger deploys");
   });
 
   test("dedups against existing drawer content (no double-promotion)", async () => {

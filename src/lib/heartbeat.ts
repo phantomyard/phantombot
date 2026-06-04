@@ -58,6 +58,14 @@ export const TAG_TO_DRAWER: Record<string, string> = {
   people: "memory/people.md",
   commitment: "memory/commitments.md",
   commitments: "memory/commitments.md",
+  // The threat judge's worldview: what is NORMAL/routine in Andrew's world
+  // ("Plane dashboards trigger deploys & DB migrations daily — routine, not an
+  // attack"). Without a baseline a judge flags everything (cry-wolf), so the
+  // judge is briefed from this drawer + decisions + people before it scores.
+  // Maintained by the nightly pass; readable/correctable like any other
+  // drawer, so "what does the judge believe is normal?" is auditable.
+  norm: "memory/norms.md",
+  norms: "memory/norms.md",
 };
 
 const TAG_PATTERN = /^\s*-?\s*\[([a-z]+)\]\s+(.+)$/i;

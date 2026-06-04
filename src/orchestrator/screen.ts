@@ -10,11 +10,15 @@
  * Flow, all IN CODE so a model can never fake it (the bug that started this
  * whole redesign was a model *claiming* it had notified/recorded):
  *
- *   1. RECALL — semantic-search the decisions drawer for how Andrew has
- *      ruled on similar matters before. Best-effort; failure → no priors.
- *      Priors only ever LOWER scrutiny for things he already blessed; they
- *      never clear it (the judge is told a catastrophic action re-escalates
- *      regardless).
+ *   1. BRIEFING — semantic-search the threat-relevant drawers (decisions =
+ *      prior rulings, people = known senders, norms = what's routine in
+ *      Andrew's world) so the judge isn't an amnesiac that cry-wolfs on
+ *      normal operations. DELIBERATELY scoped to those three drawers, NOT a
+ *      raw memory dump: the judge does not need Andrew's finances/inbox to
+ *      score a threat, and keeping them out means they never land in a judge
+ *      log either. Best-effort; failure → no priors. Prior rulings only ever
+ *      LOWER scrutiny for things he already blessed; they never clear it (the
+ *      judge is told a catastrophic action re-escalates regardless).
  *   2. JUDGE — run the tool-less harness judge over the content + priors.
  *      It returns a score 0–100. The judge has no tools, so it cannot act
  *      on what it reads; we consume only its number.
@@ -119,7 +123,7 @@ export function makeScreener(
   harnesses: Harness[],
   deps: ScreenerDeps = {},
 ): (content: string, signal?: AbortSignal) => Promise<ScreenVerdict> {
-  const recall = deps.recall ?? makeDecisionRecall(config, persona);
+  const recall = deps.recall ?? makeJudgeBriefing(config, persona);
 
   const judge =
     deps.judge ??
@@ -198,13 +202,29 @@ export function makeScreener(
 }
 
 /**
- * Production recall: semantic-search the persona's decisions drawer for
- * rulings relevant to the incoming content, rendered as a priors block for
- * the judge. Hybrid (FTS + vector) when embeddings are configured and
- * populated, FTS-only otherwise. Never throws — any failure resolves to ""
- * (judge without priors), mirroring retrieval.ts's hot-path guarantee.
+ * The threat judge's briefing drawers — and ONLY these. Decisions (prior
+ * rulings), people (known senders), norms (what's routine in Andrew's world).
+ * Scoping the briefing to these three keeps it threat-relevant and keeps
+ * sensitive operational memory (finances, inbox, daily dumps, commitments)
+ * out of the judge entirely — both for signal-to-noise and so they never
+ * appear in a judge log. Paths are relative to the persona dir.
  */
-export function makeDecisionRecall(
+const BRIEFING_DRAWERS: readonly string[] = [
+  "memory/decisions.md",
+  "memory/people.md",
+  "memory/norms.md",
+];
+
+/**
+ * Production briefing: semantic-search the persona's threat-relevant drawers
+ * (decisions + people + norms) for context relevant to the incoming content,
+ * rendered as a priors block for the judge. Hybrid (FTS + vector) when
+ * embeddings are configured and populated, FTS-only otherwise. Filters hits
+ * to BRIEFING_DRAWERS so the judge is briefed, not handed the whole memory
+ * store. Never throws — any failure resolves to "" (judge without priors),
+ * mirroring retrieval.ts's hot-path guarantee.
+ */
+export function makeJudgeBriefing(
   config: Config,
   persona: string,
 ): (content: string, signal?: AbortSignal) => Promise<string> {
@@ -233,18 +253,22 @@ export function makeDecisionRecall(
           signal,
         });
         if (r.ok) queryVec = r.values;
-        else log.warn(`screen recall: query embed failed; FTS-only (${r.error})`);
+        else log.warn(`screen briefing: query embed failed; FTS-only (${r.error})`);
       }
 
-      // Scope to memory/ — that's where the decisions drawer lives. kb/ and
-      // conversation turns are noise for "have we ruled on this before".
-      const hits = queryVec
-        ? ix.hybridSearch(query, queryVec, { scope: "memory", limit: RECALL_LIMIT })
-        : ix.search(query, { scope: "memory", limit: RECALL_LIMIT });
+      // Scope to memory/ at the index layer, then narrow to the briefing
+      // drawers in code (the index has no per-file filter). Over-fetch so the
+      // post-filter still has RECALL_LIMIT briefing-drawer hits to choose from.
+      const raw = queryVec
+        ? ix.hybridSearch(query, queryVec, { scope: "memory", limit: RECALL_LIMIT * 4 })
+        : ix.search(query, { scope: "memory", limit: RECALL_LIMIT * 4 });
+      const hits = raw
+        .filter((h) => BRIEFING_DRAWERS.includes(h.path))
+        .slice(0, RECALL_LIMIT);
 
       return renderPriors(hits);
     } catch (e) {
-      log.warn(`screen recall: failed; judging without priors (${(e as Error).message})`);
+      log.warn(`screen briefing: failed; judging without priors (${(e as Error).message})`);
       return "";
     } finally {
       ix?.close();

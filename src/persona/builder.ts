@@ -123,6 +123,9 @@ Layout (relative to your working dir):
   memory/decisions.md        — structured drawer (with rationale)
   memory/lessons.md          — structured drawer (mistakes + learnings)
   memory/commitments.md      — structured drawer (deadlines)
+  memory/norms.md            — structured drawer (what's ROUTINE in Andrew's
+                               world; briefs the threat judge so it doesn't
+                               cry wolf on normal operations)
   kb/                        — Obsidian-shaped second brain (atomic notes)
   kb/inbox/                  — quick capture; nightly cycle files or discards
   kb/templates/              — frontmatter skeletons (atomic / runbook /
@@ -134,13 +137,15 @@ Two hard rules — apply on every nontrivial task:
    first. If memory or KB has prior knowledge, use it. Investigate
    from scratch only if neither found anything.
 
-2. CAPTURE AS YOU GO. When a decision, lesson, person fact, or
-   commitment comes up, record it with:
+2. CAPTURE AS YOU GO. When a decision, lesson, person fact,
+   commitment, or norm comes up, record it with:
 
      phantombot memory capture "<the thing worth keeping>" --tag <tag>
 
-   where \`<tag>\` is \`decision\`, \`lesson\`, \`person\`, or
-   \`commitment\` (repeat \`--tag\` for more than one). This appends a
+   where \`<tag>\` is \`decision\`, \`lesson\`, \`person\`,
+   \`commitment\`, or \`norm\` (repeat \`--tag\` for more than one). Use
+   \`norm\` for "this is routine in Andrew's world" facts — they brief the
+   threat judge. This appends a
    tagged line to today's daily file so the heartbeat (every 30 min)
    and nightly cycle promote it to the right drawer — and logs the
    capture so a missed day is visible rather than silent. KB-worthy

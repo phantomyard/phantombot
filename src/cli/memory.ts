@@ -525,7 +525,7 @@ const captureCmd = defineCommand({
   meta: {
     name: "capture",
     description:
-      "Append a tagged line to today's daily file and record the capture (decision | lesson | person | commitment).",
+      "Append a tagged line to today's daily file and record the capture (decision | lesson | person | commitment | norm).",
   },
   args: {
     text: {
@@ -536,7 +536,8 @@ const captureCmd = defineCommand({
     tag: {
       type: "string",
       description:
-        "Tag (decision | lesson | person | commitment). Repeatable for multi-tag.",
+        "Tag (decision | lesson | person | commitment | norm). Repeatable for multi-tag. " +
+        "`norm` records what is ROUTINE in Andrew's world — it briefs the threat judge so it doesn't cry wolf on normal operations.",
       required: true,
     },
     persona: { type: "string", description: "Persona name." },
