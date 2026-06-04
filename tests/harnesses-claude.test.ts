@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   ClaudeHarness,
+  JUDGE_DENY_TOOLS,
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
   parseStreamJson,
@@ -341,6 +342,32 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).toContain("CronCreate");
     expect(texts).toContain("CronDelete");
     expect(texts).toContain("CronList");
+  });
+
+  test("denyToolsOverride (tool-less judge) layers the full tool surface onto the deny list", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(
+      h.invoke(newRequest({ denyToolsOverride: JUDGE_DENY_TOOLS })),
+    );
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // Baseline cron denials remain...
+    expect(texts).toContain("CronCreate");
+    // ...and the judge's tool surface is denied too (so it cannot act).
+    expect(texts).toContain("Bash");
+    expect(texts).toContain("WebFetch");
+    expect(texts).toContain("Edit");
+  });
+});
+
+describe("JUDGE_DENY_TOOLS", () => {
+  test("covers the high-risk built-in tools a fooled judge must never reach", () => {
+    for (const t of ["Bash", "Read", "Edit", "Write", "WebFetch", "Task"]) {
+      expect(JUDGE_DENY_TOOLS).toContain(t);
+    }
   });
 });
 

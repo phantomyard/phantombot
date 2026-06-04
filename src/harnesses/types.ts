@@ -48,6 +48,16 @@ export interface HarnessRequest {
   hardTimeoutMs: number;
   /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
+  /**
+   * Extra tool names to DENY for this invocation only, layered on top of
+   * the harness's baseline deny-list. Used by the tool-less threat judge
+   * (see lib/threatJudge.ts) to run a capability-free completion: the
+   * judge reads untrusted content and returns a score, and must not be
+   * able to ACT on what it reads (its own host creds would otherwise make
+   * a successful injection dangerous). Pass the full built-in tool surface
+   * here to get a bare classifier. Optional; normal turns omit it.
+   */
+  denyToolsOverride?: readonly string[];
 }
 
 export type HarnessChunk =

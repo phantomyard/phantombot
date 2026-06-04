@@ -85,7 +85,7 @@ export class ClaudeHarness implements Harness {
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    const args = this.buildArgs(req.systemPrompt);
+    const args = this.buildArgs(req.systemPrompt, req.denyToolsOverride);
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -209,7 +209,10 @@ export class ClaudeHarness implements Harness {
     }
   }
 
-  private buildArgs(systemPrompt: string): string[] {
+  private buildArgs(
+    systemPrompt: string,
+    denyToolsOverride?: readonly string[],
+  ): string[] {
     const args = [
       "--print",
       "--output-format", "stream-json",
@@ -226,11 +229,59 @@ export class ClaudeHarness implements Harness {
     // own ~/.claude/settings.json — we don't touch that file, so an operator
     // running `claude` directly on this host (e.g. for emergency repairs) is
     // unaffected. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS for the policy.
-    args.push("--settings", JSON.stringify(PHANTOMBOT_INJECTED_CLAUDE_SETTINGS));
+    //
+    // `denyToolsOverride` (the tool-less threat judge) extends the baseline
+    // deny-list for this one invocation, so a single ClaudeHarness can serve
+    // both normal turns and a capability-free classifier completion without a
+    // second spawn path.
+    const settings = denyToolsOverride?.length
+      ? {
+          ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
+          permissions: {
+            ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS.permissions,
+            deny: [
+              ...PHANTOMBOT_INJECTED_CLAUDE_SETTINGS.permissions.deny,
+              ...denyToolsOverride,
+            ],
+          },
+        }
+      : PHANTOMBOT_INJECTED_CLAUDE_SETTINGS;
+    args.push("--settings", JSON.stringify(settings));
     args.push("--system-prompt", systemPrompt);
     return args;
   }
 }
+
+/**
+ * The full built-in Claude Code tool surface, denied wholesale to produce a
+ * capability-free completion for the threat judge. The judge's job is to READ
+ * untrusted content and emit a number; it must never be able to act on what it
+ * reads. Passed as `denyToolsOverride` on the judge's HarnessRequest.
+ *
+ * Honest residual: this denies the built-in surface. Project-level MCP servers
+ * configured in ~/.claude.json are not enumerated here — the judge spawn does
+ * not pass `--mcp-config`, so none are loaded by phantombot, but an operator's
+ * own global MCP config could still surface tools. The judge prompt is the
+ * backstop (it is told it is an inert classifier), and crucially the screener
+ * consumes only the judge's JSON score — it never executes anything the judge
+ * "decides". Tool-denial is defence-in-depth, not the sole control.
+ */
+export const JUDGE_DENY_TOOLS: readonly string[] = [
+  "Bash",
+  "Read",
+  "Edit",
+  "Write",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "Task",
+  "Agent",
+  "NotebookEdit",
+  "TodoWrite",
+  "KillShell",
+  "BashOutput",
+] as const;
 
 /**
  * Settings injected into every `claude --print` invocation via `--settings`.
