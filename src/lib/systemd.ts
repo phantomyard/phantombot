@@ -36,6 +36,13 @@ const ENVIRONMENT_FILE_LINES =
   "EnvironmentFile=-%h/.config/phantombot/.env\n" +
   "EnvironmentFile=-%h/.env";
 
+export const PHANTOMBOT_SERVICE_PATH =
+  "%h/.local/share/pi-node/bin:" +
+  "%h/.local/share/pi-node/current/bin:" +
+  "%h/.pi/agent/bin:" +
+  "%h/.local/bin:" +
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 export function defaultUnitPath(): string {
   return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
 }
@@ -76,9 +83,11 @@ export interface SystemdUnitParams {
  * Generate the [Unit]/[Service]/[Install] body for the phantombot
  * systemd --user unit. Pure function.
  *
- * - Environment=PATH ensures the harness's Bash tool can find
- *   `phantombot` (installed at ~/.local/bin/phantombot) when it tries
- *   to call `phantombot memory search ...`.
+ * - Environment=PATH gives the service a deterministic non-login PATH.
+ *   It includes ~/.local/bin for phantombot plus stable per-user harness
+ *   shim locations. Versioned npm/node install paths must still leave a
+ *   stable executable on one of these PATH entries or doctor/startup will
+ *   report the missing harness.
  * - Two EnvironmentFile= lines: phantombot's own .env plus the user's
  *   general-purpose ~/.env. The agent finds credentials in process.env
  *   without re-reading either file. See ENVIRONMENT_FILE_LINES.
@@ -105,7 +114,7 @@ RestartSec=5
 # Declaring 143 a success exit status keeps self-restart journals quiet
 # and stops a spurious Restart= cycle on top of the real one.
 SuccessExitStatus=143
-Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -129,7 +138,7 @@ Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 [Service]
 Type=oneshot
 ExecStart=${exec}
-Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -172,7 +181,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=2700
-Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
@@ -205,7 +214,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${exec}
-Environment="PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal

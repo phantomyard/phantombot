@@ -20,6 +20,11 @@ import {
   type TelegramAccount,
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
+import {
+  checkConfiguredHarnesses,
+  missingHarnesses,
+  type HarnessAvailability,
+} from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
@@ -40,6 +45,10 @@ export interface RunInput {
   err?: WriteSink;
   /** Override the lock file path (for testing). */
   lockPath?: string;
+  /** Test seam for harness binary availability. Pass false to skip. */
+  checkHarnesses?:
+    | false
+    | ((config: Config) => Promise<HarnessAvailability[]>);
 }
 
 /** One persona-bound listener that runRun() will spawn. */
@@ -177,6 +186,23 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   if (harnesses.length === 0) {
     err.write(
       "no harnesses configured. Run `phantombot harness` to pick at least one.\n",
+    );
+    return 2;
+  }
+  const harnessChecks =
+    input.checkHarnesses === false
+      ? []
+      : input.checkHarnesses
+        ? await input.checkHarnesses(config)
+        : await checkConfiguredHarnesses(config);
+  const missingHarnessBins = missingHarnesses(harnessChecks);
+  if (missingHarnessBins.length > 0) {
+    err.write(
+      "configured harness binary not found on PATH:\n" +
+        missingHarnessBins
+          .map((h) => `  ${h.id}: '${h.bin}'`)
+          .join("\n") +
+        "\nRun `phantombot doctor` for the service PATH view, then fix the harness install or set PHANTOMBOT_<HARNESS>_BIN to an absolute path.\n",
     );
     return 2;
   }

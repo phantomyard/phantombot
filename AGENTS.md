@@ -143,6 +143,8 @@ EnvironmentFile=-%h/.env                        # user's general credentials
 
 Leading `-` makes both optional (no error if either file is absent). The merged `process.env` is what spawned harnesses inherit, so the agent finds credentials without re-reading either file.
 
+Service units also set a deterministic `PATH` that includes `~/.local/bin` plus stable user harness shim locations such as `~/.local/share/pi-node/bin` and `~/.local/share/pi-node/current/bin`. Do not rely on interactive shell startup files for service harness discovery; npm/node harness installers that put binaries under versioned directories need a stable shim or an absolute `PHANTOMBOT_<HARNESS>_BIN`. `phantombot run` fails fast when a configured harness is missing from its runtime PATH, and `phantombot doctor` reports the configured chain against the service PATH.
+
 If you change a unit body (any `generate*` function in `src/lib/systemd.ts`), `ensureUnitCurrent` will detect the on-disk unit as stale on the next `phantombot voice` / `phantombot harness` / etc. run and rewrite it automatically. The previous body is preserved as `${unitPath}.bak` for rollback.
 
 ## Credentials

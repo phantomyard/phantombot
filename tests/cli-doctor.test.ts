@@ -682,3 +682,73 @@ describe("runDoctor embeddings status line", () => {
     });
   });
 });
+
+describe("runDoctor harness availability", () => {
+  test("reports missing configured harness binaries and exits 1", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: async () => ({
+        path: "/service/path",
+        checks: [{ id: "pi", bin: "pi" }],
+      }),
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("harnesses: WARN");
+    expect(out.text).toContain("pi: 'pi' not found");
+    expect(out.text).toContain("PHANTOMBOT_<HARNESS>_BIN");
+  });
+
+  test("json mode includes harness checks", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      json: true,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: async () => ({
+        path: "/service/path",
+        checks: [{ id: "claude", bin: "claude", resolved: "/bin/claude" }],
+      }),
+    });
+    expect(code).toBe(0);
+    const report = JSON.parse(out.text);
+    expect(report.harnesses).toEqual({
+      path: "/service/path",
+      checks: [{ id: "claude", bin: "claude", resolved: "/bin/claude" }],
+    });
+  });
+
+  test("json mode exits 1 when a configured harness is missing", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      json: true,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: async () => ({
+        path: "/service/path",
+        checks: [{ id: "pi", bin: "pi" }],
+      }),
+    });
+    expect(code).toBe(1);
+    expect(JSON.parse(out.text).harnesses.checks[0].resolved).toBeUndefined();
+  });
+});

@@ -145,6 +145,32 @@ describe("runRun — early exits", () => {
     expect(code).toBe(2);
     expect(err.text).toContain("phantombot harness");
   });
+
+  test("returns 2 before polling when configured harness binary is missing", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: ["pi"] },
+        channels: {
+          telegram: {
+            token: "abc",
+            pollTimeoutS: 30,
+            allowedUserIds: [],
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      checkHarnesses: async () => [{ id: "pi", bin: "pi" }],
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("configured harness binary not found");
+    expect(err.text).toContain("pi: 'pi'");
+    expect(err.text).toContain("phantombot doctor");
+  });
 });
 
 describe("runRun — multi-persona telegram", () => {

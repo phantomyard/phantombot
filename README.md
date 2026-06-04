@@ -77,6 +77,9 @@ The installer:
 - Verifies the checksum before installing.
 - Installs to `~/.local/bin/phantombot` by default.
 - Warns if `~/.local/bin` is not on `PATH`.
+- Installs service units with a deterministic PATH that includes stable
+  per-user shim locations such as `~/.local/bin` and
+  `~/.local/share/pi-node/{bin,current/bin}`.
 - Starts the persona setup TUI when stdin/stdout are interactive.
 
 Installer environment overrides:
@@ -112,6 +115,13 @@ gemini
 # Codex CLI
 codex login
 ```
+
+Headless services do not inherit your interactive shell PATH. If a harness
+installer puts the real binary under a versioned npm/node directory, make sure
+it also leaves a stable executable shim on the service PATH, or set the
+matching `PHANTOMBOT_<HARNESS>_BIN` env var to an absolute path. `phantombot
+doctor` checks the configured harness chain from the service PATH and reports
+missing binaries before Telegram turns fail silently.
 
 Then configure phantombot:
 

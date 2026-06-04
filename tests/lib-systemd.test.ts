@@ -18,6 +18,7 @@ import {
   generateSystemdUnit,
   installPhantombotUnit,
   phantombotUnitTargets,
+  PHANTOMBOT_SERVICE_PATH,
   SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
   type SystemctlResult,
@@ -133,6 +134,19 @@ describe("generateSystemdUnit", () => {
       args: ["run"],
     });
     expect(u).toContain("SuccessExitStatus=143");
+  });
+
+  test("service PATH includes stable user harness shim locations", () => {
+    const u = generateSystemdUnit({
+      binPath: "/home/kai/.local/bin/phantombot",
+      args: ["run"],
+    });
+    expect(PHANTOMBOT_SERVICE_PATH).toContain("%h/.local/bin");
+    expect(PHANTOMBOT_SERVICE_PATH).toContain("%h/.local/share/pi-node/bin");
+    expect(PHANTOMBOT_SERVICE_PATH).toContain(
+      "%h/.local/share/pi-node/current/bin",
+    );
+    expect(u).toContain(`Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"`);
   });
 });
 

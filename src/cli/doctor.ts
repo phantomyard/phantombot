@@ -24,6 +24,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  checkConfiguredHarnesses,
+  expandSystemdPath,
+  missingHarnesses,
+  type HarnessAvailability,
+} from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -48,6 +54,7 @@ import {
   nightlyServicePath,
   nightlyTimerPath,
   phantombotUnitTargets,
+  PHANTOMBOT_SERVICE_PATH,
   type SystemctlRunner,
   TICK_TIMER_NAME,
   tickServicePath,
@@ -150,6 +157,15 @@ export interface DoctorReport {
       threshold_minutes: number;
     };
   };
+  /**
+   * Configured harness binaries resolved from the service/runtime PATH.
+   * Catches installs that work in an interactive shell but fail under the
+   * daemon environment.
+   */
+  harnesses?: {
+    path: string;
+    checks: HarnessAvailability[];
+  };
   repair_needed: boolean;
   repair_reason?: string;
   repair_triggered: boolean;
@@ -186,6 +202,14 @@ export interface RunDoctorInput {
   checkTimers?:
     | false
     | (() => Promise<DoctorReport["timers"] | undefined>);
+  /**
+   * Test seam for harness binary availability. Pass false to skip. In
+   * production, doctor checks the installed service PATH when running as the
+   * real phantombot binary.
+   */
+  checkHarnesses?:
+    | false
+    | (() => Promise<DoctorReport["harnesses"] | undefined>);
 }
 
 function decideRepair(
@@ -343,6 +367,15 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  let harnessReport: DoctorReport["harnesses"] | undefined;
+  if (input.checkHarnesses !== false) {
+    if (input.checkHarnesses) {
+      harnessReport = await input.checkHarnesses();
+    } else {
+      harnessReport = await computeHarnessReport(config);
+    }
+  }
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -375,14 +408,37 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     },
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
+    ...(harnessReport ? { harnesses: harnessReport } : {}),
     repair_needed: needed,
     repair_reason: reason,
     repair_triggered: repairTriggered,
   };
 
+  const systemdBroken =
+    !!systemdReport &&
+    !systemdReport.repaired &&
+    (systemdReport.missing_unit_files.length > 0 ||
+      systemdReport.drifted_unit_files.length > 0 ||
+      systemdReport.inactive_timers.length > 0);
+  const timersBroken =
+    !!timersReport &&
+    (timersReport.heartbeat.stale || timersReport.tick.stale);
+  const harnessesBroken =
+    !!harnessReport && missingHarnesses(harnessReport.checks).length > 0;
+  const exitCode =
+    needed && !repairTriggered
+      ? 1
+      : systemdBroken
+        ? 1
+        : timersBroken
+          ? 1
+          : harnessesBroken
+            ? 1
+            : 0;
+
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
-    return needed && !repairTriggered ? 1 : 0;
+    return exitCode;
   }
 
   // Human summary.
@@ -486,24 +542,39 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     renderTimer("tick", timersReport.tick);
   }
 
-  const systemdBroken =
-    !!systemdReport &&
-    !systemdReport.repaired &&
-    (systemdReport.missing_unit_files.length > 0 ||
-      systemdReport.drifted_unit_files.length > 0 ||
-      systemdReport.inactive_timers.length > 0);
-  const timersBroken =
-    !!timersReport &&
-    (timersReport.heartbeat.stale || timersReport.tick.stale);
-  const exitCode =
-    needed && !repairTriggered
-      ? 1
-      : systemdBroken
-        ? 1
-        : timersBroken
-          ? 1
-          : 0;
+  if (harnessReport) {
+    const missing = missingHarnesses(harnessReport.checks);
+    out.write(`  harnesses: ${tick(missing.length === 0)} — `);
+    if (missing.length === 0) {
+      out.write(
+        harnessReport.checks
+          .map((h) => `${h.id}: ${h.resolved}`)
+          .join("; ") + "\n",
+      );
+    } else {
+      out.write(
+        missing.map((h) => `${h.id}: '${h.bin}' not found`).join("; ") +
+          "\n" +
+          "  → fix the harness install, set PHANTOMBOT_<HARNESS>_BIN to an absolute path, or put a stable shim on the service PATH\n",
+      );
+    }
+  }
+
   return exitCode;
+}
+
+async function computeHarnessReport(
+  config: Config,
+): Promise<DoctorReport["harnesses"] | undefined> {
+  if (basename(process.execPath) !== "phantombot") return undefined;
+  const path =
+    currentPlatform() === "linux"
+      ? expandSystemdPath(PHANTOMBOT_SERVICE_PATH)
+      : (process.env.PATH ?? "");
+  return {
+    path,
+    checks: await checkConfiguredHarnesses(config, path),
+  };
 }
 
 /**
