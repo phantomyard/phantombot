@@ -212,6 +212,26 @@ describe("PiHarness.invoke (subprocess)", () => {
     });
   });
 
+  test("toolsMode 'none' passes pi's native --no-tools (true zero-tools)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest({ toolsMode: "none" })));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--no-tools");
+  });
+
+  test("a normal turn (no toolsMode) does NOT pass --no-tools", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--no-tools");
+  });
+
   test("non-zero exit emits recoverable error", async () => {
     process.env.FAKE_PI_MODE = "error";
     const chunks = await collect(mkHarness().invoke(newRequest()));

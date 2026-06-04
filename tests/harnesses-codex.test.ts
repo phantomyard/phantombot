@@ -93,6 +93,29 @@ describe("CodexHarness.invoke", () => {
     expect(done.meta?.harnessId).toBe("codex");
   });
 
+  test("toolsMode 'none' uses --sandbox read-only, NOT the YOLO bypass", async () => {
+    process.env.FAKE_CODEX_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest({ toolsMode: "none" })));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--sandbox");
+    expect(argv).toContain("read-only");
+    expect(argv).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  test("a normal turn uses the YOLO bypass, NOT read-only", async () => {
+    process.env.FAKE_CODEX_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(argv).not.toContain("read-only");
+  });
+
   test("non-zero exit -> recoverable error", async () => {
     process.env.FAKE_CODEX_MODE = "error";
     const chunks = await collect(mkHarness().invoke(newRequest()));

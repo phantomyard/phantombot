@@ -41,7 +41,7 @@ export class CodexHarness implements Harness {
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    const args = this.buildArgs();
+    const args = this.buildArgs(req.toolsMode);
     log.debug("codex.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -148,12 +148,16 @@ export class CodexHarness implements Harness {
     };
   }
 
-  private buildArgs(): string[] {
+  private buildArgs(toolsMode?: "none"): string[] {
     const args = [
       "exec",
       "--json",
       "--skip-git-repo-check",
-      ...PHANTOMBOT_INJECTED_CODEX_FLAGS,
+      // Tool-less threat-judge mode → read-only sandbox (the judge may read
+      // but cannot mutate state or act); normal turns → bypass sandbox.
+      ...(toolsMode === "none"
+        ? PHANTOMBOT_JUDGE_CODEX_FLAGS
+        : PHANTOMBOT_INJECTED_CODEX_FLAGS),
     ];
     if (this.config.model) {
       args.push("-m", this.config.model);
@@ -181,6 +185,21 @@ export function renderStdinPayload(req: HarnessRequest): string {
 
 export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
   "--dangerously-bypass-approvals-and-sandbox",
+  "--ephemeral",
+  "--ignore-user-config",
+  "--ignore-rules",
+] as const;
+
+/**
+ * Flags for the tool-less threat judge (toolsMode "none"). Swaps the YOLO
+ * bypass for codex's native `--sandbox read-only` policy (per `codex exec
+ * --help`: read-only restricts model-generated shell commands to reads). The
+ * judge can READ but cannot mutate state or act — a sufficient floor since the
+ * screener consumes only the judge's number. Keeps --ephemeral/--ignore-* so
+ * the judge spawn stays isolated from user config/rules.
+ */
+export const PHANTOMBOT_JUDGE_CODEX_FLAGS = [
+  "--sandbox", "read-only",
   "--ephemeral",
   "--ignore-user-config",
   "--ignore-rules",

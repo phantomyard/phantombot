@@ -2,10 +2,31 @@ import { describe, it, expect } from "bun:test";
 
 import {
   judgeThreat,
+  makeHarnessJudgeComplete,
   parseVerdict,
+  pickJudgeHarness,
   THREAT_THRESHOLD,
   type CompleteFn,
 } from "../src/lib/threatJudge.ts";
+import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+
+/** A fake harness that records the request it was invoked with. */
+function recordingHarness(id: string, reply: string): {
+  harness: Harness;
+  seen: { req?: HarnessRequest };
+} {
+  const seen: { req?: HarnessRequest } = {};
+  const harness: Harness = {
+    id,
+    available: async () => true,
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      seen.req = req;
+      yield { type: "text", text: reply };
+      yield { type: "done", finalText: reply };
+    },
+  };
+  return { harness, seen };
+}
 
 /**
  * A fake tool-less completion. Returns a fixed string, and captures the
@@ -86,20 +107,20 @@ describe("judgeThreat", () => {
     expect(seen.user).toContain("[marker removed]");
   });
 
-  it("includes recalled priors in the prompt when provided", async () => {
+  it("includes the recalled briefing in the prompt when provided", async () => {
     const { fn, seen } = fakeComplete('{"score": 5, "reason": "known", "question": ""}');
     await judgeThreat("invoice from billing@vendor.com", {
       complete: fn,
       priors: "- approved invoice PDFs from billing@vendor.com",
     });
-    expect(seen.user).toContain("<prior_rulings>");
+    expect(seen.user).toContain("<briefing>");
     expect(seen.user).toContain("billing@vendor.com");
   });
 
-  it("omits the priors block when there are none", async () => {
+  it("omits the briefing block when there is none", async () => {
     const { fn, seen } = fakeComplete('{"score": 5, "reason": "x", "question": ""}');
     await judgeThreat("hello", { complete: fn });
-    expect(seen.user).not.toContain("<prior_rulings>");
+    expect(seen.user).not.toContain("<briefing>");
   });
 
   it("errors when the completion throws", async () => {
@@ -116,5 +137,48 @@ describe("judgeThreat", () => {
     const { fn } = fakeComplete("this is not json at all");
     const r = await judgeThreat("x", { complete: fn });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("pickJudgeHarness", () => {
+  it("returns the PRIMARY harness (chain[0]) regardless of id — never assumes claude", () => {
+    const { harness: gemini } = recordingHarness("gemini", "x");
+    const { harness: pi } = recordingHarness("pi", "x");
+    // A gemini-only / pi-first chain (user never installed claude) still
+    // yields a judge — the primary. This is the whole point of Andrew's fix.
+    expect(pickJudgeHarness([gemini, pi])?.id).toBe("gemini");
+    expect(pickJudgeHarness([pi])?.id).toBe("pi");
+  });
+
+  it("returns undefined only for an empty chain", () => {
+    expect(pickJudgeHarness([])).toBeUndefined();
+  });
+});
+
+describe("makeHarnessJudgeComplete", () => {
+  it("invokes the harness in toolsMode 'none' with no persona (capability-restricted)", async () => {
+    const { harness, seen } = recordingHarness(
+      "gemini",
+      '{"score": 5, "reason": "ok", "question": ""}',
+    );
+    const complete = makeHarnessJudgeComplete(harness, 1000, 2000);
+    const out = await complete("sys", "user");
+    expect(out).toContain('"score"');
+    expect(seen.req?.toolsMode).toBe("none");
+    expect(seen.req?.persona).toBeUndefined();
+    // History is empty: the judge is an inert classifier, not a conversation.
+    expect(seen.req?.history).toEqual([]);
+  });
+
+  it("propagates a harness error chunk as a thrown error (screener fails open)", async () => {
+    const harness: Harness = {
+      id: "pi",
+      available: async () => true,
+      async *invoke(): AsyncGenerator<HarnessChunk> {
+        yield { type: "error", error: "harness exploded", recoverable: true };
+      },
+    };
+    const complete = makeHarnessJudgeComplete(harness, 1000, 2000);
+    await expect(complete("sys", "user")).rejects.toThrow(/harness exploded/);
   });
 });

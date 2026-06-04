@@ -110,8 +110,16 @@ export class GeminiHarness implements Harness {
     const args: string[] = [
       "-p", req.userMessage,
       "-o", "stream-json",
-      "-y",
     ];
+    // Tool-less threat-judge mode → `--approval-mode plan` (per `gemini
+    // --help`: "plan (read-only mode)"). The judge may read but cannot act.
+    // Normal turns → `-y` (yolo: auto-approve all tools) so headless tool
+    // loops don't block on an approval prompt.
+    if (req.toolsMode === "none") {
+      args.push("--approval-mode", "plan");
+    } else {
+      args.push("-y");
+    }
     if (this.config.model && this.config.model.length > 0) {
       args.push("-m", this.config.model);
     }

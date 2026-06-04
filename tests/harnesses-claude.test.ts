@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   ClaudeHarness,
-  JUDGE_DENY_TOOLS,
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
   parseStreamJson,
@@ -344,30 +343,32 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).toContain("CronList");
   });
 
-  test("denyToolsOverride (tool-less judge) layers the full tool surface onto the deny list", async () => {
+  test("toolsMode 'none' (tool-less judge) passes claude's native --tools \"\" to disable all tools", async () => {
     process.env.FAKE_CLAUDE_MODE = "argv";
     const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
     const chunks = await collect(
-      h.invoke(newRequest({ denyToolsOverride: JUDGE_DENY_TOOLS })),
+      h.invoke(newRequest({ toolsMode: "none" })),
     );
     const texts = chunks
       .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
       .map((c) => c.text)
       .join("");
-    // Baseline cron denials remain...
+    // Native zero-tools flag present (empty value disables all tools per
+    // `claude --help`) — a positive grant, not an enumerated deny-list.
+    expect(texts).toContain("--tools");
+    // Baseline cron denials still ride along on --settings.
     expect(texts).toContain("CronCreate");
-    // ...and the judge's tool surface is denied too (so it cannot act).
-    expect(texts).toContain("Bash");
-    expect(texts).toContain("WebFetch");
-    expect(texts).toContain("Edit");
   });
-});
 
-describe("JUDGE_DENY_TOOLS", () => {
-  test("covers the high-risk built-in tools a fooled judge must never reach", () => {
-    for (const t of ["Bash", "Read", "Edit", "Write", "WebFetch", "Task"]) {
-      expect(JUDGE_DENY_TOOLS).toContain(t);
-    }
+  test("a normal turn (no toolsMode) does NOT pass --tools", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).not.toContain("--tools");
   });
 });
 

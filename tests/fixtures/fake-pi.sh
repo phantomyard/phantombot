@@ -10,10 +10,17 @@
 #   error    — exit 1
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
+#   argv     — echo argv (joined) as a text_delta, exit 0 (arg-shape test)
 
 mode="${FAKE_PI_MODE:-normal}"
 
 case "$mode" in
+  argv)
+    joined="$*"
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
   normal)
     printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
     printf '%s\n' '{"type":"agent_start"}'
