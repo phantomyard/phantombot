@@ -270,6 +270,12 @@ export async function* runHarnessProcess(
 ): AsyncGenerator<HarnessChunk> {
   const { proc, req, harnessId } = spec;
 
+  // IMPORTANT: The KillCoordinator must be armed BEFORE any potentially
+  // blocking I/O (like stdin.write). If the child process hangs and stops
+  // reading stdin, the `await stdin.end()` below will block indefinitely
+  // on pipe backpressure. By arming the killer first, we ensure the hard
+  // timeout still fires and kills the process group, causing the blocked
+  // write to fail with EPIPE (which our catch block handles).
   const killer = createKillCoordinator({
     proc,
     idleTimeoutMs: req.idleTimeoutMs,

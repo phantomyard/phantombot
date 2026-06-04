@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   createKillCoordinator,
   killCauseToErrorChunk,
+  runHarnessProcess,
 } from "../src/lib/harnessRunner.ts";
 import { spawnInNewSession } from "../src/lib/processGroup.ts";
 
@@ -204,5 +205,62 @@ describe("killCauseToErrorChunk", () => {
       error: "stopped",
       recoverable: false,
     });
+  });
+});
+
+describe("runHarnessProcess — regression: stdin blocking hang", () => {
+  test("hard timeout fires even when stdin.write blocks on pipe backpressure", async () => {
+    // We spawn a child that never reads stdin (sleep).
+    // We send a large payload (multi-MB) to fill the OS pipe buffer.
+    // hardTimeoutMs is very short.
+    // If the killer arms AFTER stdin.write, we'll hang here forever.
+    // If the killer arms BEFORE, the hard timeout will kill the process,
+    // causing the blocked write to fail with EPIPE, and the turn recovers.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+
+    // 5 MB of junk to ensure we hit backpressure
+    const largePayload = Buffer.alloc(5 * 1024 * 1024, "x").toString();
+
+    const startTime = Date.now();
+    const chunks: any[] = [];
+    
+    // We run the generator. 
+    // hardTimeoutMs = 200ms. 
+    // We expect it to return within a small window (< 2s) with a timeout error.
+    const generator = runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 200,
+        workingDir: process.cwd(),
+        persona: "test",
+        trusted: true,
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      stdinPayload: largePayload,
+      parseActivity: () => "productive",
+    });
+
+    for await (const chunk of generator) {
+      chunks.push(chunk);
+    }
+
+    const duration = Date.now() - startTime;
+    
+    // If it took > 5s, something is wrong (the hard timeout is 200ms).
+    expect(duration).toBeLessThan(5000);
+    
+    // Verify we got the timeout error
+    const errorChunk = chunks.find(c => c.type === "error");
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.error).toContain("hard wall-clock");
+    expect(errorChunk.recoverable).toBe(true);
   });
 });
