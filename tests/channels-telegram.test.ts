@@ -3184,7 +3184,12 @@ describe("runTelegramServer slash commands", () => {
       { updateId: 2, chatId: 1001, fromUserId: 42, text: "hi" },
     );
     await runTelegramServer({
-      config: baseConfig(),
+      // Trusted principal: /harness is an admin command, and a trusted turn
+      // skips threat screening — so the only claude invocation we'd see would
+      // be the actual turn (which here routes to pi after the switch). Without
+      // this, the untrusted screen would invoke the claude judge and muddy the
+      // routing assertion below.
+      config: baseConfig({ allowedUserIds: [42] }),
       memory,
       harnesses: [claude, pi],
       agentDir,

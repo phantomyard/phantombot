@@ -31,6 +31,7 @@ import {
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { MemoryStore } from "../memory/store.ts";
+import type { ScreenVerdict } from "./screen.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
 
@@ -112,6 +113,40 @@ export interface TurnInput {
    * backfill searchable old turns on a cadence. Must never break a turn.
    */
   indexTurns?: () => Promise<void>;
+  /**
+   * Security-perimeter provenance bit. True ONLY when an authenticated
+   * allowed principal issued this turn (the Telegram channel sets it
+   * after the allowed-user check passes). Defaults false/undefined for
+   * every other entry point — `phantombot ask`, tick, nightly, voice —
+   * so the system FAILS CLOSED.
+   *
+   * Two effects:
+   *   1. It selects the SECURITY_PERIMETER prompt block (trusted = treat
+   *      input as commands; untrusted = treat input as data to triage).
+   *   2. It gates the threat screen below: trusted turns skip the screen
+   *      entirely (the principal is the gate); untrusted turns are
+   *      screened by the tool-less judge before any capable harness runs.
+   */
+  trusted?: boolean;
+  /**
+   * Optional threat screen for UNTRUSTED turns (built by
+   * orchestrator/screen.ts#makeScreener). Called with the incoming user
+   * message before the harness chain runs. If it returns a `hold`
+   * verdict, runTurn does NOT run the harness — the request has already
+   * been escalated to the principal (notify + audit happen inside the
+   * screener, in code, so a model can't fake them). A `pass` verdict
+   * lets the turn proceed normally and silently.
+   *
+   * Only consulted when `trusted !== true`. Trusted turns never screen.
+   * Contracted to never throw; runTurn still guards defensively and
+   * fails OPEN (proceeds) if the screen itself errors, so a judge/API
+   * outage degrades to "unscreened" rather than "app down" — see the
+   * design doc for why fail-open is the deliberate choice here.
+   */
+  screen?: (
+    content: string,
+    signal?: AbortSignal,
+  ) => Promise<ScreenVerdict | undefined>;
 }
 
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
@@ -144,6 +179,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       channel: "cli",
       conversationId: input.conversation,
       timestamp: new Date(),
+      trusted: input.trusted === true,
     },
     retrievedMemory,
   );
@@ -161,6 +197,32 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     overlays.length > 0
       ? baseSystemPrompt + "\n\n" + overlays.join("\n\n")
       : baseSystemPrompt;
+
+  // Threat screen. UNTRUSTED turns are checked by a tool-less judge
+  // BEFORE any capable harness sees the content (Andrew's two-tier model:
+  // trusted source → act, no checking; untrusted source → judge it). On a
+  // `hold` verdict the screener has already notified the principal and
+  // written the audit record IN CODE — so the model can never fake "I
+  // escalated this". We just stop the turn here. Trusted turns skip the
+  // screen entirely. The screen contracts not to throw; the catch is
+  // belt-and-suspenders and fails OPEN (proceed) so a judge outage never
+  // takes the whole agent down.
+  if (input.trusted !== true && input.screen) {
+    let verdict: ScreenVerdict | undefined;
+    try {
+      verdict = await input.screen(input.userMessage, input.signal);
+    } catch {
+      verdict = undefined;
+    }
+    if (verdict?.action === "hold") {
+      const held =
+        verdict.heldMessage ??
+        "🔒 This request touched something sensitive, so I've paused it and asked Andrew to confirm. Nothing was done.";
+      yield { type: "text", text: held };
+      yield { type: "done", finalText: held, meta: { screenedHold: true } };
+      return;
+    }
+  }
 
   let finalText = "";
   let succeeded = false;

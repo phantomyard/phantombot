@@ -49,6 +49,7 @@ import { runTurn } from "../orchestrator/turn.ts";
 import { generateRecoveryReply } from "../orchestrator/recovery.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
+import { makeScreener } from "../orchestrator/screen.ts";
 import {
   type ActiveTurnHandle,
   handleSlashCommand,
@@ -1364,6 +1365,16 @@ export async function runTelegramServer(
             activeTurns,
             botUsername,
             groupContext,
+            // Security perimeter: this turn is TRUSTED only if the sender
+            // is an explicitly allow-listed principal. An empty allowlist
+            // means "open bot" (anyone can DM) — that is NOT an
+            // authenticated principal, so trust stays false and the
+            // system fails closed. `checkAllowed` (which lets the empty
+            // case through for *answering*) is deliberately NOT reused
+            // here: answering an open bot is fine; granting it authority
+            // to write security rules is not.
+            principalAuthenticated:
+              allowedSet.size > 0 && allowedSet.has(msg.fromUserId),
           }),
         );
         // Detach completed entries so the maps don't leak.
@@ -1428,6 +1439,12 @@ async function processChatMessage(
      *  pre-rendered as a context preamble. Prepended to the user text so
      *  the harness has the thread it stayed quiet through. */
     groupContext?: string;
+    /** Security-perimeter provenance: true only when the sender is an
+     *  explicitly allow-listed principal. Flows to runTurn as `trusted`,
+     *  which gates command-vs-data framing in the prompt AND the
+     *  PHANTOMBOT_TRUST env token that lets `phantombot security` write
+     *  rules. Defaults false (fail closed) for the open-bot case. */
+    principalAuthenticated?: boolean;
   },
 ): Promise<void> {
   const { input, harnesses, activeTurns } = ctx;
@@ -1785,6 +1802,15 @@ async function processChatMessage(
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
       signal: controller.signal,
+      // Security perimeter: the ONLY place `trusted: true` originates.
+      // True iff the sender is an allow-listed principal (see the
+      // principalAuthenticated computation at the dispatch call site).
+      trusted: ctx.principalAuthenticated === true,
+      // Threat screen for the untrusted case (open bot / non-allowlisted
+      // sender). runTurn only consults this when trusted !== true, so an
+      // allow-listed principal is never screened. The judge runs on the
+      // chain's claude harness; if the chain has none, screening fails open.
+      screen: makeScreener(input.config, input.persona, conversationKey, harnesses),
       // Instinct layer: auto-retrieve relevant memory/kb for this message.
       // makeRetriever returns undefined when retrieval is disabled in
       // config, in which case runTurn skips it entirely.
