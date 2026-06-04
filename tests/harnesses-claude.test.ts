@@ -370,6 +370,23 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
       .join("");
     expect(texts).not.toContain("--tools");
   });
+
+  test("pre-prompting trim flags ride along on every turn", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // Workflow tool removed (kills the "you typed 'workflow'…" nudge at source).
+    expect(texts).toContain("--disallowedTools");
+    expect(texts).toContain("Workflow");
+    // Skills block suppressed.
+    expect(texts).toContain("--disable-slash-commands");
+    // Per-machine dynamic sections dropped.
+    expect(texts).toContain("--exclude-dynamic-system-prompt-sections");
+  });
 });
 
 describe("ClaudeHarness.available", () => {

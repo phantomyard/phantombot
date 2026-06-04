@@ -109,6 +109,15 @@ export class GeminiHarness implements Harness {
     const args: string[] = [
       "-p", req.userMessage,
       "-o", "stream-json",
+      // Skip gemini-cli's per-session workspace-trust handshake. In headless
+      // mode the trust prompt can stall startup; phantombot already runs on a
+      // trusted host. Safe for both normal and judge (read-only) modes.
+      // NB: we deliberately keep `-o stream-json` (NOT `-o text`) — the
+      // stream-json event feed is what drives heartbeats / wedge detection;
+      // collapsing to text would blind the channel layer (see header comment).
+      // We also do NOT pass `-e` (extension pinning) so any Workspace
+      // connector extensions Andrew configures keep loading.
+      "--skip-trust",
     ];
     // Tool-less threat-judge mode → `--approval-mode plan` (per `gemini
     // --help`: "plan (read-only mode)"). The judge may read but cannot act.

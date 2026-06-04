@@ -3,9 +3,13 @@
  *
  * Uses `codex exec --json` for non-interactive JSONL streaming. We run in
  * YOLO mode (`--dangerously-bypass-approvals-and-sandbox`) and with
- * `--ephemeral --ignore-user-config --ignore-rules` so phantombot-managed
- * persona/memory stays authoritative and Codex local memory/rules do not leak
- * into agent behavior.
+ * `--ephemeral --ignore-rules` so phantombot-managed persona/memory stays
+ * authoritative and Codex's local rules/memory do not leak into agent
+ * behavior. We deliberately let user config (~/.codex/config.toml) load on
+ * normal turns so MCP connectors (Google Workspace, etc.) remain available.
+ * The tool-less threat judge is the exception — it keeps `--ignore-user-config`
+ * (see PHANTOMBOT_JUDGE_CODEX_FLAGS) for maximum isolation when reading
+ * untrusted input.
  */
 
 import { access, constants } from "node:fs/promises";
@@ -113,7 +117,13 @@ export function renderStdinPayload(req: HarnessRequest): string {
 export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
   "--dangerously-bypass-approvals-and-sandbox",
   "--ephemeral",
-  "--ignore-user-config",
+  // NOTE: we intentionally do NOT pass `--ignore-user-config` on normal turns.
+  // Codex's MCP connectors (Gmail / Google Calendar / Google Drive, etc.) are
+  // configured in ~/.codex/config.toml; --ignore-user-config would skip that
+  // file entirely and silently disable every connector. Andrew wants those
+  // Workspace connectors available, so user config loads. We still keep
+  // `--ignore-rules` below so Codex's local AGENTS.md / project rules / memory
+  // do NOT leak into behavior — phantombot's persona stays authoritative.
   "--ignore-rules",
 ] as const;
 

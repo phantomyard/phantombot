@@ -138,6 +138,26 @@ export class ClaudeHarness implements Harness {
       "--no-session-persistence",
       "--permission-mode", "bypassPermissions",
       "--model", this.config.model,
+      // Pre-prompting trim (phantombot supplies persona / memory / scheduling
+      // itself, so Claude Code's daily-driver scaffolding is pure noise here):
+      //   --disallowedTools Workflow
+      //     Drops the Workflow tool from the available set. The "you typed
+      //     'workflow', use the Workflow tool" system nudge ONLY fires because
+      //     that tool is loaded — removing the tool kills the nudge at source.
+      //     (We deny by name rather than via the --settings deny-list because
+      //     disallowedTools removes it from the advertised surface, which is
+      //     what actually suppresses the injected reminder.)
+      //   --disable-slash-commands
+      //     Suppresses the entire injected "available skills" block
+      //     (deep-research / loop / schedule / verify / code-review / …).
+      //   --exclude-dynamic-system-prompt-sections
+      //     Explicitly drops the per-machine cwd/env/git cruft. --system-prompt
+      //     already drops most of it; this is the canonical belt-and-suspenders.
+      // NB: MCP connectors (Gmail / Calendar / Drive) are tools, not skills or
+      // Workflow, so they are UNAFFECTED — Andrew uses those and they stay.
+      "--disallowedTools", "Workflow",
+      "--disable-slash-commands",
+      "--exclude-dynamic-system-prompt-sections",
     ];
     if (this.config.fallbackModel) {
       args.push("--fallback-model", this.config.fallbackModel);

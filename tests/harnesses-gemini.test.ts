@@ -350,6 +350,8 @@ describe("GeminiHarness.invoke (end-to-end via fake-gemini.sh)", () => {
     expect(text1.text).toContain("-o");
     expect(text1.text).toContain("stream-json");
     expect(text1.text).toContain("-y");
+    // Workspace-trust handshake skipped for headless startup.
+    expect(text1.text).toContain("--skip-trust");
     expect(text1.text).not.toContain("-m");
 
     // With model.
