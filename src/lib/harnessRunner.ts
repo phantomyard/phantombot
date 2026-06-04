@@ -270,6 +270,14 @@ export async function* runHarnessProcess(
 ): AsyncGenerator<HarnessChunk> {
   const { proc, req, harnessId } = spec;
 
+  const killer = createKillCoordinator({
+    proc,
+    idleTimeoutMs: req.idleTimeoutMs,
+    hardTimeoutMs: req.hardTimeoutMs,
+    signal: req.signal,
+    harnessId,
+  });
+
   // Write stdin then close. EPIPE-tolerant: a proc killed between spawn and
   // write makes stdin unwritable; we don't want that to escape before the
   // for-await loop yields the proper terminal chunk.
@@ -287,14 +295,6 @@ export async function* runHarnessProcess(
       });
     }
   }
-
-  const killer = createKillCoordinator({
-    proc,
-    idleTimeoutMs: req.idleTimeoutMs,
-    hardTimeoutMs: req.hardTimeoutMs,
-    signal: req.signal,
-    harnessId,
-  });
 
   const onStderrLine =
     spec.onStderrLine ??
