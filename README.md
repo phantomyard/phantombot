@@ -538,6 +538,71 @@ phantombot env unset GITHUB_TOKEN
 Use `phantombot env set` instead of appending to `.env` by hand. It writes
 atomically, preserves file permissions, and avoids duplicate entries.
 
+## Security
+
+### Two-Tier Trust
+
+Phantombot treats input by **origin**, not by content:
+
+- **Trusted source** — a message from an allow-listed Telegram principal is
+  the authenticated owner. It is acted on directly, with no extra screening.
+  The principal is the gate.
+- **Untrusted source** — anything else (email, `phantombot ask`, web, a
+  webhook) cannot be trusted to only contain data. Its text may try to
+  *instruct* the agent. These turns are screened before the harness runs.
+
+### Untrusted-Input Threat Screening
+
+Untrusted turns are passed to a **tool-less threat judge** before any capable
+harness sees them. The judge is a bare, capability-free completion **on the
+same harness the agent already uses** (Claude) — not a keyword engine and not
+a separate API key. Its only job is to *read* the incoming content and score
+it 0–100 for threat. Because it has **no tools**, it cannot act on what it
+reads, so a successful injection can at worst move the number — it can never
+make the judge *do* anything. The screener consumes only that number.
+
+Why an LLM and not a rule list: an attacker writes natural language, in any of
+a hundred languages, specifically to look benign. A keyword/verb table is
+brittle, English-shaped theatre that a Cyrillic or Thai payload walks straight
+past — and judging by *meaning* is exactly what an LLM is for. The judge is
+told to weigh by **effect, not tone**: content engineered to read as calm and
+routine while asking for something irreversible is treated as *more*
+dangerous, not less.
+
+- **Below threshold** → the turn proceeds silently. Quiet when safe — no
+  notification.
+- **At or above threshold** → the untrusted turn is **held and does nothing**
+  (fail-closed), and you get a Telegram message explaining what arrived and
+  why, phrased to be **talked through** rather than answered yes/no. You and
+  the agent discuss it on Telegram — the trusted channel — and *that*
+  conversation is where the ruling is recorded.
+
+**Decision recall.** Before judging, the screener semantic-searches your
+decisions drawer for how you've ruled on similar matters before, and feeds
+those priors to the judge. A matching prior approval lowers scrutiny; recall
+**never clears** it — a genuinely catastrophic request re-escalates regardless.
+
+**Who can record a ruling.** Only *you*, from a trusted turn. The judge writes
+nothing; the untrusted turn writes nothing. An attacker can therefore never
+author "Andrew approved this" — your trusted reply is the only thing that
+records a decision, and that decision is what recall reads next time. Captured
+rulings are indexed on write, so they're recall-able the same session.
+
+Screening is **fail-open on infrastructure errors**: if the judge call itself
+fails, the turn proceeds *unscreened* rather than blocking the assistant — a
+screening outage degrades to "unscreened", never "app down". (This is distinct
+from the **fail-closed hold** above, which governs an escalated-but-unanswered
+request: that simply never runs.)
+
+> **Recommended for production environments.** Threat screening itself needs no
+> extra configuration — it runs on the harness, which is always present. A
+> Gemini key ([`phantombot embedding`](#semantic-search)) is only needed for
+> **semantic decision recall**; without it, recall falls back to keyword-only,
+> which is a quality degrade, not a security hole. Screening is **not** a wall —
+> a sufficiently clever injection can still fool an LLM judge, just as it can
+> fool a human — but it filters the obvious majority and puts a human beat in
+> front of the rest.
+
 ## Memory
 
 Phantombot memory has two layers:

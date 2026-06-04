@@ -98,13 +98,29 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     p.note(`provider:  none (FTS5/BM25 search only)`, "Existing config");
   }
 
+  // The Gemini key powers semantic memory search AND semantic decision
+  // RECALL — the priors the threat judge reads to remember how you've ruled
+  // before. It does NOT power threat screening itself: the judge runs on the
+  // harness and is always active. Surface that so operators understand a
+  // "none" choice degrades recall to keyword-only, but never turns screening
+  // off.
+  p.note(
+    `A Gemini key powers two things:\n` +
+      `  • semantic (vector) memory search\n` +
+      `  • semantic recall of prior security rulings (the threat judge's memory)\n\n` +
+      `Recommended for production environments and additional security.\n` +
+      `Threat screening of untrusted input runs on the harness either way;\n` +
+      `without a key, the judge just recalls prior rulings by keyword only.`,
+    "Why configure this",
+  );
+
   const provider = await p.select<"gemini" | "none" | "cancel">({
     message: "Provider",
     options: [
       {
         value: "gemini",
         label: `Gemini (${DEFAULT_MODEL}, ${DEFAULT_DIMS} dims)`,
-        hint: "free tier 1500 req/day, billing kicks in upstream",
+        hint: "semantic search + decision recall · free tier 1500 req/day",
       },
       {
         value: "none",
@@ -122,7 +138,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   if (provider === "none") {
     await applyEmbeddingConfig(config.configPath, { provider: "none" });
     p.note(
-      `provider set to "none"\nsearch will use FTS5/BM25 only`,
+      `provider set to "none"\n` +
+        `search will use FTS5/BM25 only\n` +
+        `threat screening stays ACTIVE (runs on the harness); decision ` +
+        `recall is keyword-only — semantic recall recommended for production`,
       "Saved",
     );
     if (!embedded) {
