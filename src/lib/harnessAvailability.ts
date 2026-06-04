@@ -1,4 +1,4 @@
-import { access, constants, readdir } from "node:fs/promises";
+import { access, constants, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
@@ -45,28 +45,26 @@ export async function whichBinary(
   pathEnv = process.env.PATH ?? "",
 ): Promise<string | undefined> {
   if (bin.startsWith("/")) {
-    try {
-      await access(bin, constants.X_OK);
-      return bin;
-    } catch {
-      return undefined;
-    }
+    return (await executableFile(bin)) ? bin : undefined;
   }
   for (const dir of pathEnv.split(":")) {
     if (!dir) continue;
     const candidate = join(dir, bin);
-    try {
-      await access(candidate, constants.X_OK);
+    if (await executableFile(candidate)) {
       return candidate;
-    } catch {
-      /* keep looking */
     }
   }
   return undefined;
 }
 
 async function executable(path: string): Promise<boolean> {
+  return executableFile(path);
+}
+
+async function executableFile(path: string): Promise<boolean> {
   try {
+    const info = await stat(path);
+    if (!info.isFile()) return false;
     await access(path, constants.X_OK);
     return true;
   } catch {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expandSystemdPath, whichBinary, checkConfiguredHarnesses } from "../src/lib/harnessAvailability.ts";
@@ -27,6 +27,16 @@ describe("whichBinary", () => {
 
   test("returns undefined for missing absolute paths", async () => {
     expect(await whichBinary("/tmp/definitely-not-there-12345")).toBeUndefined();
+  });
+
+  test("returns undefined for executable directories", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-harness-dir-"));
+    const executableDir = join(dir, "pi");
+    await mkdir(executableDir);
+    await chmod(executableDir, 0o755);
+
+    expect(await whichBinary(executableDir)).toBeUndefined();
+    expect(await whichBinary("pi", dir)).toBeUndefined();
   });
 
   test("resolves bare names from pathEnv", async () => {
