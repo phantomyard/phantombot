@@ -37,7 +37,7 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
-import { makeScreener } from "../orchestrator/screen.ts";
+import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 
 export interface RunAskInput {
   /** The user prompt. Required. */
@@ -63,6 +63,16 @@ export interface RunAskInput {
   config?: Config;
   memory?: MemoryStore;
   harnesses?: Harness[];
+  /**
+   * Override the threat screen (test injection). Production leaves this
+   * undefined and a real screener is built from the harness chain. Tests that
+   * exercise ask MECHANICS (not screening) inject a pass-through here so the
+   * fake harness isn't invoked twice (once as judge, once as the turn).
+   */
+  screen?: (
+    content: string,
+    signal?: AbortSignal,
+  ) => Promise<ScreenVerdict | undefined>;
   out?: WriteSink;
   err?: WriteSink;
   signal?: AbortSignal;
@@ -148,7 +158,8 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       // trusted !== true (always the case here). If the chain has no claude
       // harness the screener fails open (unscreened) — same posture as a
       // judge outage.
-      screen: makeScreener(config, persona, conversation, harnesses),
+      screen:
+        input.screen ?? makeScreener(config, persona, conversation, harnesses),
       // Streaming consumers benefit from pre-tool narration: the
       // assistant's intent sentence flushes to stdout before the
       // tool's silence begins. Non-streaming consumers see the whole

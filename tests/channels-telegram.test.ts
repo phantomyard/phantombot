@@ -630,7 +630,14 @@ const baseConfig = (
     telegram: {
       token: "fake-token",
       pollTimeoutS: 30,
-      allowedUserIds: [],
+      // Default to the realistic production posture: the principal (user 42,
+      // the sender in these tests) is allow-listed, so turns are TRUSTED and
+      // skip the threat screen. This keeps the mechanics tests focused on
+      // dispatch/groups/voice rather than re-invoking the fake harness as the
+      // screening judge. The untrusted/open-bot screening path is covered by
+      // the dedicated screen + judge unit tests. Tests that specifically need
+      // an open bot or a non-allow-listed sender override allowedUserIds.
+      allowedUserIds: [42],
       ...overrides,
     },
   },

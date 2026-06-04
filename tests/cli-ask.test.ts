@@ -89,6 +89,9 @@ describe("runAsk — happy path", () => {
       config,
       memory,
       harnesses: [harness],
+      // Mechanics test, not a screening test: inject a pass-through so the
+      // fake harness is invoked once (the turn), not also as the judge.
+      screen: async () => ({ action: "pass", score: 0, reason: "test-bypass" }),
       out,
       err,
     });
