@@ -40,9 +40,8 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
-  createKillCoordinator,
   type HarnessActivity,
-  killCauseToErrorChunk,
+  runHarnessProcess,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { killProcessGroup, spawnInNewSession } from "../lib/processGroup.ts";
@@ -143,172 +142,74 @@ export class GeminiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Idle + hard timer + abort listener. SIGTERM the whole process group
-    // on any of those firing, escalate to SIGKILL after 5s grace. The
-    // grandchild kill is the whole point: gemini-cli routinely spawns
-    // tool subprocesses (the kw-openclaw bug was `gemini usage` wedged
-    // on a TCP read; without process-group kill, that orphan survived
-    // its parent dying and held the socket open).
-    const killer = createKillCoordinator({
-      proc,
-      idleTimeoutMs: req.idleTimeoutMs,
-      hardTimeoutMs: req.hardTimeoutMs,
-      signal: req.signal,
-      harnessId: this.id,
-    });
-
-    // Write the system prompt + history to stdin and close it. gemini
-    // appends the -p value (the new user message) to whatever stdin
-    // delivers, so the model sees: <system>\n\n<history>\n\n<user msg>.
-    try {
-      proc.stdin.write(stdinPayload);
-      await proc.stdin.end();
-    } catch (e) {
-      log.warn("gemini.invoke stdin write failed", {
-        error: (e as Error).message,
-      });
-    }
-
-    // Watch stderr for HTTP 4XX errors emerging from gemini-cli's
-    // built-in retryWithBackoff loop. Once we spot a 4XX, kill the
-    // subprocess immediately so the orchestrator can fall through to
-    // the next harness without waiting for gemini-cli to finish its
-    // own ~2-minute retry budget. The status is stored here and
-    // surfaced in the post-loop error chunk.
+    // Watch stderr for HTTP 4XX errors emerging from gemini-cli's built-in
+    // retryWithBackoff loop. Once we spot a 4XX, kill the subprocess
+    // immediately so the orchestrator can fall through to the next harness
+    // without waiting for gemini-cli to finish its own ~2-minute retry budget.
+    // The status is stored here and surfaced in the post-loop error chunk
+    // (runHarnessProcess's earlyError hook, which wins over kill-cause/exit).
+    // The grandchild kill via process group is the whole point: gemini-cli
+    // routinely spawns tool subprocesses (the kw-openclaw bug was `gemini
+    // usage` wedged on a TCP read; without process-group kill that orphan
+    // survived its parent and held the socket open).
     const httpStatusBox: { status?: number } = {};
-    void consumeStderr(proc.stderr, (status) => {
-      if (httpStatusBox.status !== undefined) return; // first one wins
-      httpStatusBox.status = status;
-      log.warn("gemini stderr: 4XX detected, killing early for fast fallback", {
-        httpStatus: status,
-      });
-      // Fire-and-forget — process group SIGTERM → 5 s grace → SIGKILL.
-      // The for-await over stdout below ends naturally as the kernel
-      // closes the pipe.
-      void killProcessGroup(proc, 5000);
-    });
-
-    let buffer = "";
-    let finalText = "";
-    let resultMeta: Record<string, unknown> | undefined;
-    const decoder = new TextDecoder();
-
-    try {
-      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        // NB: do NOT touch() here. The idle timer must measure time since
-        // last *productive* output, not since last raw chunk — otherwise
-        // synthetic heartbeats keep postponing the idle kill on a wedged
-        // turn. See issue #123.
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          // Tolerate non-JSON noise that gemini-cli sometimes prints
-          // ahead of the stream (e.g. terminal-color warnings, "YOLO
-          // mode is enabled"). Surfaced as low-noise progress notes
-          // rather than dropped, so they show up in /status diagnostics.
-          // Also logged at debug level so a future gemini-cli schema
-          // change that produces unexpected non-JSON shows up in the
-          // journal without needing to reproduce live.
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(trimmed);
-          } catch {
-            log.debug("gemini: non-JSON stdout line", {
-              line: trimmed.slice(0, 200),
-            });
-            killer.touch("productive"); // non-JSON line is real output
-            yield { type: "progress", note: trimmed.slice(0, 200) };
-            continue;
-          }
-          const c = parseGeminiEvent(parsed);
-          if (!c) continue;
-          killer.touch(geminiActivity(parsed, c));
-          if (c.type === "text") finalText += c.text;
-          if (c.type === "done") {
-            // gemini's `result` event carries the authoritative stats.
-            // We hold them in resultMeta and emit a single done chunk
-            // after the loop so the orchestrator sees one terminal event.
-            resultMeta = c.meta;
-            continue;
-          }
-          yield c;
-        }
+    const onStderrLine = (line: string): void => {
+      const text = line.slice(0, 500);
+      if (GEMINI_STDERR_BANNER_PATTERNS.some((re) => re.test(line))) {
+        log.debug("gemini stderr (banner)", { text });
+        return;
       }
-      // Flush any pending bytes in the decoder.
-      buffer += decoder.decode();
-      const tail = buffer.trim();
-      if (tail) {
-        try {
-          const parsed = JSON.parse(tail);
-          const c = parseGeminiEvent(parsed);
-          if (c) {
-            killer.touch(geminiActivity(parsed, c));
-            if (c.type === "text") finalText += c.text;
-            if (c.type === "done") resultMeta = c.meta;
-            else yield c;
-          }
-        } catch {
-          /* drop trailing partial line */
+      const status = extractHttpStatus(line);
+      if (status !== undefined) {
+        log.info("gemini stderr", { text });
+        if (httpStatusBox.status === undefined) {
+          httpStatusBox.status = status; // first one wins
+          log.warn(
+            "gemini stderr: 4XX detected, killing early for fast fallback",
+            { httpStatus: status },
+          );
+          // Fire-and-forget — process group SIGTERM → 5 s grace → SIGKILL.
+          // The shared pump's for-await over stdout ends naturally as the
+          // kernel closes the pipe.
+          void killProcessGroup(proc, 5000);
         }
+        return;
       }
-    } finally {
-      await killer.dispose();
-    }
+      log.info("gemini stderr", { text });
+    };
 
-    // 4XX detected mid-stream takes priority over kill-cause / exit
-    // code: it carries the most specific signal ("upstream said 429,
-    // bail and cool the harness off") and the orchestrator wants to
-    // see it in `httpStatus` for cooldown decisions. Drain the proc
-    // first so we don't dangle.
-    if (httpStatusBox.status !== undefined) {
-      await proc.exited;
-      yield {
-        type: "error",
-        error: `gemini upstream HTTP ${httpStatusBox.status}; aborted gemini-cli's internal retry loop for fast fallback`,
-        recoverable: true,
-        httpStatus: httpStatusBox.status,
-      };
-      return;
-    }
-
-    const errChunk = killCauseToErrorChunk(
-      killer.killCause(),
-      this.id,
-      req.hardTimeoutMs,
-      req.idleTimeoutMs,
-    );
-    if (errChunk) {
-      yield errChunk;
-      return;
-    }
-
-    const code = await proc.exited;
-
-    if (code !== 0) {
-      yield {
-        type: "error",
-        error: `gemini exited with code ${code}`,
-        // 127 = "command not found"; not recoverable by retrying the next harness
-        // (the binary itself is missing). Other non-zero exits are typically
-        // model/network/auth issues that the next harness in the chain can handle.
-        recoverable: code !== 127,
-      };
-      return;
-    }
-
-    yield {
-      type: "done",
-      finalText,
-      meta: {
+    // Shared engine. gemini's extras: payload split (system+history on stdin,
+    // new message via -p in args), a decoder-tail flush for the trailing
+    // result line, non-JSON lines logged at debug, and the 4XX early-error
+    // hook above. The terminal `done` meta carries reply bytes + result stats.
+    yield* runHarnessProcess({
+      proc,
+      req,
+      harnessId: this.id,
+      stdinPayload,
+      parseEvent: parseGeminiEvent,
+      activity: geminiActivity,
+      progressNoteLimit: 200,
+      flushTail: true,
+      onNonJsonLine: (line) =>
+        log.debug("gemini: non-JSON stdout line", { line: line.slice(0, 200) }),
+      onStderrLine,
+      earlyError: () =>
+        httpStatusBox.status === undefined
+          ? undefined
+          : {
+              type: "error",
+              error: `gemini upstream HTTP ${httpStatusBox.status}; aborted gemini-cli's internal retry loop for fast fallback`,
+              recoverable: true,
+              httpStatus: httpStatusBox.status,
+            },
+      buildDoneMeta: (finalText, captured) => ({
         harnessId: this.id,
         model: this.config.model || "(default)",
         replyBytes: Buffer.byteLength(finalText, "utf8"),
-        ...(resultMeta ?? {}),
-      },
-    };
+        ...(captured ?? {}),
+      }),
+    });
   }
 }
 
@@ -468,39 +369,4 @@ export function extractHttpStatus(line: string): number | undefined {
     }
   }
   return undefined;
-}
-
-async function consumeStderr(
-  stream: ReadableStream<Uint8Array>,
-  onHttp4xx?: (status: number) => void,
-): Promise<void> {
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for await (const chunk of stream) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (GEMINI_STDERR_BANNER_PATTERNS.some((re) => re.test(trimmed))) {
-          log.debug("gemini stderr (banner)", { text: trimmed.slice(0, 500) });
-          continue;
-        }
-        if (onHttp4xx) {
-          const status = extractHttpStatus(trimmed);
-          if (status !== undefined) {
-            // Still log the line so journal forensics keep the trail.
-            log.info("gemini stderr", { text: trimmed.slice(0, 500) });
-            onHttp4xx(status);
-            continue;
-          }
-        }
-        log.info("gemini stderr", { text: trimmed.slice(0, 500) });
-      }
-    }
-  } catch {
-    /* swallow */
-  }
 }

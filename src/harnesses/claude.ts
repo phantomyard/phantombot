@@ -50,9 +50,8 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
-  createKillCoordinator,
   type HarnessActivity,
-  killCauseToErrorChunk,
+  runHarnessProcess,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
@@ -109,104 +108,22 @@ export class ClaudeHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Same EPIPE-tolerant pattern as gemini.ts: a kernel-killed proc
-    // (e.g. signal already aborted between spawn and write) makes stdin
-    // unwritable; we don't want that to escape the generator before the
-    // for-await loop yields the proper "aborted" error chunk.
-    try {
-      proc.stdin.write(renderStdinPayload(req));
-      await proc.stdin.end();
-    } catch (e) {
-      log.warn("claude.invoke stdin write failed", {
-        error: (e as Error).message,
-      });
-    }
-
-    // Kill coordinator: idle timer (resets on every chunk), hard timer
-    // (never resets), abort listener (user typed /stop). On any of those
-    // firing, SIGTERM the whole process group → 5s grace → SIGKILL the
-    // group. The "kill cause" determines whether we yield a recoverable
-    // or non-recoverable error after the stdout pipe closes.
-    const killer = createKillCoordinator({
+    // Everything below the spawn — stdin write, kill coordinator, stdout JSONL
+    // pump, kill-cause / exit-code → terminal chunk — is the shared engine. The
+    // per-CLI variable points are the parser (parseStreamJson), the idle-timer
+    // activity classifier (claudeActivity), and the done meta.
+    yield* runHarnessProcess({
       proc,
-      idleTimeoutMs: req.idleTimeoutMs,
-      hardTimeoutMs: req.hardTimeoutMs,
-      signal: req.signal,
+      req,
       harnessId: this.id,
+      stdinPayload: renderStdinPayload(req),
+      parseEvent: parseStreamJson,
+      activity: claudeActivity,
+      buildDoneMeta: () => ({
+        harnessId: this.id,
+        model: this.config.model,
+      }),
     });
-
-    // Drain stderr in the background; surface as debug logs only.
-    void consumeStderr(proc.stderr);
-
-    let buffer = "";
-    let finalText = "";
-    const decoder = new TextDecoder();
-
-    try {
-      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        // NB: do NOT touch() here. The idle timer must measure time since
-        // last *productive* output, not since last raw chunk — otherwise
-        // synthetic heartbeats (streamed thinking blocks etc.) keep
-        // postponing the idle kill on a wedged turn. See issue #123.
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(trimmed);
-          } catch {
-            // Not stream-json — surface as out-of-band progress note.
-            killer.touch("productive"); // non-JSON line is real output
-            yield { type: "progress", note: trimmed };
-            continue;
-          }
-          const c = parseStreamJson(parsed);
-          if (c) {
-            killer.touch(claudeActivity(parsed, c));
-            if (c.type === "text") finalText += c.text;
-            yield c;
-          }
-        }
-      }
-    } finally {
-      await killer.dispose();
-    }
-
-    const errChunk = killCauseToErrorChunk(
-      killer.killCause(),
-      this.id,
-      req.hardTimeoutMs,
-      req.idleTimeoutMs,
-    );
-    if (errChunk) {
-      yield errChunk;
-      return;
-    }
-
-    const code = await proc.exited;
-
-    if (code === 0) {
-      yield {
-        type: "done",
-        finalText,
-        meta: {
-          harnessId: this.id,
-          model: this.config.model,
-        },
-      };
-    } else {
-      yield {
-        type: "error",
-        error: `claude exited with code ${code}`,
-        // 127 = command not found — terminal, no point falling through. Anything
-        // else (rate limits, network blips, transient model errors) should let
-        // the orchestrator try the next harness.
-        recoverable: code !== 127,
-      };
-    }
   }
 
   private buildArgs(
@@ -411,27 +328,6 @@ function claudeActivity(
     if (hasToolResult) return "productive";
   }
   return chunk.type === "heartbeat" ? "model" : "productive";
-}
-
-async function consumeStderr(
-  stream: ReadableStream<Uint8Array>,
-): Promise<void> {
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for await (const chunk of stream) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.trim()) {
-          log.debug("claude stderr", { text: line.slice(0, 500) });
-        }
-      }
-    }
-  } catch {
-    /* swallow — stderr drain shouldn't take down the harness */
-  }
 }
 
 // ---- Note for the next maintainer ----

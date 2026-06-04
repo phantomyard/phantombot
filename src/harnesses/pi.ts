@@ -26,9 +26,8 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
-  createKillCoordinator,
   type HarnessActivity,
-  killCauseToErrorChunk,
+  runHarnessProcess,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
@@ -105,81 +104,16 @@ export class PiHarness implements Harness {
       stderr: "pipe",
     });
 
-    // Idle + hard timer + abort listener; SIGTERM-then-SIGKILL the whole
-    // process group on any of those firing. See harnessRunner.ts for the
-    // state machine.
-    const killer = createKillCoordinator({
+    // Shared engine. Pi delivers its payload via argv (stdin ignored, so no
+    // stdinPayload), and the terminal `done` meta records the argv byte count.
+    yield* runHarnessProcess({
       proc,
-      idleTimeoutMs: req.idleTimeoutMs,
-      hardTimeoutMs: req.hardTimeoutMs,
-      signal: req.signal,
+      req,
       harnessId: this.id,
+      parseEvent: parsePiEvent,
+      activity: piActivity,
+      buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
     });
-
-    void consumeStderr(proc.stderr);
-
-    let buffer = "";
-    let finalText = "";
-    const decoder = new TextDecoder();
-
-    try {
-      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        // NB: do NOT touch() here. The idle timer must measure time since
-        // last *productive* output, not since last raw chunk — otherwise
-        // synthetic heartbeats (thinking_delta etc.) keep postponing the
-        // idle kill on a wedged turn. See issue #123.
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(trimmed);
-          } catch {
-            killer.touch("productive"); // non-JSON line is real output
-            yield { type: "progress", note: trimmed };
-            continue;
-          }
-          const c = parsePiEvent(parsed);
-          if (c) {
-            killer.touch(piActivity(parsed, c));
-            if (c.type === "text") finalText += c.text;
-            yield c;
-          }
-        }
-      }
-    } finally {
-      await killer.dispose();
-    }
-
-    const errChunk = killCauseToErrorChunk(
-      killer.killCause(),
-      this.id,
-      req.hardTimeoutMs,
-      req.idleTimeoutMs,
-    );
-    if (errChunk) {
-      yield errChunk;
-      return;
-    }
-
-    const code = await proc.exited;
-
-    if (code === 0) {
-      yield {
-        type: "done",
-        finalText,
-        meta: { harnessId: this.id, payloadBytes: totalBytes },
-      };
-    } else {
-      yield {
-        type: "error",
-        error: `pi exited with code ${code}`,
-        recoverable: code !== 127,
-      };
-    }
   }
 }
 
@@ -297,25 +231,4 @@ function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-async function consumeStderr(
-  stream: ReadableStream<Uint8Array>,
-): Promise<void> {
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for await (const chunk of stream) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.trim()) {
-          log.debug("pi stderr", { text: line.slice(0, 500) });
-        }
-      }
-    }
-  } catch {
-    /* swallow */
-  }
 }

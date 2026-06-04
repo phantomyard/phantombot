@@ -12,9 +12,8 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
-  createKillCoordinator,
   type HarnessActivity,
-  killCauseToErrorChunk,
+  runHarnessProcess,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
@@ -57,95 +56,23 @@ export class CodexHarness implements Harness {
       stderr: "pipe",
     });
 
-    try {
-      proc.stdin.write(renderStdinPayload(req));
-      await proc.stdin.end();
-    } catch (e) {
-      log.warn("codex.invoke stdin write failed", {
-        error: (e as Error).message,
-      });
-    }
-
-    const killer = createKillCoordinator({
+    // Shared engine. Codex's only extras over the baseline: non-JSON progress
+    // notes are capped at 200 chars, and the terminal `done` meta folds in the
+    // usage stats captured from the turn.completed event.
+    yield* runHarnessProcess({
       proc,
-      idleTimeoutMs: req.idleTimeoutMs,
-      hardTimeoutMs: req.hardTimeoutMs,
-      signal: req.signal,
+      req,
       harnessId: this.id,
-    });
-
-    void consumeStderr(proc.stderr);
-
-    let buffer = "";
-    let finalText = "";
-    let usageMeta: Record<string, unknown> | undefined;
-    const decoder = new TextDecoder();
-
-    try {
-      for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-        // NB: do NOT touch() here. The idle timer must measure time since
-        // last *productive* output, not since last raw chunk — otherwise
-        // synthetic heartbeats keep postponing the idle kill on a wedged
-        // turn. See issue #123.
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(trimmed);
-          } catch {
-            killer.touch("productive"); // non-JSON line is real output
-            yield { type: "progress", note: trimmed.slice(0, 200) };
-            continue;
-          }
-          const c = parseCodexEvent(parsed);
-          if (!c) continue;
-          killer.touch(codexActivity(parsed, c));
-          if (c.type === "text") finalText += c.text;
-          if (c.type === "done") {
-            usageMeta = c.meta;
-            continue;
-          }
-          yield c;
-        }
-      }
-    } finally {
-      await killer.dispose();
-    }
-
-    const errChunk = killCauseToErrorChunk(
-      killer.killCause(),
-      this.id,
-      req.hardTimeoutMs,
-      req.idleTimeoutMs,
-    );
-    if (errChunk) {
-      yield errChunk;
-      return;
-    }
-
-    const code = await proc.exited;
-    if (code !== 0) {
-      yield {
-        type: "error",
-        error: `codex exited with code ${code}`,
-        recoverable: code !== 127,
-      };
-      return;
-    }
-
-    yield {
-      type: "done",
-      finalText,
-      meta: {
+      stdinPayload: renderStdinPayload(req),
+      parseEvent: parseCodexEvent,
+      activity: codexActivity,
+      progressNoteLimit: 200,
+      buildDoneMeta: (_finalText, captured) => ({
         harnessId: this.id,
         model: this.config.model || "(default)",
-        ...(usageMeta ?? {}),
-      },
-    };
+        ...(captured ?? {}),
+      }),
+    });
   }
 
   private buildArgs(toolsMode?: "none"): string[] {
@@ -264,25 +191,4 @@ function codexActivity(
     return "productive";
   }
   return chunk.type === "heartbeat" ? "model" : "productive";
-}
-
-async function consumeStderr(
-  stream: ReadableStream<Uint8Array>,
-): Promise<void> {
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for await (const chunk of stream) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.trim()) {
-          log.info("codex stderr", { text: line.slice(0, 500) });
-        }
-      }
-    }
-  } catch {
-    /* swallow */
-  }
 }
