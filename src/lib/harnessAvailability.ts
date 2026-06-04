@@ -25,6 +25,14 @@ export function harnessBin(config: Config, id: string): string | undefined {
   return undefined;
 }
 
+function defaultHarnessBin(id: string): string | undefined {
+  if (id === "claude") return "claude";
+  if (id === "pi") return "pi";
+  if (id === "gemini") return "gemini";
+  if (id === "codex") return "codex";
+  return undefined;
+}
+
 export function expandSystemdPath(path: string, home = homedir()): string {
   return path
     .split(":")
@@ -145,7 +153,13 @@ export async function checkConfiguredHarnesses(
     seen.add(id);
     const bin = harnessBin(config, id);
     if (!bin) continue;
-    const resolved = await resolveHarnessBinary(bin, pathEnv);
+    let resolved = await resolveHarnessBinary(bin, pathEnv);
+    if (!resolved.path && bin.startsWith("/")) {
+      const fallbackBin = defaultHarnessBin(id);
+      if (fallbackBin) {
+        resolved = await resolveHarnessBinary(fallbackBin, pathEnv);
+      }
+    }
     out.push({
       id,
       bin,
