@@ -117,11 +117,13 @@ codex login
 ```
 
 Headless services do not inherit your interactive shell PATH. If a harness
-installer puts the real binary under a versioned npm/node directory, make sure
-it also leaves a stable executable shim on the service PATH, or set the
-matching `PHANTOMBOT_<HARNESS>_BIN` env var to an absolute path. `phantombot
-doctor` checks the configured harness chain from the service PATH and reports
-missing binaries before Telegram turns fail silently.
+installer puts the real binary under a versioned npm/node directory,
+Phantombot records the discovered absolute path in its runtime state and uses
+that path directly on later starts. `phantombot run` never refuses to start
+because a harness is missing; it logs a loud warning and keeps the service
+alive. `phantombot doctor` checks the configured harness chain from the
+service PATH plus common npm/pi-node locations, and repair mode saves any
+paths it finds.
 
 Then configure phantombot:
 

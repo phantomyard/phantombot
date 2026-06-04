@@ -41,6 +41,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE",
+  "PHANTOMBOT_STATE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
   // Per-persona Telegram env vars touched by the persona-bound bots
@@ -157,6 +158,47 @@ model = "gpt-5.3-codex"
     expect(c.harnesses.codex).toBeDefined();
     expect(c.harnesses.codex!.bin).toBe("/opt/codex/codex");
     expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");
+  });
+
+  test("uses persisted harness bins when no explicit bin is configured", async () => {
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({
+        harness_bins: {
+          pi: "/home/test/.local/share/pi-node/node-v22/bin/pi",
+          claude: "/home/test/.local/bin/claude",
+        },
+      }),
+      "utf8",
+    );
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+
+    const c = await loadConfig();
+
+    expect(c.harnesses.pi.bin).toBe("/home/test/.local/share/pi-node/node-v22/bin/pi");
+    expect(c.harnesses.claude.bin).toBe("/home/test/.local/bin/claude");
+  });
+
+  test("explicit TOML harness bins override persisted discoveries", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses.pi]
+bin = "/opt/pi"
+`,
+      "utf8",
+    );
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ harness_bins: { pi: "/cached/pi" } }),
+      "utf8",
+    );
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+
+    const c = await loadConfig();
+
+    expect(c.harnesses.pi.bin).toBe("/opt/pi");
   });
 
   test("reads Telegram streaming knobs from [channels.telegram.streaming]", async () => {

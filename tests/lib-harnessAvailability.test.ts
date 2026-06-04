@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { expandSystemdPath, whichBinary, checkConfiguredHarnesses } from "../src/lib/harnessAvailability.ts";
 import type { Config } from "../src/config.ts";
 
@@ -47,10 +45,12 @@ describe("checkConfiguredHarnesses", () => {
   test("resolves available and missing harnesses", async () => {
     const pathEnv = "/bin:/usr/bin";
     const results = await checkConfiguredHarnesses(config, pathEnv);
-    
+
+    const missingPi = results.find((result) => result.id === "pi");
+
     expect(results).toHaveLength(2);
     expect(results[0]).toMatchObject({ id: "claude", bin: "sh", resolved: "/bin/sh" });
-    expect(results[1]).toMatchObject({ id: "pi", bin: "/tmp/missing-pi" });
-    expect(results[1].resolved).toBeUndefined();
+    expect(missingPi).toMatchObject({ id: "pi", bin: "/tmp/missing-pi" });
+    expect(missingPi?.resolved).toBeUndefined();
   });
 });

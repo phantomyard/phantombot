@@ -324,6 +324,7 @@ export async function loadConfig(): Promise<Config> {
         bin:
           process.env.PHANTOMBOT_CLAUDE_BIN ??
           asString(tomlClaude.bin) ??
+          state.harness_bins?.claude ??
           "claude",
         model:
           process.env.PHANTOMBOT_CLAUDE_MODEL ??
@@ -339,6 +340,7 @@ export async function loadConfig(): Promise<Config> {
         bin:
           process.env.PHANTOMBOT_PI_BIN ??
           asString(tomlPi.bin) ??
+          state.harness_bins?.pi ??
           "pi",
         maxPayloadBytes:
           asInt(process.env.PHANTOMBOT_PI_MAX_PAYLOAD) ??
@@ -350,6 +352,7 @@ export async function loadConfig(): Promise<Config> {
         bin:
           process.env.PHANTOMBOT_GEMINI_BIN ??
           asString(tomlGeminiHarness.bin) ??
+          state.harness_bins?.gemini ??
           "gemini",
         // Empty string = "let gemini-cli pick its own default" — see
         // GeminiHarness for why we don't pass -m in that case.
@@ -363,6 +366,7 @@ export async function loadConfig(): Promise<Config> {
         bin:
           process.env.PHANTOMBOT_CODEX_BIN ??
           asString(tomlCodex.bin) ??
+          state.harness_bins?.codex ??
           "codex",
         // Empty string = "let codex pick its own default".
         model:

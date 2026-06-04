@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { auditPath, loadState, saveState } from "../src/state.ts";
+import { auditPath, loadState, saveHarnessBins, saveState } from "../src/state.ts";
 
 const ENV_KEYS = [
   "PHANTOMBOT_STATE",
@@ -56,6 +56,17 @@ describe("saveState — round-trip", () => {
   test("writes and reads back default_persona", async () => {
     await saveState({ default_persona: "kai" });
     expect(await loadState()).toEqual({ default_persona: "kai" });
+  });
+});
+
+describe("saveHarnessBins", () => {
+  test("merges harness binaries into state", async () => {
+    await saveState({ default_persona: "kai", harness_bins: { pi: "/old/pi" } });
+    await saveHarnessBins({ pi: "/new/pi", claude: "/bin/claude" });
+    expect(await loadState()).toEqual({
+      default_persona: "kai",
+      harness_bins: { pi: "/new/pi", claude: "/bin/claude" },
+    });
   });
 });
 

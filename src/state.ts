@@ -15,6 +15,7 @@ import { xdgDataHome } from "./config.ts";
 
 export interface State {
   default_persona?: string;
+  harness_bins?: Record<string, string>;
 }
 
 export function statePath(): string {
@@ -102,4 +103,22 @@ export async function saveState(state: State): Promise<string> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(state, null, 2) + "\n", "utf8");
   return path;
+}
+
+export async function saveHarnessBins(
+  updates: Record<string, string | undefined>,
+): Promise<string | undefined> {
+  const clean = Object.fromEntries(
+    Object.entries(updates).filter(([, value]) => typeof value === "string" && value.length > 0),
+  ) as Record<string, string>;
+  if (Object.keys(clean).length === 0) return undefined;
+  const state = await loadState();
+  await saveState({
+    ...state,
+    harness_bins: {
+      ...(state.harness_bins ?? {}),
+      ...clean,
+    },
+  });
+  return statePath();
 }

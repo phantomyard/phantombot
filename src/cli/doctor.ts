@@ -28,6 +28,7 @@ import {
   checkConfiguredHarnesses,
   expandSystemdPath,
   missingHarnesses,
+  resolvedHarnessBins,
   type HarnessAvailability,
 } from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
@@ -40,6 +41,7 @@ import {
   type NightlyState,
 } from "../lib/nightly.ts";
 import { currentPlatform } from "../lib/platform.ts";
+import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
   buildSystemctlEnv,
@@ -373,6 +375,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       harnessReport = await input.checkHarnesses();
     } else {
       harnessReport = await computeHarnessReport(config);
+    }
+    if (repair && harnessReport) {
+      await saveHarnessBins(resolvedHarnessBins(harnessReport.checks));
     }
   }
 

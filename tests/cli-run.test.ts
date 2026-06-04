@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planListeners, runRun } from "../src/cli/run.ts";
@@ -146,9 +146,10 @@ describe("runRun — early exits", () => {
     expect(err.text).toContain("phantombot harness");
   });
 
-  test("returns 2 before polling when configured harness binary is missing", async () => {
+  test("warns but keeps running when a configured harness binary is missing", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
+    let listenerStarted = false;
     const code = await runRun({
       config: {
         ...config,
@@ -163,13 +164,45 @@ describe("runRun — early exits", () => {
       },
       lockPath: join(workdir, "run.lock"),
       checkHarnesses: async () => [{ id: "pi", bin: "pi" }],
+      runTelegramServer: async () => {
+        listenerStarted = true;
+      },
       out,
       err,
     });
-    expect(code).toBe(2);
+    expect(code).toBe(0);
+    expect(listenerStarted).toBe(true);
     expect(err.text).toContain("configured harness binary not found");
     expect(err.text).toContain("pi: 'pi'");
-    expect(err.text).toContain("phantombot doctor");
+    expect(err.text).toContain("Phantombot will keep running");
+  });
+
+  test("persists resolved harness binaries before starting listeners", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: ["pi"] },
+        channels: {
+          telegram: {
+            token: "abc",
+            pollTimeoutS: 30,
+            allowedUserIds: [],
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      checkHarnesses: async () => [
+        { id: "pi", bin: "pi", resolved: "/opt/pi-node/bin/pi" },
+      ],
+      runTelegramServer: async () => {},
+      out,
+      err,
+    });
+
+    const state = JSON.parse(await readFile(join(workdir, "state.json"), "utf8"));
+    expect(state.harness_bins.pi).toBe("/opt/pi-node/bin/pi");
   });
 });
 

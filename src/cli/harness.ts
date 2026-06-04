@@ -15,6 +15,7 @@ import {
   restartCommand,
   type ServiceControl,
 } from "../lib/platform.ts";
+import { saveHarnessBins } from "../state.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
 
@@ -60,6 +61,7 @@ interface RunInput {
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const availability = input.availability ?? (await detectAvailability(config));
+  await saveHarnessBins(availability);
   const svc = input.serviceControl ?? defaultServiceControl();
 
   p.intro("Configure the harness chain");
