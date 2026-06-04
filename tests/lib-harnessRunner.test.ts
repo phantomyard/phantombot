@@ -245,7 +245,9 @@ describe("runHarnessProcess — regression: stdin blocking hang", () => {
         userMessage: "test",
       } as any,
       stdinPayload: largePayload,
-      parseActivity: () => "productive",
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
     });
 
     for await (const chunk of generator) {
