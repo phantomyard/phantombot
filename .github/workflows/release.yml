@@ -62,7 +62,8 @@ on:
     branches: [main]
 
 permissions:
-  contents: write   # create release + upload assets
+  contents: write        # create release + upload assets
+  pull-requests: read    # commits->pulls lookup for release title/notes audit trail
 
 jobs:
   release:
