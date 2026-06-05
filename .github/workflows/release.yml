@@ -1,9 +1,28 @@
 name: Release on PR merge
 
-# Fires for every PR merged into main. Cuts a GitHub Release tagged
+# Fires on every push to main (i.e. every PR merge — branch protection
+# requires PRs, so a push to main IS a merge). Cuts a GitHub Release tagged
 # v1.1.<RUN_NUMBER> with cross-compiled binaries (linux x64-baseline +
 # arm64, darwin x64 + arm64) and a SHA256SUMS file. `phantombot update`
 # reads this feed.
+#
+# Why `push: main` and NOT `pull_request: closed`: a PR merged from a
+# FORK runs the closed-PR workflow with a *read-only* GITHUB_TOKEN —
+# GitHub strips write scope from fork-triggered pull_request runs by
+# design, so `gh release create` 403s ("Resource not accessible by
+# integration"). This bit us on v1.1.100 (PR #151, the first external
+# fork contribution). A `push` to a branch in THIS repo always runs with
+# the base repo's full read-write token regardless of where the merged
+# code originated, because the merge commit already lives on main. We do
+# NOT use `pull_request_target` (the other fork-write option) on purpose:
+# it would run unreviewed fork code with secrets + write scope BEFORE
+# merge. push fires only AFTER review + merge, so the code is already trusted.
+#
+# The workflow `name:` is deliberately left as "Release on PR merge" and
+# the file path is unchanged: github.run_number is keyed to the workflow
+# file and must never regress (it IS the version number — see below), so
+# we avoid anything that could reset the counter. Every push to main is
+# still a PR merge, so the name stays accurate.
 #
 # Why github.run_number and not the PR number: PR numbers can regress
 # if a later-numbered PR is merged before an earlier-numbered one
@@ -39,23 +58,44 @@ name: Release on PR merge
 # AVX2 — see the SIGILL post-mortem from the May 2026 first deploy.
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
 
 permissions:
-  contents: write   # create release + upload assets
+  contents: write        # create release + upload assets
+  pull-requests: read    # commits->pulls lookup for release title/notes audit trail
 
 jobs:
   release:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout merge commit
+      - name: Checkout pushed commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          # github.sha on a push to main is the merge commit itself.
+          ref: ${{ github.sha }}
+
+      - name: Resolve originating PR (audit trail only)
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # On a push event there is no github.event.pull_request context,
+          # so recover the PR that introduced this merge commit from the
+          # commits→pulls API. This is best-effort: a direct push to main
+          # (no PR) yields an empty number, and the release still cuts —
+          # the PR ref is purely for the audit trail in the title/notes.
+          PR_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" 2>/dev/null || echo '[]')
+          NUMBER=$(echo "$PR_JSON" | jq -r '.[0].number // ""')
+          TITLE=$(echo "$PR_JSON" | jq -r '.[0].title // ""')
+          # Fall back to the commit subject if no PR was found.
+          if [ -z "$TITLE" ]; then
+            TITLE=$(git log -1 --pretty=%s)
+          fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "Resolved PR number='$NUMBER' title='$TITLE'"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -153,19 +193,30 @@ jobs:
       - name: Write release notes to file
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
+          SHA: ${{ github.sha }}
         run: |
+          # PR_NUMBER is empty for a direct push (no PR). Render the
+          # originating-PR lines only when we actually resolved one,
+          # otherwise point at the commit so the audit trail still holds.
+          if [ -n "$PR_NUMBER" ]; then
+            ORIGIN_LINE="Originating PR: #${PR_NUMBER} — ${PR_TITLE}"
+            PR_LINK_LINE="Pull request: ${SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+          else
+            ORIGIN_LINE="Originating commit: ${SHA} — ${PR_TITLE}"
+            PR_LINK_LINE="Commit: ${SERVER_URL}/${REPO}/commit/${SHA}"
+          fi
           cat > release-notes.md <<EOF
           Automated release from workflow run #${RUN_NUMBER} (run id ${RUN_ID}).
-          Originating PR: #${PR_NUMBER} — ${PR_TITLE}
+          ${ORIGIN_LINE}
 
           Build run: ${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}
-          Pull request: ${SERVER_URL}/${REPO}/pull/${PR_NUMBER}
+          ${PR_LINK_LINE}
 
           Binaries:
           - phantombot-${TAG}-linux-x64 — x86-64, baseline (no AVX2 required)
@@ -189,17 +240,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          SHA: ${{ github.sha }}
         run: |
-          # --target pins the git tag to the merge commit we built from.
-          # Without it, a second PR landing mid-workflow would shift the
+          # --target pins the git tag to the exact commit we built from.
+          # Without it, a second push landing mid-workflow would shift the
           # tag onto the wrong sha (binaries would still be correct, but
-          # `git checkout v1.0.N` would lie about what code is in there).
-          # Release title carries the PR number so the GitHub Releases UI
-          # surfaces the originating PR without having to open the notes.
+          # `git checkout v1.1.N` would lie about what code is in there).
+          # Release title carries the PR number when we resolved one so the
+          # GitHub Releases UI surfaces the originating PR without opening
+          # the notes; a direct push falls back to a plain tag title.
+          if [ -n "$PR_NUMBER" ]; then
+            TITLE="$TAG (PR #${PR_NUMBER})"
+          else
+            TITLE="$TAG"
+          fi
           gh release create "$TAG" \
-            --target "${{ github.event.pull_request.merge_commit_sha }}" \
-            --title "$TAG (PR #${PR_NUMBER})" \
+            --target "$SHA" \
+            --title "$TITLE" \
             --notes-file release-notes.md \
             "dist/phantombot-${TAG}-linux-x64" \
             "dist/phantombot-${TAG}-linux-arm64" \
