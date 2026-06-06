@@ -51,7 +51,7 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
 const WAKE_STREAM_PREVIEW_CHARS = 2000;
-const BACKGROUND_WAKE_HARD_TIMEOUT_MS = undefined;
+const BACKGROUND_WAKE_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function defaultTickLockPath(): string {
   return join(xdgStateHome(), "phantombot", "tick.lock");

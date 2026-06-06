@@ -385,7 +385,7 @@ describe("runTick — normal task fire", () => {
     expect(code).toBe(0);
     expect(harness.invocations).toBe(1);
     expect(harness.lastRequest?.idleTimeoutMs).toBe(config.harnessIdleTimeoutMs);
-    expect(harness.lastRequest?.hardTimeoutMs).toBeUndefined();
+    expect(harness.lastRequest?.hardTimeoutMs).toBe(30 * 60 * 1000);
     // The original prompt is still there...
     expect(harness.lastUserMessage).toContain("do the thing");
     // ...followed by the hygiene footer because there's no expiry.
