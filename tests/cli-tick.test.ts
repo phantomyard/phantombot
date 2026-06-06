@@ -189,6 +189,7 @@ describe("runTick — normal task fire", () => {
       { type: "done", finalText: "partial done" },
     ]);
     const capture = captureStdout();
+    const trap = installFetchTrap();
     try {
       await runTick({
         config,
@@ -201,9 +202,12 @@ describe("runTick — normal task fire", () => {
       });
     } finally {
       capture.restore();
+      trap.restore();
     }
 
     const logs = parseJsonLogLines(capture.lines);
+    const telegramCalls = trap.calls.filter((c) => isTelegramApiUrl(c.url));
+    expect(telegramCalls).toEqual([]);
     expect(logs).toContainEqual(expect.objectContaining({
       msg: "tick: background wake started",
       taskId: created.id,
