@@ -38,7 +38,7 @@ import { spawn } from "node:child_process";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
-import type { Harness } from "../harnesses/types.ts";
+import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -49,6 +49,8 @@ import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+
+const WAKE_STREAM_PREVIEW_CHARS = 2000;
 
 export function defaultTickLockPath(): string {
   return join(xdgStateHome(), "phantombot", "tick.lock");
@@ -136,6 +138,17 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       let finalText = "";
       let runError: string | undefined;
       let exitCode = 0;
+      const startedAt = Date.now();
+      if (!isCommandTask) {
+        log.info("tick: background wake started", {
+          taskId: task.id,
+          description: task.description,
+          persona: task.persona,
+          conversation,
+          runCount: task.runCount,
+          isReview,
+        });
+      }
       try {
         if (isCommandTask) {
           const result = await runCommandTask(task.command!, {
@@ -163,6 +176,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             idleTimeoutMs: config.harnessIdleTimeoutMs,
             hardTimeoutMs: config.harnessHardTimeoutMs,
           })) {
+            logBackgroundWakeChunk(task, conversation, chunk);
             if (chunk.type === "text") finalText += chunk.text;
             if (chunk.type === "done") finalText = chunk.finalText;
           }
@@ -174,6 +188,30 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           id: task.id,
           error: runError,
         });
+      }
+      if (!isCommandTask) {
+        const durationMs = Date.now() - startedAt;
+        const fields = {
+          taskId: task.id,
+          description: task.description,
+          persona: task.persona,
+          conversation,
+          runCount: task.runCount,
+          isReview,
+          durationMs,
+          outputChars: finalText.length,
+        };
+        if (runError) {
+          log.error("tick: background wake failed", {
+            ...fields,
+            error: redactForLog(runError),
+          });
+        } else {
+          log.info("tick: background wake completed", {
+            ...fields,
+            status: "ok",
+          });
+        }
       }
 
       // Log the fire to task_runs for auditability.
@@ -300,6 +338,82 @@ function appendCommandOutput(current: string, next: string): string {
   const combined = current + next;
   if (combined.length <= 4000) return combined;
   return `${combined.slice(0, 1900)}\n... output truncated ...\n${combined.slice(-1900)}`;
+}
+
+function logBackgroundWakeChunk(
+  task: Task,
+  conversation: string,
+  chunk: HarnessChunk,
+): void {
+  const fields = {
+    taskId: task.id,
+    description: task.description,
+    persona: task.persona,
+    conversation,
+    chunkType: chunk.type,
+  };
+
+  if (chunk.type === "text") {
+    log.info("tick: background wake stream", {
+      ...fields,
+      chars: chunk.text.length,
+      ...previewForLog(chunk.text),
+    });
+    return;
+  }
+
+  if (chunk.type === "progress") {
+    log.info("tick: background wake stream", {
+      ...fields,
+      chars: chunk.note.length,
+      ...previewForLog(chunk.note),
+    });
+    return;
+  }
+
+  if (chunk.type === "done") {
+    log.info("tick: background wake stream", {
+      ...fields,
+      chars: chunk.finalText.length,
+      ...previewForLog(chunk.finalText),
+      meta: chunk.meta,
+    });
+    return;
+  }
+
+  if (chunk.type === "error") {
+    log.warn("tick: background wake stream", {
+      ...fields,
+      recoverable: chunk.recoverable,
+      httpStatus: chunk.httpStatus,
+      chars: chunk.error.length,
+      ...previewForLog(chunk.error),
+    });
+    return;
+  }
+
+  log.debug("tick: background wake stream", fields);
+}
+
+export function previewForLog(text: string): {
+  preview: string;
+  truncated: boolean;
+} {
+  const redacted = redactForLog(text);
+  return {
+    preview: redacted.slice(0, WAKE_STREAM_PREVIEW_CHARS),
+    truncated: redacted.length > WAKE_STREAM_PREVIEW_CHARS,
+  };
+}
+
+function redactForLog(text: string): string {
+  return text
+    .replace(/\b(ghp|github_pat|sk|xox[baprs])[-_][-A-Za-z0-9_]{16,}\b/g, "$1_[REDACTED]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL_REDACTED]")
+    .replace(
+      /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK|KEY)[A-Z0-9_]*)\s*=\s*([^\s"'`]+)/gi,
+      "$1=[REDACTED]",
+    );
 }
 
 /**

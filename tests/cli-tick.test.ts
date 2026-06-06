@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runTick } from "../src/cli/tick.ts";
+import { previewForLog, runTick } from "../src/cli/tick.ts";
 import type { Config } from "../src/config.ts";
 import type {
   Harness,
@@ -48,6 +48,32 @@ function installFetchTrap(): { calls: FetchCall[]; restore: () => void } {
     });
   }) as typeof fetch;
   return { calls, restore: () => { globalThis.fetch = original; } };
+}
+
+function captureStdout(): {
+  lines: string[];
+  restore: () => void;
+} {
+  const lines: string[] = [];
+  const original = process.stdout.write;
+  process.stdout.write = ((chunk: unknown) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  return {
+    lines,
+    restore: () => {
+      process.stdout.write = original;
+    },
+  };
+}
+
+function parseJsonLogLines(lines: string[]): Array<Record<string, unknown>> {
+  return lines
+    .join("")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 class ScriptedHarness implements Harness {
@@ -148,6 +174,77 @@ describe("runTick — no-op cases", () => {
 });
 
 describe("runTick — normal task fire", () => {
+  test("background agent wake logs lifecycle and stream chunks without Telegram delivery", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const harness = new ScriptedHarness("h", [
+      { type: "progress", note: "checking repo" },
+      { type: "text", text: "partial " },
+      { type: "done", finalText: "partial done" },
+    ]);
+    const capture = captureStdout();
+    try {
+      await runTick({
+        config,
+        taskStore: store,
+        memory,
+        harnesses: [harness],
+        lockPath,
+        out: { write() {} },
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+    } finally {
+      capture.restore();
+    }
+
+    const logs = parseJsonLogLines(capture.lines);
+    expect(logs).toContainEqual(expect.objectContaining({
+      msg: "tick: background wake started",
+      taskId: created.id,
+      persona: "phantom",
+      conversation: `tick:${created.id}`,
+      isReview: false,
+    }));
+    expect(logs).toContainEqual(expect.objectContaining({
+      msg: "tick: background wake stream",
+      taskId: created.id,
+      chunkType: "progress",
+      preview: "checking repo",
+      truncated: false,
+    }));
+    expect(logs).toContainEqual(expect.objectContaining({
+      msg: "tick: background wake stream",
+      taskId: created.id,
+      chunkType: "text",
+      preview: "partial ",
+      chars: 8,
+    }));
+    expect(logs).toContainEqual(expect.objectContaining({
+      msg: "tick: background wake completed",
+      taskId: created.id,
+      status: "ok",
+      outputChars: 12,
+    }));
+  });
+
+  test("background wake previews redact obvious secrets and cap long chunks", () => {
+    const token = "ghp_" + "a".repeat(36);
+    const preview = previewForLog(
+      `GITHUB_TOKEN=${token} email andrew@example.com ${"x".repeat(2100)}`,
+    );
+    expect(preview.truncated).toBe(true);
+    expect(preview.preview).toContain("GITHUB_TOKEN=[REDACTED]");
+    expect(preview.preview).toContain("[EMAIL_REDACTED]");
+    expect(preview.preview).not.toContain(token);
+    expect(preview.preview.length).toBeLessThanOrEqual(2000);
+  });
+
   test("command-backed due task gets only explicitly requested secrets", async () => {
     const oldSecret = process.env.PHANTOMBOT_TEST_SECRET;
     const oldOther = process.env.PHANTOMBOT_TEST_OTHER_SECRET;
