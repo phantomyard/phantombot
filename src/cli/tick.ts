@@ -51,6 +51,7 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
 const WAKE_STREAM_PREVIEW_CHARS = 2000;
+const BACKGROUND_WAKE_HARD_TIMEOUT_MS = undefined;
 
 export function defaultTickLockPath(): string {
   return join(xdgStateHome(), "phantombot", "tick.lock");
@@ -174,7 +175,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             harnesses,
             memory,
             idleTimeoutMs: config.harnessIdleTimeoutMs,
-            hardTimeoutMs: config.harnessHardTimeoutMs,
+            hardTimeoutMs: BACKGROUND_WAKE_HARD_TIMEOUT_MS,
           })) {
             logBackgroundWakeChunk(task, conversation, chunk);
             if (chunk.type === "text") finalText += chunk.text;

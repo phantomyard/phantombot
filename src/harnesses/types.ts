@@ -43,9 +43,11 @@ export interface HarnessRequest {
   /**
    * Hard wall-clock ceiling. Kills the subprocess regardless of activity.
    * Guards against runaway agents that legitimately keep the idle timer
-   * fed but never converge on a final reply.
+   * fed but never converge on a final reply. Omit only for scheduler wakes
+   * where the agent must be allowed to finish the promised background work;
+   * idle timeout and explicit abort still protect genuinely wedged turns.
    */
-  hardTimeoutMs: number;
+  hardTimeoutMs?: number;
   /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
   /**

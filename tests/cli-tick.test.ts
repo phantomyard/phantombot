@@ -79,6 +79,7 @@ function parseJsonLogLines(lines: string[]): Array<Record<string, unknown>> {
 class ScriptedHarness implements Harness {
   invocations = 0;
   lastUserMessage?: string;
+  lastRequest?: HarnessRequest;
   constructor(
     public readonly id: string,
     private readonly script: HarnessChunk[],
@@ -89,6 +90,7 @@ class ScriptedHarness implements Harness {
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     this.lastUserMessage = req.userMessage;
+    this.lastRequest = req;
     for (const c of this.script) yield c;
   }
 }
@@ -382,6 +384,8 @@ describe("runTick — normal task fire", () => {
     });
     expect(code).toBe(0);
     expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.idleTimeoutMs).toBe(config.harnessIdleTimeoutMs);
+    expect(harness.lastRequest?.hardTimeoutMs).toBeUndefined();
     // The original prompt is still there...
     expect(harness.lastUserMessage).toContain("do the thing");
     // ...followed by the hygiene footer because there's no expiry.
