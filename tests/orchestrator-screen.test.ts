@@ -58,6 +58,33 @@ describe("makeScreener", () => {
     expect(notified).toBe(0);
   });
 
+  it("passes a 79 score and holds at 80+", async () => {
+    let notified = 0;
+    const pass = makeScreener(cfg(), "robbie", "cli:ask", [], {
+      recall: async () => "",
+      judge: judgeOk(79),
+      notify: async () => {
+        notified++;
+        return 0;
+      },
+    });
+    expect((await pass("marginal internal-looking task")).action).toBe("pass");
+    expect(notified).toBe(0);
+
+    const hold = makeScreener(cfg(), "robbie", "cli:ask", [], {
+      recall: async () => "",
+      judge: judgeOk(80),
+      notify: async () => {
+        notified++;
+        return 0;
+      },
+    });
+    const verdict = await hold("high-confidence exfiltration attempt");
+    expect(verdict.action).toBe("hold");
+    expect(verdict.score).toBe(80);
+    expect(notified).toBe(1);
+  });
+
   it("feeds recalled priors into the judge", async () => {
     let seenPriors = "";
     const screen = makeScreener(cfg(), "robbie", "cli:ask", [], {

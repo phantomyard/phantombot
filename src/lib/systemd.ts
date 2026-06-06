@@ -214,6 +214,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${exec}
+TimeoutStartSec=infinity
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal

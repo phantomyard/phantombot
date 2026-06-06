@@ -58,7 +58,7 @@ import type { Config } from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 
 /** At or above this score, escalate to the principal. */
-export const THREAT_THRESHOLD = 51;
+export const THREAT_THRESHOLD = 80;
 
 export interface ThreatVerdict {
   /** Score 0–100. >= THREAT_THRESHOLD ⇒ escalate to the principal. */

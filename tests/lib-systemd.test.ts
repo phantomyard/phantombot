@@ -16,6 +16,7 @@ import {
   ensureUnitCurrent,
   ensureUserSystemdEnv,
   generateSystemdUnit,
+  generateTickService,
   installPhantombotUnit,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
@@ -147,6 +148,11 @@ describe("generateSystemdUnit", () => {
       "%h/.local/share/pi-node/current/bin",
     );
     expect(u).toContain(`Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"`);
+  });
+
+  test("tick service disables systemd start timeout so scheduled wakes can finish", () => {
+    const u = generateTickService("/home/kai/.local/bin/phantombot");
+    expect(u).toContain("TimeoutStartSec=infinity");
   });
 });
 

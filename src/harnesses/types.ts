@@ -45,7 +45,7 @@ export interface HarnessRequest {
    * Guards against runaway agents that legitimately keep the idle timer
    * fed but never converge on a final reply.
    */
-  hardTimeoutMs: number;
+  hardTimeoutMs?: number;
   /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
   /**
