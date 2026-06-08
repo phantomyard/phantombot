@@ -136,7 +136,7 @@ export default defineCommand({
   },
   subCommands: {
     set: defineCommand({
-      meta: { name: "set", description: "Set NAME=value in ~/.env." },
+      meta: { name: "set", description: "Add or update the NAME=value entry in ~/.env." },
       args: {
         name: { type: "positional", required: true, description: "Env var name (e.g. GITHUB_TOKEN)" },
         value: { type: "positional", required: true, description: "Value to store" },
