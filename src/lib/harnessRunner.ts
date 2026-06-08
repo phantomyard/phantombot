@@ -5,7 +5,7 @@
  *
  *   - spawn the binary in a fresh process group (so grandchildren die too)
  *   - run an idle timer that resets on useful activity from stdout
- *   - run a hard wall-clock timer that never resets
+ *   - optionally run a hard wall-clock timer that never resets
  *   - listen for an external AbortSignal (the user typed /stop)
  *   - on any of those firing, SIGTERM → 5s grace → SIGKILL the whole group
  *
@@ -48,8 +48,8 @@ export interface KillCoordinatorOpts {
   proc: HarnessSubprocess;
   /** Kill if no chunk seen for this long. Resets via touch(). */
   idleTimeoutMs: number;
-  /** Hard wall-clock cap. Never resets. */
-  hardTimeoutMs: number;
+  /** Hard wall-clock cap. Never resets. Omit to disable the wall-clock SIGTERM. */
+  hardTimeoutMs?: number;
   /** External abort, e.g. user typed /stop. */
   signal?: AbortSignal;
   /** For log lines only. */
@@ -87,7 +87,7 @@ export function createKillCoordinator(
     cause = newCause;
     log.warn(`${opts.harnessId}.invoke killed: ${newCause}`, {
       idleTimeoutMs: opts.idleTimeoutMs,
-      hardTimeoutMs: opts.hardTimeoutMs,
+      hardTimeoutMs: opts.hardTimeoutMs ?? "disabled",
     });
     // Fire-and-forget; the for-await over stdout will end naturally as
     // the kernel closes the pipe after SIGKILL.
@@ -98,10 +98,10 @@ export function createKillCoordinator(
     () => triggerKill("idle"),
     opts.idleTimeoutMs,
   );
-  const hardTimer: ReturnType<typeof setTimeout> = setTimeout(
-    () => triggerKill("timeout"),
-    opts.hardTimeoutMs,
-  );
+  const hardTimer: ReturnType<typeof setTimeout> | undefined =
+    opts.hardTimeoutMs === undefined
+      ? undefined
+      : setTimeout(() => triggerKill("timeout"), opts.hardTimeoutMs);
 
   const onAbort = (): void => triggerKill("aborted");
   if (opts.signal) {
@@ -132,7 +132,7 @@ export function createKillCoordinator(
       if (disposed) return;
       disposed = true;
       clearTimeout(idleTimer);
-      clearTimeout(hardTimer);
+      if (hardTimer) clearTimeout(hardTimer);
       if (opts.signal && !opts.signal.aborted) {
         opts.signal.removeEventListener("abort", onAbort);
       }
@@ -154,7 +154,7 @@ export function createKillCoordinator(
 export function killCauseToErrorChunk(
   cause: KillCause,
   harnessId: string,
-  hardTimeoutMs: number,
+  hardTimeoutMs: number | undefined,
   idleTimeoutMs: number,
 ):
   | { type: "error"; error: string; recoverable: boolean }
@@ -162,7 +162,7 @@ export function killCauseToErrorChunk(
   if (cause === "timeout") {
     return {
       type: "error",
-      error: `${harnessId} timed out after ${hardTimeoutMs}ms (hard wall-clock cap)`,
+      error: `${harnessId} timed out after ${hardTimeoutMs ?? "unknown"}ms (hard wall-clock cap)`,
       recoverable: true,
     };
   }

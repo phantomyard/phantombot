@@ -61,7 +61,7 @@ export interface TurnInput {
   /** Kill subprocess after this long with no chunk on stdout. Resets per chunk. */
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
-  hardTimeoutMs: number;
+  hardTimeoutMs?: number;
   /** Number of prior turns to load. Default 30. */
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
