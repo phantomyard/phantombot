@@ -1121,6 +1121,31 @@ export async function runTelegramServer(
         tg.pollTimeoutS,
         input.signal,
       );
+      // DELIBERATE DESIGN CHOICE — at-most-once delivery, not at-least-once.
+      //
+      // We advance the offset HERE, before the loop below enqueues per-chat
+      // turns fire-and-forget. The next getUpdates therefore acks these updates
+      // to Telegram even though their turns may still be in flight. A crash or
+      // SIGTERM with turns unfinished will drop those messages: Telegram
+      // considers them delivered and they are never reprocessed.
+      //
+      // This is intentional and is the RIGHT trade-off for this product. A
+      // phantom is a conversational agent, not a durable task queue. Users are
+      // mid-conversation with their agent — they are not submitting jobs to a
+      // waterfall worklist that must each be guaranteed to run exactly once.
+      // What matters here is concurrency and responsiveness: advancing the
+      // offset immediately lets us poll the next batch and fan messages out to
+      // independent per-chat turns without serializing the whole bot behind the
+      // slowest in-flight turn. Blocking the poller until every turn durably
+      // completed — or building a persistent inbox / ack-watermark + dedup
+      // layer to get true at-least-once — would buy crash-replay of the rare
+      // dropped message at the cost of the snappy, concurrent, fire-and-forget
+      // experience that defines the agent. We choose the experience.
+      //
+      // In the worst case (process dies mid-turn) a user re-sends "you there?"
+      // and the conversation continues. That is an acceptable, calculated loss.
+      // Do NOT "fix" this by moving the offset advance below the loop or gating
+      // it on turn completion without first re-litigating this trade-off.
       offset = nextOffset;
 
       for (const msg of updates) {
