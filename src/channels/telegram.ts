@@ -695,6 +695,32 @@ export function extractReplyTo(
 }
 
 /**
+ * Neutralize untrusted text before it goes INSIDE one of our bracketed
+ * `[...]` envelope markers (#161, item f).
+ *
+ * We frame attachments, reply-quotes and group catch-up as `[in reply to …]`
+ * / `[Recent group messages … ]` so the agent reads them as TRUSTED STRUCTURE,
+ * not free-form user prose. But the fields we interpolate — a quoted message
+ * body, a Telegram display name / @username — are ATTACKER-CONTROLLED. A name
+ * or quote containing a literal `]` (or a newline, in the multi-line group
+ * envelope) could close our marker early and forge a fake one after it,
+ * smuggling spoofed "system" structure into the agent's context.
+ *
+ * So in untrusted fields we (a) collapse all whitespace incl. newlines to a
+ * single space, and (b) swap ASCII square brackets for their fullwidth
+ * look-alikes ［］ — visually identical to a human, but they can NOT be parsed
+ * as our ASCII envelope delimiters. Content meaning is preserved; the ability
+ * to forge structure is removed.
+ */
+export function sanitizeEnvelopeField(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\[/g, "［")
+    .replace(/\]/g, "］")
+    .trim();
+}
+
+/**
  * Render a single bracketed line describing the message the user
  * tapped "Reply" on. Mirrors the `[attached: <path>]` convention so the
  * agent reads it as a structured envelope marker, not as free-form
@@ -707,9 +733,9 @@ export function formatReplyToContext(replyTo: TelegramReplyTo): string {
   if (replyTo.text.length === 0) {
     return `[in reply to ${who} (no text content)]`;
   }
-  // Collapse whitespace so a multi-line quoted message doesn't break
-  // the single-line envelope marker shape.
-  const snippet = replyTo.text.replace(/\s+/g, " ").trim();
+  // Sanitize: collapse whitespace AND neutralize brackets so a crafted quote
+  // can't forge envelope structure. (#161, item f)
+  const snippet = sanitizeEnvelopeField(replyTo.text);
   return `[in reply to ${who}: "${snippet}"]`;
 }
 
@@ -892,8 +918,11 @@ export function decideGroupReply(input: {
 export function formatGroupContext(
   entries: { from: string; text: string }[],
 ): string {
+  // Both the sender label and the body are attacker-controlled; sanitize each
+  // so a crafted username or message can't inject a newline + forged `]` that
+  // closes this multi-line envelope early. (#161, item f)
   const lines = entries
-    .map((e) => `${e.from}: ${e.text}`.trim())
+    .map((e) => `${sanitizeEnvelopeField(e.from)}: ${sanitizeEnvelopeField(e.text)}`.trim())
     .filter((l) => l.length > 0);
   if (lines.length === 0) return "";
   return [
