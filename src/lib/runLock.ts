@@ -9,13 +9,36 @@
  * Lock file lives at $XDG_RUNTIME_DIR/phantombot.run.lock if available
  * (tmpfs, cleaned on reboot — ideal), else /tmp/phantombot-<uid>.run.lock.
  *
- * Acquisition: O_EXCL create with our PID inside. On EEXIST, read the
- * existing PID and check via `process.kill(pid, 0)` whether the holder
- * is still alive. If dead (stale lock from a crash), reclaim. If alive,
- * report the conflict.
+ * Acquisition: O_EXCL create with our identity inside. On EEXIST, read the
+ * existing holder and decide whether it's still alive (reclaim if not).
+ *
+ * ── PID REUSE — why we record more than a bare PID (item d) ──
+ * Liveness used to be a bare `process.kill(pid, 0)`. That has a nasty failure
+ * mode: PIDs are recycled. If phantombot crashes holding the lock and the OS
+ * later hands that same numeric PID to some UNRELATED process (a cron job, a
+ * shell, anything), `kill(pid,0)` succeeds and we conclude "the lock is still
+ * held" — forever. phantombot then refuses to start, with no real conflict.
+ *
+ * Fix: alongside the PID we record a process-INSTANCE token — the kernel boot
+ * id plus the process start-time from /proc/<pid>/stat. PID + boot + start-time
+ * uniquely identifies one process instance; a recycled PID has a DIFFERENT
+ * start-time, so we can tell "the original phantombot is alive" from "a
+ * stranger inherited its PID" and reclaim the stale lock in the latter case.
+ *
+ * The token is best-effort and Linux-specific (/proc). On platforms where we
+ * can't read it (macOS dev boxes), we degrade to the old PID-only liveness
+ * check — no worse than before, and those aren't the always-on production host.
  */
 
-import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync, closeSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeSync,
+  closeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface LockHandle {
@@ -40,9 +63,28 @@ export function defaultLockPath(): string {
 }
 
 /**
+ * The lock file payload: PID on line 1, instance token on line 2.
+ * The token may be empty when /proc isn't available — callers tolerate that.
+ */
+function lockPayload(): string {
+  return `${process.pid}\n${processInstanceToken(process.pid) ?? ""}`;
+}
+
+interface ParsedLock {
+  pid: number;
+  /** Instance token recorded at lock time, or "" if none was written. */
+  token: string;
+}
+
+function parseLock(raw: string): ParsedLock {
+  const [pidLine = "", tokenLine = ""] = raw.split("\n");
+  return { pid: Number(pidLine.trim()), token: tokenLine.trim() };
+}
+
+/**
  * Try to acquire the lock. Returns either a LockHandle (success) or a
- * LockConflict (another process holds it). Stale locks (PID dead) are
- * reclaimed transparently.
+ * LockConflict (another process holds it). Stale locks (holder dead, or a
+ * recycled PID) are reclaimed transparently.
  */
 export function acquireRunLock(path: string): LockHandle | LockConflict {
   mkdirSync(dirname(path), { recursive: true });
@@ -50,7 +92,7 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
   const tryCreate = (): boolean => {
     try {
       const fd = openSync(path, "wx"); // O_CREAT | O_EXCL
-      writeSync(fd, String(process.pid));
+      writeSync(fd, lockPayload());
       closeSync(fd);
       return true;
     } catch (e) {
@@ -62,18 +104,22 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
   if (tryCreate()) return makeHandle(path);
 
   // Lock exists. Inspect the holder.
-  let holderPid = NaN;
+  let holder: ParsedLock = { pid: NaN, token: "" };
   try {
-    holderPid = Number(readFileSync(path, "utf8").trim());
+    holder = parseLock(readFileSync(path, "utf8"));
   } catch {
     // File disappeared between our create attempt and the read — race.
   }
 
-  if (Number.isInteger(holderPid) && holderPid > 0 && pidIsAlive(holderPid)) {
-    return { path, pid: holderPid };
+  if (
+    Number.isInteger(holder.pid) &&
+    holder.pid > 0 &&
+    holderIsAlive(holder)
+  ) {
+    return { path, pid: holder.pid };
   }
 
-  // Stale (or unreadable). Try to reclaim.
+  // Stale (holder dead, recycled PID, or unreadable). Try to reclaim.
   try {
     unlinkSync(path);
   } catch {
@@ -84,11 +130,11 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
   // Race lost — someone grabbed it between our unlink and our create.
   // Read the current holder PID one more time and report.
   try {
-    holderPid = Number(readFileSync(path, "utf8").trim());
+    holder = parseLock(readFileSync(path, "utf8"));
   } catch {
-    holderPid = NaN;
+    holder = { pid: NaN, token: "" };
   }
-  return { path, pid: Number.isInteger(holderPid) ? holderPid : NaN };
+  return { path, pid: Number.isInteger(holder.pid) ? holder.pid : NaN };
 }
 
 function makeHandle(path: string): LockHandle {
@@ -101,13 +147,33 @@ function makeHandle(path: string): LockHandle {
       try {
         // Only remove if the file still has OUR pid; never clobber a
         // successor's lock (rare race).
-        const content = readFileSync(path, "utf8").trim();
-        if (Number(content) === process.pid) unlinkSync(path);
+        const { pid } = parseLock(readFileSync(path, "utf8"));
+        if (pid === process.pid) unlinkSync(path);
       } catch {
         /* fine — already gone or unreadable */
       }
     },
   };
+}
+
+/**
+ * Is the recorded holder genuinely still the process that took the lock?
+ *
+ * Two-part test:
+ *   1. The PID must be alive (kill(pid,0)).
+ *   2. If we recorded an instance token AND can compute the current token for
+ *      that PID, they must MATCH. A mismatch means the PID was recycled to a
+ *      different process — the original holder is gone, the lock is stale.
+ *
+ * When no token was recorded, or we can't read /proc (non-Linux), we fall back
+ * to bare liveness — the historical behaviour.
+ */
+function holderIsAlive(holder: ParsedLock): boolean {
+  if (!pidIsAlive(holder.pid)) return false;
+  if (!holder.token) return true; // no nonce recorded → can't disprove liveness
+  const current = processInstanceToken(holder.pid);
+  if (current === undefined) return true; // can't compute → don't false-positive a kill
+  return current === holder.token;
 }
 
 function pidIsAlive(pid: number): boolean {
@@ -117,6 +183,43 @@ function pidIsAlive(pid: number): boolean {
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     return code === "EPERM"; // exists but not ours; still alive
+  }
+}
+
+/** Kernel boot id, read once. Distinguishes process instances across reboots. */
+let cachedBootId: string | undefined | null = null;
+function bootId(): string | undefined {
+  if (cachedBootId !== null) return cachedBootId ?? undefined;
+  try {
+    cachedBootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    cachedBootId = undefined;
+  }
+  return cachedBootId ?? undefined;
+}
+
+/**
+ * A token that uniquely identifies a running process instance: boot id +
+ * the process start-time (field 22 of /proc/<pid>/stat, in clock ticks since
+ * boot). Recycled PIDs get a different start-time, so the token changes.
+ *
+ * Returns undefined when /proc isn't available (e.g. macOS) — callers treat
+ * that as "fall back to bare PID liveness".
+ */
+function processInstanceToken(pid: number): string | undefined {
+  const boot = bootId();
+  if (boot === undefined) return undefined;
+  try {
+    // The comm field (in parens) can contain spaces/parens, so anchor parsing
+    // on the LAST ')' and split the remainder; starttime is field 22 overall,
+    // i.e. index 19 of the post-')' fields (state is field 3 / index 0).
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    const starttime = after[19];
+    if (!starttime) return undefined;
+    return `${boot}:${starttime}`;
+  } catch {
+    return undefined;
   }
 }
 

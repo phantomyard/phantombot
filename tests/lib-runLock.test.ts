@@ -33,7 +33,7 @@ describe("acquireRunLock", () => {
     const r = acquireRunLock(path);
     if (!isLockHandle(r)) throw new Error("expected lock handle");
     expect(existsSync(path)).toBe(true);
-    expect(Number(readFileSync(path, "utf8"))).toBe(process.pid);
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
     r.release();
     expect(existsSync(path)).toBe(false);
   });
@@ -53,7 +53,7 @@ describe("acquireRunLock", () => {
     writeFileSync(path, "999999");
     const r = acquireRunLock(path);
     if (!isLockHandle(r)) throw new Error("expected reclaim");
-    expect(Number(readFileSync(path, "utf8"))).toBe(process.pid);
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
     r.release();
   });
 
@@ -62,7 +62,7 @@ describe("acquireRunLock", () => {
     writeFileSync(path, "not-a-pid");
     const r = acquireRunLock(path);
     if (!isLockHandle(r)) throw new Error("expected reclaim");
-    expect(Number(readFileSync(path, "utf8"))).toBe(process.pid);
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
     r.release();
   });
 
@@ -84,7 +84,35 @@ describe("acquireRunLock", () => {
     r.release();
     // The file should NOT have been removed since the pid inside isn't ours.
     expect(existsSync(path)).toBe(true);
-    expect(Number(readFileSync(path, "utf8"))).toBe(12345);
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(12345);
+  });
+
+  // ── PID-reuse guard (item d) ──
+  // On Linux the lock records boot-id + start-time. A lock that names our live
+  // PID but carries a DIFFERENT instance token represents a recycled PID — the
+  // original holder is gone — and must be reclaimed, not treated as a conflict.
+  test("reclaims a lock whose PID is live but instance token mismatches (recycled PID)", () => {
+    const onLinux = existsSync("/proc/sys/kernel/random/boot_id");
+    if (!onLinux) return; // token guard is /proc-specific; nothing to assert off Linux
+    const path = join(workdir, "run.lock");
+    // Our real, live PID but a bogus token → looks like a recycled PID.
+    writeFileSync(path, `${process.pid}\nbogus-boot:0`);
+    const r = acquireRunLock(path);
+    if (!isLockHandle(r)) throw new Error("expected reclaim of recycled-PID lock");
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
+    r.release();
+  });
+
+  test("still conflicts when PID is live and token matches (genuine holder)", () => {
+    const path = join(workdir, "run.lock");
+    // First acquire writes our real pid + our real token, then a second
+    // acquire on the same path must see a genuine live holder and conflict.
+    const first = acquireRunLock(path);
+    if (!isLockHandle(first)) throw new Error("expected initial lock");
+    const second = acquireRunLock(path);
+    expect(isLockHandle(second)).toBe(false);
+    if (!isLockHandle(second)) expect(second.pid).toBe(process.pid);
+    first.release();
   });
 });
 
