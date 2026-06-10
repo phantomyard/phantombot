@@ -36,6 +36,24 @@ async function note(rel: string, content: string) {
   await writeFile(join(personaDir, rel), content);
 }
 
+describe("MemoryIndex.open", () => {
+  test("applies busy_timeout before schema setup (file-backed)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-mi-open-"));
+    const index = await MemoryIndex.open(join(dir, "index.sqlite"));
+    try {
+      // busy_timeout is connection-scoped (not persisted to the file), so we
+      // read it back off the index's own db handle. If it were still set after
+      // db.exec(SCHEMA), the first schema statements would be unprotected.
+      const db = (index as unknown as { db: { query: (sql: string) => { get: () => Record<string, number> } } }).db;
+      const row = db.query("PRAGMA busy_timeout").get();
+      expect(Object.values(row)[0]).toBe(5000);
+    } finally {
+      index.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("sanitizeFtsQuery", () => {
   test("strips special chars and quotes each token", () => {
     expect(sanitizeFtsQuery('hello world')).toBe('"hello" "world"');

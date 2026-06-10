@@ -154,11 +154,11 @@ CREATE TABLE IF NOT EXISTS turn_index_state (
 
 export class MemoryIndex {
   constructor(private readonly db: Database) {
+    // Pragmas must already be applied on `db` before this runs (see open()).
+    // busy_timeout in particular has to be set before the very first
+    // statement, or schema setup itself can throw SQLITE_BUSY when another
+    // process touches the index DB concurrently.
     db.exec(SCHEMA);
-    db.exec("PRAGMA journal_mode = WAL");
-    // Shared across processes (tick reindex vs. run query): block-and-retry
-    // on a busy writer instead of an immediate SQLITE_BUSY throw. See store.ts.
-    db.exec("PRAGMA busy_timeout = 5000");
   }
 
   static async open(indexPath: string): Promise<MemoryIndex> {
@@ -166,6 +166,13 @@ export class MemoryIndex {
       await mkdir(dirname(indexPath), { recursive: true });
     }
     const db = new Database(indexPath, { create: true });
+    // Apply pragmas BEFORE constructing (which runs schema setup). The index
+    // DB is shared across processes (tick reindex vs. run query); without
+    // busy_timeout the first concurrent writer — including schema setup —
+    // gets an immediate SQLITE_BUSY throw instead of block-and-retry.
+    // See store.ts for the same ordering.
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA busy_timeout = 5000");
     return new MemoryIndex(db);
   }
 
