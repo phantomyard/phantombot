@@ -51,6 +51,15 @@ export interface AppendCaptureInput {
 export interface MemoryStore {
   /** Persist one turn. Auto-stamps created_at to "now" UTC. */
   appendTurn(turn: AppendTurnInput): Promise<void>;
+  /**
+   * Persist a user+assistant turn pair atomically: both rows land or
+   * neither does. Guards against a crash between the two inserts leaving
+   * a half-turn (user with no assistant reply) in history.
+   */
+  appendTurnPair(
+    userTurn: AppendTurnInput,
+    assistantTurn: AppendTurnInput,
+  ): Promise<void>;
   /** Most recent N turns within (persona, conversation), oldest first. */
   recentTurns(
     persona: string,
@@ -153,6 +162,7 @@ class SqliteMemoryStore implements MemoryStore {
   private countUserTurnsStmt;
   private countTurnsSinceStmt;
   private countCapturesSinceStmt;
+  private appendPairTxn;
   private closed = false;
 
   constructor(private db: Database) {
@@ -210,6 +220,15 @@ class SqliteMemoryStore implements MemoryStore {
       `SELECT COUNT(*) AS n FROM capture_log
        WHERE persona = ? AND created_at >= ?`,
     );
+    // Atomic user+assistant pair insert. Both rows share the same
+    // created_at; ordering tiebreaks on the autoincrement id, so the
+    // user turn (inserted first) always sorts before the assistant turn.
+    this.appendPairTxn = db.transaction(
+      (u: AppendTurnInput, a: AppendTurnInput, ts: string) => {
+        this.appendStmt.run(u.persona, u.conversation, u.role, u.text, ts);
+        this.appendStmt.run(a.persona, a.conversation, a.role, a.text, ts);
+      },
+    );
   }
 
   async appendTurn(t: AppendTurnInput): Promise<void> {
@@ -218,6 +237,21 @@ class SqliteMemoryStore implements MemoryStore {
       t.conversation,
       t.role,
       t.text,
+      new Date().toISOString(),
+    );
+  }
+
+  async appendTurnPair(
+    userTurn: AppendTurnInput,
+    assistantTurn: AppendTurnInput,
+  ): Promise<void> {
+    // `.immediate` takes the write lock at BEGIN rather than on first
+    // write, so a concurrent writer in another process (tick vs run)
+    // blocks-and-retries (busy_timeout) instead of racing into the
+    // read→upgrade deadlock a deferred transaction would risk.
+    this.appendPairTxn.immediate(
+      userTurn,
+      assistantTurn,
       new Date().toISOString(),
     );
   }

@@ -25,6 +25,40 @@ async function append(
   await store.appendTurn({ persona, conversation, role, text });
 }
 
+describe("MemoryStore.appendTurnPair (atomic)", () => {
+  test("persists both rows, user before assistant", async () => {
+    await store.appendTurnPair(
+      { persona: "phantom", conversation: "c", role: "user", text: "q" },
+      { persona: "phantom", conversation: "c", role: "assistant", text: "a" },
+    );
+    const turns = await store.recentTurns("phantom", "c", 10);
+    expect(turns).toEqual([
+      { role: "user", text: "q" },
+      { role: "assistant", text: "a" },
+    ]);
+  });
+
+  test("rolls back fully if the second insert fails — no half-turn", async () => {
+    // A bad bind on the assistant turn makes the second INSERT throw mid
+    // transaction. The user turn must NOT survive: that half-turn (user
+    // with no reply) is exactly what the atomic pair is meant to prevent.
+    await expect(
+      store.appendTurnPair(
+        { persona: "phantom", conversation: "c", role: "user", text: "q" },
+        {
+          persona: "phantom",
+          conversation: "c",
+          role: "assistant",
+          // biome-ignore lint: deliberately invalid to force a bind failure
+          text: {} as unknown as string,
+        },
+      ),
+    ).rejects.toThrow();
+    const turns = await store.recentTurns("phantom", "c", 10);
+    expect(turns).toEqual([]);
+  });
+});
+
 describe("MemoryStore.appendTurn / recentTurns", () => {
   test("returns empty array when nothing has been written", async () => {
     const turns = await store.recentTurns("phantom", "cli:default", 10);

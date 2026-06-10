@@ -252,18 +252,20 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
   }
 
   if (succeeded && !input.noHistory) {
-    await input.memory.appendTurn({
-      persona: input.persona,
-      conversation: input.conversation,
-      role: "user",
-      text: input.userMessage,
-    });
-    await input.memory.appendTurn({
-      persona: input.persona,
-      conversation: input.conversation,
-      role: "assistant",
-      text: finalText,
-    });
+    await input.memory.appendTurnPair(
+      {
+        persona: input.persona,
+        conversation: input.conversation,
+        role: "user",
+        text: input.userMessage,
+      },
+      {
+        persona: input.persona,
+        conversation: input.conversation,
+        role: "assistant",
+        text: finalText,
+      },
+    );
     if (input.indexTurns) {
       try {
         await input.indexTurns();

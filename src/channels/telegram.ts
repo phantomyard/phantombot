@@ -1956,18 +1956,20 @@ async function processChatMessage(
     //                             completed; nothing meaningful to log.
     if (reason !== "reset" && msg.text.length > 0) {
       try {
-        await input.memory.appendTurn({
-          persona: input.persona,
-          conversation: `telegram:${msg.chatId}`,
-          role: "user",
-          text: msg.text,
-        });
-        await input.memory.appendTurn({
-          persona: input.persona,
-          conversation: `telegram:${msg.chatId}`,
-          role: "assistant",
-          text: "[interrupted before reply]",
-        });
+        await input.memory.appendTurnPair(
+          {
+            persona: input.persona,
+            conversation: `telegram:${msg.chatId}`,
+            role: "user",
+            text: msg.text,
+          },
+          {
+            persona: input.persona,
+            conversation: `telegram:${msg.chatId}`,
+            role: "assistant",
+            text: "[interrupted before reply]",
+          },
+        );
       } catch (e) {
         log.warn("telegram: failed to persist interrupted-pair", {
           chatId: msg.chatId,
