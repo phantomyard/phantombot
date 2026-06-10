@@ -362,44 +362,42 @@ export class TaskStore {
    * For recurring with maxRuns: deactivates if runCount >= maxRuns.
    */
   recordRun(id: number, now: Date = new Date()): void {
-    const t = this.get(id);
-    if (!t) return;
+    // Read-modify-write must be atomic: tick can fire concurrently across
+    // processes, and a stale-snapshot read + precomputed run_count write
+    // would let two runs both bind `runCount + 1` and lose a count. We
+    // hold the write lock for the whole transaction (`.immediate`) and
+    // increment run_count SQL-side in every branch, so the count is always
+    // exact and the maxRuns/one-off deactivation decision is consistent
+    // with the value actually written.
+    this.db.transaction(() => {
+      const t = this.get(id);
+      if (!t) return;
 
-    const nextRunCount = t.runCount + 1;
+      const nowIso = now.toISOString();
+      const nextRunCount = t.runCount + 1;
 
-    // Check maxRuns — deactivate if hit.
-    if (t.maxRuns !== undefined && nextRunCount >= t.maxRuns) {
+      // maxRuns hit, or one-off: deactivate after this run.
+      if ((t.maxRuns !== undefined && nextRunCount >= t.maxRuns) || t.oneOff) {
+        this.db
+          .prepare(
+            `UPDATE tasks
+             SET last_run_at = ?, run_count = run_count + 1, active = 0
+             WHERE id = ?`,
+          )
+          .run(nowIso, id);
+        return;
+      }
+
+      // Recurring: advance next_run_at.
+      const next = nextFire(t.schedule, now);
       this.db
         .prepare(
           `UPDATE tasks
-           SET last_run_at = ?, run_count = ?, active = 0
+           SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1
            WHERE id = ?`,
         )
-        .run(now.toISOString(), nextRunCount, id);
-      return;
-    }
-
-    // One-off: deactivate after single run.
-    if (t.oneOff) {
-      this.db
-        .prepare(
-          `UPDATE tasks
-           SET last_run_at = ?, run_count = ?, active = 0
-           WHERE id = ?`,
-        )
-        .run(now.toISOString(), nextRunCount, id);
-      return;
-    }
-
-    // Recurring: advance next_run_at.
-    const next = nextFire(t.schedule, now);
-    this.db
-      .prepare(
-        `UPDATE tasks
-         SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1
-         WHERE id = ?`,
-      )
-      .run(now.toISOString(), next.toISOString(), id);
+        .run(nowIso, next.toISOString(), id);
+    }).immediate();
   }
 
   /**
