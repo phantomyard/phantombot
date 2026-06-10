@@ -567,5 +567,8 @@ export async function openTaskStore(path: string): Promise<TaskStore> {
   }
   const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
+  // Shared DB across processes (tick vs. run): block-and-retry on a busy
+  // writer instead of throwing SQLITE_BUSY immediately. See store.ts.
+  db.exec("PRAGMA busy_timeout = 5000");
   return new TaskStore(db, /* ownsConnection */ true);
 }

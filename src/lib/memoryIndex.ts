@@ -156,6 +156,9 @@ export class MemoryIndex {
   constructor(private readonly db: Database) {
     db.exec(SCHEMA);
     db.exec("PRAGMA journal_mode = WAL");
+    // Shared across processes (tick reindex vs. run query): block-and-retry
+    // on a busy writer instead of an immediate SQLITE_BUSY throw. See store.ts.
+    db.exec("PRAGMA busy_timeout = 5000");
   }
 
   static async open(indexPath: string): Promise<MemoryIndex> {

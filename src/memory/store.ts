@@ -346,9 +346,13 @@ export async function openMemoryStore(path: string): Promise<MemoryStore> {
     await mkdir(dirname(path), { recursive: true });
   }
   const db = new Database(path, { create: true });
-  // WAL keeps reads non-blocking even though phantombot is single-process —
-  // useful if `phantombot history` is run while a `phantombot chat` REPL is open.
+  // WAL keeps reads non-blocking, but the file is in fact shared across
+  // processes — `phantombot run` persists turns while `phantombot tick`
+  // records task runs against the same DB. WAL permits one writer at a
+  // time; without busy_timeout a concurrent writer gets an immediate
+  // SQLITE_BUSY throw. busy_timeout makes it block-and-retry instead.
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA foreign_keys = ON");
   return new SqliteMemoryStore(db);
 }
