@@ -782,11 +782,20 @@ immediate.
 Telegram getUpdates
         |
         v
-Telegram adapter
+Telegram adapter  (channels/telegram)
+        |
+        |-- transport: HTTP getUpdates / sendMessage
+        |-- parse: raw update -> ChannelMessage
+        |-- convert numeric chat/user ids -> string at the boundary
+        |-- encrypt / decrypt seam (identity pass-through today)
+        |
+        v
+Channel core  (channels/core, channel-blind)
         |
         |-- slash command handler
         |-- group routing gate
         |-- attachment / voice handling
+        |-- streaming turn engine + server loop
         |
         v
 Turn coordinator
@@ -794,6 +803,7 @@ Turn coordinator
         |-- load persona markdown
         |-- load rolling conversation context
         |-- retrieve memory / KB hits
+        |-- threat-screen untrusted input (see Security)
         |
         v
 Harness chain: pi -> claude -> gemini -> codex
@@ -807,6 +817,13 @@ Persist turn and send Telegram reply
 
 Tool execution happens inside the harness. Phantombot only coordinates the
 turn, memory, channel behavior, and runtime services.
+
+The channel layer is split into a channel-blind core and per-platform
+adapters. The core deals only in string `conversationId` / `senderId` ids and
+plaintext `ChannelMessage`s; each adapter converts its platform's native id
+types and (in future) decrypts on ingest / encrypts on egress at its own
+boundary. Telegram is the only adapter today; the encrypt/decrypt hooks are
+identity pass-throughs and there is no Matrix or crypto code yet.
 
 ## Build From Source
 
@@ -852,6 +869,9 @@ phantombot/
     importer/
     orchestrator/
     channels/
+      core/        channel-blind types, routing, prompts, turn engine
+      telegram/    Telegram adapter: transport, parse, channel
+      telegram.ts  backward-compat barrel re-export
     cli/
     harnesses/
     lib/
