@@ -79,6 +79,28 @@ describe("filterAuthEnv", () => {
     expect(out.HOME).toBe("/home/test");
   });
 
+  test("strips the whole ANTHROPIC_* / CLAUDE_CODE_* auth family", () => {
+    const out = filterAuthEnv({
+      ANTHROPIC_API_KEY: "sk-redacted",
+      ANTHROPIC_AUTH_TOKEN: "tok-redacted",
+      ANTHROPIC_BASE_URL: "https://proxy.example",
+      ANTHROPIC_CUSTOM_HEADERS: "X-Foo: bar",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-redacted",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      PATH: "/usr/bin",
+      HOME: "/home/test",
+    });
+    expect(out).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(out).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN");
+    expect(out).not.toHaveProperty("ANTHROPIC_BASE_URL");
+    expect(out).not.toHaveProperty("ANTHROPIC_CUSTOM_HEADERS");
+    expect(out).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(out).not.toHaveProperty("CLAUDE_CODE_USE_BEDROCK");
+    // Non-auth env passes through untouched.
+    expect(out.PATH).toBe("/usr/bin");
+    expect(out.HOME).toBe("/home/test");
+  });
+
   test("drops undefined values (NodeJS.ProcessEnv allows them)", () => {
     const out = filterAuthEnv({
       DEFINED: "yes",

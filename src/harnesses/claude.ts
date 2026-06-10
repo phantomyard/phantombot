@@ -40,10 +40,11 @@
  *      subscription path. Don't add it back unless that changes upstream.
  *
  * Auth model under phantombot:
- *   ANTHROPIC_API_KEY is filtered out of the subprocess env so claude
- *   resolves credentials from ~/.claude/.credentials.json (the OAuth
+ *   The entire ANTHROPIC_* / CLAUDE_CODE_* auth+routing namespace is
+ *   filtered out of the subprocess env (see filterAuthEnv) so claude
+ *   resolves credentials only from ~/.claude/.credentials.json (the OAuth
  *   path that backs Claude Max). Phantombot does not hold or pass any
- *   API keys.
+ *   API keys, auth tokens, or base-URL overrides.
  */
 
 import { access, constants } from "node:fs/promises";
@@ -96,8 +97,9 @@ export class ClaudeHarness implements Harness {
     // Shell-exported keys remain sticky — see envBootstrap.ts header.
     await reloadEnvFiles();
 
-    // OAuth-on-host: don't leak ANTHROPIC_API_KEY into the subprocess env,
-    // so claude resolves credentials from ~/.claude/.credentials.json.
+    // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
+    // routing var into the subprocess env (reloadEnvFiles just re-sourced
+    // ~/.env), so claude resolves credentials from ~/.claude/.credentials.json.
     const env = withPersonaEnv(filterAuthEnv(process.env), req.persona);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
@@ -221,16 +223,43 @@ export const PHANTOMBOT_INJECTED_CLAUDE_SETTINGS = {
 } as const;
 
 /**
- * Strip ANTHROPIC_API_KEY from the inherited env so the subprocess uses
- * OAuth credentials at ~/.claude/.credentials.json. Exported for testing.
+ * Prefixes whose entire namespace is treated as authentication/routing
+ * config for the claude subprocess. Anything matching one of these is
+ * dropped from the inherited env UNLESS it is explicitly allow-listed in
+ * AUTH_ENV_ALLOW below.
+ *
+ * Denylisting individual names (the old behaviour, which only stripped
+ * ANTHROPIC_API_KEY) is fragile: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL,
+ * CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK, etc. all silently flip
+ * claude off the Max-subscription OAuth path. reloadEnvFiles() re-sources
+ * ~/.env into process.env right before this runs, so a stray
+ * `phantombot env set ANTHROPIC_AUTH_TOKEN …` would leak straight through.
+ * Allow-listing the namespace closes the whole family at once.
+ */
+const AUTH_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_"] as const;
+
+/**
+ * Known-safe vars inside the auth namespace that may still pass through to
+ * the subprocess. Empty today — the codebase reads none of these itself,
+ * and the claude subprocess must take its credentials only from
+ * ~/.claude/.credentials.json. Add a name here only with a clear reason.
+ */
+const AUTH_ENV_ALLOW = new Set<string>([]);
+
+/**
+ * Strip the entire ANTHROPIC_* / CLAUDE_CODE_* auth+routing namespace from
+ * the inherited env so the subprocess uses OAuth credentials at
+ * ~/.claude/.credentials.json. Exported for testing.
  */
 export function filterAuthEnv(
   source: NodeJS.ProcessEnv,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(source)) {
-    if (k === "ANTHROPIC_API_KEY") continue;
-    if (v !== undefined) out[k] = v;
+    if (v === undefined) continue;
+    const inAuthNamespace = AUTH_ENV_PREFIXES.some((p) => k.startsWith(p));
+    if (inAuthNamespace && !AUTH_ENV_ALLOW.has(k)) continue;
+    out[k] = v;
   }
   return out;
 }
