@@ -32,7 +32,6 @@ import {
 } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import {
-  type AudioSupport,
   replyModalityOverride,
   sttSupport,
   synthesize,
@@ -59,17 +58,29 @@ import {
   splitIntoSegments,
   StreamSegmenter,
 } from "./streamSegmenter.ts";
-// Engine-internal use of the moved parse/transport surface.
+// Engine-internal use of the moved parse/transport/routing/prompts surface.
 import {
   formatAttachmentUserText,
   formatReplyToContext,
   inboxDir,
-  sanitizeEnvelopeField,
   stripBotMention,
   TELEGRAM_BOT_DOWNLOAD_CAP_BYTES,
 } from "./telegram/parse.ts";
 import type { TelegramMessage } from "./telegram/parse.ts";
 import type { TelegramTransport } from "./telegram/transport.ts";
+import {
+  decideGroupReply,
+  formatGroupContext,
+  GROUP_BUFFER_MAX,
+  matchPersonaNames,
+} from "./core/routing.ts";
+import type { GroupChatState } from "./core/routing.ts";
+import {
+  captureNudgeForTurn,
+  TELEGRAM_REPLY_INSTRUCTION,
+  VOICE_REPLY_INSTRUCTION,
+  voiceUnavailableMessage,
+} from "./core/prompts.ts";
 
 // ---------------------------------------------------------------------------
 // Public-API barrel re-exports (#162).
@@ -99,6 +110,20 @@ export type {
 } from "./telegram/parse.ts";
 export { HttpTelegramTransport } from "./telegram/transport.ts";
 export type { TelegramTransport } from "./telegram/transport.ts";
+export {
+  matchPersonaNames,
+  decideGroupReply,
+  formatGroupContext,
+  GROUP_BUFFER_MAX,
+} from "./core/routing.ts";
+export {
+  TELEGRAM_REPLY_INSTRUCTION,
+  CAPTURE_NUDGE_INTERVAL,
+  CAPTURE_NUDGE_TEXT,
+  captureNudgeForTurn,
+  VOICE_REPLY_INSTRUCTION,
+  voiceUnavailableMessage,
+} from "./core/prompts.ts";
 
 /**
  * Render an AbortSignal.reason as a short string for logging.
@@ -115,101 +140,6 @@ function abortReasonString(reason: unknown): string {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-/**
- * Find which of `names` are addressed in `text`. A name matches
- * case-insensitively when bounded by non-letters, so "robbie" matches
- * inside "@robbie_agh_bot", "Robbie," or "robbie!" but NOT "robbiee" or
- * "scrobbie". Returns the matched names in the order they appear in
- * `names` (deduped, original casing preserved). Exported for testing.
- */
-export function matchPersonaNames(text: string, names: string[]): string[] {
-  if (text.length === 0 || names.length === 0) return [];
-  const out: string[] = [];
-  for (const name of names) {
-    if (name.length === 0 || out.some((n) => n.toLowerCase() === name.toLowerCase())) {
-      continue;
-    }
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Letter boundaries (not \b, which treats "_" as a word char and so
-    // would fail to match "robbie" inside "robbie_agh_bot").
-    const re = new RegExp(`(?<![a-z])${escaped}(?![a-z])`, "i");
-    if (re.test(text)) out.push(name);
-  }
-  return out;
-}
-
-/**
- * Decide whether THIS bot (persona `self`) should reply to a group message,
- * and what the chat's "last addressed" set becomes afterwards.
- *
- * Rules (all computed locally — Telegram never shows a bot another bot's
- * messages, so this must work from the human message stream alone, which
- * every bot in the group sees identically):
- *   - One or more persona names are in the message → those bots are now
- *     "addressed". I reply iff my own name is among them. Multiple names →
- *     each named bot replies independently.
- *   - No persona name at all → the message continues the current thread, so
- *     only the bot(s) addressed last reply. I reply iff I'm in lastAddressed.
- *   - No name AND nobody has ever been addressed (lastAddressed empty) →
- *     silence, full stop.
- *
- * Exported for testing.
- */
-export function decideGroupReply(input: {
-  self: string;
-  matched: string[];
-  lastAddressed: string[];
-}): { reply: boolean; nextLastAddressed: string[] } {
-  const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-  if (input.matched.length > 0) {
-    return {
-      reply: input.matched.some((n) => eq(n, input.self)),
-      nextLastAddressed: input.matched,
-    };
-  }
-  return {
-    reply: input.lastAddressed.some((n) => eq(n, input.self)),
-    nextLastAddressed: input.lastAddressed,
-  };
-}
-
-/**
- * Render the human messages a bot OBSERVED but didn't reply to (because they
- * were aimed at another bot or were thread chatter) into a context preamble.
- * Privacy-OFF means every bot sees every human message, so this is how a bot
- * catches up on the conversation it stayed quiet through before it's finally
- * addressed. Returns "" when there's nothing buffered. Exported for testing.
- */
-export function formatGroupContext(
-  entries: { from: string; text: string }[],
-): string {
-  // Both the sender label and the body are attacker-controlled; sanitize each
-  // so a crafted username or message can't inject a newline + forged `]` that
-  // closes this multi-line envelope early. (#161, item f)
-  const lines = entries
-    .map((e) => `${sanitizeEnvelopeField(e.from)}: ${sanitizeEnvelopeField(e.text)}`.trim())
-    .filter((l) => l.length > 0);
-  if (lines.length === 0) return "";
-  return [
-    "[Recent group messages you saw but didn't reply to, for context:",
-    ...lines,
-    "]",
-  ].join("\n");
-}
-
-/** In-memory per-chat group routing state. Lives for the process lifetime;
- *  intentionally not persisted (it's cheap to rebuild from the live stream
- *  and bounded to GROUP_BUFFER_MAX entries per chat). */
-interface GroupChatState {
-  /** Persona names addressed by the most recent name-bearing message. */
-  lastAddressed: string[];
-  /** Rolling buffer of recent human messages for context catch-up. */
-  buffer: { from: string; text: string; delivered: boolean }[];
-}
-
-/** Cap on buffered human messages retained per group chat. */
-export const GROUP_BUFFER_MAX = 100;
 
 export interface RunTelegramServerInput {
   config: Config;
@@ -1390,150 +1320,3 @@ async function processChatMessage(
   });
 }
 
-/**
- * System-prompt suffix applied to EVERY Telegram turn.
- *
- * Two purposes:
- *
- * 1. Reply style. The user is on a phone with a narrow column. Long
- *    walls of text and meta-narration ("Let me check…", "Right,
- *    here's what I found…") read poorly there. Default to short,
- *    conversational answers; structured-and-clear is fine when the
- *    user explicitly asks for a detailed report.
- *
- * 2. Plan-then-confirm before long jobs. A Telegram round-trip is
- *    seconds, but a misaligned 10-minute build burns the user's time
- *    AND tokens. Asking the agent to outline the plan and wait for
- *    confirmation when it's about to do something irreversible (git
- *    push, deploy) or expensive (multi-tool-call work) avoids that.
- *
- * Lives at the channel layer (not in persona files) so CLI / nightly
- * turns aren't affected — those run unattended and don't want a
- * confirmation gate, and verbose CLI output is fine.
- */
-export const TELEGRAM_REPLY_INSTRUCTION =
-  `# Reply style (Telegram chat)
-
-You're chatting via Telegram. Default to short, conversational
-replies — typically 1-4 sentences. The user is usually on a phone,
-and the narrow column makes long walls of text hard to read. Skip
-narration ("Let me…", "Right, here's what I found…"); answer directly.
-
-Longer replies are fine when the user explicitly asks for a detailed
-report or analysis. Use clear structure (headings, lists) when the
-content earns it.
-
-# Confirm before long jobs
-
-Before starting any of these, briefly outline your plan in 2-3
-sentences and ask the user to confirm or adjust:
-
-- Anything involving git, build, or deploy operations
-- Anything where you're going to spawn more than one tool call
-
-Telegram round-trips are slow and tokens aren't free — confirming up
-front beats producing the wrong thing minutes later. For
-straightforward questions, just answer.`;
-
-/**
- * Mechanical capture nudge — every {@link CAPTURE_NUDGE_INTERVAL} user
- * turns without a `memory capture`, the dispatch appends this to the
- * system-prompt suffix. Pure turn counter; no LLM decides whether to
- * nudge. Counteracts long-context dilution on weak harnesses that
- * weight standing instructions less.
- */
-export const CAPTURE_NUDGE_INTERVAL = 30;
-
-export const CAPTURE_NUDGE_TEXT =
-  `${CAPTURE_NUDGE_INTERVAL} turns without a memory capture in this ` +
-  `conversation. If a decision, lesson, person fact or commitment came ` +
-  `up, capture it now with \`phantombot memory capture\`. If nothing is ` +
-  `worth keeping, carry on — no capture is a valid answer.`;
-
-/**
- * Decide whether to append the capture nudge for this turn.
- *
- * Counts `role = 'user'` turns since the last capture in this
- * (persona, conversation) — so any capture resets the counter for free
- * and the nudge re-fires at 2x, 3x, … if still dry. State lives entirely
- * in `memory.sqlite`, shared by the long-running phantombot process and
- * the short-lived `memory capture` CLI call, so the two stay in sync.
- *
- * The current incoming user message is NOT yet persisted to `turns`
- * (runTurn appends it only after the turn completes), so the effective
- * turn index is `countUserTurnsSince(...) + 1`. The nudge fires when
- * that effective index is a positive multiple of `interval` — i.e. on
- * the 30th, 60th, … dry turn.
- *
- * Only meaningful for real `telegram:*` conversations — the caller is
- * responsible for that gate.
- */
-export async function captureNudgeForTurn(
-  memory: MemoryStore,
-  persona: string,
-  conversation: string,
-  interval = CAPTURE_NUDGE_INTERVAL,
-): Promise<string | undefined> {
-  try {
-    const since =
-      (await memory.lastCaptureAt(persona, conversation)) ??
-      "1970-01-01T00:00:00.000Z";
-    const priorTurns = await memory.countUserTurnsSince(
-      persona,
-      conversation,
-      since,
-    );
-    // +1 for the current message, not yet written to `turns`.
-    const effectiveTurn = priorTurns + 1;
-    if (effectiveTurn > 0 && effectiveTurn % interval === 0) {
-      return CAPTURE_NUDGE_TEXT;
-    }
-  } catch (e) {
-    // A nudge is a nice-to-have — never let a counter query fail a turn.
-    log.warn("telegram: capture nudge check failed", {
-      error: (e as Error).message,
-    });
-  }
-  return undefined;
-}
-
-/**
- * Voice-only overlay, stacked on top of TELEGRAM_REPLY_INSTRUCTION
- * when the reply will be synthesized via TTS.
- *
- * Why this exists separately: the chat-style instruction allows
- * "longer when asked" and structured markdown — both wrong for TTS,
- * which reads bullets/headers awkwardly and turns 4-sentence replies
- * into 90-second voice notes. This overlay tightens the length cap
- * to 1-3 sentences and forbids markdown.
- */
-export const VOICE_REPLY_INSTRUCTION =
-  `# Reply length (this turn only)
-
-This message arrived as a voice note and your reply will be spoken
-aloud via text-to-speech. Reply briefly and conversationally — 1-3
-sentences, under ~30 seconds of speech (≈60 words / ≈100 tokens).
-Output only the final answer — no narration of your work
-("Let me check…"), no markdown headers/bullets/code blocks (TTS
-reads them awkwardly), no "according to my analysis" preamble.
-Just the human reply.`;
-
-/**
- * Render an honest, actionable explanation when sttSupport() rules a
- * voice message out. Each variant points at the specific user action that
- * fixes it, instead of the old single-message catch-all that misled
- * users into thinking their provider was wrong when actually the systemd
- * unit was stale.
- */
-export function voiceUnavailableMessage(
-  s: Extract<AudioSupport, { ok: false }>,
-): string {
-  if (s.reason === "provider_none") {
-    return "voice transcription is disabled — run `phantombot voice` to set up OpenAI or ElevenLabs";
-  }
-  if (s.reason === "provider_no_stt") {
-    return `current provider '${s.provider}' has no STT — switch via \`phantombot voice\``;
-  }
-  // key_missing
-  return `voice key not loaded into the service environment — run \`phantombot install\` to upgrade the systemd unit, then try again. (provider '${s.provider}', expected env var ${s.envVar})`;
-}
