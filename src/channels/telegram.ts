@@ -63,6 +63,10 @@ import {
   splitIntoSegments,
   StreamSegmenter,
 } from "./streamSegmenter.ts";
+import type {
+  ChannelMessage,
+  ChannelTransport,
+} from "./core/types.ts";
 
 /**
  * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
@@ -154,11 +158,8 @@ export interface TelegramReplyTo {
   fromBot: boolean;
 }
 
-export interface TelegramMessage {
+export interface TelegramMessage extends ChannelMessage {
   updateId: number;
-  chatId: number;
-  fromUserId: number;
-  fromUsername?: string;
   /** Telegram chat type: "private" for DMs, "group"/"supergroup" for
    *  group chats, "channel" for channels. Drives group-only behaviour
    *  like stripping the bot's @username mention from the text. Absent
@@ -190,7 +191,7 @@ export interface TelegramMessage {
   replyTo?: TelegramReplyTo;
 }
 
-export interface TelegramTransport {
+export interface TelegramTransport extends ChannelTransport {
   /**
    * Long-poll Telegram for updates from `offset`. Returns parsed updates
    * and the new offset. The optional `signal` cancels the in-flight HTTP
