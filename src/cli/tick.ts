@@ -41,6 +41,7 @@ import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { redactForLog } from "../lib/redact.ts";
 import {
   acquireRunLock,
   isLockHandle,
@@ -405,16 +406,6 @@ export function previewForLog(text: string): {
     preview: redacted.slice(0, WAKE_STREAM_PREVIEW_CHARS),
     truncated: redacted.length > WAKE_STREAM_PREVIEW_CHARS,
   };
-}
-
-function redactForLog(text: string): string {
-  return text
-    .replace(/\b(ghp|github_pat|sk|xox[baprs])[-_][-A-Za-z0-9_]{16,}\b/g, "$1_[REDACTED]")
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL_REDACTED]")
-    .replace(
-      /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK|KEY)[A-Z0-9_]*)\s*=\s*([^\s"'`]+)/gi,
-      "$1=[REDACTED]",
-    );
 }
 
 /**

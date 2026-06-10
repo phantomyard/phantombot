@@ -17,6 +17,8 @@ import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { redactForLog } from "./redact.ts";
+
 import {
   classifyCadence,
   defaultReviewIntervalMs,
@@ -461,7 +463,9 @@ export class TaskStore {
         input.firedAt.toISOString(),
         input.status,
         input.exitCode,
-        input.outputExcerpt.slice(0, 500),
+        // Redact before persisting: command stdout/stderr can echo tokens,
+        // and task_runs rows outlive the process (visible in `task log`).
+        redactForLog(input.outputExcerpt).slice(0, 500),
         input.delivered ? 1 : 0,
       );
   }
