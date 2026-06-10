@@ -3,6 +3,11 @@
  * the `phantombot telegram` TUI to confirm the token works before saving.
  */
 
+import { timeoutSignal } from "./fetchTimeout.ts";
+
+/** getMe is a token-validation probe; a stalled call must not hang the TUI. */
+const GETME_TIMEOUT_MS = 15_000;
+
 export type GetMeResult =
   | { ok: true; username: string; firstName?: string; id: number }
   | { ok: false; error: string };
@@ -13,7 +18,9 @@ export async function telegramGetMe(
 ): Promise<GetMeResult> {
   let res: Response;
   try {
-    res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`);
+    res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`, {
+      signal: timeoutSignal(GETME_TIMEOUT_MS),
+    });
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
   }

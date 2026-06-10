@@ -149,6 +149,32 @@ export async function* runWithFallback(
     for await (const chunk of harness.invoke(req)) {
       if (chunk.type === "error") {
         if (chunk.recoverable && !isLast) {
+          // ─────────────────────────────────────────────────────────────
+          // INTENTIONAL, STREAMING-FIRST TRADE-OFF — do not "fix" this by
+          // buffering or by deleting already-sent text.
+          //
+          // If this harness streamed some text chunks before erroring, that
+          // text is ALREADY on the user's screen — we yield chunks live, the
+          // instant the harness produces them, because phantombot is a
+          // conversational agent and low-latency token streaming is the
+          // entire point of the experience. When we now fall through to the
+          // next harness, the user may briefly see a truncated partial reply
+          // followed by a fresh full reply from a different model.
+          //
+          // That is the ACCEPTED COST of streaming-first, exactly like the
+          // at-most-once Telegram offset trade-off elsewhere. The two
+          // "clean" alternatives are both worse:
+          //   1. Buffer-until-done before showing anything — kills live
+          //      streaming and the conversational feel. Non-starter.
+          //   2. Delete the already-sent bubbles on fall-through — a
+          //      behaviour-risky transport change, and yanking text a user
+          //      may have already read is its own jarring UX.
+          //
+          // A phantom is a conversation, not a transactional render that must
+          // commit atomically. A rare doubled/partial reply on a mid-stream
+          // harness failure is a calculated, acceptable price for fluid,
+          // immediate streaming. Re-litigate with Andrew before changing it.
+          // ─────────────────────────────────────────────────────────────
           log.warn(
             "orchestrator: harness recoverable error, falling through",
             {
