@@ -43,6 +43,7 @@ import {
 import { DEFAULT_STT_TIMEOUT_MS } from "../lib/voice.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { timeoutSignal } from "../lib/fetchTimeout.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
@@ -240,6 +241,26 @@ export interface TelegramTransport {
 }
 
 /**
+ * Hard timeouts for Telegram Bot API requests. Without these, a wedged
+ * upstream (a stalled file download, a control-plane call that never
+ * returns) hangs the per-chat serial chain indefinitely — the #135-class
+ * wedge. AbortSignal-backed (see lib/fetchTimeout.ts) so the socket is
+ * actually cancelled, not just a promise abandoned.
+ *
+ *   - CONTROL: sendMessage / sendVoice / sendChatAction / getFile /
+ *     getMe / setMyCommands / ackUpdates. These are small JSON or short
+ *     uploads; 30s is already pathological for them.
+ *   - DOWNLOAD: the file-body GET in downloadFile. Files can be up to the
+ *     ~20MB bot-API cap over a slow link, so it gets a longer ceiling —
+ *     but still bounded, so a non-voice attachment can't stall the chat
+ *     forever (it degrades to a graceful "download failed" instead).
+ *   - getUpdates is NOT covered here: it is a long-poll whose own
+ *     timeoutS bounds it, composed with the caller's /stop signal below.
+ */
+const TELEGRAM_CONTROL_TIMEOUT_MS = 30_000;
+const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/**
  * Real HTTP transport against api.telegram.org.
  */
 export class HttpTelegramTransport implements TelegramTransport {
@@ -253,11 +274,21 @@ export class HttpTelegramTransport implements TelegramTransport {
     const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=${timeoutS}&allowed_updates=%5B%22message%22%5D`;
     let res: Response;
     try {
-      res = await fetch(url, { signal });
+      // Long-poll: bound by Telegram's own `timeout=` plus a margin for
+      // the round-trip, composed with the caller's /stop signal. If the
+      // poll overstays its own deadline (proxy/socket wedge), the timeout
+      // fires and we return empty so the loop re-polls cleanly.
+      res = await fetch(url, {
+        signal: timeoutSignal(timeoutS * 1000 + 10_000, signal),
+      });
     } catch (e) {
-      // AbortError is the expected path on Ctrl-C; just return empty so the
-      // caller's next signal check exits the loop.
-      if ((e as Error).name === "AbortError") {
+      // AbortError (Ctrl-C / external signal) and TimeoutError (poll
+      // overstayed) are both expected; return empty so the caller's next
+      // signal check exits the loop or it simply re-polls.
+      if (
+        (e as Error).name === "AbortError" ||
+        (e as Error).name === "TimeoutError"
+      ) {
         return { updates: [], nextOffset: offset };
       }
       log.warn("telegram: getUpdates fetch failed", {
@@ -292,7 +323,9 @@ export class HttpTelegramTransport implements TelegramTransport {
   async ackUpdates(offset: number): Promise<void> {
     const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=0&limit=1&allowed_updates=%5B%22message%22%5D`;
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
+      });
       if (!res.ok) {
         log.warn("telegram: ackUpdates non-OK", {
           status: res.status,
@@ -329,6 +362,7 @@ export class HttpTelegramTransport implements TelegramTransport {
         text: html,
         parse_mode: "HTML",
       }),
+      signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
     });
     if (res.ok) return;
 
@@ -347,6 +381,7 @@ export class HttpTelegramTransport implements TelegramTransport {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, text: safe }),
+        signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
       });
       if (!fallback.ok) {
         log.warn("telegram: plain-text fallback also failed", {
@@ -369,6 +404,7 @@ export class HttpTelegramTransport implements TelegramTransport {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+      signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
     }).catch(() => {
       /* typing indicator is best-effort */
     });
@@ -380,6 +416,7 @@ export class HttpTelegramTransport implements TelegramTransport {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "record_voice" }),
+      signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
     }).catch(() => {});
   }
 
@@ -397,7 +434,11 @@ export class HttpTelegramTransport implements TelegramTransport {
     );
     const res = await fetch(
       `https://api.telegram.org/bot${this.token}/sendVoice`,
-      { method: "POST", body: form },
+      {
+        method: "POST",
+        body: form,
+        signal: timeoutSignal(TELEGRAM_DOWNLOAD_TIMEOUT_MS),
+      },
     );
     if (!res.ok) {
       log.warn("telegram: sendVoice non-OK", {
@@ -413,6 +454,7 @@ export class HttpTelegramTransport implements TelegramTransport {
     // Two-step: getFile to get file_path, then GET the file URL.
     const meta = await fetch(
       `https://api.telegram.org/bot${this.token}/getFile?file_id=${encodeURIComponent(fileId)}`,
+      { signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS) },
     );
     const metaBody = (await meta.json()) as {
       ok?: boolean;
@@ -421,8 +463,14 @@ export class HttpTelegramTransport implements TelegramTransport {
     if (!metaBody.ok || !metaBody.result?.file_path) {
       throw new Error(`getFile failed for ${fileId}`);
     }
+    // The file-body GET is the #135 wedge site: a non-voice attachment
+    // download that never returns would stall this chat's serial chain
+    // forever. The bounded signal makes a wedged download throw instead,
+    // which the caller catches and degrades to "[attachment download
+    // failed]".
     const file = await fetch(
       `https://api.telegram.org/file/bot${this.token}/${metaBody.result.file_path}`,
+      { signal: timeoutSignal(TELEGRAM_DOWNLOAD_TIMEOUT_MS) },
     );
     const data = Buffer.from(await file.arrayBuffer());
     const mime =
@@ -447,6 +495,7 @@ export class HttpTelegramTransport implements TelegramTransport {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ commands }),
+      signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
     }).catch((e) => {
       log.warn("telegram: setMyCommands fetch failed", {
         error: (e as Error).message,

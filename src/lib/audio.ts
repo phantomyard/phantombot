@@ -8,6 +8,18 @@
 
 import type { Config } from "../config.ts";
 import type { VoiceProvider } from "./voice.ts";
+import { timeoutSignal } from "./fetchTimeout.ts";
+
+/**
+ * Hard ceiling for TTS/STT provider calls. Voice replies are short (the
+ * channel caps them to a few sentences) and STT runs on brief voice
+ * notes, so 60s is already pathological — but bounded, so a wedged
+ * provider returns a clean "network" error instead of stalling the
+ * chat's serial chain (the #135-class wedge). AbortSignal-backed, so the
+ * socket is actually cancelled. Tests inject a fetchImpl that ignores the
+ * signal, so this is transparent to them.
+ */
+const AUDIO_FETCH_TIMEOUT_MS = 60_000;
 
 export interface SynthesizedAudio {
   data: Buffer;
@@ -259,6 +271,7 @@ async function elevenlabsTts(
           style: cfg.style,
         },
       }),
+      signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
     });
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
@@ -295,6 +308,7 @@ async function openaiTts(
         speed: cfg.speed,
         response_format: "opus",
       }),
+      signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
     });
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
@@ -329,6 +343,7 @@ async function elevenlabsScribe(
       method: "POST",
       headers: { "xi-api-key": apiKey },
       body: form,
+      signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
     });
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
@@ -368,6 +383,7 @@ async function openaiWhisper(
         method: "POST",
         headers: { authorization: `Bearer ${apiKey}` },
         body: form,
+        signal: timeoutSignal(AUDIO_FETCH_TIMEOUT_MS),
       },
     );
   } catch (e) {
