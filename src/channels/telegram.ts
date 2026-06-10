@@ -88,3 +88,9 @@ export {
 // --- Turn engine + server loop (core/engine.ts) ----------------------------
 export { runTelegramServer } from "./core/engine.ts";
 export type { RunTelegramServerInput } from "./core/engine.ts";
+
+// --- Channel adapter (telegram/channel.ts) ---------------------------------
+// The Telegram Channel adapter: transport + parse + capabilities + identity
+// encrypt/decrypt seam. Exported ADDITIVELY — preexisting importers and the
+// engine are unaffected; this is the slot future channels (Matrix) mirror.
+export { createTelegramChannel, TELEGRAM_CAPABILITIES } from "./telegram/channel.ts";
