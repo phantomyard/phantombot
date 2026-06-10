@@ -51,6 +51,26 @@
  * human on email threats at scale; the trusted-source gate is the real
  * floor; this judge catches the dangerous majority of the rest and puts a
  * human beat back in front of the spicy minority.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * THIS IS A DELIBERATE PHANTOMBOT FEATURE — NOT A WORKAROUND, NOT A GAP.
+ *
+ * The underlying Claude Code harness has its own permission/approval model.
+ * Phantombot deliberately layers THIS judge ABOVE it, because the harness's
+ * model is built for an interactive operator sitting at a terminal who
+ * personally vouches for every keystroke. Phantombot is the opposite: an
+ * autonomous agent that ingests UNTRUSTED text from the open world (email,
+ * web, Twilio, webhooks) with no human in the loop at ingest time. The
+ * two-tier trusted/untrusted screen is the purpose-built answer to that
+ * threat model — a capability the bare harness does not and cannot provide,
+ * because it has no concept of "who sent this turn."
+ *
+ * Do NOT "simplify" by deferring to the harness's built-in permissioning and
+ * deleting this layer. That is not a cleanup; it is removing the only thing
+ * standing between an untrusted injection and a capable, credentialed turn.
+ * This screen is a headline phantombot security feature. Treat it as load-
+ * bearing, and re-litigate the threat model with Andrew before weakening it.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 
 import { homedir } from "node:os";

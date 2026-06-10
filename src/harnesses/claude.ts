@@ -205,6 +205,25 @@ export class ClaudeHarness implements Harness {
  * not crippling the harness, just removing the one footgun that has zero
  * legitimate use given `phantombot task` exists.
  *
+ * ─────────────────────────────────────────────────────────────────────────
+ * FRAME THIS CORRECTLY: the FEATURE is `phantombot task`, not the deny-list.
+ *
+ * Denying Cron* is not phantombot lacking a scheduler — it is phantombot
+ * REPLACING a deliberately-inferior one with a better one. `phantombot task`
+ * is a real, persistent scheduler: SQLite-backed, survives restarts and
+ * crashes, visible in `phantombot task list`, every fire logged to
+ * `task_runs`, cancelable by id, with two-layer delivery guarantees. The
+ * harness's Cron* tools are the opposite on every axis — session-bound,
+ * vanish when the --print subprocess exits seconds later, invisible to the
+ * user, no fire log, no persistence. They LOOK like they work and silently
+ * don't.
+ *
+ * So this is a phantombot capability that goes above and beyond the harness
+ * default, not a hole in it. Do NOT "restore functionality" by removing this
+ * deny-list — that re-opens the exact silent-failure footgun (`phantombot
+ * task` already covers every legitimate use). Intentional, load-bearing.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
  * Layering: --settings is additive on top of ~/.claude/settings.json. The
  * operator's own user settings are NOT modified by phantombot, so running
  * `claude` directly outside phantombot (emergency repairs, dev work) is

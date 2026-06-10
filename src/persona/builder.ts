@@ -101,6 +101,28 @@ export function buildSystemPrompt(
  * two always-applied rules: search-before-debug, capture-as-you-go.
  *
  * Exported for inspection / testing — also reused by the nightly prompt.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * THIS IS A DELIBERATE PHANTOMBOT FEATURE — IT REPLACES THE HARNESS'S OWN
+ * MEMORY, ON PURPOSE, BECAUSE IT IS STRICTLY BETTER FOR OUR USE CASE.
+ *
+ * Claude Code ships its own memory: auto-loaded CLAUDE.md files and a flat
+ * per-project memory blob. Phantombot deliberately does NOT rely on that. We
+ * inject THIS four-layer system via --system-prompt instead: daily journal →
+ * structured drawers (decisions/lessons/people/commitments/norms) → an
+ * Obsidian-shaped KB → a hybrid FTS+vector index over all of it. It is
+ * persona-scoped, searchable, self-distilling (heartbeat + nightly), and it
+ * feeds the threat judge (the `norms` drawer). The harness's auto-memory is a
+ * single undifferentiated file with no recall, no decay, no provenance — a
+ * sticky note next to a filing cabinet.
+ *
+ * Do NOT "consolidate" by ripping this out and leaning on the harness's
+ * built-in CLAUDE.md auto-load. That would throw away search-before-debug,
+ * capture-as-you-go, the structured drawers, the nightly cognitive pass, and
+ * the norms feed into security screening. This is a headline phantombot
+ * capability that goes well above and beyond the harness default — treat it
+ * as load-bearing and intentional, not as duplicated scaffolding to prune.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 export const MEMORY_TOOLS_SECTION =
   `# Memory tools
