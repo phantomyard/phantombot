@@ -3,8 +3,46 @@ import {
   classifyCadence,
   defaultReviewIntervalMs,
   nextFire,
+  operatorTimeZone,
   validateCron,
 } from "../src/lib/cronSchedule.ts";
+
+describe("timezone-aware cron (item c)", () => {
+  test("PHANTOMBOT_TZ overrides and resolves a valid IANA zone", () => {
+    const prev = process.env.PHANTOMBOT_TZ;
+    process.env.PHANTOMBOT_TZ = "Europe/Amsterdam";
+    try {
+      expect(operatorTimeZone()).toBe("Europe/Amsterdam");
+    } finally {
+      if (prev === undefined) delete process.env.PHANTOMBOT_TZ;
+      else process.env.PHANTOMBOT_TZ = prev;
+    }
+  });
+
+  test("invalid PHANTOMBOT_TZ is ignored, never throws", () => {
+    const prev = process.env.PHANTOMBOT_TZ;
+    process.env.PHANTOMBOT_TZ = "Not/AZone";
+    try {
+      // Falls through to TZ/host/UTC — the point is it doesn't blow up.
+      expect(typeof operatorTimeZone()).toBe("string");
+    } finally {
+      if (prev === undefined) delete process.env.PHANTOMBOT_TZ;
+      else process.env.PHANTOMBOT_TZ = prev;
+    }
+  });
+
+  test("09:00 Amsterdam in winter (CET, UTC+1) → 08:00 UTC", () => {
+    // 0 9 * * * in Europe/Amsterdam during standard time fires at 08:00Z,
+    // not 09:00Z — the old UTC hard-coding got this wrong by an hour.
+    const next = nextFire("0 9 * * *", new Date("2026-01-10T00:00:00Z"), "Europe/Amsterdam");
+    expect(next.toISOString()).toBe("2026-01-10T08:00:00.000Z");
+  });
+
+  test("09:00 Amsterdam in summer (CEST, UTC+2) → 07:00 UTC (DST handled)", () => {
+    const next = nextFire("0 9 * * *", new Date("2026-07-10T00:00:00Z"), "Europe/Amsterdam");
+    expect(next.toISOString()).toBe("2026-07-10T07:00:00.000Z");
+  });
+});
 
 describe("validateCron", () => {
   test("standard hourly is fine", () => {
