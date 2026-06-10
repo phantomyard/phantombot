@@ -18,8 +18,10 @@ class CaptureStream {
 }
 
 class FakeTransport implements TelegramTransport {
-  sent: Array<{ chatId: number; text: string }> = [];
-  voiceSent: Array<{ chatId: number; mime: string; bytes: number }> = [];
+  // Core ids are channel-neutral strings (#168); notify stringifies the
+  // numeric config recipients at the transport boundary.
+  sent: Array<{ chatId: string; text: string }> = [];
+  voiceSent: Array<{ chatId: string; mime: string; bytes: number }> = [];
   async getUpdates(): Promise<{
     updates: TelegramMessage[];
     nextOffset: number;
@@ -27,13 +29,13 @@ class FakeTransport implements TelegramTransport {
     return { updates: [], nextOffset: 0 };
   }
   async ackUpdates(): Promise<void> {}
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string): Promise<void> {
     this.sent.push({ chatId, text });
   }
   async sendTyping(): Promise<void> {}
   async sendRecording(): Promise<void> {}
   async sendVoice(
-    chatId: number,
+    chatId: string,
     audio: Buffer,
     mime: string,
   ): Promise<void> {
@@ -134,8 +136,8 @@ describe("runNotify text", () => {
     });
     expect(code).toBe(0);
     expect(transport.sent).toEqual([
-      { chatId: 42, text: "important thing" },
-      { chatId: 99, text: "important thing" },
+      { chatId: "42", text: "important thing" },
+      { chatId: "99", text: "important thing" },
     ]);
     expect(out.text).toContain("text=2");
   });
@@ -163,7 +165,7 @@ describe("runNotify persona routing", () => {
     });
     expect(code).toBe(0);
     // Only the persona's allowlist ([7]), not the default ([42, 99]).
-    expect(transport.sent).toEqual([{ chatId: 7, text: "amanda ping" }]);
+    expect(transport.sent).toEqual([{ chatId: "7", text: "amanda ping" }]);
     expect(out.text).toContain("text=1");
   });
 

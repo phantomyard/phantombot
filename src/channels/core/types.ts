@@ -48,24 +48,29 @@
  * Normalized inbound message handed to the core, independent of channel.
  *
  * `TelegramMessage` (in `telegram/parse.ts`) EXTENDS this so existing code
- * keeps compiling unchanged. Field names that the engine and tests already
- * depend on are preserved verbatim — notably `chatId` (the conversation id;
- * Telegram's numeric chat id is fine for now) and `text` (the plaintext body
- * the core reasons over).
+ * keeps compiling unchanged. The core ids are channel-neutral STRINGS:
+ * Telegram's numeric chat / user ids are stringified (`String(id)`) at the
+ * adapter boundary (`telegram/parse.ts`) on ingest and parsed back to numbers
+ * (`Number(id)`) at the adapter boundary (`telegram/transport.ts`) on egress.
+ * Matrix / Slack / Google Chat ids are already strings, so they slot in here
+ * with no further core change — which is the whole point of this seam.
  */
 export interface ChannelMessage {
   /**
-   * Conversation id. For Telegram this is the numeric chat id; for other
-   * channels it is whatever uniquely keys a conversation thread. Used to
-   * build the per-conversation memory key (`telegram:<chatId>`), to serialize
-   * turns per chat, and to route replies back.
+   * Conversation id — a channel-neutral STRING. For Telegram this is the
+   * numeric chat id stringified at the adapter boundary; for other channels
+   * it is whatever uniquely keys a conversation thread (already a string for
+   * Matrix / Slack / Google Chat). Used to build the per-conversation memory
+   * key (`telegram:<conversationId>`), to serialize turns per conversation,
+   * and to route replies back.
    */
-  chatId: number;
+  conversationId: string;
   /**
-   * The sender's stable user id within the channel. Drives allow-listing /
-   * the trust perimeter.
+   * The sender's stable user id within the channel, as a channel-neutral
+   * STRING. Drives allow-listing / the trust perimeter. Telegram's numeric
+   * user id is stringified at the adapter boundary.
    */
-  fromUserId: number;
+  senderId: string;
   /** Optional human-readable handle for the sender (logging, group labels). */
   fromUsername?: string;
   /**
@@ -91,14 +96,18 @@ export interface ChannelMessage {
  * The inbound loop is intentionally NOT on the transport — see `Channel.listen`.
  */
 export interface ChannelTransport {
-  /** Send a plaintext text message to a conversation. */
-  sendMessage(chatId: number, text: string): Promise<void>;
+  /**
+   * Send a plaintext text message to a conversation. `conversationId` is the
+   * channel-neutral STRING id; a numeric-id transport (Telegram) converts at
+   * its own boundary, never here.
+   */
+  sendMessage(conversationId: string, text: string): Promise<void>;
   /** Show a "typing" activity indicator (best-effort). */
-  sendTyping(chatId: number): Promise<void>;
+  sendTyping(conversationId: string): Promise<void>;
   /** Send a voice clip. Optional: not every channel supports voice. */
-  sendVoice?(chatId: number, audio: Buffer, mime: string): Promise<void>;
+  sendVoice?(conversationId: string, audio: Buffer, mime: string): Promise<void>;
   /** Show a "recording voice" activity indicator. Optional. */
-  sendRecording?(chatId: number): Promise<void>;
+  sendRecording?(conversationId: string): Promise<void>;
   /**
    * Commit / acknowledge the inbound offset (or equivalent watermark) so a
    * restart doesn't re-deliver already-handled messages. Optional: channels
@@ -140,7 +149,8 @@ export interface ChannelCapabilities {
  * encryption. The encrypt hook turns this into whatever the wire needs.
  */
 export interface OutboundMessage {
-  chatId: number;
+  /** Channel-neutral STRING conversation id (see ChannelMessage). */
+  conversationId: string;
   text: string;
 }
 

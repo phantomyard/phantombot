@@ -162,27 +162,32 @@ export async function runTelegramServer(
   // back to the legacy single-bot field for older callers (tests, and
   // anyone embedding runTelegramServer directly).
   const tg = input.account ?? input.config.channels.telegram!;
+  // The configured allowlist is numeric (Telegram user ids in config.toml).
+  // The core carries the sender id as a channel-neutral string, so we compare
+  // against the numeric set via `Number(senderId)` — an exact round-trip for
+  // every real Telegram id (it was `String(id)` at ingest).
   const allowedSet = new Set(tg.allowedUserIds);
-  const checkAllowed = (userId: number): boolean =>
-    allowedSet.size === 0 || allowedSet.has(userId);
+  const checkAllowed = (senderId: string): boolean =>
+    allowedSet.size === 0 || allowedSet.has(Number(senderId));
 
   // /harness reorders this in place — keep a local mutable copy so we
   // don't mutate the caller's array.
   const harnesses: Harness[] = [...input.harnesses];
 
-  // Active turns per chat — keyed by chatId. Read by /stop and /status.
-  const activeTurns = new Map<number, ActiveTurnHandle>();
+  // Active turns per chat — keyed by the string conversation id. Read by
+  // /stop and /status.
+  const activeTurns = new Map<string, ActiveTurnHandle>();
 
   // Per-chat promise chain so messages within one chat stay ordered.
   // We chain `next = prev.then(work)` and store `next` here. When the
   // next message arrives, it chains off the latest entry.
-  const chatChains = new Map<number, Promise<void>>();
+  const chatChains = new Map<string, Promise<void>>();
   // Set of every in-flight worker promise — drained at shutdown / oneShot.
   const inFlight = new Set<Promise<void>>();
 
   // Per-chat group routing state (last-addressed bot + recent-message
   // buffer). Only touched for group/supergroup chats; DMs never key in.
-  const groupChats = new Map<number, GroupChatState>();
+  const groupChats = new Map<string, GroupChatState>();
   // This bot's own addressing token in groups is its persona name, which
   // must appear in the configured group_persona_names list (shared verbatim
   // across every bot in the group). Native @mentions route through the same
@@ -285,9 +290,9 @@ export async function runTelegramServer(
       for (const msg of updates) {
         if (input.signal?.aborted) return;
 
-        if (!checkAllowed(msg.fromUserId)) {
+        if (!checkAllowed(msg.senderId)) {
           log.info("telegram: rejecting unauthorized user", {
-            fromUserId: msg.fromUserId,
+            fromUserId: msg.senderId,
             fromUsername: msg.fromUsername,
           });
           continue;
@@ -295,8 +300,8 @@ export async function runTelegramServer(
 
         const isVoice = Boolean(msg.voice);
         log.info("telegram: incoming", {
-          chatId: msg.chatId,
-          fromUserId: msg.fromUserId,
+          chatId: msg.conversationId,
+          fromUserId: msg.senderId,
           fromUsername: msg.fromUsername,
           textLength: msg.text.length,
           persona: input.persona,
@@ -341,7 +346,7 @@ export async function runTelegramServer(
                 target.toLowerCase() !== botUsername.toLowerCase()
               ) {
                 log.info("telegram: slash for another bot — ignoring", {
-                  chatId: msg.chatId,
+                  chatId: msg.conversationId,
                   persona: input.persona,
                   target,
                 });
@@ -349,11 +354,11 @@ export async function runTelegramServer(
               }
             } else {
               const sticky = (
-                groupChats.get(msg.chatId)?.lastAddressed ?? []
+                groupChats.get(msg.conversationId)?.lastAddressed ?? []
               ).some((n) => n.toLowerCase() === selfName.toLowerCase());
               if (!sticky) {
                 log.info("telegram: untargeted group slash, not sticky — ignoring", {
-                  chatId: msg.chatId,
+                  chatId: msg.conversationId,
                   persona: input.persona,
                 });
                 continue;
@@ -361,24 +366,24 @@ export async function runTelegramServer(
             }
           }
           const result = await handleSlashCommand(msg.text, {
-            chatId: msg.chatId,
+            chatId: msg.conversationId,
             persona: input.persona,
-            conversation: `telegram:${msg.chatId}`,
+            conversation: `telegram:${msg.conversationId}`,
             memory: input.memory,
             harnesses,
             startedAt: serverStartedAt,
-            activeTurn: activeTurns.get(msg.chatId),
+            activeTurn: activeTurns.get(msg.conversationId),
             config: input.config,
             serviceControl: input.serviceControl,
             botUsername,
           });
           if (result) {
             try {
-              await input.transport.sendMessage(msg.chatId, result.reply);
+              await input.transport.sendMessage(msg.conversationId, result.reply);
             } catch (e) {
               log.error("telegram: slash reply send failed", {
                 error: (e as Error).message,
-                chatId: msg.chatId,
+                chatId: msg.conversationId,
               });
             }
             // afterSend runs strictly after sendMessage so heads-up
@@ -398,7 +403,7 @@ export async function runTelegramServer(
               } catch (e) {
                 log.error("telegram: slash afterSend failed", {
                   error: (e as Error).message,
-                  chatId: msg.chatId,
+                  chatId: msg.conversationId,
                 });
               }
             }
@@ -414,7 +419,7 @@ export async function runTelegramServer(
         // context) but produce no reply. DMs skip this entirely.
         let groupContext: string | undefined;
         if (isGroupChat) {
-          const state = groupChats.get(msg.chatId) ?? {
+          const state = groupChats.get(msg.conversationId) ?? {
             lastAddressed: [],
             buffer: [],
           };
@@ -454,7 +459,7 @@ export async function runTelegramServer(
                     : ""));
           const fromLabel = msg.fromUsername
             ? `@${msg.fromUsername}`
-            : String(msg.fromUserId);
+            : String(msg.senderId);
 
           if (!decision.reply) {
             if (bufText.length > 0) {
@@ -465,9 +470,9 @@ export async function runTelegramServer(
               });
             }
             while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
-            groupChats.set(msg.chatId, state);
+            groupChats.set(msg.conversationId, state);
             log.info("telegram: group message not for this bot — staying quiet", {
-              chatId: msg.chatId,
+              chatId: msg.conversationId,
               persona: input.persona,
               matched,
               lastAddressed: state.lastAddressed,
@@ -489,7 +494,7 @@ export async function runTelegramServer(
             });
           }
           while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
-          groupChats.set(msg.chatId, state);
+          groupChats.set(msg.conversationId, state);
         }
 
         // Regular message. If a turn is already in flight for this
@@ -500,10 +505,10 @@ export async function runTelegramServer(
         // chains off `prev` (the aborted turn's worker promise) so
         // the harness's process group has time to clean up before we
         // spawn the next subprocess.
-        const active = activeTurns.get(msg.chatId);
+        const active = activeTurns.get(msg.conversationId);
         if (active) {
           log.info("telegram: new message — interrupting active turn", {
-            chatId: msg.chatId,
+            chatId: msg.conversationId,
             elapsedS: (
               (Date.now() - active.startTime) / 1000
             ).toFixed(1),
@@ -514,7 +519,7 @@ export async function runTelegramServer(
         // Enqueue onto this chat's serial chain.
         // Convert prior rejection to resolution so a thrown
         // processChatMessage doesn't wedge the per-chat queue (GitHub #135).
-        const prev = (chatChains.get(msg.chatId) ?? Promise.resolve()).catch(
+        const prev = (chatChains.get(msg.conversationId) ?? Promise.resolve()).catch(
           () => {},
         );
         const next = prev.then(() =>
@@ -533,17 +538,17 @@ export async function runTelegramServer(
             // here: answering an open bot is fine; granting it authority
             // to write security rules is not.
             principalAuthenticated:
-              allowedSet.size > 0 && allowedSet.has(msg.fromUserId),
+              allowedSet.size > 0 && allowedSet.has(Number(msg.senderId)),
           }),
         );
         // Detach completed entries so the maps don't leak.
         const tracked = next.finally(() => {
-          if (chatChains.get(msg.chatId) === tracked) {
-            chatChains.delete(msg.chatId);
+          if (chatChains.get(msg.conversationId) === tracked) {
+            chatChains.delete(msg.conversationId);
           }
           inFlight.delete(tracked);
         });
-        chatChains.set(msg.chatId, tracked);
+        chatChains.set(msg.conversationId, tracked);
         inFlight.add(tracked);
       }
     } while (!input.oneShot);
@@ -589,7 +594,7 @@ async function processChatMessage(
   ctx: {
     input: RunTelegramServerInput;
     harnesses: Harness[];
-    activeTurns: Map<number, ActiveTurnHandle>;
+    activeTurns: Map<string, ActiveTurnHandle>;
     /** Our own @username (from startup getMe), used to strip the
      *  addressing mention from group messages. Undefined if getMe
      *  failed — stripping then no-ops. */
@@ -636,7 +641,7 @@ async function processChatMessage(
     const stt = sttSupport(input.config);
     if (!stt.ok) {
       await input.transport.sendMessage(
-        msg.chatId,
+        msg.conversationId,
         voiceUnavailableMessage(stt),
       );
       return;
@@ -657,24 +662,24 @@ async function processChatMessage(
         log.error("telegram: STT failed", {
           error: r.error,
           persona: input.persona,
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
         });
         try {
           await input.transport.sendMessage(
-            msg.chatId,
+            msg.conversationId,
             "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
           );
         } catch (sendErr) {
           log.warn("telegram: STT failure notice send failed", {
             error: (sendErr as Error).message,
-            chatId: msg.chatId,
+            chatId: msg.conversationId,
           });
         }
         return;
       }
       msg.text = r.text;
       log.info("telegram: STT ok", {
-        chatId: msg.chatId,
+        chatId: msg.conversationId,
         persona: input.persona,
         transcriptChars: r.text.length,
       });
@@ -682,17 +687,17 @@ async function processChatMessage(
       log.error("telegram: STT pipeline error", {
         error: (e as Error).message,
         persona: input.persona,
-        chatId: msg.chatId,
+        chatId: msg.conversationId,
       });
       try {
         await input.transport.sendMessage(
-          msg.chatId,
+          msg.conversationId,
           "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
         );
       } catch (sendErr) {
         log.warn("telegram: STT failure notice send failed", {
           error: (sendErr as Error).message,
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
         });
       }
       return;
@@ -715,14 +720,14 @@ async function processChatMessage(
     ) {
       oversizeBytes = att.fileSize;
       log.warn("telegram: attachment over bot-API cap, not downloading", {
-        chatId: msg.chatId,
+        chatId: msg.conversationId,
         kind: att.kind,
         fileName: att.fileName,
         fileSize: att.fileSize,
       });
     } else {
       try {
-        const dir = inboxDir(msg.chatId);
+        const dir = inboxDir(msg.conversationId);
         await mkdir(dir, { recursive: true });
         // basename strips any path separators or "../" climbs from
         // Telegram's user-controlled file_name field — without this,
@@ -733,7 +738,7 @@ async function processChatMessage(
         await writeFile(path, file.data);
         savedPath = path;
         log.info("telegram: attachment saved", {
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
           kind: att.kind,
           path,
           bytes: file.data.byteLength,
@@ -742,7 +747,7 @@ async function processChatMessage(
       } catch (e) {
         downloadError = (e as Error).message;
         log.error("telegram: attachment download failed", {
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
           kind: att.kind,
           fileName: att.fileName,
           error: downloadError,
@@ -798,8 +803,8 @@ async function processChatMessage(
   }
   const sendStatus = () =>
     willReplyWithVoice
-      ? input.transport.sendRecording(msg.chatId)
-      : input.transport.sendTyping(msg.chatId);
+      ? input.transport.sendRecording(msg.conversationId)
+      : input.transport.sendTyping(msg.conversationId);
   const streaming = input.config.telegramStreaming ?? DEFAULT_TELEGRAM_STREAMING;
   const segmenterOptions = {
     maxSentences: streaming.bubbleMaxSentences,
@@ -855,7 +860,7 @@ async function processChatMessage(
     controller,
     startTime: startedAt,
   };
-  activeTurns.set(msg.chatId, turnHandle);
+  activeTurns.set(msg.conversationId, turnHandle);
 
   // Streaming accumulators.
   //
@@ -891,13 +896,13 @@ async function processChatMessage(
   ) => {
     if (text.trim().length === 0) return;
     try {
-      await input.transport.sendMessage(msg.chatId, text);
+      await input.transport.sendMessage(msg.conversationId, text);
       if (kind === "narration") narrationBubblesSent++;
       if (kind === "final") finalBubblesSent++;
     } catch (e) {
       log.warn(`telegram: ${kind} send failed`, {
         error: (e as Error).message,
-        chatId: msg.chatId,
+        chatId: msg.conversationId,
       });
     }
     refreshIndicator();
@@ -940,7 +945,7 @@ async function processChatMessage(
   // suffix. Only for real `telegram:*` conversations — never tick:/system:.
   // runTurn appends this incoming message to `turns` only AFTER the turn,
   // so we count prior user turns + 1 to land the nudge on the Nth turn.
-  const conversationKey = `telegram:${msg.chatId}`;
+  const conversationKey = `telegram:${msg.conversationId}`;
   let captureNudge: string | undefined;
   if (conversationKey.startsWith("telegram:")) {
     captureNudge = await captureNudgeForTurn(
@@ -1045,7 +1050,7 @@ async function processChatMessage(
         // /status can show "currently: <tool>" in real time.
         turnHandle.lastProgressNote = chunk.note.slice(0, 500);
         log.debug("telegram: progress", {
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
           note: chunk.note.slice(0, 200),
         });
         // A tool is about to run. The text emitted since the previous
@@ -1085,8 +1090,8 @@ async function processChatMessage(
     stopToolRefresh();
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
-    if (activeTurns.get(msg.chatId) === turnHandle) {
-      activeTurns.delete(msg.chatId);
+    if (activeTurns.get(msg.conversationId) === turnHandle) {
+      activeTurns.delete(msg.conversationId);
     }
   }
 
@@ -1100,7 +1105,7 @@ async function processChatMessage(
   if (controller.signal.aborted) {
     const reason = abortReasonString(controller.signal.reason);
     log.info("telegram: turn aborted", {
-      chatId: msg.chatId,
+      chatId: msg.conversationId,
       durationMs: Date.now() - startedAt,
       reason,
     });
@@ -1118,20 +1123,20 @@ async function processChatMessage(
         await input.memory.appendTurnPair(
           {
             persona: input.persona,
-            conversation: `telegram:${msg.chatId}`,
+            conversation: `telegram:${msg.conversationId}`,
             role: "user",
             text: msg.text,
           },
           {
             persona: input.persona,
-            conversation: `telegram:${msg.chatId}`,
+            conversation: `telegram:${msg.conversationId}`,
             role: "assistant",
             text: "[interrupted before reply]",
           },
         );
       } catch (e) {
         log.warn("telegram: failed to persist interrupted-pair", {
-          chatId: msg.chatId,
+          chatId: msg.conversationId,
           error: (e as Error).message,
         });
       }
@@ -1149,7 +1154,7 @@ async function processChatMessage(
   let recoveryText: string | undefined;
   if (errored) {
     log.error("telegram: turn failed; generating recovery reply", {
-      chatId: msg.chatId,
+      chatId: msg.conversationId,
       error: errored,
     });
     recoveryText = await generateRecoveryReply({
@@ -1221,7 +1226,7 @@ async function processChatMessage(
         const r = await synthesize(input.config, segment);
         if (r.ok) {
           await input.transport.sendVoice(
-            msg.chatId,
+            msg.conversationId,
             r.audio.data,
             r.audio.mime,
           );
@@ -1246,12 +1251,12 @@ async function processChatMessage(
   } catch (e) {
     log.error("telegram: send failed", {
       error: (e as Error).message,
-      chatId: msg.chatId,
+      chatId: msg.conversationId,
     });
   }
 
   log.info("telegram: complete", {
-    chatId: msg.chatId,
+    chatId: msg.conversationId,
     durationMs: Date.now() - startedAt,
     replyChars: outText.length,
     consumedReplyChars,

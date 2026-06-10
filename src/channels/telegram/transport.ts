@@ -42,12 +42,16 @@ export interface TelegramTransport extends ChannelTransport {
    * process gets the same /restart again — restart loop.
    */
   ackUpdates(offset: number): Promise<void>;
-  sendMessage(chatId: number, text: string): Promise<void>;
-  sendTyping(chatId: number): Promise<void>;
+  // These keep the BASE `ChannelTransport` string-id signature verbatim (a
+  // sound subtype — no narrowing of `string` to `number`). The numeric chat
+  // id Telegram's HTTP API wants is recovered via `Number(conversationId)`
+  // inside each method, at the wire boundary.
+  sendMessage(conversationId: string, text: string): Promise<void>;
+  sendTyping(conversationId: string): Promise<void>;
   /** Send an OGG-Opus voice note. */
-  sendVoice(chatId: number, audio: Buffer, mime: string): Promise<void>;
+  sendVoice(conversationId: string, audio: Buffer, mime: string): Promise<void>;
   /** Send the "recording voice" status indicator. */
-  sendRecording(chatId: number): Promise<void>;
+  sendRecording(conversationId: string): Promise<void>;
   /** Download a file by Telegram file_id; returns audio bytes + content-type. */
   downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
   /**
@@ -168,7 +172,11 @@ export class HttpTelegramTransport implements TelegramTransport {
     }
   }
 
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  async sendMessage(conversationId: string, text: string): Promise<void> {
+    // Boundary: the core hands us a channel-neutral string id; Telegram's
+    // API wants the numeric chat id. `Number()` round-trips negative group
+    // ids and large ids exactly (parseInt would truncate large ones).
+    const chatId = Number(conversationId);
     const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
     // Telegram caps message length at 4096 chars. Truncate the SOURCE
     // markdown to stay clear of the cap after HTML conversion adds
@@ -226,7 +234,8 @@ export class HttpTelegramTransport implements TelegramTransport {
     });
   }
 
-  async sendTyping(chatId: number): Promise<void> {
+  async sendTyping(conversationId: string): Promise<void> {
+    const chatId = Number(conversationId);
     const url = `https://api.telegram.org/bot${this.token}/sendChatAction`;
     await fetch(url, {
       method: "POST",
@@ -238,7 +247,8 @@ export class HttpTelegramTransport implements TelegramTransport {
     });
   }
 
-  async sendRecording(chatId: number): Promise<void> {
+  async sendRecording(conversationId: string): Promise<void> {
+    const chatId = Number(conversationId);
     const url = `https://api.telegram.org/bot${this.token}/sendChatAction`;
     await fetch(url, {
       method: "POST",
@@ -249,10 +259,11 @@ export class HttpTelegramTransport implements TelegramTransport {
   }
 
   async sendVoice(
-    chatId: number,
+    conversationId: string,
     audio: Buffer,
     mime: string,
   ): Promise<void> {
+    const chatId = Number(conversationId);
     const form = new FormData();
     form.set("chat_id", String(chatId));
     form.set(

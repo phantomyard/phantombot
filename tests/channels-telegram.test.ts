@@ -45,10 +45,13 @@ import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
 class FakeTransport implements TelegramTransport {
   pendingUpdates: TelegramMessage[] = [];
-  sent: Array<{ chatId: number; text: string }> = [];
-  voiceSent: Array<{ chatId: number; mime: string; bytes: number }> = [];
-  typing: number[] = [];
-  recording: number[] = [];
+  // Core ids are channel-neutral strings (#168); the transport surface takes
+  // the string conversation id and Telegram's HttpTelegramTransport converts
+  // to a number at its own boundary.
+  sent: Array<{ chatId: string; text: string }> = [];
+  voiceSent: Array<{ chatId: string; mime: string; bytes: number }> = [];
+  typing: string[] = [];
+  recording: string[] = [];
   downloadedFileIds: string[] = [];
   fakeFileBytes = Buffer.from([0x4f, 0x67, 0x67, 0x53]); // "OggS" magic
   /** Per-fileId override for `downloadFile`. */
@@ -81,17 +84,17 @@ class FakeTransport implements TelegramTransport {
   async ackUpdates(offset: number): Promise<void> {
     this.ackedOffsets.push(offset);
   }
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string): Promise<void> {
     this.sent.push({ chatId, text });
   }
-  async sendTyping(chatId: number): Promise<void> {
+  async sendTyping(chatId: string): Promise<void> {
     this.typing.push(chatId);
   }
-  async sendRecording(chatId: number): Promise<void> {
+  async sendRecording(chatId: string): Promise<void> {
     this.recording.push(chatId);
   }
   async sendVoice(
-    chatId: number,
+    chatId: string,
     audio: Buffer,
     mime: string,
   ): Promise<void> {
@@ -161,8 +164,8 @@ describe("parseGetUpdatesResult", () => {
     expect(r.updates).toEqual([
       {
         updateId: 100,
-        chatId: 1,
-        fromUserId: 42,
+        conversationId: "1",
+        senderId: "42",
         fromUsername: "alice",
         text: "hi",
       },
@@ -207,8 +210,8 @@ describe("parseGetUpdatesResult", () => {
     expect(r.updates).toHaveLength(1);
     expect(r.updates[0]).toMatchObject({
       updateId: 300,
-      chatId: 1,
-      fromUserId: 42,
+      conversationId: "1",
+      senderId: "42",
       text: "",
       caption: "look at this",
       attachment: {
@@ -689,8 +692,8 @@ describe("runTelegramServer attachment dispatch", () => {
     });
     transport.pendingUpdates.push({
       updateId: 555,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       caption: "look at this report",
       attachment: {
@@ -716,7 +719,7 @@ describe("runTelegramServer attachment dispatch", () => {
 
     expect(transport.downloadedFileIds).toEqual(["doc-abc"]);
     const expectedPath = join(
-      inboxDir(1001),
+      inboxDir("1001"),
       "555-report.pdf",
     );
     const onDisk = await import("node:fs/promises").then((m) =>
@@ -733,8 +736,8 @@ describe("runTelegramServer attachment dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 556,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       caption: "big one",
       attachment: {
@@ -771,8 +774,8 @@ describe("runTelegramServer attachment dispatch", () => {
     transport.fileResponses.set("flaky", new Error("ECONNRESET"));
     transport.pendingUpdates.push({
       updateId: 557,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       attachment: {
         fileId: "flaky",
@@ -813,8 +816,8 @@ describe("runTelegramServer attachment dispatch", () => {
     });
     transport.pendingUpdates.push({
       updateId: 559,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       attachment: {
         fileId: "evil",
@@ -836,7 +839,7 @@ describe("runTelegramServer attachment dispatch", () => {
       oneShot: true,
     });
 
-    const dir = inboxDir(1001);
+    const dir = inboxDir("1001");
     const expectedPath = join(dir, "559-passwd");
     expect(harness.lastRequest?.userMessage).toBe(`[attached: ${expectedPath}]`);
     // The saved file must live under the inbox dir, not at /etc/passwd
@@ -856,8 +859,8 @@ describe("runTelegramServer attachment dispatch", () => {
     });
     transport.pendingUpdates.push({
       updateId: 558,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       attachment: {
         fileId: "photo-1",
@@ -880,7 +883,7 @@ describe("runTelegramServer attachment dispatch", () => {
       oneShot: true,
     });
 
-    const expectedPath = join(inboxDir(1001), "558-558-photo.jpg");
+    const expectedPath = join(inboxDir("1001"), "558-558-photo.jpg");
     expect(harness.lastRequest?.userMessage).toBe(`[attached: ${expectedPath}]`);
   });
 });
@@ -890,8 +893,8 @@ describe("runTelegramServer dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       fromUsername: "alice",
       text: "hello",
     });
@@ -913,8 +916,8 @@ describe("runTelegramServer dispatch", () => {
     // for the right chat. Exact count varies with chunk timing — the
     // contract is "the user saw `typing…`," not a precise sequence.
     expect(transport.typing.length).toBeGreaterThanOrEqual(1);
-    expect(transport.typing.every((c) => c === 1001)).toBe(true);
-    expect(transport.sent).toEqual([{ chatId: 1001, text: "hi alice" }]);
+    expect(transport.typing.every((c) => c === "1001")).toBe(true);
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "hi alice" }]);
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
     expect(stored).toEqual([
       { role: "user", text: "hello" },
@@ -926,8 +929,8 @@ describe("runTelegramServer dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 99,
+      conversationId: "1001",
+      senderId: "99",
       text: "hi",
     });
     const harness = new ScriptedHarness("fake", [
@@ -949,8 +952,8 @@ describe("runTelegramServer dispatch", () => {
   test("isolates conversations by chatId", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push(
-      { updateId: 1, chatId: 100, fromUserId: 42, text: "from A" },
-      { updateId: 2, chatId: 200, fromUserId: 42, text: "from B" },
+      { updateId: 1, conversationId: "100", senderId: "42", text: "from A" },
+      { updateId: 2, conversationId: "200", senderId: "42", text: "from B" },
     );
     const harness = new ScriptedHarness("fake", [
       { type: "done", finalText: "ok" },
@@ -974,8 +977,8 @@ describe("runTelegramServer dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 7,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       fromUsername: "alice",
       text: "merge",
       replyTo: {
@@ -1016,8 +1019,8 @@ describe("runTelegramServer dispatch", () => {
     // distinguishes it from any other no-text reply.
     transport.pendingUpdates.push({
       updateId: 8,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       fromUsername: "alice",
       text: "got it",
       replyTo: {
@@ -1053,8 +1056,8 @@ describe("runTelegramServer dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hi",
     });
     // This harness fails on every invoke, so the recovery re-prompt fails
@@ -1082,8 +1085,8 @@ describe("runTelegramServer dispatch", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hola, ¿cómo estás?",
     });
     // First invoke (the real turn) fails; the recovery re-prompt is a
@@ -1121,7 +1124,7 @@ describe("runTelegramServer dispatch", () => {
     });
     expect(calls).toBe(2);
     expect(transport.sent).toEqual([
-      { chatId: 1001, text: "¡Uy, me atasqué! ¿Lo intentamos otra vez?" },
+      { chatId: "1001", text: "¡Uy, me atasqué! ¿Lo intentamos otra vez?" },
     ]);
     // The raw diagnostic is never shown.
     expect(transport.sent.some((s) => /timed out|error:/i.test(s.text))).toBe(
@@ -1301,8 +1304,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "@nim_test_bot deploy the thing",
@@ -1331,8 +1334,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       chatType: "private",
       text: "@nim_test_bot hi",
     });
@@ -1378,8 +1381,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "nim, status?",
@@ -1404,8 +1407,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "vor, status?",
@@ -1430,8 +1433,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "anyone around?",
@@ -1457,16 +1460,16 @@ describe("runTelegramServer group addressing", () => {
     transport.pendingUpdates.push(
       {
         updateId: 1,
-        chatId: -1001,
-        fromUserId: 42,
+        conversationId: "-1001",
+        senderId: "42",
         fromUsername: "tester",
         chatType: "supergroup",
         text: "nim, let's talk topic A",
       },
       {
         updateId: 2,
-        chatId: -1001,
-        fromUserId: 42,
+        conversationId: "-1001",
+        senderId: "42",
         fromUsername: "tester",
         chatType: "supergroup",
         text: "and what about the edge cases?",
@@ -1497,8 +1500,8 @@ describe("runTelegramServer group addressing", () => {
       {
         // Addressed to vor — nim observes but stays silent.
         updateId: 1,
-        chatId: -1001,
-        fromUserId: 42,
+        conversationId: "-1001",
+        senderId: "42",
         fromUsername: "tester",
         chatType: "supergroup",
         text: "vor, my take on topic A is X",
@@ -1507,8 +1510,8 @@ describe("runTelegramServer group addressing", () => {
         // Now nim is addressed — should receive the vor-directed line
         // as context.
         updateId: 2,
-        chatId: -1001,
-        fromUserId: 42,
+        conversationId: "-1001",
+        senderId: "42",
         fromUsername: "tester",
         chatType: "supergroup",
         text: "nim, what do you think of that?",
@@ -1545,8 +1548,8 @@ describe("runTelegramServer group addressing", () => {
     transport.botUsername = "nim_test_bot";
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "@nim_test_bot are you there?",
@@ -1574,8 +1577,8 @@ describe("runTelegramServer group addressing", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "nim, you there?",
@@ -1653,8 +1656,8 @@ describe("runTelegramServer voice round-trip", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "abc-file", mimeType: "audio/ogg", durationS: 3 },
       });
@@ -1675,7 +1678,7 @@ describe("runTelegramServer voice round-trip", () => {
       expect(harness.invocations).toBe(1);
       expect(harness.lastRequest?.userMessage).toBe("hello from voice");
       expect(transport.voiceSent).toHaveLength(1);
-      expect(transport.voiceSent[0]?.chatId).toBe(1001);
+      expect(transport.voiceSent[0]?.chatId).toBe("1001");
       expect(transport.sent).toEqual([]);
       expect(ttsCalled).toBe(1);
       expect(transport.recording.length).toBeGreaterThan(0);
@@ -1689,8 +1692,8 @@ describe("runTelegramServer voice round-trip", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hi via text",
     });
     const harness = new ScriptedHarness("fake", [
@@ -1706,7 +1709,7 @@ describe("runTelegramServer voice round-trip", () => {
       oneShot: true,
     });
     expect(transport.sent).toEqual([
-      { chatId: 1001, text: "hello back" },
+      { chatId: "1001", text: "hello back" },
     ]);
     expect(transport.voiceSent).toEqual([]);
     expect(transport.downloadedFileIds).toEqual([]);
@@ -1718,8 +1721,8 @@ describe("runTelegramServer voice round-trip", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "",
       voice: { fileId: "xyz", mimeType: "audio/ogg", durationS: 5 },
     });
@@ -1759,8 +1762,8 @@ describe("runTelegramServer voice round-trip", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "abc", mimeType: "audio/ogg", durationS: 2 },
       });
@@ -1817,16 +1820,16 @@ describe("runTelegramServer voice round-trip", () => {
       // 1) voice note in chat 1001 whose transcription will hang.
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "stuck-voice", mimeType: "audio/ogg", durationS: 3 },
       });
       // 2) a later text message in the SAME chat — must still get through.
       transport.pendingUpdates.push({
         updateId: 2,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "still here?",
       });
 
@@ -1897,8 +1900,8 @@ describe("runTelegramServer voice round-trip", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "v1", mimeType: "audio/ogg", durationS: 2 },
       });
@@ -1917,7 +1920,7 @@ describe("runTelegramServer voice round-trip", () => {
       expect(whisperCalled).toBe(1); // STT still ran
       expect(ttsCalled).toBe(0); // but TTS was skipped
       expect(transport.voiceSent).toEqual([]);
-      expect(transport.sent).toEqual([{ chatId: 1001, text: "sunny" }]);
+      expect(transport.sent).toEqual([{ chatId: "1001", text: "sunny" }]);
       // typing indicator (text-out) not recording (voice-out)
       expect(transport.typing.length).toBeGreaterThan(0);
       expect(transport.recording).toEqual([]);
@@ -1947,8 +1950,8 @@ describe("runTelegramServer voice round-trip", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "give me today's agenda — send me a voice note",
       });
       const harness = new ScriptedHarness("fake", [
@@ -1965,7 +1968,7 @@ describe("runTelegramServer voice round-trip", () => {
       });
       expect(ttsCalled).toBe(1);
       expect(transport.voiceSent).toHaveLength(1);
-      expect(transport.voiceSent[0]?.chatId).toBe(1001);
+      expect(transport.voiceSent[0]?.chatId).toBe("1001");
       // No text fallback when the voice send succeeded.
       expect(transport.sent).toEqual([]);
       // recording indicator (voice-out path)
@@ -1982,8 +1985,8 @@ describe("runTelegramServer voice round-trip", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "ping — reply with voice please",
     });
     const harness = new ScriptedHarness("fake", [
@@ -2000,7 +2003,7 @@ describe("runTelegramServer voice round-trip", () => {
       oneShot: true,
     });
     expect(transport.voiceSent).toEqual([]);
-    expect(transport.sent).toEqual([{ chatId: 1001, text: "pong" }]);
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "pong" }]);
     expect(transport.recording).toEqual([]);
     expect(transport.typing.length).toBeGreaterThan(0);
   });
@@ -2053,8 +2056,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "f", mimeType: "audio/ogg", durationS: 2 },
       });
@@ -2088,8 +2091,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "long question?",
     });
     const harness = new ScriptedHarness("fake", [
@@ -2117,8 +2120,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hi",
     });
     const harness = new ScriptedHarness("fake", [
@@ -2155,8 +2158,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "f", mimeType: "audio/ogg", durationS: 2 },
       });
@@ -2208,8 +2211,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "any new email from turtle crossing?",
     });
     await runTelegramServer({
@@ -2225,7 +2228,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
     expect(transport.sent.map((s) => s.text)).toEqual([
       "Found 3 threads from Turtle Crossing.",
     ]);
-    expect(transport.sent.every((s) => s.chatId === 1001)).toBe(true);
+    expect(transport.sent.every((s) => s.chatId === "1001")).toBe(true);
   });
 
   test("multi-tool turn: narration coalesces instead of sending one bubble per tool", async () => {
@@ -2254,8 +2257,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "any urgent emails or calendar blockers?",
     });
     await runTelegramServer({
@@ -2292,8 +2295,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "check calendar",
     });
     await runTelegramServer({
@@ -2330,8 +2333,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "explain",
     });
     await runTelegramServer({
@@ -2371,8 +2374,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "what's the capital of France?",
     });
     await runTelegramServer({
@@ -2386,7 +2389,7 @@ describe("runTelegramServer narration flush (text-out)", () => {
     });
 
     expect(transport.sent).toEqual([
-      { chatId: 1001, text: "The capital of France is Paris." },
+      { chatId: "1001", text: "The capital of France is Paris." },
     ]);
   });
 
@@ -2410,8 +2413,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "anything?",
     });
     await runTelegramServer({
@@ -2451,8 +2454,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "ultimate question?",
     });
     await runTelegramServer({
@@ -2490,8 +2493,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "any results?",
     });
     await runTelegramServer({
@@ -2528,8 +2531,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "anything?",
     });
     await runTelegramServer({
@@ -2566,8 +2569,8 @@ describe("runTelegramServer narration flush (text-out)", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "anything?",
     });
     await runTelegramServer({
@@ -2654,8 +2657,8 @@ describe("runTelegramServer narration flush (voice-out)", () => {
       const transport = new FakeTransport();
       transport.pendingUpdates.push({
         updateId: 1,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "",
         voice: { fileId: "abc", mimeType: "audio/ogg", durationS: 2 },
       });
@@ -2715,8 +2718,8 @@ describe("runTelegramServer typing indicator", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hi",
     });
     const harness = new ScriptedHarness("fast", [
@@ -2733,7 +2736,7 @@ describe("runTelegramServer typing indicator", () => {
     });
     // Just the initial sendStatus — the harness emitted no streamable
     // chunks (only `done`).
-    expect(transport.typing).toEqual([1001]);
+    expect(transport.typing).toEqual(["1001"]);
   });
 
   test("refreshes on text + heartbeat + progress chunks (with throttle disabled)", async () => {
@@ -2756,8 +2759,8 @@ describe("runTelegramServer typing indicator", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "stream me",
     });
     await runTelegramServer({
@@ -2773,7 +2776,7 @@ describe("runTelegramServer typing indicator", () => {
     // 1 initial + 4 chunks (heartbeat, text, progress, text). `done`
     // doesn't refresh.
     expect(transport.typing.length).toBeGreaterThanOrEqual(5);
-    expect(transport.typing.every((c) => c === 1001)).toBe(true);
+    expect(transport.typing.every((c) => c === "1001")).toBe(true);
   });
 
   test("throttle: rapid chunks within the window collapse to one sendStatus", async () => {
@@ -2792,8 +2795,8 @@ describe("runTelegramServer typing indicator", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "x",
     });
     await runTelegramServer({
@@ -2815,8 +2818,8 @@ describe("runTelegramServer typing indicator", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "hi",
     });
     const harness = new ScriptedHarness("fast", [
@@ -2847,8 +2850,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "/help",
     });
     const harness = new ScriptedHarness("fake", [
@@ -2881,8 +2884,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "/reset@pax_test_bot",
@@ -2912,8 +2915,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "/status",
@@ -2937,8 +2940,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: -1001,
-      fromUserId: 42,
+      conversationId: "-1001",
+      senderId: "42",
       fromUsername: "tester",
       chatType: "supergroup",
       text: "/status@nim_test_bot",
@@ -2975,8 +2978,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "/reset",
     });
     const harness = new ScriptedHarness("fake", [
@@ -3033,16 +3036,16 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "kick off something slow",
     });
     // /stop arrives ~30ms later, after the harness is already in-flight.
     setTimeout(() => {
       transport.pendingUpdates.push({
         updateId: 2,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "/stop",
       });
     }, 30);
@@ -3125,15 +3128,15 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "kick off something slow",
     });
     setTimeout(() => {
       transport.pendingUpdates.push({
         updateId: 2,
-        chatId: 1001,
-        fromUserId: 42,
+        conversationId: "1001",
+        senderId: "42",
         text: "actually do this instead",
       });
     }, 30);
@@ -3182,8 +3185,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "/status",
     });
     const claude = new ScriptedHarness("claude", []);
@@ -3211,8 +3214,8 @@ describe("runTelegramServer slash commands", () => {
     ]);
     const transport = new FakeTransport();
     transport.pendingUpdates.push(
-      { updateId: 1, chatId: 1001, fromUserId: 42, text: "/harness pi" },
-      { updateId: 2, chatId: 1001, fromUserId: 42, text: "hi" },
+      { updateId: 1, conversationId: "1001", senderId: "42", text: "/harness pi" },
+      { updateId: 2, conversationId: "1001", senderId: "42", text: "hi" },
     );
     await runTelegramServer({
       // Trusted principal: /harness is an admin command, and a trusted turn
@@ -3246,8 +3249,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 5,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "/restart",
     });
 
@@ -3302,8 +3305,8 @@ describe("runTelegramServer slash commands", () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({
       updateId: 1,
-      chatId: 1001,
-      fromUserId: 42,
+      conversationId: "1001",
+      senderId: "42",
       text: "/remember the milk",
     });
     const harness = new ScriptedHarness("fake", [
@@ -3320,7 +3323,7 @@ describe("runTelegramServer slash commands", () => {
     });
     expect(harness.invocations).toBe(1);
     expect(harness.lastRequest?.userMessage).toBe("/remember the milk");
-    expect(transport.sent).toEqual([{ chatId: 1001, text: "noted" }]);
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "noted" }]);
   });
 });
 
@@ -3354,7 +3357,7 @@ describe("HttpTelegramTransport HTML rendering", () => {
         () => 200,
       );
       const t = new HttpTelegramTransport("test-token");
-      await t.sendMessage(7, "**hi** _there_ `code`");
+      await t.sendMessage("7", "**hi** _there_ `code`");
       expect(captured).toHaveLength(1);
       expect(captured[0]!.body.parse_mode).toBe("HTML");
       expect(captured[0]!.body.text).toBe(
@@ -3375,7 +3378,7 @@ describe("HttpTelegramTransport HTML rendering", () => {
         (_url, body) => (body.parse_mode === "HTML" ? 400 : 200),
       );
       const t = new HttpTelegramTransport("test-token");
-      await t.sendMessage(7, "**hi**");
+      await t.sendMessage("7", "**hi**");
       expect(captured).toHaveLength(2);
       expect(captured[0]!.body.parse_mode).toBe("HTML");
       expect(captured[1]!.body.parse_mode).toBeUndefined();
@@ -3395,7 +3398,7 @@ describe("HttpTelegramTransport HTML rendering", () => {
         () => 200,
       );
       const t = new HttpTelegramTransport("test-token");
-      await t.sendMessage(7, "**hi**");
+      await t.sendMessage("7", "**hi**");
       expect(captured).toHaveLength(1);
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
@@ -3411,7 +3414,7 @@ describe("HttpTelegramTransport HTML rendering", () => {
         () => 500,
       );
       const t = new HttpTelegramTransport("test-token");
-      await t.sendMessage(7, "**hi**");
+      await t.sendMessage("7", "**hi**");
       // Just the one HTML attempt; we don't retry server errors as
       // plain text (the issue isn't our markup).
       expect(captured).toHaveLength(1);
@@ -3431,7 +3434,7 @@ describe("HttpTelegramTransport HTML rendering", () => {
       );
       const t = new HttpTelegramTransport("test-token");
       const huge = "x".repeat(10_000);
-      await t.sendMessage(7, huge);
+      await t.sendMessage("7", huge);
       const sent = captured[0]!.body.text as string;
       expect(sent.length).toBeLessThan(4096);
       expect(sent.endsWith("\n…[truncated]")).toBe(true);

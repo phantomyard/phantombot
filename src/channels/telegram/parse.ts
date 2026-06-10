@@ -26,9 +26,14 @@ import type { ChannelMessage } from "../core/types.ts";
  */
 export const TELEGRAM_BOT_DOWNLOAD_CAP_BYTES = 20 * 1024 * 1024;
 
-/** Per-chat inbox where Telegram attachments are saved. */
-export function inboxDir(chatId: number): string {
-  return join(xdgDataHome(), "phantombot", "inbox", String(chatId));
+/**
+ * Per-chat inbox where Telegram attachments are saved. Takes the
+ * channel-neutral STRING conversation id (the engine's `msg.conversationId`);
+ * Telegram's numeric chat id was already stringified at ingest, so the on-disk
+ * path is byte-identical to the previous `String(chatId)` form.
+ */
+export function inboxDir(conversationId: string): string {
+  return join(xdgDataHome(), "phantombot", "inbox", conversationId);
 }
 
 /**
@@ -504,8 +509,11 @@ export function parseGetUpdatesResult(
           : undefined;
       updates.push({
         updateId: u.update_id,
-        chatId: msg.chat.id,
-        fromUserId: msg.from.id,
+        // Stringify Telegram's numeric ids at the adapter boundary so the
+        // core only ever sees channel-neutral string ids. `String()` (not
+        // parseInt) round-trips negative group ids and large ids exactly.
+        conversationId: String(msg.chat.id),
+        senderId: String(msg.from.id),
         fromUsername: msg.from.username,
         text: "", // filled by processChatMessage after download
         caption: captionFromMedia ?? captionFromText,
@@ -518,8 +526,8 @@ export function parseGetUpdatesResult(
     if (typeof msg.text === "string" && msg.text.length > 0) {
       updates.push({
         updateId: u.update_id,
-        chatId: msg.chat.id,
-        fromUserId: msg.from.id,
+        conversationId: String(msg.chat.id),
+        senderId: String(msg.from.id),
         fromUsername: msg.from.username,
         text: msg.text,
         ...(replyTo ? { replyTo } : {}),
@@ -530,8 +538,8 @@ export function parseGetUpdatesResult(
     if (msg.voice && typeof msg.voice.file_id === "string") {
       updates.push({
         updateId: u.update_id,
-        chatId: msg.chat.id,
-        fromUserId: msg.from.id,
+        conversationId: String(msg.chat.id),
+        senderId: String(msg.from.id),
         fromUsername: msg.from.username,
         text: "", // filled by STT before harness dispatch
         voice: {

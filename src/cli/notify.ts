@@ -136,11 +136,13 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   for (const chatId of tg.allowedUserIds) {
     try {
       if (input.message) {
-        await transport.sendMessage(chatId, input.message);
+        // String id at the transport boundary; recipients are numeric
+        // Telegram chat ids from the config allowlist.
+        await transport.sendMessage(String(chatId), input.message);
         textSent++;
       }
       if (voiceAudio) {
-        await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
+        await transport.sendVoice(String(chatId), voiceAudio.data, voiceAudio.mime);
         voiceSent++;
       }
     } catch (e) {

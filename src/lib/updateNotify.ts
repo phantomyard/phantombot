@@ -505,7 +505,9 @@ export async function checkAndNotifyOnce(
   let sent = 0;
   for (const chatId of tg.allowedUserIds) {
     try {
-      await transport.sendMessage(chatId, message);
+      // transport.sendMessage takes the channel-neutral string id; these
+      // recipients come from the numeric config allowlist.
+      await transport.sendMessage(String(chatId), message);
       sent++;
     } catch (e) {
       log.warn("updateNotify: heartbeat notify send failed", {
@@ -627,7 +629,9 @@ export async function notifyPostRestartIfPending(
 
   for (const chatId of recipients) {
     try {
-      await transport.sendMessage(chatId, message);
+      // String id at the transport boundary; recipients are numeric Telegram
+      // chat ids (marker or config allowlist).
+      await transport.sendMessage(String(chatId), message);
     } catch (e) {
       log.warn("updateNotify: post-restart notify send failed", {
         chatId,

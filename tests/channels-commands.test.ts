@@ -44,7 +44,7 @@ function ctx(
   overrides: Partial<SlashCommandContext> = {},
 ): SlashCommandContext {
   return {
-    chatId: 42,
+    chatId: "42",
     persona: "phantom",
     conversation: "telegram:42",
     memory,

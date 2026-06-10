@@ -36,8 +36,10 @@ let pendingPath: string;
 let lastNotifiedPathLocal: string;
 
 class FakeTransport implements TelegramTransport {
-  sent: Array<{ chatId: number; text: string }> = [];
-  sendMessageImpl?: (chatId: number, text: string) => Promise<void>;
+  // Core ids are channel-neutral strings (#168); updateNotify stringifies the
+  // numeric recipient ids at the transport boundary.
+  sent: Array<{ chatId: string; text: string }> = [];
+  sendMessageImpl?: (chatId: string, text: string) => Promise<void>;
   async getUpdates(): Promise<{
     updates: TelegramMessage[];
     nextOffset: number;
@@ -45,7 +47,7 @@ class FakeTransport implements TelegramTransport {
     return { updates: [], nextOffset: 0 };
   }
   async ackUpdates(): Promise<void> {}
-  async sendMessage(chatId: number, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string): Promise<void> {
     if (this.sendMessageImpl) await this.sendMessageImpl(chatId, text);
     this.sent.push({ chatId, text });
   }
@@ -669,7 +671,7 @@ describe("checkAndNotifyOnce", () => {
   test("dedup writes even on partial send failure (better one missed than one re-pinged)", async () => {
     const transport = new FakeTransport();
     transport.sendMessageImpl = async (chatId) => {
-      if (chatId === 99) throw new Error("rate limited");
+      if (chatId === "99") throw new Error("rate limited");
     };
     const r = await checkAndNotifyOnce({
       config: baseConfig(),
@@ -724,7 +726,7 @@ describe("notifyPostRestartIfPending", () => {
     expect(r.status).toBe("success_notified");
     // Only sent to chatId 42 (from marker), NOT broadcast to allowedUserIds.
     expect(transport.sent.length).toBe(1);
-    expect(transport.sent[0]!.chatId).toBe(42);
+    expect(transport.sent[0]!.chatId).toBe("42");
     expect(transport.sent[0]!.text).toContain("✅");
     expect(transport.sent[0]!.text).toContain("v1.0.99");
     expect(transport.sent[0]!.text).toContain("v1.0.42");
@@ -776,7 +778,7 @@ describe("notifyPostRestartIfPending", () => {
     });
     expect(r.status).toBe("success_notified");
     // No chatId in marker → broadcast to BOTH allowed users.
-    expect(transport.sent.map((s) => s.chatId).sort()).toEqual([42, 99]);
+    expect(transport.sent.map((s) => s.chatId).sort()).toEqual(["42", "99"]);
   });
 
   test("no telegram configured → clears marker without notify, returns status no_telegram", async () => {
@@ -851,7 +853,7 @@ describe("notifyPostRestartIfPending", () => {
     });
     expect(r.status).toBe("success_notified");
     // Broadcast to adminAccount.allowedUserIds, NOT no-op.
-    expect(transport.sent.map((s) => s.chatId).sort()).toEqual([42, 99]);
+    expect(transport.sent.map((s) => s.chatId).sort()).toEqual(["42", "99"]);
     expect(await readPendingUpdate(pendingPath)).toBeUndefined();
   });
 
@@ -896,7 +898,7 @@ describe("notifyPostRestartIfPending", () => {
 
     expect(r.status).toBe("success_notified");
     expect(createdForTokens).toEqual(["miles-tok"]);
-    expect(transport.sent.map((s) => s.chatId)).toEqual([4242]);
+    expect(transport.sent.map((s) => s.chatId)).toEqual(["4242"]);
     expect(await readPendingUpdate(pendingPath)).toBeUndefined();
   });
 
@@ -932,6 +934,6 @@ describe("notifyPostRestartIfPending", () => {
       },
     });
     expect(r.status).toBe("success_notified");
-    expect(transport.sent.map((s) => s.chatId)).toEqual([777]);
+    expect(transport.sent.map((s) => s.chatId)).toEqual(["777"]);
   });
 });

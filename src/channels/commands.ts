@@ -45,8 +45,9 @@ export interface ActiveTurnHandle {
 }
 
 export interface SlashCommandContext {
-  /** For logging / disambiguation only. */
-  chatId: number;
+  /** For logging / disambiguation only. The channel-neutral string
+   *  conversation id (e.g. Telegram's stringified chat id). */
+  chatId: string;
   persona: string;
   /** Conversation key, e.g. "telegram:42". Used by /reset. */
   conversation: string;
@@ -246,7 +247,10 @@ async function handleUpdate(
   const r = await runUpdateFlow({
     config: ctx.config,
     currentVersion: VERSION,
-    chatId: ctx.chatId,
+    // The update-notify subsystem keys recipients by numeric Telegram chat
+    // id (it persists the id into the post-restart marker). Convert the
+    // channel-neutral string conversation id back at this boundary.
+    chatId: Number(ctx.chatId),
     persona: ctx.persona,
   });
   return { reply: r.reply, afterSend: r.restart };
