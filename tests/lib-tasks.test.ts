@@ -19,6 +19,28 @@ afterEach(async () => {
 
 const NOW = new Date("2026-05-02T09:30:00Z");
 
+describe("TaskStore migrations (item e)", () => {
+  test("re-opening an existing DB replays ADD COLUMN migrations as a silent no-op", async () => {
+    const dbPath = join(workdir, "reopen.sqlite");
+    const a = await openTaskStore(dbPath);
+    a.add({
+      persona: "phantom",
+      description: "x",
+      schedule: "0 * * * *",
+      prompt: "p",
+      now: NOW,
+    });
+    a.close();
+    // Second open replays every ADD COLUMN against an already-current schema.
+    // With the narrowed catch the duplicate-column error is still swallowed,
+    // so this must resolve without throwing — proving we kept idempotency
+    // while no longer masking real migration failures.
+    const b = await openTaskStore(dbPath);
+    expect(b.list("phantom").length).toBeGreaterThanOrEqual(1);
+    b.close();
+  });
+});
+
 describe("TaskStore.add", () => {
   test("happy path: persists + computes next_run_at + next_review_at", () => {
     const r = store.add({

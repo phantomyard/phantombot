@@ -171,6 +171,17 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN command_secrets TEXT NOT NULL DEFAULT '[]'`,
 ];
 
+/**
+ * True only for SQLite's "duplicate column name: X" — the benign signal that
+ * an ADD COLUMN migration already ran. Matched on the message because
+ * bun:sqlite doesn't expose a stable structured code for it. Any other error
+ * (disk full, locked DB, etc.) returns false so the caller rethrows it.
+ */
+function isDuplicateColumnError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /duplicate column name/i.test(msg);
+}
+
 interface RawTaskRow {
   id: number;
   persona: string;
@@ -238,13 +249,19 @@ export class TaskStore {
   }
 
   private applyMigrations(): void {
-    // Run all migrations idempotently. SQLite reports duplicate columns
-    // when a database is already current; that is the desired no-op path.
+    // Run all migrations idempotently. The ONLY benign error is "the column
+    // already exists" — that's how we make ADD COLUMN idempotent on an
+    // already-current DB. Everything else (disk full, locked DB, corrupt
+    // schema, a typo'd migration) is a REAL failure: a blanket catch here
+    // would swallow it and leave the schema silently half-migrated, which
+    // surfaces much later as baffling "no such column" crashes. So we match
+    // the duplicate-column error narrowly and rethrow anything else loudly.
     for (const sql of MIGRATIONS) {
       try {
         this.db.exec(sql);
-      } catch {
-        // Column already exists (idempotent).
+      } catch (e) {
+        if (isDuplicateColumnError(e)) continue; // expected no-op on current DB
+        throw e;
       }
     }
   }
