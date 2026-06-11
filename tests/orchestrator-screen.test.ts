@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 
 import {
   makeScreener,
+  resolveNotifyPersona,
   type HeldEpisode,
   type ScreenerDeps,
 } from "../src/orchestrator/screen.ts";
@@ -372,5 +373,56 @@ describe("makeScreener", () => {
     const v = await screen("a benign question");
     expect(v.action).toBe("pass");
     expect(called).toBe(0);
+  });
+});
+
+describe("resolveNotifyPersona — escalation notify routing (PR #172, Kai)", () => {
+  /** cfg() with a persona-bound telegram bot added for `persona`. */
+  function cfgWithPersonaBot(persona: string): Config {
+    return {
+      embeddings: { provider: "none" },
+      channels: {
+        telegram: {
+          token: "default-token",
+          allowedUserIds: [1],
+          pollTimeoutS: 0,
+          groupPersonaNames: [],
+        },
+        telegramPersonas: {
+          [persona]: {
+            token: "persona-token",
+            allowedUserIds: [42],
+            pollTimeoutS: 0,
+            groupPersonaNames: [],
+          },
+        },
+      },
+    } as unknown as Config;
+  }
+
+  it("returns undefined (→ default bot) when no persona bot is configured", () => {
+    // cfg() has only the default telegram bot, no telegramPersonas.
+    expect(resolveNotifyPersona(cfg(), "robbie")).toBeUndefined();
+  });
+
+  it("returns the persona name when that persona has its own bot", () => {
+    // A non-default persona with a persona-bound bot must route notify through
+    // it, so the owner is pinged in the SAME conversation principalConversations
+    // wrote the grounding pair into.
+    expect(resolveNotifyPersona(cfgWithPersonaBot("lena"), "lena")).toBe("lena");
+  });
+
+  it("falls back to default when this persona has no bot even if others do", () => {
+    // telegramPersonas exists for "lena" but we screen as "kai" → default bot.
+    expect(resolveNotifyPersona(cfgWithPersonaBot("lena"), "kai")).toBeUndefined();
+  });
+
+  it("notify routing matches principalConversations account selection", () => {
+    // The whole point of concern D+E: the account notify goes through must be
+    // the same account the grounding pair is written under. Persona-bound case:
+    const cfgP = cfgWithPersonaBot("lena");
+    expect(resolveNotifyPersona(cfgP, "lena")).toBe("lena");
+    // principalConversations(cfgP, "lena") resolves the persona bot's allowlist
+    // [42] → telegram:42 (NOT the default [1]), confirming both sides agree.
   });
 });

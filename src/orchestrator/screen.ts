@@ -295,8 +295,16 @@ export function makeScreener(
   // persona context is the briefing.
   const recall = deps.recall;
 
+  // Route the escalation notify through the SAME account selection as
+  // principalConversations(): the persona-bound bot when one is configured for
+  // this persona, else the default bot. Without this the owner is pinged in the
+  // default bot's chat while the grounding pair was written to the
+  // persona-bound conversation — so their approve/deny reply has no referent.
+  // (Concern raised by Kai on PR #172.)
+  const notifyPersona = resolveNotifyPersona(config, persona);
   const notify =
-    deps.notify ?? ((message: string) => runNotify({ config, message }));
+    deps.notify ??
+    ((message: string) => runNotify({ config, message, persona: notifyPersona }));
 
   // The grounding write. Default: write a turn pair into the principal's
   // conversation via the store (quarantined payload + embeddable judge text).
@@ -424,6 +432,23 @@ function principalConversations(config: Config, persona: string): string[] {
     config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
   if (!account) return [];
   return account.allowedUserIds.map((id) => `telegram:${id}`);
+}
+
+/**
+ * Which persona name to route the escalation notify through, mirroring
+ * principalConversations()'s account selection: the persona's own bot when
+ * `channels.telegram.personas.<persona>` is configured, else undefined (route
+ * through the default bot). Returning the name — not the account object — keeps
+ * it aligned with runNotify's `persona` option, so notify reuses runNotify's
+ * own account resolution and error messaging. Exported for regression tests.
+ */
+export function resolveNotifyPersona(
+  config: Config,
+  persona: string,
+): string | undefined {
+  return config.channels.telegramPersonas?.[persona] !== undefined
+    ? persona
+    : undefined;
 }
 
 /**
