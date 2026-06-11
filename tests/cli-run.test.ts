@@ -60,12 +60,14 @@ afterEach(async () => {
 });
 
 describe("runRun — early exits", () => {
-  test("returns 2 when telegram is not configured", async () => {
+  test("returns 2 when no channel is configured", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const code = await runRun({ config, out, err });
     expect(code).toBe(2);
-    expect(err.text).toContain("phantombot telegram");
+    // Post-rename: the message now points at the `chat` namespace and mentions
+    // both channels (telegram + matrix).
+    expect(err.text).toContain("phantombot chat telegram");
   });
 
   test("returns 2 when persona dir is missing and no other personas exist", async () => {
@@ -408,6 +410,8 @@ describe("runRun — multi-persona telegram", () => {
       err,
     });
     expect(code).toBe(2);
-    expect(err.text).toContain("no telegram listeners could be started");
+    // Post-rename: the message is now channel-agnostic since Matrix listeners
+    // share the same "every configured channel's persona is missing" path.
+    expect(err.text).toContain("no listeners could be started");
   });
 });

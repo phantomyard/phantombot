@@ -14,8 +14,15 @@ import {
   runTelegramServer,
 } from "../channels/telegram.ts";
 import {
+  ClientMatrixTransport,
+  createRealMatrixClient,
+  runMatrixServer,
+} from "../channels/matrix.ts";
+import {
   type Config,
   loadConfig,
+  matrixCryptoStoreDir,
+  type MatrixAccount,
   personaDir,
   type TelegramAccount,
 } from "../config.ts";
@@ -53,15 +60,98 @@ export interface RunInput {
     | false
     | ((config: Config) => Promise<HarnessAvailability[]>);
   runTelegramServer?: typeof runTelegramServer;
+  /** Test seam for the Matrix listener. */
+  runMatrixServer?: typeof runMatrixServer;
+  /**
+   * Test seam: build a Matrix transport for an account. Production builds a
+   * real crypto-enabled SDK client; tests inject a fake so `run` doesn't touch
+   * the network / WASM.
+   */
+  makeMatrixTransport?: (
+    account: MatrixAccount,
+    persona: string,
+  ) => Promise<ClientMatrixTransport>;
 }
 
-/** One persona-bound listener that runRun() will spawn. */
+/** One persona-bound Telegram listener that runRun() will spawn. */
 export interface ListenerSpec {
   persona: string;
   agentDir: string;
   account: TelegramAccount;
   /** "default" or "personas.<name>" — used in log/error messages. */
   source: string;
+}
+
+/** One persona-bound Matrix listener that runRun() will spawn. */
+export interface MatrixListenerSpec {
+  persona: string;
+  agentDir: string;
+  account: MatrixAccount;
+  /** "default" or "personas.<name>" — used in log/error messages. */
+  source: string;
+}
+
+/**
+ * Build the Matrix listeners to spawn — the Matrix mirror of planListeners.
+ * `[channels.matrix]` → one listener bound to `defaultPersona`; each
+ * `[channels.matrix.personas.<name>]` → a listener for that persona. Missing
+ * persona dirs are dropped with a warn. Duplicate (homeserver+userId) logins
+ * fail fast: two /sync loops on the same device would fight over the crypto
+ * store + to-device queue.
+ */
+export function planMatrixListeners(
+  config: Config,
+  defaultPersona: string,
+  err: WriteSink,
+): { listeners: MatrixListenerSpec[]; fatal?: string } {
+  const listeners: MatrixListenerSpec[] = [];
+
+  if (config.channels.matrix) {
+    const agentDir = personaDir(config, defaultPersona);
+    if (existsSync(agentDir)) {
+      listeners.push({
+        persona: defaultPersona,
+        agentDir,
+        account: config.channels.matrix,
+        source: "default",
+      });
+    } else {
+      err.write(
+        `warning: default persona '${defaultPersona}' agent dir missing at ${agentDir} — skipping default matrix listener\n`,
+      );
+    }
+  }
+
+  for (const [persona, account] of Object.entries(
+    config.channels.matrixPersonas ?? {},
+  )) {
+    const agentDir = personaDir(config, persona);
+    if (!existsSync(agentDir)) {
+      err.write(
+        `warning: channels.matrix.personas.${persona} references persona '${persona}' but no agent dir at ${agentDir} — skipping\n`,
+      );
+      continue;
+    }
+    listeners.push({ persona, agentDir, account, source: `personas.${persona}` });
+  }
+
+  // Duplicate-device guard: a (homeserver, userId, deviceId) identity may only
+  // back ONE /sync loop. Reusing it across two listeners corrupts the shared
+  // crypto store.
+  const seen = new Map<string, string>();
+  for (const l of listeners) {
+    const key = `${l.account.homeserver}|${l.account.userId}|${l.account.deviceId}`;
+    const prev = seen.get(key);
+    if (prev) {
+      return {
+        listeners: [],
+        fatal: `matrix: device identity ${l.account.userId} (${l.account.deviceId}) reused by '${prev}' and '${l.source}'. Each persona needs its own Matrix login.`,
+      };
+    }
+    seen.set(key, l.source);
+  }
+
+  return { listeners };
 }
 
 /**
@@ -145,9 +235,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   const hasPersonas =
     !!config.channels.telegramPersonas &&
     Object.keys(config.channels.telegramPersonas).length > 0;
-  if (!hasDefault && !hasPersonas) {
+  const hasMatrix =
+    !!config.channels.matrix ||
+    (!!config.channels.matrixPersonas &&
+      Object.keys(config.channels.matrixPersonas).length > 0);
+  if (!hasDefault && !hasPersonas && !hasMatrix) {
     err.write(
-      "no telegram bot token configured. Run `phantombot telegram` to set one up.\n",
+      "no chat channel configured. Run `phantombot chat telegram` or `phantombot chat matrix` to set one up.\n",
     );
     return 2;
   }
@@ -157,7 +251,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // visible to it. Only relevant when the default account is configured;
   // a personas-only setup doesn't depend on defaultPersona's dir.
   let defaultPersona = config.defaultPersona;
-  if (hasDefault) {
+  if (hasDefault || !!config.channels.matrix) {
     const agentDir = personaDir(config, defaultPersona);
     if (!existsSync(agentDir)) {
       const healed = await healDefaultPersonaIfBroken(config, err);
@@ -179,9 +273,14 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     err.write(`${plan.fatal}\n`);
     return 2;
   }
-  if (plan.listeners.length === 0) {
+  const matrixPlan = planMatrixListeners(config, defaultPersona, err);
+  if (matrixPlan.fatal) {
+    err.write(`${matrixPlan.fatal}\n`);
+    return 2;
+  }
+  if (plan.listeners.length === 0 && matrixPlan.listeners.length === 0) {
     err.write(
-      "no telegram listeners could be started — every configured bot's persona is missing.\n",
+      "no listeners could be started — every configured channel's persona is missing.\n",
     );
     return 2;
   }
@@ -238,41 +337,54 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // The post-restart-notify hook uses the persona stored in a pending
   // `/update` marker when present, and falls back to this admin listener
   // for legacy markers. Prefer the default listener for that fallback;
-  // use the first listener when no default account is configured.
-  // Non-null: we returned above if plan.listeners.length === 0.
-  const adminListener: ListenerSpec =
-    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0]!;
+  // use the first listener when no default account is configured. The
+  // `/update` marker is ONLY written by Telegram's slash handler (Matrix has
+  // no slash commands in v1), so when there's no Telegram listener at all
+  // (Matrix-only setup) there's nothing to surface — skip the hook.
+  const adminListener: ListenerSpec | undefined =
+    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0];
   // Post-restart check: if `/update` wrote a pending-update marker before
   // we got SIGTERMed, surface the result to the chat that triggered it.
   // Runs once at startup; if no marker exists this is a quick no-op stat.
   // Logged + swallowed so a notify-send failure can't keep us out of the
   // poll loop — startup must always succeed.
-  try {
-    const r = await notifyPostRestartIfPending({
-      config,
-      currentVersion: VERSION,
-      adminAccount: adminListener.account,
-    });
-    if (r.status === "success_notified" || r.status === "failure_notified") {
-      log.info("run: post-restart notify", {
-        status: r.status,
-        targetTag: r.marker?.targetTag,
-        previousVersion: r.marker?.previousVersion,
+  if (adminListener) {
+    try {
+      const r = await notifyPostRestartIfPending({
+        config,
         currentVersion: VERSION,
+        adminAccount: adminListener.account,
+      });
+      if (r.status === "success_notified" || r.status === "failure_notified") {
+        log.info("run: post-restart notify", {
+          status: r.status,
+          targetTag: r.marker?.targetTag,
+          previousVersion: r.marker?.previousVersion,
+          currentVersion: VERSION,
+        });
+      }
+    } catch (e) {
+      log.warn("run: post-restart notify threw", {
+        error: (e as Error).message,
       });
     }
-  } catch (e) {
-    log.warn("run: post-restart notify threw", {
-      error: (e as Error).message,
-    });
   }
 
   out.write(
-    `phantombot — ${plan.listeners.length} telegram listener(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
+    `phantombot — ${plan.listeners.length} telegram + ${matrixPlan.listeners.length} matrix listener(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
   );
   for (const l of plan.listeners) {
     out.write(
-      `  [${l.source}] persona '${l.persona}', long-poll ${l.account.pollTimeoutS}s, allowed users: ${
+      `  [telegram:${l.source}] persona '${l.persona}', long-poll ${l.account.pollTimeoutS}s, allowed users: ${
+        l.account.allowedUserIds.length === 0
+          ? "ANY (no allowlist)"
+          : l.account.allowedUserIds.join(",")
+      }\n`,
+    );
+  }
+  for (const l of matrixPlan.listeners) {
+    out.write(
+      `  [matrix:${l.source}] persona '${l.persona}', ${l.account.userId}, allowed users: ${
         l.account.allowedUserIds.length === 0
           ? "ANY (no allowlist)"
           : l.account.allowedUserIds.join(",")
@@ -310,8 +422,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // `nightly --resume` that picks up from the last good stage. This
   // covers machines powered off during the 02:00 window. Don't await —
   // doctor's repair is a detached child, so this returns immediately.
-  // Runs against the admin persona for the same reason as notify above.
-  runDoctor({ config, persona: adminListener.persona, out, err }).then(
+  // Runs against the admin persona for the same reason as notify above. Falls
+  // back to the first Matrix listener's persona (or the default persona) when
+  // there's no Telegram listener.
+  const doctorPersona =
+    adminListener?.persona ??
+    matrixPlan.listeners.find((l) => l.source === "default")?.persona ??
+    matrixPlan.listeners[0]?.persona ??
+    defaultPersona;
+  runDoctor({ config, persona: doctorPersona, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
@@ -327,9 +446,24 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   process.on("SIGTERM", onSig);
 
   try {
-    // Fan-out: one listener per (persona, account). Shared AbortSignal
-    // so Ctrl-C cleanly tears all of them down together.
+    // Fan-out: one listener per (persona, account), Telegram AND Matrix.
+    // Shared AbortSignal so Ctrl-C cleanly tears all of them down together.
     const startTelegram = input.runTelegramServer ?? runTelegramServer;
+    const startMatrix = input.runMatrixServer ?? runMatrixServer;
+    // Default Matrix transport factory: a real crypto-enabled SDK client whose
+    // crypto store lives in the persona dir (so it migrates with the persona).
+    const makeMatrixTransport =
+      input.makeMatrixTransport ??
+      (async (account: MatrixAccount, persona: string) =>
+        new ClientMatrixTransport(
+          await createRealMatrixClient({
+            homeserver: account.homeserver,
+            userId: account.userId,
+            deviceId: account.deviceId,
+            accessToken: account.accessToken,
+            cryptoStoreDir: matrixCryptoStoreDir(config, persona),
+          }),
+        ));
     const tasks = plan.listeners.map((l) =>
       startTelegram({
         config,
@@ -344,6 +478,27 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         err,
       }),
     );
+    // Matrix listeners. Building the transport is async (login-less client +
+    // crypto init), so each is wrapped in an async IIFE that resolves the
+    // transport then runs the server — keeping the fan-out uniform.
+    const matrixTasks = matrixPlan.listeners.map((l) =>
+      (async () => {
+        const transport = await makeMatrixTransport(l.account, l.persona);
+        await startMatrix({
+          config,
+          memory,
+          harnesses,
+          agentDir: l.agentDir,
+          persona: l.persona,
+          account: l.account,
+          transport,
+          signal: ac.signal,
+          out,
+          err,
+        });
+      })(),
+    );
+    tasks.push(...matrixTasks);
     try {
       await Promise.all(tasks);
     } catch (e) {

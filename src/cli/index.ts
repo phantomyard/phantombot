@@ -3,7 +3,9 @@
  *
  *   import-persona  - copy an OpenClaw agent dir + telegram config in
  *   create-persona  - TUI to make a new persona from scratch
- *   telegram        - TUI to configure the Telegram channel
+ *   chat            - configure chat channels: chat telegram | chat matrix |
+ *                     chat default <telegram|matrix>
+ *   telegram        - DEPRECATED alias for `chat telegram` (warns + forwards)
  *   harness         - TUI to choose primary + fallback harnesses
  *   install         - install systemd --user unit so phantombot survives logout
  *   uninstall       - remove the systemd unit
@@ -21,7 +23,8 @@ import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
 import askCmd from "./ask.ts";
 import personaCmd from "./persona.ts";
-import telegramCmd from "./telegram.ts";
+import chatCmd from "./chat.ts";
+import { telegramAliasCommand } from "./telegram.ts";
 import harnessCmd from "./harness.ts";
 import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
@@ -48,7 +51,10 @@ export const mainCommand = defineCommand({
   },
   subCommands: {
     persona: personaCmd,
-    telegram: telegramCmd,
+    chat: chatCmd,
+    // Deprecated alias — `phantombot telegram` warns + forwards to
+    // `phantombot chat telegram` (see cli/telegram.ts#telegramAliasCommand).
+    telegram: telegramAliasCommand,
     harness: harnessCmd,
     embedding: embeddingCmd,
     env: envCmd,

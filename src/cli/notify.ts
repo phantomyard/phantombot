@@ -31,22 +31,37 @@ import {
   HttpTelegramTransport,
   type TelegramTransport,
 } from "../channels/telegram.ts";
-import { type Config, type TelegramAccount, loadConfig } from "../config.ts";
+import {
+  type Config,
+  type DefaultChannel,
+  type TelegramAccount,
+  loadConfig,
+  resolveDefaultChannel,
+} from "../config.ts";
 import { synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { runMatrixNotify, type MatrixNotifySender } from "./notify-matrix.ts";
 
 export interface RunNotifyInput {
   config?: Config;
   message?: string;
   voice?: string;
   /**
-   * Route through a persona-bound bot from `channels.telegram.personas`.
-   * When omitted, the default `channels.telegram` bot is used.
+   * Route through a persona-bound bot from `channels.<chan>.personas`.
+   * When omitted, the default `channels.<chan>` account is used.
    */
   persona?: string;
+  /**
+   * Which channel to send on. Defaults to `default_channel` (resolveDefault
+   * Channel). The screener passes this explicitly so the held-episode notify
+   * lands on the same channel as the grounding write. Voice is Telegram-only.
+   */
+  channel?: DefaultChannel;
   /** Inject for testing. Default: HttpTelegramTransport with the configured token. */
   transport?: TelegramTransport;
+  /** Inject the Matrix sender for testing (no SDK / network). */
+  matrixSender?: MatrixNotifySender;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -61,6 +76,22 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   }
 
   const config = input.config ?? (await loadConfig());
+
+  // Channel dispatch. Default to default_channel; the screener passes it
+  // explicitly. Matrix is text-only (no voice synthesis), handled in its own
+  // module so this file's Telegram path stays untouched for the common case.
+  const channel = input.channel ?? resolveDefaultChannel(config);
+  if (channel === "matrix") {
+    return runMatrixNotify({
+      config,
+      message: input.message,
+      voice: input.voice,
+      persona: input.persona,
+      sender: input.matrixSender,
+      out,
+      err,
+    });
+  }
 
   // Resolve which Telegram bot account to send through. With --persona,
   // pick the persona-bound account from `channels.telegram.personas`;
@@ -190,14 +221,32 @@ export default defineCommand({
     persona: {
       type: "string",
       description:
-        "Route through the persona-bound bot in channels.telegram.personas.<name> (its own token + allowlist) instead of the default bot.",
+        "Route through the persona-bound bot in channels.<chan>.personas.<name> (its own account) instead of the default account.",
+    },
+    channel: {
+      type: "string",
+      description:
+        "Channel to send on: telegram | matrix. Defaults to default_channel. Voice is Telegram-only.",
     },
   },
   async run({ args }) {
+    const rawChannel = args.channel as string | undefined;
+    const channel =
+      rawChannel === "telegram" || rawChannel === "matrix"
+        ? rawChannel
+        : undefined;
+    if (rawChannel !== undefined && channel === undefined) {
+      process.stderr.write(
+        `unknown channel '${rawChannel}' — expected telegram or matrix.\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     process.exitCode = await runNotify({
       message: args.message as string | undefined,
       voice: args.voice as string | undefined,
       persona: args.persona as string | undefined,
+      channel,
     });
   },
 });

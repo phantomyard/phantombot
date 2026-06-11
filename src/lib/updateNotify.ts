@@ -36,8 +36,10 @@ import {
 import {
   type Config,
   type TelegramAccount,
+  resolveDefaultChannel,
   xdgConfigHome,
 } from "../config.ts";
+import { runNotify } from "../cli/notify.ts";
 import { runUpdate } from "../cli/update.ts";
 import {
   detectSupportedTarget,
@@ -443,6 +445,16 @@ export interface CheckAndNotifyOnceResult {
 export async function checkAndNotifyOnce(
   input: CheckAndNotifyOnceInput,
 ): Promise<CheckAndNotifyOnceResult> {
+  // The "update available" heads-up is UNSOLICITED, so it follows
+  // default_channel. For a Matrix default we route the final send through
+  // runNotify (which owns Matrix account + DM resolution); the dedup/delay
+  // bookkeeping below is channel-agnostic and runs identically. Telegram keeps
+  // its bespoke transport path verbatim (the common case, with its own tests).
+  const channel = resolveDefaultChannel(input.config);
+  if (channel === "matrix") {
+    return checkAndNotifyOnceMatrix(input);
+  }
+
   const tg = input.config.channels.telegram;
   if (!tg) return { status: "no_telegram" };
 
@@ -534,6 +546,87 @@ export async function checkAndNotifyOnce(
     status: "notified",
     latestVersion: release.version,
     notifiedRecipients: sent,
+  };
+}
+
+/**
+ * Matrix variant of the heartbeat update-available check. Same release-check +
+ * 72h delay + dedup bookkeeping as the Telegram path, but the final send goes
+ * through `runNotify({ channel: "matrix" })`. Kept as a sibling rather than
+ * inlined so the Telegram path (and its tests) are completely untouched.
+ */
+async function checkAndNotifyOnceMatrix(
+  input: CheckAndNotifyOnceInput,
+): Promise<CheckAndNotifyOnceResult> {
+  const mx = input.config.channels.matrix;
+  // Reuse "no_telegram" as the generic "no default-channel account" status so
+  // the result union doesn't need a new member; the heartbeat only logs it.
+  if (!mx) return { status: "no_telegram" };
+
+  const procPlatform = input.procPlatform ?? process.platform;
+  const procArch = input.procArch ?? process.arch;
+  const target = detectSupportedTarget(procPlatform, procArch);
+  if (!target) return { status: "no_target" };
+
+  const r = await findLatestRelease({ target, fetchImpl: input.fetchImpl });
+  if (!r.ok) {
+    log.warn("updateNotify: heartbeat release-check failed", { error: r.error });
+    return { status: "release_check_failed", error: r.error };
+  }
+  const release = r.release;
+  const now = input.now ?? new Date();
+
+  if (release.version === input.currentVersion) {
+    return { status: "already_current", latestVersion: release.version };
+  }
+
+  const state = await readLastNotifiedState(input.lastNotifiedPath);
+  if (state?.version === release.version && state.notifiedAt) {
+    return { status: "already_notified", latestVersion: release.version };
+  }
+
+  const firstSeenAt =
+    (state?.version === release.version ? state.firstSeenAt : undefined) ??
+    release.publishedAt ??
+    now.toISOString();
+  const releaseAgeMs = now.getTime() - Date.parse(firstSeenAt);
+  if (!Number.isFinite(releaseAgeMs) || releaseAgeMs < AUTO_UPDATE_NOTIFY_DELAY_MS) {
+    await writeLastNotifiedState(
+      { version: release.version, firstSeenAt },
+      input.lastNotifiedPath,
+    );
+    return { status: "waiting_delay", latestVersion: release.version };
+  }
+
+  if (mx.allowedUserIds.length === 0) {
+    log.warn("updateNotify: matrix has no allowed_user_ids; refusing to broadcast");
+    return { status: "no_allowed_users", latestVersion: release.version };
+  }
+
+  const message =
+    `📦 phantombot ${release.tag} is available ` +
+    `(you're on ${input.currentVersion}).\n\n` +
+    `Send /update to install it.`;
+  const code = await runNotify({
+    config: input.config,
+    message,
+    channel: "matrix",
+  });
+
+  await writeLastNotifiedState(
+    { version: release.version, firstSeenAt, notifiedAt: now.toISOString() },
+    input.lastNotifiedPath,
+  );
+
+  log.info("updateNotify: heartbeat notified update available (matrix)", {
+    latestVersion: release.version,
+    notifyExit: code,
+  });
+
+  return {
+    status: "notified",
+    latestVersion: release.version,
+    notifiedRecipients: mx.allowedUserIds.length,
   };
 }
 

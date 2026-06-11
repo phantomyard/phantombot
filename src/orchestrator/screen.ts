@@ -106,6 +106,17 @@ import {
   type JudgeResult,
 } from "../lib/threatJudge.ts";
 import { runNotify } from "../cli/notify.ts";
+import {
+  notifyChannel,
+  principalConversations,
+  resolveNotifyPersona,
+} from "./principalRouting.ts";
+
+// Re-export the routing helpers from their new home so existing importers
+// (and the #172 regression tests) keep resolving them from screen.ts. The
+// implementations moved to principalRouting.ts to be shared with notify and to
+// become channel-aware off default_channel.
+export { principalConversations, resolveNotifyPersona } from "./principalRouting.ts";
 
 export interface ScreenVerdict {
   /** "pass" → run the turn normally; "hold" → already escalated, stop. */
@@ -302,9 +313,18 @@ export function makeScreener(
   // persona-bound conversation — so their approve/deny reply has no referent.
   // (Concern raised by Kai on PR #172.)
   const notifyPersona = resolveNotifyPersona(config, persona);
+  // Route the escalation notify on the DEFAULT channel (telegram|matrix) — the
+  // same channel principalConversations() keys the grounding write to, so the
+  // owner is pinged in the conversation their approve/deny reply will land in.
   const notify =
     deps.notify ??
-    ((message: string) => runNotify({ config, message, persona: notifyPersona }));
+    ((message: string) =>
+      runNotify({
+        config,
+        message,
+        persona: notifyPersona,
+        channel: notifyChannel(config),
+      }));
 
   // The grounding write. Default: write a turn pair into the principal's
   // conversation via the store (quarantined payload + embeddable judge text).
@@ -419,36 +439,6 @@ export function makeScreener(
         "pinged the owner to talk it through before doing anything. Nothing was done.",
     };
   };
-}
-
-/**
- * Resolve the principal telegram conversation key(s) for this persona. The
- * principal account is the persona-bound bot if configured, else the default
- * telegram bot; each allowed user id maps to `telegram:<userId>`. Empty when
- * telegram isn't configured / the allowlist is empty (grounding is a no-op).
- */
-function principalConversations(config: Config, persona: string): string[] {
-  const account =
-    config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  if (!account) return [];
-  return account.allowedUserIds.map((id) => `telegram:${id}`);
-}
-
-/**
- * Which persona name to route the escalation notify through, mirroring
- * principalConversations()'s account selection: the persona's own bot when
- * `channels.telegram.personas.<persona>` is configured, else undefined (route
- * through the default bot). Returning the name — not the account object — keeps
- * it aligned with runNotify's `persona` option, so notify reuses runNotify's
- * own account resolution and error messaging. Exported for regression tests.
- */
-export function resolveNotifyPersona(
-  config: Config,
-  persona: string,
-): string | undefined {
-  return config.channels.telegramPersonas?.[persona] !== undefined
-    ? persona
-    : undefined;
 }
 
 /**

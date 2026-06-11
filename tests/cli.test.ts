@@ -21,6 +21,7 @@ describe("phantombot CLI dispatcher", () => {
     const names = Object.keys(subs).sort();
     expect(names).toEqual([
       "ask",
+      "chat",
       "doctor",
       "embedding",
       "env",
@@ -34,6 +35,7 @@ describe("phantombot CLI dispatcher", () => {
       "persona",
       "run",
       "task",
+      // Deprecated alias kept for back-compat — forwards to `chat telegram`.
       "telegram",
       "tick",
       "uninstall",

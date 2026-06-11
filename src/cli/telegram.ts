@@ -293,3 +293,40 @@ export default defineCommand({
     process.exitCode = code;
   },
 });
+
+/**
+ * The deprecation notice printed when the OLD top-level `phantombot telegram`
+ * alias is used. Exported so tests can assert the exact wording forwards.
+ */
+export const TELEGRAM_DEPRECATION_NOTICE =
+  "note: `phantombot telegram` is deprecated — use `phantombot chat telegram`. Forwarding…";
+
+/**
+ * Thin DEPRECATED ALIAS for the top-level `phantombot telegram` command. Prints
+ * a one-line deprecation warning, then FORWARDS to the exact same `runTelegram`
+ * flow that `phantombot chat telegram` uses. Registered at the top level in
+ * cli/index.ts; the un-warned `default` export above is what `chat telegram`
+ * mounts, so the canonical path stays quiet.
+ *
+ * `out`/`err` injectable so a test can assert the notice was printed and the
+ * forward happened without driving the interactive TUI.
+ */
+export async function runTelegramAlias(
+  input: { out?: WriteSink; run?: typeof runTelegram } = {},
+): Promise<number> {
+  const err = input.out ?? process.stderr;
+  err.write(`${TELEGRAM_DEPRECATION_NOTICE}\n`);
+  const run = input.run ?? runTelegram;
+  return run();
+}
+
+export const telegramAliasCommand = defineCommand({
+  meta: {
+    name: "telegram",
+    description:
+      "DEPRECATED alias for `phantombot chat telegram`. Forwards after a warning.",
+  },
+  async run() {
+    process.exitCode = await runTelegramAlias();
+  },
+});

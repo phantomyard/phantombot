@@ -84,6 +84,43 @@ export interface TelegramAccount {
   groupPersonaNames?: string[];
 }
 
+/**
+ * One Matrix account: the credentials + per-account trust perimeter for a
+ * Matrix homeserver login. Mirrors `TelegramAccount` so the two channels plug
+ * into the same listener / notify / screener machinery.
+ *
+ * NOTE on E2EE invisibility (the principal's hard requirement): there is NO
+ * "enable encryption" knob here and no recovery-key field. E2EE is ALWAYS on;
+ * the auto-generated recovery key lives in `~/.env` as `MATRIX_RECOVERY_KEY`
+ * (per-persona suffix for persona-bound bots), never in config.toml. The
+ * crypto SQLite store lives next to SOUL.md under the persona work dir
+ * (`<personaDir>/matrix/`) so copying the persona dir migrates the device
+ * identity + Megolm sessions wholesale. See src/channels/matrix/transport.ts.
+ *
+ * The password is NEVER stored — the setup wizard exchanges it for the
+ * `accessToken` + `deviceId` below and discards it. Only those survive.
+ */
+export interface MatrixAccount {
+  /** Homeserver base URL, e.g. "https://matrix.org". */
+  homeserver: string;
+  /** The bot's full MXID, e.g. "@robbie:matrix.org". */
+  userId: string;
+  /** Device id minted at login. Pinned so the same crypto identity is reused
+   *  across restarts (the device the crypto store is bound to). */
+  deviceId: string;
+  /** Access token from the password login. Bearer credential for /sync +
+   *  sends; the password it was exchanged for is discarded at setup. */
+  accessToken: string;
+  /**
+   * If non-empty, only these MXIDs are TRUSTED principals (mirror of
+   * Telegram `allowedUserIds`). An empty list means "answer anyone" but —
+   * exactly as for Telegram — an open bot is NOT an authenticated principal,
+   * so trust stays false and security-rule writes fail closed. Allow-listing
+   * is the only thing that grants TRUSTED tier on Matrix inbound.
+   */
+  allowedUserIds: string[];
+}
+
 export interface TurnIndexingSettings {
   enabled: boolean;
   /** Trigger when at least this many new user turns have accrued. */
@@ -154,9 +191,26 @@ export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
   voiceMaxSentences: 3,
 };
 
+/**
+ * Which channel carries UNSOLICITED traffic — proactive notify, briefings,
+ * task fires, AND the #172 security-hold grounding write. Replies always go
+ * back on the inbound channel regardless of this; `default_channel` governs
+ * only outbound-without-an-inbound. Default "telegram" for back-compat with
+ * every existing single-channel install.
+ */
+export type DefaultChannel = "telegram" | "matrix";
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
+  /**
+   * Channel for unsolicited/proactive outbound + held-episode grounding
+   * writes (see DefaultChannel). Optional on the type (like `retrieval`) so
+   * ad-hoc Config literals in tests/scripts needn't spell it out;
+   * `loadConfig` ALWAYS populates it, and callers treat an absent value as
+   * "telegram" (see `resolveDefaultChannel`).
+   */
+  defaultChannel?: DefaultChannel;
   /**
    * Kill the harness subprocess if no output lands on stdout for this
    * long. Resets every time the harness emits a chunk. Right knob for
@@ -195,6 +249,17 @@ export interface Config {
      * resolve to undefined and behave exactly as before.
      */
     telegramPersonas?: Record<string, TelegramAccount>;
+    /**
+     * Default Matrix account, bound to `config.defaultPersona`. Mirrors the
+     * `telegram` slot. Undefined when no `[channels.matrix]` block is set, so
+     * a Telegram-only install is wholly unaffected.
+     */
+    matrix?: MatrixAccount;
+    /**
+     * Per-persona Matrix accounts, keyed by persona name — the Matrix mirror
+     * of `telegramPersonas`. Each spawns its own listener + crypto store.
+     */
+    matrixPersonas?: Record<string, MatrixAccount>;
   };
 
   telegramStreaming?: TelegramStreamingSettings;
@@ -252,6 +317,8 @@ export async function loadConfig(): Promise<Config> {
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
+  const tomlMatrix = (tomlChannels.matrix ?? {}) as Record<string, unknown>;
+  const tomlChat = (toml.chat ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
   const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
@@ -267,6 +334,14 @@ export async function loadConfig(): Promise<Config> {
       state.default_persona ??
       asString(toml.default_persona) ??
       "phantom",
+
+    // Unsolicited-traffic channel. Env > [chat].default_channel > "telegram".
+    // Anything unrecognized falls back to "telegram" (the safe, pre-existing
+    // behaviour) rather than throwing on a fat-fingered config.
+    defaultChannel: normalizeDefaultChannel(
+      process.env.PHANTOMBOT_DEFAULT_CHANNEL ??
+        asString(tomlChat.default_channel),
+    ),
 
     // Legacy alias: pre-PR-#56 configs only had `turn_timeout_s`, which
     // meant "kill at this wall-clock with no other constraints." The new
@@ -379,6 +454,8 @@ export async function loadConfig(): Promise<Config> {
     channels: {
       telegram: buildTelegramConfig(tomlTelegram),
       telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
+      matrix: buildMatrixConfig(tomlMatrix),
+      matrixPersonas: buildMatrixPersonasConfig(tomlMatrix),
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
@@ -709,6 +786,102 @@ function buildTelegramPersonasConfig(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Normalize an arbitrary string to a DefaultChannel; default "telegram". */
+function normalizeDefaultChannel(raw: string | undefined): DefaultChannel {
+  return raw === "matrix" ? "matrix" : "telegram";
+}
+
+/**
+ * The single place consumers read `default_channel`. Absent (ad-hoc Config
+ * literal) → "telegram", the pre-existing behaviour. Keeps the `?? "telegram"`
+ * default from being copy-pasted across notify / heartbeat / screen routing.
+ */
+export function resolveDefaultChannel(config: Config): DefaultChannel {
+  return config.defaultChannel ?? "telegram";
+}
+
+/**
+ * Build the default `[channels.matrix]` account from TOML + env. Mirrors
+ * buildTelegramConfig: returns undefined when the block has no usable login
+ * (no homeserver / userId / accessToken), so a Matrix-less install resolves
+ * to `channels.matrix === undefined` exactly like before.
+ *
+ * The access token + device id are written by the setup wizard
+ * (`phantombot chat matrix`); the env overrides exist so they can be pinned
+ * in systemd EnvironmentFile / ~/.env without rewriting config.toml.
+ */
+function buildMatrixConfig(
+  tomlMatrix: Record<string, unknown>,
+): MatrixAccount | undefined {
+  const homeserver =
+    process.env.MATRIX_HOMESERVER ?? asString(tomlMatrix.homeserver);
+  const userId = process.env.MATRIX_USER_ID ?? asString(tomlMatrix.user_id);
+  const deviceId =
+    process.env.MATRIX_DEVICE_ID ?? asString(tomlMatrix.device_id);
+  const accessToken =
+    process.env.MATRIX_ACCESS_TOKEN ?? asString(tomlMatrix.access_token);
+  // A Matrix account needs all four to function; anything less is "not
+  // configured" rather than a half-built bot that crashes at /sync.
+  if (!homeserver || !userId || !deviceId || !accessToken) return undefined;
+
+  const allowedFromEnv = process.env.MATRIX_ALLOWED_USERS
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const allowedUserIds =
+    allowedFromEnv ?? asStringArray(tomlMatrix.allowed_user_ids) ?? [];
+
+  return { homeserver, userId, deviceId, accessToken, allowedUserIds };
+}
+
+/**
+ * Parse `[channels.matrix.personas.<name>]` blocks into a persona →
+ * MatrixAccount map. The Matrix mirror of buildTelegramPersonasConfig: entries
+ * missing any of the four required fields are dropped with a warning. Env
+ * tokens follow the same `MATRIX_ACCESS_TOKEN_<PERSONA_UPPERCASE>` convention
+ * as Telegram's per-persona tokens.
+ */
+function buildMatrixPersonasConfig(
+  tomlMatrix: Record<string, unknown>,
+): Record<string, MatrixAccount> | undefined {
+  const personas = tomlMatrix.personas;
+  if (!personas || typeof personas !== "object" || Array.isArray(personas)) {
+    return undefined;
+  }
+  const out: Record<string, MatrixAccount> = {};
+  for (const [personaName, raw] of Object.entries(
+    personas as Record<string, unknown>,
+  )) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const entry = raw as Record<string, unknown>;
+    const envSuffix = personaEnvSuffix(personaName);
+    const homeserver =
+      process.env[`MATRIX_HOMESERVER_${envSuffix}`] ??
+      asString(entry.homeserver);
+    const userId =
+      process.env[`MATRIX_USER_ID_${envSuffix}`] ?? asString(entry.user_id);
+    const deviceId =
+      process.env[`MATRIX_DEVICE_ID_${envSuffix}`] ?? asString(entry.device_id);
+    const accessToken =
+      process.env[`MATRIX_ACCESS_TOKEN_${envSuffix}`] ??
+      asString(entry.access_token);
+    if (!homeserver || !userId || !deviceId || !accessToken) {
+      log.warn(
+        `config: channels.matrix.personas.${personaName} is missing homeserver/user_id/device_id/access_token — skipping (run \`phantombot chat matrix\` to set it up)`,
+      );
+      continue;
+    }
+    const allowedFromEnv = process.env[`MATRIX_ALLOWED_USERS_${envSuffix}`]
+      ?.split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const allowedUserIds =
+      allowedFromEnv ?? asStringArray(entry.allowed_user_ids) ?? [];
+    out[personaName] = { homeserver, userId, deviceId, accessToken, allowedUserIds };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function clampPollTimeout(s: number): number {
   if (!Number.isFinite(s)) return 30;
   return Math.max(1, Math.min(50, Math.floor(s)));
@@ -732,6 +905,19 @@ function asIntArray(v: unknown): number[] | undefined {
 /** Resolve the on-disk directory for a named persona. */
 export function personaDir(config: Config, name: string): string {
   return join(config.personasDir, name);
+}
+
+/**
+ * The Matrix rust-crypto SQLite store directory for a persona — DELIBERATELY
+ * next to SOUL.md, under the persona work dir (`<personaDir>/matrix/`), not in
+ * a global XDG cache. This is the migration contract: the store holds the
+ * device identity + Olm/Megolm sessions, so copying the persona dir to a new
+ * VM carries the SAME device with it (no re-verification, no lost history).
+ * `cryptoDatabasePrefix` passed to `MatrixClient.initRustCrypto` points here.
+ * Reuses `personaDir` so it tracks any future change to persona-dir resolution.
+ */
+export function matrixCryptoStoreDir(config: Config, persona: string): string {
+  return join(personaDir(config, persona), "matrix");
 }
 
 /**
