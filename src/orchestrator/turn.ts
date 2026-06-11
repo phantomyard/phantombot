@@ -180,9 +180,16 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       verdict = undefined;
     }
     if (verdict?.action === "hold") {
+      // NOTE: the screener already did the grounding write — it wrote the
+      // held episode (quarantined payload + judge text) into the PRINCIPAL'S
+      // telegram conversation, which is the correct scope (that's where the
+      // approve/deny reply lands). We deliberately do NOT write anything here:
+      // this entry point's conversation is the wrong one to ground against.
+      // See orchestrator/screen.ts (recordHeld + the conversation-scoping
+      // comment). We just surface the held message and stop.
       const held =
         verdict.heldMessage ??
-        "🔒 This request touched something sensitive, so I've paused it and asked Andrew to confirm. Nothing was done.";
+        "🔒 This request touched something sensitive, so I've paused it and asked the owner to confirm. Nothing was done.";
       yield { type: "text", text: held };
       yield { type: "done", finalText: held, meta: { screenedHold: true } };
       return;
@@ -266,6 +273,28 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         text: finalText,
       },
     );
+
+    // Purge-after-ruling. On a TRUSTED turn that SUCCEEDS, drop any
+    // quarantined held-payload rows in THIS conversation. Rationale: by the
+    // time the principal has taken a trusted turn here, the held untrusted
+    // payload has already been replayed into context once (this very turn),
+    // grounding their approve/deny, and the agent has had its chance to
+    // record the ruling — the judge-reasoning turn (embeddable assistant
+    // turn) and any `memory capture --tag decision` are KEPT; only the raw
+    // verbatim untrusted payload (embeddable=0) is dropped. Deliberate
+    // tradeoff: the raw payload is retained for grounding for exactly one
+    // trusted turn, then purged so verbatim untrusted text isn't kept long-
+    // term. Best-effort: a purge failure must never break the turn.
+    // purgeQuarantined is a no-op (returns 0) when there are no quarantined
+    // rows, so calling it unconditionally on trusted success is safe.
+    if (input.trusted === true) {
+      try {
+        await input.memory.purgeQuarantined(input.persona, input.conversation);
+      } catch {
+        // Quarantine cleanup must never turn a successful reply into an error.
+      }
+    }
+
     if (input.indexTurns) {
       try {
         await input.indexTurns();

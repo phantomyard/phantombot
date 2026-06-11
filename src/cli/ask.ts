@@ -159,7 +159,8 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       // harness the screener fails open (unscreened) — same posture as a
       // judge outage.
       screen:
-        input.screen ?? makeScreener(config, persona, conversation, harnesses),
+        input.screen ??
+        makeScreener(config, persona, conversation, harnesses, memory),
       // Streaming consumers benefit from pre-tool narration: the
       // assistant's intent sentence flushes to stdout before the
       // tool's silence begins. Non-streaming consumers see the whole

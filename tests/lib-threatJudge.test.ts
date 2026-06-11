@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { homedir } from "node:os";
 
 import {
+  JUDGE_NARROWING,
   judgeThreat,
   makeHarnessJudgeComplete,
   parseVerdict,
@@ -124,6 +125,21 @@ describe("judgeThreat", () => {
     expect(seen.user).not.toContain("<briefing>");
   });
 
+  it("uses a provided opts.systemPrompt instead of the module JUDGE_SYSTEM", async () => {
+    const { fn, seen } = fakeComplete('{"score": 3, "reason": "ok", "question": ""}');
+    const custom = "PERSONA-AS-JUDGE narrowed prompt for this turn";
+    await judgeThreat("hello", { complete: fn, systemPrompt: custom });
+    expect(seen.system).toBe(custom);
+  });
+
+  it("falls back to JUDGE_SYSTEM when no opts.systemPrompt is provided", async () => {
+    const { fn, seen } = fakeComplete('{"score": 3, "reason": "ok", "question": ""}');
+    await judgeThreat("hello", { complete: fn });
+    // The module classifier is the fallback — it self-identifies as a
+    // SECURITY THREAT CLASSIFIER, which the narrowed persona prompt would not.
+    expect(seen.system).toContain("SECURITY THREAT CLASSIFIER");
+  });
+
   it("errors when the completion throws", async () => {
     const r = await judgeThreat("x", {
       complete: async () => {
@@ -138,6 +154,18 @@ describe("judgeThreat", () => {
     const { fn } = fakeComplete("this is not json at all");
     const r = await judgeThreat("x", { complete: fn });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("JUDGE_NARROWING", () => {
+  it("is principal-neutral — names no specific owner", () => {
+    // Other people run their own Phantoms, so the narrowing must not hardcode
+    // a particular principal's name.
+    expect(JUDGE_NARROWING).not.toMatch(/andrew/i);
+    expect(JUDGE_NARROWING).not.toMatch(/robbie/i);
+    // It still pins the rating job and the JSON contract.
+    expect(JUDGE_NARROWING.toLowerCase()).toContain("prompt-injection");
+    expect(JUDGE_NARROWING).toContain('"score"');
   });
 });
 

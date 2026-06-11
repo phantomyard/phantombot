@@ -335,6 +335,87 @@ describe("runTurn — failure path", () => {
   });
 });
 
+describe("runTurn — purge-after-ruling (trusted success)", () => {
+  /** Wrap the real store, counting purgeQuarantined calls. */
+  function spyStore(inner: MemoryStore): {
+    store: MemoryStore;
+    purgeCalls: Array<{ persona: string; conversation: string }>;
+  } {
+    const purgeCalls: Array<{ persona: string; conversation: string }> = [];
+    const store = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "purgeQuarantined") {
+          return async (persona: string, conversation: string) => {
+            purgeCalls.push({ persona, conversation });
+            return inner.purgeQuarantined(persona, conversation);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    return { store, purgeCalls };
+  }
+
+  test("a successful TRUSTED turn calls purgeQuarantined for this conversation", async () => {
+    const { store, purgeCalls } = spyStore(memory);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        memory: store,
+        userMessage: "approve it",
+        harnesses: [harness],
+        trusted: true,
+      }),
+    );
+
+    expect(purgeCalls).toEqual([
+      { persona: "phantom", conversation: "cli:default" },
+    ]);
+  });
+
+  test("an UNTRUSTED successful turn does NOT purge", async () => {
+    const { store, purgeCalls } = spyStore(memory);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        memory: store,
+        userMessage: "ambient input",
+        harnesses: [harness],
+        // trusted omitted → untrusted; no purge.
+      }),
+    );
+
+    expect(purgeCalls).toEqual([]);
+  });
+
+  test("a FAILED trusted turn does NOT purge (nothing was persisted to rule on)", async () => {
+    const { store, purgeCalls } = spyStore(memory);
+    const harness = new ScriptedHarness("fake", [
+      { type: "error", error: "boom", recoverable: false },
+    ]);
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        memory: store,
+        userMessage: "approve it",
+        harnesses: [harness],
+        trusted: true,
+      }),
+    );
+
+    expect(purgeCalls).toEqual([]);
+  });
+});
+
 describe("runTurn — noHistory option", () => {
   test("skips loading prior turns AND skips persisting this turn", async () => {
     await memory.appendTurn({
