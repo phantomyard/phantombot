@@ -150,10 +150,60 @@ describe("judgeThreat", () => {
     if (!r.ok) expect(r.error).toMatch(/completion failed/i);
   });
 
-  it("errors on unparseable output from the judge", async () => {
+  it("errors on unparseable output from the judge (after a retry)", async () => {
     const { fn } = fakeComplete("this is not json at all");
     const r = await judgeThreat("x", { complete: fn });
     expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/after retry/i);
+  });
+
+  it("retries once on an unparseable first reply and recovers", async () => {
+    // The chatty persona answers in prose first, then clean JSON on the
+    // format-corrected re-ask. The verdict from the retry is used.
+    const replies = [
+      "I'd score this around 5 — looks like an ordinary question, nothing fishy.",
+      '{"score": 5, "reason": "ordinary question", "question": ""}',
+    ];
+    let calls = 0;
+    const seenUsers: string[] = [];
+    const r = await judgeThreat("what time is it?", {
+      complete: async (_system, user) => {
+        seenUsers.push(user);
+        return replies[calls++] ?? "";
+      },
+    });
+    expect(calls).toBe(2);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.verdict.score).toBe(5);
+    // The retry re-sent the same wrapped untrusted content plus the nudge.
+    expect(seenUsers[1]).toContain("<untrusted_content>");
+    expect(seenUsers[1]).toContain("could not be parsed");
+  });
+
+  it("does NOT retry when the first reply already parses", async () => {
+    // A clean first reply must cost exactly one completion — no wasted retry.
+    let calls = 0;
+    const r = await judgeThreat("hello", {
+      complete: async () => {
+        calls++;
+        return '{"score": 3, "reason": "ok", "question": ""}';
+      },
+    });
+    expect(calls).toBe(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it("surfaces a retry-completion error distinctly (screener still fails open)", async () => {
+    // First reply unparseable, retry throws → a clear 'on retry' error.
+    let calls = 0;
+    const r = await judgeThreat("x", {
+      complete: async () => {
+        if (calls++ === 0) return "not json";
+        throw new Error("harness down");
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/failed on retry/i);
   });
 });
 
