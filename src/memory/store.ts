@@ -32,6 +32,16 @@ export interface Turn {
   role: Role;
   text: string;
   createdAt: Date;
+  /**
+   * Whether this turn is eligible for FTS/vector indexing. Default true.
+   * A `false` row is QUARANTINED untrusted payload (a held-episode user
+   * turn written by the screener): it MUST still appear in the recentTurns
+   * history replay so the principal's approve/deny reply is grounded, but
+   * it must NEVER land in the search index — see turnIndexer.ts, which
+   * skips embeddable=false rows, and purgeQuarantined, which drops them
+   * once a trusted turn has ruled on them.
+   */
+  embeddable: boolean;
 }
 
 export interface AppendTurnInput {
@@ -39,6 +49,14 @@ export interface AppendTurnInput {
   conversation: string;
   role: Role;
   text: string;
+  /**
+   * Index-eligibility flag. Defaults to true. Set false to QUARANTINE the
+   * row — it persists and replays in history, but the turn indexer skips it
+   * (never FTS-indexed, never embedded) and purgeQuarantined can later drop
+   * it. Used by the screener's held-episode write to keep verbatim untrusted
+   * payload out of the search index. See the `embeddable` doc on Turn.
+   */
+  embeddable?: boolean;
 }
 
 export interface AppendCaptureInput {
@@ -79,6 +97,16 @@ export interface MemoryStore {
   countUserTurns(persona: string, conversation: string): Promise<number>;
   /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
   deleteConversation(persona: string, conversation: string): Promise<number>;
+  /**
+   * Delete the quarantined (embeddable=0) turns for a (persona,
+   * conversation) pair; returns rows deleted. Called after a TRUSTED turn
+   * succeeds (orchestrator/turn.ts): by then the held untrusted payload has
+   * been replayed into context once to ground the principal's approve/deny,
+   * so the raw verbatim text can be dropped — only the judge-reasoning turn
+   * and any decision capture are kept. No-op (returns 0) when there are no
+   * quarantined rows.
+   */
+  purgeQuarantined(persona: string, conversation: string): Promise<number>;
   /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
   appendCapture(input: AppendCaptureInput): Promise<void>;
   /**
@@ -124,7 +152,10 @@ CREATE TABLE IF NOT EXISTS turns (
   conversation TEXT NOT NULL,
   role         TEXT NOT NULL CHECK (role IN ('user','assistant')),
   text         TEXT NOT NULL,
-  created_at   TEXT NOT NULL
+  created_at   TEXT NOT NULL,
+  -- 1 = indexable (default), 0 = QUARANTINED untrusted payload that must
+  -- replay in history but never reach the search index. See Turn.embeddable.
+  embeddable   INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_turns_persona_conv_time
   ON turns (persona, conversation, created_at);
@@ -149,6 +180,7 @@ interface RawDisplayRow {
   role: Role;
   text: string;
   created_at: string;
+  embeddable: number;
 }
 
 class SqliteMemoryStore implements MemoryStore {
@@ -157,6 +189,7 @@ class SqliteMemoryStore implements MemoryStore {
   private recentDisplayStmt;
   private turnsAfterIdStmt;
   private deleteStmt;
+  private purgeQuarantinedStmt;
   private appendCaptureStmt;
   private lastCaptureStmt;
   private countUserTurnsStmt;
@@ -167,8 +200,21 @@ class SqliteMemoryStore implements MemoryStore {
 
   constructor(private db: Database) {
     db.exec(SCHEMA);
+    // Idempotent migration for DBs created before the embeddable column
+    // existed: SCHEMA's CREATE TABLE IF NOT EXISTS leaves an old `turns`
+    // table untouched, so add the column in place. Existing rows default to
+    // 1 (indexable) — the pre-quarantine behaviour, which is correct since
+    // nothing written before this column was ever a quarantined payload.
+    const hasEmbeddable = (
+      db.query("PRAGMA table_info(turns)").all() as Array<{ name: string }>
+    ).some((c) => c.name === "embeddable");
+    if (!hasEmbeddable) {
+      db.exec(
+        "ALTER TABLE turns ADD COLUMN embeddable INTEGER NOT NULL DEFAULT 1",
+      );
+    }
     this.appendStmt = db.prepare(
-      "INSERT INTO turns (persona, conversation, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable) VALUES (?, ?, ?, ?, ?, ?)",
     );
     // Inner query gets most-recent-N descending; outer flips back to chronological.
     this.recentStmt = db.prepare(
@@ -181,8 +227,8 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.recentDisplayStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at FROM (
-         SELECT id, persona, conversation, role, text, created_at
+      `SELECT id, persona, conversation, role, text, created_at, embeddable FROM (
+         SELECT id, persona, conversation, role, text, created_at, embeddable
          FROM turns
          WHERE persona = ?
          ORDER BY created_at DESC, id DESC
@@ -190,7 +236,7 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.turnsAfterIdStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at
+      `SELECT id, persona, conversation, role, text, created_at, embeddable
        FROM turns
        WHERE persona = ? AND conversation = ? AND id > ?
        ORDER BY id ASC
@@ -198,6 +244,9 @@ class SqliteMemoryStore implements MemoryStore {
     );
     this.deleteStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ?",
+    );
+    this.purgeQuarantinedStmt = db.prepare(
+      "DELETE FROM turns WHERE persona = ? AND conversation = ? AND embeddable = 0",
     );
     this.appendCaptureStmt = db.prepare(
       "INSERT INTO capture_log (persona, conversation, tags, created_at) VALUES (?, ?, ?, ?)",
@@ -223,10 +272,27 @@ class SqliteMemoryStore implements MemoryStore {
     // Atomic user+assistant pair insert. Both rows share the same
     // created_at; ordering tiebreaks on the autoincrement id, so the
     // user turn (inserted first) always sorts before the assistant turn.
+    // Per-turn embeddable is passed in so a held-episode pair can quarantine
+    // the user (raw payload, embeddable=0) while keeping the assistant turn
+    // (judge reasoning, embeddable=1) indexable.
     this.appendPairTxn = db.transaction(
       (u: AppendTurnInput, a: AppendTurnInput, ts: string) => {
-        this.appendStmt.run(u.persona, u.conversation, u.role, u.text, ts);
-        this.appendStmt.run(a.persona, a.conversation, a.role, a.text, ts);
+        this.appendStmt.run(
+          u.persona,
+          u.conversation,
+          u.role,
+          u.text,
+          ts,
+          embeddableInt(u.embeddable),
+        );
+        this.appendStmt.run(
+          a.persona,
+          a.conversation,
+          a.role,
+          a.text,
+          ts,
+          embeddableInt(a.embeddable),
+        );
       },
     );
   }
@@ -238,6 +304,7 @@ class SqliteMemoryStore implements MemoryStore {
       t.role,
       t.text,
       new Date().toISOString(),
+      embeddableInt(t.embeddable),
     );
   }
 
@@ -362,6 +429,19 @@ class SqliteMemoryStore implements MemoryStore {
     const result = this.deleteStmt.run(persona, conversation);
     return result.changes;
   }
+
+  async purgeQuarantined(
+    persona: string,
+    conversation: string,
+  ): Promise<number> {
+    const result = this.purgeQuarantinedStmt.run(persona, conversation);
+    return result.changes;
+  }
+}
+
+/** Normalize the optional embeddable flag to a SQLite int (default 1 = true). */
+function embeddableInt(embeddable: boolean | undefined): number {
+  return embeddable === false ? 0 : 1;
 }
 
 function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
@@ -372,6 +452,7 @@ function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
     role: r.role,
     text: r.text,
     createdAt: new Date(r.created_at),
+    embeddable: r.embeddable !== 0,
   }));
 }
 

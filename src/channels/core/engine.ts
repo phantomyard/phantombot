@@ -972,9 +972,18 @@ async function processChatMessage(
       trusted: ctx.principalAuthenticated === true,
       // Threat screen for the untrusted case (open bot / non-allowlisted
       // sender). runTurn only consults this when trusted !== true, so an
-      // allow-listed principal is never screened. The judge runs on the
-      // chain's claude harness; if the chain has none, screening fails open.
-      screen: makeScreener(input.config, input.persona, conversationKey, harnesses),
+      // allow-listed principal is never screened. The judge runs as the
+      // narrowed persona on the chain's primary harness; if the chain has
+      // none, screening fails open. `input.memory` is passed so a HOLD can
+      // write the held episode into the principal's telegram conversation
+      // (the grounding write — see orchestrator/screen.ts recordHeld).
+      screen: makeScreener(
+        input.config,
+        input.persona,
+        conversationKey,
+        harnesses,
+        input.memory,
+      ),
       // Instinct layer: auto-retrieve relevant memory/kb for this message.
       // makeRetriever returns undefined when retrieval is disabled in
       // config, in which case runTurn skips it entirely.

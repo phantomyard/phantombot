@@ -166,6 +166,137 @@ describe("MemoryStore.turnsAfterId / countUserTurns", () => {
   });
 });
 
+describe("MemoryStore — embeddable / quarantine (F)", () => {
+  test("appendTurn defaults embeddable to true", async () => {
+    await append("phantom", "c", "user", "ordinary turn");
+    const rows = await store.recentTurnsForDisplay("phantom", 10);
+    expect(rows[0]?.embeddable).toBe(true);
+  });
+
+  test("appendTurnPair persists per-turn embeddable (user false, assistant true)", async () => {
+    await store.appendTurnPair(
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "user",
+        text: "raw untrusted payload",
+        embeddable: false,
+      },
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "assistant",
+        text: "judge reasoning",
+        embeddable: true,
+      },
+    );
+    const rows = await store.recentTurnsForDisplay("phantom", 10);
+    expect(rows.map((r) => [r.role, r.embeddable])).toEqual([
+      ["user", false],
+      ["assistant", true],
+    ]);
+  });
+
+  test("turnsAfterId returns the embeddable flag", async () => {
+    await store.appendTurnPair(
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "user",
+        text: "payload",
+        embeddable: false,
+      },
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "assistant",
+        text: "judge",
+        embeddable: true,
+      },
+    );
+    const after = await store.turnsAfterId("phantom", "telegram:1", 0);
+    expect(after.map((t) => t.embeddable)).toEqual([false, true]);
+  });
+
+  test("recentTurns still returns quarantined turns (history replay must include them)", async () => {
+    // The grounding replay depends on the quarantined payload appearing in the
+    // 30-turn history; only EMBEDDING excludes it, not the history read.
+    await store.appendTurnPair(
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "user",
+        text: "quarantined payload",
+        embeddable: false,
+      },
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "assistant",
+        text: "held you",
+        embeddable: true,
+      },
+    );
+    const turns = await store.recentTurns("phantom", "telegram:1", 10);
+    expect(turns).toEqual([
+      { role: "user", text: "quarantined payload" },
+      { role: "assistant", text: "held you" },
+    ]);
+  });
+
+  test("purgeQuarantined deletes only embeddable=0 rows and returns the count", async () => {
+    await store.appendTurnPair(
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "user",
+        text: "quarantined payload",
+        embeddable: false,
+      },
+      {
+        persona: "phantom",
+        conversation: "telegram:1",
+        role: "assistant",
+        text: "judge reasoning (kept)",
+        embeddable: true,
+      },
+    );
+    await append("phantom", "telegram:1", "user", "later trusted turn");
+
+    const deleted = await store.purgeQuarantined("phantom", "telegram:1");
+    expect(deleted).toBe(1);
+    const turns = await store.recentTurns("phantom", "telegram:1", 10);
+    expect(turns).toEqual([
+      { role: "assistant", text: "judge reasoning (kept)" },
+      { role: "user", text: "later trusted turn" },
+    ]);
+  });
+
+  test("purgeQuarantined is a no-op (returns 0) when nothing is quarantined", async () => {
+    await append("phantom", "telegram:1", "user", "normal turn");
+    expect(await store.purgeQuarantined("phantom", "telegram:1")).toBe(0);
+  });
+});
+
+describe("MemoryStore — embeddable migration on existing DBs", () => {
+  test("a freshly opened db has the embeddable column", async () => {
+    // openMemoryStore runs SCHEMA + the idempotent migration; the column must
+    // exist so the row mapping can read it back as a bool.
+    const tmp = `/tmp/phantombot-embeddable-migration-${Date.now()}.sqlite`;
+    const a = await openMemoryStore(tmp);
+    await a.appendTurn({
+      persona: "phantom",
+      conversation: "c",
+      role: "user",
+      text: "x",
+    });
+    const rows = await a.recentTurnsForDisplay("phantom", 10);
+    expect(rows[0]?.embeddable).toBe(true);
+    await a.close();
+    await Bun.file(tmp).delete?.();
+  });
+});
+
 describe("MemoryStore.close", () => {
   test("close is idempotent — calling twice does not throw", async () => {
     await store.close();

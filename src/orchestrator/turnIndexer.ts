@@ -86,6 +86,17 @@ export async function indexConversationTurnsIfDue(
       if (turns.length === 0) break;
 
       for (const turn of turns) {
+        // QUARANTINED turn (embeddable=0): a held untrusted payload the
+        // screener wrote into the principal's conversation to ground their
+        // approve/deny. It must NEVER reach the FTS/vector index — that is
+        // the whole point of the quarantine flag (F). Skip indexing AND
+        // embedding, but still advance the cursor past it (afterId) and
+        // count it as processed so the next run doesn't re-scan it forever.
+        if (turn.embeddable === false) {
+          indexed++;
+          afterId = turn.id;
+          continue;
+        }
         const text = renderTurnForIndex(turn);
         const textSha = sha256(text);
         const vec = embedder ? await embedTurn(embedder, turn, text) : undefined;

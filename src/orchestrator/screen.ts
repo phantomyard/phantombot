@@ -10,36 +10,69 @@
  * Flow, all IN CODE so a model can never fake it (the bug that started this
  * whole redesign was a model *claiming* it had notified/recorded):
  *
- *   1. BRIEFING — semantic-search the threat-relevant drawers (decisions =
- *      prior rulings, people = known senders, norms = what's routine in
- *      Andrew's world) so the judge isn't an amnesiac that cry-wolfs on
- *      normal operations. DELIBERATELY scoped to those three drawers, NOT a
- *      raw memory dump: the judge does not need Andrew's finances/inbox to
- *      score a threat, and keeping them out means they never land in a judge
- *      log either. Best-effort; failure → no priors. Prior rulings only ever
- *      LOWER scrutiny for things he already blessed; they never clear it (the
- *      judge is told a catastrophic action re-escalates regardless).
- *   2. JUDGE — run the tool-less harness judge over the content + priors.
- *      It returns a score 0–100. The judge has no tools, so it cannot act
- *      on what it reads; we consume only its number.
+ *   1. BRIEFING — the judge runs as the FULL PERSONA, narrowed. This is the
+ *      deliberate reversal the principal approved: instead of semantic-
+ *      searching three drawers and feeding the judge a handful of TRUNCATED
+ *      FTS snippets, the screener loads the persona (identity + MEMORY) and
+ *      reads the decisions/people/norms drawers IN FULL, then composes them
+ *      into the judge's system prompt via buildSystemPrompt + JUDGE_NARROWING.
+ *      The judge therefore has the principal's real context — identity, prior
+ *      rulings, known senders, documented norms — at full fidelity, which
+ *      fixes the old "nuance lost to truncation" problem (concern #1). The
+ *      drawers are still scoped to decisions/people/norms (capped at ~16KB),
+ *      so finances/inbox stay out of the judge; what changed is they are now
+ *      full rulings, and MEMORY/identity also inform the judge. Best-effort:
+ *      if the persona can't load, the judge falls back to the module
+ *      JUDGE_SYSTEM classifier (no persona context) and still screens.
+ *   2. JUDGE — run the tool-less harness judge over the content, with the
+ *      narrowed persona as its system prompt. It returns a score 0–100. The
+ *      judge has no tools, so it cannot act on what it reads; we consume only
+ *      its number. (The legacy <briefing>/priors channel still EXISTS in
+ *      threatJudge — we just stop populating it; persona context replaces it,
+ *      so priors is passed empty.)
  *   3. score <  THREAT_THRESHOLD → {action:"pass"}; the turn proceeds
- *      silently. No notification — quiet when safe (Andrew's "don't nag").
+ *      silently. No notification — quiet when safe (the "don't nag" rule).
  *   4. score >= THREAT_THRESHOLD → HOLD (fail-closed):
  *        - The untrusted turn does NOTHING. runTurn returns the heldMessage
  *          instead of running the harness. Untrusted entry points are
  *          one-shot, so "held" == the action simply never happened — the
- *          fail-closed default Andrew chose (option b). There is no paused
- *          process to time out; if he wants it done, he says so.
+ *          fail-closed default. There is no paused process to time out; if
+ *          the principal wants it done, they say so.
  *        - `phantombot notify` opens a CONVERSATION on Telegram (in CODE):
  *          what arrived, why it tripped, and the concern to weigh —
  *          phrased to be talked through, not answered yes/no.
+ *        - GROUNDING WRITE (the crux fix, concern D+E): the held episode is
+ *          written into the PRINCIPAL'S telegram conversation(s) — NOT the
+ *          untrusted entry point's. See recordHeld below for why.
  *
  * What the screener deliberately does NOT do: write a decision. Decisions
- * are recorded ONLY from a TRUSTED turn — i.e. when Andrew talks it through
- * on Telegram and concludes. The judge writes nothing; the untrusted turn
- * writes nothing. That is the whole point: an attacker can never author
- * "Andrew approved this". His trusted reply is the only thing that records
- * a ruling, and that ruling is what recall reads next time.
+ * are recorded ONLY from a TRUSTED turn — i.e. when the principal talks it
+ * through on Telegram and concludes. The judge writes nothing; the untrusted
+ * turn writes nothing. That is the whole point: an attacker can never author
+ * "the principal approved this". The trusted reply is the only thing that
+ * records a ruling, and that ruling is what recall reads next time.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * CONVERSATION SCOPING OF THE HELD EPISODE (concern D+E) — READ THIS.
+ *
+ * A held untrusted episode arrives under SOME entry-point conversation key
+ * (e.g. an email-woken `phantombot ask`), but the principal's approve/deny
+ * reply arrives in THEIR telegram conversation (`telegram:<userId>`) — a
+ * DIFFERENT conversation, the one the notify lands in. The 30-turn history
+ * replay is per-conversation, so for the principal's reply to be GROUNDED in
+ * what was held, the held episode must be written into the PRINCIPAL'S
+ * telegram conversation, the same one the notify went to.
+ *
+ * So on HOLD, after notifying, we write a turn PAIR per principal telegram
+ * conversation: a QUARANTINED user turn carrying the raw untrusted payload
+ * (embeddable:false — never indexed/embedded; see memory/store.ts + the
+ * turnIndexer), and an embeddable assistant turn carrying the judge-
+ * notification text. The pair replays into the principal's next turn so
+ * "yes, go ahead" / "no" has a referent. This is done HERE in the screener,
+ * correctly scoped to the principal — NOT in notify.ts (which only sends a
+ * message and has no business writing memory) and NOT in turn.ts's hold path
+ * (which is scoped to the untrusted entry point, the wrong conversation).
+ * ─────────────────────────────────────────────────────────────────────────
  *
  * Fail-OPEN on judge/recall error by design: if screening itself errors
  * (harness down, bad JSON), the screener returns "pass" and logs. A
@@ -50,16 +83,23 @@
  * answered-vs-unanswered escalation, not an infra error.)
  */
 
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import {
   type Config,
-  memoryIndexPath,
   personaDir,
 } from "../config.ts";
-import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { log } from "../lib/logger.ts";
-import { MemoryIndex, type SearchHit } from "../lib/memoryIndex.ts";
 import {
+  buildSystemPrompt,
+  type ChannelContext,
+} from "../persona/builder.ts";
+import { loadPersona, type PersonaFiles } from "../persona/loader.ts";
+import type { MemoryStore } from "../memory/store.ts";
+import {
+  JUDGE_NARROWING,
   judgeThreat,
   makeChainJudgeComplete,
   THREAT_THRESHOLD,
@@ -86,11 +126,47 @@ const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
   reason,
 });
 
-/** How many prior rulings to recall and feed the judge. */
-const RECALL_LIMIT = 5;
+/**
+ * The threat judge's briefing drawers — and ONLY these. Decisions (prior
+ * rulings), people (known senders), norms (what's routine in the principal's
+ * world). Scoping the persona-as-judge briefing to these three keeps it
+ * threat-relevant and keeps sensitive operational memory (finances, inbox,
+ * daily dumps, commitments) out of the judge entirely. Read in FULL now, not
+ * as snippets — see DRAWERS_CAP_BYTES. Paths are relative to the persona dir.
+ */
+const BRIEFING_DRAWERS: readonly string[] = [
+  "memory/decisions.md",
+  "memory/people.md",
+  "memory/norms.md",
+];
+
+/**
+ * Cap on the concatenated drawer text injected into the judge's prompt.
+ * Full rulings (concern #1's fix) but bounded so a runaway drawer can't blow
+ * the judge's context. ~16KB ≈ 4K tokens — generous for three drawers.
+ */
+const DRAWERS_CAP_BYTES = 16 * 1024;
+
+/** Cap on the raw untrusted payload written into the principal's history. */
+const HELD_PAYLOAD_CAP = 2000;
+
+/**
+ * A held-episode write into one principal conversation: a quarantined user
+ * turn (the raw payload) + an embeddable assistant turn (the judge text).
+ */
+export interface HeldEpisode {
+  conversation: string;
+  payload: string;
+  notifyText: string;
+}
 
 export interface ScreenerDeps {
-  /** Override recall (tests). Returns prior-rulings text, or "" for none. */
+  /**
+   * Override recall (tests / back-compat). Returns prior-rulings text, or ""
+   * for none. Production no longer sets this — the persona context replaces
+   * the FTS briefing — but the hook is kept so older tests that still pass a
+   * `recall` (and assert it reaches the judge as priors) keep working.
+   */
   recall?: (content: string, signal?: AbortSignal) => Promise<string>;
   /** Override the judge (tests). */
   judge?: (
@@ -100,6 +176,12 @@ export interface ScreenerDeps {
   ) => Promise<JudgeResult>;
   /** Override the notify side-effect (tests). Returns 0 on success. */
   notify?: (message: string) => Promise<number>;
+  /**
+   * Override the held-episode grounding write (tests). Production writes a
+   * turn pair into each principal telegram conversation via the MemoryStore;
+   * tests inject a stub to assert what would be written without a real store.
+   */
+  recordHeld?: (episode: HeldEpisode) => Promise<void>;
 }
 
 /**
@@ -107,8 +189,12 @@ export interface ScreenerDeps {
  *
  * Unlike the previous Gemini-keyed design, this ALWAYS returns a screener:
  * the judge runs on the harness, which is always present, so there is no
- * "no key ⇒ screening silently off" hole. (Only RECALL degrades without
- * embeddings, and it degrades to FTS / no-priors, never to no-screening.)
+ * "no key ⇒ screening silently off" hole.
+ *
+ * `memory` is the open store; on a HOLD the screener writes the held episode
+ * into the principal's telegram conversation(s) through it (concern D+E). The
+ * persona files are loaded ONCE here (best-effort) and cached for the life of
+ * the screener so every screened turn reuses the same narrowed-judge prompt.
  */
 export function makeScreener(
   config: Config,
@@ -121,13 +207,40 @@ export function makeScreener(
   // (chain[0], whichever binary the user configured). An empty chain (e.g. a
   // test fake chain with no harness) → screening fails open and spawns nothing.
   harnesses: Harness[],
+  // The open memory store. On a HOLD the screener writes the held episode
+  // into the principal's telegram conversation(s) so their approve/deny reply
+  // is grounded. Pass-through from the engine's `input.memory`.
+  memory: MemoryStore,
   deps: ScreenerDeps = {},
 ): (content: string, signal?: AbortSignal) => Promise<ScreenVerdict> {
-  const recall = deps.recall ?? makeJudgeBriefing(config, persona);
+  // Load + cache the persona ONCE per screener so the judge runs as the full
+  // narrowed persona (persona-as-judge). Lazy + best-effort: if it throws
+  // (persona dir missing, unreadable), we fall back to undefined so the judge
+  // uses the module JUDGE_SYSTEM classifier and still screens.
+  let personaFilesPromise: Promise<PersonaFiles | undefined> | undefined;
+  const loadPersonaFiles = (): Promise<PersonaFiles | undefined> => {
+    if (!personaFilesPromise) {
+      personaFilesPromise = (async () => {
+        try {
+          return await loadPersona(personaDir(config, persona));
+        } catch (e) {
+          log.warn(
+            `screen: persona load failed, judging with fallback classifier: ${(e as Error).message}`,
+          );
+          return undefined;
+        }
+      })();
+    }
+    return personaFilesPromise;
+  };
 
   const judge =
     deps.judge ??
-    (() => {
+    (async (
+      content: string,
+      _priors: string,
+      signal?: AbortSignal,
+    ): Promise<JudgeResult> => {
       // Spawn the judge in the persona's own dir, never the ambient cwd — an
       // inaccessible cwd makes the harness spawn EACCES, which would fail the
       // screen OPEN (silently unscreened). personaDir is owned by the running
@@ -143,28 +256,91 @@ export function makeScreener(
       const complete = makeChainJudgeComplete(harnesses, config, judgeCwd);
       if (!complete) {
         // No harness available to screen with (empty chain) — fail open.
-        return async (): Promise<JudgeResult> => ({
-          ok: false,
-          error: "no harness in chain for screening",
-        });
+        return { ok: false, error: "no harness in chain for screening" };
       }
-      return (content: string, priors: string, signal?: AbortSignal) =>
-        judgeThreat(content, { complete, priors, signal });
-    })();
+      // Compose the judge's system prompt from the FULL narrowed persona: the
+      // persona's own system prompt (identity + MEMORY + the full drawers in
+      // the retrievedMemory slot), then JUDGE_NARROWING to collapse it to the
+      // one rating job. If the persona didn't load, systemPrompt stays
+      // undefined and threatJudge falls back to JUDGE_SYSTEM.
+      const personaFiles = await loadPersonaFiles();
+      let systemPrompt: string | undefined;
+      if (personaFiles) {
+        const untrustedCtx: ChannelContext = {
+          channel: "screen",
+          conversationId: _conversation,
+          timestamp: new Date(),
+          trusted: false,
+        };
+        const drawersText = await readBriefingDrawers(config, persona);
+        systemPrompt =
+          buildSystemPrompt(personaFiles, untrustedCtx, drawersText) +
+          "\n\n" +
+          JUDGE_NARROWING;
+      }
+      // priors is intentionally empty in production — the persona context
+      // replaces the old FTS briefing. The <briefing> channel still exists in
+      // threatJudge; we just don't feed it. (deps.recall, when set by an older
+      // test, is still honoured below and passed through as priors.)
+      return judgeThreat(content, {
+        complete,
+        priors: _priors,
+        systemPrompt,
+        signal,
+      });
+    });
+
+  // Back-compat: an older test may inject `recall` (expecting its output to
+  // reach the judge as priors). Honour it; production leaves it unset and the
+  // persona context is the briefing.
+  const recall = deps.recall;
 
   const notify =
     deps.notify ?? ((message: string) => runNotify({ config, message }));
 
+  // The grounding write. Default: write a turn pair into the principal's
+  // conversation via the store (quarantined payload + embeddable judge text).
+  const recordHeld =
+    deps.recordHeld ??
+    (async (episode: HeldEpisode): Promise<void> => {
+      await memory.appendTurnPair(
+        {
+          persona,
+          conversation: episode.conversation,
+          role: "user",
+          // QUARANTINED: raw untrusted payload — replays in history to ground
+          // the principal's reply, but never indexed/embedded (embeddable
+          // false) and purged once a trusted turn rules. See store.ts.
+          text: episode.payload,
+          embeddable: false,
+        },
+        {
+          persona,
+          conversation: episode.conversation,
+          role: "assistant",
+          // The judge's notification text is safe to index (it's our own
+          // reasoning, not attacker text), so it stays embeddable.
+          text: episode.notifyText,
+          embeddable: true,
+        },
+      );
+    });
+
   return async (content: string, signal?: AbortSignal): Promise<ScreenVerdict> => {
-    // 1. Recall prior rulings (best-effort; never throws → "").
+    // 1. Optional legacy recall (best-effort; never throws → ""). Production
+    //    leaves recall unset; the persona context is the briefing now.
     let priors = "";
-    try {
-      priors = await recall(content, signal);
-    } catch (e) {
-      log.warn(`screen: recall failed, judging without priors: ${(e as Error).message}`);
+    if (recall) {
+      try {
+        priors = await recall(content, signal);
+      } catch (e) {
+        log.warn(`screen: recall failed, judging without priors: ${(e as Error).message}`);
+      }
     }
 
-    // 2. Judge (fail-open on any judge error).
+    // 2. Judge (fail-open on any judge error). The default judge runs as the
+    //    narrowed persona (it closes over _conversation for its channel
+    //    context); an injected test judge uses the legacy 3-arg shape.
     let result: JudgeResult;
     try {
       result = await judge(content, priors, signal);
@@ -201,6 +377,30 @@ export function makeScreener(
       log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
     }
 
+    // 4. GROUNDING WRITE (concern D+E) — AFTER notifying. Write the held
+    //    episode into each principal telegram conversation so the principal's
+    //    approve/deny reply (which lands in telegram:<userId>, NOT this
+    //    untrusted entry point) replays the payload + judge text and is
+    //    grounded. Best-effort: a failure logs but must NEVER downgrade the
+    //    hold to a pass and must never throw out of the screener. No-op when
+    //    telegram isn't configured or the allowlist is empty.
+    try {
+      const payload = content.replace(/\s+/g, " ").trim().slice(0, HELD_PAYLOAD_CAP);
+      for (const conversation of principalConversations(config, persona)) {
+        try {
+          await recordHeld({ conversation, payload, notifyText: notifyMessage });
+        } catch (e) {
+          log.warn(
+            `screen: held-episode write failed for ${conversation} (hold still stands): ${(e as Error).message}`,
+          );
+        }
+      }
+    } catch (e) {
+      // Defensive belt-and-suspenders: resolving the principal list must never
+      // bring down the screener or weaken the hold.
+      log.warn(`screen: held-episode grounding skipped: ${(e as Error).message}`);
+    }
+
     return {
       action: "hold",
       score: v.score,
@@ -208,91 +408,62 @@ export function makeScreener(
       question: concern,
       heldMessage:
         "🔒 That request touched something sensitive, so I've paused it and " +
-        "pinged Andrew to talk it through before doing anything. Nothing was done.",
+        "pinged the owner to talk it through before doing anything. Nothing was done.",
     };
   };
 }
 
 /**
- * The threat judge's briefing drawers — and ONLY these. Decisions (prior
- * rulings), people (known senders), norms (what's routine in Andrew's world).
- * Scoping the briefing to these three keeps it threat-relevant and keeps
- * sensitive operational memory (finances, inbox, daily dumps, commitments)
- * out of the judge entirely — both for signal-to-noise and so they never
- * appear in a judge log. Paths are relative to the persona dir.
+ * Resolve the principal telegram conversation key(s) for this persona. The
+ * principal account is the persona-bound bot if configured, else the default
+ * telegram bot; each allowed user id maps to `telegram:<userId>`. Empty when
+ * telegram isn't configured / the allowlist is empty (grounding is a no-op).
  */
-const BRIEFING_DRAWERS: readonly string[] = [
-  "memory/decisions.md",
-  "memory/people.md",
-  "memory/norms.md",
-];
-
-/**
- * Production briefing: semantic-search the persona's threat-relevant drawers
- * (decisions + people + norms) for context relevant to the incoming content,
- * rendered as a priors block for the judge. Hybrid (FTS + vector) when
- * embeddings are configured and populated, FTS-only otherwise. Filters hits
- * to BRIEFING_DRAWERS so the judge is briefed, not handed the whole memory
- * store. Never throws — any failure resolves to "" (judge without priors),
- * mirroring retrieval.ts's hot-path guarantee.
- */
-export function makeJudgeBriefing(
-  config: Config,
-  persona: string,
-): (content: string, signal?: AbortSignal) => Promise<string> {
-  return async (content: string, signal?: AbortSignal): Promise<string> => {
-    const query = content.trim();
-    if (query.length === 0) return "";
-
-    let ix: MemoryIndex | undefined;
-    try {
-      // Resolve paths lazily inside the guard: a degenerate config must
-      // degrade to "no priors", never throw on the screening hot path.
-      const indexPath = memoryIndexPath(persona);
-      const dir = personaDir(config, persona);
-      ix = await MemoryIndex.open(indexPath);
-      await ix.refreshStale(dir);
-
-      let queryVec: Float32Array | undefined;
-      if (
-        config.embeddings.provider === "gemini" &&
-        config.embeddings.gemini?.apiKey &&
-        ix.embeddingCount() > 0
-      ) {
-        const r = await geminiEmbed(config.embeddings.gemini.apiKey, query, {
-          model: config.embeddings.gemini.model,
-          dims: config.embeddings.gemini.dims,
-          signal,
-        });
-        if (r.ok) queryVec = r.values;
-        else log.warn(`screen briefing: query embed failed; FTS-only (${r.error})`);
-      }
-
-      // Scope to memory/ at the index layer, then narrow to the briefing
-      // drawers in code (the index has no per-file filter). Over-fetch so the
-      // post-filter still has RECALL_LIMIT briefing-drawer hits to choose from.
-      const raw = queryVec
-        ? ix.hybridSearch(query, queryVec, { scope: "memory", limit: RECALL_LIMIT * 4 })
-        : ix.search(query, { scope: "memory", limit: RECALL_LIMIT * 4 });
-      const hits = raw
-        .filter((h) => BRIEFING_DRAWERS.includes(h.path))
-        .slice(0, RECALL_LIMIT);
-
-      return renderPriors(hits);
-    } catch (e) {
-      log.warn(`screen briefing: failed; judging without priors (${(e as Error).message})`);
-      return "";
-    } finally {
-      ix?.close();
-    }
-  };
+function principalConversations(config: Config, persona: string): string[] {
+  const account =
+    config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
+  if (!account) return [];
+  return account.allowedUserIds.map((id) => `telegram:${id}`);
 }
 
-/** Render recalled hits into the priors text the judge sees. */
-function renderPriors(hits: SearchHit[]): string {
-  const lines = hits
-    .map((h) => h.snippet.replace(/[«»]/g, "").replace(/\s+/g, " ").trim())
-    .filter((s) => s.length > 0);
-  if (lines.length === 0) return "";
-  return lines.map((l) => `- ${l}`).join("\n");
+/**
+ * Read the briefing drawers (decisions/people/norms) in FULL from the persona
+ * dir, concatenate them under short headers, and cap the total at
+ * DRAWERS_CAP_BYTES (truncating with a marker if larger). This replaces the
+ * old truncated FTS snippets — full rulings fix concern #1's "nuance lost to
+ * truncation". Best-effort per file (missing files are skipped); never throws.
+ * Returns undefined when no drawer exists, so buildSystemPrompt omits the
+ * retrieved-context slot entirely.
+ */
+async function readBriefingDrawers(
+  config: Config,
+  persona: string,
+): Promise<string | undefined> {
+  let dir: string;
+  try {
+    dir = personaDir(config, persona);
+  } catch {
+    return undefined;
+  }
+  const sections: string[] = [];
+  for (const rel of BRIEFING_DRAWERS) {
+    try {
+      const content = (await readFile(join(dir, rel), "utf8")).trim();
+      if (content.length > 0) {
+        sections.push(`## ${rel}\n\n${content}`);
+      }
+    } catch {
+      // Missing/unreadable drawer — skip it; the judge briefs on what exists.
+    }
+  }
+  if (sections.length === 0) return undefined;
+  let text = sections.join("\n\n");
+  if (Buffer.byteLength(text, "utf8") > DRAWERS_CAP_BYTES) {
+    // Truncate to the cap (byte-safe slice via Buffer) and mark it so the
+    // judge knows the briefing was clipped rather than silently ending.
+    text =
+      Buffer.from(text, "utf8").subarray(0, DRAWERS_CAP_BYTES).toString("utf8") +
+      "\n\n[briefing truncated at cap]";
+  }
+  return text;
 }

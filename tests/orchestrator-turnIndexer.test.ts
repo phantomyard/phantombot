@@ -100,6 +100,49 @@ describe("indexConversationTurnsIfDue", () => {
     ix.close();
   });
 
+  test("skips a quarantined turn (embeddable=false) but advances the cursor past it", async () => {
+    // A held-episode quarantined user turn must never be indexed/embedded, but
+    // it still counts as processed so the cursor moves past it; a following
+    // embeddable turn IS indexed. Use interval 1 so a single user turn triggers.
+    const settings = { enabled: true, interval: 1, batchSize: 200 };
+
+    // Quarantined raw payload (would otherwise FTS-match "Etna secret").
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "Etna secret quarantined payload",
+      embeddable: false,
+    });
+    // A normal, indexable turn that should surface.
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "assistant",
+      text: "Stromboli indexable reasoning",
+      embeddable: true,
+    });
+
+    const result = await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings,
+    });
+
+    expect(result?.triggered).toBe(true);
+    // Both rows are "processed" (cursor advanced past both)...
+    expect(result?.indexed).toBe(2);
+
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    // ...but only the embeddable one is searchable; the quarantined payload
+    // never entered the index.
+    expect(ix.search("Stromboli indexable", { scope: "turns" }).length).toBeGreaterThan(0);
+    expect(ix.search("Etna secret quarantined", { scope: "turns" })).toEqual([]);
+    ix.close();
+  });
+
   test("second trigger only indexes turns since the previous state", async () => {
     for (let i = 1; i <= 20; i++) await appendPair(i);
     await indexConversationTurnsIfDue({

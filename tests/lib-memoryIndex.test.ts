@@ -176,6 +176,7 @@ describe("MemoryIndex.search", () => {
       role: "user",
       text: "The Vesuvius pension tracing email came from Isio.",
       createdAt: new Date("2026-05-28T06:00:00Z"),
+      embeddable: true,
     };
     ix.upsertTurn(turn);
 
@@ -195,6 +196,7 @@ describe("MemoryIndex.search", () => {
       role: "assistant",
       text: "Vesuvius turn note",
       createdAt: new Date("2026-05-28T06:00:00Z"),
+      embeddable: true,
     });
 
     const hits = ix.search("Vesuvius", { scope: "turns" });
@@ -211,6 +213,7 @@ describe("MemoryIndex.search", () => {
       role: "user",
       text: "reset-sensitive turn",
       createdAt: new Date("2026-05-28T06:00:00Z"),
+      embeddable: true,
     };
     const vec = new Float32Array([1, 0, 0]);
     ix.upsertTurn(turn, vec, "sha");
@@ -234,6 +237,7 @@ describe("MemoryIndex.search", () => {
       role: "user",
       text: "Vesuvius pension discussed in conversation AAA",
       createdAt: new Date("2026-05-28T06:00:00Z"),
+      embeddable: true,
     });
     ix.upsertTurn({
       id: 2,
@@ -242,6 +246,7 @@ describe("MemoryIndex.search", () => {
       role: "user",
       text: "Vesuvius pension discussed in conversation BBB",
       createdAt: new Date("2026-05-28T06:01:00Z"),
+      embeddable: true,
     });
 
     const paths = ix
@@ -265,6 +270,7 @@ describe("MemoryIndex.search", () => {
         role: "user",
         text: "pension turn in AAA",
         createdAt: new Date("2026-05-28T06:00:00Z"),
+        embeddable: true,
       },
       vec,
       "sha-aaa",
@@ -277,6 +283,7 @@ describe("MemoryIndex.search", () => {
         role: "user",
         text: "pension turn in BBB",
         createdAt: new Date("2026-05-28T06:01:00Z"),
+        embeddable: true,
       },
       vec,
       "sha-bbb",
