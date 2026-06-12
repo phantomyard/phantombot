@@ -50,6 +50,39 @@ import { log } from "../lib/logger.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { maybePromptRestart } from "./harness.ts";
 
+/**
+ * Parse a comma/space-separated list of trusted Matrix IDs into a clean,
+ * de-duplicated MXID array — the Matrix equivalent of Telegram's
+ * `parseAllowedUserIds`. MXIDs are strings (`@localpart:server`), not numbers.
+ * Entries that don't look like an MXID are returned separately as `invalid` so
+ * the caller can warn rather than silently writing garbage into the allowlist.
+ */
+export function parseAllowedMxids(raw: string): {
+  ids: string[];
+  invalid: string[];
+} {
+  const tokens = (raw ?? "")
+    .split(/[,\s]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  const ids: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const t of tokens) {
+    // A valid MXID is `@localpart:domain`. Be lenient on the localpart/domain
+    // charset (homeservers vary) but require the @…:… shape.
+    if (/^@[^:\s]+:[^:\s]+$/.test(t)) {
+      if (!seen.has(t)) {
+        seen.add(t);
+        ids.push(t);
+      }
+    } else {
+      invalid.push(t);
+    }
+  }
+  return { ids, invalid };
+}
+
 /** The crypto-enabling client the setup needs after login. A thin seam so the
  *  wizard can be tested without a real SDK client / WASM. */
 export interface MatrixSetupClient {
@@ -84,6 +117,13 @@ export interface ChatMatrixSetupInput {
   homeserver: string;
   username: string;
   password: string;
+  /**
+   * Trusted Matrix IDs to write into `allowed_user_ids`. Empty/omitted →
+   * fail-closed: an empty allowlist answers anyone but trusts no one (same
+   * policy as Telegram). A non-empty list is written verbatim into the config
+   * block so these MXIDs are treated as trusted principals.
+   */
+  allowedUserIds?: string[];
   /** Injectable login (default realMatrixLogin). */
   login?: MatrixLoginFn;
   /** Injectable crypto-client factory (default builds a real SDK client). */
@@ -154,6 +194,7 @@ export async function runChatMatrixSetup(
       deviceId: creds.deviceId,
       accessToken: creds.accessToken,
       e2ee: false,
+      allowedUserIds: input.allowedUserIds,
     });
     return { ok: true, userId: creds.userId, deviceId: creds.deviceId };
   }
@@ -206,6 +247,7 @@ export async function runChatMatrixSetup(
       deviceId: creds.deviceId,
       accessToken: creds.accessToken,
       e2ee: true,
+      allowedUserIds: input.allowedUserIds,
     });
 
     // Force the crypto store to disk NOW. The debounced auto-snapshot may not
@@ -250,6 +292,8 @@ async function writeMatrixConfig(
     deviceId: string;
     accessToken: string;
     e2ee: boolean;
+    /** Trusted MXIDs to write into allowed_user_ids (see note below). */
+    allowedUserIds?: string[];
   },
 ): Promise<void> {
   const base = args.perPersona
@@ -263,11 +307,16 @@ async function writeMatrixConfig(
     // Record the encryption mode so the runtime + notify path know whether to
     // spin up rust-crypto. Explicit in config so flipping it is a visible edit.
     setIn(toml, [...base, "e2ee"], args.e2ee);
-    // Only seed an empty allowlist if none exists yet (don't clobber a
-    // re-run where the user already added MXIDs).
-    const existing = getIn(toml, [...base, "allowed_user_ids"]);
-    if (existing === undefined) {
-      setIn(toml, [...base, "allowed_user_ids"], []);
+    // allowed_user_ids: if the user supplied trusted MXIDs, write them
+    // verbatim (a deliberate edit wins). Otherwise only SEED an empty list when
+    // none exists yet — never clobber MXIDs a prior run already wrote.
+    if (args.allowedUserIds && args.allowedUserIds.length > 0) {
+      setIn(toml, [...base, "allowed_user_ids"], args.allowedUserIds);
+    } else {
+      const existing = getIn(toml, [...base, "allowed_user_ids"]);
+      if (existing === undefined) {
+        setIn(toml, [...base, "allowed_user_ids"], []);
+      }
     }
   });
 }
@@ -392,6 +441,8 @@ export async function runChatMatrix(
       username: string;
       passwordEnvVar: string;
       e2ee: boolean;
+      /** Trusted MXIDs for allowed_user_ids (already parsed). */
+      allowedUserIds?: string[];
     };
   } = {},
 ): Promise<number> {
@@ -416,6 +467,7 @@ export async function runChatMatrix(
       homeserver: ni.homeserver,
       username: ni.username,
       password,
+      allowedUserIds: ni.allowedUserIds,
     });
     if (!result.ok) {
       log.error(`matrix setup failed: ${result.error}`);
@@ -473,6 +525,34 @@ export async function runChatMatrix(
   }
   const e2ee = e2eeChoice === true;
 
+  // Trusted principals. Same model as the Telegram allow-list: a
+  // comma-separated list, empty = answer anyone but trust no one (fail-closed).
+  // Asked once up front so the retry loop below doesn't re-prompt it.
+  const allowedRaw = await p.text({
+    message:
+      "Trusted Matrix IDs (comma-separated MXIDs like @you:matrix.org; empty = answer anyone, trust no one)",
+    placeholder: "@you:matrix.org, @other:example.org",
+  });
+  if (p.isCancel(allowedRaw)) {
+    p.cancel("cancelled");
+    return 1;
+  }
+  const { ids: allowedUserIds, invalid: invalidMxids } = parseAllowedMxids(
+    (allowedRaw as string) ?? "",
+  );
+  if (invalidMxids.length > 0) {
+    p.note(
+      `These didn't look like MXIDs (@name:server) and were skipped:\n  ${invalidMxids.join(", ")}`,
+      "Ignored",
+    );
+  }
+  if (allowedUserIds.length === 0) {
+    p.note(
+      "No trusted MXIDs set — the bot will answer anyone but trust no one. You can add them to allowed_user_ids later.",
+      "Heads up",
+    );
+  }
+
   // Credential prompt + setup, wrapped in a retry loop. A bad password or wrong
   // homeserver shouldn't dump the user back to the shell — on failure we offer
   // "try again" (re-ask credentials) or "cancel setup", so this slots cleanly
@@ -523,6 +603,7 @@ export async function runChatMatrix(
       homeserver: homeserverUrl,
       username: username as string,
       password: password as string,
+      allowedUserIds,
     });
 
     if (result.ok) {
@@ -562,7 +643,7 @@ async function finishMatrixSetup(
       `device: ${result.deviceId}\n` +
       `${encryptionLine}\n` +
       `block: ${perPersona ? `[channels.matrix.personas.${persona}]` : "[channels.matrix]"}\n` +
-      `\nNext: add allowed MXIDs to allowed_user_ids so the bot trusts you.`,
+      `\nTrusted principals live in allowed_user_ids in that block — edit it to adjust who the bot trusts.`,
     "Saved",
   );
 
@@ -609,11 +690,25 @@ export default defineCommand({
         "Non-interactive: enable end-to-end encryption (default true). Use --no-e2ee for plaintext-over-TLS.",
       default: true,
     },
+    "allowed-users": {
+      type: "string",
+      description:
+        "Non-interactive: comma-separated trusted MXIDs (@you:matrix.org) for allowed_user_ids. Empty = answer anyone, trust no one.",
+    },
   },
   async run({ args }) {
     const homeserver = args.homeserver as string | undefined;
     const username = args.username as string | undefined;
     const passwordEnvVar = args["password-env"] as string | undefined;
+    const allowedRaw = args["allowed-users"] as string | undefined;
+    const { ids: allowedUserIds, invalid: invalidMxids } = parseAllowedMxids(
+      allowedRaw ?? "",
+    );
+    if (invalidMxids.length > 0) {
+      log.warn(
+        `matrix setup: ignoring entries that aren't MXIDs: ${invalidMxids.join(", ")}`,
+      );
+    }
     // All three present → headless setup; otherwise fall through to the wizard.
     const nonInteractive =
       homeserver && username && passwordEnvVar
@@ -622,6 +717,7 @@ export default defineCommand({
             username,
             passwordEnvVar,
             e2ee: args.e2ee !== false,
+            allowedUserIds,
           }
         : undefined;
     process.exitCode = await runChatMatrix({

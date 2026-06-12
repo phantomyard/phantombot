@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  parseAllowedMxids,
   runChatMatrixSetup,
   type MatrixSetupClient,
 } from "../src/cli/chat-matrix.ts";
@@ -68,6 +69,27 @@ function fakeCrypto(): { crypto: MatrixCryptoLike; calls: string[] } {
   };
   return { crypto, calls };
 }
+
+describe("parseAllowedMxids", () => {
+  test("splits on commas and whitespace, trims, de-dupes", () => {
+    const { ids, invalid } = parseAllowedMxids(
+      " @a:matrix.org, @b:example.org  @a:matrix.org\n@c:hs.io ",
+    );
+    expect(ids).toEqual(["@a:matrix.org", "@b:example.org", "@c:hs.io"]);
+    expect(invalid).toEqual([]);
+  });
+
+  test("separates non-MXID tokens into invalid", () => {
+    const { ids, invalid } = parseAllowedMxids("@ok:hs.io, notanmxid, bob");
+    expect(ids).toEqual(["@ok:hs.io"]);
+    expect(invalid).toEqual(["notanmxid", "bob"]);
+  });
+
+  test("empty / whitespace input yields empty lists", () => {
+    expect(parseAllowedMxids("")).toEqual({ ids: [], invalid: [] });
+    expect(parseAllowedMxids("   \n ")).toEqual({ ids: [], invalid: [] });
+  });
+});
 
 describe("runChatMatrixSetup — invisible E2EE", () => {
   test("logs in, bootstraps, stores recovery key in env (not config), writes config", async () => {
@@ -136,6 +158,63 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     expect(toml).not.toContain("hunter2");
     expect(toml).not.toContain("EsTx 1234 5678 ABCD");
     expect(toml).not.toContain("recovery");
+  });
+
+  test("writes supplied trusted MXIDs into allowed_user_ids", async () => {
+    const fc = fakeCrypto();
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      e2ee: true,
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      allowedUserIds: ["@andrew:matrix.org", "@andrew:hodges.nl"],
+      login: async ({ username }) => ({
+        userId: `@${username}:hs.example`,
+        accessToken: "syt_token_abc",
+        deviceId: "DEVICE123",
+      }),
+      makeClient: async (): Promise<MatrixSetupClient> => ({
+        initCrypto: async () => {},
+        crypto: () => fc.crypto,
+        authUploadCallback: () => async () => {},
+        stop: () => {},
+      }),
+      envSet: async () => 0,
+      configPath,
+    });
+
+    expect(result.ok).toBe(true);
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain('"@andrew:matrix.org"');
+    expect(toml).toContain('"@andrew:hodges.nl"');
+    // Not the empty scaffold when MXIDs were supplied.
+    expect(toml).not.toContain("allowed_user_ids = []");
+  });
+
+  test("plaintext path also writes supplied trusted MXIDs", async () => {
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      // e2ee omitted → plaintext path.
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      allowedUserIds: ["@andrew:matrix.org"],
+      login: async ({ username }) => ({
+        userId: `@${username}:hs.example`,
+        accessToken: "syt_token_abc",
+        deviceId: "DEVICE123",
+      }),
+      envSet: async () => 0,
+      configPath,
+    });
+    expect(result.ok).toBe(true);
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain('"@andrew:matrix.org"');
   });
 
   test("per-persona setup writes the personas block + suffixed env var", async () => {
