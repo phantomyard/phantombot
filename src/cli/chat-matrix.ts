@@ -292,60 +292,106 @@ export async function runChatMatrix(
   const perPersona = input.persona !== undefined && input.persona !== config.defaultPersona;
 
   p.intro("Configure the Matrix channel");
+
+  // Opt-in gate. This wizard is part of the `phantombot init` chain, and most
+  // users will not be wiring up Matrix — so ask first, default to NO, and exit
+  // cleanly (0, not an error) when skipped so the init chain keeps flowing.
+  const proceed = await p.confirm({
+    message: "Set up Matrix now? (most users skip this)",
+    initialValue: false,
+  });
+  if (p.isCancel(proceed) || !proceed) {
+    p.outro("skipped Matrix setup — you can run `phantombot chat matrix` later");
+    return 0;
+  }
+
   p.note(
     "E2EE is always on and fully automatic — you'll only be asked for your\n" +
-      "homeserver, username, and password. Nothing else.",
-    "Encrypted by default",
+      "homeserver, username, and password. Nothing else.\n\n" +
+      "This logs into an EXISTING Matrix account — it does not create one.\n" +
+      "If you don't have an account yet, register one on your homeserver first\n" +
+      "(e.g. at https://app.element.io), then come back here.",
+    "Before you start",
   );
 
-  const homeserver = await p.text({
-    message: "Homeserver URL",
-    placeholder: "https://matrix.org",
-    validate: (v) => {
-      if (!v || v.length === 0) return "homeserver is required";
-      if (!/^https?:\/\//.test(v)) return "must start with http:// or https://";
-      return undefined;
-    },
-  });
-  if (p.isCancel(homeserver)) {
-    p.cancel("cancelled");
-    return 1;
-  }
+  // Credential prompt + setup, wrapped in a retry loop. A bad password or wrong
+  // homeserver shouldn't dump the user back to the shell — on failure we offer
+  // "try again" (re-ask credentials) or "cancel setup", so this slots cleanly
+  // into the init chain either way.
+  for (;;) {
+    const homeserver = await p.text({
+      message: "Homeserver URL",
+      placeholder: "https://matrix.org",
+      // Empty-Enter accepts the placeholder — no retyping the common default.
+      defaultValue: "https://matrix.org",
+      validate: (v) => {
+        if (v && !/^https?:\/\//.test(v))
+          return "must start with http:// or https://";
+        return undefined;
+      },
+    });
+    if (p.isCancel(homeserver)) {
+      p.cancel("cancelled");
+      return 1;
+    }
+    const homeserverUrl = (homeserver as string) || "https://matrix.org";
 
-  const username = await p.text({
-    message: "Username (MXID or localpart, e.g. @robbie:matrix.org or robbie)",
-    validate: (v) => (!v || v.length === 0 ? "username is required" : undefined),
-  });
-  if (p.isCancel(username)) {
-    p.cancel("cancelled");
-    return 1;
-  }
+    const username = await p.text({
+      message: "Username (MXID or localpart, e.g. @robbie:matrix.org or robbie)",
+      validate: (v) => (!v || v.length === 0 ? "username is required" : undefined),
+    });
+    if (p.isCancel(username)) {
+      p.cancel("cancelled");
+      return 1;
+    }
 
-  const password = await p.password({
-    message: "Password (used once to log in, then discarded — never stored)",
-    validate: (v) => (!v || v.length === 0 ? "password is required" : undefined),
-  });
-  if (p.isCancel(password)) {
-    p.cancel("cancelled");
-    return 1;
-  }
+    const password = await p.password({
+      message: "Password (used once to log in, then discarded — never stored)",
+      validate: (v) => (!v || v.length === 0 ? "password is required" : undefined),
+    });
+    if (p.isCancel(password)) {
+      p.cancel("cancelled");
+      return 1;
+    }
 
-  const spinner = p.spinner();
-  spinner.start("logging in + setting up encryption…");
-  const result = await runChatMatrixSetup({
-    config,
-    persona,
-    perPersona,
-    homeserver: homeserver as string,
-    username: username as string,
-    password: password as string,
-  });
-  if (!result.ok) {
+    const spinner = p.spinner();
+    spinner.start("logging in + setting up encryption…");
+    const result = await runChatMatrixSetup({
+      config,
+      persona,
+      perPersona,
+      homeserver: homeserverUrl,
+      username: username as string,
+      password: password as string,
+    });
+
+    if (result.ok) {
+      spinner.stop(`logged in as ${result.userId} (device ${result.deviceId})`);
+      return await finishMatrixSetup(result, { perPersona, persona, svc });
+    }
+
     spinner.stop(`setup failed: ${result.error}`);
-    p.cancel("aborting — Matrix was not configured");
-    return 1;
+    const retry = await p.confirm({
+      message: "Try again?",
+      initialValue: true,
+    });
+    if (p.isCancel(retry) || !retry) {
+      p.cancel("Matrix was not configured");
+      return 1;
+    }
+    // loop: re-prompt credentials and retry.
   }
-  spinner.stop(`logged in as ${result.userId} (device ${result.deviceId})`);
+}
+
+/**
+ * Report a successful setup (redacted) and offer the restart prompt. Split out
+ * so the retry loop has a single clean exit on success.
+ */
+async function finishMatrixSetup(
+  result: ChatMatrixSetupResult,
+  ctx: { perPersona: boolean; persona: string; svc: ServiceControl },
+): Promise<number> {
+  const { perPersona, persona, svc } = ctx;
 
   // Deliberately do NOT print the recovery key — only that it was stored.
   p.note(
