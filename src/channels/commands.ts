@@ -2,7 +2,7 @@
  * Slash command dispatcher for chat channels.
  *
  * Sits BEFORE the LLM in the message loop. Catches in-band control commands
- * (`/stop`, `/reset`, `/status`, `/harness`, `/help`) and handles them in the
+ * (`/start`, `/stop`, `/reset`, `/status`, `/harness`, `/help`) and handles them in the
  * channel layer so they keep working even when the LLM is hung on a
  * subprocess tool call — that was the failure mode that motivated this
  * module: PhantomBot's old design routed every message through the harness,
@@ -15,7 +15,7 @@
  * the reply text back to the user.
  *
  * Recognized vs unknown:
- *   - `/stop`, `/reset`, `/status`, `/harness`, `/help` → handled here.
+ *   - `/start`, `/stop`, `/reset`, `/status`, `/harness`, `/help` → handled here.
  *   - Any other `/foo` → returned as null, channel falls through to runTurn
  *     so the LLM can interpret it (some personas use `/remember`, etc.).
  */
@@ -123,6 +123,7 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
   command: string;
   description: string;
 }> = [
+  { command: "start", description: "Show this command list" },
   { command: "stop", description: "Abort the current turn" },
   { command: "reset", description: "Clear this chat's history" },
   { command: "status", description: "Show harness, uptime, context usage" },
@@ -209,6 +210,7 @@ export async function handleSlashCommand(
       return await handleUpdate(ctx);
     case "/restart":
       return handleRestart(ctx);
+    case "/start":
     case "/help":
       return { reply: HELP };
     default:
