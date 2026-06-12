@@ -1,0 +1,46 @@
+diff --git a/index-wasm-esm.mjs b/index-wasm-esm.mjs
+index 89db5179802e3c32d6ed9513dd6be1b6261f6ca5..473d28e85574790cad0541bef1e9ab4fa7b12ce7 100644
+--- a/index-wasm-esm.mjs
++++ b/index-wasm-esm.mjs
+@@ -22,6 +22,20 @@
+ 
+ import * as bindings from "./pkg/matrix_sdk_crypto_wasm_bg.js";
+ 
++// --- phantombot patch: single-binary (bun --compile) WASM loader ----------
++// Under `bun build --compile`, `await import("...wasm")` does NOT return an
++// instantiated WebAssembly namespace — it yields a module whose `default` is
++// the embedded FILE PATH. So upstream's `loadModuleAsync` (below) calls
++// `wasm.__wbindgen_start()` on a non-instance → "__wbindgen_start is not a
++// function", AND clobbers any instance set earlier via __wbg_set_wasm. We
++// instead embed the bytes with `with { type: "file" }` (Bun copies them into
++// $bunfs and hands back a readable path; on-disk path under plain `bun run`),
++// read them, and instantiate manually against THIS bindings module. See
++// phantombot src/channels/matrix/cryptoWasm.ts for the matching context.
++import { readFileSync } from "node:fs";
++import wasmPath from "./pkg/matrix_sdk_crypto_wasm_bg.wasm" with { type: "file" };
++// --------------------------------------------------------------------------
++
+ // Although we could simply instantiate the WASM at import time with a top-level `await`,
+ // we avoid that, to make it easier for callers to delay loading the WASM (and instead
+ // wait until `initAsync` is called). (Also, Safari 14 doesn't support top-level `await`.)
+@@ -54,11 +68,15 @@ let modPromise = null;
+  * @returns {Promise<void>}
+  */
+ async function loadModuleAsync() {
+-    /** @type {typeof import("./pkg/matrix_sdk_crypto_wasm_bg.wasm.d.ts")} */
+-    // @ts-expect-error TSC can't find the definitions file, for some reason.
+-    const wasm = await import("./pkg/matrix_sdk_crypto_wasm_bg.wasm");
+-    bindings.__wbg_set_wasm(wasm);
+-    wasm.__wbindgen_start();
++    // phantombot patch: read the embedded bytes and instantiate manually,
++    // rather than `await import("...wasm")` which is broken under bun --compile.
++    const bytes = readFileSync(wasmPath);
++    const mod = new WebAssembly.Module(bytes);
++    const instance = new WebAssembly.Instance(mod, {
++        "./matrix_sdk_crypto_wasm_bg.js": bindings,
++    });
++    bindings.__wbg_set_wasm(instance.exports);
++    instance.exports.__wbindgen_start();
+ }
+ 
+ /**

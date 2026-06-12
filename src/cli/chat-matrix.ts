@@ -315,12 +315,55 @@ export async function runChatMatrix(
     persona?: string;
     serviceControl?: ServiceControl;
     out?: WriteSink;
+    /**
+     * Non-interactive setup (no TUI prompts). When provided, the wizard runs
+     * the setup core directly with these values and reports a redacted result.
+     * Used by automation / init chains and to configure a headless host. The
+     * password comes from the env var named here (never an argument), so it
+     * stays out of argv / process listings.
+     */
+    nonInteractive?: {
+      homeserver: string;
+      username: string;
+      passwordEnvVar: string;
+      e2ee: boolean;
+    };
   } = {},
 ): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const svc = input.serviceControl ?? defaultServiceControl();
   const persona = input.persona ?? config.defaultPersona;
   const perPersona = input.persona !== undefined && input.persona !== config.defaultPersona;
+
+  // Non-interactive branch: no prompts, single setup attempt, structured exit.
+  if (input.nonInteractive) {
+    const ni = input.nonInteractive;
+    const password = process.env[ni.passwordEnvVar];
+    if (!password) {
+      log.error(`matrix setup: password env var ${ni.passwordEnvVar} is empty`);
+      return 1;
+    }
+    const result = await runChatMatrixSetup({
+      config,
+      persona,
+      perPersona,
+      e2ee: ni.e2ee,
+      homeserver: ni.homeserver,
+      username: ni.username,
+      password,
+    });
+    if (!result.ok) {
+      log.error(`matrix setup failed: ${result.error}`);
+      return 1;
+    }
+    log.info("matrix: setup complete (non-interactive)", {
+      userId: result.userId,
+      deviceId: result.deviceId,
+      e2ee: ni.e2ee,
+      recoveryKeyEnvVar: result.recoveryKeyEnvVar,
+    });
+    return 0;
+  }
 
   p.intro("Configure the Matrix channel");
 
@@ -347,12 +390,23 @@ export async function runChatMatrix(
       "  • Already have one? Just use it below. This logs into an EXISTING\n" +
       "    account; it never creates or modifies one.\n\n" +
       "Your homeserver URL is where the account lives — if you registered on\n" +
-      "matrix.org, that's https://matrix.org (the default below).\n\n" +
-      "Messages travel encrypted-in-transit (TLS) to your homeserver — the same\n" +
-      "protection the Telegram bot uses today. Full end-to-end encryption is a\n" +
-      "later opt-in once it's hardened; it's off for now.",
+      "matrix.org, that's https://matrix.org (the default below).",
     "Before you start",
   );
+
+  // End-to-end encryption is opt-in. It now works inside the single binary
+  // (see channels/matrix/cryptoWasm.ts), so default it ON — but allow opting
+  // out to the plaintext-over-TLS path (same protection as the Telegram bot).
+  const e2eeChoice = await p.confirm({
+    message:
+      "Turn on end-to-end encryption? (recommended — auto-managed, nothing extra to do)",
+    initialValue: true,
+  });
+  if (p.isCancel(e2eeChoice)) {
+    p.cancel("cancelled");
+    return 1;
+  }
+  const e2ee = e2eeChoice === true;
 
   // Credential prompt + setup, wrapped in a retry loop. A bad password or wrong
   // homeserver shouldn't dump the user back to the shell — on failure we offer
@@ -395,13 +449,12 @@ export async function runChatMatrix(
     }
 
     const spinner = p.spinner();
-    spinner.start("logging in…");
+    spinner.start(e2ee ? "logging in + setting up encryption…" : "logging in…");
     const result = await runChatMatrixSetup({
       config,
       persona,
       perPersona,
-      // v1 ships plaintext-to-homeserver; E2EE is a deliberate later opt-in.
-      e2ee: false,
+      e2ee,
       homeserver: homeserverUrl,
       username: username as string,
       password: password as string,
@@ -471,10 +524,44 @@ export default defineCommand({
       description:
         "Bind this Matrix account to a specific persona ([channels.matrix.personas.<name>]) instead of the default.",
     },
+    homeserver: {
+      type: "string",
+      description:
+        "Non-interactive: homeserver URL. With --username + --password-env, skips all prompts.",
+    },
+    username: {
+      type: "string",
+      description: "Non-interactive: MXID or localpart to log in as.",
+    },
+    "password-env": {
+      type: "string",
+      description:
+        "Non-interactive: name of the env var holding the login password (never passed as an argument).",
+    },
+    e2ee: {
+      type: "boolean",
+      description:
+        "Non-interactive: enable end-to-end encryption (default true). Use --no-e2ee for plaintext-over-TLS.",
+      default: true,
+    },
   },
   async run({ args }) {
+    const homeserver = args.homeserver as string | undefined;
+    const username = args.username as string | undefined;
+    const passwordEnvVar = args["password-env"] as string | undefined;
+    // All three present → headless setup; otherwise fall through to the wizard.
+    const nonInteractive =
+      homeserver && username && passwordEnvVar
+        ? {
+            homeserver,
+            username,
+            passwordEnvVar,
+            e2ee: args.e2ee !== false,
+          }
+        : undefined;
     process.exitCode = await runChatMatrix({
       persona: args.persona as string | undefined,
+      nonInteractive,
     });
   },
 });

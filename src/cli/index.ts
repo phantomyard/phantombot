@@ -41,6 +41,7 @@ import taskCmd from "./task.ts";
 import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import voiceCmd from "./voice.ts";
+import matrixCryptoCheckCmd from "./matrix-cryptocheck.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -72,5 +73,6 @@ export const mainCommand = defineCommand({
     tick: tickCmd,
     update: updateCmd,
     voice: voiceCmd,
+    "matrix-cryptocheck": matrixCryptoCheckCmd,
   },
 });

@@ -28,5 +28,8 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.0"
+  },
+  "patchedDependencies": {
+    "@matrix-org/matrix-sdk-crypto-wasm@18.3.1": "patches/@matrix-org%2Fmatrix-sdk-crypto-wasm@18.3.1.patch"
   }
 }
