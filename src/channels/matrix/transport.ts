@@ -79,6 +79,10 @@ export class ClientMatrixTransport implements MatrixTransport {
 
   stop(): void {
     this.client.stopClient();
+    // Best-effort: persist the crypto store one last time on a clean shutdown
+    // so anything written since the last debounced snapshot survives. No-op
+    // (returns immediately) for a plaintext account that never installed it.
+    void import("./idbPersist.ts").then((m) => m.flushSnapshot()).catch(() => {});
   }
 
   isEncrypted(roomId: string): boolean {
@@ -188,13 +192,17 @@ export async function createRealMatrixClient(
   });
 
   if (opts.e2ee) {
-    // Enable E2EE. ensureCryptoWasm() MUST run before initRustCrypto under
-    // `bun --compile` (see cryptoWasm.ts). `useIndexedDB:false` is implied by
-    // passing a database prefix for the node sqlite store; cryptoDatabasePrefix
-    // is the on-disk store dir. Skipped entirely in the plaintext default so a
-    // non-E2EE account never touches the WASM bootstrap.
+    // Enable E2EE. The rust-crypto store needs IndexedDB; under `bun --compile`
+    // there is none, so we install fake-indexeddb backed by a disk snapshot
+    // FIRST (restores the device identity → same device across restarts, no
+    // device-list churn — see idbPersist.ts). ensureCryptoWasm() MUST run
+    // before initRustCrypto (see cryptoWasm.ts). All of this is skipped in the
+    // plaintext default so a non-E2EE account never touches the WASM bootstrap.
+    const { installPersistentIndexedDB, cryptoSnapshotPath, MATRIX_CRYPTO_DB_PREFIX } =
+      await import("./idbPersist.ts");
+    await installPersistentIndexedDB(cryptoSnapshotPath(opts.cryptoStoreDir));
     await ensureCryptoWasm();
-    await client.initRustCrypto({ cryptoDatabasePrefix: opts.cryptoStoreDir });
+    await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
   }
 
   return wrapSdkClient(client);

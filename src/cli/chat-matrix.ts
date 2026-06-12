@@ -208,6 +208,14 @@ export async function runChatMatrixSetup(
       e2ee: true,
     });
 
+    // Force the crypto store to disk NOW. The debounced auto-snapshot may not
+    // have fired before this short-lived setup process exits; without an
+    // explicit flush the device we just minted would be lost and the runtime
+    // would register a brand-new one. No-op under unit tests (fake client never
+    // installed the store).
+    const { flushSnapshot } = await import("../channels/matrix/idbPersist.ts");
+    await flushSnapshot();
+
     return {
       ok: true,
       userId: creds.userId,
@@ -289,7 +297,13 @@ const defaultMakeClient = async (args: {
   });
   return {
     initCrypto: async (cryptoStoreDir: string) => {
-      await client.initRustCrypto({ cryptoDatabasePrefix: cryptoStoreDir });
+      // Install fake-indexeddb + disk snapshot BEFORE initRustCrypto so the
+      // device identity this setup mints is persisted to disk and reused by the
+      // runtime listener (same device, no re-verification). See idbPersist.ts.
+      const { installPersistentIndexedDB, cryptoSnapshotPath, MATRIX_CRYPTO_DB_PREFIX } =
+        await import("../channels/matrix/idbPersist.ts");
+      await installPersistentIndexedDB(cryptoSnapshotPath(cryptoStoreDir));
+      await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
     },
     crypto: () => client.getCrypto() as MatrixCryptoLike,
     authUploadCallback: () => async (makeRequest) => {

@@ -18,7 +18,11 @@
  * silent; a combined text+voice notify sends the text.
  */
 
-import { type Config, type MatrixAccount } from "../config.ts";
+import {
+  type Config,
+  type MatrixAccount,
+  matrixCryptoStoreDir,
+} from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 
@@ -32,6 +36,10 @@ export interface MatrixNotifySender {
     account: MatrixAccount;
     mxid: string;
     message: string;
+    /** Per-persona crypto store dir; the E2EE sender restores the device
+     *  identity from its snapshot (read-only) so it sends as the bot's real
+     *  device rather than minting a throwaway one. */
+    cryptoStoreDir?: string;
   }): Promise<void>;
 }
 
@@ -99,10 +107,23 @@ export async function runMatrixNotify(
 
   const sender = input.sender ?? (await defaultMatrixSender());
 
+  // Only the E2EE sender needs this (to restore the device snapshot); resolve
+  // it defensively so a minimal/plaintext config never trips persona-dir
+  // resolution. Undefined is fine — the plaintext sender ignores it.
+  let cryptoStoreDir: string | undefined;
+  try {
+    cryptoStoreDir = matrixCryptoStoreDir(
+      input.config,
+      input.persona ?? input.config.defaultPersona,
+    );
+  } catch {
+    cryptoStoreDir = undefined;
+  }
+
   let textSent = 0;
   for (const mxid of mx.allowedUserIds) {
     try {
-      await sender.send({ account: mx, mxid, message: input.message });
+      await sender.send({ account: mx, mxid, message: input.message, cryptoStoreDir });
       textSent++;
     } catch (e) {
       log.warn("matrix notify: send failed", {
@@ -127,7 +148,7 @@ export async function runMatrixNotify(
  */
 async function defaultMatrixSender(): Promise<MatrixNotifySender> {
   return {
-    send: async ({ account, mxid, message }) => {
+    send: async ({ account, mxid, message, cryptoStoreDir }) => {
       const sdk = await import("matrix-js-sdk");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client: any = sdk.createClient({
@@ -137,15 +158,29 @@ async function defaultMatrixSender(): Promise<MatrixNotifySender> {
         accessToken: account.accessToken,
       });
       // Only spin up rust-crypto for an E2EE account. With E2EE on, crypto must
-      // be up so the DM sends ciphertext, not a UISI; a transient one-shot send
-      // uses the default store prefix. With E2EE off (the v1 default) we skip
-      // the WASM bootstrap entirely and send plaintext-over-TLS.
+      // be up so the DM sends ciphertext, not a UISI. We restore the bot's
+      // device identity from its snapshot in READ-ONLY mode: this short-lived
+      // notify process reuses the real device (no churn) but never writes back,
+      // so it can't race the long-running listener that owns the snapshot. With
+      // E2EE off (the v1 default) we skip the WASM bootstrap and send plaintext.
       if (account.e2ee) {
+        const {
+          installPersistentIndexedDB,
+          cryptoSnapshotPath,
+          MATRIX_CRYPTO_DB_PREFIX,
+        } = await import("../channels/matrix/idbPersist.ts");
         const { ensureCryptoWasm } = await import(
           "../channels/matrix/cryptoWasm.ts"
         );
+        if (cryptoStoreDir) {
+          await installPersistentIndexedDB(cryptoSnapshotPath(cryptoStoreDir), {
+            readOnly: true,
+          });
+        }
         await ensureCryptoWasm();
-        await client.initRustCrypto();
+        await client.initRustCrypto({
+          cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX,
+        });
       }
       await client.startClient({ initialSyncLimit: 1 });
       try {
