@@ -34,6 +34,7 @@ Supported harnesses:
 - [Build From Source](#build-from-source)
 - [Project Layout](#project-layout)
 - [Design Principles](#design-principles)
+- [Policies & Guidelines](#policies--guidelines)
 - [Contributing](#contributing)
 
 ## Why Phantombot Exists
@@ -921,6 +922,50 @@ logic.
 - Prefer host OAuth for model CLIs.
 - Make updates atomic.
 - Keep Telegram behavior predictable in both DMs and groups.
+
+## Policies & Guidelines
+
+Lessons written in blood. These are decisions that cost us real time, real
+pain, and a closed PR before we learned them. Read them before you propose
+something that "should be easy."
+
+### Chat channels must be bot-friendly — or we don't build them
+
+**Policy:** A new chat channel is not even *evaluated* unless it is
+bot-friendly. The bar is non-negotiable:
+
+- **First-class bot identity** — bots are a supported account type, not a human
+  account in a trench coat.
+- **Headless token auth** — log in with a token or app password from a config
+  file. No GUI. No phone. No QR codes.
+- **Zero human-in-the-loop verification** — no "is this really you?" popups, no
+  emoji-comparison device verification, no security prompts on other sessions
+  that only a human can dismiss.
+- **Stable, long-lived credentials** — tokens don't silently self-invalidate
+  and strand the bot mid-holiday.
+- **Headless provisioning** — an account and its credentials can be created and
+  rotated from a terminal, start to finish.
+- **Single-binary friendly** — no heavyweight client runtime or native crypto
+  store that fights a static build.
+
+Telegram clears every one of these. That's why it's our daily driver.
+
+**Case study — Matrix (don't reopen this):** We tried. It turned into colera and
+shit. End-to-end encryption sounds great until you live it: GUI-only onboarding
+through `app.element.io`, recovery keys that go stale the moment a human resets
+recovery in their client, orphaned devices whose private keys live in exactly
+one snapshot that the still-running process happily clobbers, the *entire bot*
+crash-looping (Telegram included) when the on-disk crypto store drifts from the
+configured device, and "prove it's you" popups that are unsuppressable by design
+because they're aimed at a human, not a bot. An afternoon of a person's life,
+gone, for a device that *still* showed unverified.
+
+Read the full post-mortem before you ever think "maybe Matrix isn't that bad":
+**[Issue #154 — Matrix channel: won't do, and why](https://github.com/phantomyard/phantombot/issues/154)**
+(PR #175 closed unmerged).
+
+If a channel can't pass the bar above, the answer is no — and "but it's popular"
+is not a counterargument to "it requires a human to babysit every login."
 
 ## Contributing
 
