@@ -20,6 +20,11 @@
 import { log } from "../../lib/logger.ts";
 import type { ChannelTransport } from "../core/types.ts";
 import { ensureCryptoWasm } from "./cryptoWasm.ts";
+import { quietMatrixLogger } from "./sdkLogging.ts";
+import {
+  installSelfVerificationAutoResponder,
+  type VerifiableClient,
+} from "./verification.ts";
 import type {
   MatrixClientLike,
   MatrixTimelineEvent,
@@ -189,6 +194,9 @@ export async function createRealMatrixClient(
     userId: opts.userId,
     deviceId: opts.deviceId,
     accessToken: opts.accessToken,
+    // Silence the SDK's own debug firehose (FetchHttpApi/sync/Perf/push-rule
+    // lines). undefined under PHANTOMBOT_MATRIX_DEBUG → SDK default verbose.
+    logger: quietMatrixLogger(),
   });
 
   if (opts.e2ee) {
@@ -203,6 +211,18 @@ export async function createRealMatrixClient(
     await installPersistentIndexedDB(cryptoSnapshotPath(opts.cryptoStoreDir));
     await ensureCryptoWasm();
     await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
+
+    // Wire the self-verification auto-responder so the operator can clear the
+    // device's "unverified" badge by clicking Verify in their own Element — the
+    // bot accepts + auto-confirms the SAS for its own user's devices. Only ever
+    // honours SELF-verification (see verification.ts). Crypto-only; the
+    // plaintext path never reaches here.
+    // The SDK's CryptoApi is a runtime event emitter, but its public type omits
+    // `on`/`off` — cast to our structural surface (exercised at runtime + unit
+    // tested against fakes).
+    installSelfVerificationAutoResponder(
+      client as unknown as VerifiableClient,
+    );
   }
 
   return wrapSdkClient(client);

@@ -221,10 +221,13 @@ export async function runChatMatrixSetup(
   try {
     await client.initCrypto(cryptoStoreDir);
 
-    // 3. Invisible E2EE bootstrap — auto-generates the recovery key.
+    // 3. Invisible E2EE bootstrap — auto-generates the recovery key AND
+    //    cross-signs this device (deviceId) so it lands verified, not just
+    //    self-signed.
     const { recoveryKey } = await bootstrapInvisibleE2ee(
       client.crypto(),
       client.authUploadCallback(),
+      { deviceId: creds.deviceId },
     );
 
     // 3b. Store the recovery key as a per-persona-suffixed env var (default
@@ -425,6 +428,7 @@ const defaultMakeClient = async (args: {
       return null;
     },
   };
+  const { quietMatrixLogger } = await import("../channels/matrix/sdkLogging.ts");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const client: any = sdk.createClient({
     baseUrl: args.homeserver,
@@ -432,6 +436,9 @@ const defaultMakeClient = async (args: {
     deviceId: args.deviceId,
     accessToken: args.accessToken,
     cryptoCallbacks,
+    // Silence the SDK's debug firehose during setup; the wizard's own clack UI
+    // (spinner, "Saved" box) is untouched. undefined under PHANTOMBOT_MATRIX_DEBUG.
+    logger: quietMatrixLogger(),
   });
   return {
     initCrypto: async (cryptoStoreDir: string) => {

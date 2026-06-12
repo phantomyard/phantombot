@@ -150,12 +150,18 @@ async function defaultMatrixSender(): Promise<MatrixNotifySender> {
   return {
     send: async ({ account, mxid, message, cryptoStoreDir }) => {
       const sdk = await import("matrix-js-sdk");
+      const { quietMatrixLogger } = await import(
+        "../channels/matrix/sdkLogging.ts"
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client: any = sdk.createClient({
         baseUrl: account.homeserver,
         userId: account.userId,
         deviceId: account.deviceId,
         accessToken: account.accessToken,
+        // Quiet the SDK firehose on the notify path too (undefined under
+        // PHANTOMBOT_MATRIX_DEBUG).
+        logger: quietMatrixLogger(),
       });
       // Only spin up rust-crypto for an E2EE account. With E2EE on, crypto must
       // be up so the DM sends ciphertext, not a UISI. We restore the bot's

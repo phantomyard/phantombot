@@ -82,6 +82,9 @@ export async function runCryptoPersistPhase(
     await installPersistentIndexedDB(cryptoSnapshotPath(dir));
     await ensureCryptoWasm();
     const sdk = await import("matrix-js-sdk");
+    const { quietMatrixLogger } = await import(
+      "../channels/matrix/sdkLogging.ts"
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const client: any = sdk.createClient({
       // Unroutable base URL: initRustCrypto does a best-effort key-backup probe
@@ -90,6 +93,9 @@ export async function runCryptoPersistPhase(
       userId: "@cryptocheck:phantombot.local",
       deviceId: "CRYPTOCHECK",
       accessToken: "syt_cryptocheck_offline",
+      // Keep the gate's output to its own OK/FAIL lines (undefined under
+      // PHANTOMBOT_MATRIX_DEBUG).
+      logger: quietMatrixLogger(),
     });
     await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
     const keys = await client.getCrypto().getOwnDeviceKeys();

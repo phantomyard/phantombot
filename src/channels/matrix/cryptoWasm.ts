@@ -58,13 +58,32 @@
 
 // The package entry under the `matrix-org:wasm-esm` build condition — the SAME
 // module matrix-js-sdk imports, so this is the one shared init path.
-import { initAsync } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { initAsync, Tracing, LoggerLevel } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { matrixDebugEnabled } from "./sdkLogging.ts";
+
+// Keep the installed tracing layer referenced for the process lifetime so it is
+// never freed out from under the WASM. Set once, on first `ensureCryptoWasm`.
+let tracing: Tracing | undefined;
 
 /**
  * Idempotently instantiate the rust-crypto WASM. Awaited before the first
  * `MatrixClient.initRustCrypto()`. Cheap to call repeatedly — the package's
  * `modPromise` gate makes everything after the first a no-op.
+ *
+ * Side effect: clamps the rust-crypto `tracing` layer to ERROR so the hundreds
+ * of `INFO matrix_sdk_indexeddb::crypto_store::migrations …` lines the WASM
+ * emits straight to console during store open/migration stay silent. Set
+ * `PHANTOMBOT_MATRIX_DEBUG` to leave tracing at its verbose default.
  */
 export async function ensureCryptoWasm(): Promise<void> {
   await initAsync();
+  if (!tracing && !matrixDebugEnabled()) {
+    try {
+      // Installs/overrides the tracing layer at ERROR — suppresses the
+      // INFO/DEBUG crypto-store migration firehose without touching warnings.
+      tracing = new Tracing(LoggerLevel.Error);
+    } catch {
+      /* tracing control is best-effort; noisy logs are not worth failing on */
+    }
+  }
 }

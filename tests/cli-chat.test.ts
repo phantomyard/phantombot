@@ -161,6 +161,109 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     expect(toml).not.toContain("recovery");
   });
 
+  test("cross-signs this device when cross-signing is ready", async () => {
+    const calls: string[] = [];
+    let crossSignedDevice: string | undefined;
+    // A crypto stub that also implements the optional self-cross-sign surface.
+    const crypto: MatrixCryptoLike = {
+      bootstrapCrossSigning: async () => {
+        calls.push("crossSigning");
+      },
+      bootstrapSecretStorage: async (opts) => {
+        calls.push("secretStorage");
+        if (opts.createSecretStorageKey) await opts.createSecretStorageKey();
+      },
+      createRecoveryKeyFromPassphrase: async () => {
+        calls.push("recoveryKey");
+        return {
+          encodedPrivateKey: "EsTx 1234 5678 ABCD",
+          privateKey: new Uint8Array([1, 2, 3]),
+        };
+      },
+      isCrossSigningReady: async () => {
+        calls.push("isReady");
+        return true;
+      },
+      crossSignDevice: async (deviceId) => {
+        calls.push("crossSign");
+        crossSignedDevice = deviceId;
+      },
+    };
+
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      e2ee: true,
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      login: async ({ username }) => ({
+        userId: `@${username}:hs.example`,
+        accessToken: "syt_token_abc",
+        deviceId: "DEVICE123",
+      }),
+      makeClient: async (): Promise<MatrixSetupClient> => ({
+        initCrypto: async () => {},
+        crypto: () => crypto,
+        authUploadCallback: () => async () => {},
+        stop: () => {},
+      }),
+      envSet: async () => 0,
+      configPath,
+    });
+
+    expect(result.ok).toBe(true);
+    // The new device got explicitly cross-signed → lands verified, not just
+    // self-signed (the durable "unverified" badge fix).
+    expect(crossSignedDevice).toBe("DEVICE123");
+    expect(calls).toEqual([
+      "crossSigning",
+      "secretStorage",
+      "recoveryKey",
+      "isReady",
+      "crossSign",
+    ]);
+  });
+
+  test("skips cross-sign (no throw) when cross-signing is NOT ready", async () => {
+    const fc = fakeCrypto();
+    // isCrossSigningReady=false → crossSignDevice must never run (the
+    // contaminated-account / skipped-bootstrap case).
+    let crossSignCalled = false;
+    const crypto: MatrixCryptoLike = {
+      ...fc.crypto,
+      isCrossSigningReady: async () => false,
+      crossSignDevice: async () => {
+        crossSignCalled = true;
+      },
+    };
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      e2ee: true,
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      login: async ({ username }) => ({
+        userId: `@${username}:hs.example`,
+        accessToken: "syt_token_abc",
+        deviceId: "DEVICE123",
+      }),
+      makeClient: async (): Promise<MatrixSetupClient> => ({
+        initCrypto: async () => {},
+        crypto: () => crypto,
+        authUploadCallback: () => async () => {},
+        stop: () => {},
+      }),
+      envSet: async () => 0,
+      configPath,
+    });
+    expect(result.ok).toBe(true);
+    expect(crossSignCalled).toBe(false);
+  });
+
   test("writes supplied trusted MXIDs into allowed_user_ids", async () => {
     const fc = fakeCrypto();
     const result = await runChatMatrixSetup({

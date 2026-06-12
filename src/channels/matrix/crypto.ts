@@ -47,6 +47,30 @@ export interface MatrixCryptoLike {
     encodedPrivateKey?: string;
     privateKey: Uint8Array;
   }>;
+  /**
+   * True once cross-signing private keys are available to this device (i.e.
+   * `bootstrapCrossSigning` established or unlocked them). Optional so test
+   * fakes need not implement it. When absent, the self-cross-sign step below is
+   * skipped (best-effort).
+   */
+  isCrossSigningReady?(): Promise<boolean>;
+  /**
+   * Sign one of our own devices with the self-signing key — the step that flips
+   * a freshly-minted device from "unverified" to cross-signed. Optional for the
+   * same reason as above.
+   */
+  crossSignDevice?(deviceId: string): Promise<void>;
+}
+
+/** Extra context the bootstrap needs beyond the crypto API + auth callback. */
+export interface BootstrapOpts {
+  /**
+   * This device's id. When provided AND cross-signing ends up ready, the
+   * bootstrap explicitly cross-signs this device so it lands VERIFIED instead
+   * of merely self-signed — the durable fix for the "unverified" badge on a
+   * fresh, bot-owned account.
+   */
+  deviceId?: string;
 }
 
 export interface BootstrapResult {
@@ -72,6 +96,7 @@ export async function bootstrapInvisibleE2ee(
   authCallback: (
     makeRequest: (authData: unknown) => Promise<unknown>,
   ) => Promise<void>,
+  opts: BootstrapOpts = {},
 ): Promise<BootstrapResult> {
   // IMPORTANT: the caller MUST have started the client and reached first sync
   // before calling this. bootstrapSecretStorage reads/writes account data; with
@@ -121,6 +146,30 @@ export async function bootstrapInvisibleE2ee(
     throw new Error(
       "matrix: secret-storage bootstrap produced no encoded recovery key",
     );
+  }
+
+  // 3. Self-cross-sign this device — BEST EFFORT. With cross-signing + secret
+  //    storage now established, signing our own device flips it from
+  //    "unverified" to cross-signed, so other clients render it trusted without
+  //    any manual SAS. Gated on cross-signing actually being ready: on a
+  //    contaminated account where step 1 was skipped (existing identity we
+  //    can't unlock), this is a no-op and the device stays self-signed — the
+  //    operator clears it later via the runtime self-verification responder.
+  try {
+    if (opts.deviceId && crypto.isCrossSigningReady && crypto.crossSignDevice) {
+      if (await crypto.isCrossSigningReady()) {
+        await crypto.crossSignDevice(opts.deviceId);
+        log.info("matrix: device cross-signed", { deviceId: opts.deviceId });
+      } else {
+        log.warn(
+          "matrix: cross-signing not ready — device left unverified (verify from your client later)",
+        );
+      }
+    }
+  } catch (e) {
+    log.warn("matrix: self cross-sign skipped", {
+      error: (e as Error).message,
+    });
   }
 
   return { recoveryKey: captured };
