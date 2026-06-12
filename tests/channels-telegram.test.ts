@@ -2872,6 +2872,33 @@ describe("runTelegramServer slash commands", () => {
     expect(transport.sent[0]!.text).toContain("/status");
   });
 
+  test("/start is handled by the channel layer (no harness fallback slash-command leak)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "/start",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: 'Unknown command: /start' },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]!.text).toContain("/start");
+    expect(transport.sent[0]!.text).toContain("/help");
+    expect(transport.sent[0]!.text).not.toContain("Unknown command");
+  });
+
   test("group: /cmd@otherbot is ignored — a state-changing command doesn't fan out to every bot", async () => {
     // Privacy-off groups deliver every slash command to every bot. A
     // /reset addressed to another bot must NOT clear this bot's history.
