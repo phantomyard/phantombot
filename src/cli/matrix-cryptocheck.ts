@@ -117,10 +117,25 @@ async function runPersistRoundTrip(): Promise<number> {
       const r = spawnSync(
         process.execPath,
         ["matrix-cryptocheck", `--persist-phase=${phase}`, `--dir=${dir}`],
-        { encoding: "utf8" },
+        {
+          encoding: "utf8",
+          // The rust-crypto migrations log verbosely to stderr; the default
+          // 1MB maxBuffer overflows, killing the child with status=null and
+          // error=ENOBUFS — which surfaced as the opaque "exited undefined".
+          // Give it generous headroom so the round-trip isn't a false failure.
+          maxBuffer: 256 * 1024 * 1024,
+        },
       );
+      if (r.error) {
+        process.stderr.write(
+          `child ${phase} spawn error: ${(r.error as Error).message}\n`,
+        );
+        return null;
+      }
       if (r.status !== 0) {
-        process.stderr.write(r.stderr || `child ${phase} exited ${r.status}\n`);
+        process.stderr.write(
+          r.stderr || `child ${phase} exited with status ${r.status}\n`,
+        );
         return null;
       }
       const m = /DEVICE=(\S+)/.exec(r.stdout);
