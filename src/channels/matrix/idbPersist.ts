@@ -96,12 +96,27 @@ const SNAPSHOT_DEBOUNCE_MS = 400;
  */
 export async function installPersistentIndexedDB(
   path: string,
-  opts: { readOnly?: boolean } = {},
+  opts: { readOnly?: boolean; fresh?: boolean } = {},
 ): Promise<void> {
   // readOnly restores the device identity but never writes back. Used by the
   // short-lived notify process so it reuses the bot's device WITHOUT racing the
   // long-running listener for ownership of the snapshot file.
   snapshotPath = opts.readOnly ? null : path;
+
+  // fresh: discard any existing snapshot and start from an EMPTY store. Used at
+  // setup time — a password login always mints a NEW device id, so the crypto
+  // store must be bound to that new device; restoring a previous device's store
+  // would mismatch ("account in the store doesn't match the constructor"). The
+  // new device is snapshotted as setup writes it.
+  if (opts.fresh && existsSync(path)) {
+    try {
+      const { rmSync } = await import("node:fs");
+      rmSync(path, { force: true });
+      log.info("matrix: cleared stale crypto snapshot for fresh setup", { path });
+    } catch {
+      /* best-effort */
+    }
+  }
 
   // Dynamic import: only an E2EE Matrix account pays the cost. The rust-crypto
   // store reaches for the FULL set of IDB globals (cursors, transactions, key

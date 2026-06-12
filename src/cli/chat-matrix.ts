@@ -288,12 +288,45 @@ const defaultMakeClient = async (args: {
   const { ensureCryptoWasm } = await import("../channels/matrix/cryptoWasm.ts");
   await ensureCryptoWasm();
   const sdk = await import("matrix-js-sdk");
+
+  // Secret-storage (4S) bootstrap stashes the recovery key it creates via
+  // `cacheSecretStorageKey`, then reads it back via `getSecretStorageKey` to
+  // write cross-signing + backup secrets into 4S. matrix-js-sdk requires BOTH
+  // callbacks at client-construction time — without them bootstrapSecretStorage
+  // throws "No getSecretStorageKey callback supplied". We hold the key only in
+  // this short-lived in-memory map for the duration of setup (it's also encoded
+  // into MATRIX_RECOVERY_KEY by the caller); nothing is persisted here.
+  const ssKeys = new Map<string, Uint8Array>();
+  let lastKeyId: string | undefined;
+  // Typed `any`: the SDK's cryptoCallbacks signature pins Uint8Array<ArrayBuffer>
+  // which our generic Uint8Array doesn't satisfy under this lib version; the
+  // client is `any` regardless and these are exercised at runtime.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cryptoCallbacks: any = {
+    cacheSecretStorageKey: (keyId: string, _keyInfo: unknown, key: Uint8Array) => {
+      ssKeys.set(keyId, key);
+      lastKeyId = keyId;
+    },
+    getSecretStorageKey: async (opts: { keys: Record<string, unknown> }) => {
+      // Prefer a key the request explicitly references; else fall back to the
+      // one we just cached during this bootstrap.
+      for (const keyId of Object.keys(opts.keys)) {
+        const k = ssKeys.get(keyId);
+        if (k) return [keyId, k];
+      }
+      if (lastKeyId && ssKeys.has(lastKeyId)) {
+        return [lastKeyId, ssKeys.get(lastKeyId)!];
+      }
+      return null;
+    },
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const client: any = sdk.createClient({
     baseUrl: args.homeserver,
     userId: args.userId,
     deviceId: args.deviceId,
     accessToken: args.accessToken,
+    cryptoCallbacks,
   });
   return {
     initCrypto: async (cryptoStoreDir: string) => {
@@ -302,8 +335,26 @@ const defaultMakeClient = async (args: {
       // runtime listener (same device, no re-verification). See idbPersist.ts.
       const { installPersistentIndexedDB, cryptoSnapshotPath, MATRIX_CRYPTO_DB_PREFIX } =
         await import("../channels/matrix/idbPersist.ts");
-      await installPersistentIndexedDB(cryptoSnapshotPath(cryptoStoreDir));
+      // fresh:true — setup mints a NEW device on every login, so start from an
+      // empty store and snapshot the new device; never restore a prior one.
+      await installPersistentIndexedDB(cryptoSnapshotPath(cryptoStoreDir), {
+        fresh: true,
+      });
       await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
+
+      // Start the client and wait for first sync BEFORE the E2EE bootstrap.
+      // bootstrapSecretStorage reads/writes account data; without a running
+      // /sync those reads are inconsistent and the bootstrap hangs forever.
+      await client.startClient({ initialSyncLimit: 1 });
+      await new Promise<void>((resolve) => {
+        const onSync = (state: string) => {
+          if (state === "PREPARED" || state === "SYNCING") {
+            client.removeListener?.("sync", onSync);
+            resolve();
+          }
+        };
+        client.on("sync", onSync);
+      });
     },
     crypto: () => client.getCrypto() as MatrixCryptoLike,
     authUploadCallback: () => async (makeRequest) => {

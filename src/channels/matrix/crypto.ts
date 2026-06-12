@@ -73,23 +73,41 @@ export async function bootstrapInvisibleE2ee(
     makeRequest: (authData: unknown) => Promise<unknown>,
   ) => Promise<void>,
 ): Promise<BootstrapResult> {
-  // 1. Cross-signing. authUploadDeviceSigningKeys re-auths the signing-key
-  //    upload. setupNewCrossSigning:false → reuse existing if already present
-  //    (idempotent re-run during a retried setup).
+  // IMPORTANT: the caller MUST have started the client and reached first sync
+  // before calling this. bootstrapSecretStorage reads/writes account data; with
+  // no running /sync those reads are inconsistent and the bootstrap hangs.
+  //
+  // 1. Cross-signing — BEST EFFORT. On a clean account this creates the
+  //    cross-signing identity (password UIA via authUploadDeviceSigningKeys).
+  //    But matrix.org gates RESETTING an EXISTING cross-signing identity behind
+  //    a one-time WEB approval (UIA flow `m.oauth` / `org.matrix.cross_signing_
+  //    reset` at account.matrix.org) that a headless daemon cannot satisfy. So
+  //    if cross-signing can't be established we LOG AND CONTINUE: device-level
+  //    E2EE (encrypt/decrypt via device keys + key backup) does not depend on
+  //    it — cross-signing only governs cross-client device VERIFICATION, and an
+  //    unverified-but-working device is the accepted trade-off (see header).
   log.info("matrix: bootstrapping cross-signing");
-  await crypto.bootstrapCrossSigning({
-    setupNewCrossSigning: false,
-    authUploadDeviceSigningKeys: authCallback,
-  });
+  try {
+    await crypto.bootstrapCrossSigning({
+      setupNewCrossSigning: false,
+      authUploadDeviceSigningKeys: authCallback,
+    });
+  } catch (e) {
+    log.warn(
+      "matrix: cross-signing bootstrap skipped (E2EE still works; device may show unverified)",
+      { error: (e as Error).message },
+    );
+  }
 
-  // 2. Generate the recovery key ourselves so we can capture its encoded form
-  //    BEFORE handing it to secret-storage bootstrap. createSecretStorageKey
-  //    is the callback bootstrapSecretStorage invokes to mint the 4S key; we
-  //    intercept it to keep the encoded key.
+  // 2. Secret storage + key backup. setupNewSecretStorage:true establishes a
+  //    fresh 4S we control (replacing any orphaned one this device can't
+  //    unlock) and createSecretStorageKey mints the recovery key — we intercept
+  //    it to capture the encoded form BEFORE it's handed to the bootstrap.
   let captured: string | undefined;
   log.info("matrix: bootstrapping secret storage + key backup");
   await crypto.bootstrapSecretStorage({
     setupNewKeyBackup: true,
+    setupNewSecretStorage: true,
     createSecretStorageKey: async () => {
       const key = await crypto.createRecoveryKeyFromPassphrase();
       captured = key.encodedPrivateKey;
