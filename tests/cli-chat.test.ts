@@ -80,6 +80,7 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       config: cfg(),
       persona: "phantom",
       perPersona: false,
+      e2ee: true,
       homeserver: "https://hs.example",
       username: "robbie",
       password: "hunter2",
@@ -131,6 +132,7 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     expect(toml).toContain('device_id = "DEVICE123"');
     expect(toml).toContain('access_token = "syt_token_abc"');
     expect(toml).toContain("allowed_user_ids = []");
+    expect(toml).toContain("e2ee = true");
     expect(toml).not.toContain("hunter2");
     expect(toml).not.toContain("EsTx 1234 5678 ABCD");
     expect(toml).not.toContain("recovery");
@@ -143,6 +145,7 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       config: cfg(),
       persona: "lena",
       perPersona: true,
+      e2ee: true,
       homeserver: "https://hs",
       username: "lena",
       password: "pw",
@@ -168,6 +171,52 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     expect(envWrites[0]?.name).toBe("MATRIX_RECOVERY_KEY_LENA");
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[channels.matrix.personas.lena]");
+  });
+
+  test("plaintext default (e2ee off): login + write config, NO crypto/recovery key", async () => {
+    const envWrites: Array<{ name: string; value: string }> = [];
+    let clientBuilt = false;
+
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      // e2ee omitted → defaults to false (the plaintext-to-homeserver path).
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      login: async ({ username }) => ({
+        userId: `@${username}:hs.example`,
+        accessToken: "syt_token_abc",
+        deviceId: "DEVICE123",
+      }),
+      // If the plaintext path touches the crypto client at all, this trips.
+      makeClient: async (): Promise<MatrixSetupClient> => {
+        clientBuilt = true;
+        throw new Error("crypto client must not be built when e2ee is off");
+      },
+      envSet: async (name, value) => {
+        envWrites.push({ name, value });
+        return 0;
+      },
+      configPath,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.userId).toBe("@robbie:hs.example");
+    expect(result.deviceId).toBe("DEVICE123");
+    // No crypto client, no recovery key, no env writes.
+    expect(clientBuilt).toBe(false);
+    expect(result.recoveryKeyEnvVar).toBeUndefined();
+    expect(envWrites).toEqual([]);
+
+    // Config has the account + e2ee = false; no recovery material anywhere.
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain("[channels.matrix]");
+    expect(toml).toContain('access_token = "syt_token_abc"');
+    expect(toml).toContain("e2ee = false");
+    expect(toml).not.toContain("hunter2");
+    expect(toml).not.toContain("recovery");
   });
 
   test("returns a failure (no throw) when login is rejected", async () => {

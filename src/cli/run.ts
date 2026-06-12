@@ -462,6 +462,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             deviceId: account.deviceId,
             accessToken: account.accessToken,
             cryptoStoreDir: matrixCryptoStoreDir(config, persona),
+            e2ee: account.e2ee,
           }),
         ));
     const tasks = plan.listeners.map((l) =>

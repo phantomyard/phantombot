@@ -68,6 +68,7 @@ const ENV_KEYS = [
   "MATRIX_DEVICE_ID",
   "MATRIX_ACCESS_TOKEN",
   "MATRIX_ALLOWED_USERS",
+  "MATRIX_E2EE",
 ];
 
 let workdir: string;
@@ -165,6 +166,56 @@ model = "gpt-5.3-codex"
     expect(c.harnesses.codex).toBeDefined();
     expect(c.harnesses.codex!.bin).toBe("/opt/codex/codex");
     expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");
+  });
+
+  test("matrix account: e2ee defaults to false and parses true when set", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    // Two accounts: default (no e2ee key → false) + a persona block with
+    // e2ee = true. Proves the opt-in default and the explicit override.
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `default_persona = "phantom"
+
+[channels.matrix]
+homeserver = "https://matrix.org"
+user_id = "@bot:matrix.org"
+device_id = "DEV1"
+access_token = "tok1"
+allowed_user_ids = ["@owner:matrix.org"]
+
+[channels.matrix.personas.lena]
+homeserver = "https://matrix.org"
+user_id = "@lena:matrix.org"
+device_id = "DEV2"
+access_token = "tok2"
+e2ee = true
+`,
+      "utf8",
+    );
+    const c = await loadConfig();
+    // Default account: no e2ee key → plaintext default.
+    expect(c.channels.matrix?.e2ee).toBe(false);
+    // Persona account: explicit opt-in.
+    expect(c.channels.matrixPersonas?.lena?.e2ee).toBe(true);
+  });
+
+  test("matrix account: MATRIX_E2EE env overrides the default to true", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[channels.matrix]
+homeserver = "https://matrix.org"
+user_id = "@bot:matrix.org"
+device_id = "DEV1"
+access_token = "tok1"
+`,
+      "utf8",
+    );
+    process.env.MATRIX_E2EE = "true";
+    const c = await loadConfig();
+    expect(c.channels.matrix?.e2ee).toBe(true);
   });
 
   test("uses persisted harness bins when no explicit bin is configured", async () => {

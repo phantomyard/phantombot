@@ -143,6 +143,14 @@ export interface RealMatrixClientOptions {
   accessToken: string;
   /** Directory for the rust-crypto SQLite store (`<personaDir>/matrix/`). */
   cryptoStoreDir: string;
+  /**
+   * Enable end-to-end encryption. DEFAULT FALSE. When false, the client is
+   * built WITHOUT rust-crypto: no `ensureCryptoWasm`, no `initRustCrypto`. It
+   * talks plaintext-over-TLS — the v1 default that keeps the connect path off
+   * the WASM-in-single-binary crypto bootstrap. Set true only for an account
+   * whose config carries `e2ee = true`.
+   */
+  e2ee?: boolean;
 }
 
 /**
@@ -169,7 +177,6 @@ export interface RealMatrixClientOptions {
 export async function createRealMatrixClient(
   opts: RealMatrixClientOptions,
 ): Promise<MatrixClientLike> {
-  await ensureCryptoWasm();
   // Dynamic import keeps the heavy SDK out of the startup path for
   // Telegram-only installs.
   const sdk = await import("matrix-js-sdk");
@@ -180,9 +187,15 @@ export async function createRealMatrixClient(
     accessToken: opts.accessToken,
   });
 
-  // Enable E2EE. `useIndexedDB:false` is implied by passing a database prefix
-  // for the node sqlite store; cryptoDatabasePrefix is the on-disk store dir.
-  await client.initRustCrypto({ cryptoDatabasePrefix: opts.cryptoStoreDir });
+  if (opts.e2ee) {
+    // Enable E2EE. ensureCryptoWasm() MUST run before initRustCrypto under
+    // `bun --compile` (see cryptoWasm.ts). `useIndexedDB:false` is implied by
+    // passing a database prefix for the node sqlite store; cryptoDatabasePrefix
+    // is the on-disk store dir. Skipped entirely in the plaintext default so a
+    // non-E2EE account never touches the WASM bootstrap.
+    await ensureCryptoWasm();
+    await client.initRustCrypto({ cryptoDatabasePrefix: opts.cryptoStoreDir });
+  }
 
   return wrapSdkClient(client);
 }

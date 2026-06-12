@@ -128,10 +128,6 @@ export async function runMatrixNotify(
 async function defaultMatrixSender(): Promise<MatrixNotifySender> {
   return {
     send: async ({ account, mxid, message }) => {
-      const { ensureCryptoWasm } = await import(
-        "../channels/matrix/cryptoWasm.ts"
-      );
-      await ensureCryptoWasm();
       const sdk = await import("matrix-js-sdk");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client: any = sdk.createClient({
@@ -140,11 +136,17 @@ async function defaultMatrixSender(): Promise<MatrixNotifySender> {
         deviceId: account.deviceId,
         accessToken: account.accessToken,
       });
-      // Crypto must be up so the DM (encrypted by default on most servers)
-      // sends ciphertext, not a UISI. Store dir is irrelevant for a one-shot
-      // send, but reuse the same per-persona store would require the config;
-      // a transient send uses the default prefix.
-      await client.initRustCrypto();
+      // Only spin up rust-crypto for an E2EE account. With E2EE on, crypto must
+      // be up so the DM sends ciphertext, not a UISI; a transient one-shot send
+      // uses the default store prefix. With E2EE off (the v1 default) we skip
+      // the WASM bootstrap entirely and send plaintext-over-TLS.
+      if (account.e2ee) {
+        const { ensureCryptoWasm } = await import(
+          "../channels/matrix/cryptoWasm.ts"
+        );
+        await ensureCryptoWasm();
+        await client.initRustCrypto();
+      }
       await client.startClient({ initialSyncLimit: 1 });
       try {
         const roomId = await resolveOrCreateDm(client, mxid);

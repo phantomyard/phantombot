@@ -74,6 +74,13 @@ export interface ChatMatrixSetupInput {
   persona: string;
   /** Whether to write the per-persona block vs the default block. */
   perPersona: boolean;
+  /**
+   * Bootstrap + persist end-to-end encryption. DEFAULT FALSE. When false the
+   * setup is login → write config only: no crypto client, no WASM, no recovery
+   * key — the plaintext-to-homeserver path that decouples onboarding from the
+   * rust-crypto bootstrap. Set true to run the full invisible-E2EE setup.
+   */
+  e2ee?: boolean;
   homeserver: string;
   username: string;
   password: string;
@@ -119,6 +126,7 @@ export async function runChatMatrixSetup(
   const envSet =
     input.envSet ?? ((name: string, value: string) => runEnvSet({ name, value }));
   const configPath = input.configPath ?? input.config.configPath;
+  const e2ee = input.e2ee ?? false;
 
   // 1. Password login → token + device id. Password is spent here.
   let creds;
@@ -130,6 +138,24 @@ export async function runChatMatrixSetup(
     });
   } catch (e) {
     return { ok: false, error: `login failed: ${(e as Error).message}` };
+  }
+
+  // PLAINTEXT FAST-PATH (default). E2EE is decoupled from onboarding: a v1
+  // Matrix account talks plaintext-over-TLS to its homeserver (same protection
+  // as the Telegram bot API), so setup is just login → write config. No crypto
+  // client, no WASM bootstrap, no recovery key. This is the path that lets
+  // onboarding succeed without the rust-crypto-in-single-binary fight.
+  if (!e2ee) {
+    await writeMatrixConfig(configPath, {
+      perPersona: input.perPersona,
+      persona: input.persona,
+      homeserver: input.homeserver,
+      userId: creds.userId,
+      deviceId: creds.deviceId,
+      accessToken: creds.accessToken,
+      e2ee: false,
+    });
+    return { ok: true, userId: creds.userId, deviceId: creds.deviceId };
   }
 
   // 2. Build a crypto-enabled client and init rust-crypto against the
@@ -179,6 +205,7 @@ export async function runChatMatrixSetup(
       userId: creds.userId,
       deviceId: creds.deviceId,
       accessToken: creds.accessToken,
+      e2ee: true,
     });
 
     return {
@@ -214,6 +241,7 @@ async function writeMatrixConfig(
     userId: string;
     deviceId: string;
     accessToken: string;
+    e2ee: boolean;
   },
 ): Promise<void> {
   const base = args.perPersona
@@ -224,6 +252,9 @@ async function writeMatrixConfig(
     setIn(toml, [...base, "user_id"], args.userId);
     setIn(toml, [...base, "device_id"], args.deviceId);
     setIn(toml, [...base, "access_token"], args.accessToken);
+    // Record the encryption mode so the runtime + notify path know whether to
+    // spin up rust-crypto. Explicit in config so flipping it is a visible edit.
+    setIn(toml, [...base, "e2ee"], args.e2ee);
     // Only seed an empty allowlist if none exists yet (don't clobber a
     // re-run where the user already added MXIDs).
     const existing = getIn(toml, [...base, "allowed_user_ids"]);
@@ -297,7 +328,7 @@ export async function runChatMatrix(
   // users will not be wiring up Matrix — so ask first, default to NO, and exit
   // cleanly (0, not an error) when skipped so the init chain keeps flowing.
   const proceed = await p.confirm({
-    message: "Set up Matrix now? (most users skip this)",
+    message: "Set up Matrix now?",
     initialValue: false,
   });
   if (p.isCancel(proceed) || !proceed) {
@@ -306,11 +337,20 @@ export async function runChatMatrix(
   }
 
   p.note(
-    "E2EE is always on and fully automatic — you'll only be asked for your\n" +
-      "homeserver, username, and password. Nothing else.\n\n" +
-      "This logs into an EXISTING Matrix account — it does not create one.\n" +
-      "If you don't have an account yet, register one on your homeserver first\n" +
-      "(e.g. at https://app.element.io), then come back here.",
+    "You'll be asked for three things: homeserver, username, and password.\n\n" +
+      "FIRST, you need an account. A Matrix account lives on a HOMESERVER\n" +
+      "(e.g. matrix.org). Apps like Element (app.element.io) are just clients —\n" +
+      "they connect TO a homeserver, they aren't the account itself.\n\n" +
+      "  • No account yet? Open https://app.element.io, pick \"Create account\",\n" +
+      "    and keep the default homeserver (matrix.org). No special steps — a\n" +
+      "    plain username + password is all this needs.\n" +
+      "  • Already have one? Just use it below. This logs into an EXISTING\n" +
+      "    account; it never creates or modifies one.\n\n" +
+      "Your homeserver URL is where the account lives — if you registered on\n" +
+      "matrix.org, that's https://matrix.org (the default below).\n\n" +
+      "Messages travel encrypted-in-transit (TLS) to your homeserver — the same\n" +
+      "protection the Telegram bot uses today. Full end-to-end encryption is a\n" +
+      "later opt-in once it's hardened; it's off for now.",
     "Before you start",
   );
 
@@ -337,7 +377,7 @@ export async function runChatMatrix(
     const homeserverUrl = (homeserver as string) || "https://matrix.org";
 
     const username = await p.text({
-      message: "Username (MXID or localpart, e.g. @robbie:matrix.org or robbie)",
+      message: "Username (full MXID like @name:matrix.org, or just the localpart)",
       validate: (v) => (!v || v.length === 0 ? "username is required" : undefined),
     });
     if (p.isCancel(username)) {
@@ -355,11 +395,13 @@ export async function runChatMatrix(
     }
 
     const spinner = p.spinner();
-    spinner.start("logging in + setting up encryption…");
+    spinner.start("logging in…");
     const result = await runChatMatrixSetup({
       config,
       persona,
       perPersona,
+      // v1 ships plaintext-to-homeserver; E2EE is a deliberate later opt-in.
+      e2ee: false,
       homeserver: homeserverUrl,
       username: username as string,
       password: password as string,
@@ -394,10 +436,13 @@ async function finishMatrixSetup(
   const { perPersona, persona, svc } = ctx;
 
   // Deliberately do NOT print the recovery key — only that it was stored.
+  const encryptionLine = result.recoveryKeyEnvVar
+    ? `encryption: end-to-end on (recovery key stored as ${result.recoveryKeyEnvVar})`
+    : `encryption: in-transit (TLS to homeserver); end-to-end is a later opt-in`;
   p.note(
     `MXID: ${result.userId}\n` +
       `device: ${result.deviceId}\n` +
-      `encryption: on (recovery key stored as ${result.recoveryKeyEnvVar})\n` +
+      `${encryptionLine}\n` +
       `block: ${perPersona ? `[channels.matrix.personas.${persona}]` : "[channels.matrix]"}\n` +
       `\nNext: add allowed MXIDs to allowed_user_ids so the bot trusts you.`,
     "Saved",

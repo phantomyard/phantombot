@@ -272,6 +272,7 @@ function account(allowedUserIds: string[]): MatrixAccount {
     userId: "@bot:hs",
     deviceId: "DEV",
     accessToken: "tok",
+    e2ee: false,
     allowedUserIds,
   };
 }

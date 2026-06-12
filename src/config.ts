@@ -119,6 +119,16 @@ export interface MatrixAccount {
    * is the only thing that grants TRUSTED tier on Matrix inbound.
    */
   allowedUserIds: string[];
+  /**
+   * Whether to bootstrap + run end-to-end encryption (Megolm via rust-crypto).
+   * DEFAULT FALSE. v1 ships plaintext-to-homeserver (TLS only, same protection
+   * level as the Telegram bot API) so the channel doesn't depend on the
+   * WASM-in-single-binary crypto bootstrap. E2EE is an opt-in toggle
+   * (`e2ee = true` in the account block) added deliberately once the embedded
+   * rust-crypto WASM is proven in the compiled binary. When false: no
+   * `ensureCryptoWasm`, no `initRustCrypto`, no recovery key — just /sync + send.
+   */
+  e2ee: boolean;
 }
 
 export interface TurnIndexingSettings {
@@ -831,7 +841,11 @@ function buildMatrixConfig(
   const allowedUserIds =
     allowedFromEnv ?? asStringArray(tomlMatrix.allowed_user_ids) ?? [];
 
-  return { homeserver, userId, deviceId, accessToken, allowedUserIds };
+  // E2EE is opt-in; absent or unparseable → false (plaintext-to-homeserver).
+  const e2ee =
+    asBool(process.env.MATRIX_E2EE) ?? asBool(tomlMatrix.e2ee) ?? false;
+
+  return { homeserver, userId, deviceId, accessToken, allowedUserIds, e2ee };
 }
 
 /**
@@ -877,7 +891,18 @@ function buildMatrixPersonasConfig(
       .filter((s) => s.length > 0);
     const allowedUserIds =
       allowedFromEnv ?? asStringArray(entry.allowed_user_ids) ?? [];
-    out[personaName] = { homeserver, userId, deviceId, accessToken, allowedUserIds };
+    const e2ee =
+      asBool(process.env[`MATRIX_E2EE_${envSuffix}`]) ??
+      asBool(entry.e2ee) ??
+      false;
+    out[personaName] = {
+      homeserver,
+      userId,
+      deviceId,
+      accessToken,
+      allowedUserIds,
+      e2ee,
+    };
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
