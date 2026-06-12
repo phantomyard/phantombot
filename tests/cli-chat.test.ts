@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   parseAllowedMxids,
   runChatMatrixSetup,
+  waitForFirstSync,
   type MatrixSetupClient,
 } from "../src/cli/chat-matrix.ts";
 import { applyDefaultChannel } from "../src/cli/chat.ts";
@@ -337,6 +338,62 @@ describe("applyDefaultChannel", () => {
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain('default_persona = "robbie"');
     expect(toml).toContain('default_channel = "telegram"');
+  });
+});
+
+describe("waitForFirstSync (first-sync bound)", () => {
+  /**
+   * A fake matrix-js-sdk client that records sync listeners so tests can drive
+   * the "sync" event — or never fire it — and asserts the listener is removed.
+   */
+  function fakeSyncClient() {
+    const listeners = new Set<(state: string) => void>();
+    return {
+      on(_event: "sync", listener: (state: string) => void) {
+        listeners.add(listener);
+      },
+      removeListener(_event: "sync", listener: (state: string) => void) {
+        listeners.delete(listener);
+      },
+      emit(state: string) {
+        for (const l of [...listeners]) l(state);
+      },
+      get listenerCount() {
+        return listeners.size;
+      },
+    };
+  }
+
+  test("resolves on PREPARED and removes the listener", async () => {
+    const client = fakeSyncClient();
+    const p = waitForFirstSync(client, { timeoutMs: 1000 });
+    client.emit("PREPARED");
+    await expect(p).resolves.toBeUndefined();
+    expect(client.listenerCount).toBe(0);
+  });
+
+  test("rejects on ERROR so setup can fail cleanly (no hang)", async () => {
+    const client = fakeSyncClient();
+    const p = waitForFirstSync(client, { timeoutMs: 1000 });
+    client.emit("ERROR");
+    await expect(p).rejects.toThrow(/ERROR/);
+    expect(client.listenerCount).toBe(0);
+  });
+
+  test("rejects on STOPPED", async () => {
+    const client = fakeSyncClient();
+    const p = waitForFirstSync(client, { timeoutMs: 1000 });
+    client.emit("STOPPED");
+    await expect(p).rejects.toThrow(/STOPPED/);
+    expect(client.listenerCount).toBe(0);
+  });
+
+  test("times out when first sync never reaches a terminal state", async () => {
+    const client = fakeSyncClient();
+    const p = waitForFirstSync(client, { timeoutMs: 20 });
+    client.emit("RECONNECTING"); // transient — must NOT settle the promise
+    await expect(p).rejects.toThrow(/timed out/);
+    expect(client.listenerCount).toBe(0);
   });
 });
 

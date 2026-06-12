@@ -321,6 +321,62 @@ async function writeMatrixConfig(
   });
 }
 
+/** Minimal sync-event surface of a matrix-js-sdk client, for {@link waitForFirstSync}. */
+export interface SyncCapableClient {
+  on(event: "sync", listener: (state: string) => void): void;
+  removeListener?(event: "sync", listener: (state: string) => void): void;
+}
+
+/** Default ceiling for the first-sync wait. matrix.org cold syncs are well under this. */
+export const FIRST_SYNC_TIMEOUT_MS = 60_000;
+
+/**
+ * Wait for matrix-js-sdk's first /sync to reach a usable state before the E2EE
+ * bootstrap runs. Resolves on PREPARED/SYNCING. Rejects on ERROR/STOPPED, or if
+ * no terminal state arrives within `timeoutMs`.
+ *
+ * Without this bound, a homeserver/network stall after login, an invalidated
+ * token, or an SDK that only ever emits ERROR would leave `initCrypto` — and
+ * therefore `runChatMatrixSetup` — hanging forever instead of returning a
+ * structured setup failure. The listener is removed and the timer cleared on
+ * every exit path.
+ */
+export function waitForFirstSync(
+  client: SyncCapableClient,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? FIRST_SYNC_TIMEOUT_MS;
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      client.removeListener?.("sync", onSync);
+      clearTimeout(timer);
+    };
+    const onSync = (state: string) => {
+      if (settled) return;
+      if (state === "PREPARED" || state === "SYNCING") {
+        settled = true;
+        cleanup();
+        resolve();
+      } else if (state === "ERROR" || state === "STOPPED") {
+        settled = true;
+        cleanup();
+        reject(new Error(`matrix first sync failed: ${state}`));
+      }
+      // Transient states (RECONNECTING, CATCHUP, …) are ignored — keep waiting
+      // until a usable/terminal state or the timeout.
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`matrix first sync timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    client.on("sync", onSync);
+  });
+}
+
 /**
  * Default production client factory: builds a real crypto-enabled SDK client
  * and exposes the setup seam. Imported dynamically so the heavy SDK only loads
@@ -395,15 +451,7 @@ const defaultMakeClient = async (args: {
       // bootstrapSecretStorage reads/writes account data; without a running
       // /sync those reads are inconsistent and the bootstrap hangs forever.
       await client.startClient({ initialSyncLimit: 1 });
-      await new Promise<void>((resolve) => {
-        const onSync = (state: string) => {
-          if (state === "PREPARED" || state === "SYNCING") {
-            client.removeListener?.("sync", onSync);
-            resolve();
-          }
-        };
-        client.on("sync", onSync);
-      });
+      await waitForFirstSync(client);
     },
     crypto: () => client.getCrypto() as MatrixCryptoLike,
     authUploadCallback: () => async (makeRequest) => {
