@@ -25,6 +25,7 @@ import type {
   MatrixTimelineEvent,
 } from "../src/channels/matrix/types.ts";
 import type { Config, MatrixAccount } from "../src/config.ts";
+import { principalConversations } from "../src/orchestrator/principalRouting.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
@@ -61,6 +62,8 @@ class FakeMatrixClient implements MatrixClientLike {
   constructor(
     private readonly self: string,
     private readonly encryptedRooms: Set<string> = new Set(["!room:hs"]),
+    /** Rooms the bot treats as 1:1 DMs (drives sender-scoped keying). */
+    private readonly directRooms: Set<string> = new Set(),
   ) {}
   getUserId(): string | null {
     return this.self;
@@ -80,6 +83,9 @@ class FakeMatrixClient implements MatrixClientLike {
   }
   isRoomEncrypted(roomId: string): boolean {
     return this.encryptedRooms.has(roomId);
+  }
+  isDirectRoom(roomId: string): boolean {
+    return this.directRooms.has(roomId);
   }
   onTimelineEvent(cb: (e: MatrixTimelineEvent) => void): () => void {
     this.listeners.push(cb);
@@ -384,5 +390,86 @@ describe("runMatrixServer", () => {
     ac.abort();
     await server;
     expect(harness.invocations).toBe(0);
+  });
+
+  // --- conversation keying (PR #175 fix: held-grounding referent) ----------
+  //
+  // The bug Kai flagged: inbound was keyed `matrix:<roomId>` while the
+  // grounding write + notify key `matrix:<mxid>`, so a held request's
+  // approve/deny reply landed in a different conversation than the grounding
+  // pair. These pin the contract: a PRINCIPAL's DM is sender-scoped (matching
+  // principalConversations), everything else stays room-scoped.
+
+  test("a principal's 1:1 DM is keyed matrix:<mxid> — matches principalConversations", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ack" },
+    ]);
+    // `!dm:hs` is a direct room; @alice is the allow-listed principal.
+    const client = new FakeMatrixClient(
+      "@bot:hs",
+      new Set(["!dm:hs"]),
+      new Set(["!dm:hs"]),
+    );
+    await runWith({
+      acct: account(["@alice:hs"]),
+      harness,
+      client,
+      events: [
+        evt({ sender: "@alice:hs", roomId: "!dm:hs", body: "hi", ts: Date.now() + 1000 }),
+      ],
+    });
+    // The turn was persisted under the SENDER-scoped key, not the room key.
+    expect(await memory.countUserTurns("phantom", "matrix:@alice:hs")).toBe(1);
+    expect(await memory.countUserTurns("phantom", "matrix:!dm:hs")).toBe(0);
+
+    // And that key is exactly what the grounding/notify path targets when
+    // default_channel = matrix — so a held episode + the reply share one key.
+    const cfg = {
+      ...baseConfig(),
+      defaultChannel: "matrix",
+      channels: { matrix: account(["@alice:hs"]) },
+    } as unknown as Config;
+    expect(principalConversations(cfg, "phantom")).toContain("matrix:@alice:hs");
+  });
+
+  test("a principal in a NON-direct (group) room stays room-scoped", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ack" },
+    ]);
+    // directRooms is empty → `!group:hs` is not a DM.
+    const client = new FakeMatrixClient("@bot:hs", new Set(["!group:hs"]));
+    await runWith({
+      acct: account(["@alice:hs"]),
+      harness,
+      client,
+      events: [
+        evt({ sender: "@alice:hs", roomId: "!group:hs", body: "hi", ts: Date.now() + 1000 }),
+      ],
+    });
+    expect(await memory.countUserTurns("phantom", "matrix:!group:hs")).toBe(1);
+    expect(await memory.countUserTurns("phantom", "matrix:@alice:hs")).toBe(0);
+  });
+
+  test("a NON-principal in a direct room stays room-scoped (sender-scoping is principal-only)", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ack" },
+    ]);
+    // Open bot (empty allowlist): @stranger is answered but NOT a principal,
+    // and a direct room must NOT collapse to their MXID.
+    const client = new FakeMatrixClient(
+      "@bot:hs",
+      new Set(["!dm:hs"]),
+      new Set(["!dm:hs"]),
+    );
+    await runWith({
+      acct: account([]),
+      harness,
+      client,
+      events: [
+        evt({ sender: "@stranger:hs", roomId: "!dm:hs", body: "hi", ts: Date.now() + 1000 }),
+      ],
+    });
+    expect(await memory.countUserTurns("phantom", "matrix:!dm:hs")).toBe(1);
+    expect(await memory.countUserTurns("phantom", "matrix:@stranger:hs")).toBe(0);
   });
 });

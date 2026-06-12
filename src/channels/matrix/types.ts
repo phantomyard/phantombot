@@ -81,6 +81,14 @@ export interface MatrixClientLike {
   /** Whether a room is E2E-encrypted (drives the `encrypted` flag + logging). */
   isRoomEncrypted(roomId: string): boolean;
   /**
+   * Whether `roomId` is a 1:1 DIRECT room (a DM), per the bot's `m.direct`
+   * account data, with a 2-member-room fallback. Drives sender-scoped
+   * conversation keying for a principal's DM so the inbound key matches the
+   * grounding write + proactive notify (both keyed `matrix:<mxid>`). See
+   * channels/matrix/server.ts + orchestrator/principalRouting.ts.
+   */
+  isDirectRoom(roomId: string): boolean;
+  /**
    * Register a timeline-event listener. The callback fires for each live
    * event; the server filters to decrypted `m.room.message`s from others.
    * Returns an unsubscribe function.

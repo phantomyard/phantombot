@@ -24,8 +24,19 @@
  * attachments, group-addressing, or slash commands for v1) — text in, harness,
  * text out — because Matrix landed text-first like Telegram once did.
  *
- * Conversation key is `matrix:<roomId>` so Matrix memory is isolated from
- * Telegram's `telegram:<chatId>` and the CLI's `cli:default`.
+ * Conversation key — IMPORTANT, this is load-bearing for the #172 security
+ * grounding loop:
+ *   - A PRINCIPAL's 1:1 DM is keyed SENDER-SCOPED: `matrix:<senderMxid>`. This
+ *     is the Matrix analogue of Telegram's `telegram:<userId>` (where a private
+ *     chat's id already equals the user id). It MUST match the key the grounding
+ *     write + proactive notify use (`matrix:<mxid>` via
+ *     orchestrator/principalRouting.ts + cli/notify-matrix.ts), or a held
+ *     request's approve/deny reply lands in a different conversation than the
+ *     grounding pair and loses its referent (the bug Kai flagged on PR #175).
+ *   - Everything else (group rooms, non-principal senders) stays room-scoped:
+ *     `matrix:<roomId>`. Group rooms aren't principal conversations.
+ * Either way Matrix memory is isolated from Telegram's `telegram:<chatId>` and
+ * the CLI's `cli:default`.
  */
 
 import type { Config } from "../../config.ts";
@@ -184,7 +195,15 @@ async function processMatrixMessage(
 ): Promise<void> {
   const { input } = ctx;
   const startedAt = Date.now();
-  const conversationKey = `matrix:${msg.conversationId}`;
+  // Sender-scope a PRINCIPAL's 1:1 DM so the conversation key matches the
+  // grounding write + proactive notify (`matrix:<mxid>`); otherwise room-scope.
+  // Non-principals and group rooms are never sender-scoped. See the file header
+  // + orchestrator/principalRouting.ts.
+  const isPrincipalDm =
+    ctx.principalAuthenticated && input.transport.isDirect(msg.roomId);
+  const conversationKey = isPrincipalDm
+    ? `matrix:${msg.senderId}`
+    : `matrix:${msg.conversationId}`;
 
   // Show a typing indicator while we work (best-effort).
   void input.transport.sendTyping(msg.conversationId);

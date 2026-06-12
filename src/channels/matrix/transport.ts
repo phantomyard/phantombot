@@ -45,6 +45,8 @@ export interface MatrixTransport extends ChannelTransport {
   stop(): void;
   /** Is this room E2E-encrypted? Drives the inbound `encrypted` flag. */
   isEncrypted(roomId: string): boolean;
+  /** Is this room a 1:1 DM? Drives sender-scoped keying for a principal's DM. */
+  isDirect(roomId: string): boolean;
   /** Subscribe to live timeline events; returns an unsubscribe fn. */
   onEvent(cb: (event: MatrixTimelineEvent) => void): () => void;
   // Base ChannelTransport members, narrowed to required for Matrix:
@@ -82,6 +84,14 @@ export class ClientMatrixTransport implements MatrixTransport {
   isEncrypted(roomId: string): boolean {
     try {
       return this.client.isRoomEncrypted(roomId);
+    } catch {
+      return false;
+    }
+  }
+
+  isDirect(roomId: string): boolean {
+    try {
+      return this.client.isDirectRoom(roomId);
     } catch {
       return false;
     }
@@ -204,6 +214,29 @@ function wrapSdkClient(client: any): MatrixClientLike {
         return Boolean(room.hasEncryptionStateEvent?.());
       }
       return Boolean(client.isRoomEncrypted?.(roomId));
+    },
+    isDirectRoom: (roomId) => {
+      // Primary signal: the bot's `m.direct` account data maps each DM peer
+      // MXID → [roomId,…]. This is the SAME source notify-matrix.ts uses to
+      // resolve the DM room, so inbound keying and outbound routing agree.
+      try {
+        const direct =
+          client.getAccountData?.("m.direct")?.getContent?.() ?? {};
+        for (const rooms of Object.values(direct)) {
+          if (Array.isArray(rooms) && rooms.includes(roomId)) return true;
+        }
+      } catch {
+        /* fall through to the member-count heuristic */
+      }
+      // Fallback (account data not yet synced / not set by the peer's client):
+      // a 2-member room is a de-facto 1:1 DM.
+      try {
+        const room = client.getRoom?.(roomId);
+        const count = room?.getJoinedMemberCount?.();
+        return typeof count === "number" && count === 2;
+      } catch {
+        return false;
+      }
     },
     onTimelineEvent: (cb) => {
       // matrix-js-sdk emits "Room.timeline" with (event, room, toStartOfTimeline).
