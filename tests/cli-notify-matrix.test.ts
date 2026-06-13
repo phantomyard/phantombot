@@ -9,7 +9,11 @@
 import { describe, expect, test } from "bun:test";
 
 import { runNotify } from "../src/cli/notify.ts";
-import type { MatrixNotifySender } from "../src/cli/notify-matrix.ts";
+import {
+  resolveOrCreateDm,
+  type DmResolverClient,
+  type MatrixNotifySender,
+} from "../src/cli/notify-matrix.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -95,5 +99,89 @@ describe("runNotify — matrix channel", () => {
     });
     expect(code).toBe(0);
     expect(sends).toEqual(["@a:hs"]);
+  });
+});
+
+/**
+ * Regression tests for the DM resolver (PR #179 review): a freshly created DM
+ * on an E2EE account MUST be provisioned with `m.room.encryption` initial
+ * state, or matrix-bot-sdk sends the first proactive notify plaintext. We also
+ * persist `m.direct` so the next notify reuses the room.
+ */
+describe("resolveOrCreateDm", () => {
+  function fakeClient(direct: Record<string, unknown> | undefined) {
+    const created: Array<Record<string, unknown>> = [];
+    const accountWrites: Array<{ type: string; content: unknown }> = [];
+    let store = direct;
+    const client: DmResolverClient = {
+      getAccountData: async (type: string) =>
+        type === "m.direct" ? store : undefined,
+      setAccountData: async (type: string, content: unknown) => {
+        if (type === "m.direct") store = content as Record<string, unknown>;
+        accountWrites.push({ type, content });
+      },
+      createRoom: async (opts: Record<string, unknown>) => {
+        created.push(opts);
+        return "!new:hs";
+      },
+    };
+    return { client, created, accountWrites, getStore: () => store };
+  }
+
+  test("reuses the existing DM room from m.direct without creating one", async () => {
+    const { client, created } = fakeClient({ "@a:hs": ["!existing:hs"] });
+    const room = await resolveOrCreateDm(client, "@a:hs", true);
+    expect(room).toBe("!existing:hs");
+    expect(created).toHaveLength(0);
+  });
+
+  test("E2EE: creates the DM with m.room.encryption initial state", async () => {
+    const { client, created } = fakeClient({});
+    const room = await resolveOrCreateDm(client, "@a:hs", true);
+    expect(room).toBe("!new:hs");
+    expect(created).toHaveLength(1);
+    const opts = created[0]!;
+    expect(opts.preset).toBe("trusted_private_chat");
+    expect(opts.is_direct).toBe(true);
+    expect(opts.invite).toEqual(["@a:hs"]);
+    expect(opts.initial_state).toEqual([
+      {
+        type: "m.room.encryption",
+        state_key: "",
+        content: { algorithm: "m.megolm.v1.aes-sha2" },
+      },
+    ]);
+  });
+
+  test("non-E2EE: creates the DM with no encryption initial state", async () => {
+    const { client, created } = fakeClient({});
+    await resolveOrCreateDm(client, "@a:hs", false);
+    expect(created[0]!.initial_state).toBeUndefined();
+  });
+
+  test("persists the new room into m.direct for reuse", async () => {
+    const { client, getStore } = fakeClient({ "@b:hs": ["!other:hs"] });
+    await resolveOrCreateDm(client, "@a:hs", true);
+    expect(getStore()).toEqual({
+      "@b:hs": ["!other:hs"],
+      "@a:hs": ["!new:hs"],
+    });
+  });
+
+  test("a failed m.direct write does not block returning the room", async () => {
+    const created: Array<Record<string, unknown>> = [];
+    const client: DmResolverClient = {
+      getAccountData: async () => ({}),
+      setAccountData: async () => {
+        throw new Error("network");
+      },
+      createRoom: async (opts) => {
+        created.push(opts);
+        return "!new:hs";
+      },
+    };
+    const room = await resolveOrCreateDm(client, "@a:hs", true);
+    expect(room).toBe("!new:hs");
+    expect(created).toHaveLength(1);
   });
 });

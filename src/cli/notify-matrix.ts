@@ -206,28 +206,77 @@ async function defaultMatrixSender(): Promise<MatrixNotifySender> {
         await client.crypto.prepare(joined);
       }
 
-      const roomId = await resolveOrCreateDm(client, mxid);
+      const roomId = await resolveOrCreateDm(client, mxid, account.e2ee === true);
       await client.sendText(roomId, message);
     },
   };
 }
 
 /**
+ * The minimal client surface `resolveOrCreateDm` needs. The real bot-sdk
+ * `MatrixClient` is a structural superset; the test fake implements exactly
+ * these members.
+ */
+export interface DmResolverClient {
+  getAccountData(eventType: string): Promise<Record<string, unknown> | undefined>;
+  setAccountData(eventType: string, content: unknown): Promise<void>;
+  createRoom(opts: Record<string, unknown>): Promise<string>;
+}
+
+/**
  * Resolve the existing 1:1 DM room for `mxid` from the bot's `m.direct`
  * account data, or create one. Kept tiny + isolated so the testable surface
  * (everything above) doesn't depend on it.
+ *
+ * When `encrypt` is set (the account is E2EE), a freshly created DM MUST carry
+ * an `m.room.encryption` state event in its `initial_state`. matrix-bot-sdk
+ * only auto-encrypts sends when `crypto.isRoomEncrypted(roomId)` sees that
+ * state; a bare `createRoom` with no encryption state yields a plaintext
+ * `trusted_private_chat`, so the first proactive notify to an allow-listed
+ * MXID would go plaintext-over-TLS despite E2EE being configured (regression
+ * caught in PR #179 review). We also persist the new room into `m.direct` so
+ * the next notify reuses it (and it's recognised as a 1:1 DM) instead of
+ * spawning a fresh room each time.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function resolveOrCreateDm(client: any, mxid: string): Promise<string> {
+export async function resolveOrCreateDm(
+  client: DmResolverClient,
+  mxid: string,
+  encrypt: boolean,
+): Promise<string> {
   const direct = (await client.getAccountData("m.direct").catch(() => ({}))) as
     | Record<string, unknown>
     | undefined;
   const rooms = direct?.[mxid];
   const existing = Array.isArray(rooms) ? rooms[0] : undefined;
   if (typeof existing === "string" && existing.length > 0) return existing;
-  return await client.createRoom({
+
+  const roomId = await client.createRoom({
     invite: [mxid],
     is_direct: true,
     preset: "trusted_private_chat",
+    ...(encrypt
+      ? {
+          initial_state: [
+            {
+              type: "m.room.encryption",
+              state_key: "",
+              content: { algorithm: "m.megolm.v1.aes-sha2" },
+            },
+          ],
+        }
+      : {}),
   });
+
+  // Persist the freshly created DM into `m.direct` so subsequent notifies
+  // resolve this same room. Best-effort: a failed write must not block the
+  // send the user asked for.
+  const next: Record<string, unknown> = { ...(direct ?? {}) };
+  const list = Array.isArray(next[mxid]) ? [...(next[mxid] as unknown[])] : [];
+  list.push(roomId);
+  next[mxid] = list;
+  await client.setAccountData("m.direct", next).catch(() => {
+    /* best-effort m.direct persistence */
+  });
+
+  return roomId;
 }
