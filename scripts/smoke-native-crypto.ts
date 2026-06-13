@@ -1,7 +1,9 @@
 /**
- * Phase 1 smoke test: prove the Matrix native crypto addon loads inside a
- * `bun build --compile` binary via the patched loader + sibling .node, with the
- * build tree (node_modules) absent. Run by scripts/smoke-native-crypto.sh.
+ * Phase 1 smoke test: prove the Matrix native crypto addon embeds into a single
+ * `bun build --compile` binary with no external .node file and no node_modules —
+ * a regression guard for the static-embed path. There is no patched loader and
+ * no sibling .node: bun statically detects the NAPI require() and inlines the
+ * addon into the compiled binary. Run by scripts/smoke-native-crypto.sh.
  */
 import { loadNativeCrypto, nativeCryptoFilename } from "../src/channels/matrix/nativeCrypto";
 
