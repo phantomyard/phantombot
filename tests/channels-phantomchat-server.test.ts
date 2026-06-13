@@ -60,10 +60,15 @@ class FakePool implements RelayPool {
 
   subscribeMany(
     _relays: string[],
-    _filters: NostrFilter[],
-    params: { onevent: (event: NTNostrEvent) => void },
+    _filter: NostrFilter,
+    params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
   ): { close(): void } {
     this.onevent = params.onevent;
+    // Simulate an empty stored backlog: signal EOSE immediately so the
+    // channel's live-gate opens and subsequently fed events are treated as
+    // live (and therefore processed). Without this, the live-gate would skip
+    // everything as pre-EOSE history.
+    params.oneose?.();
     return {
       close: () => {
         this.onevent = undefined;
@@ -249,5 +254,83 @@ describe("phantomchat auth gate", () => {
 
     expect(harness.invocations).toBe(1);
     expect(pool.published.length).toBe(2);
+  });
+});
+
+/**
+ * Live-gate regression (the restart-replay bug). On (re)connect the relays
+ * replay up to 49h of stored gift-wraps; the channel must IGNORE that backlog
+ * (everything before EOSE) and only act on messages that arrive live (after
+ * EOSE). Without this, a restart re-replies to every past DM.
+ */
+describe("phantomchat channel live-gate", () => {
+  // A pool that does NOT auto-fire EOSE, so the test controls backlog vs live.
+  class DeferredEosePool implements RelayPool {
+    onevent?: (event: NTNostrEvent) => void;
+    fireEose?: () => void;
+    published: NTNostrEvent[] = [];
+    subscribeMany(
+      _relays: string[],
+      _filter: NostrFilter,
+      params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
+    ): { close(): void } {
+      this.onevent = params.onevent;
+      this.fireEose = params.oneose;
+      return { close: () => {} };
+    }
+    publish(_relays: string[], event: NTNostrEvent): Promise<string>[] {
+      this.published.push(event);
+      return [Promise.resolve("ok")];
+    }
+    close(): void {}
+  }
+
+  test("pre-EOSE backlog is skipped; post-EOSE live message is delivered", async () => {
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const senderSk = generateSecretKey();
+    const pool = new DeferredEosePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const ac = new AbortController();
+    const got: string[] = [];
+    const drain = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg.text);
+    })();
+
+    const wrapFor = (text: string): NTNostrEvent => {
+      const env = JSON.stringify({
+        id: text,
+        from: getPublicKey(senderSk),
+        to: botHex,
+        type: "text",
+        content: text,
+        timestamp: Date.now(),
+      });
+      return wrapNip17Message(senderSk, botHex, env).wraps[0] as NTNostrEvent;
+    };
+
+    // Backlog (pre-EOSE) — must be ignored.
+    pool.onevent!(wrapFor("historical"));
+    await new Promise((r) => setTimeout(r, 10));
+    // Relays finish replaying history → go live.
+    pool.fireEose!();
+    // Live message (post-EOSE) — must be delivered.
+    pool.onevent!(wrapFor("live"));
+    await new Promise((r) => setTimeout(r, 10));
+
+    ac.abort();
+    await drain;
+
+    expect(got).toEqual(["live"]);
   });
 });

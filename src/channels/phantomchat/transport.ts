@@ -57,13 +57,20 @@ export interface NostrFilter {
  */
 export interface RelayPool {
   /**
-   * Subscribe to `filters` across `relays`. `onevent` fires for each matching
-   * event (possibly more than once across relays — the caller dedups). Returns
-   * a handle whose `close()` tears the subscription down.
+   * Subscribe with a SINGLE `filter` across `relays`. `onevent` fires for each
+   * matching event (possibly more than once across relays — the caller dedups).
+   * Returns a handle whose `close()` tears the subscription down.
+   *
+   * IMPORTANT — nostr-tools 2.23.3 quirk: `SimplePool.subscribeMany` takes a
+   * single filter OBJECT here, not an array. Internally it groups per-relay into
+   * the `filters` array the REQ frame needs (see `subscribeMap`). Passing
+   * `[filter]` double-wraps it — the wire REQ becomes `["REQ",id,[{...}]]` and
+   * strict relays (e.g. primal) reject it with "provided filter is not an
+   * object", silently delivering ZERO events. So this is `filter`, singular.
    */
   subscribeMany(
     relays: string[],
-    filters: NostrFilter[],
+    filter: NostrFilter,
     params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
   ): { close(): void };
   /** Publish `event` to every relay. Returns one promise per relay. */
@@ -85,13 +92,15 @@ export interface PhantomchatTransport extends ChannelTransport {
   readonly relays: string[];
   /**
    * Subscribe for inbound kind-1059 gift-wraps addressed to `ourPubHex`.
-   * `onWrap` fires per raw wrap event (caller unwraps + dedups). Returns a
-   * close handle. `since` defaults to ~now minus a small slack.
+   * `onWrap` fires per raw wrap event (caller unwraps + dedups). `onEose` fires
+   * once the relays have replayed their stored backlog, so the caller can tell
+   * historical messages from live ones (see channel.listen's live-gate). Returns
+   * a close handle.
    */
   subscribeGiftWraps(
     ourPubHex: string,
     onWrap: (event: NTNostrEvent) => void,
-    since?: number,
+    onEose?: () => void,
   ): { close(): void };
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
@@ -125,17 +134,27 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   subscribeGiftWraps(
     ourPubHex: string,
     onWrap: (event: NTNostrEvent) => void,
-    since?: number,
+    onEose?: () => void,
   ): { close(): void } {
     const filter: NostrFilter = {
       kinds: [1059],
       "#p": [ourPubHex],
-      // A small slack below "now" — gift-wraps backdate up to 48h so we cannot
-      // rely on this to bound delivery; it only trims ancient history on first
-      // connect. Dedup downstream is what actually prevents reprocessing.
-      since: since ?? Math.floor(Date.now() / 1000) - 60,
+      // CRITICAL: `since` MUST cover the gift-wrap backdate window. NIP-59
+      // randomizes a gift-wrap's `created_at` up to 48h INTO THE PAST for
+      // metadata privacy, and relays (strfry/damus/primal) apply `since` to
+      // LIVE events too — not just the stored backlog. A tight `since` (e.g.
+      // now-60s) therefore silently drops essentially every real DM, because a
+      // brand-new message's wrap is timestamped hours ago. We widen to 49h
+      // (48h max backdate + 1h slack) so live wraps are never filtered out.
+      // History this pulls in on connect is discarded by channel.listen's
+      // live-gate (it ignores everything before EOSE), so a restart never
+      // replays old conversations.
+      since: Math.floor(Date.now() / 1000) - (49 * 60 * 60),
     };
-    return this.pool.subscribeMany(this.relays, [filter], {
+    // Single filter object — NOT `[filter]`. See the RelayPool.subscribeMany
+    // doc: nostr-tools wraps it into the per-relay filters array itself, and
+    // double-wrapping produces a malformed REQ that delivers nothing.
+    return this.pool.subscribeMany(this.relays, filter, {
       onevent: (event) => {
         try {
           onWrap(event);
@@ -145,6 +164,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
           });
         }
       },
+      oneose: onEose,
     });
   }
 

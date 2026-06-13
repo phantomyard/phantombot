@@ -194,6 +194,19 @@ export function createPhantomchatChannel(
           return;
         }
 
+        // (6) LIVE-GATE. On (re)connect the relays replay up to 49h of stored
+        // gift-wraps (the wide `since` we need so live backdated wraps aren't
+        // filtered — see transport.subscribeGiftWraps). We must NOT answer that
+        // history: a restart would otherwise re-reply to every past DM. So we
+        // process a message only once it arrives LIVE, i.e. after the relays
+        // have signalled EOSE (end of stored events). Everything before EOSE is
+        // already marked seen above (wrap id + rumor id), so it's silently
+        // consumed — never enqueued, and never reprocessed if re-delivered.
+        if (!live) {
+          log.debug("phantomchat: skipping backlog gift-wrap (pre-EOSE)");
+          return;
+        }
+
         // Yield a plaintext, channel-neutral message. conversationId and
         // senderId are BOTH the proven sender hex: a DM thread is keyed by the
         // peer, and the trust perimeter gates on this same proven id.
@@ -205,7 +218,19 @@ export function createPhantomchatChannel(
         wake?.();
       };
 
-      const sub = transport.subscribeGiftWraps(publicKeyHex, onWrap);
+      // The live-gate flag (see onWrap step 6). Flipped true on EOSE — or after
+      // a fallback timeout, in case a slow/dead relay never sends EOSE and would
+      // otherwise wedge the bot in "backlog mode" forever (deaf to new DMs).
+      let live = false;
+      const goLive = (): void => {
+        if (!live) {
+          live = true;
+          log.info("phantomchat: backlog drained — now live");
+        }
+      };
+      const liveFallback = setTimeout(goLive, 8000);
+
+      const sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
 
       const onAbort = (): void => {
         closed = true;
@@ -233,6 +258,7 @@ export function createPhantomchatChannel(
           yield queue.shift()!;
         }
       } finally {
+        clearTimeout(liveFallback);
         if (signal) signal.removeEventListener("abort", onAbort);
         sub.close();
       }
