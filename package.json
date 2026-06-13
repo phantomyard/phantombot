@@ -23,6 +23,7 @@
     "citty": "^0.1.6",
     "cron-parser": "^5.5.0",
     "fake-indexeddb": "^6.2.5",
+    "matrix-bot-sdk": "^0.8.0",
     "matrix-js-sdk": "^41.7.0",
     "smol-toml": "^1.3.0"
   },
@@ -32,5 +33,8 @@
   },
   "patchedDependencies": {
     "@matrix-org/matrix-sdk-crypto-wasm@18.3.1": "patches/@matrix-org%2Fmatrix-sdk-crypto-wasm@18.3.1.patch"
-  }
+  },
+  "trustedDependencies": [
+    "@matrix-org/matrix-sdk-crypto-nodejs"
+  ]
 }
