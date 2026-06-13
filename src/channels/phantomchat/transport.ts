@@ -1,0 +1,210 @@
+/**
+ * phantomchat transport: the Nostr relay-pool surface — subscribe for inbound
+ * gift-wraps, publish outbound ones.
+ *
+ * Unlike Telegram, the "transport" here is a set of websocket relays rather
+ * than a single HTTP API. phantombot is just another Nostr CLIENT (symmetric
+ * with the PWA): it SUBSCRIBES to kind-1059 gift-wraps tagged to its own
+ * pubkey, and PUBLISHES wrapped replies to the same relays. There is no server.
+ *
+ * The wrap/unwrap crypto lives in the channel/server layers (so the core only
+ * ever sees plaintext — the encryption seam in core/types.ts); this module is
+ * purely the relay plumbing plus event dedup.
+ */
+
+import { getPublicKey } from "nostr-tools/pure";
+
+import { log } from "../../lib/logger.ts";
+import type { ChannelTransport } from "../core/types.ts";
+import type { NTNostrEvent } from "../../lib/nostrCrypto.ts";
+import {
+  wrapNip17Message,
+  type NTNostrEvent as WrapEvent,
+} from "../../lib/nostrCrypto.ts";
+
+/**
+ * The five default public relays the PhantomChat PWA uses. phantombot must be
+ * on the SAME relays as Andrew's PWA for a DM to reach it, so these are the
+ * defaults; the config can override them per deployment.
+ *
+ * (Source: phantomchat repo, src/lib/phantomchat/nostr-relay-pool.ts.)
+ */
+export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.primal.net",
+  "wss://nostr.mom",
+  "wss://nostr.data.haus",
+];
+
+/**
+ * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
+ * tagged to our pubkey, from roughly now. We deliberately set `since` to a
+ * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
+ * to 48h INTO THE PAST for metadata privacy — a tight `since` would drop fresh
+ * messages. Dedup (by wrap id, then rumor id) is the real guard, not `since`.
+ */
+export interface NostrFilter {
+  kinds: number[];
+  "#p": string[];
+  since?: number;
+}
+
+/**
+ * The slice of nostr-tools' `SimplePool` we depend on. Declaring it as an
+ * interface lets tests inject an in-memory fake pool — no real relays, no
+ * websockets — exactly the way the Telegram tests inject a fake transport.
+ */
+export interface RelayPool {
+  /**
+   * Subscribe to `filters` across `relays`. `onevent` fires for each matching
+   * event (possibly more than once across relays — the caller dedups). Returns
+   * a handle whose `close()` tears the subscription down.
+   */
+  subscribeMany(
+    relays: string[],
+    filters: NostrFilter[],
+    params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
+  ): { close(): void };
+  /** Publish `event` to every relay. Returns one promise per relay. */
+  publish(relays: string[], event: NTNostrEvent): Promise<string>[];
+  /** Close all relay connections. */
+  close(relays: string[]): void;
+}
+
+/**
+ * phantomchat's transport surface. It satisfies the channel-agnostic
+ * `ChannelTransport` contract — most notably `sendMessage(conversationId,
+ * text)`, where `conversationId` is the recipient's 64-char HEX pubkey. The
+ * actual NIP-17 wrapping happens INSIDE `sendMessage` so callers (the server)
+ * hand it plaintext and a hex destination, mirroring how Telegram callers hand
+ * it plaintext and a chat id.
+ */
+export interface PhantomchatTransport extends ChannelTransport {
+  /** The relays this transport publishes to / subscribes on. */
+  readonly relays: string[];
+  /**
+   * Subscribe for inbound kind-1059 gift-wraps addressed to `ourPubHex`.
+   * `onWrap` fires per raw wrap event (caller unwraps + dedups). Returns a
+   * close handle. `since` defaults to ~now minus a small slack.
+   */
+  subscribeGiftWraps(
+    ourPubHex: string,
+    onWrap: (event: NTNostrEvent) => void,
+    since?: number,
+  ): { close(): void };
+  /** Publish an already-wrapped kind-1059 event to all relays. */
+  publishWrap(event: NTNostrEvent): Promise<void>;
+  /** Tear down all relay connections. */
+  close(): void;
+}
+
+/**
+ * Real relay-pool transport over nostr-tools' `SimplePool`.
+ *
+ * `sendMessage` is the `ChannelTransport` egress entry point: it takes the
+ * recipient hex pubkey as `conversationId`, NIP-17-wraps the plaintext with our
+ * secret key, and publishes BOTH the recipient wrap and the self wrap (the PWA
+ * reads its own sent messages back from the self wrap). Typing / voice /
+ * attachments are no-ops — Nostr DMs carry none of those (see capabilities).
+ */
+export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
+  readonly relays: string[];
+  /** Our 64-char hex pubkey — the `from` field of every reply envelope. */
+  private readonly ourPubHex: string;
+
+  constructor(
+    private readonly ourSecretKey: Uint8Array,
+    relays: string[],
+    private readonly pool: RelayPool,
+  ) {
+    this.relays = [...relays];
+    this.ourPubHex = getPublicKey(ourSecretKey);
+  }
+
+  subscribeGiftWraps(
+    ourPubHex: string,
+    onWrap: (event: NTNostrEvent) => void,
+    since?: number,
+  ): { close(): void } {
+    const filter: NostrFilter = {
+      kinds: [1059],
+      "#p": [ourPubHex],
+      // A small slack below "now" — gift-wraps backdate up to 48h so we cannot
+      // rely on this to bound delivery; it only trims ancient history on first
+      // connect. Dedup downstream is what actually prevents reprocessing.
+      since: since ?? Math.floor(Date.now() / 1000) - 60,
+    };
+    return this.pool.subscribeMany(this.relays, [filter], {
+      onevent: (event) => {
+        try {
+          onWrap(event);
+        } catch (e) {
+          log.warn("phantomchat: onWrap handler threw", {
+            error: (e as Error).message,
+          });
+        }
+      },
+    });
+  }
+
+  async publishWrap(event: NTNostrEvent): Promise<void> {
+    // SimplePool.publish returns one promise per relay; a publish that fails on
+    // some relays but lands on others is still a success from our side. We wait
+    // on all of them (allSettled) so a single dead relay can't reject the send,
+    // and log if EVERY relay rejected.
+    const results = await Promise.allSettled(this.pool.publish(this.relays, event));
+    const ok = results.some((r) => r.status === "fulfilled");
+    if (!ok) {
+      log.warn("phantomchat: publish failed on all relays", {
+        relays: this.relays.length,
+        eventId: event.id,
+      });
+    }
+  }
+
+  /**
+   * ChannelTransport egress. `conversationId` is the recipient's 64-char hex
+   * pubkey, `text` the plaintext reply.
+   *
+   * The rumor `content` on the wire is NOT the raw text — it's the phantomchat
+   * JSON envelope `{id, from, to, type, content, timestamp}` the PWA expects
+   * (hex pubkeys, ms timestamp). We build that here, then NIP-17-wrap it and
+   * publish both the recipient and self wraps.
+   */
+  async sendMessage(conversationId: string, text: string): Promise<void> {
+    const envelope = JSON.stringify({
+      id: crypto.randomUUID(),
+      from: this.ourPubHex,
+      to: conversationId,
+      type: "text",
+      content: text,
+      timestamp: Date.now(),
+    });
+    const { wraps } = wrapNip17Message(
+      this.ourSecretKey,
+      conversationId,
+      envelope,
+    );
+    for (const wrap of wraps) {
+      await this.publishWrap(wrap as unknown as NTNostrEvent);
+    }
+  }
+
+  /** Typing indicators don't exist for Nostr DMs — no-op (best-effort). */
+  async sendTyping(_conversationId: string): Promise<void> {
+    // Intentionally empty; phantomchat capabilities report typing: false.
+  }
+
+  close(): void {
+    try {
+      this.pool.close(this.relays);
+    } catch (e) {
+      log.warn("phantomchat: pool close threw", { error: (e as Error).message });
+    }
+  }
+}
+
+// Re-export the wrap event type so server/channel code can name it without
+// reaching back into nostrCrypto for this one alias.
+export type { WrapEvent };
