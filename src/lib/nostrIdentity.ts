@@ -1,12 +1,12 @@
 /**
  * Nostr identity helpers for the phantomchat channel.
  *
- * phantombot owns ONE long-lived Nostr keypair (the bot's identity on the
- * PhantomChat network). Unlike the PWA — which derives its key from a BIP-39
- * mnemonic the human writes down — phantombot generates a RAW 32-byte secret
- * key and stores it as an `nsec` in `~/.env` under `PHANTOMCHAT_NSEC`. There's
- * no human to recite a mnemonic to, and the nsec round-trips the key losslessly
- * for backup, so the mnemonic layer the PWA uses is intentionally omitted here.
+ * Each PERSONA owns its own long-lived Nostr keypair (its identity on the
+ * PhantomChat network), stored as an `nsec` in that persona's
+ * `phantomchat.json` (see channels/phantomchat/personaStore.ts). Unlike the PWA
+ * — which derives its key from a BIP-39 mnemonic the human writes down —
+ * phantombot generates a RAW 32-byte secret key; the nsec round-trips it
+ * losslessly for backup, so the mnemonic layer the PWA uses is omitted here.
  *
  * Encoding conventions (NIP-19):
  *   - npub… : bech32 public key. This is what Andrew copies into the PWA to
@@ -102,24 +102,6 @@ export function decodeNpubToHex(npubOrHex: string): string {
     return trimmed.toLowerCase();
   }
   throw new Error("not a valid npub or 64-char hex public key");
-}
-
-/**
- * Load phantombot's phantomchat identity from `PHANTOMCHAT_NSEC` in the
- * environment (populated from ~/.env by the env bootstrap at startup).
- * Returns undefined when the var is absent or unparseable — the caller treats
- * that as "phantomchat not configured" and simply doesn't start the listener.
- */
-export function loadIdentityFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): NostrIdentity | undefined {
-  const raw = env.PHANTOMCHAT_NSEC;
-  if (!raw || raw.trim().length === 0) return undefined;
-  try {
-    return identityFromNsec(raw);
-  } catch {
-    return undefined;
-  }
 }
 
 /**

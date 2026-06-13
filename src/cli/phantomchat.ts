@@ -1,22 +1,25 @@
 /**
  * `phantombot phantomchat` — interactive TUI to configure the phantomchat
- * (Nostr NIP-17 DM) channel.
+ * (Nostr NIP-17 DM) channel FOR A PERSONA.
  *
  * phantomchat connects phantombot to the SAME Nostr relays as the PhantomChat
- * PWA as just another client (there is no server). This command:
+ * PWA as just another client (there is no server). Identity is PER-PERSONA and
+ * lives inside the persona's own agent directory, next to SOUL.md, in
+ * `phantomchat.json` (mode 0600). That keeps a persona folder self-contained
+ * and portable — copy it to another PC/VM and its npub travels with it — and
+ * lets one machine run many personas, each with its own npub, exactly like
+ * Telegram runs one bot token per persona.
  *
- *   1. Ensures the bot has a Nostr keypair. If `PHANTOMCHAT_NSEC` isn't set in
- *      ~/.env, it GENERATES one and saves the nsec there (atomic, mode 0o600,
- *      via the same `phantombot env set` path Telegram tokens never touch —
- *      the nsec is a SECRET and stays out of config.toml). The value is shown
- *      ONCE for backup and otherwise only confirmed by name.
- *   2. Prints the bot's npub PROMINENTLY — this is what Andrew pastes into the
- *      PhantomChat PWA to start a DM with phantombot.
- *   3. Lets the operator set the relay list and the npub allowlist into the
- *      `[channels.phantomchat]` block of config.toml (the non-secret knobs).
- *
- * Mirrors src/cli/telegram.ts: same clack style, same config-writer helper,
- * same restart prompt.
+ * This command:
+ *   1. Targets a persona (default: the resolved default persona; override with
+ *      `--persona <name>`).
+ *   2. Ensures that persona has a Nostr keypair. If `phantomchat.json` has no
+ *      nsec yet, it GENERATES one and writes it (the nsec is shown ONCE for
+ *      backup, otherwise only confirmed by name).
+ *   3. Prints the persona's npub PROMINENTLY — paste it into the PhantomChat
+ *      PWA to start a DM with that persona.
+ *   4. Lets the operator set the relay list and the npub allowlist, written to
+ *      the SAME `phantomchat.json`.
  */
 
 import { defineCommand } from "citty";
@@ -24,48 +27,26 @@ import * as p from "@clack/prompts";
 
 import {
   DEFAULT_PHANTOMCHAT_RELAYS,
+  personaDir,
   type Config,
   loadConfig,
 } from "../config.ts";
-import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import {
+  loadPhantomchatPersonaConfig,
+  savePhantomchatPersonaConfig,
+} from "../channels/phantomchat/personaStore.ts";
 import {
   decodeNpubToHex,
   generateIdentity,
-  loadIdentityFromEnv,
 } from "../lib/nostrIdentity.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { maybePromptRestart } from "./harness.ts";
-import { runEnvSet } from "./env.ts";
-
-export interface PhantomchatTuiInputs {
-  relays: string[];
-  allowedNpubs: string[];
-}
-
-/**
- * Write the relay list + allowlist to the `[channels.phantomchat]` block,
- * preserving other config sections. The nsec is NOT written here — it lives in
- * ~/.env. Pure side effect.
- */
-export async function applyPhantomchatConfig(
-  configPath: string,
-  inputs: PhantomchatTuiInputs,
-): Promise<void> {
-  await updateConfigToml(configPath, (toml) => {
-    setIn(toml, ["channels", "phantomchat", "relays"], inputs.relays);
-    setIn(
-      toml,
-      ["channels", "phantomchat", "allowed_npubs"],
-      inputs.allowedNpubs,
-    );
-  });
-}
 
 /**
  * Parse a comma/whitespace-separated list of npubs, keeping only entries that
  * decode to a valid pubkey. Returns the cleaned npub strings (not the hex) so
- * the human-readable form is what lands in config.toml.
+ * the human-readable form is what lands in phantomchat.json.
  */
 export function parseAllowedNpubs(raw: string): string[] {
   return raw
@@ -92,60 +73,64 @@ export function parseRelays(raw: string): string[] {
 }
 
 interface RunInput {
+  /** Persona to configure. Defaults to the resolved default persona. */
+  persona?: string;
   config?: Config;
   serviceControl?: ServiceControl;
   out?: WriteSink;
   /** Override identity generation (for testing). */
   generate?: typeof generateIdentity;
-  /** Override env load (for testing). */
-  loadIdentity?: typeof loadIdentityFromEnv;
-  /** Override the ~/.env writer (for testing). */
-  saveNsec?: (nsec: string) => Promise<void>;
+  /** Override the per-persona loader (for testing). */
+  loadPersonaConfig?: typeof loadPhantomchatPersonaConfig;
+  /** Override the per-persona writer (for testing). */
+  savePersonaConfig?: typeof savePhantomchatPersonaConfig;
 }
 
 export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const svc = input.serviceControl ?? defaultServiceControl();
   const generate = input.generate ?? generateIdentity;
-  const loadIdentity = input.loadIdentity ?? loadIdentityFromEnv;
-  const saveNsec =
-    input.saveNsec ??
-    (async (nsec: string) => {
-      await runEnvSet({ name: "PHANTOMCHAT_NSEC", value: nsec });
-    });
+  const loadPersonaConfig =
+    input.loadPersonaConfig ?? loadPhantomchatPersonaConfig;
+  const savePersonaConfig =
+    input.savePersonaConfig ?? savePhantomchatPersonaConfig;
 
-  p.intro("Configure the phantomchat channel (Nostr NIP-17 DMs)");
+  const persona = input.persona ?? config.defaultPersona;
+  const agentDir = personaDir(config, persona);
 
-  // 1. Ensure a key exists. Existing → print npub; absent → generate + save.
+  p.intro(`Configure phantomchat (Nostr NIP-17 DMs) for persona '${persona}'`);
+
+  // 1. Ensure a key exists for THIS persona. Existing → reuse; absent → make.
+  const existing = loadPersonaConfig(agentDir);
+  let nsec: string;
   let npub: string;
-  const existing = loadIdentity();
   if (existing) {
-    npub = existing.npub;
+    nsec = existing.identity.nsec;
+    npub = existing.identity.npub;
     p.note(
-      `phantombot already has a phantomchat identity.\n\n` +
-        `Your npub (paste this into the PhantomChat app to DM phantombot):\n\n` +
+      `Persona '${persona}' already has a phantomchat identity.\n\n` +
+        `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
         `  ${npub}`,
       "Existing identity",
     );
   } else {
     const identity = generate();
+    nsec = identity.nsec;
     npub = identity.npub;
-    await saveNsec(identity.nsec);
     p.note(
-      `Generated a new Nostr keypair and saved the secret (nsec) to ~/.env\n` +
-        `as PHANTOMCHAT_NSEC (mode 0600). Back it up somewhere safe — losing\n` +
-        `it means a new identity (and Andrew re-adding the new npub in the app).\n\n` +
+      `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
+        `saved to <persona-dir>/phantomchat.json (mode 0600). Back it up — losing\n` +
+        `it means a new identity (and re-adding the new npub in the app).\n\n` +
         `  nsec (one-time display): ${identity.nsec}\n\n` +
-        `Your npub (paste this into the PhantomChat app to DM phantombot):\n\n` +
+        `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
         `  ${npub}`,
       "New identity created",
     );
   }
 
-  // 2. Relays.
+  // 2. Relays (prefill from the existing file, else the PWA defaults).
   const currentRelays =
-    config.channels.phantomchat?.relays?.join(", ") ??
-    [...DEFAULT_PHANTOMCHAT_RELAYS].join(", ");
+    existing?.relays.join(", ") ?? [...DEFAULT_PHANTOMCHAT_RELAYS].join(", ");
   const relaysRaw = await p.text({
     message:
       "Relays (comma-separated wss:// URLs; empty = keep the 5 default PWA relays)",
@@ -160,9 +145,8 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const relays =
     parsedRelays.length > 0 ? parsedRelays : [...DEFAULT_PHANTOMCHAT_RELAYS];
 
-  // 3. Allowlist.
-  const currentAllowed =
-    config.channels.phantomchat?.allowedNpubs?.join(", ") ?? "";
+  // 3. Allowlist (prefill from the existing file).
+  const currentAllowed = existing?.allowedNpubs.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
       "Allowed npubs (comma-separated; empty = anyone can DM the bot, with a warning)",
@@ -186,14 +170,19 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     }
   }
 
-  await applyPhantomchatConfig(config.configPath, { relays, allowedNpubs });
+  const savedPath = await savePersonaConfig(agentDir, {
+    nsec,
+    relays,
+    allowedNpubs,
+  });
   p.note(
-    `npub: ${npub}\n` +
+    `persona: ${persona}\n` +
+      `npub: ${npub}\n` +
       `relays: ${relays.length}\n` +
       `allowed npubs: ${
         allowedNpubs.length === 0 ? "(any)" : allowedNpubs.join(", ")
       }\n` +
-      `saved to ${config.configPath}`,
+      `saved to ${savedPath}`,
     "Saved",
   );
 
@@ -207,10 +196,19 @@ export default defineCommand({
   meta: {
     name: "phantomchat",
     description:
-      "Configure the phantomchat channel (Nostr NIP-17 DMs). Generates a keypair on first run, prints the npub to share, and sets relays + allowed npubs.",
+      "Configure the phantomchat channel (Nostr NIP-17 DMs) for a persona. Generates a per-persona keypair on first run, prints the npub to share, and sets relays + allowed npubs (stored in the persona dir's phantomchat.json).",
   },
-  async run() {
-    const code = await runPhantomchat();
+  args: {
+    persona: {
+      type: "string",
+      description:
+        "Persona to configure. Defaults to the resolved default persona.",
+    },
+  },
+  async run({ args }) {
+    const code = await runPhantomchat({
+      persona: args.persona ? String(args.persona) : undefined,
+    });
     process.exitCode = code;
   },
 });

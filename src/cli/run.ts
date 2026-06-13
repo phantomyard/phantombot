@@ -16,10 +16,7 @@ import {
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
-import {
-  decodeAllowedNpubs,
-  loadIdentityFromEnv,
-} from "../lib/nostrIdentity.ts";
+import { listPhantomchatPersonas } from "../channels/phantomchat/personaStore.ts";
 import {
   type Config,
   loadConfig,
@@ -358,65 +355,66 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }),
     );
 
-    // phantomchat (Nostr NIP-17 DM) listener — runs ALONGSIDE Telegram. It
-    // starts only when PHANTOMCHAT_NSEC is present in the environment (the
-    // secret isn't stored in config.toml); an absent nsec just means the
-    // channel is off, exactly like a missing Telegram token. It binds to the
-    // admin listener's persona/agentDir so it shares phantombot's brain with
-    // the default Telegram bot.
-    const phantomchatIdentity = loadIdentityFromEnv();
-    if (phantomchatIdentity) {
-      const pc = config.channels.phantomchat;
-      const relays = pc?.relays ?? [];
-      const allowedHex = decodeAllowedNpubs(pc?.allowedNpubs ?? []);
-      if (allowedHex.length === 0) {
-        // Mirror Telegram's empty-allowlist behaviour: answer anyone, but warn
-        // loudly so an open bot is never accidental.
-        log.warn(
-          "phantomchat: no allowed_npubs configured — ANYONE who DMs the bot will be answered",
-        );
-        err.write(
-          "warning: phantomchat has no allowlist — anyone who DMs the bot will be answered. Set allowed_npubs via `phantombot phantomchat`.\n",
-        );
-      }
-      out.write(
-        `  [phantomchat] npub ${phantomchatIdentity.npub}, ${relays.length} relay(s), allowed npubs: ${
-          allowedHex.length === 0 ? "ANY (no allowlist)" : allowedHex.length
-        }\n`,
-      );
+    // phantomchat (Nostr NIP-17 DM) listeners — run ALONGSIDE Telegram. Fan-out
+    // mirrors the Telegram one: each persona dir under personasDir that holds a
+    // `phantomchat.json` (its OWN nsec + relays + allowlist) becomes its OWN
+    // listener bound to that persona, with its OWN npub. No config.toml editing
+    // and no shared env secret — the identity is self-contained in the persona
+    // folder, so a copy/pasted persona just works.
+    const phantomchatPersonas = listPhantomchatPersonas(config);
+    if (phantomchatPersonas.length > 0) {
       // Lazy import of SimplePool keeps the nostr-tools websocket machinery out
       // of the import graph for Telegram-only deployments. Tests inject
       // runPhantomchatServer (which ignores the channel it's handed), so the
       // SimplePool that gets built here is never actually driven by a test.
-      const startPhantomchat = input.runPhantomchatServer ?? runPhantomchatServer;
+      const startPhantomchat =
+        input.runPhantomchatServer ?? runPhantomchatServer;
       const { SimplePool } = await import("nostr-tools/pool");
-      const pool = new SimplePool();
-      const transport = new SimplePoolPhantomchatTransport(
-        phantomchatIdentity.secretKey,
-        relays,
-        pool as unknown as ConstructorParameters<
-          typeof SimplePoolPhantomchatTransport
-        >[2],
-      );
-      const channel = createPhantomchatChannel({
-        secretKey: phantomchatIdentity.secretKey,
-        publicKeyHex: phantomchatIdentity.publicKeyHex,
-        transport,
-      });
-      tasks.push(
-        startPhantomchat({
-          config,
-          memory,
-          harnesses,
-          agentDir: adminListener.agentDir,
-          persona: adminListener.persona,
-          channel,
-          allowedHex,
-          signal: ac.signal,
-          out,
-          err,
-        }).finally(() => transport.close()),
-      );
+      for (const spec of phantomchatPersonas) {
+        const { identity, relays, allowedHex } = spec.config;
+        if (allowedHex.length === 0) {
+          // Mirror Telegram's empty-allowlist behaviour: answer anyone, but
+          // warn loudly so an open bot is never accidental.
+          log.warn(
+            `phantomchat[${spec.persona}]: no allowed_npubs configured — ANYONE who DMs this persona will be answered`,
+          );
+          err.write(
+            `warning: phantomchat persona '${spec.persona}' has no allowlist — anyone who DMs it will be answered. Set allowed_npubs via \`phantombot phantomchat --persona ${spec.persona}\`.\n`,
+          );
+        }
+        out.write(
+          `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${
+            allowedHex.length === 0 ? "ANY (no allowlist)" : allowedHex.length
+          }\n`,
+        );
+        const pool = new SimplePool();
+        const transport = new SimplePoolPhantomchatTransport(
+          identity.secretKey,
+          relays,
+          pool as unknown as ConstructorParameters<
+            typeof SimplePoolPhantomchatTransport
+          >[2],
+        );
+        const channel = createPhantomchatChannel({
+          secretKey: identity.secretKey,
+          publicKeyHex: identity.publicKeyHex,
+          transport,
+        });
+        tasks.push(
+          startPhantomchat({
+            config,
+            memory,
+            harnesses,
+            agentDir: spec.agentDir,
+            persona: spec.persona,
+            channel,
+            allowedHex,
+            signal: ac.signal,
+            out,
+            err,
+          }).finally(() => transport.close()),
+        );
+      }
     }
     try {
       await Promise.all(tasks);

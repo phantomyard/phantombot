@@ -1,35 +1,16 @@
 /**
- * Tests for `phantombot phantomchat`'s side-effect helpers + identity helpers.
+ * Tests for `phantombot phantomchat`'s parse helpers + identity helpers.
+ * (The per-persona file store is covered in channels-phantomchat-personaStore.test.ts.)
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
 
-import {
-  applyPhantomchatConfig,
-  parseAllowedNpubs,
-  parseRelays,
-} from "../src/cli/phantomchat.ts";
+import { parseAllowedNpubs, parseRelays } from "../src/cli/phantomchat.ts";
 import {
   decodeNpubToHex,
   generateIdentity,
   identityFromNsec,
-  loadIdentityFromEnv,
 } from "../src/lib/nostrIdentity.ts";
-
-let workdir: string;
-let configPath: string;
-
-beforeEach(async () => {
-  workdir = await mkdtemp(join(tmpdir(), "phantombot-pc-cli-"));
-  configPath = join(workdir, "config.toml");
-});
-
-afterEach(async () => {
-  await rm(workdir, { recursive: true, force: true });
-});
 
 describe("parseRelays", () => {
   test("keeps only ws(s):// URLs, comma/space separated", () => {
@@ -54,21 +35,6 @@ describe("parseAllowedNpubs", () => {
   });
 });
 
-describe("applyPhantomchatConfig", () => {
-  test("writes [channels.phantomchat] relays + allowed_npubs, not the nsec", async () => {
-    await applyPhantomchatConfig(configPath, {
-      relays: ["wss://a.example"],
-      allowedNpubs: ["npub1aaa"],
-    });
-    const text = await readFile(configPath, "utf8");
-    expect(text).toContain("[channels.phantomchat]");
-    expect(text).toContain("wss://a.example");
-    expect(text).toContain("npub1aaa");
-    expect(text).not.toContain("nsec");
-    expect(text).not.toContain("secret");
-  });
-});
-
 describe("nostr identity helpers", () => {
   test("generate → nsec → identity round-trips the keypair", () => {
     const id = generateIdentity();
@@ -86,16 +52,5 @@ describe("nostr identity helpers", () => {
     expect(decodeNpubToHex(id.npub)).toBe(id.publicKeyHex);
     // Bare hex passes through (lowercased).
     expect(decodeNpubToHex(id.publicKeyHex.toUpperCase())).toBe(id.publicKeyHex);
-  });
-
-  test("loadIdentityFromEnv reads PHANTOMCHAT_NSEC, undefined when absent/bad", () => {
-    const id = generateIdentity();
-    expect(loadIdentityFromEnv({ PHANTOMCHAT_NSEC: id.nsec } as never)?.npub).toBe(
-      id.npub,
-    );
-    expect(loadIdentityFromEnv({} as never)).toBeUndefined();
-    expect(
-      loadIdentityFromEnv({ PHANTOMCHAT_NSEC: "not-an-nsec" } as never),
-    ).toBeUndefined();
   });
 });

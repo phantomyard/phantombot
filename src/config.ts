@@ -85,28 +85,13 @@ export interface TelegramAccount {
 }
 
 /**
- * phantomchat channel config. The bot's SECRET key (nsec) is NOT stored here —
- * it lives in ~/.env as `PHANTOMCHAT_NSEC` and is read at runtime — so this
- * block carries only the non-secret knobs: the relay list and the npub
- * allowlist. The presence of `PHANTOMCHAT_NSEC` (not this block) is what
- * decides whether the listener starts; an absent `[channels.phantomchat]`
- * block resolves to defaults (the 5 public relays, no allowlist).
- */
-export interface PhantomchatAccount {
-  /** Relays to subscribe/publish on. Defaults to the 5 PWA relays. */
-  relays: string[];
-  /**
-   * npub strings allowed to DM the bot. Decoded to hex at the auth gate. Empty
-   * = answer anyone (with a loud startup warning), mirroring Telegram's empty
-   * `allowedUserIds` semantics.
-   */
-  allowedNpubs: string[];
-}
-
-/**
  * The 5 default public relays the PhantomChat PWA uses. phantombot must share
  * relays with Andrew's PWA for a DM to reach it, so these are the defaults when
- * `[channels.phantomchat]` omits `relays`.
+ * a persona's `phantomchat.json` omits `relays`.
+ *
+ * NOTE: phantomchat identity + settings are now PER-PERSONA and live in
+ * `<persona-dir>/phantomchat.json` (see channels/phantomchat/personaStore.ts),
+ * NOT in config.toml. There is intentionally no `[channels.phantomchat]` block.
  */
 export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
   "wss://relay.damus.io",
@@ -227,15 +212,9 @@ export interface Config {
      * resolve to undefined and behave exactly as before.
      */
     telegramPersonas?: Record<string, TelegramAccount>;
-    /**
-     * phantomchat (Nostr NIP-17 DM) channel. Present when a
-     * `[channels.phantomchat]` block exists OR defaults are wanted; the
-     * listener only actually STARTS when `PHANTOMCHAT_NSEC` is set in the env
-     * (the secret isn't stored in config — see PhantomchatAccount). Undefined
-     * when no block is present, in which case run.ts falls back to defaults if
-     * the nsec is set.
-     */
-    phantomchat?: PhantomchatAccount;
+    // phantomchat (Nostr NIP-17 DM) is configured PER-PERSONA in
+    // `<persona-dir>/phantomchat.json` (channels/phantomchat/personaStore.ts),
+    // not here — so it has no config.toml block.
   };
 
   telegramStreaming?: TelegramStreamingSettings;
@@ -293,10 +272,6 @@ export async function loadConfig(): Promise<Config> {
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
-  const tomlPhantomchat = (tomlChannels.phantomchat ?? {}) as Record<
-    string,
-    unknown
-  >;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
   const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
@@ -424,7 +399,6 @@ export async function loadConfig(): Promise<Config> {
     channels: {
       telegram: buildTelegramConfig(tomlTelegram),
       telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
-      phantomchat: buildPhantomchatConfig(tomlPhantomchat),
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
@@ -658,52 +632,6 @@ function buildTelegramConfig(
     [];
 
   return { token, pollTimeoutS, allowedUserIds, groupPersonaNames };
-}
-
-/**
- * Resolve the phantomchat channel config. Always returns an object (never
- * undefined): the relay list defaults to the 5 PWA relays and the allowlist
- * defaults to empty, so a deployment that only sets `PHANTOMCHAT_NSEC` in
- * ~/.env (no TOML block) still gets a working, default-relay channel. Whether
- * the listener actually starts is decided by the nsec's presence in run.ts,
- * not by this block.
- *
- * Precedence per field: env wins over TOML wins over default.
- *   - relays:        PHANTOMBOT_PHANTOMCHAT_RELAYS (comma-sep) | relays | defaults
- *   - allowed_npubs: PHANTOMBOT_PHANTOMCHAT_ALLOWED_NPUBS (comma-sep) | allowed_npubs | []
- */
-function buildPhantomchatConfig(
-  tomlPhantomchat: Record<string, unknown>,
-): Config["channels"]["phantomchat"] {
-  const relaysFromEnv = parseCommaList(
-    process.env.PHANTOMBOT_PHANTOMCHAT_RELAYS,
-  );
-  const relaysFromToml = asStringArray(tomlPhantomchat.relays);
-  const relays =
-    relaysFromEnv ??
-    (relaysFromToml && relaysFromToml.length > 0 ? relaysFromToml : undefined) ??
-    [...DEFAULT_PHANTOMCHAT_RELAYS];
-
-  const allowedFromEnv = parseCommaList(
-    process.env.PHANTOMBOT_PHANTOMCHAT_ALLOWED_NPUBS,
-  );
-  const allowedFromToml = asStringArray(tomlPhantomchat.allowed_npubs);
-  const allowedNpubs = allowedFromEnv ?? allowedFromToml ?? [];
-
-  return { relays, allowedNpubs };
-}
-
-/**
- * Split a comma-separated env value into a trimmed, non-empty string list.
- * Returns undefined when unset so callers can fall through to TOML/defaults.
- */
-function parseCommaList(raw: string | undefined): string[] | undefined {
-  if (raw === undefined) return undefined;
-  const items = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  return items.length > 0 ? items : undefined;
 }
 
 /**
