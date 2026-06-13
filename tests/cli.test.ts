@@ -32,6 +32,7 @@ describe("phantombot CLI dispatcher", () => {
       "nightly",
       "notify",
       "persona",
+      "phantomchat",
       "run",
       "task",
       "telegram",

@@ -22,6 +22,7 @@ import { VERSION } from "../version.ts";
 import askCmd from "./ask.ts";
 import personaCmd from "./persona.ts";
 import telegramCmd from "./telegram.ts";
+import phantomchatCmd from "./phantomchat.ts";
 import harnessCmd from "./harness.ts";
 import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
@@ -49,6 +50,7 @@ export const mainCommand = defineCommand({
   subCommands: {
     persona: personaCmd,
     telegram: telegramCmd,
+    phantomchat: phantomchatCmd,
     harness: harnessCmd,
     embedding: embeddingCmd,
     env: envCmd,
