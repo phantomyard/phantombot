@@ -3,7 +3,7 @@
  *
  * Pure functions that turn a (already-decrypted) Matrix timeline event into
  * the channel-neutral `MatrixChannelMessage`. The Matrix analogue of
- * telegram/parse.ts — same job, far simpler input because matrix-js-sdk has
+ * telegram/parse.ts — same job, far simpler input because matrix-bot-sdk has
  * already done the heavy lifting (decryption, type resolution) by the time an
  * event reaches us.
  *

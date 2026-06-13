@@ -1,9 +1,10 @@
 /**
  * Tests for the `phantombot chat` namespace (issue #154):
- *   - runChatMatrixSetup: the invisible-E2EE setup core with all SDK/crypto/
- *     env/login seams mocked (no network, no WASM). Asserts the password is
- *     NEVER persisted, the recovery key goes to env (not config), and the
- *     token/device/MXID land in the right config block.
+ *   - runChatMatrixSetup: the matrix-bot-sdk setup core with the login/register
+ *     seam mocked (no network). Asserts the password is NEVER persisted, the
+ *     token/device/MXID land in the right config block, the e2ee flag is
+ *     written, and that register vs login dispatch is honoured. There is NO
+ *     crypto bootstrap / recovery key at setup time under matrix-bot-sdk.
  *   - applyDefaultChannel: writes [chat].default_channel.
  *   - runTelegramAlias: the deprecated `phantombot telegram` warns + forwards.
  */
@@ -16,8 +17,6 @@ import { join } from "node:path";
 import {
   parseAllowedMxids,
   runChatMatrixSetup,
-  waitForFirstSync,
-  type MatrixSetupClient,
 } from "../src/cli/chat-matrix.ts";
 import { applyDefaultChannel } from "../src/cli/chat.ts";
 import {
@@ -25,7 +24,6 @@ import {
   TELEGRAM_DEPRECATION_NOTICE,
 } from "../src/cli/telegram.ts";
 import type { Config } from "../src/config.ts";
-import type { MatrixCryptoLike } from "../src/channels/matrix/crypto.ts";
 
 let workdir: string;
 let configPath: string;
@@ -48,27 +46,23 @@ function cfg(): Config {
   } as unknown as Config;
 }
 
-/** A crypto stub that records the bootstrap calls + returns a fixed key. */
-function fakeCrypto(): { crypto: MatrixCryptoLike; calls: string[] } {
-  const calls: string[] = [];
-  const crypto: MatrixCryptoLike = {
-    bootstrapCrossSigning: async () => {
-      calls.push("crossSigning");
-    },
-    bootstrapSecretStorage: async (opts) => {
-      calls.push("secretStorage");
-      // Exercise the recovery-key capture path the real bootstrap uses.
-      if (opts.createSecretStorageKey) await opts.createSecretStorageKey();
-    },
-    createRecoveryKeyFromPassphrase: async () => {
-      calls.push("recoveryKey");
-      return {
-        encodedPrivateKey: "EsTx 1234 5678 ABCD",
-        privateKey: new Uint8Array([1, 2, 3]),
-      };
-    },
+/** A login/register seam that records which credentials it saw. */
+function fakeAuth(deviceId = "DEVICE123") {
+  const seen: Array<{ homeserver: string; username: string; password: string }> =
+    [];
+  const fn = async (args: {
+    homeserver: string;
+    username: string;
+    password: string;
+  }) => {
+    seen.push(args);
+    return {
+      userId: `@${args.username}:hs.example`,
+      accessToken: "syt_token_abc",
+      deviceId,
+    };
   };
-  return { crypto, calls };
+  return { fn, seen };
 }
 
 describe("parseAllowedMxids", () => {
@@ -92,13 +86,9 @@ describe("parseAllowedMxids", () => {
   });
 });
 
-describe("runChatMatrixSetup — invisible E2EE", () => {
-  test("logs in, bootstraps, stores recovery key in env (not config), writes config", async () => {
-    const cryptoCalls: string[] = [];
-    const envWrites: Array<{ name: string; value: string }> = [];
-    let initCryptoDir: string | undefined;
-    const fc = fakeCrypto();
-
+describe("runChatMatrixSetup — matrix-bot-sdk", () => {
+  test("logs in and writes token/device/MXID + e2ee flag; password never persisted", async () => {
+    const login = fakeAuth();
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "phantom",
@@ -107,47 +97,15 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       homeserver: "https://hs.example",
       username: "robbie",
       password: "hunter2",
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      makeClient: async (): Promise<MatrixSetupClient> => ({
-        initCrypto: async (dir) => {
-          initCryptoDir = dir;
-        },
-        crypto: () => fc.crypto,
-        authUploadCallback: () => async () => {
-          cryptoCalls.push("authUpload");
-        },
-        stop: () => {},
-      }),
-      envSet: async (name, value) => {
-        envWrites.push({ name, value });
-        return 0;
-      },
+      login: login.fn,
       configPath,
     });
 
     expect(result.ok).toBe(true);
     expect(result.userId).toBe("@robbie:hs.example");
     expect(result.deviceId).toBe("DEVICE123");
+    expect(result.e2ee).toBe(true);
 
-    // Recovery key went to ~/.env (the default account uses the bare name),
-    // NEVER to config.
-    expect(envWrites).toEqual([
-      { name: "MATRIX_RECOVERY_KEY", value: "EsTx 1234 5678 ABCD" },
-    ]);
-    expect(result.recoveryKeyEnvVar).toBe("MATRIX_RECOVERY_KEY");
-
-    // The crypto bootstrap ran cross-signing + secret-storage + key gen.
-    expect(fc.calls).toEqual(["crossSigning", "secretStorage", "recoveryKey"]);
-
-    // Crypto store dir is the per-persona dir, next to SOUL.md.
-    expect(initCryptoDir).toBe(join(workdir, "personas", "phantom", "matrix"));
-
-    // Config got token/device/MXID + an empty allowlist scaffold — and NOT the
-    // password nor the recovery key.
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[channels.matrix]");
     expect(toml).toContain('homeserver = "https://hs.example"');
@@ -156,116 +114,73 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     expect(toml).toContain('access_token = "syt_token_abc"');
     expect(toml).toContain("allowed_user_ids = []");
     expect(toml).toContain("e2ee = true");
+    // The password (and any recovery material) must never reach config.
     expect(toml).not.toContain("hunter2");
-    expect(toml).not.toContain("EsTx 1234 5678 ABCD");
     expect(toml).not.toContain("recovery");
   });
 
-  test("cross-signs this device when cross-signing is ready", async () => {
-    const calls: string[] = [];
-    let crossSignedDevice: string | undefined;
-    // A crypto stub that also implements the optional self-cross-sign surface.
-    const crypto: MatrixCryptoLike = {
-      bootstrapCrossSigning: async () => {
-        calls.push("crossSigning");
-      },
-      bootstrapSecretStorage: async (opts) => {
-        calls.push("secretStorage");
-        if (opts.createSecretStorageKey) await opts.createSecretStorageKey();
-      },
-      createRecoveryKeyFromPassphrase: async () => {
-        calls.push("recoveryKey");
-        return {
-          encodedPrivateKey: "EsTx 1234 5678 ABCD",
-          privateKey: new Uint8Array([1, 2, 3]),
-        };
-      },
-      isCrossSigningReady: async () => {
-        calls.push("isReady");
-        return true;
-      },
-      crossSignDevice: async (deviceId) => {
-        calls.push("crossSign");
-        crossSignedDevice = deviceId;
-      },
-    };
-
+  test("register mode dispatches to registerFn, not login", async () => {
+    const login = fakeAuth("LOGIN_DEV");
+    const register = fakeAuth("REG_DEV");
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "phantom",
       perPersona: false,
       e2ee: true,
+      register: true,
       homeserver: "https://hs.example",
       username: "robbie",
       password: "hunter2",
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      makeClient: async (): Promise<MatrixSetupClient> => ({
-        initCrypto: async () => {},
-        crypto: () => crypto,
-        authUploadCallback: () => async () => {},
-        stop: () => {},
-      }),
-      envSet: async () => 0,
+      login: login.fn,
+      registerFn: register.fn,
       configPath,
     });
 
     expect(result.ok).toBe(true);
-    // The new device got explicitly cross-signed → lands verified, not just
-    // self-signed (the durable "unverified" badge fix).
-    expect(crossSignedDevice).toBe("DEVICE123");
-    expect(calls).toEqual([
-      "crossSigning",
-      "secretStorage",
-      "recoveryKey",
-      "isReady",
-      "crossSign",
-    ]);
+    expect(result.deviceId).toBe("REG_DEV");
+    expect(register.seen).toHaveLength(1);
+    expect(login.seen).toHaveLength(0);
   });
 
-  test("skips cross-sign (no throw) when cross-signing is NOT ready", async () => {
-    const fc = fakeCrypto();
-    // isCrossSigningReady=false → crossSignDevice must never run (the
-    // contaminated-account / skipped-bootstrap case).
-    let crossSignCalled = false;
-    const crypto: MatrixCryptoLike = {
-      ...fc.crypto,
-      isCrossSigningReady: async () => false,
-      crossSignDevice: async () => {
-        crossSignCalled = true;
-      },
-    };
+  test("e2ee off writes e2ee = false (plaintext-over-TLS)", async () => {
+    const login = fakeAuth();
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "phantom",
       perPersona: false,
-      e2ee: true,
+      e2ee: false,
       homeserver: "https://hs.example",
       username: "robbie",
       password: "hunter2",
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      makeClient: async (): Promise<MatrixSetupClient> => ({
-        initCrypto: async () => {},
-        crypto: () => crypto,
-        authUploadCallback: () => async () => {},
-        stop: () => {},
-      }),
-      envSet: async () => 0,
+      login: login.fn,
       configPath,
     });
     expect(result.ok).toBe(true);
-    expect(crossSignCalled).toBe(false);
+    expect(result.e2ee).toBe(false);
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain("e2ee = false");
+  });
+
+  test("defaults e2ee to ON when omitted", async () => {
+    const login = fakeAuth();
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      homeserver: "https://hs.example",
+      username: "robbie",
+      password: "hunter2",
+      login: login.fn,
+      configPath,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.e2ee).toBe(true);
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain("e2ee = true");
   });
 
   test("writes supplied trusted MXIDs into allowed_user_ids", async () => {
-    const fc = fakeCrypto();
+    const login = fakeAuth();
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "phantom",
@@ -275,18 +190,7 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       username: "robbie",
       password: "hunter2",
       allowedUserIds: ["@andrew:matrix.org", "@andrew:hodges.nl"],
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      makeClient: async (): Promise<MatrixSetupClient> => ({
-        initCrypto: async () => {},
-        crypto: () => fc.crypto,
-        authUploadCallback: () => async () => {},
-        stop: () => {},
-      }),
-      envSet: async () => 0,
+      login: login.fn,
       configPath,
     });
 
@@ -294,36 +198,11 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain('"@andrew:matrix.org"');
     expect(toml).toContain('"@andrew:hodges.nl"');
-    // Not the empty scaffold when MXIDs were supplied.
     expect(toml).not.toContain("allowed_user_ids = []");
   });
 
-  test("plaintext path also writes supplied trusted MXIDs", async () => {
-    const result = await runChatMatrixSetup({
-      config: cfg(),
-      persona: "phantom",
-      perPersona: false,
-      // e2ee omitted → plaintext path.
-      homeserver: "https://hs.example",
-      username: "robbie",
-      password: "hunter2",
-      allowedUserIds: ["@andrew:matrix.org"],
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      envSet: async () => 0,
-      configPath,
-    });
-    expect(result.ok).toBe(true);
-    const toml = await readFile(configPath, "utf8");
-    expect(toml).toContain('"@andrew:matrix.org"');
-  });
-
-  test("per-persona setup writes the personas block + suffixed env var", async () => {
-    const envWrites: Array<{ name: string; value: string }> = [];
-    const fc = fakeCrypto();
+  test("per-persona setup writes the personas block", async () => {
+    const login = fakeAuth("D");
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "lena",
@@ -332,77 +211,15 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       homeserver: "https://hs",
       username: "lena",
       password: "pw",
-      login: async () => ({
-        userId: "@lena:hs",
-        accessToken: "tok",
-        deviceId: "D",
-      }),
-      makeClient: async () => ({
-        initCrypto: async () => {},
-        crypto: () => fc.crypto,
-        authUploadCallback: () => async () => {},
-        stop: () => {},
-      }),
-      envSet: async (name, value) => {
-        envWrites.push({ name, value });
-        return 0;
-      },
+      login: login.fn,
       configPath,
     });
     expect(result.ok).toBe(true);
-    expect(result.recoveryKeyEnvVar).toBe("MATRIX_RECOVERY_KEY_LENA");
-    expect(envWrites[0]?.name).toBe("MATRIX_RECOVERY_KEY_LENA");
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[channels.matrix.personas.lena]");
   });
 
-  test("plaintext default (e2ee off): login + write config, NO crypto/recovery key", async () => {
-    const envWrites: Array<{ name: string; value: string }> = [];
-    let clientBuilt = false;
-
-    const result = await runChatMatrixSetup({
-      config: cfg(),
-      persona: "phantom",
-      perPersona: false,
-      // e2ee omitted → defaults to false (the plaintext-to-homeserver path).
-      homeserver: "https://hs.example",
-      username: "robbie",
-      password: "hunter2",
-      login: async ({ username }) => ({
-        userId: `@${username}:hs.example`,
-        accessToken: "syt_token_abc",
-        deviceId: "DEVICE123",
-      }),
-      // If the plaintext path touches the crypto client at all, this trips.
-      makeClient: async (): Promise<MatrixSetupClient> => {
-        clientBuilt = true;
-        throw new Error("crypto client must not be built when e2ee is off");
-      },
-      envSet: async (name, value) => {
-        envWrites.push({ name, value });
-        return 0;
-      },
-      configPath,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(result.userId).toBe("@robbie:hs.example");
-    expect(result.deviceId).toBe("DEVICE123");
-    // No crypto client, no recovery key, no env writes.
-    expect(clientBuilt).toBe(false);
-    expect(result.recoveryKeyEnvVar).toBeUndefined();
-    expect(envWrites).toEqual([]);
-
-    // Config has the account + e2ee = false; no recovery material anywhere.
-    const toml = await readFile(configPath, "utf8");
-    expect(toml).toContain("[channels.matrix]");
-    expect(toml).toContain('access_token = "syt_token_abc"');
-    expect(toml).toContain("e2ee = false");
-    expect(toml).not.toContain("hunter2");
-    expect(toml).not.toContain("recovery");
-  });
-
-  test("returns a failure (no throw) when login is rejected", async () => {
+  test("returns a failure (no throw) when login is rejected; nothing written", async () => {
     const result = await runChatMatrixSetup({
       config: cfg(),
       persona: "phantom",
@@ -413,16 +230,29 @@ describe("runChatMatrixSetup — invisible E2EE", () => {
       login: async () => {
         throw new Error("M_FORBIDDEN");
       },
-      makeClient: async () => {
-        throw new Error("should not reach client init when login fails");
-      },
-      envSet: async () => 0,
       configPath,
     });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("login failed");
-    // Nothing was written to config.
     await expect(readFile(configPath, "utf8")).rejects.toThrow();
+  });
+
+  test("register failure surfaces a registration error", async () => {
+    const result = await runChatMatrixSetup({
+      config: cfg(),
+      persona: "phantom",
+      perPersona: false,
+      register: true,
+      homeserver: "https://hs",
+      username: "x",
+      password: "bad",
+      registerFn: async () => {
+        throw new Error("M_FORBIDDEN: registration disabled");
+      },
+      configPath,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("registration failed");
   });
 });
 
@@ -441,62 +271,6 @@ describe("applyDefaultChannel", () => {
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain('default_persona = "robbie"');
     expect(toml).toContain('default_channel = "telegram"');
-  });
-});
-
-describe("waitForFirstSync (first-sync bound)", () => {
-  /**
-   * A fake matrix-js-sdk client that records sync listeners so tests can drive
-   * the "sync" event — or never fire it — and asserts the listener is removed.
-   */
-  function fakeSyncClient() {
-    const listeners = new Set<(state: string) => void>();
-    return {
-      on(_event: "sync", listener: (state: string) => void) {
-        listeners.add(listener);
-      },
-      removeListener(_event: "sync", listener: (state: string) => void) {
-        listeners.delete(listener);
-      },
-      emit(state: string) {
-        for (const l of [...listeners]) l(state);
-      },
-      get listenerCount() {
-        return listeners.size;
-      },
-    };
-  }
-
-  test("resolves on PREPARED and removes the listener", async () => {
-    const client = fakeSyncClient();
-    const p = waitForFirstSync(client, { timeoutMs: 1000 });
-    client.emit("PREPARED");
-    await expect(p).resolves.toBeUndefined();
-    expect(client.listenerCount).toBe(0);
-  });
-
-  test("rejects on ERROR so setup can fail cleanly (no hang)", async () => {
-    const client = fakeSyncClient();
-    const p = waitForFirstSync(client, { timeoutMs: 1000 });
-    client.emit("ERROR");
-    await expect(p).rejects.toThrow(/ERROR/);
-    expect(client.listenerCount).toBe(0);
-  });
-
-  test("rejects on STOPPED", async () => {
-    const client = fakeSyncClient();
-    const p = waitForFirstSync(client, { timeoutMs: 1000 });
-    client.emit("STOPPED");
-    await expect(p).rejects.toThrow(/STOPPED/);
-    expect(client.listenerCount).toBe(0);
-  });
-
-  test("times out when first sync never reaches a terminal state", async () => {
-    const client = fakeSyncClient();
-    const p = waitForFirstSync(client, { timeoutMs: 20 });
-    client.emit("RECONNECTING"); // transient — must NOT settle the promise
-    await expect(p).rejects.toThrow(/timed out/);
-    expect(client.listenerCount).toBe(0);
   });
 });
 

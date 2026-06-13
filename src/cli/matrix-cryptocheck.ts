@@ -1,22 +1,23 @@
 /**
- * `phantombot matrix-cryptocheck` — the rust-crypto WASM + persistence smoke test.
+ * `phantombot matrix-cryptocheck` — the native Rust-crypto smoke test.
  *
- * WHY THIS EXISTS: the unit suite cannot catch the single-binary WASM bug. Unit
- * tests run interpreted (`bun test`), where `await import("...wasm")` returns a
- * real instance and the crypto bootstraps fine. The failure only manifests in a
- * `bun --compile` ELF (see channels/matrix/cryptoWasm.ts). So "green tests"
- * never proved crypto worked — this command does, by instantiating a real
- * `OlmMachine` through the production init path INSIDE the compiled binary.
+ * WHY THIS EXISTS: the unit suite cannot catch a single-binary crypto packaging
+ * bug. Unit tests run interpreted (`bun test`), where the native addon resolves
+ * from `node_modules` and crypto loads fine. The risk is only in a `bun
+ * --compile` ELF (does the embedded `.node` resolve?). So "green tests" never
+ * proved crypto worked in the shipped binary — this command does, by
+ * instantiating a real `OlmMachine` through the production native-load path
+ * INSIDE the compiled binary.
  *
- *     ./dist/phantombot matrix-cryptocheck            # WASM works (exit 0)
- *     ./dist/phantombot matrix-cryptocheck --persist  # WASM + disk round-trip
+ *     ./dist/phantombot matrix-cryptocheck            # native addon works (exit 0)
+ *     ./dist/phantombot matrix-cryptocheck --persist  # + Rust SQLite store round-trip
  *
- * `--persist` additionally proves the fake-indexeddb → disk snapshot layer
- * (see channels/matrix/idbPersist.ts): it forks TWO child processes against a
- * temp dir — one mints a crypto device + snapshots it, the second restores from
- * that snapshot in a FRESH process — and asserts both report the SAME device
- * key. Separate processes = real proof the device survives a restart (not a
- * same-process cache hit). It touches no homeserver and no real config.
+ * `--persist` additionally proves the on-disk crypto store: it forks TWO child
+ * processes against a temp dir — one mints a crypto device into a Sqlite store,
+ * the second re-opens that store in a FRESH process — and asserts both report
+ * the SAME ed25519 device key. Separate processes = real proof the device
+ * survives a restart (not a same-process cache hit). It touches no homeserver
+ * and no real config.
  */
 
 import { defineCommand } from "citty";
@@ -25,86 +26,64 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { loadNativeCrypto } from "../channels/matrix/nativeCrypto.ts";
+
+/** Minimal shape of the bits of the native addon we touch here. */
+interface NativeCrypto {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  OlmMachine: { initialize(...args: any[]): Promise<any> };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  UserId: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  DeviceId: any;
+  StoreType: { Sqlite: number };
+}
+
+/**
+ * Instantiate a real `OlmMachine` through the SAME native loader the SDK uses
+ * (in-memory store — no disk). Exercises the addon end to end; if the embedded
+ * `.node` is missing/broken in a compiled binary it throws here.
+ */
 export async function runMatrixCryptoCheck(): Promise<number> {
   try {
-    const { ensureCryptoWasm } = await import(
-      "../channels/matrix/cryptoWasm.ts"
-    );
-    await ensureCryptoWasm();
-
-    // Instantiate a real OlmMachine through the SAME bindings the SDK uses.
-    // This exercises wasm malloc + the rust-crypto entry points end to end; if
-    // the WASM instance is missing/broken it throws here.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rust: any = await import("@matrix-org/matrix-sdk-crypto-wasm");
+    const rust = loadNativeCrypto() as NativeCrypto;
     const machine = await rust.OlmMachine.initialize(
       new rust.UserId("@cryptocheck:phantombot.local"),
       new rust.DeviceId("CRYPTOCHECK"),
     );
-    const deviceId = machine.deviceId?.toString?.() ?? "?";
-    // Best-effort free if the binding exposes it.
-    try {
-      machine.free?.();
-    } catch {
-      /* ignore */
-    }
-
+    const ed25519 = machine.identityKeys?.ed25519?.toBase64?.() ?? "?";
     process.stdout.write(
-      `matrix-cryptocheck: OK — OlmMachine instantiated (device ${deviceId})\n`,
+      `matrix-cryptocheck: OK — OlmMachine instantiated (ed25519 ${ed25519.slice(0, 16)}…)\n`,
     );
     return 0;
   } catch (e) {
-    process.stderr.write(
-      `matrix-cryptocheck: FAIL — ${(e as Error).message}\n`,
-    );
+    process.stderr.write(`matrix-cryptocheck: FAIL — ${(e as Error).message}\n`);
     return 1;
   }
 }
 
 /**
  * One phase of the persistence round-trip, run in a CHILD process so "restore"
- * gets a genuinely empty in-memory store that can only be filled from disk.
- * Prints `DEVICE=<ed25519>` on success. `generate` wipes + creates; `restore`
- * reads back the snapshot.
+ * gets a genuinely fresh process whose device can only come from the on-disk
+ * Sqlite store. Prints `DEVICE=<ed25519>` on success. `generate` wipes +
+ * creates; `restore` re-opens the same store dir.
  */
 export async function runCryptoPersistPhase(
   phase: "generate" | "restore",
   dir: string,
 ): Promise<number> {
   try {
-    const { installPersistentIndexedDB, cryptoSnapshotPath, MATRIX_CRYPTO_DB_PREFIX, flushSnapshot } =
-      await import("../channels/matrix/idbPersist.ts");
-    const { ensureCryptoWasm } = await import(
-      "../channels/matrix/cryptoWasm.ts"
-    );
+    const rust = loadNativeCrypto() as NativeCrypto;
     if (phase === "generate") rmSync(dir, { recursive: true, force: true });
-
-    await installPersistentIndexedDB(cryptoSnapshotPath(dir));
-    await ensureCryptoWasm();
-    const sdk = await import("matrix-js-sdk");
-    const { quietMatrixLogger } = await import(
-      "../channels/matrix/sdkLogging.ts"
+    const machine = await rust.OlmMachine.initialize(
+      new rust.UserId("@cryptocheck:phantombot.local"),
+      new rust.DeviceId("CRYPTOCHECK"),
+      dir,
+      undefined,
+      rust.StoreType.Sqlite,
     );
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const client: any = sdk.createClient({
-      // Unroutable base URL: initRustCrypto does a best-effort key-backup probe
-      // we don't care about; the device keys are generated/read locally.
-      baseUrl: "https://localhost:1",
-      userId: "@cryptocheck:phantombot.local",
-      deviceId: "CRYPTOCHECK",
-      accessToken: "syt_cryptocheck_offline",
-      // Keep the gate's output to its own OK/FAIL lines (undefined under
-      // PHANTOMBOT_MATRIX_DEBUG).
-      logger: quietMatrixLogger(),
-    });
-    await client.initRustCrypto({ cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX });
-    const keys = await client.getCrypto().getOwnDeviceKeys();
-    if (phase === "generate") {
-      // Let the store settle, then force the snapshot to disk.
-      await new Promise((r) => setTimeout(r, 500));
-      await flushSnapshot();
-    }
-    process.stdout.write(`DEVICE=${keys.ed25519}\n`);
+    const ed25519 = machine.identityKeys?.ed25519?.toBase64?.() ?? "?";
+    process.stdout.write(`DEVICE=${ed25519}\n`);
     return 0;
   } catch (e) {
     process.stderr.write(`PERSIST-${phase}: FAIL — ${(e as Error).message}\n`);
@@ -114,8 +93,8 @@ export async function runCryptoPersistPhase(
 
 /** Orchestrate the two-process persistence round-trip and compare device keys. */
 async function runPersistRoundTrip(): Promise<number> {
-  const wasm = await runMatrixCryptoCheck();
-  if (wasm !== 0) return wasm;
+  const base = await runMatrixCryptoCheck();
+  if (base !== 0) return base;
 
   const dir = mkdtempSync(join(tmpdir(), "phantom-cryptocheck-"));
   try {
@@ -125,10 +104,8 @@ async function runPersistRoundTrip(): Promise<number> {
         ["matrix-cryptocheck", `--persist-phase=${phase}`, `--dir=${dir}`],
         {
           encoding: "utf8",
-          // The rust-crypto migrations log verbosely to stderr; the default
-          // 1MB maxBuffer overflows, killing the child with status=null and
-          // error=ENOBUFS — which surfaced as the opaque "exited undefined".
-          // Give it generous headroom so the round-trip isn't a false failure.
+          // The Rust store migrations log verbosely; give generous headroom so
+          // an ENOBUFS doesn't masquerade as a crypto failure.
           maxBuffer: 256 * 1024 * 1024,
         },
       );
@@ -138,20 +115,25 @@ async function runPersistRoundTrip(): Promise<number> {
         );
         return null;
       }
-      if (r.status !== 0) {
-        process.stderr.write(
-          r.stderr || `child ${phase} exited with status ${r.status}\n`,
-        );
-        return null;
-      }
+      // The DEVICE= line is the source of truth, NOT the exit code: the prebuilt
+      // Rust addon SIGABRTs during napi/tokio teardown on process exit (see
+      // nativeCrypto.ts), so a child that did its job perfectly still exits
+      // non-zero. stdout is already flushed before the abort, so parse it first
+      // and only treat a MISSING device line as a real failure.
       const m = /DEVICE=(\S+)/.exec(r.stdout);
-      return m ? m[1]! : null;
+      if (m) return m[1]!;
+      process.stderr.write(
+        r.stderr || `child ${phase} produced no device (status ${r.status})\n`,
+      );
+      return null;
     };
 
     const gen = runChild("generate");
     const res = runChild("restore");
     if (!gen || !res) {
-      process.stderr.write("matrix-cryptocheck: FAIL — persistence phase errored\n");
+      process.stderr.write(
+        "matrix-cryptocheck: FAIL — persistence phase errored\n",
+      );
       return 1;
     }
     if (gen !== res) {
@@ -173,18 +155,19 @@ export default defineCommand({
   meta: {
     name: "matrix-cryptocheck",
     description:
-      "Smoke-test rust-crypto: instantiate a real OlmMachine in the compiled binary; --persist also proves the disk snapshot round-trip (exit 0 = E2EE works).",
+      "Smoke-test native Rust crypto: instantiate a real OlmMachine in the compiled binary; --persist also proves the on-disk Sqlite store round-trip (exit 0 = E2EE works).",
   },
   args: {
     persist: {
       type: "boolean",
       description:
-        "Also verify the crypto store survives a restart (two-process disk snapshot round-trip).",
+        "Also verify the crypto store survives a restart (two-process Sqlite store round-trip).",
       default: false,
     },
     "persist-phase": {
       type: "string",
-      description: "(internal) one phase of the persistence round-trip: generate | restore.",
+      description:
+        "(internal) one phase of the persistence round-trip: generate | restore.",
     },
     dir: {
       type: "string",

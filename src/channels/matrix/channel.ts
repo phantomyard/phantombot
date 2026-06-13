@@ -13,22 +13,22 @@
  * place transport encryption happens: decrypt-on-ingest, encrypt-on-egress,
  * so the core only ever sees plaintext. For Telegram these are identity
  * pass-throughs (no E2EE). For Matrix the work is REAL Megolm — but
- * matrix-js-sdk + rust-crypto perform it UNDER THE HOOD:
+ * matrix-bot-sdk + its Rust crypto addon perform it UNDER THE HOOD:
  *
- *   - INGEST: by the time a live timeline event reaches us, the SDK has
- *     already Megolm-DECRYPTED it (we filter out decryption failures in the
- *     transport). So `decrypt()` receives an already-plaintext message; its
- *     job is to ASSERT/normalize that invariant, not to run a cipher.
- *   - EGRESS: `transport.sendMessage` → `client.sendTextMessage`, which the
- *     SDK transparently Megolm-ENCRYPTS for an encrypted room. So `encrypt()`
- *     is a pass-through of the plaintext OutboundMessage; the actual
- *     encryption happens at send time inside the SDK.
+ *   - INGEST: matrix-bot-sdk emits `room.message` ONLY AFTER decryption, so by
+ *     the time an event reaches us it is already Megolm-DECRYPTED. So
+ *     `decrypt()` receives an already-plaintext message; its job is to
+ *     ASSERT/normalize that invariant, not to run a cipher.
+ *   - EGRESS: `transport.sendMessage` → `client.sendText`, which the SDK
+ *     transparently Megolm-ENCRYPTS for an encrypted room. So `encrypt()` is a
+ *     pass-through of the plaintext OutboundMessage; the actual encryption
+ *     happens at send time inside the SDK.
  *
  * So `encryption: true` is HONEST — the wire carries ciphertext — even though
  * these hooks look like pass-throughs. The cipher lives in the SDK, gated on
- * crypto being initialised (createRealMatrixClient → initRustCrypto) and the
- * room being encrypted. The hooks remain the documented seam: if we ever need
- * to touch the ciphertext boundary directly, this is where it goes.
+ * crypto being prepared (createRealMatrixClient → crypto.prepare) and the room
+ * being encrypted. The hooks remain the documented seam: if we ever need to
+ * touch the ciphertext boundary directly, this is where it goes.
  * ===========================================================================
  */
 

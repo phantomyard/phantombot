@@ -140,61 +140,74 @@ export async function runMatrixNotify(
 }
 
 /**
- * Default production Matrix sender: a crypto-enabled SDK client that resolves
- * (or creates) the 1:1 DM room for the target MXID and sends the message
- * there. Imported dynamically so the heavy SDK only loads on an actual Matrix
- * notify. The send is Megolm-encrypted transparently if the DM room is
- * encrypted (which a fresh DM with an E2EE-capable user will be).
+ * Default production Matrix sender (matrix-bot-sdk): resolves (or creates) the
+ * 1:1 DM room for the target MXID and sends the message there. Imported
+ * dynamically so the SDK only loads on an actual Matrix notify. With E2EE on,
+ * the message is Megolm-encrypted transparently — the Rust crypto store
+ * (`<personaDir>/matrix/crypto-store/`) holds the bot's device identity.
+ *
+ * Concurrency note: an E2EE notify reuses the SAME crypto store as the running
+ * listener (so the bot keeps one stable device — no churn). The Rust SQLite
+ * store tolerates a short-lived second opener for a single send; if a future
+ * homeserver/store change makes that contend, the fix is a dedicated notify
+ * device, not a snapshot dance. Tracked for dogfooding.
  */
 async function defaultMatrixSender(): Promise<MatrixNotifySender> {
   return {
     send: async ({ account, mxid, message, cryptoStoreDir }) => {
-      const sdk = await import("matrix-js-sdk");
-      const { quietMatrixLogger } = await import(
-        "../channels/matrix/sdkLogging.ts"
-      );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const client: any = sdk.createClient({
-        baseUrl: account.homeserver,
-        userId: account.userId,
-        deviceId: account.deviceId,
-        accessToken: account.accessToken,
-        // Quiet the SDK firehose on the notify path too (undefined under
-        // PHANTOMBOT_MATRIX_DEBUG).
-        logger: quietMatrixLogger(),
-      });
-      // Only spin up rust-crypto for an E2EE account. With E2EE on, crypto must
-      // be up so the DM sends ciphertext, not a UISI. We restore the bot's
-      // device identity from its snapshot in READ-ONLY mode: this short-lived
-      // notify process reuses the real device (no churn) but never writes back,
-      // so it can't race the long-running listener that owns the snapshot. With
-      // E2EE off (the v1 default) we skip the WASM bootstrap and send plaintext.
-      if (account.e2ee) {
-        const {
-          installPersistentIndexedDB,
-          cryptoSnapshotPath,
-          MATRIX_CRYPTO_DB_PREFIX,
-        } = await import("../channels/matrix/idbPersist.ts");
-        const { ensureCryptoWasm } = await import(
-          "../channels/matrix/cryptoWasm.ts"
-        );
-        if (cryptoStoreDir) {
-          await installPersistentIndexedDB(cryptoSnapshotPath(cryptoStoreDir), {
-            readOnly: true,
-          });
+      const { mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const sdk = await import("matrix-bot-sdk");
+      const {
+        MatrixClient,
+        SimpleFsStorageProvider,
+        RustSdkCryptoStorageProvider,
+        LogService,
+        LogLevel,
+      } = sdk;
+      if (!process.env.PHANTOMBOT_MATRIX_DEBUG) {
+        try {
+          LogService.setLevel(LogLevel.ERROR);
+        } catch {
+          /* logging is best-effort */
         }
-        await ensureCryptoWasm();
-        await client.initRustCrypto({
-          cryptoDatabasePrefix: MATRIX_CRYPTO_DB_PREFIX,
-        });
       }
-      await client.startClient({ initialSyncLimit: 1 });
-      try {
-        const roomId = await resolveOrCreateDm(client, mxid);
-        await client.sendTextMessage(roomId, message);
-      } finally {
-        client.stopClient();
+
+      // The bot-sdk client needs a storage dir for its sync cache. Reuse the
+      // per-persona Matrix dir when known; fall back to a temp dir otherwise.
+      const dir =
+        cryptoStoreDir ??
+        join((await import("node:os")).tmpdir(), "phantombot-matrix-notify");
+      mkdirSync(dir, { recursive: true });
+      const storage = new SimpleFsStorageProvider(join(dir, "bot-sdk-sync.json"));
+      let crypto: InstanceType<typeof RustSdkCryptoStorageProvider> | undefined;
+      if (account.e2ee) {
+        // `StoreType` is an ambient const enum; the runtime module is a real
+        // object — read it via an any-cast (see transport.ts for the rationale).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const cryptoPkg: any = await import("@matrix-org/matrix-sdk-crypto-nodejs");
+        crypto = new RustSdkCryptoStorageProvider(
+          join(dir, "crypto-store"),
+          cryptoPkg.StoreType.Sqlite,
+        );
       }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const client: any = new MatrixClient(
+        account.homeserver,
+        account.accessToken,
+        storage,
+        crypto,
+      );
+
+      // Crypto must be prepared before an encrypted send so the DM ciphers
+      // rather than UISIs. No sync loop needed — we just resolve a room + send.
+      if (account.e2ee && client.crypto) {
+        const joined = await client.getJoinedRooms().catch(() => []);
+        await client.crypto.prepare(joined);
+      }
+
+      const roomId = await resolveOrCreateDm(client, mxid);
+      await client.sendText(roomId, message);
     },
   };
 }
@@ -206,13 +219,15 @@ async function defaultMatrixSender(): Promise<MatrixNotifySender> {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function resolveOrCreateDm(client: any, mxid: string): Promise<string> {
-  const direct = client.getAccountData?.("m.direct")?.getContent?.() ?? {};
-  const existing = Array.isArray(direct[mxid]) ? direct[mxid][0] : undefined;
+  const direct = (await client.getAccountData("m.direct").catch(() => ({}))) as
+    | Record<string, unknown>
+    | undefined;
+  const rooms = direct?.[mxid];
+  const existing = Array.isArray(rooms) ? rooms[0] : undefined;
   if (typeof existing === "string" && existing.length > 0) return existing;
-  const res = await client.createRoom({
+  return await client.createRoom({
     invite: [mxid],
     is_direct: true,
     preset: "trusted_private_chat",
   });
-  return res.room_id;
 }

@@ -5,16 +5,15 @@
  * server + setup helpers under stable names so callers (cli/run.ts,
  * cli/chat-matrix, routing) import from one place. Submodules:
  *
- *   - matrix/types.ts      — MatrixChannelMessage + MatrixClientLike seam
- *   - matrix/parse.ts      — pure timeline-event → MatrixChannelMessage
- *   - matrix/transport.ts  — MatrixTransport + ClientMatrixTransport +
- *                            createRealMatrixClient (the SDK + crypto wiring)
- *   - matrix/channel.ts    — the Matrix Channel adapter (real-Megolm seam +
- *                            listen() over /sync)
- *   - matrix/server.ts     — runMatrixServer (the listener loop)
- *   - matrix/login.ts      — password → token+deviceId, password discarded
- *   - matrix/crypto.ts     — invisible-E2EE bootstrap (recovery key auto-gen)
- *   - matrix/cryptoWasm.ts — the single-binary WASM embedding seam
+ *   - matrix/types.ts       — MatrixChannelMessage + MatrixClientLike seam
+ *   - matrix/parse.ts       — pure timeline-event → MatrixChannelMessage
+ *   - matrix/transport.ts   — MatrixTransport + ClientMatrixTransport +
+ *                             createRealMatrixClient (matrix-bot-sdk + Rust crypto)
+ *   - matrix/channel.ts     — the Matrix Channel adapter (real-Megolm seam +
+ *                             listen() over /sync)
+ *   - matrix/server.ts      — runMatrixServer (the listener loop)
+ *   - matrix/login.ts       — password → token+deviceId, password discarded
+ *   - matrix/nativeCrypto.ts — single-binary native-addon load seam
  */
 
 export { parseTimelineEvent, MATRIX_MESSAGE_TYPE } from "./matrix/parse.ts";
@@ -34,15 +33,15 @@ export {
 } from "./matrix/server.ts";
 export {
   realMatrixLogin,
+  realMatrixRegister,
   type MatrixLoginFn,
   type MatrixLoginResult,
 } from "./matrix/login.ts";
 export {
-  bootstrapInvisibleE2ee,
-  type BootstrapResult,
-  type MatrixCryptoLike,
-} from "./matrix/crypto.ts";
-export { ensureCryptoWasm } from "./matrix/cryptoWasm.ts";
+  loadNativeCrypto,
+  nativeCryptoFilename,
+  nativeCryptoVariant,
+} from "./matrix/nativeCrypto.ts";
 export type {
   MatrixChannelMessage,
   MatrixClientLike,

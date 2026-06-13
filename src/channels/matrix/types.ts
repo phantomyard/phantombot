@@ -4,8 +4,8 @@
  *
  * Two reasons this file exists separately from `transport.ts`:
  *
- *   1. The real `matrix-js-sdk` `MatrixClient` is enormous and pulls in the
- *      WASM crypto on import. The transport + server should depend on a SMALL,
+ *   1. The real matrix-bot-sdk `MatrixClient` is large and pulls in the native
+ *      Rust crypto addon. The transport + server should depend on a SMALL,
  *      explicit interface (`MatrixClientLike`) so unit tests can drive the
  *      whole channel with a hand-written fake — no network, no crypto, no
  *      subprocess (mirrors how the Telegram tests use a `FakeTransport`).
@@ -42,7 +42,7 @@ export interface MatrixChannelMessage extends ChannelMessage {
 
 /**
  * A single raw timeline event as the adapter consumes it. A thin projection
- * of matrix-js-sdk's `MatrixEvent` exposing only what the parser needs, so the
+ * of a matrix-bot-sdk raw event exposing only what the parser needs, so the
  * parser stays pure + testable without constructing real SDK events.
  */
 export interface MatrixTimelineEvent {
@@ -59,7 +59,7 @@ export interface MatrixTimelineEvent {
 
 /**
  * The minimal Matrix client surface the transport + server need. The real
- * `matrix-js-sdk` `MatrixClient` is a structural superset of this, so the
+ * matrix-bot-sdk `MatrixClient` (via our wrapper) is a structural superset of this, so the
  * production wrapper is a near pass-through; the test fake implements exactly
  * these members.
  */
@@ -67,7 +67,7 @@ export interface MatrixClientLike {
   /** The bot's own MXID — used to skip our own echoed messages on /sync. */
   getUserId(): string | null;
   /** Begin syncing. Resolves once the initial sync completes (or rejects). */
-  startClient(opts?: { initialSyncLimit?: number }): Promise<void>;
+  startClient(): Promise<void>;
   /** Stop syncing + tear down. */
   stopClient(): void;
   /**

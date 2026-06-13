@@ -89,13 +89,12 @@ export interface TelegramAccount {
  * Matrix homeserver login. Mirrors `TelegramAccount` so the two channels plug
  * into the same listener / notify / screener machinery.
  *
- * NOTE on E2EE invisibility (the principal's hard requirement): there is NO
- * "enable encryption" knob here and no recovery-key field. E2EE is ALWAYS on;
- * the auto-generated recovery key lives in `~/.env` as `MATRIX_RECOVERY_KEY`
- * (per-persona suffix for persona-bound bots), never in config.toml. The
- * crypto SQLite store lives next to SOUL.md under the persona work dir
- * (`<personaDir>/matrix/`) so copying the persona dir migrates the device
- * identity + Megolm sessions wholesale. See src/channels/matrix/transport.ts.
+ * NOTE on E2EE invisibility (the principal's hard requirement): under
+ * matrix-bot-sdk there is NOTHING to keep — no recovery-key field, no
+ * verification, no cross-signing. When `e2ee` is on, the Rust crypto SQLite
+ * store lives next to SOUL.md under the persona work dir
+ * (`<personaDir>/matrix/crypto-store/`) so copying the persona dir migrates the
+ * device identity + Megolm sessions wholesale. See src/channels/matrix/transport.ts.
  *
  * The password is NEVER stored — the setup wizard exchanges it for the
  * `accessToken` + `deviceId` below and discards it. Only those survive.
@@ -120,13 +119,12 @@ export interface MatrixAccount {
    */
   allowedUserIds: string[];
   /**
-   * Whether to bootstrap + run end-to-end encryption (Megolm via rust-crypto).
-   * DEFAULT FALSE. v1 ships plaintext-to-homeserver (TLS only, same protection
-   * level as the Telegram bot API) so the channel doesn't depend on the
-   * WASM-in-single-binary crypto bootstrap. E2EE is an opt-in toggle
-   * (`e2ee = true` in the account block) added deliberately once the embedded
-   * rust-crypto WASM is proven in the compiled binary. When false: no
-   * `ensureCryptoWasm`, no `initRustCrypto`, no recovery key — just /sync + send.
+   * Whether to run end-to-end encryption (Megolm via matrix-bot-sdk's Rust
+   * crypto addon). When true, a `RustSdkCryptoStorageProvider` is attached and
+   * `crypto.prepare()` runs before sync — encrypted rooms then "just work" with
+   * no verification, cross-signing, or recovery key. When false, the client
+   * talks plaintext-over-TLS (same protection level as the Telegram bot API).
+   * The setup wizard defaults this ON (E2EE is free under bot-sdk).
    */
   e2ee: boolean;
 }
@@ -933,12 +931,13 @@ export function personaDir(config: Config, name: string): string {
 }
 
 /**
- * The Matrix rust-crypto SQLite store directory for a persona — DELIBERATELY
- * next to SOUL.md, under the persona work dir (`<personaDir>/matrix/`), not in
- * a global XDG cache. This is the migration contract: the store holds the
- * device identity + Olm/Megolm sessions, so copying the persona dir to a new
- * VM carries the SAME device with it (no re-verification, no lost history).
- * `cryptoDatabasePrefix` passed to `MatrixClient.initRustCrypto` points here.
+ * The Matrix base dir for a persona — DELIBERATELY next to SOUL.md, under the
+ * persona work dir (`<personaDir>/matrix/`), not in a global XDG cache. It holds
+ * the bot-sdk sync state and the Rust crypto store (`crypto-store/`). This is the
+ * migration contract: the crypto store holds the device identity + Olm/Megolm
+ * sessions, so copying the persona dir to a new VM carries the SAME device with
+ * it (no re-verification, no lost history). The transport's
+ * `RustSdkCryptoStorageProvider` is rooted here.
  * Reuses `personaDir` so it tracks any future change to persona-dir resolution.
  */
 export function matrixCryptoStoreDir(config: Config, persona: string): string {
