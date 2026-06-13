@@ -47,6 +47,10 @@ function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
       calls.push("persona");
       return 0;
     },
+    runPhantomchat: async () => {
+      calls.push("phantomchat");
+      return 0;
+    },
     runTelegram: async () => {
       calls.push("telegram");
       return 0;
@@ -57,11 +61,18 @@ function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
 }
 
 describe("runInitFlow", () => {
-  test("happy path: runs harness → persona → telegram in order", async () => {
+  test("happy path: harness → persona → phantomchat → telegram in order", async () => {
     const { deps, calls } = makeDeps();
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(0);
-    expect(calls).toEqual(["harness", "persona", "telegram"]);
+    expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
+  });
+
+  test("skipTelegram: phantomchat runs, telegram skipped", async () => {
+    const { deps, calls } = makeDeps();
+    const code = await runInitFlow({ ...fakeInput(), skipTelegram: true }, deps);
+    expect(code).toBe(0);
+    expect(calls).toEqual(["harness", "persona", "phantomchat"]);
   });
 
   test("forwards config + availability to runHarness", async () => {
@@ -79,7 +90,7 @@ describe("runInitFlow", () => {
     expect(seen[0]?.availability).toBe(input.availability);
   });
 
-  test("short-circuits on harness failure: persona + telegram NOT called", async () => {
+  test("short-circuits on harness failure: nothing else called", async () => {
     const { deps, calls } = makeDeps({
       runHarness: async () => {
         calls.push("harness");
@@ -91,7 +102,7 @@ describe("runInitFlow", () => {
     expect(calls).toEqual(["harness"]);
   });
 
-  test("short-circuits on persona failure: telegram NOT called", async () => {
+  test("short-circuits on persona failure: phantomchat + telegram NOT called", async () => {
     const { deps, calls } = makeDeps({
       runPersona: async () => {
         calls.push("persona");
@@ -103,6 +114,18 @@ describe("runInitFlow", () => {
     expect(calls).toEqual(["harness", "persona"]);
   });
 
+  test("short-circuits on phantomchat failure: telegram NOT called", async () => {
+    const { deps, calls } = makeDeps({
+      runPhantomchat: async () => {
+        calls.push("phantomchat");
+        return 5;
+      },
+    });
+    const code = await runInitFlow(fakeInput(), deps);
+    expect(code).toBe(5);
+    expect(calls).toEqual(["harness", "persona", "phantomchat"]);
+  });
+
   test("propagates telegram failure exit code", async () => {
     const { deps, calls } = makeDeps({
       runTelegram: async () => {
@@ -112,6 +135,6 @@ describe("runInitFlow", () => {
     });
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(9);
-    expect(calls).toEqual(["harness", "persona", "telegram"]);
+    expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
   });
 });

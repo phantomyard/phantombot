@@ -14,11 +14,18 @@ import {
 import { runEmbedding } from "./embedding.ts";
 import { runInstall } from "./install.ts";
 import { runPersona } from "./persona.ts";
+import { runPhantomchat } from "./phantomchat.ts";
 import { runTelegram } from "./telegram.ts";
 
 export interface InitFlowInput {
   config: Config;
   availability: Record<HarnessId, string | undefined>;
+  /**
+   * Skip the Telegram step. phantomchat is the mandatory primary channel;
+   * Telegram is optional for users who only want phantomchat. Resolved by a
+   * confirm in `run()` so the ordering/short-circuit logic stays TTY-free.
+   */
+  skipTelegram?: boolean;
 }
 
 export interface InitFlowDeps {
@@ -27,15 +34,19 @@ export interface InitFlowDeps {
     availability: Record<HarnessId, string | undefined>;
   }) => Promise<number>;
   runPersona: () => Promise<number>;
+  runPhantomchat: () => Promise<number>;
   runTelegram: () => Promise<number>;
 }
 
 /**
- * Pure orchestration of the three configuration wizards: harness → persona
- * → telegram. Short-circuits on the first non-zero exit. Extracted from the
- * interactive `run()` so the ordering and short-circuit behavior is testable
- * without a TTY. The install wizard runs after this in `run()` so it can be
- * gated on a separate user confirmation and a Linux-only linger pre-check.
+ * Pure orchestration of the configuration wizards:
+ *   harness → persona → phantomchat (MANDATORY) → telegram (OPTIONAL).
+ * Short-circuits on the first non-zero exit. phantomchat is the primary channel
+ * and always runs; Telegram is skipped when `input.skipTelegram` is set.
+ * Extracted from the interactive `run()` so the ordering and short-circuit
+ * behavior is testable without a TTY. The install wizard runs after this in
+ * `run()` so it can be gated on a separate user confirmation and a Linux-only
+ * linger pre-check.
  */
 export async function runInitFlow(
   input: InitFlowInput,
@@ -50,8 +61,13 @@ export async function runInitFlow(
   const personaCode = await deps.runPersona();
   if (personaCode !== 0) return personaCode;
 
-  const telegramCode = await deps.runTelegram();
-  if (telegramCode !== 0) return telegramCode;
+  const phantomchatCode = await deps.runPhantomchat();
+  if (phantomchatCode !== 0) return phantomchatCode;
+
+  if (!input.skipTelegram) {
+    const telegramCode = await deps.runTelegram();
+    if (telegramCode !== 0) return telegramCode;
+  }
 
   return 0;
 }
@@ -88,9 +104,10 @@ export default defineCommand({
       "This wizard will guide you through a few quick steps to get your agent running:\n" +
       "  1. Pick your AI harness (claude, pi, gemini, or codex)\n" +
       "  2. Create a persona (identity & memory)\n" +
-      "  3. Connect to Telegram\n" +
-      "  4. Enable semantic memory search (optional)\n" +
-      "  5. Install as a background service",
+      "  3. Connect PhantomChat (your private Nostr DM channel)\n" +
+      "  4. Connect Telegram (optional — skippable)\n" +
+      "  5. Enable semantic memory search (optional)\n" +
+      "  6. Install as a background service",
       "Setup Flow"
     );
 
@@ -140,13 +157,29 @@ export default defineCommand({
       );
     }
 
-    // 1-3: harness → persona → telegram, orchestrated by runInitFlow so
-    // the ordering + short-circuit behavior can be tested without a TTY.
+    // PhantomChat is the mandatory primary channel; Telegram is optional. Ask
+    // up front so the flow itself stays TTY-free and testable.
+    p.note(
+      "PhantomChat is your private, end-to-end-encrypted DM channel (over Nostr)\n" +
+      "and is set up next — it's required. Telegram is optional: skip it if you\n" +
+      "only want to talk to your agent through PhantomChat.",
+      "Channels"
+    );
+    const wantTelegram = await p.confirm({
+      message: "Also connect Telegram? (optional)",
+      initialValue: true,
+    });
+    const skipTelegram = p.isCancel(wantTelegram) ? false : !wantTelegram;
+
+    // 1-4: harness → persona → phantomchat (mandatory) → telegram (optional),
+    // orchestrated by runInitFlow so the ordering + short-circuit behavior can
+    // be tested without a TTY.
     const flowCode = await runInitFlow(
-      { config, availability: avail },
+      { config, availability: avail, skipTelegram },
       {
         runHarness: (input) => runHarness(input),
         runPersona,
+        runPhantomchat: () => runPhantomchat(),
         runTelegram,
       },
     );

@@ -41,10 +41,24 @@ export interface RunPhantomchatServerInput {
   channel: Channel<PhantomchatTransport>;
   /**
    * Decoded allowlist: lowercase 64-char hex pubkeys permitted to talk to the
-   * bot. Empty = answer anyone (parallel to Telegram's empty `allowedUserIds`),
-   * with a loud startup warning emitted by the caller.
+   * bot. Non-empty = only these are answered. Empty = see `tofu`.
    */
   allowedHex: string[];
+  /**
+   * Trust-on-first-use. Only consulted when `allowedHex` is empty:
+   *   - tofu true  → the FIRST sender is trusted, persisted via `persistTrust`,
+   *     and the bot locks to it (every later stranger is dropped).
+   *   - tofu false → open bot: answer anyone (parallel to Telegram's empty
+   *     `allowedUserIds`), with a loud startup warning emitted by the caller.
+   */
+  tofu?: boolean;
+  /**
+   * Persist a TOFU-trusted sender (called once, when tofu fires). The caller
+   * encodes the hex→npub and writes it into phantomchat.json (clearing tofu).
+   * Best-effort: a rejection is logged but the sender is still trusted for the
+   * life of this process. Omitted in tests that don't exercise persistence.
+   */
+  persistTrust?: (senderHex: string) => Promise<void>;
   /** Stop after draining the currently-available messages. For tests. */
   oneShot?: boolean;
   /** Signal to stop the loop cleanly (Ctrl-C / SIGTERM). */
@@ -68,10 +82,11 @@ export async function runPhantomchatServer(
   const { channel } = input;
   const transport = channel.transport;
 
-  // Decoded allowlist as a set for O(1) membership. Empty = open bot.
+  // Decoded allowlist as a set for O(1) membership. Mutable: TOFU adds the
+  // first sender at runtime, after which the set is non-empty and locked.
   const allowedSet = new Set(input.allowedHex.map((h) => h.toLowerCase()));
-  const checkAllowed = (senderHex: string): boolean =>
-    allowedSet.size === 0 || allowedSet.has(senderHex.toLowerCase());
+  // TOFU is armed only when we start with an empty allowlist and tofu is on.
+  let tofuArmed = allowedSet.size === 0 && input.tofu === true;
 
   const harnesses: Harness[] = [...input.harnesses];
 
@@ -89,12 +104,34 @@ export async function runPhantomchatServer(
     // controllable plaintext. A sender not in the allowlist is dropped SILENTLY
     // (info log only) — no reply, so the bot doesn't become an oracle that
     // confirms its own pubkey is live to strangers.
-    if (!checkAllowed(senderHex)) {
-      log.info("phantomchat: dropping message from non-allowed sender", {
+    const lowerHex = senderHex.toLowerCase();
+    if (allowedSet.size > 0) {
+      // Locked allowlist (configured, or already claimed by TOFU).
+      if (!allowedSet.has(lowerHex)) {
+        log.info("phantomchat: dropping message from non-allowed sender", {
+          sender: senderHex.slice(0, 12) + "…",
+        });
+        return;
+      }
+    } else if (tofuArmed) {
+      // TRUST-ON-FIRST-USE. Claim this sender SYNCHRONOUSLY (before any await)
+      // so a near-simultaneous second stranger sees a now-non-empty set and is
+      // dropped — JS single-threading makes this block atomic vs other peers.
+      tofuArmed = false;
+      allowedSet.add(lowerHex);
+      log.info("phantomchat: TOFU — trusted first sender and locked", {
         sender: senderHex.slice(0, 12) + "…",
       });
-      return;
+      if (input.persistTrust) {
+        // Best-effort durable write; trust already stands in-memory regardless.
+        void input.persistTrust(senderHex).catch((e) => {
+          log.warn("phantomchat: failed to persist TOFU-trusted npub", {
+            error: (e as Error).message,
+          });
+        });
+      }
     }
+    // else: empty set + tofu off = open bot — answer anyone (caller warned).
 
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the

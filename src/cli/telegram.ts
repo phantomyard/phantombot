@@ -25,25 +25,24 @@ export interface TelegramTuiInputs {
 }
 
 /**
- * Write the supplied inputs to the [channels.telegram] block of the
- * config file, preserving other sections. Pure side effect.
+ * Write the supplied inputs to the Telegram config block, preserving other
+ * sections. With `persona`, writes the PERSONA-BOUND block
+ * `[channels.telegram.personas.<persona>]` (its own token + allowlist), mirroring
+ * `phantombot phantomchat --persona`. Without it, writes the default
+ * `[channels.telegram]` block. Pure side effect.
  */
 export async function applyTelegramConfig(
   configPath: string,
   inputs: TelegramTuiInputs,
+  persona?: string,
 ): Promise<void> {
+  const base = persona
+    ? ["channels", "telegram", "personas", persona]
+    : ["channels", "telegram"];
   await updateConfigToml(configPath, (toml) => {
-    setIn(toml, ["channels", "telegram", "token"], inputs.token);
-    setIn(
-      toml,
-      ["channels", "telegram", "poll_timeout_s"],
-      inputs.pollTimeoutS,
-    );
-    setIn(
-      toml,
-      ["channels", "telegram", "allowed_user_ids"],
-      inputs.allowedUserIds,
-    );
+    setIn(toml, [...base, "token"], inputs.token);
+    setIn(toml, [...base, "poll_timeout_s"], inputs.pollTimeoutS);
+    setIn(toml, [...base, "allowed_user_ids"], inputs.allowedUserIds);
   });
 }
 
@@ -62,16 +61,29 @@ interface RunInput {
   validateToken?: (token: string) => Promise<GetMeResult>;
   serviceControl?: ServiceControl;
   out?: WriteSink;
+  /**
+   * Configure the persona-bound bot `channels.telegram.personas.<persona>`
+   * instead of the default `channels.telegram` bot. Mirrors
+   * `phantombot phantomchat --persona`.
+   */
+  persona?: string;
 }
 
 export async function runTelegram(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const validate = input.validateToken ?? telegramGetMe;
   const svc = input.serviceControl ?? defaultServiceControl();
+  const persona = input.persona;
 
-  p.intro("Configure the Telegram channel");
+  p.intro(
+    persona
+      ? `Configure the Telegram channel for persona '${persona}'`
+      : "Configure the Telegram channel",
+  );
 
-  const existing = config.channels.telegram;
+  const existing = persona
+    ? config.channels.telegramPersonas?.[persona]
+    : config.channels.telegram;
   if (existing?.token) {
     p.note(
       `Token: ${maskToken(existing.token)}\n` +
@@ -93,7 +105,7 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
       return 0;
     }
     if (action === "users") {
-      return updateAllowedUsersOnly(config, existing.token, svc);
+      return updateAllowedUsersOnly(config, existing.token, svc, persona);
     }
     // fallthrough to replace flow
   } else {
@@ -134,11 +146,10 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
   }
   spinner.stop(`bot validated: @${me.username} (id ${me.id})`);
 
-  const currentAllowed =
-    config.channels.telegram?.allowedUserIds.join(", ") ?? "";
+  const currentAllowed = existing?.allowedUserIds.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
-      "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning)",
+      "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning). The FIRST ID is the incident-notification target.",
     placeholder: "123456789",
     defaultValue: currentAllowed,
   });
@@ -157,13 +168,24 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
       p.cancel("cancelled");
       return 1;
     }
+  } else {
+    p.note(
+      `The FIRST ID on the allowlist (${allowedUserIds[0]}) is the incident-\n` +
+        `notification target — held-request / security alerts land there.\n` +
+        `Re-run this command to change the order.`,
+      "Incident target",
+    );
   }
 
-  await applyTelegramConfig(config.configPath, {
-    token: token as string,
-    pollTimeoutS: 30,
-    allowedUserIds,
-  });
+  await applyTelegramConfig(
+    config.configPath,
+    {
+      token: token as string,
+      pollTimeoutS: 30,
+      allowedUserIds,
+    },
+    persona,
+  );
   p.note(
     `bot: @${me.username}\n` +
       `allowed users: ${
@@ -183,12 +205,16 @@ async function updateAllowedUsersOnly(
   config: Config,
   existingToken: string,
   svc: ServiceControl,
+  persona?: string,
 ): Promise<number> {
   const currentAllowed =
-    config.channels.telegram?.allowedUserIds.join(", ") ?? "";
+    (persona
+      ? config.channels.telegramPersonas?.[persona]
+      : config.channels.telegram
+    )?.allowedUserIds.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
-      "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning)",
+      "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning). The FIRST ID is the incident-notification target.",
     placeholder: "123456789",
     defaultValue: currentAllowed,
   });
@@ -208,11 +234,15 @@ async function updateAllowedUsersOnly(
       return 0;
     }
   }
-  await applyTelegramConfig(config.configPath, {
-    token: existingToken,
-    pollTimeoutS: 30,
-    allowedUserIds,
-  });
+  await applyTelegramConfig(
+    config.configPath,
+    {
+      token: existingToken,
+      pollTimeoutS: 30,
+      allowedUserIds,
+    },
+    persona,
+  );
   p.note(
     `allowed users: ${allowedUserIds.length === 0 ? "(any)" : allowedUserIds.join(", ")}\n` +
       `saved to ${config.configPath}`,
@@ -288,8 +318,17 @@ export default defineCommand({
     description:
       "Configure the Telegram channel (token + allowed users). Validates the token before saving.",
   },
-  async run() {
-    const code = await runTelegram();
+  args: {
+    persona: {
+      type: "string",
+      description:
+        "Configure the persona-bound bot (channels.telegram.personas.<name>) instead of the default bot. Mirrors `phantombot phantomchat --persona`.",
+    },
+  },
+  async run({ args }) {
+    const code = await runTelegram({
+      persona: args.persona ? String(args.persona) : undefined,
+    });
     process.exitCode = code;
   },
 });

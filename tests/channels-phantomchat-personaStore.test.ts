@@ -11,9 +11,11 @@ import { join } from "node:path";
 
 import { DEFAULT_PHANTOMCHAT_RELAYS, type Config } from "../src/config.ts";
 import {
+  cacheRelaysForPersona,
   listPhantomchatPersonas,
   loadPhantomchatPersonaConfig,
   phantomchatConfigPath,
+  recordTrustedNpub,
   savePhantomchatPersonaConfig,
 } from "../src/channels/phantomchat/personaStore.ts";
 import { decodeNpubToHex, generateIdentity } from "../src/lib/nostrIdentity.ts";
@@ -50,6 +52,78 @@ describe("save/load round-trip", () => {
     expect(loaded!.allowedNpubs).toEqual([allowed]);
     // allowedHex is the decoded lowercase-hex form used by the auth gate.
     expect(loaded!.allowedHex).toEqual([decodeNpubToHex(allowed)]);
+  });
+
+  test("tofu round-trips: persisted only when enabled, defaults false", async () => {
+    const id = generateIdentity();
+    const onDir = join(workdir, "tofu-on");
+    const offDir = join(workdir, "tofu-off");
+    await mkdir(onDir, { recursive: true });
+    await mkdir(offDir, { recursive: true });
+
+    await savePhantomchatPersonaConfig(onDir, {
+      nsec: id.nsec,
+      relays: [],
+      allowedNpubs: [],
+      tofu: true,
+    });
+    await savePhantomchatPersonaConfig(offDir, {
+      nsec: id.nsec,
+      relays: [],
+      allowedNpubs: [],
+    });
+
+    expect(loadPhantomchatPersonaConfig(onDir)!.tofu).toBe(true);
+    expect(loadPhantomchatPersonaConfig(offDir)!.tofu).toBe(false);
+  });
+
+  test("recordTrustedNpub appends the npub and clears tofu (lock)", async () => {
+    const id = generateIdentity();
+    const trusted = generateIdentity().npub;
+    const agentDir = join(workdir, "tofu-commit");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://keep.example"],
+      allowedNpubs: [],
+      tofu: true,
+    });
+
+    const updated = await recordTrustedNpub(agentDir, trusted);
+    expect(updated).toEqual([trusted]);
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.allowedNpubs).toEqual([trusted]);
+    expect(loaded.tofu).toBe(false); // locked
+    expect(loaded.relays).toEqual(["wss://keep.example"]); // preserved
+    // Idempotent: re-recording the same npub doesn't duplicate it.
+    expect(await recordTrustedNpub(agentDir, trusted)).toEqual([trusted]);
+  });
+
+  test("cacheRelaysForPersona updates only relays, preserving identity + allowlist", async () => {
+    const id = generateIdentity();
+    const allowed = generateIdentity().npub;
+    const agentDir = join(workdir, "relay-cache");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://old.example"],
+      allowedNpubs: [allowed],
+    });
+
+    const ok = await cacheRelaysForPersona(agentDir, [
+      "wss://new1.example",
+      "wss://new2.example",
+    ]);
+    expect(ok).toBe(true);
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.relays).toEqual(["wss://new1.example", "wss://new2.example"]);
+    expect(loaded.allowedNpubs).toEqual([allowed]); // preserved
+    expect(loaded.identity.npub).toBe(id.npub); // preserved
+
+    // No config → no-op false.
+    expect(await cacheRelaysForPersona(join(workdir, "absent"), [])).toBe(false);
   });
 
   test("file is written mode 0600 (the nsec is a secret)", async () => {

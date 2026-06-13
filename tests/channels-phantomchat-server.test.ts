@@ -135,6 +135,8 @@ async function runOnce(opts: {
   allowedHex: string[];
   harness: Harness;
   text: string;
+  tofu?: boolean;
+  persistTrust?: (senderHex: string) => Promise<void>;
 }): Promise<FakePool> {
   const botHex = getPublicKey(opts.botSk);
   const pool = new FakePool();
@@ -170,6 +172,8 @@ async function runOnce(opts: {
     persona: "phantom",
     channel,
     allowedHex: opts.allowedHex,
+    tofu: opts.tofu,
+    persistTrust: opts.persistTrust,
     oneShot: true,
     signal: ac.signal,
   });
@@ -254,6 +258,101 @@ describe("phantomchat auth gate", () => {
 
     expect(harness.invocations).toBe(1);
     expect(pool.published.length).toBe(2);
+  });
+});
+
+describe("phantomchat TOFU (trust-on-first-use)", () => {
+  test("empty allowlist + tofu: first sender is answered and persisted", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "welcome" },
+    ]);
+    const trusted: string[] = [];
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [],
+      tofu: true,
+      persistTrust: async (hex) => {
+        trusted.push(hex);
+      },
+      harness,
+      text: "first contact",
+    });
+
+    // First sender is trusted: turn runs, reply published, and the sender hex
+    // is persisted (the run.ts callback would encode it to npub + clear tofu).
+    expect(harness.invocations).toBe(1);
+    expect(pool.published.length).toBe(2);
+    expect(trusted).toEqual([getPublicKey(senderSk).toLowerCase()]);
+  });
+
+  test("tofu locks to the first sender: a later stranger is dropped", async () => {
+    const firstSk = generateSecretKey();
+    const strangerSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hi first" },
+      { type: "done", finalText: "should not reach stranger" },
+    ]);
+    const trusted: string[] = [];
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const mkWrap = (sk: Uint8Array, id: string, text: string) => {
+      const envelope = JSON.stringify({
+        id,
+        from: getPublicKey(sk),
+        to: botHex,
+        type: "text",
+        content: text,
+        timestamp: Date.now(),
+      });
+      return wrapNip17Message(sk, botHex, envelope).wraps[0] as NTNostrEvent;
+    };
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      allowedHex: [],
+      tofu: true,
+      persistTrust: async (hex) => {
+        trusted.push(hex);
+      },
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    // First sender claims TOFU; the stranger arrives after and must be dropped.
+    pool.feed(mkWrap(firstSk, "a-1", "i am first"));
+    await new Promise((r) => setTimeout(r, 10));
+    pool.feed(mkWrap(strangerSk, "b-1", "let me in too"));
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+    await serverPromise;
+
+    // Only the first sender ran + got a reply; the stranger was gated out.
+    expect(harness.invocations).toBe(1);
+    expect(pool.published.length).toBe(2); // recipient + self wrap for first only
+    expect(trusted).toEqual([getPublicKey(firstSk).toLowerCase()]);
   });
 });
 

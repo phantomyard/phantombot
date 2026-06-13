@@ -16,9 +16,21 @@
  * File: `<agentDir>/phantomchat.json` (mode 0600), shape:
  *   {
  *     "nsec": "nsec1…",                 // REQUIRED — presence enables the channel
- *     "relays": ["wss://…", …],         // optional — defaults to the PWA relay set
- *     "allowed_npubs": ["npub1…", …]    // optional — [] means "answer anyone" (warn)
+ *     "relays": ["wss://…", …],         // optional CACHE — refreshed from the
+ *                                       //   canonical /relays.json on startup;
+ *                                       //   falls back to the PWA seed set
+ *     "allowed_npubs": ["npub1…", …],   // optional — the trust allowlist
+ *     "tofu": true                      // optional — trust-on-first-use: when the
+ *                                       //   allowlist is empty, the FIRST npub to
+ *                                       //   DM is trusted, appended here, and the
+ *                                       //   bot then locks to it (tofu cleared)
  *   }
+ *
+ * Allowlist semantics:
+ *   - allowed_npubs non-empty → only those npubs are answered. The FIRST entry
+ *     is the incident-notification target.
+ *   - allowed_npubs empty + tofu true → TOFU: first DMer is trusted + locked.
+ *   - allowed_npubs empty + tofu false/absent → open bot (answer anyone), warned.
  */
 
 import {
@@ -54,6 +66,12 @@ export interface PhantomchatPersonaConfig {
   allowedNpubs: string[];
   /** Decoded lowercase 64-char hex pubkeys — the auth-gate comparison form. */
   allowedHex: string[];
+  /**
+   * Trust-on-first-use. When true AND the allowlist is empty, the first npub to
+   * DM is trusted, appended to allowed_npubs, and the bot locks to it. Ignored
+   * once allowed_npubs is non-empty.
+   */
+  tofu: boolean;
   /** Absolute path to the phantomchat.json this came from. */
   path: string;
 }
@@ -68,6 +86,7 @@ interface PhantomchatFileShape {
   nsec?: string;
   relays?: unknown;
   allowed_npubs?: unknown;
+  tofu?: unknown;
 }
 
 function asStringArray(v: unknown): string[] {
@@ -116,6 +135,7 @@ export function loadPhantomchatPersonaConfig(
     relays,
     allowedNpubs,
     allowedHex: decodeAllowedNpubs(allowedNpubs),
+    tofu: parsed.tofu === true,
     path,
   };
 }
@@ -127,7 +147,7 @@ export function loadPhantomchatPersonaConfig(
  */
 export async function savePhantomchatPersonaConfig(
   agentDir: string,
-  data: { nsec: string; relays: string[]; allowedNpubs: string[] },
+  data: { nsec: string; relays: string[]; allowedNpubs: string[]; tofu?: boolean },
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
   await mkdir(dirname(path), { recursive: true });
@@ -136,6 +156,8 @@ export async function savePhantomchatPersonaConfig(
     relays: data.relays,
     allowed_npubs: data.allowedNpubs,
   };
+  // Only persist tofu when explicitly enabled — keep the file clean otherwise.
+  if (data.tofu) body.tofu = true;
   const tmp = `${path}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
@@ -152,6 +174,53 @@ export async function savePhantomchatPersonaConfig(
     throw e;
   }
   return path;
+}
+
+/**
+ * Update ONLY the cached relay list in a persona's phantomchat.json, preserving
+ * nsec / allowlist / tofu. Used by startup to write back the canonical relays
+ * fetched from /relays.json. No-op (returns false) when the persona has no
+ * usable config. Best-effort: callers treat a throw as "couldn't cache, carry
+ * on with the in-memory relays".
+ */
+export async function cacheRelaysForPersona(
+  agentDir: string,
+  relays: string[],
+): Promise<boolean> {
+  const existing = loadPhantomchatPersonaConfig(agentDir);
+  if (!existing) return false;
+  await savePhantomchatPersonaConfig(agentDir, {
+    nsec: existing.identity.nsec,
+    relays,
+    allowedNpubs: existing.allowedNpubs,
+    tofu: existing.tofu,
+  });
+  return true;
+}
+
+/**
+ * TOFU commit: append `npub` to the allowlist and CLEAR tofu (the bot is now
+ * locked to its trusted set). Idempotent — a npub already present is left as-is
+ * and tofu is still cleared. Preserves nsec + relays. Returns the updated list.
+ */
+export async function recordTrustedNpub(
+  agentDir: string,
+  npub: string,
+): Promise<string[]> {
+  const existing = loadPhantomchatPersonaConfig(agentDir);
+  if (!existing) {
+    throw new Error(`phantomchat: no config to record trusted npub in ${agentDir}`);
+  }
+  const allowedNpubs = existing.allowedNpubs.includes(npub)
+    ? existing.allowedNpubs
+    : [...existing.allowedNpubs, npub];
+  await savePhantomchatPersonaConfig(agentDir, {
+    nsec: existing.identity.nsec,
+    relays: existing.relays,
+    allowedNpubs,
+    tofu: false,
+  });
+  return allowedNpubs;
 }
 
 /** One persona with a configured phantomchat identity. */

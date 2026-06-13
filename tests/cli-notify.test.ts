@@ -94,7 +94,7 @@ describe("runNotify input validation", () => {
     expect(err.text).toContain("nothing to notify");
   });
 
-  test("no telegram configured → exit 2 with hint", async () => {
+  test("no channel configured at all → exit 2 with hint", async () => {
     const cfg = baseConfig();
     cfg.channels.telegram = undefined;
     const err = new CaptureStream();
@@ -105,10 +105,10 @@ describe("runNotify input validation", () => {
       out: new CaptureStream(),
     });
     expect(code).toBe(2);
-    expect(err.text).toContain("phantombot telegram");
+    expect(err.text).toContain("no notify channel configured");
   });
 
-  test("empty allowed_user_ids → exit 2 (refuse to broadcast)", async () => {
+  test("empty allowed_user_ids + no phantomchat → exit 2 (nothing to notify)", async () => {
     const cfg = baseConfig();
     cfg.channels.telegram!.allowedUserIds = [];
     const err = new CaptureStream();
@@ -119,12 +119,12 @@ describe("runNotify input validation", () => {
       out: new CaptureStream(),
     });
     expect(code).toBe(2);
-    expect(err.text).toContain("allowed_user_ids is empty");
+    expect(err.text).toContain("no notify channel configured");
   });
 });
 
 describe("runNotify text", () => {
-  test("fans out --message to every allowed user", async () => {
+  test("sends --message to the FIRST allowed user only (first-owner routing)", async () => {
     const transport = new FakeTransport();
     const out = new CaptureStream();
     const code = await runNotify({
@@ -135,22 +135,22 @@ describe("runNotify text", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
+    // First-owner-per-channel: only id 42, NOT the whole [42, 99] list.
     expect(transport.sent).toEqual([
       { chatId: "42", text: "important thing" },
-      { chatId: "99", text: "important thing" },
     ]);
-    expect(out.text).toContain("text=2");
+    expect(out.text).toContain("text=1");
   });
 });
 
 describe("runNotify persona routing", () => {
-  test("--persona routes to that persona's bot + allowlist", async () => {
+  test("--persona routes to that persona's bot + first allowed id", async () => {
     const cfg = baseConfig();
     cfg.channels.telegramPersonas = {
       amanda: {
         token: "amanda-token",
         pollTimeoutS: 30,
-        allowedUserIds: [7],
+        allowedUserIds: [7, 8],
       },
     };
     const transport = new FakeTransport();
@@ -164,30 +164,30 @@ describe("runNotify persona routing", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    // Only the persona's allowlist ([7]), not the default ([42, 99]).
+    // The persona's bot, first id only ([7]) — not the default ([42, 99]).
     expect(transport.sent).toEqual([{ chatId: "7", text: "amanda ping" }]);
     expect(out.text).toContain("text=1");
   });
 
-  test("unknown --persona → exit 2 with hint", async () => {
+  test("persona with no bot → falls back to the default bot's first id", async () => {
     const cfg = baseConfig();
     cfg.channels.telegramPersonas = {
       amanda: { token: "t", pollTimeoutS: 30, allowedUserIds: [7] },
     };
-    const err = new CaptureStream();
+    const transport = new FakeTransport();
+    const out = new CaptureStream();
     const code = await runNotify({
       config: cfg,
-      transport: new FakeTransport(),
+      transport,
       persona: "nobody",
       message: "hi",
-      out: new CaptureStream(),
-      err,
+      out,
+      err: new CaptureStream(),
     });
-    expect(code).toBe(2);
-    expect(err.text).toContain(
-      "no telegram bot configured for persona 'nobody'",
-    );
-    expect(err.text).toContain("amanda");
+    // No bot for 'nobody' → default telegram, first id (42).
+    expect(code).toBe(0);
+    expect(transport.sent).toEqual([{ chatId: "42", text: "hi" }]);
+    expect(out.text).toContain("text=1");
   });
 });
 
@@ -208,7 +208,7 @@ describe("runNotify voice", () => {
     });
     expect(code).toBe(0);
     expect(err.text).toContain("voice synthesis unavailable");
-    expect(transport.sent.length).toBe(2); // text fan-out
+    expect(transport.sent.length).toBe(1); // text to first owner
     expect(transport.voiceSent.length).toBe(0);
   });
 
@@ -251,9 +251,9 @@ describe("runNotify voice", () => {
         err: new CaptureStream(),
       });
       expect(code).toBe(0);
-      expect(transport.voiceSent.length).toBe(2); // fanned to both users
+      expect(transport.voiceSent.length).toBe(1); // voice to first owner
       expect(transport.sent.length).toBe(0);
-      expect(out.text).toContain("voice=2");
+      expect(out.text).toContain("voice=1");
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
     }

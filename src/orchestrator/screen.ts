@@ -97,6 +97,7 @@ import {
   type ChannelContext,
 } from "../persona/builder.ts";
 import { loadPersona, type PersonaFiles } from "../persona/loader.ts";
+import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import {
   JUDGE_NARROWING,
@@ -295,16 +296,15 @@ export function makeScreener(
   // persona context is the briefing.
   const recall = deps.recall;
 
-  // Route the escalation notify through the SAME account selection as
-  // principalConversations(): the persona-bound bot when one is configured for
-  // this persona, else the default bot. Without this the owner is pinged in the
-  // default bot's chat while the grounding pair was written to the
-  // persona-bound conversation — so their approve/deny reply has no referent.
-  // (Concern raised by Kai on PR #172.)
-  const notifyPersona = resolveNotifyPersona(config, persona);
+  // Route the escalation notify for THIS persona. runNotify reaches the first
+  // owner of every configured channel (persona-bound Telegram bot — falling back
+  // to the default bot — AND the persona's phantomchat identity), which is
+  // exactly the set principalConversations() grounds into, so the owner's
+  // approve/deny reply always has a referent regardless of which channel they
+  // answer on. (Generalises the PR #172 fix from telegram-only to multi-channel.)
   const notify =
     deps.notify ??
-    ((message: string) => runNotify({ config, message, persona: notifyPersona }));
+    ((message: string) => runNotify({ config, message, persona }));
 
   // The grounding write. Default: write a turn pair into the principal's
   // conversation via the store (quarantined payload + embeddable judge text).
@@ -422,16 +422,43 @@ export function makeScreener(
 }
 
 /**
- * Resolve the principal telegram conversation key(s) for this persona. The
- * principal account is the persona-bound bot if configured, else the default
- * telegram bot; each allowed user id maps to `telegram:<userId>`. Empty when
- * telegram isn't configured / the allowlist is empty (grounding is a no-op).
+ * Resolve the principal conversation key(s) for this persona — one per
+ * configured channel's PRIMARY (first) owner, matching where `notify` lands the
+ * held-request alert. The principal's approve/deny reply arrives in one of these
+ * conversations, so the held episode must be grounded into each.
+ *
+ *   - Telegram: persona-bound bot if configured, else the default bot; the
+ *     first allowed user id → `telegram:<userId>`.
+ *   - Phantomchat: the persona's first allowed npub → `phantomchat:<hex>` (the
+ *     server keys conversations by the lowercase sender hex).
+ *
+ * Empty when neither channel is configured / has an owner (grounding no-op).
+ *
+ * NOTE: Telegram uses the FIRST id only now (not every id), to mirror notify's
+ * first-owner-per-channel routing — the grounding target must match the notify
+ * recipient or the reply has no referent.
  */
 function principalConversations(config: Config, persona: string): string[] {
+  const out: string[] = [];
+
   const account =
     config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  if (!account) return [];
-  return account.allowedUserIds.map((id) => `telegram:${id}`);
+  const firstId = account?.allowedUserIds[0];
+  if (firstId !== undefined) {
+    out.push(`telegram:${firstId}`);
+  }
+
+  try {
+    const pc = loadPhantomchatPersonaConfig(personaDir(config, persona));
+    const firstHex = pc?.allowedHex[0];
+    if (firstHex) {
+      out.push(`phantomchat:${firstHex.toLowerCase()}`);
+    }
+  } catch {
+    // No phantomchat config / unresolvable persona dir — telegram-only grounding.
+  }
+
+  return out;
 }
 
 /**

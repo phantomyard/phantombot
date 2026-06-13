@@ -16,7 +16,16 @@ import {
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
-import { listPhantomchatPersonas } from "../channels/phantomchat/personaStore.ts";
+import {
+  listPhantomchatPersonas,
+  cacheRelaysForPersona,
+  recordTrustedNpub,
+} from "../channels/phantomchat/personaStore.ts";
+import {
+  fetchCanonicalRelays,
+  sameRelays,
+} from "../channels/phantomchat/relaysSource.ts";
+import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
   type Config,
   loadConfig,
@@ -370,22 +379,54 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       const startPhantomchat =
         input.runPhantomchatServer ?? runPhantomchatServer;
       const { SimplePool } = await import("nostr-tools/pool");
+
+      // Fetch the canonical relay list ONCE (single source of truth, served by
+      // the PWA at /relays.json). Shared across every persona. null = fetch
+      // failed → each persona falls back to its cached relays, then the seed.
+      const canonicalRelays = await fetchCanonicalRelays();
+      if (canonicalRelays) {
+        out.write(
+          `  [phantomchat] canonical relays: ${canonicalRelays.length} from /relays.json\n`,
+        );
+      } else {
+        out.write(
+          `  [phantomchat] /relays.json unavailable — using cached/seed relays per persona\n`,
+        );
+      }
+
       for (const spec of phantomchatPersonas) {
-        const { identity, relays, allowedHex } = spec.config;
-        if (allowedHex.length === 0) {
-          // Mirror Telegram's empty-allowlist behaviour: answer anyone, but
-          // warn loudly so an open bot is never accidental.
+        const { identity, allowedHex, tofu } = spec.config;
+
+        // Effective relays: canonical (if fetched) else the persona's cached
+        // relays. When canonical differs from the cache, write it back so a
+        // later offline start uses the freshest known-good set.
+        const relays = canonicalRelays ?? spec.config.relays;
+        if (canonicalRelays && !sameRelays(canonicalRelays, spec.config.relays)) {
+          void cacheRelaysForPersona(spec.agentDir, canonicalRelays).catch((e) => {
+            log.warn(`phantomchat[${spec.persona}]: relay cache write failed`, {
+              error: (e as Error).message,
+            });
+          });
+        }
+
+        const openBot = allowedHex.length === 0 && tofu !== true;
+        if (openBot) {
+          // Empty allowlist with TOFU off = answer anyone. Warn loudly.
           log.warn(
-            `phantomchat[${spec.persona}]: no allowed_npubs configured — ANYONE who DMs this persona will be answered`,
+            `phantomchat[${spec.persona}]: no allowed_npubs and TOFU off — ANYONE who DMs this persona will be answered`,
           );
           err.write(
             `warning: phantomchat persona '${spec.persona}' has no allowlist — anyone who DMs it will be answered. Set allowed_npubs via \`phantombot phantomchat --persona ${spec.persona}\`.\n`,
           );
         }
+        const allowedLabel =
+          allowedHex.length > 0
+            ? String(allowedHex.length)
+            : tofu === true
+              ? "TOFU (trust first DM)"
+              : "ANY (no allowlist)";
         out.write(
-          `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${
-            allowedHex.length === 0 ? "ANY (no allowlist)" : allowedHex.length
-          }\n`,
+          `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${allowedLabel}\n`,
         );
         const pool = new SimplePool();
         const transport = new SimplePoolPhantomchatTransport(
@@ -400,15 +441,26 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           publicKeyHex: identity.publicKeyHex,
           transport,
         });
+        const agentDir = spec.agentDir;
         tasks.push(
           startPhantomchat({
             config,
             memory,
             harnesses,
-            agentDir: spec.agentDir,
+            agentDir,
             persona: spec.persona,
             channel,
             allowedHex,
+            tofu,
+            // TOFU commit: encode the proven sender hex → npub and persist it to
+            // this persona's phantomchat.json (clearing tofu). Best-effort.
+            persistTrust: async (senderHex: string) => {
+              const npub = npubEncode(senderHex);
+              await recordTrustedNpub(agentDir, npub);
+              out.write(
+                `  [phantomchat:${spec.persona}] TOFU trusted ${npub} — now locked\n`,
+              );
+            },
             signal: ac.signal,
             out,
             err,

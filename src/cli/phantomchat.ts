@@ -39,6 +39,7 @@ import {
   decodeNpubToHex,
   generateIdentity,
 } from "../lib/nostrIdentity.ts";
+import { fetchCanonicalRelays } from "../channels/phantomchat/relaysSource.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { maybePromptRestart } from "./harness.ts";
@@ -128,28 +129,22 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     );
   }
 
-  // 2. Relays (prefill from the existing file, else the PWA defaults).
-  const currentRelays =
-    existing?.relays.join(", ") ?? [...DEFAULT_PHANTOMCHAT_RELAYS].join(", ");
-  const relaysRaw = await p.text({
-    message:
-      "Relays (comma-separated wss:// URLs; empty = keep the 5 default PWA relays)",
-    placeholder: [...DEFAULT_PHANTOMCHAT_RELAYS].join(", "),
-    defaultValue: currentRelays,
-  });
-  if (p.isCancel(relaysRaw)) {
-    p.cancel("cancelled");
-    return 1;
-  }
-  const parsedRelays = parseRelays(relaysRaw as string);
+  // 2. Relays are NOT prompted any more — they come from the canonical
+  //    /relays.json (single source of truth shared with the PWA). We warm the
+  //    cache here best-effort; startup re-fetches and re-caches on every run.
+  //    Fallback chain: canonical fetch → existing cached relays → PWA seed.
   const relays =
-    parsedRelays.length > 0 ? parsedRelays : [...DEFAULT_PHANTOMCHAT_RELAYS];
+    (await fetchCanonicalRelays()) ??
+    existing?.relays ??
+    [...DEFAULT_PHANTOMCHAT_RELAYS];
 
-  // 3. Allowlist (prefill from the existing file).
+  // 3. Allowlist (prefill from the existing file). Empty now means TRUST-ON-
+  //    FIRST-USE (TOFU): the first npub to DM the bot is trusted, added here,
+  //    and the bot locks to it — much safer than the old "answer anyone".
   const currentAllowed = existing?.allowedNpubs.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
-      "Allowed npubs (comma-separated; empty = anyone can DM the bot, with a warning)",
+      "Allowed npubs (comma-separated; empty = the first npub to DM is trusted and added)",
     placeholder: "npub1…",
     defaultValue: currentAllowed,
   });
@@ -158,29 +153,39 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     return 1;
   }
   const allowedNpubs = parseAllowedNpubs(allowedRaw as string);
-  if (allowedNpubs.length === 0) {
-    const proceed = await p.confirm({
-      message:
-        "No allowlist set — anyone who DMs the bot will be answered. Proceed?",
-      initialValue: false,
-    });
-    if (p.isCancel(proceed) || !proceed) {
-      p.cancel("cancelled");
-      return 1;
-    }
+  // Empty allowlist arms TOFU; a set allowlist clears it. The FIRST npub on a
+  // set list is the incident-notification target (surfaced in the note below).
+  const tofu = allowedNpubs.length === 0;
+  if (tofu) {
+    p.note(
+      "No allowlist set — trust-on-first-use is ON. The FIRST npub that DMs\n" +
+        "this persona will be trusted, added to the allowlist, and the bot then\n" +
+        "locks to it. Re-run this command to set the allowlist explicitly.",
+      "Trust-on-first-use",
+    );
+  } else {
+    p.note(
+      `The FIRST npub on the allowlist is the incident-notification target —\n` +
+        `that's where held-request / security alerts for '${persona}' are sent.\n` +
+        `Re-run this command to change the order or the list.`,
+      "Incident target",
+    );
   }
 
   const savedPath = await savePersonaConfig(agentDir, {
     nsec,
     relays,
     allowedNpubs,
+    tofu,
   });
   p.note(
     `persona: ${persona}\n` +
       `npub: ${npub}\n` +
       `relays: ${relays.length}\n` +
       `allowed npubs: ${
-        allowedNpubs.length === 0 ? "(any)" : allowedNpubs.join(", ")
+        allowedNpubs.length === 0
+          ? "(TOFU — first DM trusted)"
+          : allowedNpubs.join(", ")
       }\n` +
       `saved to ${savedPath}`,
     "Saved",

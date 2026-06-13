@@ -54,6 +54,24 @@ describe("applyTelegramConfig", () => {
     expect(text).toContain("allowed_user_ids = [ 42, 99 ]");
   });
 
+  test("--persona writes the [channels.telegram.personas.<name>] block", async () => {
+    await applyTelegramConfig(
+      configPath,
+      {
+        token: "222:lenasecret",
+        pollTimeoutS: 30,
+        allowedUserIds: [7, 8],
+      },
+      "lena",
+    );
+    const text = await readFile(configPath, "utf8");
+    expect(text).toContain("[channels.telegram.personas.lena]");
+    expect(text).toContain('token = "222:lenasecret"');
+    expect(text).toContain("allowed_user_ids = [ 7, 8 ]");
+    // The default block is NOT created when targeting a persona.
+    expect(text).not.toContain("[channels.telegram]\n");
+  });
+
   test("preserves other sections of an existing config", async () => {
     const { writeConfigToml } = await import("../src/lib/configWriter.ts");
     await writeConfigToml(configPath, {
