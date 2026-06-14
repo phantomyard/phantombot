@@ -39,14 +39,14 @@ import {
 import type { PhantomchatTransport } from "./transport.ts";
 
 /**
- * phantomchat's static capabilities. Nostr DMs carry text only — no typing
- * indicators, no voice, no attachments — but they ARE end-to-end encrypted
- * (NIP-17 gift-wrap), so `encryption: true`. This is the flag a future encrypted
- * channel mirrors.
+ * phantomchat's static capabilities. Nostr DMs carry text + a typing indicator
+ * (a NIP-16 ephemeral kind-20001 event — see transport.sendTyping); no voice,
+ * no attachments. They ARE end-to-end encrypted (NIP-17 gift-wrap), so
+ * `encryption: true`. This is the flag a future encrypted channel mirrors.
  */
 export const PHANTOMCHAT_CAPABILITIES: ChannelCapabilities = {
   voice: false,
-  typing: false,
+  typing: true,
   attachments: false,
   encryption: true,
 };

@@ -139,6 +139,22 @@ export async function runPhantomchatServer(
     const conversationKey = `phantomchat:${senderHex}`;
 
     let reply = "";
+    // Typing indicator. Unlike Telegram's streaming engine (which refreshes the
+    // indicator on every chunk), this loop sends a single message at the end —
+    // so we drive the typing tick ourselves. The PWA shows three-dots on each
+    // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
+    // every 2s for the whole turn. A plain interval (rather than per-chunk)
+    // keeps the dots alive through long tool-call gaps where runTurn emits no
+    // chunks at all. Best-effort: sendTyping never throws (see transport).
+    //
+    // Both the first tick and the interval are scheduled on the macrotask queue
+    // (setTimeout 0 / setInterval) rather than called inline: a typing tick
+    // signs a Nostr event (Schnorr), and doing that synchronously here would
+    // delay the start of the turn itself. The indicator must never be on the
+    // turn's critical path.
+    const sendTypingTick = () => void transport.sendTyping(senderHex);
+    const firstTypingTick = setTimeout(sendTypingTick, 0);
+    const typingTimer = setInterval(sendTypingTick, 2000);
     try {
       for await (const chunk of runTurn({
         persona: input.persona,
@@ -193,6 +209,12 @@ export async function runPhantomchatServer(
         sender: senderHex.slice(0, 12) + "…",
       });
       return;
+    } finally {
+      // Stop the typing refresh whether the turn succeeded, errored, or the
+      // early-return above fired. The PWA's last indicator self-expires ~6s
+      // later, and the reply we send (success path) clears it immediately.
+      clearTimeout(firstTypingTick);
+      clearInterval(typingTimer);
     }
 
     const finalReply = reply.trim();

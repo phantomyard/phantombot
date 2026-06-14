@@ -78,4 +78,63 @@ describe("phantomchat transport subscription wire shape", () => {
     onEvent?.({ id: "abc", kind: 1059 } as NTNostrEvent);
     expect(seen).toEqual(["abc"]);
   });
+
+  test("sendTyping publishes a signed ephemeral kind-20001 p-tagged to the recipient", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const recipient = getPublicKey(generateSecretKey());
+    await transport.sendTyping(recipient);
+
+    expect(published.length).toBe(1);
+    const ev = published[0]!;
+    // NIP-16 ephemeral kind, signed by us, p-tagged to the recipient, no body.
+    expect(ev.kind).toBe(20001);
+    expect(ev.pubkey).toBe(getPublicKey(sk));
+    expect(ev.content).toBe("");
+    expect(ev.tags).toEqual([["p", recipient]]);
+    // Real signature — finalizeEvent produces id + sig.
+    expect(typeof ev.id).toBe("string");
+    expect(typeof ev.sig).toBe("string");
+  });
+
+  test("sendTyping never throws even if every relay publish rejects", async () => {
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish() {
+        return [Promise.reject(new Error("relay down"))];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    // Best-effort: a failed publish must resolve, never reject into the engine.
+    await expect(
+      transport.sendTyping(getPublicKey(generateSecretKey())),
+    ).resolves.toBeUndefined();
+  });
 });

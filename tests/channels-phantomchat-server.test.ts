@@ -182,7 +182,7 @@ async function runOnce(opts: {
   pool.feed(wraps[0] as NTNostrEvent);
   // Give the microtask queue a tick so the channel enqueues the message before
   // we abort the listen loop.
-  await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 80));
   ac.abort();
   await serverPromise;
 
@@ -211,12 +211,16 @@ describe("phantomchat auth gate", () => {
 
     expect(senderNpub.startsWith("npub1")).toBe(true);
     expect(harness.invocations).toBe(1);
-    // Two wraps published (recipient + self), both kind 1059.
-    expect(pool.published.length).toBe(2);
-    expect(pool.published.every((e) => e.kind === 1059)).toBe(true);
+    // Two REPLY wraps published (recipient + self), both kind 1059. The pool
+    // may also carry ephemeral kind-20001 typing ticks (driven off the turn's
+    // critical path via a deferred timer, so their presence here is timing-
+    // dependent — emission is covered deterministically by the transport unit
+    // test), so filter to the reply wraps.
+    const wraps = pool.published.filter((e) => e.kind === 1059);
+    expect(wraps.length).toBe(2);
 
     // The recipient (original sender) can unwrap the reply and read "pong".
-    const reply = unwrapNip17Message(pool.published[0] as NTNostrEvent, senderSk);
+    const reply = unwrapNip17Message(wraps[0] as NTNostrEvent, senderSk);
     expect(JSON.parse(reply.content).content).toBe("pong");
     expect(JSON.parse(reply.content).type).toBe("text");
   });
@@ -257,7 +261,7 @@ describe("phantomchat auth gate", () => {
     });
 
     expect(harness.invocations).toBe(1);
-    expect(pool.published.length).toBe(2);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
   });
 });
 
@@ -285,7 +289,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
     // First sender is trusted: turn runs, reply published, and the sender hex
     // is persisted (the run.ts callback would encode it to npub + clear tofu).
     expect(harness.invocations).toBe(1);
-    expect(pool.published.length).toBe(2);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
     expect(trusted).toEqual([getPublicKey(senderSk).toLowerCase()]);
   });
 
@@ -343,15 +347,15 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
 
     // First sender claims TOFU; the stranger arrives after and must be dropped.
     pool.feed(mkWrap(firstSk, "a-1", "i am first"));
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 80));
     pool.feed(mkWrap(strangerSk, "b-1", "let me in too"));
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 80));
     ac.abort();
     await serverPromise;
 
     // Only the first sender ran + got a reply; the stranger was gated out.
     expect(harness.invocations).toBe(1);
-    expect(pool.published.length).toBe(2); // recipient + self wrap for first only
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2); // recipient + self wrap for first only
     expect(trusted).toEqual([getPublicKey(firstSk).toLowerCase()]);
   });
 });
@@ -420,12 +424,12 @@ describe("phantomchat channel live-gate", () => {
 
     // Backlog (pre-EOSE) — must be ignored.
     pool.onevent!(wrapFor("historical"));
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 80));
     // Relays finish replaying history → go live.
     pool.fireEose!();
     // Live message (post-EOSE) — must be delivered.
     pool.onevent!(wrapFor("live"));
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 80));
 
     ac.abort();
     await drain;

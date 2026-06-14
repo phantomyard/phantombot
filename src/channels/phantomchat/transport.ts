@@ -12,7 +12,7 @@
  * purely the relay plumbing plus event dedup.
  */
 
-import { getPublicKey } from "nostr-tools/pure";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import { log } from "../../lib/logger.ts";
 import type { ChannelTransport } from "../core/types.ts";
@@ -36,6 +36,16 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
   "wss://nostr.mom",
   "wss://nostr.data.haus",
 ];
+
+/**
+ * NIP-16 EPHEMERAL event kind for the typing indicator (range 20000–29999).
+ * Relays do NOT store ephemeral events — they only fan them out to currently
+ * connected subscribers — so a typing signal cannot be replayed on reconnect
+ * and self-expires the moment nobody is listening. The PWA subscribes for this
+ * kind p-tagged to itself and injects a native `updateUserTyping` (three-dots,
+ * 6s auto-expiry). Must match phantomchat's `NOSTR_KIND_TYPING`.
+ */
+export const NOSTR_KIND_TYPING = 20001;
 
 /**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
@@ -211,9 +221,40 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     }
   }
 
-  /** Typing indicators don't exist for Nostr DMs — no-op (best-effort). */
-  async sendTyping(_conversationId: string): Promise<void> {
-    // Intentionally empty; phantomchat capabilities report typing: false.
+  /**
+   * Typing indicator. Publishes a NIP-16 EPHEMERAL kind-20001 event signed by
+   * our key and p-tagged to the recipient hex. The PWA, subscribed for this
+   * kind addressed to itself, injects a native `updateUserTyping` (three-dots,
+   * 6s auto-expiry). Because ephemeral events aren't stored by relays, there's
+   * nothing to replay on reconnect — no boomerang risk.
+   *
+   * Best-effort: the engine calls this on every harness chunk (throttled to
+   * ~2s), so a single failed publish is harmless and must never throw into the
+   * turn loop. `content` is empty — the kind + `#p` tag carry all the meaning.
+   *
+   * NOTE: unlike `sendMessage`, this is intentionally NOT gift-wrapped. A
+   * typing tick is bot→you only, fires every 2s, and self-expires; wrapping it
+   * would double-encrypt a throwaway signal. The tradeoff (the relay learns
+   * "bot ↔ you active now") matches the posture the app already has for its
+   * plaintext kind-7 reactions / kind-5 deletes.
+   */
+  async sendTyping(conversationId: string): Promise<void> {
+    try {
+      const event = finalizeEvent(
+        {
+          kind: NOSTR_KIND_TYPING,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", conversationId]],
+          content: "",
+        },
+        this.ourSecretKey,
+      );
+      await this.publishWrap(event as unknown as NTNostrEvent);
+    } catch (e) {
+      log.debug("phantomchat: sendTyping publish failed", {
+        error: (e as Error).message,
+      });
+    }
   }
 
   close(): void {
