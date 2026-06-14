@@ -136,7 +136,16 @@ export async function runPhantomchatServer(
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the
     // trusted SECURITY_PERIMETER prompt block and skips the threat screen.
-    const conversationKey = `phantomchat:${senderHex}`;
+    //
+    // The conversation key threads the turn. A GROUP message is keyed by the
+    // group (so HQ has its own memory/turn-ordering thread, distinct from the
+    // sender's 1:1 DM with the bot); a plain DM keeps the per-peer key. The
+    // channel already set msg.conversationId to `group:<id>` for group messages,
+    // so we reuse it — falling back to the sender hex for DMs (whose
+    // conversationId equals senderHex).
+    const conversationKey = msg.groupId
+      ? `phantomchat:group:${msg.groupId}`
+      : `phantomchat:${senderHex}`;
 
     let reply = "";
     // Typing indicator. Unlike Telegram's streaming engine (which refreshes the
@@ -221,9 +230,29 @@ export async function runPhantomchatServer(
     if (finalReply.length === 0) return;
 
     try {
-      // transport.sendMessage NIP-17-wraps the plaintext to `senderHex` and
-      // publishes both wraps. conversationId === recipient hex pubkey.
-      await transport.sendMessage(senderHex, finalReply);
+      if (msg.groupId) {
+        // GROUP REPLY. Broadcast back into the group instead of DMing the
+        // sender (the HQ bug was replying 1:1). The bridge holds no group DB, so
+        // the outbound member set is reconstructed from the inbound rumor:
+        //
+        //   full group  = inbound p-tags ∪ { sender }      (the PWA omits the
+        //                                                    sender from its own
+        //                                                    p-tags)
+        //   others (us excluded) = full group \ { us }
+        //
+        // wrapGroupMessage adds OUR self-wrap, so we pass it everyone-but-us.
+        // (sendGroupMessage defensively drops our own hex if it appears here.)
+        const others = new Set<string>(msg.groupMemberHexes ?? []);
+        // Add the original sender back: the PWA omits the sender from its own
+        // p-tags, so without this the sender wouldn't receive our reply.
+        others.add(senderHex.toLowerCase());
+        const memberHexes = [...others];
+        await transport.sendGroupMessage(msg.groupId, memberHexes, finalReply);
+      } else {
+        // transport.sendMessage NIP-17-wraps the plaintext to `senderHex` and
+        // publishes both wraps. conversationId === recipient hex pubkey.
+        await transport.sendMessage(senderHex, finalReply);
+      }
     } catch (e) {
       log.warn("phantomchat: reply publish failed", {
         error: (e as Error).message,

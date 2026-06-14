@@ -152,6 +152,62 @@ export function wrapNip17Message(
 }
 
 /**
+ * Wrap a text message as NIP-17 gift-wrap events for N group members + self.
+ *
+ * This is a faithful port of the PWA's `wrapGroupMessage`
+ * (src/lib/phantomchat/nostr-crypto.ts) — the group sibling of
+ * `wrapNip17Message`, kept byte-compatible so a reply phantombot sends into a
+ * group is indistinguishable from one the PWA would send:
+ *
+ *   - A SINGLE rumor (kind 14) is created with one `['p', <memberHex>]` tag per
+ *     member PLUS a trailing `['group', <groupId>]` tag. The PWA's inbound
+ *     router (`getGroupIdFromRumor`) keys off exactly this `group` tag to route
+ *     the message into the group thread instead of a 1:1 DM — so the tag SHAPE
+ *     and ORDER (p-tags first, group tag last) must match.
+ *   - That one rumor is sealed + gift-wrapped INDIVIDUALLY for each member, then
+ *     once more for the sender (self-send, multi-device recovery) — exactly like
+ *     the DM path's recipient + self wraps, generalized to N recipients.
+ *
+ * `memberPubkeys` is the OTHER members (the sender is added as the self-wrap and
+ * must NOT appear in `memberPubkeys`, mirroring the PWA's `otherMembers`).
+ *
+ * Returns `memberPubkeys.length + 1` kind-1059 wraps and the canonical rumor id.
+ */
+export function wrapGroupMessage(
+  senderSk: Uint8Array,
+  memberPubkeys: string[],
+  content: string,
+  groupId: string,
+): { wraps: NTNostrEvent[]; rumorId: string } {
+  const senderPubHex = getPublicKey(senderSk);
+  const allWraps: NTNostrEvent[] = [];
+
+  // Tags: one p-tag per OTHER member, then the group tag last (matches the PWA's
+  // wrapGroupMessage tag order — the group tag is what the PWA routes on).
+  const tags: string[][] = memberPubkeys.map((pk) => ["p", pk]);
+  tags.push(["group", groupId]);
+
+  // A single rumor shared across all wraps (so every member converges on the
+  // same rumor id, just like the DM path).
+  const rumor = createRumor(content, senderSk, tags);
+
+  // One seal+gift-wrap per other member.
+  for (const memberPk of memberPubkeys) {
+    const seal = createSeal(rumor, senderSk, memberPk);
+    const wrap = createGiftWrap(seal, memberPk);
+    allWraps.push(wrap as unknown as NTNostrEvent);
+  }
+
+  // Self-send for multi-device recovery (the bot reads its own sent messages
+  // back from this wrap — same role as the DM self-wrap).
+  const selfSeal = createSeal(rumor, senderSk, senderPubHex);
+  const selfWrap = createGiftWrap(selfSeal, senderPubHex);
+  allWraps.push(selfWrap as unknown as NTNostrEvent);
+
+  return { wraps: allWraps, rumorId: rumor.id };
+}
+
+/**
  * Error thrown by `unwrapNip17Message` when a verification step fails, so
  * callers can distinguish a hostile/forged event (drop silently) from a
  * transport/parse error (log + move on). The `code` names the failed check.

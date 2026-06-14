@@ -18,6 +18,7 @@ import { log } from "../../lib/logger.ts";
 import type { ChannelTransport } from "../core/types.ts";
 import type { NTNostrEvent } from "../../lib/nostrCrypto.ts";
 import {
+  wrapGroupMessage,
   wrapNip17Message,
   type NTNostrEvent as WrapEvent,
 } from "../../lib/nostrCrypto.ts";
@@ -131,6 +132,20 @@ export interface PhantomchatTransport extends ChannelTransport {
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
   /**
+   * Send a plaintext reply into a GROUP. `groupId` is the group identifier from
+   * the inbound rumor's `['group', ...]` tag; `memberHexes` is the OTHER group
+   * members to broadcast to (every member except us — the self-wrap is added
+   * internally). Builds the phantomchat text envelope, group-wraps it (one
+   * gift-wrap per member + a self-wrap, with the `['group', groupId]` rumor tag
+   * the PWA routes on), and publishes every wrap. A no-op when `memberHexes` is
+   * empty (a lone-member group has nobody to reach).
+   */
+  sendGroupMessage(
+    groupId: string,
+    memberHexes: string[],
+    text: string,
+  ): Promise<void>;
+  /**
    * Publish a single NIP-38 kind-30315 presence heartbeat, p-tagged to every
    * hex pubkey in `peerHexes`, advertising that we're online. Best-effort: never
    * throws. A no-op when `peerHexes` is empty (no one to advertise to).
@@ -237,6 +252,63 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       this.ourSecretKey,
       conversationId,
       envelope,
+    );
+    for (const wrap of wraps) {
+      await this.publishWrap(wrap as unknown as NTNostrEvent);
+    }
+  }
+
+  /**
+   * Group egress. Mirrors the PWA's `GroupAPI.sendMessage` wire contract so a
+   * reply we send into a group is indistinguishable from a PWA-sent one.
+   *
+   * The rumor `content` is the GROUP message payload `{content, type, id,
+   * timestamp}` — NOT the DM envelope `{id, from, to, type, content,
+   * timestamp}`. Two differences vs the DM path, both load-bearing:
+   *   - There is NO `from`/`to`: a group rumor has multiple recipients, so the
+   *     PWA's `parseGroupRumorContent` ignores those fields entirely.
+   *   - `id` is a `grp-<ms>-<rand>` string (the PWA's messageId shape). It MUST
+   *     be non-empty: the PWA's `parseGroupRumorContent` returns null (drops the
+   *     message) when `id` is falsy.
+   * `type` is always "text" — phantombot only sends text.
+   *
+   * The `['group', groupId]` rumor tag (added by wrapGroupMessage) is what the
+   * PWA's inbound router keys on to thread the reply into the group instead of a
+   * 1:1 DM — so getting the wrap right is exactly what makes Lena's reply land
+   * in HQ rather than her DM.
+   */
+  async sendGroupMessage(
+    groupId: string,
+    memberHexes: string[],
+    text: string,
+  ): Promise<void> {
+    // Defensively drop our own hex and dedupe: wrapGroupMessage adds the
+    // self-wrap, and a member list that included us would double-wrap to
+    // ourselves. (callers pass everyone-but-us, but the inbound p-tags are
+    // attacker-adjacent data so we don't trust them to already exclude us.)
+    const ourHexLower = this.ourPubHex.toLowerCase();
+    const others = [
+      ...new Set(memberHexes.map((h) => h.toLowerCase())),
+    ].filter((h) => h !== ourHexLower);
+
+    // Nobody to reach (we'd only build a self-wrap). Skip — matches the PWA's
+    // otherMembers-empty case being a no-broadcast.
+    if (others.length === 0) return;
+
+    const timestampMs = Date.now();
+    const messageId = `grp-${timestampMs}-${crypto.randomUUID().slice(0, 6)}`;
+    const payload = JSON.stringify({
+      content: text,
+      type: "text",
+      id: messageId,
+      timestamp: timestampMs,
+    });
+
+    const { wraps } = wrapGroupMessage(
+      this.ourSecretKey,
+      others,
+      payload,
+      groupId,
     );
     for (const wrap of wraps) {
       await this.publishWrap(wrap as unknown as NTNostrEvent);

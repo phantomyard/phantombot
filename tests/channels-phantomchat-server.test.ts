@@ -25,6 +25,7 @@ import {
 } from "../src/channels/phantomchat/transport.ts";
 import {
   unwrapNip17Message,
+  wrapGroupMessage,
   wrapNip17Message,
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
@@ -435,5 +436,231 @@ describe("phantomchat channel live-gate", () => {
     await drain;
 
     expect(got).toEqual(["live"]);
+  });
+});
+
+/**
+ * Group-routing regression (the "HQ" bug, 2026-06-14). Andrew said hi to Lena
+ * in a GROUP, but Lena's bridge ignored the rumor's `['group', ...]` tag and
+ * replied in her 1:1 DM. The fix: detect the group tag on inbound, thread the
+ * turn under `group:<id>`, and broadcast the reply back as a GROUP wrap (one
+ * gift-wrap per member + self-wrap, group tag preserved) so the PWA routes it
+ * into the group instead of a DM.
+ *
+ * These tests drive a full inbound→reply round trip with a real group wrap and
+ * assert: (a) the turn is threaded under the group conversation, and (b) every
+ * group member — including the original sender — can unwrap the reply and the
+ * reply carries the same group tag the PWA routes on.
+ */
+describe("phantomchat group routing (HQ bug)", () => {
+  test("channel.listen surfaces the group tag: conversationId is group:<id> and member hexes ride inbound", async () => {
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-detect-test";
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const payload = JSON.stringify({
+      content: "hi Lena",
+      type: "text",
+      id: `grp-${Date.now()}-zzz`,
+      timestamp: Date.now(),
+    });
+    const { wraps } = wrapGroupMessage(
+      andrewSk,
+      [botHex, memberHex],
+      payload,
+      groupId,
+    );
+    let inboundForBot: NTNostrEvent | undefined;
+    for (const w of wraps) {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        inboundForBot = w as NTNostrEvent;
+        break;
+      } catch {
+        /* not ours */
+      }
+    }
+
+    const ac = new AbortController();
+    const got: import("../src/channels/core/types.ts").ChannelMessage[] = [];
+    const drain = (async () => {
+      for await (const m of channel.listen!(ac.signal)) got.push(m);
+    })();
+    pool.feed(inboundForBot!);
+    await new Promise((r) => setTimeout(r, 80));
+    ac.abort();
+    await drain;
+
+    expect(got.length).toBe(1);
+    const m = got[0]!;
+    // Threaded under the GROUP, not the sender's DM.
+    expect(m.conversationId).toBe(`group:${groupId}`);
+    // senderId is still the proven sender (auth gate is per-person).
+    expect(m.senderId).toBe(getPublicKey(andrewSk));
+    expect(m.text).toBe("hi Lena");
+    expect(m.groupId).toBe(groupId);
+    // Member hexes carried from the rumor's p-tags (the bot + the other member,
+    // lowercased), so the server can broadcast the reply with no group DB.
+    expect(new Set(m.groupMemberHexes)).toEqual(
+      new Set([botHex.toLowerCase(), memberHex.toLowerCase()]),
+    );
+  });
+
+  test("inbound group message → group-threaded turn + group-wrapped reply to all members", async () => {
+    // Cast: Andrew (sender) + Lena (the bot) + a second member, in group "HQ".
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey(); // Lena
+    const memberSk = generateSecretKey(); // another HQ member
+    const andrewHex = getPublicKey(andrewSk);
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-group-id-deadbeef";
+
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hey Andrew, in HQ" },
+    ]);
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    // Andrew sends a GROUP message to HQ exactly as the PWA does: otherMembers
+    // (everyone but Andrew) = [Lena, member], wrapped via wrapGroupMessage with
+    // the group tag. wraps reaching Lena are the ones p-tagged to her.
+    const groupPayload = JSON.stringify({
+      content: "hi Lena",
+      type: "text",
+      id: `grp-${Date.now()}-abc123`,
+      timestamp: Date.now(),
+    });
+    const { wraps } = wrapGroupMessage(
+      andrewSk,
+      [botHex, memberHex],
+      groupPayload,
+      groupId,
+    );
+    // Find the wrap Lena (the bot) can unwrap — that's the one the relay would
+    // deliver to her #p subscription.
+    let inboundForBot: NTNostrEvent | undefined;
+    for (const w of wraps) {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        inboundForBot = w as NTNostrEvent;
+        break;
+      } catch {
+        /* not ours */
+      }
+    }
+    expect(inboundForBot).toBeDefined();
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      allowedHex: [andrewHex], // Andrew is allowlisted
+      oneShot: true,
+      signal: ac.signal,
+    });
+
+    pool.feed(inboundForBot!);
+    await new Promise((r) => setTimeout(r, 100));
+    ac.abort();
+    await serverPromise;
+
+    // The turn ran on the inbound group text.
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.userMessage).toBe("hi Lena");
+
+    // The reply is a group broadcast: one wrap per OTHER member (Andrew +
+    // member) plus Lena's self-wrap = 3 kind-1059 wraps.
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
+    expect(replyWraps.length).toBe(3);
+
+    // Andrew (the original sender) can unwrap the reply, read the text, and see
+    // the SAME group tag — so his PWA routes it into HQ, not a DM from Lena.
+    let andrewReply: ReturnType<typeof unwrapNip17Message> | undefined;
+    for (const w of replyWraps) {
+      try {
+        andrewReply = unwrapNip17Message(w as NTNostrEvent, andrewSk);
+        break;
+      } catch {
+        /* not for Andrew */
+      }
+    }
+    expect(andrewReply).toBeDefined();
+    expect(JSON.parse(andrewReply!.content).content).toBe("hey Andrew, in HQ");
+    expect(andrewReply!.tags.find((t) => t[0] === "group")).toEqual([
+      "group",
+      groupId,
+    ]);
+    // The reply's p-tags reach the other live member too (Andrew + member),
+    // never Lena herself.
+    const replyPTags = andrewReply!.tags
+      .filter((t) => t[0] === "p")
+      .map((t) => t[1]);
+    expect(new Set(replyPTags)).toEqual(new Set([andrewHex, memberHex]));
+    expect(replyPTags).not.toContain(botHex);
+
+    // The other HQ member can also unwrap the reply (full broadcast).
+    let memberReply: ReturnType<typeof unwrapNip17Message> | undefined;
+    for (const w of replyWraps) {
+      try {
+        memberReply = unwrapNip17Message(w as NTNostrEvent, memberSk);
+        break;
+      } catch {
+        /* not for member */
+      }
+    }
+    expect(memberReply).toBeDefined();
+    expect(JSON.parse(memberReply!.content).content).toBe("hey Andrew, in HQ");
+  });
+
+  test("a plain DM still replies 1:1 (no group tag → unchanged DM behaviour)", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "dm reply" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "hi in DM",
+    });
+
+    // DM reply = recipient wrap + self wrap = 2, and NO group tag on the rumor.
+    const wraps = pool.published.filter((e) => e.kind === 1059);
+    expect(wraps.length).toBe(2);
+    const reply = unwrapNip17Message(wraps[0] as NTNostrEvent, senderSk);
+    expect(reply.tags.find((t) => t[0] === "group")).toBeUndefined();
   });
 });

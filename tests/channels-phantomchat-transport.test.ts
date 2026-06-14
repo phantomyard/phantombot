@@ -20,7 +20,10 @@ import {
   type NostrFilter,
   type RelayPool,
 } from "../src/channels/phantomchat/transport.ts";
-import type { NTNostrEvent } from "../src/lib/nostrCrypto.ts";
+import {
+  unwrapNip17Message,
+  type NTNostrEvent,
+} from "../src/lib/nostrCrypto.ts";
 
 describe("phantomchat transport subscription wire shape", () => {
   test("subscribeGiftWraps passes a single filter OBJECT, not an array", () => {
@@ -176,6 +179,134 @@ describe("phantomchat transport subscription wire shape", () => {
     );
 
     await transport.sendPresence([]);
+    expect(publishCalls).toBe(0);
+  });
+
+  test("sendGroupMessage publishes one wrap per member plus a self-wrap, with a group-tagged rumor", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const botSk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const memberASk = generateSecretKey();
+    const memberBSk = generateSecretKey();
+    const memberAHex = getPublicKey(memberASk);
+    const memberBHex = getPublicKey(memberBSk);
+    const groupId = "abc123groupid";
+
+    await transport.sendGroupMessage(groupId, [memberAHex, memberBHex], "hi HQ");
+
+    // Two members + one self-wrap = three kind-1059 gift-wraps.
+    expect(published.length).toBe(3);
+    expect(published.every((e) => e.kind === 1059)).toBe(true);
+
+    // Member A can unwrap one of the wraps and recover the group payload + tags.
+    let unwrapped: ReturnType<typeof unwrapNip17Message> | undefined;
+    for (const w of published) {
+      try {
+        unwrapped = unwrapNip17Message(w as NTNostrEvent, memberASk);
+        break;
+      } catch {
+        // wrong recipient for this wrap; try the next
+      }
+    }
+    expect(unwrapped).toBeDefined();
+    const rumor = unwrapped!;
+
+    // The group tag the PWA routes on must be present and carry our group id.
+    const groupTag = rumor.tags.find((t) => t[0] === "group");
+    expect(groupTag).toEqual(["group", groupId]);
+
+    // Every OTHER member is p-tagged (so each member's #p subscription delivers
+    // it); the sender (bot) is NOT in the p-tags (it gets the self-wrap).
+    const pTags = rumor.tags.filter((t) => t[0] === "p").map((t) => t[1]);
+    expect(new Set(pTags)).toEqual(new Set([memberAHex, memberBHex]));
+    expect(pTags).not.toContain(getPublicKey(botSk));
+
+    // The payload is the GROUP shape: {content, type, id, timestamp} with a
+    // NON-EMPTY id (the PWA drops group messages whose id is falsy) and NO
+    // from/to fields.
+    const payload = JSON.parse(rumor.content);
+    expect(payload.content).toBe("hi HQ");
+    expect(payload.type).toBe("text");
+    expect(typeof payload.id).toBe("string");
+    expect(payload.id.length).toBeGreaterThan(0);
+    expect(typeof payload.timestamp).toBe("number");
+    expect(payload.from).toBeUndefined();
+    expect(payload.to).toBeUndefined();
+  });
+
+  test("sendGroupMessage drops our own hex from the member list and dedupes", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const botSk = generateSecretKey();
+    const botHex = getPublicKey(botSk);
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const memberHex = getPublicKey(generateSecretKey());
+
+    // Member list redundantly contains our own hex (and a dup) — both must be
+    // collapsed so we don't double-wrap to ourselves.
+    await transport.sendGroupMessage(
+      "g1",
+      [memberHex, memberHex, botHex],
+      "hello",
+    );
+
+    // One real member wrap + one self-wrap = 2 (not 3, not 4).
+    expect(published.length).toBe(2);
+  });
+
+  test("sendGroupMessage is a no-op when there are no other members", async () => {
+    let publishCalls = 0;
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish() {
+        publishCalls += 1;
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const botSk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    // Only our own hex in the list → no one to broadcast to.
+    await transport.sendGroupMessage("g1", [getPublicKey(botSk)], "anyone?");
     expect(publishCalls).toBe(0);
   });
 

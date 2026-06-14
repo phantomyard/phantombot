@@ -207,6 +207,41 @@ export function createPhantomchatChannel(
           return;
         }
 
+        // (7) GROUP ROUTING. The PWA wraps a GROUP message with the same text
+        // envelope content as a DM, distinguishing it ONLY in the rumor tags: a
+        // `['group', <groupId>]` tag plus one `['p', <memberHex>]` tag per OTHER
+        // member (see the PWA's wrapGroupMessage). Without reading those tags
+        // every group message looks like a DM and the reply goes back 1:1 to
+        // the sender instead of into the group — the HQ bug. So: if a group tag
+        // is present, thread the turn under a `group:<groupId>` conversation and
+        // carry the member hexes so the server can broadcast the reply to the
+        // whole group. No group DB is needed: the member list rides inbound.
+        const groupTag = rumor.tags.find(
+          (t) => t[0] === "group" && typeof t[1] === "string" && t[1].length > 0,
+        );
+        const groupId = groupTag?.[1];
+
+        if (groupId) {
+          // Members the sender wrapped to (everyone but the sender). Lowercased
+          // for stable comparison; the sender adds itself back on reply.
+          const memberHexes = rumor.tags
+            .filter((t) => t[0] === "p" && typeof t[1] === "string")
+            .map((t) => t[1]!.toLowerCase());
+          queue.push({
+            // Key the thread by the group, not the peer, so a group and a 1:1
+            // DM with the same person stay distinct conversations.
+            conversationId: `group:${groupId}`,
+            // senderId stays the proven sender hex — the auth gate is per-person
+            // regardless of whether the message came via a group.
+            senderId: senderHex,
+            text: envelope.content,
+            groupId,
+            groupMemberHexes: memberHexes,
+          });
+          wake?.();
+          return;
+        }
+
         // Yield a plaintext, channel-neutral message. conversationId and
         // senderId are BOTH the proven sender hex: a DM thread is keyed by the
         // peer, and the trust perimeter gates on this same proven id.
