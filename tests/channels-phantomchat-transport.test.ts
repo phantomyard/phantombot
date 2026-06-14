@@ -117,6 +117,128 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(typeof ev.sig).toBe("string");
   });
 
+  test("sendTyping with stop=true publishes the STOP content marker", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const recipient = getPublicKey(generateSecretKey());
+    await transport.sendTyping(recipient, true);
+
+    expect(published.length).toBe(1);
+    const ev = published[0]!;
+    expect(ev.kind).toBe(20001);
+    // STOP marker so the PWA clears the dots immediately.
+    expect(ev.content).toBe("stop");
+    expect(ev.tags).toEqual([["p", recipient]]);
+  });
+
+  test("sendGroupTyping publishes one kind-20001 with a group tag + a p-tag per member", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const memberA = getPublicKey(generateSecretKey());
+    const memberB = getPublicKey(generateSecretKey());
+    await transport.sendGroupTyping("grp-123", [memberA, memberB]);
+
+    expect(published.length).toBe(1);
+    const ev = published[0]!;
+    expect(ev.kind).toBe(20001);
+    expect(ev.pubkey).toBe(getPublicKey(sk));
+    expect(ev.content).toBe("");
+    // Group tag routes the dots to the group chat; one p-tag per member so each
+    // member's #p subscription delivers it.
+    expect(ev.tags).toEqual([
+      ["group", "grp-123"],
+      ["p", memberA.toLowerCase()],
+      ["p", memberB.toLowerCase()],
+    ]);
+    expect(typeof ev.sig).toBe("string");
+  });
+
+  test("sendGroupTyping with stop=true emits the STOP marker", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const member = getPublicKey(generateSecretKey());
+    await transport.sendGroupTyping("grp-9", [member], true);
+
+    expect(published.length).toBe(1);
+    expect(published[0]!.content).toBe("stop");
+  });
+
+  test("sendGroupTyping is a no-op when the only member is ourselves", async () => {
+    let publishCalls = 0;
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish() {
+        publishCalls += 1;
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    // Only our own hex → nobody else to signal → no publish.
+    await transport.sendGroupTyping("grp-1", [getPublicKey(sk)]);
+    expect(publishCalls).toBe(0);
+  });
+
   test("sendPresence publishes a signed kind-30315 status p-tagged to every peer", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {

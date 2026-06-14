@@ -49,6 +49,16 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
 export const NOSTR_KIND_TYPING = 20001;
 
 /**
+ * Typing-event content markers. A kind-20001 event's `content` is the lifecycle
+ * signal the PWA reads: empty string = "I'm typing now" (start/refresh);
+ * `"stop"` = "I've stopped" (cancel immediately). The bot emits a STOP the
+ * instant a reply is published so the PWA clears the dots at once instead of
+ * waiting out its 6s auto-expiry — the "typing lingers after the answer" fix.
+ */
+export const TYPING_CONTENT_START = "";
+export const TYPING_CONTENT_STOP = "stop";
+
+/**
  * NIP-38 PARAMETERIZED-REPLACEABLE event kind for user status / presence
  * (range 30000–39999). We use it as a liveness heartbeat: while phantombot's
  * listener is up it republishes one of these every ~60s, p-tagged to each
@@ -144,6 +154,25 @@ export interface PhantomchatTransport extends ChannelTransport {
     groupId: string,
     memberHexes: string[],
     text: string,
+  ): Promise<void>;
+  /**
+   * Group typing indicator. Publishes ONE kind-20001 ephemeral event carrying a
+   * `['group', groupId]` tag plus one `['p', hex]` tag per member, so the PWA
+   * routes the dots into the GROUP chat (showing "Lena is typing…", natively
+   * aggregated with other members) rather than a 1:1 DM. `stop` true emits the
+   * STOP marker to clear the indicator immediately. Best-effort: never throws.
+   * A no-op when `memberHexes` is empty.
+   */
+  /**
+   * DM typing tick. `stop` true emits the STOP marker so the PWA clears the
+   * dots immediately instead of waiting out its 6s auto-expiry. Widens the base
+   * `ChannelTransport.sendTyping(conversationId)` with the optional flag.
+   */
+  sendTyping(conversationId: string, stop?: boolean): Promise<void>;
+  sendGroupTyping(
+    groupId: string,
+    memberHexes: string[],
+    stop?: boolean,
   ): Promise<void>;
   /**
    * Publish a single NIP-38 kind-30315 presence heartbeat, p-tagged to every
@@ -332,20 +361,59 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * "bot ↔ you active now") matches the posture the app already has for its
    * plaintext kind-7 reactions / kind-5 deletes.
    */
-  async sendTyping(conversationId: string): Promise<void> {
+  async sendTyping(conversationId: string, stop?: boolean): Promise<void> {
     try {
       const event = finalizeEvent(
         {
           kind: NOSTR_KIND_TYPING,
           created_at: Math.floor(Date.now() / 1000),
           tags: [["p", conversationId]],
-          content: "",
+          content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,
         },
         this.ourSecretKey,
       );
       await this.publishWrap(event as unknown as NTNostrEvent);
     } catch (e) {
       log.debug("phantomchat: sendTyping publish failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Group typing tick. One ephemeral kind-20001 event tagged with the group id
+   * and every member's `#p` (so the PWA's `#p:[self]` subscription delivers it to
+   * each member). The `['group', groupId]` tag is what makes the PWA render the
+   * dots inside the group chat — without it a group-message reply-in-progress
+   * shows as a 1:1 DM typing indicator (the HQ mis-routing). `stop` emits the
+   * STOP marker. Best-effort; mirrors sendTyping's never-throw contract.
+   */
+  async sendGroupTyping(
+    groupId: string,
+    memberHexes: string[],
+    stop?: boolean,
+  ): Promise<void> {
+    const ourHexLower = this.ourPubHex.toLowerCase();
+    const others = [
+      ...new Set(memberHexes.map((h) => h.toLowerCase())),
+    ].filter((h) => h !== ourHexLower);
+    if (others.length === 0) return;
+    try {
+      const event = finalizeEvent(
+        {
+          kind: NOSTR_KIND_TYPING,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["group", groupId],
+            ...others.map((hex) => ["p", hex]),
+          ],
+          content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,
+        },
+        this.ourSecretKey,
+      );
+      await this.publishWrap(event as unknown as NTNostrEvent);
+    } catch (e) {
+      log.debug("phantomchat: sendGroupTyping publish failed", {
         error: (e as Error).message,
       });
     }

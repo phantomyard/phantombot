@@ -161,7 +161,21 @@ export async function runPhantomchatServer(
     // signs a Nostr event (Schnorr), and doing that synchronously here would
     // delay the start of the turn itself. The indicator must never be on the
     // turn's critical path.
-    const sendTypingTick = () => void transport.sendTyping(senderHex);
+    // For a group message the dots must land in the GROUP chat (so the PWA
+    // shows "Lena is typing…" in HQ, not in her DM). Reconstruct the broadcast
+    // set exactly like the reply path: inbound p-tags ∪ { sender }. For a DM the
+    // tick p-tags the sender as before.
+    const groupTypingMembers = msg.groupId
+      ? (() => {
+          const set = new Set<string>(msg.groupMemberHexes ?? []);
+          set.add(senderHex.toLowerCase());
+          return [...set];
+        })()
+      : null;
+    const sendTypingTick = () =>
+      msg.groupId
+        ? void transport.sendGroupTyping(msg.groupId, groupTypingMembers!)
+        : void transport.sendTyping(senderHex);
     const firstTypingTick = setTimeout(sendTypingTick, 0);
     const typingTimer = setInterval(sendTypingTick, 2000);
     try {
@@ -220,10 +234,16 @@ export async function runPhantomchatServer(
       return;
     } finally {
       // Stop the typing refresh whether the turn succeeded, errored, or the
-      // early-return above fired. The PWA's last indicator self-expires ~6s
-      // later, and the reply we send (success path) clears it immediately.
+      // early-return above fired, then publish an explicit STOP so the PWA
+      // clears the dots AT ONCE instead of waiting out its 6s auto-expiry (the
+      // "typing lingers after the answer" fix). Best-effort: never throws.
       clearTimeout(firstTypingTick);
       clearInterval(typingTimer);
+      if (msg.groupId) {
+        void transport.sendGroupTyping(msg.groupId, groupTypingMembers!, true);
+      } else {
+        void transport.sendTyping(senderHex, true);
+      }
     }
 
     const finalReply = reply.trim();

@@ -640,6 +640,23 @@ describe("phantomchat group routing (HQ bug)", () => {
     }
     expect(memberReply).toBeDefined();
     expect(JSON.parse(memberReply!.content).content).toBe("hey Andrew, in HQ");
+
+    // Typing indicators for a GROUP turn are kind-20001 events that carry the
+    // group tag (so the PWA renders the dots in HQ, not in Lena's DM), NOT a
+    // bare `['p', sender]` DM typing tick.
+    const typingEvents = pool.published.filter((e) => e.kind === 20001);
+    expect(typingEvents.length).toBeGreaterThan(0);
+    for (const ev of typingEvents) {
+      expect(ev.tags.find((t) => t[0] === "group")).toEqual(["group", groupId]);
+      // p-tags reach the other members (Andrew + member), never Lena herself.
+      const pTags = ev.tags.filter((t) => t[0] === "p").map((t) => t[1]);
+      expect(pTags).not.toContain(botHex.toLowerCase());
+      expect(new Set(pTags)).toEqual(
+        new Set([andrewHex.toLowerCase(), memberHex.toLowerCase()]),
+      );
+    }
+    // The turn ends with an explicit STOP so the dots clear at once.
+    expect(typingEvents.some((e) => e.content === "stop")).toBe(true);
   });
 
   test("a plain DM still replies 1:1 (no group tag → unchanged DM behaviour)", async () => {
