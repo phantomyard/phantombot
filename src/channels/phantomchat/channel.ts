@@ -52,6 +52,15 @@ export const PHANTOMCHAT_CAPABILITIES: ChannelCapabilities = {
 };
 
 /**
+ * How often the self-heal watchdog polls relay connection health. A dropped
+ * relay's inbound subscription is dead until the next check, so this bounds the
+ * worst-case deaf window after a hard relay drop. 20s balances quick recovery
+ * against not thrashing re-subscriptions on a transient blip (enablePing's ~30s
+ * keepalive means most idle drops never happen in the first place).
+ */
+export const SUBSCRIPTION_HEAL_CHECK_MS = 20_000;
+
+/**
  * The application-level message envelope carried INSIDE a rumor's `content`,
  * as a JSON string. This is the wire contract with the PWA: the rumor content
  * is NOT the raw text but this object stringified.
@@ -81,6 +90,12 @@ export interface PhantomchatChannelInput {
   publicKeyHex: string;
   /** The relay-pool transport (subscribe + publish). */
   transport: PhantomchatTransport;
+  /**
+   * Self-heal watchdog poll interval (ms). Defaults to
+   * `SUBSCRIPTION_HEAL_CHECK_MS`; overridable so tests can drive the watchdog
+   * without a 20s wait.
+   */
+  healCheckMs?: number;
 }
 
 /**
@@ -97,6 +112,7 @@ export function createPhantomchatChannel(
   input: PhantomchatChannelInput,
 ): Channel<PhantomchatTransport> {
   const { secretKey, publicKeyHex, transport } = input;
+  const healCheckMs = input.healCheckMs ?? SUBSCRIPTION_HEAL_CHECK_MS;
 
   return {
     id: "phantomchat",
@@ -178,36 +194,53 @@ export function createPhantomchatChannel(
         // than one wrap; the rumor id is stable across them.
         if (!remember(seenRumorIds, rumor.id)) return;
 
-        // (5) Parse the JSON envelope. Only `type === "text"` is handled; any
-        // other type (or malformed JSON) is ignored silently per the spec.
-        let envelope: { type?: unknown; content?: unknown };
+        // (5) Parse the JSON envelope. `type === "text"` is a chat message;
+        // `type === "presence-ping"` is a liveness probe we answer with a pong;
+        // any other type (or malformed JSON) is ignored silently.
+        let envelope: { type?: unknown; content?: unknown; nonce?: unknown };
         try {
           envelope = JSON.parse(rumor.content) as {
             type?: unknown;
             content?: unknown;
+            nonce?: unknown;
           };
         } catch {
           log.debug("phantomchat: rumor content is not valid JSON; ignoring");
           return;
         }
-        if (envelope.type !== "text" || typeof envelope.content !== "string") {
-          return;
-        }
 
         // (6) LIVE-GATE. On (re)connect the relays replay up to 49h of stored
         // gift-wraps (the wide `since` we need so live backdated wraps aren't
-        // filtered — see transport.subscribeGiftWraps). We must NOT answer that
-        // history: a restart would otherwise re-reply to every past DM. So we
-        // process a message only once it arrives LIVE, i.e. after the relays
-        // have signalled EOSE (end of stored events). Everything before EOSE is
-        // already marked seen above (wrap id + rumor id), so it's silently
-        // consumed — never enqueued, and never reprocessed if re-delivered.
+        // filtered — see transport.subscribeGiftWraps). We must NOT act on that
+        // history: a restart would otherwise re-reply to every past DM, and a
+        // stale ping's pong is useless (the sender long ago timed that nonce
+        // out). So we act only once a message arrives LIVE, i.e. after the
+        // relays have signalled EOSE. Everything before EOSE is already marked
+        // seen above (wrap id + rumor id), so it's silently consumed — never
+        // enqueued, never re-ponged, never reprocessed if re-delivered.
         if (!live) {
           log.debug("phantomchat: skipping backlog gift-wrap (pre-EOSE)");
           return;
         }
 
-        // (7) GROUP ROUTING. The PWA wraps a GROUP message with the same text
+        // (7) PRESENCE PING → PONG. A live ping means the sender's PWA is
+        // probing whether we can actually hear them on the real message path.
+        // Answer with a gift-wrapped pong echoing the nonce; do NOT enqueue a
+        // turn. Riding the same kind-1059 path as messages is the point: a pong
+        // proves the delivery path is alive, not merely some side channel.
+        if (envelope.type === "presence-ping") {
+          const nonce = typeof envelope.nonce === "string" ? envelope.nonce : "";
+          if (nonce) {
+            void transport.sendPresencePong(senderHex, nonce);
+          }
+          return;
+        }
+
+        if (envelope.type !== "text" || typeof envelope.content !== "string") {
+          return;
+        }
+
+        // (8) GROUP ROUTING. The PWA wraps a GROUP message with the same text
         // envelope content as a DM, distinguishing it ONLY in the rumor tags: a
         // `['group', <groupId>]` tag plus one `['p', <memberHex>]` tag per OTHER
         // member (see the PWA's wrapGroupMessage). Without reading those tags
@@ -265,7 +298,52 @@ export function createPhantomchatChannel(
       };
       const liveFallback = setTimeout(goLive, 8000);
 
-      const sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+      let sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+
+      // SELF-HEAL WATCHDOG. `enablePing` (set on the pool) keeps idle sockets
+      // warm so they aren't dropped for inactivity — that alone fixes the common
+      // "ignores the first DM after idle" case. But a HARD drop (relay restart,
+      // network blip, or a ping-timeout force-close) deletes the relay from the
+      // pool with reconnect OFF, tearing its gift-wrap subscription down for
+      // good. So we poll connection health and, when fewer relays are connected
+      // than configured, re-arm a fresh subscription. A fresh subscribeGiftWraps
+      // reconnects the dropped relay (nostr-tools' ensureRelay) and re-sends our
+      // REQ with the correct WIDE `since` — crucially NOT nostr-tools' own
+      // reconnect, which narrows `since` to lastEmitted+1 and would silently drop
+      // gift-wraps backdated up to 48h. `live` stays true and the dedup sets
+      // persist across the re-arm, so the backlog this replays is silently
+      // consumed — never a re-reply. No-op when the pool can't report status
+      // (in-memory test fakes return undefined).
+      const expectedRelays = transport.relays.length;
+      // EDGE-TRIGGERED. Re-arm only when the connected count FELL since the last
+      // check, not on every tick a relay stays down. A re-arm reconnects dropped
+      // relays (ensureRelay), so a healthy recovery returns the count to
+      // `expectedRelays` and no further re-arm fires. But if a relay is
+      // persistently dead the count plateaus below expected — level-triggering
+      // there would re-subscribe (and replay 49h of backlog on) the HEALTHY
+      // relays every interval forever. Edge-triggering re-arms once per drop and
+      // then waits for either recovery or a further drop. The surviving relays
+      // carry traffic in the meantime (a DM publishes to all of them).
+      let lastConnected = expectedRelays;
+      const healCheck = (): void => {
+        if (closed) return;
+        const connected = transport.connectedRelayCount();
+        if (connected === undefined) return;
+        if (connected < expectedRelays && connected < lastConnected) {
+          log.info("phantomchat: relay(s) dropped — re-arming gift-wrap subscription", {
+            connected,
+            expected: expectedRelays,
+          });
+          try {
+            sub.close();
+          } catch {
+            // already torn down by the hard close — re-arm anyway.
+          }
+          sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+        }
+        lastConnected = connected;
+      };
+      const healTimer = setInterval(healCheck, healCheckMs);
 
       const onAbort = (): void => {
         closed = true;
@@ -294,6 +372,7 @@ export function createPhantomchatChannel(
         }
       } finally {
         clearTimeout(liveFallback);
+        clearInterval(healTimer);
         if (signal) signal.removeEventListener("abort", onAbort);
         sub.close();
       }

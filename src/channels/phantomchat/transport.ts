@@ -112,6 +112,13 @@ export interface RelayPool {
   ): { close(): void };
   /** Publish `event` to every relay. Returns one promise per relay. */
   publish(relays: string[], event: NTNostrEvent): Promise<string>[];
+  /**
+   * Per-relay connection status: a Map of relay-url → connected?. nostr-tools'
+   * SimplePool exposes this as `listConnectionStatus()`; a relay that has hard-
+   * closed is either absent from the map or present with `false`. Optional so
+   * in-memory test fakes (which have no sockets) don't have to implement it.
+   */
+  listConnectionStatus?(): Map<string, boolean>;
   /** Close all relay connections. */
   close(relays: string[]): void;
 }
@@ -180,6 +187,22 @@ export interface PhantomchatTransport extends ChannelTransport {
    * throws. A no-op when `peerHexes` is empty (no one to advertise to).
    */
   sendPresence(peerHexes: string[]): Promise<void>;
+  /**
+   * Reply to a presence PING with a PONG: publish a NIP-17 gift-wrapped
+   * `{type:"presence-pong", nonce, ...}` envelope to `toHex`, echoing the
+   * ping's `nonce` so the sender can correlate it (freshness is by nonce, not
+   * timestamp — gift-wrap created_at is backdated). Rides the SAME kind-1059
+   * path as real messages, so a pong proves the actual message-delivery path is
+   * live (not merely some side-channel). Best-effort: never throws.
+   */
+  sendPresencePong(toHex: string, nonce: string): Promise<void>;
+  /**
+   * How many of our relays are currently connected, or `undefined` if the
+   * underlying pool can't report it (in-memory test fakes). The channel-layer
+   * self-heal watchdog reads this: a count below `relays.length` means a relay
+   * dropped and the subscription must be re-armed.
+   */
+  connectedRelayCount(): number | undefined;
   /** Tear down all relay connections. */
   close(): void;
 }
@@ -449,6 +472,45 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         error: (e as Error).message,
       });
     }
+  }
+
+  /**
+   * Reply to a presence ping. Builds the phantomchat envelope with
+   * `type:"presence-pong"` carrying the ping's `nonce`, NIP-17-wraps it to the
+   * pinger, and publishes ONLY the recipient wrap (no self-wrap — the bot never
+   * reads its own pongs). Best-effort: a failed publish must never throw into
+   * the receive loop.
+   */
+  async sendPresencePong(toHex: string, nonce: string): Promise<void> {
+    try {
+      const envelope = JSON.stringify({
+        id: crypto.randomUUID(),
+        from: this.ourPubHex,
+        to: toHex,
+        type: "presence-pong",
+        nonce,
+        content: "",
+        timestamp: Date.now(),
+      });
+      const { wraps } = wrapNip17Message(this.ourSecretKey, toHex, envelope);
+      // wraps = [recipientWrap, selfWrap]; only the recipient needs the pong.
+      const recipientWrap = wraps[0];
+      if (recipientWrap) {
+        await this.publishWrap(recipientWrap as unknown as NTNostrEvent);
+      }
+    } catch (e) {
+      log.debug("phantomchat: sendPresencePong failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  connectedRelayCount(): number | undefined {
+    const status = this.pool.listConnectionStatus?.();
+    if (!status) return undefined;
+    let n = 0;
+    for (const connected of status.values()) if (connected) n++;
+    return n;
   }
 
   close(): void {

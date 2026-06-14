@@ -434,7 +434,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         out.write(
           `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${allowedLabel}\n`,
         );
-        const pool = new SimplePool();
+        // enablePing: nostr-tools sends a keepalive (ws ping, or a dummy REQ for
+        // WebSocket impls without .ping()) every ~30s so an idle relay socket is
+        // never closed for inactivity. This is the root fix for "the persona
+        // ignores the first DM after it's been idle": without keepalive the relay
+        // drops the idle socket, the gift-wrap subscription dies, and the first
+        // message lands into a connection nobody is holding. We deliberately do
+        // NOT set enableReconnect — on reconnect nostr-tools narrows each filter's
+        // `since` to lastEmitted+1, which would silently drop gift-wraps whose
+        // created_at is backdated up to 48h (NIP-59). Hard-drop recovery is
+        // handled instead by the channel-layer self-heal watchdog, which re-arms
+        // the subscription with our own correct wide `since`.
+        const pool = new SimplePool({ enablePing: true });
         const transport = new SimplePoolPhantomchatTransport(
           identity.secretKey,
           relays,
