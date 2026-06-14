@@ -15,6 +15,7 @@ import {
   listPhantomchatPersonas,
   loadPhantomchatPersonaConfig,
   phantomchatConfigPath,
+  recordGreeted,
   recordTrustedNpub,
   savePhantomchatPersonaConfig,
 } from "../src/channels/phantomchat/personaStore.ts";
@@ -98,6 +99,72 @@ describe("save/load round-trip", () => {
     expect(loaded.relays).toEqual(["wss://keep.example"]); // preserved
     // Idempotent: re-recording the same npub doesn't duplicate it.
     expect(await recordTrustedNpub(agentDir, trusted)).toEqual([trusted]);
+  });
+
+  test("greeted round-trips: persisted only when non-empty, defaults []", async () => {
+    const id = generateIdentity();
+    const a = generateIdentity().npub;
+    const withDir = join(workdir, "greeted-on");
+    const withoutDir = join(workdir, "greeted-off");
+    await mkdir(withDir, { recursive: true });
+    await mkdir(withoutDir, { recursive: true });
+
+    await savePhantomchatPersonaConfig(withDir, {
+      nsec: id.nsec,
+      relays: [],
+      allowedNpubs: [a],
+      greeted: [a],
+    });
+    await savePhantomchatPersonaConfig(withoutDir, {
+      nsec: id.nsec,
+      relays: [],
+      allowedNpubs: [a],
+    });
+
+    expect(loadPhantomchatPersonaConfig(withDir)!.greeted).toEqual([a]);
+    expect(loadPhantomchatPersonaConfig(withoutDir)!.greeted).toEqual([]);
+  });
+
+  test("recordGreeted appends, is idempotent, and preserves identity/allowlist/tofu", async () => {
+    const id = generateIdentity();
+    const a = generateIdentity().npub;
+    const b = generateIdentity().npub;
+    const agentDir = join(workdir, "greet-record");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://keep.example"],
+      allowedNpubs: [a, b],
+    });
+
+    expect(await recordGreeted(agentDir, a)).toEqual([a]);
+    expect(await recordGreeted(agentDir, b)).toEqual([a, b]);
+    // Idempotent — re-recording doesn't duplicate.
+    expect(await recordGreeted(agentDir, a)).toEqual([a, b]);
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.greeted).toEqual([a, b]);
+    expect(loaded.allowedNpubs).toEqual([a, b]); // preserved
+    expect(loaded.relays).toEqual(["wss://keep.example"]); // preserved
+    expect(loaded.identity.npub).toBe(id.npub); // preserved
+  });
+
+  test("recordTrustedNpub preserves an existing greeted list", async () => {
+    const id = generateIdentity();
+    const greetedNpub = generateIdentity().npub;
+    const trusted = generateIdentity().npub;
+    const agentDir = join(workdir, "trust-keeps-greeted");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: [],
+      allowedNpubs: [],
+      tofu: true,
+      greeted: [greetedNpub],
+    });
+
+    await recordTrustedNpub(agentDir, trusted);
+    expect(loadPhantomchatPersonaConfig(agentDir)!.greeted).toEqual([greetedNpub]);
   });
 
   test("cacheRelaysForPersona updates only relays, preserving identity + allowlist", async () => {

@@ -138,13 +138,16 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     existing?.relays ??
     [...DEFAULT_PHANTOMCHAT_RELAYS];
 
-  // 3. Allowlist (prefill from the existing file). Empty now means TRUST-ON-
-  //    FIRST-USE (TOFU): the first npub to DM the bot is trusted, added here,
-  //    and the bot locks to it — much safer than the old "answer anyone".
+  // 3. Allowlist (prefill from the existing file). The bot REACHES OUT to these
+  //    npubs — on start it sends each one a friendly "Hello" (in the persona's
+  //    voice) that lands in their PhantomChat app as a contact request to
+  //    approve. No need to DM the bot first. Empty means TRUST-ON-FIRST-USE
+  //    (TOFU): the first npub to DM the bot is trusted, added here, and the bot
+  //    locks to it — much safer than the old "answer anyone".
   const currentAllowed = existing?.allowedNpubs.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
-      "Allowed npubs (comma-separated; empty = the first npub to DM is trusted and added)",
+      "Allowed npubs (comma-separated; the bot greets each one. Empty = the first npub to DM the bot is trusted and added)",
     placeholder: "npub1…",
     defaultValue: currentAllowed,
   });
@@ -165,10 +168,13 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     );
   } else {
     p.note(
-      `The FIRST npub on the allowlist is the incident-notification target —\n` +
-        `that's where held-request / security alerts for '${persona}' are sent.\n` +
-        `Re-run this command to change the order or the list.`,
-      "Incident target",
+      `On its next start the bot sends a "Hello" to each of these npubs —\n` +
+        `that DM shows up in their PhantomChat app as a contact request to\n` +
+        `approve. Already-greeted npubs are remembered and not re-greeted.\n\n` +
+        `The FIRST npub on the allowlist is also the incident-notification\n` +
+        `target — where held-request / security alerts for '${persona}' are\n` +
+        `sent. Re-run this command to change the order or the list.`,
+      "Bot greets these · incident target",
     );
   }
 
@@ -177,6 +183,9 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     relays,
     allowedNpubs,
     tofu,
+    // Preserve the greeted markers across edits so adding/removing an npub
+    // doesn't re-trigger greetings for contacts already onboarded.
+    greeted: existing?.greeted,
   });
   p.note(
     `persona: ${persona}\n` +

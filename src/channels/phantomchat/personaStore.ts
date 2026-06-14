@@ -20,10 +20,16 @@
  *                                       //   canonical /relays.json on startup;
  *                                       //   falls back to the PWA seed set
  *     "allowed_npubs": ["npub1…", …],   // optional — the trust allowlist
- *     "tofu": true                      // optional — trust-on-first-use: when the
+ *     "tofu": true,                     // optional — trust-on-first-use: when the
  *                                       //   allowlist is empty, the FIRST npub to
  *                                       //   DM is trusted, appended here, and the
  *                                       //   bot then locks to it (tofu cleared)
+ *     "greeted": ["npub1…", …]          // optional — npubs the bot has already
+ *                                       //   sent its proactive "Hello" to. On
+ *                                       //   every start the bot greets any
+ *                                       //   allowed npub NOT in this list, then
+ *                                       //   records it here so restarts don't
+ *                                       //   re-spam onboarded contacts.
  *   }
  *
  * Allowlist semantics:
@@ -72,6 +78,13 @@ export interface PhantomchatPersonaConfig {
    * once allowed_npubs is non-empty.
    */
   tofu: boolean;
+  /**
+   * Raw npub strings the bot has already sent its proactive onboarding "Hello"
+   * to. The startup greet pass greets every entry in `allowedNpubs` that is NOT
+   * present here, then appends it — so a restart re-greets only the npubs added
+   * since last time, never the ones already onboarded.
+   */
+  greeted: string[];
   /** Absolute path to the phantomchat.json this came from. */
   path: string;
 }
@@ -87,6 +100,7 @@ interface PhantomchatFileShape {
   relays?: unknown;
   allowed_npubs?: unknown;
   tofu?: unknown;
+  greeted?: unknown;
 }
 
 function asStringArray(v: unknown): string[] {
@@ -136,6 +150,7 @@ export function loadPhantomchatPersonaConfig(
     allowedNpubs,
     allowedHex: decodeAllowedNpubs(allowedNpubs),
     tofu: parsed.tofu === true,
+    greeted: asStringArray(parsed.greeted),
     path,
   };
 }
@@ -147,7 +162,13 @@ export function loadPhantomchatPersonaConfig(
  */
 export async function savePhantomchatPersonaConfig(
   agentDir: string,
-  data: { nsec: string; relays: string[]; allowedNpubs: string[]; tofu?: boolean },
+  data: {
+    nsec: string;
+    relays: string[];
+    allowedNpubs: string[];
+    tofu?: boolean;
+    greeted?: string[];
+  },
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
   await mkdir(dirname(path), { recursive: true });
@@ -158,6 +179,8 @@ export async function savePhantomchatPersonaConfig(
   };
   // Only persist tofu when explicitly enabled — keep the file clean otherwise.
   if (data.tofu) body.tofu = true;
+  // Only persist greeted when non-empty — keep fresh files clean.
+  if (data.greeted && data.greeted.length > 0) body.greeted = data.greeted;
   const tmp = `${path}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
@@ -194,6 +217,7 @@ export async function cacheRelaysForPersona(
     relays,
     allowedNpubs: existing.allowedNpubs,
     tofu: existing.tofu,
+    greeted: existing.greeted,
   });
   return true;
 }
@@ -219,8 +243,38 @@ export async function recordTrustedNpub(
     relays: existing.relays,
     allowedNpubs,
     tofu: false,
+    greeted: existing.greeted,
   });
   return allowedNpubs;
+}
+
+/**
+ * Record that the bot has sent its proactive onboarding "Hello" to `npub`,
+ * appending it to the persona's `greeted` list. Idempotent — a npub already
+ * present is left as-is. Preserves nsec / relays / allowlist / tofu. Returns
+ * the updated greeted list. Best-effort: callers treat a throw as "couldn't
+ * persist the greeted marker, carry on" — the worst case is one duplicate
+ * greeting on the next restart, never a missed onboarding.
+ */
+export async function recordGreeted(
+  agentDir: string,
+  npub: string,
+): Promise<string[]> {
+  const existing = loadPhantomchatPersonaConfig(agentDir);
+  if (!existing) {
+    throw new Error(`phantomchat: no config to record greeted npub in ${agentDir}`);
+  }
+  const greeted = existing.greeted.includes(npub)
+    ? existing.greeted
+    : [...existing.greeted, npub];
+  await savePhantomchatPersonaConfig(agentDir, {
+    nsec: existing.identity.nsec,
+    relays: existing.relays,
+    allowedNpubs: existing.allowedNpubs,
+    tofu: existing.tofu,
+    greeted,
+  });
+  return greeted;
 }
 
 /** One persona with a configured phantomchat identity. */

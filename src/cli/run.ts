@@ -20,7 +20,12 @@ import {
   listPhantomchatPersonas,
   cacheRelaysForPersona,
   recordTrustedNpub,
+  recordGreeted,
 } from "../channels/phantomchat/personaStore.ts";
+import {
+  resolvePersonaGreeting,
+  greetPendingNpubs,
+} from "../channels/phantomchat/greet.ts";
 import {
   fetchCanonicalRelays,
   sameRelays,
@@ -466,6 +471,48 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             err,
           }).finally(() => transport.close()),
         );
+
+        // Proactive onboarding: the bot reaches OUT to its allowlist instead of
+        // waiting to be DM'd. Greet every allowed npub not yet in `greeted`,
+        // then record it so restarts re-greet only npubs added since last time.
+        // Runs DETACHED (not pushed to `tasks`) so a slow greeting generation
+        // never delays startup or the relay subscription, and only fires when
+        // there's pending work — a fully-onboarded persona costs nothing on
+        // restart. TOFU/open-bot personas have an empty allowlist, so there's
+        // nothing to greet and this is skipped.
+        const greetedSet = new Set(spec.config.greeted);
+        const pendingGreet = spec.config.allowedNpubs.filter(
+          (n) => !greetedSet.has(n),
+        );
+        if (pendingGreet.length > 0) {
+          const greetSpec = spec;
+          void (async () => {
+            const greeting = await resolvePersonaGreeting({
+              agentDir,
+              persona: greetSpec.persona,
+              harnesses,
+              idleTimeoutMs: config.harnessIdleTimeoutMs,
+              hardTimeoutMs: config.harnessHardTimeoutMs,
+              signal: ac.signal,
+            });
+            await greetPendingNpubs({
+              persona: greetSpec.persona,
+              allowedNpubs: greetSpec.config.allowedNpubs,
+              greetedNpubs: greetSpec.config.greeted,
+              greeting,
+              sendMessage: (hex, text) => transport.sendMessage(hex, text),
+              recordGreeted: async (npub) => {
+                await recordGreeted(agentDir, npub);
+              },
+              out,
+              err,
+            });
+          })().catch((e) => {
+            log.warn(`phantomchat[${greetSpec.persona}]: greet pass failed`, {
+              error: (e as Error).message,
+            });
+          });
+        }
       }
     }
     try {
