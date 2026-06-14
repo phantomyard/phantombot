@@ -48,6 +48,22 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
 export const NOSTR_KIND_TYPING = 20001;
 
 /**
+ * NIP-38 PARAMETERIZED-REPLACEABLE event kind for user status / presence
+ * (range 30000–39999). We use it as a liveness heartbeat: while phantombot's
+ * listener is up it republishes one of these every ~60s, p-tagged to each
+ * allowlist peer and carrying `["status","online"]` + content `"online"`. The
+ * PWA — already subscribed for events p-tagged to itself — resolves the author
+ * pubkey to a contact and renders a REAL "Online" badge; when the heartbeats
+ * stop (service down / relays unreachable) the PWA flips the contact to
+ * "last seen at HH:MM" after its offline threshold. Must match phantomchat's
+ * `KIND_STATUS` and the `d`/`status`/content shape its presence engine expects.
+ *
+ * Being parameterized-replaceable (keyed by author+kind+`d`), each new beat
+ * supersedes the last on the relay — no unbounded accumulation.
+ */
+export const NOSTR_KIND_PRESENCE = 30315;
+
+/**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
  * tagged to our pubkey, from roughly now. We deliberately set `since` to a
  * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
@@ -114,6 +130,12 @@ export interface PhantomchatTransport extends ChannelTransport {
   ): { close(): void };
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
+  /**
+   * Publish a single NIP-38 kind-30315 presence heartbeat, p-tagged to every
+   * hex pubkey in `peerHexes`, advertising that we're online. Best-effort: never
+   * throws. A no-op when `peerHexes` is empty (no one to advertise to).
+   */
+  sendPresence(peerHexes: string[]): Promise<void>;
   /** Tear down all relay connections. */
   close(): void;
 }
@@ -252,6 +274,38 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       await this.publishWrap(event as unknown as NTNostrEvent);
     } catch (e) {
       log.debug("phantomchat: sendTyping publish failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Presence heartbeat. Publishes ONE NIP-38 kind-30315 event signed by our key,
+   * p-tagged to every recipient in `peerHexes`, with `["status","online"]` and
+   * content `"online"` — the exact shape phantomchat's presence engine consumes.
+   * Like `sendTyping` it is intentionally NOT gift-wrapped (it's a liveness
+   * beacon, not private content) and is fully best-effort: a failed publish must
+   * never throw into the heartbeat loop. A no-op when there are no peers.
+   */
+  async sendPresence(peerHexes: string[]): Promise<void> {
+    if (peerHexes.length === 0) return;
+    try {
+      const event = finalizeEvent(
+        {
+          kind: NOSTR_KIND_PRESENCE,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ["d", "general"],
+            ["status", "online"],
+            ...peerHexes.map((hex) => ["p", hex]),
+          ],
+          content: "online",
+        },
+        this.ourSecretKey,
+      );
+      await this.publishWrap(event as unknown as NTNostrEvent);
+    } catch (e) {
+      log.debug("phantomchat: sendPresence publish failed", {
         error: (e as Error).message,
       });
     }

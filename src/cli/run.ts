@@ -16,6 +16,7 @@ import {
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
+import { startPresenceHeartbeat } from "../channels/phantomchat/presence.ts";
 import {
   listPhantomchatPersonas,
   cacheRelaysForPersona,
@@ -446,6 +447,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           publicKeyHex: identity.publicKeyHex,
           transport,
         });
+        // Presence: while this listener is up, beat a NIP-38 kind-30315 status
+        // to the allowlist peers every 60s so Andrew's PWA shows the persona as
+        // a REAL "Online" (and "last seen at HH:MM" the moment the service dies).
+        // No-op for open/TOFU personas (empty allowlist — no one to advertise to).
+        const presence = startPresenceHeartbeat({
+          transport,
+          peerHexes: allowedHex,
+          signal: ac.signal,
+        });
         const agentDir = spec.agentDir;
         tasks.push(
           startPhantomchat({
@@ -469,7 +479,10 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             signal: ac.signal,
             out,
             err,
-          }).finally(() => transport.close()),
+          }).finally(() => {
+            presence.stop();
+            transport.close();
+          }),
         );
 
         // Proactive onboarding: the bot reaches OUT to its allowlist instead of
