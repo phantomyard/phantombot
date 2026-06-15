@@ -15,6 +15,7 @@ import { describe, expect, test } from "bun:test";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
 import { createPhantomchatChannel } from "../src/channels/phantomchat/channel.ts";
+import type { ChannelMessage } from "../src/channels/core/types.ts";
 import {
   SimplePoolPhantomchatTransport,
   type NostrFilter,
@@ -173,6 +174,70 @@ describe("phantomchat channel — presence ping/pong", () => {
     await pump;
 
     // No EOSE ever fired → live-gate closed → backlog ping ignored, no pong.
+    expect(pool.published.length).toBe(0);
+  });
+});
+
+describe("phantomchat channel — delivery receipt plumbing", () => {
+  test("a live DM text surfaces a turn carrying the envelope id as messageId", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "chat-42-0", // app message id the PWA's DeliveryTracker keys on
+      from: "peer",
+      to: ourPub,
+      type: "text",
+      content: "hello lena",
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    // The DM surfaces with the app message id plumbed through, so the SERVER
+    // can receipt it after the auth gate. The channel itself receipts nothing
+    // (gating belongs to the server — strangers must be dropped silently).
+    expect(got.length).toBe(1);
+    expect(got[0]!.text).toBe("hello lena");
+    expect(got[0]!.messageId).toBe("chat-42-0");
+    expect(pool.published.length).toBe(0);
+  });
+
+  test("a pre-EOSE (backlog) DM text yields no turn", async () => {
+    const { ourPub, pool, channel } = setup({ autoEose: false });
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "chat-99-0",
+      from: "peer",
+      to: ourPub,
+      type: "text",
+      content: "backlog",
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    // Live-gate closed → no turn surfaces, so the server never receipts it.
+    expect(got.length).toBe(0);
     expect(pool.published.length).toBe(0);
   });
 });

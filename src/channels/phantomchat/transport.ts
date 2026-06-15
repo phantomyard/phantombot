@@ -18,6 +18,9 @@ import { log } from "../../lib/logger.ts";
 import type { ChannelTransport } from "../core/types.ts";
 import type { NTNostrEvent } from "../../lib/nostrCrypto.ts";
 import {
+  createGiftWrap,
+  createRumor,
+  createSeal,
   wrapGroupMessage,
   wrapNip17Message,
   type NTNostrEvent as WrapEvent,
@@ -196,6 +199,14 @@ export interface PhantomchatTransport extends ChannelTransport {
    * live (not merely some side-channel). Best-effort: never throws.
    */
   sendPresencePong(toHex: string, nonce: string): Promise<void>;
+  /**
+   * Send a NIP-17 delivery receipt for a received DM back to its sender so the
+   * sender's PWA lights the second ("delivered") tick AND stops its always-on
+   * resend. `originalMessageId` is the app message id carried in the DM
+   * envelope's `id` field — the value the PWA's DeliveryTracker keys on, NOT
+   * the Nostr rumor id. Best-effort: never throws into the receive loop.
+   */
+  sendDeliveryReceipt(toHex: string, originalMessageId: string): Promise<void>;
   /**
    * How many of our relays are currently connected, or `undefined` if the
    * underlying pool can't report it (in-memory test fakes). The channel-layer
@@ -500,6 +511,34 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       }
     } catch (e) {
       log.debug("phantomchat: sendPresencePong failed", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Send a NIP-17 delivery receipt for a received DM back to its sender. The
+   * PWA's DeliveryTracker keys outgoing messages by the app message id carried
+   * in the envelope's `id` field, so `originalMessageId` MUST be that value
+   * (NOT the Nostr rumor id). The receipt is a kind-14 rumor with empty content
+   * and tags `[['e', originalMessageId], ['receipt-type','delivery'], ['p', toHex]]`,
+   * gift-wrapped to the sender only (no self-wrap — we never read our own
+   * receipts). This is what lights the second tick on Andrew's side AND lets the
+   * PWA's retry layer stop re-sending once we've actually got the message.
+   * Best-effort: a failed publish must never throw into the receive loop.
+   */
+  async sendDeliveryReceipt(toHex: string, originalMessageId: string): Promise<void> {
+    try {
+      const rumor = createRumor("", this.ourSecretKey, [
+        ["e", originalMessageId],
+        ["receipt-type", "delivery"],
+        ["p", toHex],
+      ]);
+      const seal = createSeal(rumor, this.ourSecretKey, toHex);
+      const giftWrap = createGiftWrap(seal, toHex);
+      await this.publishWrap(giftWrap as unknown as NTNostrEvent);
+    } catch (e) {
+      log.debug("phantomchat: sendDeliveryReceipt failed", {
         error: (e as Error).message,
       });
     }

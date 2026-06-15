@@ -101,6 +101,16 @@ export interface ChannelMessage {
    * outbound member set from this list plus the sender (see server.ts).
    */
   groupMemberHexes?: string[];
+  /**
+   * ORIGINATING MESSAGE ID (optional; currently only the phantomchat channel
+   * sets it). The sender-side application message id the remote client uses to
+   * track delivery — for phantomchat it is the DM envelope's `id` field, which
+   * the PWA's DeliveryTracker keys on. The server uses it, AFTER the auth gate
+   * admits the sender, to send a delivery receipt back (lighting the remote's
+   * second tick and stopping its resend). Absent for channels with no
+   * application-level delivery receipts (e.g. Telegram, which has its own).
+   */
+  messageId?: string;
 }
 
 /**

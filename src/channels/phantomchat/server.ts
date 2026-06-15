@@ -133,6 +133,18 @@ export async function runPhantomchatServer(
     }
     // else: empty set + tofu off = open bot — answer anyone (caller warned).
 
+    // ===================== DELIVERY RECEIPT =====================
+    // The sender just passed the auth gate, so acknowledging receipt to them is
+    // safe (we never receipt a dropped stranger — that path returned above). A
+    // NIP-17 delivery receipt lights the remote's second tick AND, crucially,
+    // tells its always-on retry layer the message landed so it stops re-sending
+    // — closing the "first message ghosts, second works" loop. DM only: group
+    // delivery is tracked per-member on the client via a separate mechanism.
+    // Fire-and-forget BEFORE the (possibly slow) turn so the tick is prompt.
+    if (!msg.groupId && msg.messageId) {
+      void transport.sendDeliveryReceipt(senderHex, msg.messageId);
+    }
+
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the
     // trusted SECURITY_PERIMETER prompt block and skips the threat screen.

@@ -197,9 +197,15 @@ export function createPhantomchatChannel(
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
         // `type === "presence-ping"` is a liveness probe we answer with a pong;
         // any other type (or malformed JSON) is ignored silently.
-        let envelope: { type?: unknown; content?: unknown; nonce?: unknown };
+        let envelope: {
+          id?: unknown;
+          type?: unknown;
+          content?: unknown;
+          nonce?: unknown;
+        };
         try {
           envelope = JSON.parse(rumor.content) as {
+            id?: unknown;
             type?: unknown;
             content?: unknown;
             nonce?: unknown;
@@ -278,10 +284,18 @@ export function createPhantomchatChannel(
         // Yield a plaintext, channel-neutral message. conversationId and
         // senderId are BOTH the proven sender hex: a DM thread is keyed by the
         // peer, and the trust perimeter gates on this same proven id.
+        //
+        // messageId carries the envelope's app message id so the SERVER can send
+        // a delivery receipt back AFTER the auth gate admits the sender — we do
+        // NOT receipt here, or we'd ack (and de-stealth) non-allowlisted
+        // strangers the gate is meant to drop silently.
         queue.push({
           conversationId: senderHex,
           senderId: senderHex,
           text: envelope.content,
+          ...(typeof envelope.id === "string" && envelope.id
+            ? { messageId: envelope.id }
+            : {}),
         });
         wake?.();
       };
