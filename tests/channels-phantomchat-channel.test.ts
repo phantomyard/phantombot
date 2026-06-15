@@ -277,3 +277,88 @@ describe("phantomchat channel — self-heal watchdog", () => {
     expect(pool.subscribeCount).toBe(1);
   });
 });
+
+/**
+ * A pool whose FIRST subscribeMany is the long-lived live subscription and whose
+ * SUBSEQUENT calls are catch-up-poll fetches that replay `fetchQueue` then EOSE.
+ * It deliberately NEVER pushes anything to the live subscription, modelling the
+ * ghost bug: a wrap that persists on the relay but the live push dropped. Only
+ * the poll can recover it.
+ */
+class PollOnlyPool implements RelayPool {
+  fetchQueue: NTNostrEvent[] = [];
+  private calls = 0;
+  private connected = new Map<string, boolean>();
+  constructor(relays: string[]) {
+    for (const r of relays) this.connected.set(r, true);
+  }
+  subscribeMany(
+    _relays: string[],
+    _filter: NostrFilter,
+    params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
+  ): { close(): void } {
+    this.calls++;
+    if (this.calls === 1) {
+      // Live subscription: go live immediately, but NEVER push any event.
+      params.oneose?.();
+      return { close: () => {} };
+    }
+    // Catch-up poll fetch: replay the queued wraps, then signal EOSE.
+    for (const e of this.fetchQueue) params.onevent(e);
+    params.oneose?.();
+    return { close: () => {} };
+  }
+  publish(_relays: string[], _event: NTNostrEvent): Promise<string>[] {
+    return [Promise.resolve("ok")];
+  }
+  listConnectionStatus(): Map<string, boolean> {
+    return this.connected;
+  }
+  close(_relays: string[]): void {}
+}
+
+describe("phantomchat channel — catch-up poll", () => {
+  test("delivers a message the live push dropped, recovered only via the poll", async () => {
+    const ourSk = generateSecretKey();
+    const ourPub = getPublicKey(ourSk);
+    const pool = new PollOnlyPool(RELAYS);
+    const transport = new SimplePoolPhantomchatTransport(
+      ourSk,
+      RELAYS,
+      pool as unknown as ConstructorParameters<
+        typeof SimplePoolPhantomchatTransport
+      >[2],
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: ourSk,
+      publicKeyHex: ourPub,
+      transport,
+      healCheckMs: 100_000, // keep the watchdog out of this test
+      backfillPollMs: 20, // fire the poll quickly
+    });
+
+    // Queue a real text message that will ONLY ever arrive via the poll.
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "msg-poll-1",
+      from: "peer",
+      to: ourPub,
+      type: "text",
+      content: "recovered by poll",
+      timestamp: Date.now(),
+    });
+    pool.fetchQueue = [wrap];
+
+    const ac = new AbortController();
+    const received: string[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) received.push(msg.text);
+    })();
+
+    // Wait past a couple of poll intervals.
+    await new Promise((r) => setTimeout(r, 80));
+    ac.abort();
+    await pump;
+
+    expect(received).toContain("recovered by poll");
+  });
+});

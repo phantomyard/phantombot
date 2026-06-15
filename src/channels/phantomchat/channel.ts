@@ -61,6 +61,24 @@ export const PHANTOMCHAT_CAPABILITIES: ChannelCapabilities = {
 export const SUBSCRIPTION_HEAL_CHECK_MS = 20_000;
 
 /**
+ * How often the catch-up poll re-queries the relays for recent gift-wraps. This
+ * is the delivery backbone: relays sometimes silently fail to PUSH a freshly-
+ * published wrap to an already-live subscription (the proven cause of the "first
+ * message ghosts" bug), but the wrap still PERSISTS on the relay. Every tick we
+ * pull the last `BACKFILL_POLL_WINDOW_SEC` of wraps and run them through the same
+ * dedup'd onWrap, so any missed message self-heals within one interval. We no
+ * longer depend on the live push for correctness — only for latency.
+ */
+export const BACKFILL_POLL_MS = 15_000;
+
+/**
+ * How far back (seconds) each catch-up poll reaches. Must comfortably exceed the
+ * poll interval so consecutive windows overlap and nothing can fall between two
+ * polls. Dedup makes the overlap free.
+ */
+export const BACKFILL_POLL_WINDOW_SEC = 90;
+
+/**
  * The application-level message envelope carried INSIDE a rumor's `content`,
  * as a JSON string. This is the wire contract with the PWA: the rumor content
  * is NOT the raw text but this object stringified.
@@ -96,6 +114,11 @@ export interface PhantomchatChannelInput {
    * without a 20s wait.
    */
   healCheckMs?: number;
+  /**
+   * Catch-up poll interval (ms). Defaults to `BACKFILL_POLL_MS`; overridable so
+   * tests can drive the poll without a 15s wait.
+   */
+  backfillPollMs?: number;
 }
 
 /**
@@ -113,6 +136,7 @@ export function createPhantomchatChannel(
 ): Channel<PhantomchatTransport> {
   const { secretKey, publicKeyHex, transport } = input;
   const healCheckMs = input.healCheckMs ?? SUBSCRIPTION_HEAL_CHECK_MS;
+  const backfillPollMs = input.backfillPollMs ?? BACKFILL_POLL_MS;
 
   return {
     id: "phantomchat",
@@ -359,6 +383,41 @@ export function createPhantomchatChannel(
       };
       const healTimer = setInterval(healCheck, healCheckMs);
 
+      // CATCH-UP POLL. The delivery backbone. A relay can silently fail to PUSH
+      // a freshly-published wrap to our already-live subscription — the proven
+      // cause of the "first message ghosts" bug — yet the wrap still PERSISTS on
+      // the relay. So we periodically PULL the last BACKFILL_POLL_WINDOW_SEC of
+      // gift-wraps and run each through the SAME onWrap. Dedup (wrap id + rumor
+      // id) makes overlap with the live push free, so a message the push dropped
+      // self-heals within one interval. Only runs once live (pre-EOSE results
+      // would be dropped by the live-gate anyway) and never overlaps itself.
+      let polling = false;
+      const backfillPoll = async (): Promise<void> => {
+        if (closed || !live || polling) return;
+        polling = true;
+        try {
+          const since =
+            Math.floor(Date.now() / 1000) - BACKFILL_POLL_WINDOW_SEC;
+          const events = await transport.fetchGiftWrapsSince(
+            publicKeyHex,
+            since,
+          );
+          for (const event of events) {
+            if (closed) break;
+            onWrap(event);
+          }
+        } catch (e) {
+          log.debug("phantomchat: catch-up poll failed", {
+            error: (e as Error).message,
+          });
+        } finally {
+          polling = false;
+        }
+      };
+      const pollTimer = setInterval(() => {
+        void backfillPoll();
+      }, backfillPollMs);
+
       const onAbort = (): void => {
         closed = true;
         wake?.();
@@ -387,6 +446,7 @@ export function createPhantomchatChannel(
       } finally {
         clearTimeout(liveFallback);
         clearInterval(healTimer);
+        clearInterval(pollTimer);
         if (signal) signal.removeEventListener("abort", onAbort);
         sub.close();
       }

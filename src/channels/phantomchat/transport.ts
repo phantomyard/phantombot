@@ -78,6 +78,21 @@ export const TYPING_CONTENT_STOP = "stop";
 export const NOSTR_KIND_PRESENCE = 30315;
 
 /**
+ * How far back (seconds) the live gift-wrap subscription's `since` reaches. With
+ * truthful (non-backdated) wrap timestamps this only needs to absorb clock skew
+ * between sender, relay and us, plus a brief reconnect gap — not the old 48h
+ * backdate window. The periodic catch-up poll (see fetchGiftWrapsSince) is what
+ * actually guarantees delivery, so this stays small.
+ */
+export const GIFTWRAP_SINCE_WINDOW_SEC = 120;
+
+/**
+ * Hard timeout (ms) for a one-shot `fetchGiftWrapsSince` pull, in case a slow or
+ * dead relay never sends EOSE. We resolve with whatever events arrived so far.
+ */
+const FETCH_GIFTWRAPS_TIMEOUT_MS = 4000;
+
+/**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
  * tagged to our pubkey, from roughly now. We deliberately set `since` to a
  * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
@@ -149,6 +164,21 @@ export interface PhantomchatTransport extends ChannelTransport {
     onWrap: (event: NTNostrEvent) => void,
     onEose?: () => void,
   ): { close(): void };
+  /**
+   * ONE-SHOT catch-up pull: query the relays for kind-1059 gift-wraps addressed
+   * to `ourPubHex` with `created_at >= sinceSec`, resolving with the collected
+   * events once the relays signal EOSE (or a short hard timeout fires). This is
+   * the delivery backbone: a relay may silently fail to PUSH a freshly-published
+   * wrap to an already-live subscription (the proven cause of the "first message
+   * ghosts" bug), but the wrap still PERSISTS on the relay, so a periodic pull
+   * with a tight `since` recovers it. Caller feeds each event through the same
+   * dedup'd `onWrap`, so overlap with the live subscription is harmless. Relies
+   * on truthful (non-backdated) wrap timestamps — see nostrCrypto.createGiftWrap.
+   */
+  fetchGiftWrapsSince(
+    ourPubHex: string,
+    sinceSec: number,
+  ): Promise<NTNostrEvent[]>;
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
   /**
@@ -249,17 +279,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     const filter: NostrFilter = {
       kinds: [1059],
       "#p": [ourPubHex],
-      // CRITICAL: `since` MUST cover the gift-wrap backdate window. NIP-59
-      // randomizes a gift-wrap's `created_at` up to 48h INTO THE PAST for
-      // metadata privacy, and relays (strfry/damus/primal) apply `since` to
-      // LIVE events too — not just the stored backlog. A tight `since` (e.g.
-      // now-60s) therefore silently drops essentially every real DM, because a
-      // brand-new message's wrap is timestamped hours ago. We widen to 49h
-      // (48h max backdate + 1h slack) so live wraps are never filtered out.
-      // History this pulls in on connect is discarded by channel.listen's
-      // live-gate (it ignores everything before EOSE), so a restart never
-      // replays old conversations.
-      since: Math.floor(Date.now() / 1000) - (49 * 60 * 60),
+      // `since` is now a TIGHT window. Gift-wraps are no longer backdated (see
+      // nostrCrypto.createGiftWrap) — a wrap's `created_at` is its real send
+      // time — so we no longer need the old 49h window that compensated for the
+      // 0–48h backdate. A tight window means a (re)connect replays only the last
+      // few minutes instead of 49h of history, which kills the backlog-replay
+      // flood that re-ran on every watchdog re-arm. Any message the live push
+      // drops is recovered by the periodic fetchGiftWrapsSince poll, not by a
+      // wide `since`.
+      since: Math.floor(Date.now() / 1000) - GIFTWRAP_SINCE_WINDOW_SEC,
     };
     // Single filter object — NOT `[filter]`. See the RelayPool.subscribeMany
     // doc: nostr-tools wraps it into the per-relay filters array itself, and
@@ -275,6 +303,42 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         }
       },
       oneose: onEose,
+    });
+  }
+
+  fetchGiftWrapsSince(
+    ourPubHex: string,
+    sinceSec: number,
+  ): Promise<NTNostrEvent[]> {
+    const filter: NostrFilter = {
+      kinds: [1059],
+      "#p": [ourPubHex],
+      since: sinceSec,
+    };
+    return new Promise<NTNostrEvent[]>((resolve) => {
+      const events: NTNostrEvent[] = [];
+      let settled = false;
+      let sub: { close(): void } | undefined;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          sub?.close();
+        } catch {
+          // already torn down — nothing to do.
+        }
+        resolve(events);
+      };
+      // Resolve on EOSE (all relays replayed their match set) or the hard
+      // timeout, whichever comes first.
+      const timer = setTimeout(finish, FETCH_GIFTWRAPS_TIMEOUT_MS);
+      sub = this.pool.subscribeMany(this.relays, filter, {
+        onevent: (event) => {
+          events.push(event);
+        },
+        oneose: finish,
+      });
     });
   }
 

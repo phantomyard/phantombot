@@ -326,8 +326,11 @@ export function createRumor(
 
 /**
  * Create a sealed event (NIP-17 kind 13): the rumor JSON, NIP-44-encrypted to
- * the recipient and signed by the SENDER's key. `created_at` is randomized up
- * to 48h into the past for metadata protection.
+ * the recipient and signed by the SENDER's key. `created_at` is the REAL send
+ * time — no backdating. The seal is encrypted inside the gift-wrap so its
+ * timestamp is never observable anyway, and truthful timestamps are what let
+ * the PWA poll with a tight `since` to recover any reply the relay dropped from
+ * its live push. (Mirror of the PWA-side change in phantomchat nostr-crypto.ts.)
  */
 export function createSeal(
   rumor: UnsignedEvent,
@@ -337,8 +340,7 @@ export function createSeal(
   const convKey = getConversationKey(senderSk, recipientPk);
   const encryptedContent = nip44Encrypt(JSON.stringify(rumor), convKey);
 
-  const randomOffset = Math.floor(Math.random() * 48 * 60 * 60);
-  const created_at = Math.floor(Date.now() / 1000) - randomOffset;
+  const created_at = Math.floor(Date.now() / 1000);
 
   const sealTemplate = {
     kind: 13,
@@ -354,7 +356,8 @@ export function createSeal(
  * Create a gift-wrapped event (NIP-17 kind 1059): the seal JSON, NIP-44-
  * encrypted to the recipient and signed by a fresh EPHEMERAL key (so relays
  * can't link the wrap to the real sender). `#p` tags the recipient for relay
- * routing; `created_at` is randomized into the past for metadata protection.
+ * routing; `created_at` is the REAL send time — no backdating, so the PWA's
+ * tight-`since` catch-up poll can recover a reply the relay failed to push.
  */
 export function createGiftWrap(
   seal: SignedEvent,
@@ -364,8 +367,7 @@ export function createGiftWrap(
   const convKey = getConversationKey(ephemeralSk, recipientPk);
   const encryptedContent = nip44Encrypt(JSON.stringify(seal), convKey);
 
-  const randomOffset = Math.floor(Math.random() * 48 * 60 * 60);
-  const created_at = Math.floor(Date.now() / 1000) - randomOffset;
+  const created_at = Math.floor(Date.now() / 1000);
 
   const wrapTemplate = {
     kind: 1059,
