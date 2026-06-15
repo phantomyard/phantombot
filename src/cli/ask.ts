@@ -31,6 +31,7 @@ import { existsSync } from "node:fs";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
+import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { Harness } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
@@ -88,7 +89,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     return 2;
   }
 
-  const config = input.config ?? (await loadConfig());
+  let config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
   const agentDir = personaDir(config, persona);
   if (!existsSync(agentDir)) {
@@ -98,7 +99,15 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     return 2;
   }
 
-  const harnesses = input.harnesses ?? buildHarnessChain(config, err);
+  // Resolve harness binaries against the live filesystem like `run` does, so
+  // an `ask` invoked from a systemd context (e.g. a command-task that shells
+  // out to `phantombot ask`) doesn't hit `exit 127` on a PATH-relative `pi`
+  // that lives outside the unit's narrow Environment=PATH (issue #181 §1).
+  let harnesses = input.harnesses;
+  if (!harnesses) {
+    ({ config } = await resolveHarnessBinsForConfig(config, { err }));
+    harnesses = buildHarnessChain(config, err);
+  }
   if (harnesses.length === 0) {
     err.write(
       "phantombot ask: no harnesses configured. Run `phantombot harness` to pick at least one.\n",

@@ -21,10 +21,7 @@ import {
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import {
-  applyResolvedHarnessBins,
-  checkConfiguredHarnesses,
-  missingHarnesses,
-  resolvedHarnessBins,
+  resolveHarnessBinsForConfig,
   type HarnessAvailability,
 } from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
@@ -38,7 +35,6 @@ import {
 } from "../lib/runLock.ts";
 import { notifyPostRestartIfPending } from "../lib/updateNotify.ts";
 import { openMemoryStore } from "../memory/store.ts";
-import { saveHarnessBins } from "../state.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
 
@@ -186,20 +182,14 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     return 2;
   }
 
-  const harnessChecks =
-    input.checkHarnesses === false
-      ? []
-      : input.checkHarnesses
-        ? await input.checkHarnesses(config)
-        : await checkConfiguredHarnesses(config);
+  let missingHarnessBins: HarnessAvailability[] = [];
   if (input.checkHarnesses !== false) {
-    const resolved = resolvedHarnessBins(harnessChecks);
-    if (Object.keys(resolved).length > 0) {
-      await saveHarnessBins(resolved);
-      config = applyResolvedHarnessBins(config, harnessChecks);
-    }
+    const resolution = await resolveHarnessBinsForConfig(config, {
+      ...(input.checkHarnesses ? { check: input.checkHarnesses } : {}),
+    });
+    config = resolution.config;
+    missingHarnessBins = resolution.missing;
   }
-  const missingHarnessBins = missingHarnesses(harnessChecks);
   if (missingHarnessBins.length > 0) {
     log.error("run: configured harness binary not found", {
       missing: missingHarnessBins.map((h) => ({ id: h.id, bin: h.bin })),
