@@ -99,6 +99,41 @@ describe("promoteTaggedLines", () => {
     ).toBe(1);
   });
 
+  test("strips the daily line's leading bullet (no `- - [tag]` double-bullet)", async () => {
+    // Real daily captures are written as `- [tag] …`. TAG_PATTERN matches
+    // the leading dash, so the drawer append must not blindly prepend
+    // another bullet.
+    await file(
+      "memory/2026-05-02.md",
+      [
+        "# 2026-05-02",
+        "",
+        "- [decision] Pin bun to 1.1.x in CI",
+        "- [norm] Nightly deploys at 03:00 are routine",
+      ].join("\n"),
+    );
+    for (const d of ["decisions.md", "norms.md"]) {
+      await file(`memory/${d}`, `# ${d}\n\n## (no entries yet)\n`);
+    }
+
+    const r = await promoteTaggedLines(personaDir, "2026-05-02");
+    expect(r.map((p) => p.line)).toEqual([
+      "[decision] Pin bun to 1.1.x in CI",
+      "[norm] Nightly deploys at 03:00 are routine",
+    ]);
+
+    const decisions = await readFile(
+      join(personaDir, "memory/decisions.md"),
+      "utf8",
+    );
+    expect(decisions).toContain("- [decision] Pin bun to 1.1.x in CI");
+    expect(decisions).not.toContain("- - [decision]");
+
+    const norms = await readFile(join(personaDir, "memory/norms.md"), "utf8");
+    expect(norms).toContain("- [norm] Nightly deploys at 03:00 are routine");
+    expect(norms).not.toContain("- - [norm]");
+  });
+
   test("returns [] when today's daily file is missing", async () => {
     expect(await promoteTaggedLines(personaDir, "2026-05-02")).toEqual([]);
   });
