@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import {
   SimplePoolPhantomchatTransport,
   type NostrFilter,
@@ -115,6 +115,42 @@ describe("phantomchat transport subscription wire shape", () => {
     // Real signature — finalizeEvent produces id + sig.
     expect(typeof ev.id).toBe("string");
     expect(typeof ev.sig).toBe("string");
+  });
+
+  test("publishProfile publishes a signed kind-0 with the display name + bot:true", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    await transport.publishProfile({ name: "Lena", bot: true });
+
+    expect(published.length).toBe(1);
+    const ev = published[0]!;
+    expect(ev.kind).toBe(0);
+    expect(ev.pubkey).toBe(getPublicKey(sk));
+    // A real, verifiable NIP-01 metadata event.
+    expect(verifyEvent(ev as Parameters<typeof verifyEvent>[0])).toBe(true);
+    // Content carries name + display_name so the PWA shows "Lena", and NIP-24
+    // bot:true so it can badge the account as automated.
+    const meta = JSON.parse(ev.content);
+    expect(meta.name).toBe("Lena");
+    expect(meta.display_name).toBe("Lena");
+    expect(meta.bot).toBe(true);
   });
 
   test("sendTyping with stop=true publishes the STOP content marker", async () => {

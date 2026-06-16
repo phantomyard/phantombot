@@ -458,6 +458,25 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           publicKeyHex: identity.publicKeyHex,
           transport,
         });
+        // Register/refresh this persona's public profile (NIP-01 kind 0) so the
+        // PWA shows a real name ("Lena", not the npub) and badges it as a bot
+        // (NIP-24 bot:true). kind 0 is replaceable, so this just supersedes the
+        // prior one on each start. Detached + best-effort — a relay hiccup must
+        // never delay the listener coming up.
+        const displayName =
+          spec.persona.charAt(0).toUpperCase() + spec.persona.slice(1);
+        void transport
+          .publishProfile({ name: displayName, bot: true })
+          .then(() =>
+            out.write(
+              `  [phantomchat:${spec.persona}] published profile '${displayName}' (bot)\n`,
+            ),
+          )
+          .catch((e) =>
+            log.warn(`phantomchat[${spec.persona}]: profile publish failed`, {
+              error: (e as Error).message,
+            }),
+          );
         // Presence: while this listener is up, beat a NIP-38 kind-30315 status
         // to the allowlist peers every 60s so Andrew's PWA shows the persona as
         // a REAL "Online" (and "last seen at HH:MM" the moment the service dies).

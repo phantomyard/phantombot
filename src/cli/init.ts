@@ -5,6 +5,7 @@ import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
+import { loadState } from "../state.ts";
 import { ensureUserSystemdEnv } from "../lib/systemd.ts";
 import {
   detectAvailability,
@@ -34,8 +35,16 @@ export interface InitFlowDeps {
     availability: Record<HarnessId, string | undefined>;
   }) => Promise<number>;
   runPersona: () => Promise<number>;
-  runPhantomchat: () => Promise<number>;
-  runTelegram: () => Promise<number>;
+  /**
+   * Resolve the persona the user just created/selected in the persona step, so
+   * the channel configurators can be bound to it explicitly. Creating or
+   * switching a persona writes it to `default_persona`, so the real impl re-reads
+   * that from state (the in-memory config captured before the wizard ran is
+   * stale). Returns undefined only if no persona could be resolved.
+   */
+  resolvePersona: () => Promise<string | undefined>;
+  runPhantomchat: (persona?: string) => Promise<number>;
+  runTelegram: (persona?: string) => Promise<number>;
 }
 
 /**
@@ -61,11 +70,19 @@ export async function runInitFlow(
   const personaCode = await deps.runPersona();
   if (personaCode !== 0) return personaCode;
 
-  const phantomchatCode = await deps.runPhantomchat();
+  // Bind both channel configurators to the persona just set up. Telegram now
+  // writes a persona-bound block (`[channels.telegram.personas.<persona>]`)
+  // when given --persona; phantomchat keys its identity per persona. Passing
+  // the name explicitly keeps them on the SAME persona — without it Telegram
+  // would fall back to the default block and a fresh persona that isn't yet the
+  // resolved default would be misconfigured.
+  const persona = await deps.resolvePersona();
+
+  const phantomchatCode = await deps.runPhantomchat(persona);
   if (phantomchatCode !== 0) return phantomchatCode;
 
   if (!input.skipTelegram) {
-    const telegramCode = await deps.runTelegram();
+    const telegramCode = await deps.runTelegram(persona);
     if (telegramCode !== 0) return telegramCode;
   }
 
@@ -179,8 +196,12 @@ export default defineCommand({
       {
         runHarness: (input) => runHarness(input),
         runPersona,
-        runPhantomchat: () => runPhantomchat(),
-        runTelegram,
+        // Re-read default_persona from state — runPersona just wrote it (create
+        // or switch both set it); the `config` above was loaded before that.
+        resolvePersona: async () =>
+          (await loadState()).default_persona ?? config.defaultPersona,
+        runPhantomchat: (persona) => runPhantomchat({ persona }),
+        runTelegram: (persona) => runTelegram({ persona }),
       },
     );
     if (flowCode !== 0) {

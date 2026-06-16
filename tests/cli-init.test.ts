@@ -36,8 +36,12 @@ function fakeInput(): InitFlowInput {
 function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
   deps: InitFlowDeps;
   calls: string[];
+  personaArgs: Array<string | undefined>;
 } {
   const calls: string[] = [];
+  // Records the persona forwarded to each channel configurator, as
+  // ["phantomchat:<persona>", "telegram:<persona>"].
+  const personaArgs: Array<string | undefined> = [];
   const deps: InitFlowDeps = {
     runHarness: async () => {
       calls.push("harness");
@@ -47,17 +51,20 @@ function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
       calls.push("persona");
       return 0;
     },
-    runPhantomchat: async () => {
+    resolvePersona: async () => "lena",
+    runPhantomchat: async (persona) => {
       calls.push("phantomchat");
+      personaArgs.push(`phantomchat:${persona}`);
       return 0;
     },
-    runTelegram: async () => {
+    runTelegram: async (persona) => {
       calls.push("telegram");
+      personaArgs.push(`telegram:${persona}`);
       return 0;
     },
     ...overrides,
   };
-  return { deps, calls };
+  return { deps, calls, personaArgs };
 }
 
 describe("runInitFlow", () => {
@@ -73,6 +80,32 @@ describe("runInitFlow", () => {
     const code = await runInitFlow({ ...fakeInput(), skipTelegram: true }, deps);
     expect(code).toBe(0);
     expect(calls).toEqual(["harness", "persona", "phantomchat"]);
+  });
+
+  test("threads the resolved persona into BOTH phantomchat and telegram", async () => {
+    // Regression: the wizard must bind both channels to the persona just set up
+    // (telegram now writes a persona-bound block). Pre-fix it called them with
+    // no persona, so telegram fell back to the default block.
+    const { deps, personaArgs } = makeDeps({ resolvePersona: async () => "lena" });
+    const code = await runInitFlow(fakeInput(), deps);
+    expect(code).toBe(0);
+    expect(personaArgs).toEqual(["phantomchat:lena", "telegram:lena"]);
+  });
+
+  test("resolvePersona runs AFTER runPersona (so it sees the newly-set default)", async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      runPersona: async () => {
+        order.push("persona");
+        return 0;
+      },
+      resolvePersona: async () => {
+        order.push("resolve");
+        return "lena";
+      },
+    });
+    await runInitFlow(fakeInput(), deps);
+    expect(order).toEqual(["persona", "resolve"]);
   });
 
   test("forwards config + availability to runHarness", async () => {

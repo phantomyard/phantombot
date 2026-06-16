@@ -182,6 +182,13 @@ export interface PhantomchatTransport extends ChannelTransport {
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
   /**
+   * Publish (or replace) this identity's NIP-01 kind-0 profile metadata so the
+   * PhantomChat PWA shows a real display name for the persona instead of a raw
+   * npub, and flags the account as automated. kind 0 is a replaceable event, so
+   * re-publishing on each start just supersedes the previous one. Best-effort.
+   */
+  publishProfile(metadata: { name: string; bot?: boolean; about?: string }): Promise<void>;
+  /**
    * Send a plaintext reply into a GROUP. `groupId` is the group identifier from
    * the inbound rumor's `['group', ...]` tag; `memberHexes` is the OTHER group
    * members to broadcast to (every member except us — the self-wrap is added
@@ -355,6 +362,27 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         eventId: event.id,
       });
     }
+  }
+
+  /**
+   * Publish this identity's NIP-01 kind-0 profile. The content is the standard
+   * metadata JSON: `name`/`display_name` (so the PWA shows e.g. "Lena" not the
+   * npub) plus NIP-24 `bot: true` to mark the account automated. Signed with our
+   * key and published to all relays the same best-effort way as a wrap.
+   */
+  async publishProfile(metadata: { name: string; bot?: boolean; about?: string }): Promise<void> {
+    const content = JSON.stringify({
+      name: metadata.name,
+      display_name: metadata.name,
+      // NIP-24: flags the account as (partly) automated so clients can badge it.
+      bot: metadata.bot ?? true,
+      ...(metadata.about ? { about: metadata.about } : {}),
+    });
+    const event = finalizeEvent(
+      { kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content },
+      this.ourSecretKey,
+    );
+    await this.publishWrap(event as unknown as NTNostrEvent);
   }
 
   /**
