@@ -38,6 +38,7 @@ import { spawn } from "node:child_process";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
+import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -75,7 +76,7 @@ export interface RunTickInput {
 export async function runTick(input: RunTickInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  const config = input.config ?? (await loadConfig());
+  let config = input.config ?? (await loadConfig());
   const now = input.now ?? new Date();
 
   // Record that the tick timer fired — even if the body exits early
@@ -164,7 +165,16 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             runError = `command exited ${result.exitCode}`;
           }
         } else {
-          harnesses ??= buildHarnessChain(config, err);
+          if (!harnesses) {
+            // Resolve harness binaries against the live filesystem the same
+            // way the `run` daemon does — the tick oneshot otherwise relied
+            // solely on the systemd unit's narrow Environment=PATH, so a
+            // PATH-relative `pi` could fail with `exit 127` (issue #181 §1).
+            // Done lazily (only when an agent-backed task is actually due) so
+            // a tick with no agent work doesn't pay the filesystem search.
+            ({ config } = await resolveHarnessBinsForConfig(config, { err }));
+            harnesses = buildHarnessChain(config, err);
+          }
           if (harnesses.length === 0) {
             throw new Error("no harnesses configured");
           }

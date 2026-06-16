@@ -147,6 +147,39 @@ describe("runDoctor", () => {
     expect(code).toBe(1);
   });
 
+  test("surfaces the nightly errors array (human + json) and flags WARN on non-ok status", async () => {
+    // A fresh run (not stale) that still recorded a failing stage. Status
+    // is non-ok and errors is populated — both must reach the operator.
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "partial",
+      errors: ["stage 'essence': pi exited with code 127"],
+    });
+    const out = new CaptureStream();
+    await runDoctor({ config, out, spawnRepair: () => {} });
+    expect(out.text).toContain("pi exited with code 127");
+    // Non-ok status downgrades the nightly line to WARN even when recent.
+    expect(out.text).toMatch(/nightly: WARN/);
+
+    const jsonOut = new CaptureStream();
+    await runDoctor({ config, json: true, out: jsonOut, spawnRepair: () => {} });
+    const report = JSON.parse(jsonOut.text);
+    expect(report.nightly.errors).toEqual([
+      "stage 'essence': pi exited with code 127",
+    ]);
+  });
+
+  test("omits the errors field when the last run was clean", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({ config, json: true, out, spawnRepair: () => {} });
+    const report = JSON.parse(out.text);
+    expect(report.nightly.errors).toBeUndefined();
+  });
+
   test("json mode emits a parseable report", async () => {
     await writeState({
       last_run: new Date().toISOString(),

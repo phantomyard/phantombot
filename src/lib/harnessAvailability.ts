@@ -2,6 +2,9 @@ import { access, constants, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
+import { log } from "./logger.ts";
+import { saveHarnessBins } from "../state.ts";
+import type { WriteSink } from "./io.ts";
 
 export type KnownHarnessId = "claude" | "pi" | "gemini" | "codex";
 
@@ -182,6 +185,57 @@ export function resolvedHarnessBins(
       .filter((h) => h.resolved)
       .map((h) => [h.id, h.resolved!]),
   );
+}
+
+/**
+ * Resolve every configured harness binary against the live filesystem,
+ * persist the resolved absolute paths to state, and return a config whose
+ * harness bins point at those absolute paths.
+ *
+ * Why this exists as a shared helper: the long-running `run` daemon already
+ * did this inline, but the systemd ONESHOTS (`nightly`, `tick`) and `ask`
+ * did not — they built their harness chain straight off `loadConfig()`. A
+ * PATH-relative bin like `pi` then relied solely on the unit's narrow
+ * `Environment=PATH=` (PHANTOMBOT_SERVICE_PATH). If `pi` lives anywhere
+ * outside those dirs — a versioned nvm/fnm/volta/.bun path that only the
+ * broad `harnessSearchPath()` covers — the oneshot spawned `pi` and got
+ * `exit 127` (command not found) every single night, while the interactive
+ * daemon (which DID resolve) worked fine. That divergence was phantombot
+ * issue #181 §1. Routing all four entry points through this one helper
+ * means a oneshot resolves binaries exactly the way the daemon does.
+ *
+ * `check` is injectable for tests; `persist` defaults to true (cheap write
+ * that keeps state.json's resolved bins fresh for the next loadConfig).
+ */
+export async function resolveHarnessBinsForConfig(
+  config: Config,
+  opts: {
+    check?: (c: Config) => Promise<HarnessAvailability[]>;
+    persist?: boolean;
+    err?: WriteSink;
+  } = {},
+): Promise<{ config: Config; missing: HarnessAvailability[] }> {
+  const checks = opts.check
+    ? await opts.check(config)
+    : await checkConfiguredHarnesses(config);
+  const resolved = resolvedHarnessBins(checks);
+  let next = config;
+  if (Object.keys(resolved).length > 0) {
+    if (opts.persist !== false) await saveHarnessBins(resolved);
+    next = applyResolvedHarnessBins(config, checks);
+  }
+  const missing = missingHarnesses(checks);
+  if (missing.length > 0) {
+    log.warn("harness binary not found on PATH or search path", {
+      missing: missing.map((h) => ({ id: h.id, bin: h.bin })),
+    });
+    opts.err?.write(
+      "warning: configured harness binary not found:\n" +
+        missing.map((h) => `  ${h.id}: '${h.bin}'`).join("\n") +
+        "\n",
+    );
+  }
+  return { config: next, missing };
 }
 
 export function applyResolvedHarnessBins(

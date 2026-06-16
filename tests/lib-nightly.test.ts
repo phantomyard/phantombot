@@ -290,7 +290,19 @@ describe("buildNightlyStagePrompt", () => {
     expect(bodies[0]).toContain("DAY ESSENCE");
     expect(bodies[1]).toContain("PROMOTE TO DRAWERS");
     expect(bodies[2]).toContain("FEED THE KB");
-    expect(bodies[3]).toContain("COMPRESS MEMORY.md");
+    expect(bodies[3]).toContain("MAINTAIN MEMORY.md");
     expect(bodies[4]).toContain("STATE REPORT");
+  });
+
+  // Issue #181 §4: MEMORY.md was never populated because the old stage only
+  // ever TRIMMED. The maintain stage must also instruct the agent to FILL the
+  // "## Recent" orientation section, otherwise MEMORY.md stays at template.
+  test("the MEMORY.md stage instructs filling, not only trimming", () => {
+    const body = buildNightlyStagePrompt("robbie", "2026-05-18", "compress");
+    expect(body).toContain("FILL");
+    expect(body).toContain("## Recent");
+    expect(body).toMatch(/maintain/i);
+    // and still keeps the trim half
+    expect(body).toContain("TRIM");
   });
 });

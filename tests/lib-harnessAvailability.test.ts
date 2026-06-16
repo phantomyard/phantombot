@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expandSystemdPath, whichBinary, checkConfiguredHarnesses } from "../src/lib/harnessAvailability.ts";
+import {
+  expandSystemdPath,
+  whichBinary,
+  checkConfiguredHarnesses,
+  resolveHarnessBinsForConfig,
+  type HarnessAvailability,
+} from "../src/lib/harnessAvailability.ts";
 import type { Config } from "../src/config.ts";
 
 describe("expandSystemdPath", () => {
@@ -97,5 +103,53 @@ describe("checkConfiguredHarnesses", () => {
         source: "path",
       },
     ]);
+  });
+});
+
+describe("resolveHarnessBinsForConfig", () => {
+  // The whole point of issue #181 §1: the systemd oneshots (nightly/tick/ask)
+  // must resolve a PATH-relative `pi` to its absolute path the way `run`
+  // does, instead of handing the bare "pi" to the spawn and getting exit 127.
+  const baseConfig = {
+    harnesses: {
+      chain: ["claude", "pi"],
+      claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+      pi: { bin: "pi", maxPayloadBytes: 1000 },
+      gemini: { bin: "gemini", model: "" },
+    },
+  } as unknown as Config;
+
+  test("rewrites config bins to the resolved absolute paths", async () => {
+    const check = async (): Promise<HarnessAvailability[]> => [
+      { id: "claude", bin: "claude", resolved: "/abs/claude", source: "path" },
+      { id: "pi", bin: "pi", resolved: "/abs/pi", source: "search" },
+    ];
+
+    const { config, missing } = await resolveHarnessBinsForConfig(baseConfig, {
+      check,
+      persist: false,
+    });
+
+    expect(config.harnesses.claude.bin).toBe("/abs/claude");
+    expect(config.harnesses.pi.bin).toBe("/abs/pi");
+    expect(missing).toHaveLength(0);
+    // copy-on-write — the input config is never mutated
+    expect(baseConfig.harnesses.pi.bin).toBe("pi");
+  });
+
+  test("reports an unresolvable binary as missing and leaves its bin alone", async () => {
+    const check = async (): Promise<HarnessAvailability[]> => [
+      { id: "claude", bin: "claude", resolved: "/abs/claude", source: "path" },
+      { id: "pi", bin: "pi" }, // not found anywhere
+    ];
+
+    const { config, missing } = await resolveHarnessBinsForConfig(baseConfig, {
+      check,
+      persist: false,
+    });
+
+    expect(config.harnesses.claude.bin).toBe("/abs/claude");
+    expect(config.harnesses.pi.bin).toBe("pi");
+    expect(missing.map((m) => m.id)).toEqual(["pi"]);
   });
 });

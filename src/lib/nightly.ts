@@ -282,8 +282,10 @@ PHASE 3 — Feed the KB
   Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
   Run \`phantombot memory index --rebuild\` at the end so new notes have embeddings.
 
-PHASE 4 — Compress MEMORY.md
-  MEMORY.md should stay short (orientation layer only). If it's bloated, move detail into the relevant KB note(s) and leave a short pointer. Clear items from "## Recent" that you've now distilled to a permanent home.
+PHASE 4 — Maintain MEMORY.md
+  MEMORY.md is the always-in-context orientation layer — MAINTAIN it (fill AND trim), don't only trim.
+    - FILL: read MEMORY.md; if there is no "## Recent" section, add one. From today's daily file and what you promoted/distilled above, add a few SHORT orientation bullets (one line each) for durable, still-relevant facts worth having in context every turn. Summarise and point to the KB note / drawer that holds the detail — don't paste whole entries.
+    - TRIM: keep MEMORY.md short. Remove "## Recent" bullets that are now stale or fully distilled to a permanent home (leave a pointer if useful). If a section bloated into long-form prose, move detail into the relevant KB note(s) and leave a short pointer.
 
 PHASE 5 — State report
   Write your summary to memory/.nightly-state.json (overwrite). Include:
@@ -337,8 +339,12 @@ Re-read today's daily file for durable knowledge (procedures, configs, runbooks,
   c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a kb/templates/ scaffold. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
 Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
 Finish with \`phantombot memory index --rebuild\` so new notes get embeddings.`,
-  compress: () => `STAGE: COMPRESS MEMORY.md
-MEMORY.md should stay short (orientation layer only). If it is bloated, move detail into the relevant KB note(s) and leave a short pointer. Clear items from "## Recent" that have now been distilled to a permanent home.`,
+  compress: (today) => `STAGE: COMPRESS / MAINTAIN MEMORY.md
+MEMORY.md is the always-in-context orientation layer. Your job here is to MAINTAIN it — both fill and trim — not just trim.
+  1. Read MEMORY.md (use your Read tool). If it has no "## Recent" section, add one.
+  2. FILL: from today's daily file (memory/${today}.md) and the items you promoted/distilled in earlier stages, add a few SHORT orientation bullets under "## Recent" — only durable, still-relevant facts worth having in context every turn (current focus, active projects, fresh standing facts). One line each. Do not copy whole entries; summarise and link to the KB note or drawer that holds the detail.
+  3. TRIM: MEMORY.md must stay short. Remove "## Recent" bullets that are now stale or have a permanent home in a drawer/KB note (leave a short pointer if useful). If any section has bloated into long-form prose, move that detail into the relevant KB note and leave a one-line pointer.
+If today's daily file is missing or empty and nothing has changed, say so and make no edits.`,
   state: (today) => `STAGE: STATE REPORT
 Write memory/.nightly-state.json (overwrite). Include:
   last_run         (ISO 8601 timestamp — now)

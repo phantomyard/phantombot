@@ -25,11 +25,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
-import { ClaudeHarness } from "../harnesses/claude.ts";
-import { PiHarness } from "../harnesses/pi.ts";
-import { GeminiHarness } from "../harnesses/gemini.ts";
-import { CodexHarness } from "../harnesses/codex.ts";
+import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
+import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -111,13 +109,19 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
 
-  const config = input.config ?? (await loadConfig());
+  let config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
   const dir = personaDir(config, persona);
   if (!existsSync(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
   }
+
+  // Resolve harness binaries against the live filesystem the same way the
+  // long-running `run` daemon does. Without this the nightly oneshot relied
+  // solely on the systemd unit's narrow Environment=PATH and a PATH-relative
+  // `pi` could fail with `exit 127` every night (issue #181 §1).
+  ({ config } = await resolveHarnessBinsForConfig(config, { err }));
 
   const harnesses = buildHarnessChain(config, err);
   if (harnesses.length === 0) {
@@ -256,18 +260,6 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   } finally {
     await memory.close();
   }
-}
-
-function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
-  const out: Harness[] = [];
-  for (const id of config.harnesses.chain) {
-    if (id === "claude") out.push(new ClaudeHarness(config.harnesses.claude));
-    else if (id === "pi") out.push(new PiHarness(config.harnesses.pi));
-    else if (id === "gemini") out.push(new GeminiHarness(config.harnesses.gemini));
-    else if (id === "codex") out.push(new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" }));
-    else err.write(`warning: unknown harness '${id}', skipping\n`);
-  }
-  return out;
 }
 
 export default defineCommand({

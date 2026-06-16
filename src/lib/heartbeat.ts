@@ -191,7 +191,11 @@ export async function promoteTaggedLines(
     const tag = m[1]!.toLowerCase();
     const drawer = TAG_TO_DRAWER[tag];
     if (!drawer) continue;
-    const cleanLine = raw.trim();
+    // Strip any leading list bullet the daily line already carries. Daily
+    // captures are written as `- [tag] …`, and TAG_PATTERN matches that
+    // (`-?`). Without stripping it here, the `- ` we prepend below would
+    // produce malformed double-bullet drawer entries (`- - [tag] …`).
+    const cleanLine = raw.trim().replace(/^[-*]\s+/, "");
     const existing = await loadDrawer(drawer);
     if (existing.includes(cleanLine)) continue;
 

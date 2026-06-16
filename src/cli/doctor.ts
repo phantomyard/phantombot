@@ -84,6 +84,12 @@ export interface DoctorReport {
   nightly: {
     last_run?: string;
     last_status?: string;
+    /**
+     * Error messages from the last run, if any. Persisted in
+     * `.nightly-state.json` but historically dropped here, so a failing
+     * stage was invisible to `doctor` (it only showed `last_status`).
+     */
+    errors?: string[];
     /** Hours since the last run, or null if it never ran. */
     age_hours: number | null;
     stale: boolean;
@@ -386,6 +392,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     nightly: {
       last_run: state.last_run,
       last_status: state.last_status,
+      ...(state.errors && state.errors.length > 0
+        ? { errors: state.errors }
+        : {}),
       age_hours: ageHours === null ? null : Math.round(ageHours * 10) / 10,
       stale: needed,
       ...(progress
@@ -449,8 +458,13 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Human summary.
   const tick = (ok: boolean) => (ok ? "ok" : "WARN");
   out.write(`phantombot doctor — persona '${persona}'\n`);
+  // A non-ok status is a warning even when the run isn't stale: a stage
+  // can fail today yet still be "recent", which previously slipped past
+  // the staleness-only marker.
+  const statusBad =
+    state.last_status === "error" || state.last_status === "partial";
   out.write(
-    `  nightly: ${tick(!needed)} — ` +
+    `  nightly: ${tick(!needed && !statusBad)} — ` +
       (state.last_run
         ? `last run ${state.last_run} (${report.nightly.age_hours}h ago), status '${
             state.last_status ?? "unknown"
@@ -458,6 +472,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         : "never run") +
       "\n",
   );
+  if (state.errors && state.errors.length > 0) {
+    for (const e of state.errors) {
+      out.write(`    error: ${e}\n`);
+    }
+  }
   if (progress) {
     out.write(
       `  checkpoint: ${progress.status} for ${progress.date} — ` +
