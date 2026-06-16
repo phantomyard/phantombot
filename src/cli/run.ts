@@ -200,20 +200,29 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       if (healed) {
         defaultPersona = healed;
         config.defaultPersona = healed;
-      } else {
+      } else if (!hasPhantomchat) {
         err.write(
           `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
             "Create one with `phantombot persona`.\n",
         );
         return 2;
       }
+      // else: Telegram's default persona is broken, but PhantomChat is a
+      // runnable channel — fall through. planListeners skips the missing default
+      // and we continue PhantomChat-only (warned below). The service must never
+      // fail to start just because one channel is misconfigured.
     }
   }
 
   const plan = planListeners(config, defaultPersona, err);
   if (plan.fatal) {
     err.write(`${plan.fatal}\n`);
-    return 2;
+    // Fatal only when Telegram is the sole channel. With PhantomChat available,
+    // a broken Telegram config (e.g. a reused bot token) must NOT kill the
+    // service — disable Telegram and continue PhantomChat-only. plan.listeners
+    // is already [] here, so the rest of the flow runs without Telegram.
+    if (!hasPhantomchat) return 2;
+    err.write("  telegram disabled — continuing with phantomchat only.\n");
   }
   if (plan.listeners.length === 0 && !hasPhantomchat) {
     err.write(

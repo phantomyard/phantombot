@@ -452,4 +452,71 @@ describe("runRun — phantomchat-only (no Telegram)", () => {
     expect(err.text).not.toContain("no channels configured");
     expect(err.text).not.toContain("no telegram listeners could be started");
   });
+
+  // A BROKEN (not just absent) Telegram config must also degrade to
+  // PhantomChat-only rather than kill the service — the app must never fail to
+  // start while a runnable channel exists. Same empty-harness-chain trick:
+  // reaching the harness guard proves we got PAST the Telegram fatal.
+  async function givePhantomchat(persona = "lena") {
+    const agentDir = join(workdir, "personas", persona);
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: generateIdentity().nsec,
+      relays: ["wss://relay.example"],
+      allowedNpubs: [generateIdentity().npub],
+    });
+  }
+
+  test("reused Telegram bot token degrades to PhantomChat-only (does NOT fatal)", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await givePhantomchat();
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] }, // exit after channel guards
+        channels: {
+          // default + a persona share ONE token → planListeners would fatal.
+          telegram: { token: "dup", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            phantom: { token: "dup", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    // Reached the harness guard → got PAST the dup-token fatal (which would
+    // otherwise have returned 2 without ever mentioning the harness).
+    expect(code).toBe(2);
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).toContain("token reused"); // surfaced as a warning…
+    expect(err.text).toContain("continuing with phantomchat only");
+  });
+
+  test("missing Telegram default persona degrades to PhantomChat-only (does NOT fatal)", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await givePhantomchat();
+    // Telegram default configured, but its persona dir does not exist and no
+    // other persona can heal it.
+    await rm(join(workdir, "personas", "phantom"), { recursive: true, force: true });
+    const code = await runRun({
+      config: {
+        ...config,
+        defaultPersona: "ghostfixture",
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: {
+          telegram: { token: "abc", pollTimeoutS: 30, allowedUserIds: [] },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("phantombot harness"); // got past the persona-missing fatal
+    expect(err.text).not.toContain("no other personas exist");
+  });
 });
