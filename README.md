@@ -23,6 +23,7 @@ Supported harnesses:
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
 - [Telegram](#telegram)
+- [PhantomChat (Alpha)](#phantomchat-alpha)
 - [Group Chats](#group-chats)
 - [Voice Replies](#voice-replies)
 - [Scheduled Tasks](#scheduled-tasks)
@@ -52,6 +53,7 @@ Phantombot keeps the parts a personal assistant actually needs:
 
 - A persistent persona loaded from markdown.
 - Telegram text, group, attachment, and voice I/O.
+- A [PhantomChat](https://github.com/phantomyard/phantomchat) (Nostr, end-to-end-encrypted) DM channel — **Alpha**, runs alongside Telegram.
 - Rolling conversation context.
 - Durable markdown memory and KB.
 - Scheduled tasks.
@@ -194,6 +196,7 @@ Interactive setup:
 | `phantombot persona` | Create, import, restore, or switch personas |
 | `phantombot harness` | Choose harness chain |
 | `phantombot telegram` | Configure Telegram token and allowlist |
+| `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel — **Alpha** |
 | `phantombot voice` | Configure TTS/STT providers |
 | `phantombot embedding` | Configure semantic memory |
 
@@ -310,6 +313,39 @@ bubble_max_chars = 700
 bubble_delay_ms = 800
 voice_max_sentences = 3
 ```
+
+## PhantomChat (Alpha)
+
+> **Status: Alpha.** PhantomChat works end-to-end today — you can DM a persona
+> from the app and get replies in its voice, with the same trust model as
+> Telegram — but it still needs polish (delivery-receipt edge cases, richer
+> media, and broader client interop are actively being smoothed out). Treat it
+> as a preview alongside the stable Telegram channel rather than a finished one.
+
+[PhantomChat](https://github.com/phantomyard/phantomchat) is a decentralized,
+end-to-end-encrypted messenger built on [Nostr](https://nostr.com) (NIP-17
+gift-wrapped DMs). This channel lets phantombot join the **same** network as a
+client and answer DMs from the PhantomChat app, **alongside** Telegram — both
+channels run at once. There is no server: the bot is just another Nostr client.
+
+Set it up per persona:
+
+```bash
+phantombot phantomchat --persona <name>
+```
+
+This generates the persona's Nostr keypair on first run (stored 0600 in the
+persona's own `phantomchat.json`) and prints an **npub** — paste that into the
+PhantomChat app to start a DM with the persona. On start the bot publishes its
+profile (display name = the persona name, flagged as a bot) and greets the npubs
+on its allowlist. The allowlist is the trust boundary: listed npubs become
+trusted principals (same grant as Telegram's allow-listed users); an empty
+allowlist arms trust-on-first-use. Authorization keys on the **cryptographic
+sender** (`rumor.pubkey`), never the attacker-controllable envelope `from`.
+
+Relays come from a shared canonical list and can be edited by re-running the
+command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
+for the app itself and the wire-protocol details.
 
 ## Group Chats
 

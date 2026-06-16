@@ -79,6 +79,38 @@ export interface ChannelMessage {
    * ciphertext (see the encryption seam doc above).
    */
   text: string;
+  /**
+   * GROUP ROUTING (optional; currently only the phantomchat channel sets it).
+   *
+   * When the inbound message arrived as a GROUP message rather than a 1:1 DM,
+   * this carries the group identifier the message belongs to. The phantomchat
+   * channel surfaces it from the rumor's `['group', <id>]` tag and uses
+   * `conversationId = "group:<groupId>"` so a group thread is keyed separately
+   * from the sender's DM thread. Absent for plain DMs, so DM behaviour is
+   * unchanged. The server uses its presence to decide whether to reply with a
+   * group wrap (broadcast to all members) instead of a 1:1 DM wrap.
+   */
+  groupId?: string;
+  /**
+   * GROUP MEMBER LIST (optional; paired with `groupId`).
+   *
+   * The hex pubkeys carried in the inbound rumor's `['p', ...]` tags — i.e. the
+   * group members the SENDER wrapped to (everyone except the sender themselves).
+   * The bridge holds no group database, so this is the only source of truth for
+   * who to broadcast a group reply back to. The server reconstructs the full
+   * outbound member set from this list plus the sender (see server.ts).
+   */
+  groupMemberHexes?: string[];
+  /**
+   * ORIGINATING MESSAGE ID (optional; currently only the phantomchat channel
+   * sets it). The sender-side application message id the remote client uses to
+   * track delivery — for phantomchat it is the DM envelope's `id` field, which
+   * the PWA's DeliveryTracker keys on. The server uses it, AFTER the auth gate
+   * admits the sender, to send a delivery receipt back (lighting the remote's
+   * second tick and stopping its resend). Absent for channels with no
+   * application-level delivery receipts (e.g. Telegram, which has its own).
+   */
+  messageId?: string;
 }
 
 /**

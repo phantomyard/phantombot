@@ -84,6 +84,23 @@ export interface TelegramAccount {
   groupPersonaNames?: string[];
 }
 
+/**
+ * The 5 default public relays the PhantomChat PWA uses. phantombot must share
+ * relays with Andrew's PWA for a DM to reach it, so these are the defaults when
+ * a persona's `phantomchat.json` omits `relays`.
+ *
+ * NOTE: phantomchat identity + settings are now PER-PERSONA and live in
+ * `<persona-dir>/phantomchat.json` (see channels/phantomchat/personaStore.ts),
+ * NOT in config.toml. There is intentionally no `[channels.phantomchat]` block.
+ */
+export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.primal.net",
+  "wss://nostr.mom",
+  "wss://nostr.data.haus",
+];
+
 export interface TurnIndexingSettings {
   enabled: boolean;
   /** Trigger when at least this many new user turns have accrued. */
@@ -195,6 +212,9 @@ export interface Config {
      * resolve to undefined and behave exactly as before.
      */
     telegramPersonas?: Record<string, TelegramAccount>;
+    // phantomchat (Nostr NIP-17 DM) is configured PER-PERSONA in
+    // `<persona-dir>/phantomchat.json` (channels/phantomchat/personaStore.ts),
+    // not here — so it has no config.toml block.
   };
 
   telegramStreaming?: TelegramStreamingSettings;

@@ -6,6 +6,7 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
 import { ensureUserSystemdEnv } from "../lib/systemd.ts";
+import { pickChannelPersona } from "./channelPersona.ts";
 import {
   detectAvailability,
   type HarnessId,
@@ -14,6 +15,7 @@ import {
 import { runEmbedding } from "./embedding.ts";
 import { runInstall } from "./install.ts";
 import { runPersona } from "./persona.ts";
+import { runPhantomchat } from "./phantomchat.ts";
 import { runTelegram } from "./telegram.ts";
 
 export interface InitFlowInput {
@@ -27,15 +29,26 @@ export interface InitFlowDeps {
     availability: Record<HarnessId, string | undefined>;
   }) => Promise<number>;
   runPersona: () => Promise<number>;
-  runTelegram: () => Promise<number>;
+  /**
+   * Pick the persona to bind a channel to (or null to SKIP it). Mirrors
+   * `phantombot persona`: the detected personas are listed with the default
+   * pre-selected, plus a "None" option. `null` means the user skipped this
+   * channel — there is no separate skip confirm.
+   */
+  pickPersona: (channelLabel: string) => Promise<string | null>;
+  runPhantomchat: (persona: string) => Promise<number>;
+  runTelegram: (persona: string) => Promise<number>;
+  /** Called when the user skipped BOTH channels, so `run()` can warn. */
+  onNoChannels?: () => void;
 }
 
 /**
- * Pure orchestration of the three configuration wizards: harness → persona
- * → telegram. Short-circuits on the first non-zero exit. Extracted from the
- * interactive `run()` so the ordering and short-circuit behavior is testable
- * without a TTY. The install wizard runs after this in `run()` so it can be
- * gated on a separate user confirmation and a Linux-only linger pre-check.
+ * Pure orchestration of the configuration wizards:
+ *   harness → persona → phantomchat → telegram.
+ * Short-circuits on the first non-zero exit. Each channel step asks which
+ * persona to bind to (default pre-selected) or to skip — neither channel is
+ * mandatory. Extracted from the interactive `run()` so the ordering and
+ * short-circuit behavior is testable without a TTY.
  */
 export async function runInitFlow(
   input: InitFlowInput,
@@ -50,8 +63,26 @@ export async function runInitFlow(
   const personaCode = await deps.runPersona();
   if (personaCode !== 0) return personaCode;
 
-  const telegramCode = await deps.runTelegram();
-  if (telegramCode !== 0) return telegramCode;
+  // Each channel step: pick a persona to bind it to, or skip ("None"). Both
+  // channels are optional — the user can run PhantomChat-only, Telegram-only,
+  // both (even on different personas), or neither.
+  let configuredAny = false;
+
+  const phantomchatPersona = await deps.pickPersona("PhantomChat");
+  if (phantomchatPersona) {
+    const code = await deps.runPhantomchat(phantomchatPersona);
+    if (code !== 0) return code;
+    configuredAny = true;
+  }
+
+  const telegramPersona = await deps.pickPersona("Telegram");
+  if (telegramPersona) {
+    const code = await deps.runTelegram(telegramPersona);
+    if (code !== 0) return code;
+    configuredAny = true;
+  }
+
+  if (!configuredAny) deps.onNoChannels?.();
 
   return 0;
 }
@@ -88,9 +119,10 @@ export default defineCommand({
       "This wizard will guide you through a few quick steps to get your agent running:\n" +
       "  1. Pick your AI harness (claude, pi, gemini, or codex)\n" +
       "  2. Create a persona (identity & memory)\n" +
-      "  3. Connect to Telegram\n" +
-      "  4. Enable semantic memory search (optional)\n" +
-      "  5. Install as a background service",
+      "  3. Connect PhantomChat (your private Nostr DM channel)\n" +
+      "  4. Connect Telegram (optional — skippable)\n" +
+      "  5. Enable semantic memory search (optional)\n" +
+      "  6. Install as a background service",
       "Setup Flow"
     );
 
@@ -140,14 +172,35 @@ export default defineCommand({
       );
     }
 
-    // 1-3: harness → persona → telegram, orchestrated by runInitFlow so
-    // the ordering + short-circuit behavior can be tested without a TTY.
+    // Channels: each step asks which persona to bind it to (default
+    // pre-selected) or "None" to skip — same detected-personas pattern as
+    // `phantombot persona`. Both channels are optional.
+    p.note(
+      "Next you'll connect your agent's chat channels. For each one, pick which\n" +
+      "persona it should use — or choose None to skip it. PhantomChat is your\n" +
+      "private end-to-end-encrypted DM channel (over Nostr); Telegram is optional.",
+      "Channels"
+    );
+
+    // harness → persona → phantomchat → telegram, orchestrated by runInitFlow
+    // so the ordering + short-circuit behavior can be tested without a TTY.
     const flowCode = await runInitFlow(
       { config, availability: avail },
       {
         runHarness: (input) => runHarness(input),
         runPersona,
-        runTelegram,
+        // Detected-personas picker (default pre-selected, "None" = skip). Reads
+        // the persona list + default fresh, so a persona just created in the
+        // step above is offered and highlighted.
+        pickPersona: (channelLabel) => pickChannelPersona(config, channelLabel),
+        runPhantomchat: (persona) => runPhantomchat({ persona }),
+        runTelegram: (persona) => runTelegram({ persona }),
+        onNoChannels: () =>
+          p.note(
+            "No channels set up — your agent has nowhere to receive messages yet.\n" +
+            "Add one anytime with `phantombot phantomchat` or `phantombot telegram`.",
+            "No channels configured",
+          ),
       },
     );
     if (flowCode !== 0) {

@@ -13,6 +13,25 @@ import {
   HttpTelegramTransport,
   runTelegramServer,
 } from "../channels/telegram.ts";
+import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
+import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
+import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
+import { startPresenceHeartbeat } from "../channels/phantomchat/presence.ts";
+import {
+  listPhantomchatPersonas,
+  cacheRelaysForPersona,
+  recordTrustedNpub,
+  recordGreeted,
+} from "../channels/phantomchat/personaStore.ts";
+import {
+  resolvePersonaGreeting,
+  greetPendingNpubs,
+} from "../channels/phantomchat/greet.ts";
+import {
+  fetchCanonicalRelays,
+  sameRelays,
+} from "../channels/phantomchat/relaysSource.ts";
+import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
   type Config,
   loadConfig,
@@ -49,6 +68,12 @@ export interface RunInput {
     | false
     | ((config: Config) => Promise<HarnessAvailability[]>);
   runTelegramServer?: typeof runTelegramServer;
+  /**
+   * Test seam for the phantomchat server. Production uses the real
+   * `runPhantomchatServer` over a SimplePool relay transport; tests inject a
+   * stub so run-wiring can be asserted without touching real relays.
+   */
+  runPhantomchatServer?: typeof runPhantomchatServer;
 }
 
 /** One persona-bound listener that runRun() will spawn. */
@@ -141,9 +166,20 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   const hasPersonas =
     !!config.channels.telegramPersonas &&
     Object.keys(config.channels.telegramPersonas).length > 0;
-  if (!hasDefault && !hasPersonas) {
+
+  // PhantomChat personas are a runnable channel in their own right. Compute
+  // this BEFORE the channel guards below: `phantombot init` now makes
+  // PhantomChat the required primary channel and Telegram optional/skippable,
+  // so a clean PhantomChat-only install has no [channels.telegram] but does
+  // have one or more persona `phantomchat.json` files. Without accounting for
+  // them here, runRun would exit at the Telegram guard and the freshly
+  // installed service would die immediately on the advertised no-Telegram path.
+  const phantomchatPersonas = listPhantomchatPersonas(config);
+  const hasPhantomchat = phantomchatPersonas.length > 0;
+
+  if (!hasDefault && !hasPersonas && !hasPhantomchat) {
     err.write(
-      "no telegram bot token configured. Run `phantombot telegram` to set one up.\n",
+      "no channels configured. Run `phantombot telegram` and/or `phantombot phantomchat` to set one up.\n",
     );
     return 2;
   }
@@ -160,26 +196,43 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       if (healed) {
         defaultPersona = healed;
         config.defaultPersona = healed;
-      } else {
+      } else if (!hasPhantomchat) {
         err.write(
           `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
             "Create one with `phantombot persona`.\n",
         );
         return 2;
       }
+      // else: Telegram's default persona is broken, but PhantomChat is a
+      // runnable channel — fall through. planListeners skips the missing default
+      // and we continue PhantomChat-only (warned below). The service must never
+      // fail to start just because one channel is misconfigured.
     }
   }
 
   const plan = planListeners(config, defaultPersona, err);
   if (plan.fatal) {
     err.write(`${plan.fatal}\n`);
-    return 2;
+    // Fatal only when Telegram is the sole channel. With PhantomChat available,
+    // a broken Telegram config (e.g. a reused bot token) must NOT kill the
+    // service — disable Telegram and continue PhantomChat-only. plan.listeners
+    // is already [] here, so the rest of the flow runs without Telegram.
+    if (!hasPhantomchat) return 2;
+    err.write("  telegram disabled — continuing with phantomchat only.\n");
   }
-  if (plan.listeners.length === 0) {
+  if (plan.listeners.length === 0 && !hasPhantomchat) {
     err.write(
       "no telegram listeners could be started — every configured bot's persona is missing.\n",
     );
     return 2;
+  }
+  if (plan.listeners.length === 0 && (hasDefault || hasPersonas)) {
+    // Telegram WAS configured but no listener could be planned (every bot's
+    // persona dir is missing). PhantomChat still has runnable personas, so warn
+    // loudly and keep going rather than killing the whole process.
+    err.write(
+      "warning: telegram is configured but no listener could start (persona missing) — continuing with phantomchat only.\n",
+    );
   }
 
   let missingHarnessBins: HarnessAvailability[] = [];
@@ -230,35 +283,42 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // for legacy markers. Prefer the default listener for that fallback;
   // use the first listener when no default account is configured.
   // Non-null: we returned above if plan.listeners.length === 0.
-  const adminListener: ListenerSpec =
-    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0]!;
+  // May be undefined on a PhantomChat-only install (no Telegram listeners).
+  // The post-restart Telegram notify below is skipped in that case; doctor
+  // falls back to a PhantomChat persona (then defaultPersona).
+  const adminListener: ListenerSpec | undefined =
+    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0];
   // Post-restart check: if `/update` wrote a pending-update marker before
   // we got SIGTERMed, surface the result to the chat that triggered it.
   // Runs once at startup; if no marker exists this is a quick no-op stat.
   // Logged + swallowed so a notify-send failure can't keep us out of the
-  // poll loop — startup must always succeed.
-  try {
-    const r = await notifyPostRestartIfPending({
-      config,
-      currentVersion: VERSION,
-      adminAccount: adminListener.account,
-    });
-    if (r.status === "success_notified" || r.status === "failure_notified") {
-      log.info("run: post-restart notify", {
-        status: r.status,
-        targetTag: r.marker?.targetTag,
-        previousVersion: r.marker?.previousVersion,
+  // poll loop — startup must always succeed. Skipped with no Telegram admin
+  // listener: the post-restart notify path delivers over Telegram, so there's
+  // no channel to send on (PhantomChat-only update-notify is a separate path).
+  if (adminListener) {
+    try {
+      const r = await notifyPostRestartIfPending({
+        config,
         currentVersion: VERSION,
+        adminAccount: adminListener.account,
+      });
+      if (r.status === "success_notified" || r.status === "failure_notified") {
+        log.info("run: post-restart notify", {
+          status: r.status,
+          targetTag: r.marker?.targetTag,
+          previousVersion: r.marker?.previousVersion,
+          currentVersion: VERSION,
+        });
+      }
+    } catch (e) {
+      log.warn("run: post-restart notify threw", {
+        error: (e as Error).message,
       });
     }
-  } catch (e) {
-    log.warn("run: post-restart notify threw", {
-      error: (e as Error).message,
-    });
   }
 
   out.write(
-    `phantombot — ${plan.listeners.length} telegram listener(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
+    `phantombot — ${plan.listeners.length} telegram listener(s), ${phantomchatPersonas.length} phantomchat persona(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
   );
   for (const l of plan.listeners) {
     out.write(
@@ -301,7 +361,9 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // covers machines powered off during the 02:00 window. Don't await —
   // doctor's repair is a detached child, so this returns immediately.
   // Runs against the admin persona for the same reason as notify above.
-  runDoctor({ config, persona: adminListener.persona, out, err }).then(
+  const doctorPersona =
+    adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
+  runDoctor({ config, persona: doctorPersona, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
@@ -334,6 +396,196 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         err,
       }),
     );
+
+    // phantomchat (Nostr NIP-17 DM) listeners — run ALONGSIDE Telegram. Fan-out
+    // mirrors the Telegram one: each persona dir under personasDir that holds a
+    // `phantomchat.json` (its OWN nsec + relays + allowlist) becomes its OWN
+    // listener bound to that persona, with its OWN npub. No config.toml editing
+    // and no shared env secret — the identity is self-contained in the persona
+    // folder, so a copy/pasted persona just works.
+    // phantomchatPersonas was computed up-front (it gates the no-Telegram
+    // start path); reuse it here rather than re-scanning the persona dir.
+    if (phantomchatPersonas.length > 0) {
+      // Lazy import of SimplePool keeps the nostr-tools websocket machinery out
+      // of the import graph for Telegram-only deployments. Tests inject
+      // runPhantomchatServer (which ignores the channel it's handed), so the
+      // SimplePool that gets built here is never actually driven by a test.
+      const startPhantomchat =
+        input.runPhantomchatServer ?? runPhantomchatServer;
+      const { SimplePool } = await import("nostr-tools/pool");
+
+      // Fetch the canonical relay list ONCE (single source of truth, served by
+      // the PWA at /relays.json). Shared across every persona. null = fetch
+      // failed → each persona falls back to its cached relays, then the seed.
+      const canonicalRelays = await fetchCanonicalRelays();
+      if (canonicalRelays) {
+        out.write(
+          `  [phantomchat] canonical relays: ${canonicalRelays.length} from /relays.json\n`,
+        );
+      } else {
+        out.write(
+          `  [phantomchat] /relays.json unavailable — using cached/seed relays per persona\n`,
+        );
+      }
+
+      for (const spec of phantomchatPersonas) {
+        const { identity, allowedHex, tofu } = spec.config;
+
+        // Effective relays: canonical (if fetched) else the persona's cached
+        // relays. When canonical differs from the cache, write it back so a
+        // later offline start uses the freshest known-good set.
+        const relays = canonicalRelays ?? spec.config.relays;
+        if (canonicalRelays && !sameRelays(canonicalRelays, spec.config.relays)) {
+          void cacheRelaysForPersona(spec.agentDir, canonicalRelays).catch((e) => {
+            log.warn(`phantomchat[${spec.persona}]: relay cache write failed`, {
+              error: (e as Error).message,
+            });
+          });
+        }
+
+        const openBot = allowedHex.length === 0 && tofu !== true;
+        if (openBot) {
+          // Empty allowlist with TOFU off = answer anyone. Warn loudly.
+          log.warn(
+            `phantomchat[${spec.persona}]: no allowed_npubs and TOFU off — ANYONE who DMs this persona will be answered`,
+          );
+          err.write(
+            `warning: phantomchat persona '${spec.persona}' has no allowlist — anyone who DMs it will be answered. Set allowed_npubs via \`phantombot phantomchat --persona ${spec.persona}\`.\n`,
+          );
+        }
+        const allowedLabel =
+          allowedHex.length > 0
+            ? String(allowedHex.length)
+            : tofu === true
+              ? "TOFU (trust first DM)"
+              : "ANY (no allowlist)";
+        out.write(
+          `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${allowedLabel}\n`,
+        );
+        // enablePing: nostr-tools sends a keepalive (ws ping, or a dummy REQ for
+        // WebSocket impls without .ping()) every ~30s so an idle relay socket is
+        // never closed for inactivity. This is the root fix for "the persona
+        // ignores the first DM after it's been idle": without keepalive the relay
+        // drops the idle socket, the gift-wrap subscription dies, and the first
+        // message lands into a connection nobody is holding. We deliberately do
+        // NOT set enableReconnect — on reconnect nostr-tools narrows each filter's
+        // `since` to lastEmitted+1, which would silently drop gift-wraps whose
+        // created_at is backdated up to 48h (NIP-59). Hard-drop recovery is
+        // handled instead by the channel-layer self-heal watchdog, which re-arms
+        // the subscription with our own correct wide `since`.
+        const pool = new SimplePool({ enablePing: true });
+        const transport = new SimplePoolPhantomchatTransport(
+          identity.secretKey,
+          relays,
+          pool as unknown as ConstructorParameters<
+            typeof SimplePoolPhantomchatTransport
+          >[2],
+        );
+        const channel = createPhantomchatChannel({
+          secretKey: identity.secretKey,
+          publicKeyHex: identity.publicKeyHex,
+          transport,
+        });
+        // Register/refresh this persona's public profile (NIP-01 kind 0) so the
+        // PWA shows a real name ("Lena", not the npub) and badges it as a bot
+        // (NIP-24 bot:true). kind 0 is replaceable, so this just supersedes the
+        // prior one on each start. Detached + best-effort — a relay hiccup must
+        // never delay the listener coming up.
+        const displayName =
+          spec.persona.charAt(0).toUpperCase() + spec.persona.slice(1);
+        void transport
+          .publishProfile({ name: displayName, bot: true })
+          .then(() =>
+            out.write(
+              `  [phantomchat:${spec.persona}] published profile '${displayName}' (bot)\n`,
+            ),
+          )
+          .catch((e) =>
+            log.warn(`phantomchat[${spec.persona}]: profile publish failed`, {
+              error: (e as Error).message,
+            }),
+          );
+        // Presence: while this listener is up, beat a NIP-38 kind-30315 status
+        // to the allowlist peers every 60s so Andrew's PWA shows the persona as
+        // a REAL "Online" (and "last seen at HH:MM" the moment the service dies).
+        // No-op for open/TOFU personas (empty allowlist — no one to advertise to).
+        const presence = startPresenceHeartbeat({
+          transport,
+          peerHexes: allowedHex,
+          signal: ac.signal,
+        });
+        const agentDir = spec.agentDir;
+        tasks.push(
+          startPhantomchat({
+            config,
+            memory,
+            harnesses,
+            agentDir,
+            persona: spec.persona,
+            channel,
+            allowedHex,
+            tofu,
+            // TOFU commit: encode the proven sender hex → npub and persist it to
+            // this persona's phantomchat.json (clearing tofu). Best-effort.
+            persistTrust: async (senderHex: string) => {
+              const npub = npubEncode(senderHex);
+              await recordTrustedNpub(agentDir, npub);
+              out.write(
+                `  [phantomchat:${spec.persona}] TOFU trusted ${npub} — now locked\n`,
+              );
+            },
+            signal: ac.signal,
+            out,
+            err,
+          }).finally(() => {
+            presence.stop();
+            transport.close();
+          }),
+        );
+
+        // Proactive onboarding: the bot reaches OUT to its allowlist instead of
+        // waiting to be DM'd. Greet every allowed npub not yet in `greeted`,
+        // then record it so restarts re-greet only npubs added since last time.
+        // Runs DETACHED (not pushed to `tasks`) so a slow greeting generation
+        // never delays startup or the relay subscription, and only fires when
+        // there's pending work — a fully-onboarded persona costs nothing on
+        // restart. TOFU/open-bot personas have an empty allowlist, so there's
+        // nothing to greet and this is skipped.
+        const greetedSet = new Set(spec.config.greeted);
+        const pendingGreet = spec.config.allowedNpubs.filter(
+          (n) => !greetedSet.has(n),
+        );
+        if (pendingGreet.length > 0) {
+          const greetSpec = spec;
+          void (async () => {
+            const greeting = await resolvePersonaGreeting({
+              agentDir,
+              persona: greetSpec.persona,
+              harnesses,
+              idleTimeoutMs: config.harnessIdleTimeoutMs,
+              hardTimeoutMs: config.harnessHardTimeoutMs,
+              signal: ac.signal,
+            });
+            await greetPendingNpubs({
+              persona: greetSpec.persona,
+              allowedNpubs: greetSpec.config.allowedNpubs,
+              greetedNpubs: greetSpec.config.greeted,
+              greeting,
+              sendMessage: (hex, text) => transport.sendMessage(hex, text),
+              recordGreeted: async (npub) => {
+                await recordGreeted(agentDir, npub);
+              },
+              out,
+              err,
+            });
+          })().catch((e) => {
+            log.warn(`phantomchat[${greetSpec.persona}]: greet pass failed`, {
+              error: (e as Error).message,
+            });
+          });
+        }
+      }
+    }
     try {
       await Promise.all(tasks);
     } catch (e) {
