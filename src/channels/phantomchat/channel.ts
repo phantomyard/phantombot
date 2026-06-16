@@ -221,22 +221,20 @@ export function createPhantomchatChannel(
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
         // `type === "presence-ping"` is a liveness probe we answer with a pong;
         // any other type (or malformed JSON) is ignored silently.
-        let envelope: {
-          id?: unknown;
-          type?: unknown;
-          content?: unknown;
-          nonce?: unknown;
-        };
+        // NIP-17 dual-read. Two accepted shapes:
+        //   - Legacy PhantomChat JSON envelope {type, content, id, nonce}.
+        //   - Standard NIP-17: rumor.content IS the plain message text (what
+        //     0xchat/Amethyst and the aligned PWA send). Resolved below.
+        let envelope: {id?: unknown; type?: unknown; content?: unknown; nonce?: unknown} | null = null;
         try {
-          envelope = JSON.parse(rumor.content) as {
-            id?: unknown;
-            type?: unknown;
-            content?: unknown;
-            nonce?: unknown;
-          };
+          const parsed = JSON.parse(rumor.content);
+          // Only OUR envelope has a string `type`. A plain-text body that happens
+          // to be JSON without a `type` falls through to the plain-text path.
+          if (parsed && typeof parsed === "object" && typeof parsed.type === "string") {
+            envelope = parsed;
+          }
         } catch {
-          log.debug("phantomchat: rumor content is not valid JSON; ignoring");
-          return;
+          // not JSON → standard NIP-17 plain-text message (handled below)
         }
 
         // (6) LIVE-GATE. On (re)connect the relays replay up to 49h of stored
@@ -258,7 +256,7 @@ export function createPhantomchatChannel(
         // Answer with a gift-wrapped pong echoing the nonce; do NOT enqueue a
         // turn. Riding the same kind-1059 path as messages is the point: a pong
         // proves the delivery path is alive, not merely some side channel.
-        if (envelope.type === "presence-ping") {
+        if (envelope?.type === "presence-ping") {
           const nonce = typeof envelope.nonce === "string" ? envelope.nonce : "";
           if (nonce) {
             void transport.sendPresencePong(senderHex, nonce);
@@ -266,8 +264,24 @@ export function createPhantomchatChannel(
           return;
         }
 
-        if (envelope.type !== "text" || typeof envelope.content !== "string") {
-          return;
+        // Resolve the message text + id from whichever shape arrived.
+        let text: string;
+        let messageId: string | undefined;
+        if (envelope) {
+          // Legacy envelope: only `text` envelopes become turns (reactions/etc. drop).
+          if (envelope.type !== "text" || typeof envelope.content !== "string") {
+            return;
+          }
+          text = envelope.content;
+          if (typeof envelope.id === "string" && envelope.id) messageId = envelope.id;
+        } else {
+          // Standard NIP-17 plain-text DM. Empty bodies (e.g. delivery-receipt
+          // rumors carry empty content) are ignored so we never run an empty turn.
+          if (typeof rumor.content !== "string" || !rumor.content.trim()) {
+            return;
+          }
+          text = rumor.content;
+          messageId = rumor.id; // NIP-17 keys receipts/edits off the rumor id
         }
 
         // (8) GROUP ROUTING. The PWA wraps a GROUP message with the same text
@@ -297,7 +311,7 @@ export function createPhantomchatChannel(
             // senderId stays the proven sender hex — the auth gate is per-person
             // regardless of whether the message came via a group.
             senderId: senderHex,
-            text: envelope.content,
+            text,
             groupId,
             groupMemberHexes: memberHexes,
           });
@@ -316,10 +330,8 @@ export function createPhantomchatChannel(
         queue.push({
           conversationId: senderHex,
           senderId: senderHex,
-          text: envelope.content,
-          ...(typeof envelope.id === "string" && envelope.id
-            ? { messageId: envelope.id }
-            : {}),
+          text,
+          ...(messageId ? { messageId } : {}),
         });
         wake?.();
       };

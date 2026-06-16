@@ -242,6 +242,53 @@ describe("phantomchat channel — delivery receipt plumbing", () => {
   });
 });
 
+describe("phantomchat channel — NIP-17 dual-read (plain text)", () => {
+  test("a live plain-text rumor (no envelope) surfaces a turn keyed by the rumor id", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Standard NIP-17: the rumor content IS the plain text (what 0xchat and the
+    // aligned PWA send) — no JSON envelope.
+    const peerSk = generateSecretKey();
+    const { wraps, rumorId } = wrapNip17Message(peerSk, ourPub, "hello from 0xchat");
+    pool.feed(wraps[0] as unknown as NTNostrEvent);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    expect(got[0]!.text).toBe("hello from 0xchat");
+    expect(got[0]!.messageId).toBe(rumorId); // receipts/edits key off the rumor id
+    expect(pool.published.length).toBe(0);
+  });
+
+  test("an empty-content rumor (e.g. a delivery receipt) yields no turn", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const peerSk = generateSecretKey();
+    const { wraps } = wrapNip17Message(peerSk, ourPub, "");
+    pool.feed(wraps[0] as unknown as NTNostrEvent);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(0);
+  });
+});
+
 describe("phantomchat channel — self-heal watchdog", () => {
   test("re-arms the subscription when a relay drops", async () => {
     const { pool, channel } = setup({ healCheckMs: 10 });
