@@ -152,11 +152,12 @@ export function renderPayload(req: HarnessRequest): string {
 /**
  * Translate one pi stream-json line into a HarnessChunk.
  *
- * Schema (verified against pi v0.67.x with `--mode json`):
+ * Schema (verified against pi v0.79.x with `--mode json`; older v0.67.x
+ * event names — `tool_use_*`, `tool_name` — still accepted as fallback):
  *
  *   {"type":"message_update",
  *    "assistantMessageEvent":{
- *       "type":"text_delta"|"thinking_delta"|"tool_use_*"|...,
+ *       "type":"text_delta"|"thinking_delta"|"toolcall_*"|...,
  *       "contentIndex": N,
  *       "delta": "...",     // for *_delta events
  *       "partial": {...},
@@ -176,9 +177,10 @@ export function renderPayload(req: HarnessRequest): string {
  * time, that's pi actually thinking — the indicator vanishing means the
  * model has gone silent (and may be wedged on a tool call).
  *
- * tool_use_* event types inside assistantMessageEvent → `progress`
- * so the channel layer flushes narration into a bubble before the tool
- * runs. thinking_delta + other event types → `heartbeat`.
+ * toolcall_* (pi ≥0.79; formerly tool_use_*) event types inside
+ * assistantMessageEvent → `progress` so the channel layer flushes narration
+ * into a bubble before the tool runs. thinking_delta + other event types →
+ * `heartbeat`.
  *
  * Exported for testing.
  */
@@ -191,7 +193,14 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   // flushes any buffered narration into a bubble before the tool
   // runs (keeping the user oriented during the silence).
   if (obj.type === "tool_execution_start") {
-    const toolName = typeof obj.tool_name === "string" ? obj.tool_name : undefined;
+    // pi 0.79.x renamed this field `tool_name` → `toolName` (camelCase).
+    // Accept both so the adapter works across pi versions.
+    const toolName =
+      typeof obj.toolName === "string"
+        ? obj.toolName
+        : typeof obj.tool_name === "string"
+          ? obj.tool_name
+          : undefined;
     return { type: "progress", note: toolName ? `tool: ${toolName}` : "tool" };
   }
 
@@ -209,12 +218,15 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   }
 
   if (typeof ame.type === "string") {
-    // tool_use_* assistantMessageEvent: the model has decided to call
+    // toolcall_* assistantMessageEvent: the model has decided to call
     // a tool — emit `progress` so the channel layer flushes narration
     // into a bubble before the tool runs. Previously these were mapped
     // to heartbeats, which kept the typing indicator alive but never
     // triggered a bubble flush (defeating the purpose of PR #74).
-    if (ame.type.startsWith("tool_use")) {
+    //
+    // pi 0.79.x renamed these events `tool_use_*` → `toolcall_*`. Match
+    // both prefixes so narration surfaces across pi versions.
+    if (ame.type.startsWith("toolcall") || ame.type.startsWith("tool_use")) {
       return { type: "progress", note: "tool" };
     }
     // thinking_delta + anything else → heartbeat.
@@ -235,8 +247,13 @@ function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
   if (obj.type === "tool_execution_start") return "tool";
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
-    if (ame.type === "tool_use_end") return "productive";
-    if (ame.type.startsWith("tool_use")) return "tool";
+    // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.
+    if (ame.type === "toolcall_end" || ame.type === "tool_use_end") {
+      return "productive";
+    }
+    if (ame.type.startsWith("toolcall") || ame.type.startsWith("tool_use")) {
+      return "tool";
+    }
   }
   return chunk.type === "heartbeat" ? "model" : "productive";
 }

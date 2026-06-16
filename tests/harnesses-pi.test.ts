@@ -92,7 +92,15 @@ describe("parsePiEvent", () => {
     expect(JSON.stringify(c)).not.toContain("internal reasoning");
   });
 
-  test("emits progress for tool_execution_start (top-level event)", () => {
+  test("emits progress for tool_execution_start (pi 0.79.x toolName field)", () => {
+    const c = parsePiEvent({
+      type: "tool_execution_start",
+      toolName: "bash",
+    });
+    expect(c).toEqual({ type: "progress", note: "tool: bash" });
+  });
+
+  test("emits progress for tool_execution_start (legacy 0.67.x tool_name field)", () => {
     const c = parsePiEvent({
       type: "tool_execution_start",
       tool_name: "run_shell_command",
@@ -100,13 +108,22 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "progress", note: "tool: run_shell_command" });
   });
 
-  test("emits progress for tool_execution_start without a tool_name", () => {
+  test("emits progress for tool_execution_start without a tool name", () => {
     const c = parsePiEvent({ type: "tool_execution_start" });
     expect(c).toEqual({ type: "progress", note: "tool" });
   });
 
-  test("emits progress for tool_use assistantMessageEvent (not heartbeat)", () => {
-    for (const ameType of ["tool_use_start", "tool_use_end", "tool_use"]) {
+  test("emits progress for toolcall_* / tool_use_* assistantMessageEvent (not heartbeat)", () => {
+    for (const ameType of [
+      // pi 0.79.x names
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      // legacy 0.67.x names (still accepted)
+      "tool_use_start",
+      "tool_use_end",
+      "tool_use",
+    ]) {
       expect(
         parsePiEvent({
           type: "message_update",
