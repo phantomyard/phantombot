@@ -25,12 +25,18 @@ import {
 } from "../../config.ts";
 import type { Harness } from "../../harnesses/types.ts";
 import {
-  replyModalityOverride,
   sttSupport,
   synthesize,
   transcribe,
   ttsSupported,
 } from "../../lib/audio.ts";
+import {
+  DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+  normalizeReplyMode,
+  setReplyModeOverride,
+  touchReplyModeOverride,
+  type ReplyMode,
+} from "../../lib/replyMode.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
@@ -768,26 +774,30 @@ async function processChatMessage(
   //
   //   default       — mirror the input modality (voice-in → voice-out,
   //                   text-in → text-out)
-  //   user override — explicit per-message directive in the message
-  //                   text ("reply in text", "send a voice note") flips
-  //                   the wire format. Applies AFTER STT so the
-  //                   transcript is what gets inspected for voice-in.
+  //   model override — the harness may call `phantombot reply-mode text|voice`
+  //                   when the user asks to change wire format. That persists
+  //                   for this persona+conversation while the chat remains
+  //                   active, then expires after 10 minutes of idle time.
   //
-  // Voice is still capped by ttsSupported(): if the user asks for a
-  // voice reply but the provider can't do TTS, we degrade to text
-  // gracefully (same fallback as the original voice-in path).
-  const modalityOverride = replyModalityOverride(msg.text);
-  const wantsVoiceReply =
-    modalityOverride === "voice"
-      ? true
-      : modalityOverride === "text"
-        ? false
-        : isVoice;
-  const willReplyWithVoice = wantsVoiceReply && ttsSupported(input.config);
+  // We deliberately do NOT regex-scan the user's message for English phrases.
+  // Natural-language interpretation belongs to the model; deterministic state
+  // enforcement belongs here.
+  const conversationKey = `telegram:${msg.conversationId}`;
+  let modalityOverride = await touchReplyModeOverride({
+    persona: input.persona,
+    conversation: conversationKey,
+    ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+  });
+  const resolveWillReplyWithVoice = (override: ReplyMode | undefined) => {
+    const wantsVoiceReply =
+      override === "voice" ? true : override === "text" ? false : isVoice;
+    return wantsVoiceReply && ttsSupported(input.config);
+  };
+  let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
 
-  // Forward `reply_to_message` context AFTER modality detection so a
-  // quoted "send a voice note" can't flip routing for a fresh "merge"
-  // reply. We mutate `msg.text` so both the harness call and the
+  // Forward `reply_to_message` context AFTER modality detection so quoted
+  // context never affects the current turn's wire-format routing. We mutate
+  // `msg.text` so both the harness call and the
   // interrupted-pair persistence (further down) see the same envelope.
   if (msg.replyTo) {
     const prefix = formatReplyToContext(msg.replyTo);
@@ -885,6 +895,7 @@ async function processChatMessage(
   let finalCandidateSentChars = 0;
   let finalBubblesSent = 0;
   let finalReply: string | undefined;
+  let requestedReplyMode: ReplyMode | undefined;
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
@@ -945,7 +956,6 @@ async function processChatMessage(
   // suffix. Only for real `telegram:*` conversations — never tick:/system:.
   // runTurn appends this incoming message to `turns` only AFTER the turn,
   // so we count prior user turns + 1 to land the nudge on the Nth turn.
-  const conversationKey = `telegram:${msg.conversationId}`;
   let captureNudge: string | undefined;
   if (conversationKey.startsWith("telegram:")) {
     captureNudge = await captureNudgeForTurn(
@@ -1085,6 +1095,7 @@ async function processChatMessage(
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
+        requestedReplyMode = normalizeReplyMode(chunk.meta?.replyMode);
         const meta = chunk.meta as { harnessId?: unknown } | undefined;
         if (typeof meta?.harnessId === "string") {
           chosenHarness = meta.harnessId;
@@ -1215,6 +1226,16 @@ async function processChatMessage(
     outText = fullReply.slice(consumedReplyChars);
   } else {
     outText = fullReply;
+  }
+
+  if (requestedReplyMode && requestedReplyMode !== modalityOverride) {
+    await setReplyModeOverride({
+      persona: input.persona,
+      conversation: conversationKey,
+      mode: requestedReplyMode,
+    });
+    modalityOverride = requestedReplyMode;
+    willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
   }
 
   // Voice in → voice out (when TTS is configured AND we have something to

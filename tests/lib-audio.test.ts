@@ -5,7 +5,6 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
-  replyModalityOverride,
   sttSupport,
   sttSupported,
   synthesize,
@@ -304,92 +303,5 @@ describe("transcribe", () => {
       fakeJsonFetch({}),
     );
     expect(r.ok).toBe(false);
-  });
-});
-
-describe("replyModalityOverride", () => {
-  // Positive — text directive
-  test.each([
-    "please reply in text",
-    "respond with text",
-    "Answer as text please",
-    "give me a text reply",
-    "text response only",
-    "no voice please",
-    "don't use voice",
-    "Do not reply with voice",
-    "as text",
-    "in text format",
-    "could you respond using text",
-  ])("text directive: %s → text", (input) => {
-    expect(replyModalityOverride(input)).toBe("text");
-  });
-
-  // Positive — voice directive
-  test.each([
-    "respond with voice",
-    "reply in voice please",
-    "send me a voice note",
-    "voice note please",
-    "as a voice",
-    "voice reply",
-    "answer with a voice note",
-    "no text please",
-    "don't use text",
-    "Do not reply with text",
-    "no text, voice please",
-    "don't reply with text",
-  ])("voice directive: %s → voice", (input) => {
-    expect(replyModalityOverride(input)).toBe("voice");
-  });
-
-  // Negative — bare nouns must not trigger
-  test.each([
-    "the next chapter is text-heavy",
-    "compose a text message to john",
-    "what is the voice of the narrator",
-    "the report has voice tags in it",
-    "I'm reading a textbook",
-    "summarise this text",
-    "what's the difference between text and audio formats",
-    // Regression: NEGATION_TEXT must not match "no text message(s)" — the
-    // positive textPatterns deliberately exclude "text message" (SMS), so
-    // negating it shouldn't flip routing to voice either.
-    "no text messages today please",
-    "don't send any text message to john",
-    "",
-    undefined,
-  ])("no directive: %p → undefined", (input) => {
-    expect(replyModalityOverride(input)).toBeUndefined();
-  });
-
-  test("both directives in one message — later one wins (text after voice)", () => {
-    expect(
-      replyModalityOverride("send a voice note — actually reply in text"),
-    ).toBe("text");
-  });
-
-  test("both directives in one message — later one wins (voice after text)", () => {
-    expect(
-      replyModalityOverride("text response please — wait, respond with voice"),
-    ).toBe("voice");
-  });
-
-  test("both negations in one message — later one wins (voice negated last → text)", () => {
-    expect(
-      replyModalityOverride("no text — actually don't use voice either"),
-    ).toBe("text");
-  });
-
-  test("both negations in one message — later one wins (text negated last → voice)", () => {
-    expect(
-      replyModalityOverride("no voice — actually don't reply with text"),
-    ).toBe("voice");
-  });
-
-  test("case-insensitive", () => {
-    expect(replyModalityOverride("REPLY IN TEXT")).toBe("text");
-    expect(replyModalityOverride("Send A Voice Note")).toBe("voice");
-    expect(replyModalityOverride("NO TEXT PLEASE")).toBe("voice");
   });
 });

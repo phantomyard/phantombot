@@ -100,7 +100,11 @@ export class ClaudeHarness implements Harness {
     // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
     // routing var into the subprocess env (reloadEnvFiles just re-sourced
     // ~/.env), so claude resolves credentials from ~/.claude/.credentials.json.
-    const env = withPersonaEnv(filterAuthEnv(process.env), req.persona);
+    const env = withPersonaEnv(
+      filterAuthEnv(process.env),
+      req.persona,
+      req.conversation,
+    );
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,

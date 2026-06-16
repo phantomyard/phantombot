@@ -39,6 +39,7 @@ import taskCmd from "./task.ts";
 import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import voiceCmd from "./voice.ts";
+import replyModeCmd from "./replyMode.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -68,5 +69,6 @@ export const mainCommand = defineCommand({
     tick: tickCmd,
     update: updateCmd,
     voice: voiceCmd,
+    "reply-mode": replyModeCmd,
   },
 });

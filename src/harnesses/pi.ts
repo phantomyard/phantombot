@@ -110,7 +110,7 @@ export class PiHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: withPersonaEnv(process.env, req.persona),
+      env: withPersonaEnv(process.env, req.persona, req.conversation),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

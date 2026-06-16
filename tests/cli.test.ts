@@ -33,6 +33,7 @@ describe("phantombot CLI dispatcher", () => {
       "notify",
       "persona",
       "phantomchat",
+      "reply-mode",
       "run",
       "task",
       "telegram",

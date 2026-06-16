@@ -243,6 +243,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     userMessage: input.userMessage,
     history,
     persona: input.persona,
+    conversation: input.conversation,
     workingDir: input.workingDir ?? homedir(),
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,

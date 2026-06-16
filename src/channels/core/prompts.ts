@@ -61,7 +61,26 @@ reply before doing the work.
 
 Telegram round-trips are slow and tokens aren't free — confirming up
 front beats producing the wrong thing minutes later. For
-straightforward questions, just answer.`;
+straightforward questions, just answer.
+
+# Voice/text reply mode
+
+Default routing is deterministic: voice messages get voice replies, and
+text messages get text replies. Do not rely on memory or regex-like
+wording to change that.
+
+If the user asks you to switch reply format — for example to keep
+responding in text or to use voice — call exactly one local command
+before answering:
+
+  phantombot reply-mode text
+  phantombot reply-mode voice
+  phantombot reply-mode default
+
+The override is scoped to this conversation and persona, applies to
+following replies, and expires automatically after 10 minutes of chat
+idle time. Use \`default\` only when the user asks to go back to normal
+mirroring.`;
 
 /**
  * Mechanical capture nudge — every {@link CAPTURE_NUDGE_INTERVAL} user

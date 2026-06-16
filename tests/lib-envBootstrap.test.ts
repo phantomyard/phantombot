@@ -316,10 +316,11 @@ describe("reloadEnvFiles — mtime stat cache", () => {
 });
 
 describe("withPersonaEnv", () => {
-  test("sets PHANTOMBOT_PERSONA to the persona key", () => {
+  test("sets PHANTOMBOT_PERSONA and PHANTOMBOT_CONVERSATION to the turn context", () => {
     const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
-    const out = withPersonaEnv(base, "burt");
+    const out = withPersonaEnv(base, "burt", "telegram:42");
     expect(out.PHANTOMBOT_PERSONA).toBe("burt");
+    expect(out.PHANTOMBOT_CONVERSATION).toBe("telegram:42");
     expect(out.PATH).toBe("/usr/bin");
   });
 
@@ -328,16 +329,18 @@ describe("withPersonaEnv", () => {
     const out = withPersonaEnv(base, "robbie");
     expect(out).not.toBe(base);
     expect(base.PHANTOMBOT_PERSONA).toBeUndefined();
+    expect(base.PHANTOMBOT_CONVERSATION).toBeUndefined();
   });
 
-  test("returns the base untouched when persona is undefined", () => {
+  test("sets only conversation when persona is undefined", () => {
     const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
-    const out = withPersonaEnv(base, undefined);
-    expect(out).toBe(base);
+    const out = withPersonaEnv(base, undefined, "telegram:42");
+    expect(out).not.toBe(base);
     expect(out.PHANTOMBOT_PERSONA).toBeUndefined();
+    expect(out.PHANTOMBOT_CONVERSATION).toBe("telegram:42");
   });
 
-  test("returns the base untouched when persona is empty", () => {
+  test("returns the base untouched when persona and conversation are empty", () => {
     const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
     expect(withPersonaEnv(base, "")).toBe(base);
   });
