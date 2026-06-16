@@ -372,6 +372,53 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(payload.to).toBeUndefined();
   });
 
+  test("sendMessage publishes a PLAIN-TEXT rumor (standard NIP-17, 0xchat-readable)", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const botSk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const recipientSk = generateSecretKey();
+    const recipientHex = getPublicKey(recipientSk);
+
+    await transport.sendMessage(recipientHex, "hello from Lena");
+
+    // Recipient wrap + self-wrap.
+    expect(published.length).toBe(2);
+    expect(published.every((e) => e.kind === 1059)).toBe(true);
+
+    // The recipient can unwrap and the rumor content is the RAW text — NOT a
+    // JSON envelope. This is what makes Lena's replies readable in 0xchat.
+    let unwrapped: ReturnType<typeof unwrapNip17Message> | undefined;
+    for (const w of published) {
+      try {
+        unwrapped = unwrapNip17Message(w as NTNostrEvent, recipientSk);
+        break;
+      } catch {
+        // wrong recipient for this wrap; try the next
+      }
+    }
+    expect(unwrapped).toBeDefined();
+    expect(unwrapped!.content).toBe("hello from Lena");
+    // Native NIP-17 metadata replaces the envelope fields.
+    expect(unwrapped!.pubkey).toBe(getPublicKey(botSk));
+    expect(unwrapped!.tags.find((t) => t[0] === "p")?.[1]).toBe(recipientHex);
+  });
+
   test("sendGroupMessage drops our own hex from the member list and dedupes", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {

@@ -361,24 +361,19 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * ChannelTransport egress. `conversationId` is the recipient's 64-char hex
    * pubkey, `text` the plaintext reply.
    *
-   * The rumor `content` on the wire is NOT the raw text — it's the phantomchat
-   * JSON envelope `{id, from, to, type, content, timestamp}` the PWA expects
-   * (hex pubkeys, ms timestamp). We build that here, then NIP-17-wrap it and
-   * publish both the recipient and self wraps.
+   * The rumor `content` on the wire is the PLAIN reply text — standard NIP-17,
+   * so 0xchat/Amethyst can read Lena's replies. (We used to wrap it in the
+   * phantomchat JSON envelope `{id, from, to, type, content, timestamp}`, but
+   * every field there is redundant with native rumor fields: from=rumor.pubkey,
+   * to=p-tag, timestamp=created_at, id=rumor id — and the PWA dual-reads plain
+   * text.) Groups keep the envelope (see sendGroupMessage) — they don't interop
+   * with stock clients and the PWA's GroupAPI still expects that shape.
    */
   async sendMessage(conversationId: string, text: string): Promise<void> {
-    const envelope = JSON.stringify({
-      id: crypto.randomUUID(),
-      from: this.ourPubHex,
-      to: conversationId,
-      type: "text",
-      content: text,
-      timestamp: Date.now(),
-    });
     const { wraps } = wrapNip17Message(
       this.ourSecretKey,
       conversationId,
-      envelope,
+      text,
     );
     for (const wrap of wraps) {
       await this.publishWrap(wrap as unknown as NTNostrEvent);

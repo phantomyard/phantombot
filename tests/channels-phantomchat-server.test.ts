@@ -234,10 +234,11 @@ describe("phantomchat auth gate", () => {
     expect(receipt!.tags.find((t) => t[0] === "e")![1]).toBe("in-1");
 
     // The recipient (original sender) can unwrap the reply and read "pong".
+    // The reply rumor content is now PLAIN TEXT (standard NIP-17, 0xchat-readable)
+    // — no longer a JSON envelope.
     const reply = rumors.find((r) => !r.tags.some((t) => t[0] === "receipt-type"));
     expect(reply).toBeDefined();
-    expect(JSON.parse(reply!.content).content).toBe("pong");
-    expect(JSON.parse(reply!.content).type).toBe("text");
+    expect(reply!.content).toBe("pong");
   });
 
   test("non-allowed npub: message is dropped, no turn, no reply", async () => {
