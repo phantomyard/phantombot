@@ -25,6 +25,8 @@
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
+import { pickChannelPersona } from "./channelPersona.ts";
+
 import {
   DEFAULT_PHANTOMCHAT_RELAYS,
   personaDir,
@@ -96,7 +98,18 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const savePersonaConfig =
     input.savePersonaConfig ?? savePhantomchatPersonaConfig;
 
-  const persona = input.persona ?? config.defaultPersona;
+  // Target persona: an explicit `--persona` wins; otherwise pick from the
+  // detected personas (default pre-selected, "None" to skip) — same pattern as
+  // `phantombot persona`.
+  let persona = input.persona;
+  if (!persona) {
+    const picked = await pickChannelPersona(config, "PhantomChat");
+    if (!picked) {
+      p.cancel("No persona selected — phantomchat not configured.");
+      return 0;
+    }
+    persona = picked;
+  }
   const agentDir = personaDir(config, persona);
 
   p.intro(`Configure phantomchat (Nostr NIP-17 DMs) for persona '${persona}'`);

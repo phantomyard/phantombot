@@ -12,6 +12,7 @@ import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
+import { pickChannelPersona } from "./channelPersona.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { telegramGetMe, type GetMeResult } from "../lib/telegramApi.ts";
@@ -73,13 +74,21 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const validate = input.validateToken ?? telegramGetMe;
   const svc = input.serviceControl ?? defaultServiceControl();
-  const persona = input.persona;
 
-  p.intro(
-    persona
-      ? `Configure the Telegram channel for persona '${persona}'`
-      : "Configure the Telegram channel",
-  );
+  // Target persona: an explicit `--persona` wins; otherwise pick from the
+  // detected personas (default pre-selected, "None" to skip) — same pattern as
+  // `phantombot persona`.
+  let persona = input.persona;
+  if (!persona) {
+    const picked = await pickChannelPersona(config, "Telegram");
+    if (!picked) {
+      p.cancel("No persona selected — Telegram not configured.");
+      return 0;
+    }
+    persona = picked;
+  }
+
+  p.intro(`Configure the Telegram channel for persona '${persona}'`);
 
   const existing = persona
     ? config.channels.telegramPersonas?.[persona]

@@ -5,8 +5,8 @@ import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
 import { type Config, loadConfig } from "../config.ts";
-import { loadState } from "../state.ts";
 import { ensureUserSystemdEnv } from "../lib/systemd.ts";
+import { pickChannelPersona } from "./channelPersona.ts";
 import {
   detectAvailability,
   type HarnessId,
@@ -21,12 +21,6 @@ import { runTelegram } from "./telegram.ts";
 export interface InitFlowInput {
   config: Config;
   availability: Record<HarnessId, string | undefined>;
-  /**
-   * Skip the Telegram step. phantomchat is the mandatory primary channel;
-   * Telegram is optional for users who only want phantomchat. Resolved by a
-   * confirm in `run()` so the ordering/short-circuit logic stays TTY-free.
-   */
-  skipTelegram?: boolean;
 }
 
 export interface InitFlowDeps {
@@ -36,40 +30,26 @@ export interface InitFlowDeps {
   }) => Promise<number>;
   runPersona: () => Promise<number>;
   /**
-   * Resolve the persona the user just created/selected in the persona step, so
-   * the channel configurators can be bound to it explicitly. Creating or
-   * switching a persona writes it to `default_persona`, so the real impl re-reads
-   * that from state (the in-memory config captured before the wizard ran is
-   * stale). Returns undefined only if no persona could be resolved.
+   * Pick the persona to bind a channel to (or null to SKIP it). Mirrors
+   * `phantombot persona`: the detected personas are listed with the default
+   * pre-selected, plus a "None" option. `null` means the user skipped this
+   * channel — there is no separate skip confirm.
    */
-  resolvePersona: () => Promise<string | undefined>;
-  runPhantomchat: (persona?: string) => Promise<number>;
-  runTelegram: (persona?: string) => Promise<number>;
+  pickPersona: (channelLabel: string) => Promise<string | null>;
+  runPhantomchat: (persona: string) => Promise<number>;
+  runTelegram: (persona: string) => Promise<number>;
+  /** Called when the user skipped BOTH channels, so `run()` can warn. */
+  onNoChannels?: () => void;
 }
 
 /**
  * Pure orchestration of the configuration wizards:
- *   harness → persona → phantomchat (MANDATORY) → telegram (OPTIONAL).
- * Short-circuits on the first non-zero exit. phantomchat is the primary channel
- * and always runs; Telegram is skipped when `input.skipTelegram` is set.
- * Extracted from the interactive `run()` so the ordering and short-circuit
- * behavior is testable without a TTY. The install wizard runs after this in
- * `run()` so it can be gated on a separate user confirmation and a Linux-only
- * linger pre-check.
+ *   harness → persona → phantomchat → telegram.
+ * Short-circuits on the first non-zero exit. Each channel step asks which
+ * persona to bind to (default pre-selected) or to skip — neither channel is
+ * mandatory. Extracted from the interactive `run()` so the ordering and
+ * short-circuit behavior is testable without a TTY.
  */
-/**
- * Map the "Also connect Telegram?" confirm answer to `skipTelegram`.
- *
- * The DEFAULT is to SET UP Telegram, never to skip it: only an EXPLICIT "No"
- * (a `false` answer) opts out. The default answer (Yes) and a cancel
- * (Ctrl-C / Esc) both keep Telegram in the flow. Kept as a pure helper so this
- * "default = set up, not skip" guarantee is unit-testable without a TTY.
- */
-export function resolveSkipTelegram(answer: boolean | symbol): boolean {
-  if (p.isCancel(answer)) return false;
-  return answer === false;
-}
-
 export async function runInitFlow(
   input: InitFlowInput,
   deps: InitFlowDeps,
@@ -83,21 +63,26 @@ export async function runInitFlow(
   const personaCode = await deps.runPersona();
   if (personaCode !== 0) return personaCode;
 
-  // Bind both channel configurators to the persona just set up. Telegram now
-  // writes a persona-bound block (`[channels.telegram.personas.<persona>]`)
-  // when given --persona; phantomchat keys its identity per persona. Passing
-  // the name explicitly keeps them on the SAME persona — without it Telegram
-  // would fall back to the default block and a fresh persona that isn't yet the
-  // resolved default would be misconfigured.
-  const persona = await deps.resolvePersona();
+  // Each channel step: pick a persona to bind it to, or skip ("None"). Both
+  // channels are optional — the user can run PhantomChat-only, Telegram-only,
+  // both (even on different personas), or neither.
+  let configuredAny = false;
 
-  const phantomchatCode = await deps.runPhantomchat(persona);
-  if (phantomchatCode !== 0) return phantomchatCode;
-
-  if (!input.skipTelegram) {
-    const telegramCode = await deps.runTelegram(persona);
-    if (telegramCode !== 0) return telegramCode;
+  const phantomchatPersona = await deps.pickPersona("PhantomChat");
+  if (phantomchatPersona) {
+    const code = await deps.runPhantomchat(phantomchatPersona);
+    if (code !== 0) return code;
+    configuredAny = true;
   }
+
+  const telegramPersona = await deps.pickPersona("Telegram");
+  if (telegramPersona) {
+    const code = await deps.runTelegram(telegramPersona);
+    if (code !== 0) return code;
+    configuredAny = true;
+  }
+
+  if (!configuredAny) deps.onNoChannels?.();
 
   return 0;
 }
@@ -187,36 +172,35 @@ export default defineCommand({
       );
     }
 
-    // PhantomChat is the mandatory primary channel; Telegram is optional. Ask
-    // up front so the flow itself stays TTY-free and testable.
+    // Channels: each step asks which persona to bind it to (default
+    // pre-selected) or "None" to skip — same detected-personas pattern as
+    // `phantombot persona`. Both channels are optional.
     p.note(
-      "PhantomChat is your private, end-to-end-encrypted DM channel (over Nostr)\n" +
-      "and is set up next — it's required. Telegram is optional: skip it if you\n" +
-      "only want to talk to your agent through PhantomChat.",
+      "Next you'll connect your agent's chat channels. For each one, pick which\n" +
+      "persona it should use — or choose None to skip it. PhantomChat is your\n" +
+      "private end-to-end-encrypted DM channel (over Nostr); Telegram is optional.",
       "Channels"
     );
-    const wantTelegram = await p.confirm({
-      message: "Also connect Telegram? (optional)",
-      // Default to YES — setting up Telegram is the default; the user must
-      // explicitly answer No to opt out. See resolveSkipTelegram.
-      initialValue: true,
-    });
-    const skipTelegram = resolveSkipTelegram(wantTelegram);
 
-    // 1-4: harness → persona → phantomchat (mandatory) → telegram (optional),
-    // orchestrated by runInitFlow so the ordering + short-circuit behavior can
-    // be tested without a TTY.
+    // harness → persona → phantomchat → telegram, orchestrated by runInitFlow
+    // so the ordering + short-circuit behavior can be tested without a TTY.
     const flowCode = await runInitFlow(
-      { config, availability: avail, skipTelegram },
+      { config, availability: avail },
       {
         runHarness: (input) => runHarness(input),
         runPersona,
-        // Re-read default_persona from state — runPersona just wrote it (create
-        // or switch both set it); the `config` above was loaded before that.
-        resolvePersona: async () =>
-          (await loadState()).default_persona ?? config.defaultPersona,
+        // Detected-personas picker (default pre-selected, "None" = skip). Reads
+        // the persona list + default fresh, so a persona just created in the
+        // step above is offered and highlighted.
+        pickPersona: (channelLabel) => pickChannelPersona(config, channelLabel),
         runPhantomchat: (persona) => runPhantomchat({ persona }),
         runTelegram: (persona) => runTelegram({ persona }),
+        onNoChannels: () =>
+          p.note(
+            "No channels set up — your agent has nowhere to receive messages yet.\n" +
+            "Add one anytime with `phantombot phantomchat` or `phantombot telegram`.",
+            "No channels configured",
+          ),
       },
     );
     if (flowCode !== 0) {

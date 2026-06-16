@@ -1,12 +1,14 @@
 /**
  * Tests for the orchestrated init flow (`runInitFlow`).
  *
- * These exercise the call ordering and short-circuit behavior of the three
- * configuration wizards (harness → persona → telegram). The fully-interactive
- * `run()` exported as default is *not* tested here — it requires a TTY and
- * touches @clack/prompts, sudo, and the install wizard. The orchestration
- * function is the right unit boundary: it captures the "flow ordering"
- * regression risk Kai called out in review without dragging clack into tests.
+ * These exercise the call ordering and short-circuit behavior of the wizards
+ * (harness → persona → phantomchat → telegram). The fully-interactive `run()`
+ * exported as default is *not* tested here — it requires a TTY and touches
+ * @clack/prompts. The orchestration function is the right unit boundary.
+ *
+ * Channel steps follow the `phantombot persona` pattern: each asks which
+ * persona to bind the channel to (via `pickPersona`), or `null` to skip —
+ * there is no separate skip confirm, and neither channel is mandatory.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -16,7 +18,6 @@ import type { HarnessId } from "../src/cli/harness.ts";
 import {
   type InitFlowDeps,
   type InitFlowInput,
-  resolveSkipTelegram,
   runInitFlow,
 } from "../src/cli/init.ts";
 
@@ -37,12 +38,14 @@ function fakeInput(): InitFlowInput {
 function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
   deps: InitFlowDeps;
   calls: string[];
-  personaArgs: Array<string | undefined>;
+  personaArgs: string[];
+  picks: string[];
 } {
   const calls: string[] = [];
-  // Records the persona forwarded to each channel configurator, as
-  // ["phantomchat:<persona>", "telegram:<persona>"].
-  const personaArgs: Array<string | undefined> = [];
+  // The persona forwarded to each channel configurator: ["phantomchat:<p>", …].
+  const personaArgs: string[] = [];
+  // The channel labels pickPersona was asked for, in order.
+  const picks: string[] = [];
   const deps: InitFlowDeps = {
     runHarness: async () => {
       calls.push("harness");
@@ -52,7 +55,10 @@ function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
       calls.push("persona");
       return 0;
     },
-    resolvePersona: async () => "lena",
+    pickPersona: async (label) => {
+      picks.push(label);
+      return "lena"; // default: bind every channel to "lena"
+    },
     runPhantomchat: async (persona) => {
       calls.push("phantomchat");
       personaArgs.push(`phantomchat:${persona}`);
@@ -63,9 +69,12 @@ function makeDeps(overrides: Partial<InitFlowDeps> = {}): {
       personaArgs.push(`telegram:${persona}`);
       return 0;
     },
+    onNoChannels: () => {
+      calls.push("noChannels");
+    },
     ...overrides,
   };
-  return { deps, calls, personaArgs };
+  return { deps, calls, personaArgs, picks };
 }
 
 describe("runInitFlow", () => {
@@ -76,46 +85,43 @@ describe("runInitFlow", () => {
     expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
   });
 
-  test("default is to SET UP telegram, not skip (unset skipTelegram → telegram runs)", async () => {
-    // The wizard's opt-out must default to setup: with no explicit skip, the
-    // telegram configurator runs.
-    const { deps, calls } = makeDeps();
-    const code = await runInitFlow(fakeInput(), deps);
-    expect(code).toBe(0);
-    expect(calls).toContain("telegram");
+  test("asks pickPersona for PhantomChat then Telegram (after the persona step)", async () => {
+    const { deps, calls, picks } = makeDeps();
+    await runInitFlow(fakeInput(), deps);
+    expect(picks).toEqual(["PhantomChat", "Telegram"]);
+    // pickPersona is only reached after the persona step succeeds.
+    expect(calls.indexOf("persona")).toBeLessThan(calls.indexOf("phantomchat"));
   });
 
-  test("skipTelegram: phantomchat runs, telegram skipped", async () => {
-    const { deps, calls } = makeDeps();
-    const code = await runInitFlow({ ...fakeInput(), skipTelegram: true }, deps);
-    expect(code).toBe(0);
-    expect(calls).toEqual(["harness", "persona", "phantomchat"]);
-  });
-
-  test("threads the resolved persona into BOTH phantomchat and telegram", async () => {
-    // Regression: the wizard must bind both channels to the persona just set up
-    // (telegram now writes a persona-bound block). Pre-fix it called them with
-    // no persona, so telegram fell back to the default block.
-    const { deps, personaArgs } = makeDeps({ resolvePersona: async () => "lena" });
-    const code = await runInitFlow(fakeInput(), deps);
-    expect(code).toBe(0);
+  test("binds each channel to the persona the picker returned", async () => {
+    const { deps, personaArgs } = makeDeps();
+    await runInitFlow(fakeInput(), deps);
     expect(personaArgs).toEqual(["phantomchat:lena", "telegram:lena"]);
   });
 
-  test("resolvePersona runs AFTER runPersona (so it sees the newly-set default)", async () => {
-    const order: string[] = [];
-    const { deps } = makeDeps({
-      runPersona: async () => {
-        order.push("persona");
-        return 0;
-      },
-      resolvePersona: async () => {
-        order.push("resolve");
-        return "lena";
-      },
+  test("supports a different persona per channel", async () => {
+    const { deps, personaArgs } = makeDeps({
+      pickPersona: async (label) => (label === "Telegram" ? "kai" : "lena"),
     });
     await runInitFlow(fakeInput(), deps);
-    expect(order).toEqual(["persona", "resolve"]);
+    expect(personaArgs).toEqual(["phantomchat:lena", "telegram:kai"]);
+  });
+
+  test("None for PhantomChat → it is skipped, Telegram still runs", async () => {
+    const { deps, calls, personaArgs } = makeDeps({
+      pickPersona: async (label) => (label === "PhantomChat" ? null : "kai"),
+    });
+    const code = await runInitFlow(fakeInput(), deps);
+    expect(code).toBe(0);
+    expect(calls).toEqual(["harness", "persona", "telegram"]);
+    expect(personaArgs).toEqual(["telegram:kai"]);
+  });
+
+  test("None for BOTH channels → neither configurator runs, onNoChannels fires", async () => {
+    const { deps, calls } = makeDeps({ pickPersona: async () => null });
+    const code = await runInitFlow(fakeInput(), deps);
+    expect(code).toBe(0);
+    expect(calls).toEqual(["harness", "persona", "noChannels"]);
   });
 
   test("forwards config + availability to runHarness", async () => {
@@ -145,8 +151,8 @@ describe("runInitFlow", () => {
     expect(calls).toEqual(["harness"]);
   });
 
-  test("short-circuits on persona failure: phantomchat + telegram NOT called", async () => {
-    const { deps, calls } = makeDeps({
+  test("short-circuits on persona failure: pickPersona + channels NOT reached", async () => {
+    const { deps, calls, picks } = makeDeps({
       runPersona: async () => {
         calls.push("persona");
         return 3;
@@ -155,6 +161,7 @@ describe("runInitFlow", () => {
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(3);
     expect(calls).toEqual(["harness", "persona"]);
+    expect(picks).toEqual([]);
   });
 
   test("short-circuits on phantomchat failure: telegram NOT called", async () => {
@@ -179,20 +186,5 @@ describe("runInitFlow", () => {
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(9);
     expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
-  });
-});
-
-describe("resolveSkipTelegram (opt-out defaults to set up)", () => {
-  test("default answer (Yes) → does NOT skip", () => {
-    expect(resolveSkipTelegram(true)).toBe(false);
-  });
-
-  test("explicit No → skips", () => {
-    expect(resolveSkipTelegram(false)).toBe(true);
-  });
-
-  test("cancel / any non-No value → does NOT skip (defaults to set up)", () => {
-    // A clack cancel (or any non-false sentinel) must keep Telegram in the flow.
-    expect(resolveSkipTelegram(Symbol("clack-cancel"))).toBe(false);
   });
 });
