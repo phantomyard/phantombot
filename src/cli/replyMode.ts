@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import {
   clearReplyModeOverride,
-  normalizeReplyMode,
+  normalizeReplyModeRequest,
   setReplyModeOverride,
 } from "../lib/replyMode.ts";
 
@@ -37,21 +37,20 @@ export default defineCommand({
       );
     }
 
-    const mode = String(args.mode).toLowerCase();
-    if (mode === "default" || mode === "clear" || mode === "auto") {
+    const replyMode = normalizeReplyModeRequest(String(args.mode).toLowerCase());
+    if (!replyMode) {
+      throw new Error("mode must be one of: text, voice, default, disable");
+    }
+    if (replyMode === "default") {
       await clearReplyModeOverride({ persona, conversation });
       process.stdout.write("reply mode override cleared\n");
       return;
-    }
-    const replyMode = normalizeReplyMode(mode);
-    if (!replyMode) {
-      throw new Error("mode must be one of: text, voice, default");
     }
     await setReplyModeOverride({
       persona,
       conversation,
       mode: replyMode,
     });
-    process.stdout.write(`reply mode override set to ${mode}\n`);
+    process.stdout.write(`reply mode override set to ${replyMode}\n`);
   },
 });

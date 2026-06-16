@@ -76,11 +76,12 @@ before answering:
   phantombot reply-mode text
   phantombot reply-mode voice
   phantombot reply-mode default
+  phantombot reply-mode disable
 
 The override is scoped to this conversation and persona, applies to
 following replies, and expires automatically after 10 minutes of chat
-idle time. Use \`default\` only when the user asks to go back to normal
-mirroring.`;
+idle time. Use \`default\` or \`disable\` only when the user asks to go
+back to normal mirroring.`;
 
 /**
  * Mechanical capture nudge — every {@link CAPTURE_NUDGE_INTERVAL} user

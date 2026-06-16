@@ -6,6 +6,7 @@ import {
   clearReplyModeOverride,
   getReplyModeOverride,
   normalizeReplyMode,
+  normalizeReplyModeRequest,
   replyModeStatePath,
   setReplyModeOverride,
   touchReplyModeOverride,
@@ -26,11 +27,20 @@ afterEach(async () => {
 });
 
 describe("reply mode overrides", () => {
-  test("normalizes only supported modes", () => {
+  test("normalizes only persisted override modes", () => {
     expect(normalizeReplyMode("text")).toBe("text");
     expect(normalizeReplyMode("voice")).toBe("voice");
     expect(normalizeReplyMode("default")).toBeUndefined();
     expect(normalizeReplyMode(undefined)).toBeUndefined();
+  });
+
+  test("normalizes request modes including explicit disable", () => {
+    expect(normalizeReplyModeRequest("text")).toBe("text");
+    expect(normalizeReplyModeRequest("voice")).toBe("voice");
+    expect(normalizeReplyModeRequest("default")).toBe("default");
+    expect(normalizeReplyModeRequest("disable")).toBe("default");
+    expect(normalizeReplyModeRequest("clear")).toBe("default");
+    expect(normalizeReplyModeRequest(undefined)).toBeUndefined();
   });
 
   test("sets and reads a persona+conversation scoped override", async () => {

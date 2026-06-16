@@ -2060,6 +2060,39 @@ describe("runTelegramServer voice round-trip", () => {
     expect(transport.typing.length).toBeGreaterThan(0);
   });
 
+  test("done meta replyMode=disable clears persisted override and mirrors current turn", async () => {
+    await setReplyModeOverride({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      mode: "voice",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "back to normal please",
+    });
+    const harness = new ScriptedHarness("fake", [
+      {
+        type: "done",
+        finalText: "normal text",
+        meta: { replyMode: "disable" },
+      },
+    ]);
+    await runTelegramServer({
+      config: withVoiceConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.voiceSent).toEqual([]);
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "normal text" }]);
+  });
+
   test("text-in + persisted voice override + provider=none (no TTS) → graceful text reply", async () => {
     await setReplyModeOverride({
       persona: "phantom",

@@ -92,7 +92,7 @@ export type HarnessChunk =
   | { type: "heartbeat" }
   /** Out-of-band progress with a human-readable note (e.g. "running tool X"). */
   | { type: "progress"; note: string }
-  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `meta.replyMode` may be "text" or "voice" for channel adapters that support model-selected reply modality. */
+  /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }
   /**
    * Error. `recoverable: true` means the orchestrator should try the next harness.

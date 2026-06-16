@@ -31,11 +31,13 @@ import {
   ttsSupported,
 } from "../../lib/audio.ts";
 import {
+  clearReplyModeOverride,
   DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
-  normalizeReplyMode,
+  normalizeReplyModeRequest,
   setReplyModeOverride,
   touchReplyModeOverride,
   type ReplyMode,
+  type ReplyModeRequest,
 } from "../../lib/replyMode.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import type { WriteSink } from "../../lib/io.ts";
@@ -895,7 +897,7 @@ async function processChatMessage(
   let finalCandidateSentChars = 0;
   let finalBubblesSent = 0;
   let finalReply: string | undefined;
-  let requestedReplyMode: ReplyMode | undefined;
+  let requestedReplyMode: ReplyModeRequest | undefined;
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
@@ -1095,7 +1097,7 @@ async function processChatMessage(
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
-        requestedReplyMode = normalizeReplyMode(chunk.meta?.replyMode);
+        requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);
         const meta = chunk.meta as { harnessId?: unknown } | undefined;
         if (typeof meta?.harnessId === "string") {
           chosenHarness = meta.harnessId;
@@ -1228,7 +1230,14 @@ async function processChatMessage(
     outText = fullReply;
   }
 
-  if (requestedReplyMode && requestedReplyMode !== modalityOverride) {
+  if (requestedReplyMode === "default") {
+    await clearReplyModeOverride({
+      persona: input.persona,
+      conversation: conversationKey,
+    });
+    modalityOverride = undefined;
+    willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+  } else if (requestedReplyMode && requestedReplyMode !== modalityOverride) {
     await setReplyModeOverride({
       persona: input.persona,
       conversation: conversationKey,

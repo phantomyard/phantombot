@@ -3,11 +3,23 @@ import { dirname, join } from "node:path";
 import { xdgStateHome } from "../config.ts";
 
 export type ReplyMode = "text" | "voice";
+export type ReplyModeRequest = ReplyMode | "default";
 
 export const DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS = 600_000;
 
 export function normalizeReplyMode(value: unknown): ReplyMode | undefined {
   return value === "text" || value === "voice" ? value : undefined;
+}
+
+export function normalizeReplyModeRequest(
+  value: unknown,
+): ReplyModeRequest | undefined {
+  if (value === "text" || value === "voice") return value;
+  if (value === "default" || value === "clear" || value === "auto") {
+    return "default";
+  }
+  if (value === "disable" || value === "disabled") return "default";
+  return undefined;
 }
 
 interface StoredOverride {
