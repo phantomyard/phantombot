@@ -339,7 +339,7 @@ Re-read today's daily file for durable knowledge (procedures, configs, runbooks,
   c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a kb/templates/ scaffold. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
 Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
 Finish with \`phantombot memory index --rebuild\` so new notes get embeddings.`,
-  compress: (today) => `STAGE: MAINTAIN MEMORY.md
+  compress: (today) => `STAGE: COMPRESS / MAINTAIN MEMORY.md
 MEMORY.md is the always-in-context orientation layer. Your job here is to MAINTAIN it — both fill and trim — not just trim.
   1. Read MEMORY.md (use your Read tool). If it has no "## Recent" section, add one.
   2. FILL: from today's daily file (memory/${today}.md) and the items you promoted/distilled in earlier stages, add a few SHORT orientation bullets under "## Recent" — only durable, still-relevant facts worth having in context every turn (current focus, active projects, fresh standing facts). One line each. Do not copy whole entries; summarise and link to the KB note or drawer that holds the detail.
