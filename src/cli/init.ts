@@ -57,6 +57,19 @@ export interface InitFlowDeps {
  * `run()` so it can be gated on a separate user confirmation and a Linux-only
  * linger pre-check.
  */
+/**
+ * Map the "Also connect Telegram?" confirm answer to `skipTelegram`.
+ *
+ * The DEFAULT is to SET UP Telegram, never to skip it: only an EXPLICIT "No"
+ * (a `false` answer) opts out. The default answer (Yes) and a cancel
+ * (Ctrl-C / Esc) both keep Telegram in the flow. Kept as a pure helper so this
+ * "default = set up, not skip" guarantee is unit-testable without a TTY.
+ */
+export function resolveSkipTelegram(answer: boolean | symbol): boolean {
+  if (p.isCancel(answer)) return false;
+  return answer === false;
+}
+
 export async function runInitFlow(
   input: InitFlowInput,
   deps: InitFlowDeps,
@@ -184,9 +197,11 @@ export default defineCommand({
     );
     const wantTelegram = await p.confirm({
       message: "Also connect Telegram? (optional)",
+      // Default to YES — setting up Telegram is the default; the user must
+      // explicitly answer No to opt out. See resolveSkipTelegram.
       initialValue: true,
     });
-    const skipTelegram = p.isCancel(wantTelegram) ? false : !wantTelegram;
+    const skipTelegram = resolveSkipTelegram(wantTelegram);
 
     // 1-4: harness → persona → phantomchat (mandatory) → telegram (optional),
     // orchestrated by runInitFlow so the ordering + short-circuit behavior can

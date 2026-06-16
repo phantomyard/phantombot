@@ -16,6 +16,7 @@ import type { HarnessId } from "../src/cli/harness.ts";
 import {
   type InitFlowDeps,
   type InitFlowInput,
+  resolveSkipTelegram,
   runInitFlow,
 } from "../src/cli/init.ts";
 
@@ -73,6 +74,15 @@ describe("runInitFlow", () => {
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(0);
     expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
+  });
+
+  test("default is to SET UP telegram, not skip (unset skipTelegram → telegram runs)", async () => {
+    // The wizard's opt-out must default to setup: with no explicit skip, the
+    // telegram configurator runs.
+    const { deps, calls } = makeDeps();
+    const code = await runInitFlow(fakeInput(), deps);
+    expect(code).toBe(0);
+    expect(calls).toContain("telegram");
   });
 
   test("skipTelegram: phantomchat runs, telegram skipped", async () => {
@@ -169,5 +179,20 @@ describe("runInitFlow", () => {
     const code = await runInitFlow(fakeInput(), deps);
     expect(code).toBe(9);
     expect(calls).toEqual(["harness", "persona", "phantomchat", "telegram"]);
+  });
+});
+
+describe("resolveSkipTelegram (opt-out defaults to set up)", () => {
+  test("default answer (Yes) → does NOT skip", () => {
+    expect(resolveSkipTelegram(true)).toBe(false);
+  });
+
+  test("explicit No → skips", () => {
+    expect(resolveSkipTelegram(false)).toBe(true);
+  });
+
+  test("cancel / any non-No value → does NOT skip (defaults to set up)", () => {
+    // A clack cancel (or any non-false sentinel) must keep Telegram in the flow.
+    expect(resolveSkipTelegram(Symbol("clack-cancel"))).toBe(false);
   });
 });
