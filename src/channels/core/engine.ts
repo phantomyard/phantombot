@@ -33,6 +33,7 @@ import {
 import {
   clearReplyModeOverride,
   DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+  getReplyModeOverride,
   normalizeReplyModeRequest,
   setReplyModeOverride,
   touchReplyModeOverride,
@@ -1235,16 +1236,27 @@ async function processChatMessage(
       persona: input.persona,
       conversation: conversationKey,
     });
-    modalityOverride = undefined;
-    willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
-  } else if (requestedReplyMode && requestedReplyMode !== modalityOverride) {
+  } else if (requestedReplyMode) {
     await setReplyModeOverride({
       persona: input.persona,
       conversation: conversationKey,
       mode: requestedReplyMode,
     });
-    modalityOverride = requestedReplyMode;
-    willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+  }
+
+  // Re-read reply-mode state after the harness finishes, so a model/tool call
+  // to `phantombot reply-mode text|voice|disable` can affect this final reply
+  // without every harness having to emit meta.replyMode. Do not switch into
+  // voice after text/progress bubbles have already been sent; that would mix
+  // wire formats for one answer and duplicate streamed content.
+  modalityOverride = await getReplyModeOverride({
+    persona: input.persona,
+    conversation: conversationKey,
+    ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+  });
+  willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+  if (willReplyWithVoice && (narrationBubblesSent > 0 || finalBubblesSent > 0)) {
+    willReplyWithVoice = false;
   }
 
   // Voice in → voice out (when TTS is configured AND we have something to

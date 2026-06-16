@@ -42,7 +42,10 @@ import type {
 } from "../src/harnesses/types.ts";
 import type { ServiceControl } from "../src/lib/systemd.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
-import { setReplyModeOverride } from "../src/lib/replyMode.ts";
+import {
+  clearReplyModeOverride,
+  setReplyModeOverride,
+} from "../src/lib/replyMode.ts";
 
 class FakeTransport implements TelegramTransport {
   pendingUpdates: TelegramMessage[] = [];
@@ -2032,6 +2035,93 @@ describe("runTelegramServer voice round-trip", () => {
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
     }
+  });
+
+  test("tool-set reply-mode voice is re-read and applies to the current final reply", async () => {
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      if (String(url).includes("audio/speech")) {
+        return new Response(Buffer.from([1, 2, 3, 4]), {
+          status: 200,
+          headers: { "content-type": "audio/ogg" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    try {
+      const transport = new FakeTransport();
+      transport.pendingUpdates.push({
+        updateId: 1,
+        conversationId: "1001",
+        senderId: "42",
+        text: "use voice for this answer",
+      });
+      const harness: Harness = {
+        id: "fake",
+        available: async () => true,
+        async *invoke() {
+          await setReplyModeOverride({
+            persona: "phantom",
+            conversation: "telegram:1001",
+            mode: "voice",
+          });
+          yield { type: "done", finalText: "spoken now" };
+        },
+      };
+      await runTelegramServer({
+        config: withVoiceConfig(),
+        memory,
+        harnesses: [harness],
+        agentDir,
+        persona: "phantom",
+        transport,
+        oneShot: true,
+      });
+      expect(transport.voiceSent).toHaveLength(1);
+      expect(transport.sent).toEqual([]);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  });
+
+  test("tool-disable reply-mode is re-read and mirrors the current text turn", async () => {
+    await setReplyModeOverride({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      mode: "voice",
+    });
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "disable override for this answer",
+    });
+    const harness: Harness = {
+      id: "fake",
+      available: async () => true,
+      async *invoke() {
+        await clearReplyModeOverride({
+          persona: "phantom",
+          conversation: "telegram:1001",
+        });
+        yield { type: "done", finalText: "normal text now" };
+      },
+    };
+    await runTelegramServer({
+      config: withVoiceConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(transport.voiceSent).toEqual([]);
+    expect(transport.sent).toEqual([{ chatId: "1001", text: "normal text now" }]);
   });
 
   test("message wording no longer flips routing without persisted state", async () => {
