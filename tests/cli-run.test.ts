@@ -9,6 +9,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planListeners, runRun } from "../src/cli/run.ts";
+import { savePhantomchatPersonaConfig } from "../src/channels/phantomchat/personaStore.ts";
+import { generateIdentity } from "../src/lib/nostrIdentity.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -409,5 +411,45 @@ describe("runRun — multi-persona telegram", () => {
     });
     expect(code).toBe(2);
     expect(err.text).toContain("no telegram listeners could be started");
+  });
+});
+
+describe("runRun — phantomchat-only (no Telegram)", () => {
+  // `phantombot init` now makes PhantomChat the required primary channel and
+  // lets the user skip Telegram. The clean no-Telegram install has NO
+  // [channels.telegram] / [channels.telegram.personas] but DOES have a persona
+  // phantomchat.json. runRun must accept that as a runnable channel instead of
+  // bailing at the Telegram guard (which would install a service that dies on
+  // first start). We use the empty-harness-chain trick to force a clean early
+  // exit AFTER the channel guards have accepted the setup — proving the
+  // PhantomChat-only path is reached without spinning up real relay sockets.
+  test("accepts a phantomchat-only setup past the Telegram and listener guards", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const agentDir = join(workdir, "personas", "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: generateIdentity().nsec,
+      relays: ["wss://relay.example"],
+      allowedNpubs: [generateIdentity().npub],
+    });
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] }, // force exit after channel guards
+        channels: {}, // no Telegram at all
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+
+    // Got past the Telegram guard AND the "no telegram listeners" guard, then
+    // hit the empty harness chain — proving the PhantomChat-only path is live.
+    expect(code).toBe(2);
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).not.toContain("no channels configured");
+    expect(err.text).not.toContain("no telegram listeners could be started");
   });
 });

@@ -170,9 +170,20 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   const hasPersonas =
     !!config.channels.telegramPersonas &&
     Object.keys(config.channels.telegramPersonas).length > 0;
-  if (!hasDefault && !hasPersonas) {
+
+  // PhantomChat personas are a runnable channel in their own right. Compute
+  // this BEFORE the channel guards below: `phantombot init` now makes
+  // PhantomChat the required primary channel and Telegram optional/skippable,
+  // so a clean PhantomChat-only install has no [channels.telegram] but does
+  // have one or more persona `phantomchat.json` files. Without accounting for
+  // them here, runRun would exit at the Telegram guard and the freshly
+  // installed service would die immediately on the advertised no-Telegram path.
+  const phantomchatPersonas = listPhantomchatPersonas(config);
+  const hasPhantomchat = phantomchatPersonas.length > 0;
+
+  if (!hasDefault && !hasPersonas && !hasPhantomchat) {
     err.write(
-      "no telegram bot token configured. Run `phantombot telegram` to set one up.\n",
+      "no channels configured. Run `phantombot telegram` and/or `phantombot phantomchat` to set one up.\n",
     );
     return 2;
   }
@@ -204,11 +215,19 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     err.write(`${plan.fatal}\n`);
     return 2;
   }
-  if (plan.listeners.length === 0) {
+  if (plan.listeners.length === 0 && !hasPhantomchat) {
     err.write(
       "no telegram listeners could be started — every configured bot's persona is missing.\n",
     );
     return 2;
+  }
+  if (plan.listeners.length === 0 && (hasDefault || hasPersonas)) {
+    // Telegram WAS configured but no listener could be planned (every bot's
+    // persona dir is missing). PhantomChat still has runnable personas, so warn
+    // loudly and keep going rather than killing the whole process.
+    err.write(
+      "warning: telegram is configured but no listener could start (persona missing) — continuing with phantomchat only.\n",
+    );
   }
 
   const harnessChecks =
@@ -265,35 +284,42 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // for legacy markers. Prefer the default listener for that fallback;
   // use the first listener when no default account is configured.
   // Non-null: we returned above if plan.listeners.length === 0.
-  const adminListener: ListenerSpec =
-    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0]!;
+  // May be undefined on a PhantomChat-only install (no Telegram listeners).
+  // The post-restart Telegram notify below is skipped in that case; doctor
+  // falls back to a PhantomChat persona (then defaultPersona).
+  const adminListener: ListenerSpec | undefined =
+    plan.listeners.find((l) => l.source === "default") ?? plan.listeners[0];
   // Post-restart check: if `/update` wrote a pending-update marker before
   // we got SIGTERMed, surface the result to the chat that triggered it.
   // Runs once at startup; if no marker exists this is a quick no-op stat.
   // Logged + swallowed so a notify-send failure can't keep us out of the
-  // poll loop — startup must always succeed.
-  try {
-    const r = await notifyPostRestartIfPending({
-      config,
-      currentVersion: VERSION,
-      adminAccount: adminListener.account,
-    });
-    if (r.status === "success_notified" || r.status === "failure_notified") {
-      log.info("run: post-restart notify", {
-        status: r.status,
-        targetTag: r.marker?.targetTag,
-        previousVersion: r.marker?.previousVersion,
+  // poll loop — startup must always succeed. Skipped with no Telegram admin
+  // listener: the post-restart notify path delivers over Telegram, so there's
+  // no channel to send on (PhantomChat-only update-notify is a separate path).
+  if (adminListener) {
+    try {
+      const r = await notifyPostRestartIfPending({
+        config,
         currentVersion: VERSION,
+        adminAccount: adminListener.account,
+      });
+      if (r.status === "success_notified" || r.status === "failure_notified") {
+        log.info("run: post-restart notify", {
+          status: r.status,
+          targetTag: r.marker?.targetTag,
+          previousVersion: r.marker?.previousVersion,
+          currentVersion: VERSION,
+        });
+      }
+    } catch (e) {
+      log.warn("run: post-restart notify threw", {
+        error: (e as Error).message,
       });
     }
-  } catch (e) {
-    log.warn("run: post-restart notify threw", {
-      error: (e as Error).message,
-    });
   }
 
   out.write(
-    `phantombot — ${plan.listeners.length} telegram listener(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
+    `phantombot — ${plan.listeners.length} telegram listener(s), ${phantomchatPersonas.length} phantomchat persona(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
   );
   for (const l of plan.listeners) {
     out.write(
@@ -336,7 +362,9 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // covers machines powered off during the 02:00 window. Don't await —
   // doctor's repair is a detached child, so this returns immediately.
   // Runs against the admin persona for the same reason as notify above.
-  runDoctor({ config, persona: adminListener.persona, out, err }).then(
+  const doctorPersona =
+    adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
+  runDoctor({ config, persona: doctorPersona, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
@@ -376,7 +404,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     // listener bound to that persona, with its OWN npub. No config.toml editing
     // and no shared env secret — the identity is self-contained in the persona
     // folder, so a copy/pasted persona just works.
-    const phantomchatPersonas = listPhantomchatPersonas(config);
+    // phantomchatPersonas was computed up-front (it gates the no-Telegram
+    // start path); reuse it here rather than re-scanning the persona dir.
     if (phantomchatPersonas.length > 0) {
       // Lazy import of SimplePool keeps the nostr-tools websocket machinery out
       // of the import graph for Telegram-only deployments. Tests inject
