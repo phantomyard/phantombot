@@ -108,8 +108,11 @@ function wrapEnvelopeToUs(toHex: string, envelope: object) {
   return { peerPub: getPublicKey(peerSk), wrap: wraps[0] as unknown as NTNostrEvent };
 }
 
-describe("phantomchat channel — presence ping/pong", () => {
-  test("a live ping is answered with a nonce-echoing pong, no chat message", async () => {
+describe("phantomchat channel — presence dropped", () => {
+  test("a presence ping is silently dropped — no pong, no chat message", async () => {
+    // Presence was removed: the channel no longer pongs (or shows status). A
+    // stale ping from a not-yet-updated client must be discarded, never spawn a
+    // turn, and never publish a pong.
     const { ourPub, pool, channel } = setup();
     const ac = new AbortController();
 
@@ -118,7 +121,6 @@ describe("phantomchat channel — presence ping/pong", () => {
       for await (const msg of channel.listen!(ac.signal)) received.push(msg.text);
     })();
 
-    // Give listen() a tick to subscribe + open the live-gate (auto-EOSE).
     await new Promise((r) => setTimeout(r, 10));
 
     const { wrap } = wrapEnvelopeToUs(ourPub, {
@@ -136,45 +138,9 @@ describe("phantomchat channel — presence ping/pong", () => {
     ac.abort();
     await pump;
 
-    // The pong is addressed (gift-wrapped) to the pinger, so we can't unwrap it
-    // here without the peer's key. Assert at the wire level: exactly one wrap
-    // published, it's a kind-1059 gift-wrap (the pong), and NO chat message
-    // surfaced in the listen() stream (a ping must never spawn a turn).
-    expect(pool.published.length).toBe(1);
-    expect(pool.published[0]!.kind).toBe(1059);
-    expect(received.length).toBe(0);
-  });
-
-  test("a pre-EOSE (backlog) ping is NOT ponged", async () => {
-    const { ourPub, pool, channel } = setup({ autoEose: false });
-    const ac = new AbortController();
-    const pump = (async () => {
-      for await (const _ of channel.listen!(ac.signal)) { /* drain */ }
-    })();
-    await new Promise((r) => setTimeout(r, 10));
-
-    const peerSk = generateSecretKey();
-    const { wraps } = wrapNip17Message(
-      peerSk,
-      ourPub,
-      JSON.stringify({
-        id: "x",
-        from: getPublicKey(peerSk),
-        to: ourPub,
-        type: "presence-ping",
-        nonce: "stale",
-        content: "",
-        timestamp: Date.now(),
-      }),
-    );
-    pool.feed(wraps[0] as unknown as NTNostrEvent);
-
-    await new Promise((r) => setTimeout(r, 30));
-    ac.abort();
-    await pump;
-
-    // No EOSE ever fired → live-gate closed → backlog ping ignored, no pong.
+    // No pong published, no chat message surfaced.
     expect(pool.published.length).toBe(0);
+    expect(received.length).toBe(0);
   });
 });
 
