@@ -62,22 +62,6 @@ export const TYPING_CONTENT_START = "";
 export const TYPING_CONTENT_STOP = "stop";
 
 /**
- * NIP-38 PARAMETERIZED-REPLACEABLE event kind for user status / presence
- * (range 30000–39999). We use it as a liveness heartbeat: while phantombot's
- * listener is up it republishes one of these every ~60s, p-tagged to each
- * allowlist peer and carrying `["status","online"]` + content `"online"`. The
- * PWA — already subscribed for events p-tagged to itself — resolves the author
- * pubkey to a contact and renders a REAL "Online" badge; when the heartbeats
- * stop (service down / relays unreachable) the PWA flips the contact to
- * "last seen at HH:MM" after its offline threshold. Must match phantomchat's
- * `KIND_STATUS` and the `d`/`status`/content shape its presence engine expects.
- *
- * Being parameterized-replaceable (keyed by author+kind+`d`), each new beat
- * supersedes the last on the relay — no unbounded accumulation.
- */
-export const NOSTR_KIND_PRESENCE = 30315;
-
-/**
  * How far back (seconds) the live gift-wrap subscription's `since` reaches. With
  * truthful (non-backdated) wrap timestamps this only needs to absorb clock skew
  * between sender, relay and us, plus a brief reconnect gap — not the old 48h
@@ -221,21 +205,6 @@ export interface PhantomchatTransport extends ChannelTransport {
     memberHexes: string[],
     stop?: boolean,
   ): Promise<void>;
-  /**
-   * Publish a single NIP-38 kind-30315 presence heartbeat, p-tagged to every
-   * hex pubkey in `peerHexes`, advertising that we're online. Best-effort: never
-   * throws. A no-op when `peerHexes` is empty (no one to advertise to).
-   */
-  sendPresence(peerHexes: string[]): Promise<void>;
-  /**
-   * Reply to a presence PING with a PONG: publish a NIP-17 gift-wrapped
-   * `{type:"presence-pong", nonce, ...}` envelope to `toHex`, echoing the
-   * ping's `nonce` so the sender can correlate it (freshness is by nonce, not
-   * timestamp — gift-wrap created_at is backdated). Rides the SAME kind-1059
-   * path as real messages, so a pong proves the actual message-delivery path is
-   * live (not merely some side-channel). Best-effort: never throws.
-   */
-  sendPresencePong(toHex: string, nonce: string): Promise<void>;
   /**
    * Send a NIP-17 delivery receipt for a received DM back to its sender so the
    * sender's PWA lights the second ("delivered") tick AND stops its always-on
@@ -535,69 +504,6 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       await this.publishWrap(event as unknown as NTNostrEvent);
     } catch (e) {
       log.debug("phantomchat: sendGroupTyping publish failed", {
-        error: (e as Error).message,
-      });
-    }
-  }
-
-  /**
-   * Presence heartbeat. Publishes ONE NIP-38 kind-30315 event signed by our key,
-   * p-tagged to every recipient in `peerHexes`, with `["status","online"]` and
-   * content `"online"` — the exact shape phantomchat's presence engine consumes.
-   * Like `sendTyping` it is intentionally NOT gift-wrapped (it's a liveness
-   * beacon, not private content) and is fully best-effort: a failed publish must
-   * never throw into the heartbeat loop. A no-op when there are no peers.
-   */
-  async sendPresence(peerHexes: string[]): Promise<void> {
-    if (peerHexes.length === 0) return;
-    try {
-      const event = finalizeEvent(
-        {
-          kind: NOSTR_KIND_PRESENCE,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [
-            ["d", "general"],
-            ["status", "online"],
-            ...peerHexes.map((hex) => ["p", hex]),
-          ],
-          content: "online",
-        },
-        this.ourSecretKey,
-      );
-      await this.publishWrap(event as unknown as NTNostrEvent);
-    } catch (e) {
-      log.debug("phantomchat: sendPresence publish failed", {
-        error: (e as Error).message,
-      });
-    }
-  }
-
-  /**
-   * Reply to a presence ping. Builds the phantomchat envelope with
-   * `type:"presence-pong"` carrying the ping's `nonce`, NIP-17-wraps it to the
-   * pinger, and publishes ONLY the recipient wrap (no self-wrap — the bot never
-   * reads its own pongs). Best-effort: a failed publish must never throw into
-   * the receive loop.
-   */
-  async sendPresencePong(toHex: string, nonce: string): Promise<void> {
-    try {
-      const envelope = JSON.stringify({
-        id: crypto.randomUUID(),
-        from: this.ourPubHex,
-        to: toHex,
-        type: "presence-pong",
-        nonce,
-        content: "",
-        timestamp: Date.now(),
-      });
-      const { wraps } = wrapNip17Message(this.ourSecretKey, toHex, envelope);
-      // wraps = [recipientWrap, selfWrap]; only the recipient needs the pong.
-      const recipientWrap = wraps[0];
-      if (recipientWrap) {
-        await this.publishWrap(recipientWrap as unknown as NTNostrEvent);
-      }
-    } catch (e) {
-      log.debug("phantomchat: sendPresencePong failed", {
         error: (e as Error).message,
       });
     }

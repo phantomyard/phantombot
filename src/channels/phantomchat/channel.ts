@@ -219,8 +219,9 @@ export function createPhantomchatChannel(
         if (!remember(seenRumorIds, rumor.id)) return;
 
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
-        // `type === "presence-ping"` is a liveness probe we answer with a pong;
-        // any other type (or malformed JSON) is ignored silently.
+        // `presence-ping` / `presence-pong` are legacy types, silently dropped
+        // (presence was removed — see drop below); any other type (or malformed
+        // JSON) is ignored silently.
         // NIP-17 dual-read. Two accepted shapes:
         //   - Legacy PhantomChat JSON envelope {type, content, id, nonce}.
         //   - Standard NIP-17: rumor.content IS the plain message text (what
@@ -251,16 +252,10 @@ export function createPhantomchatChannel(
           return;
         }
 
-        // (7) PRESENCE PING → PONG. A live ping means the sender's PWA is
-        // probing whether we can actually hear them on the real message path.
-        // Answer with a gift-wrapped pong echoing the nonce; do NOT enqueue a
-        // turn. Riding the same kind-1059 path as messages is the point: a pong
-        // proves the delivery path is alive, not merely some side channel.
-        if (envelope?.type === "presence-ping") {
-          const nonce = typeof envelope.nonce === "string" ? envelope.nonce : "";
-          if (nonce) {
-            void transport.sendPresencePong(senderHex, nonce);
-          }
+        // (7) PRESENCE was removed (the client no longer shows online/last-seen
+        // and no longer pings). Drop any stale presence envelope silently — never
+        // pong, never enqueue a turn.
+        if (envelope?.type === "presence-ping" || envelope?.type === "presence-pong") {
           return;
         }
 

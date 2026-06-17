@@ -16,7 +16,6 @@ import {
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
-import { startPresenceHeartbeat } from "../channels/phantomchat/presence.ts";
 import {
   listPhantomchatPersonas,
   cacheRelaysForPersona,
@@ -505,15 +504,9 @@ export async function runRun(input: RunInput = {}): Promise<number> {
               error: (e as Error).message,
             }),
           );
-        // Presence: while this listener is up, beat a NIP-38 kind-30315 status
-        // to the allowlist peers every 60s so Andrew's PWA shows the persona as
-        // a REAL "Online" (and "last seen at HH:MM" the moment the service dies).
-        // No-op for open/TOFU personas (empty allowlist — no one to advertise to).
-        const presence = startPresenceHeartbeat({
-          transport,
-          peerHexes: allowedHex,
-          signal: ac.signal,
-        });
+        // Presence was removed — the client no longer shows online/last-seen, so
+        // we don't publish status heartbeats (saved bandwidth + the recipient's
+        // gift-wrap crypto).
         const agentDir = spec.agentDir;
         tasks.push(
           startPhantomchat({
@@ -538,7 +531,6 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             out,
             err,
           }).finally(() => {
-            presence.stop();
             transport.close();
           }),
         );
