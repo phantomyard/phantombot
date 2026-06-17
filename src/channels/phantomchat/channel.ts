@@ -219,8 +219,9 @@ export function createPhantomchatChannel(
         if (!remember(seenRumorIds, rumor.id)) return;
 
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
-        // `type === "presence-ping"` is a liveness probe we answer with a pong;
-        // any other type (or malformed JSON) is ignored silently.
+        // `presence-ping` / `presence-pong` are legacy types, silently dropped
+        // (presence was removed — see drop below); any other type (or malformed
+        // JSON) is ignored silently.
         // NIP-17 dual-read. Two accepted shapes:
         //   - Legacy PhantomChat JSON envelope {type, content, id, nonce}.
         //   - Standard NIP-17: rumor.content IS the plain message text (what
