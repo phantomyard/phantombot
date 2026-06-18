@@ -375,3 +375,52 @@ describe("phantomchat channel — catch-up poll", () => {
     expect(received).toContain("recovered by poll");
   });
 });
+
+describe("phantomchat channel — voice / media intake", () => {
+  test("a voice envelope surfaces as a media message, not a turn over raw JSON", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The PWA's voice envelope: an encrypted Blossom file, no `type` field.
+    const voiceEnvelope = {
+      url: "https://blossom.primal.net/b8447b96c67839dc9aa4632408a0d35375",
+      sha256: "b8447b96c67839dc9aa4632408a0d35375ad6d9c0f42ee6057a5be47eb074b03",
+      mimeType: "audio/ogg",
+      size: 26050,
+      key: "2d3574e50d989038d2b377601485960210a2f381068a49446b40f2e754f9adb8",
+      iv: "7bab87dee86e940684b2ff88",
+      mediaType: "voice",
+      duration: 9,
+      waveform: [0, 0, 8, 255, 255],
+    };
+    const { wrap } = wrapEnvelopeToUs(ourPub, voiceEnvelope);
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const m = got[0]!;
+    // Surfaced as MEDIA (so the server transcribes), NOT a turn over the JSON.
+    expect(m.text).toBe("");
+    expect(m.media).toBeDefined();
+    expect(m.media!.kind).toBe("voice");
+    expect(m.media!.url).toBe(voiceEnvelope.url);
+    expect(m.media!.sha256).toBe(voiceEnvelope.sha256);
+    expect(m.media!.keyHex).toBe(voiceEnvelope.key);
+    expect(m.media!.ivHex).toBe(voiceEnvelope.iv);
+    expect(m.media!.mimeType).toBe("audio/ogg");
+    expect(m.media!.durationS).toBe(9);
+    // Keyed by the rumor id for the delivery receipt.
+    expect(typeof m.messageId).toBe("string");
+    expect(m.messageId!.length).toBe(64);
+  });
+});

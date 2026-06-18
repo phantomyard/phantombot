@@ -23,9 +23,24 @@ import { runTurn } from "../../orchestrator/turn.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
 import { makeScreener } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
-import { TELEGRAM_REPLY_INSTRUCTION } from "../core/prompts.ts";
+import { TELEGRAM_REPLY_INSTRUCTION, voiceUnavailableMessage } from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import type { PhantomchatTransport } from "./transport.ts";
+import { sttSupport, transcribe } from "../../lib/audio.ts";
+import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
+import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
+
+// Bound the voice fetch+decrypt+transcribe step. A hung Blossom fetch or STT
+// request would otherwise never settle and wedge this peer's serial turn chain
+// forever (the Telegram engine guards its STT the same way).
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
 
 export interface RunPhantomchatServerInput {
   config: Config;
@@ -145,6 +160,77 @@ export async function runPhantomchatServer(
       void transport.sendDeliveryReceipt(senderHex, msg.messageId);
     }
 
+    // ===================== VOICE / MEDIA → TEXT =====================
+    // A voice note arrives as an encrypted Blossom file (msg.media) with an
+    // empty text body. Fetch + AES-256-GCM decrypt + transcribe so the turn
+    // reasons over the words — mirroring the Telegram voice→STT path
+    // (core/engine.processChatMessage). Done AFTER the auth gate so we never
+    // spend a paid STT call (or de-stealth) on a dropped stranger. Other media
+    // kinds carry no transcript yet, so the turn sees a short marker.
+    let userMessage = msg.text;
+    if (msg.media) {
+      const m = msg.media;
+      if (m.kind === "voice") {
+        const stt = sttSupport(input.config);
+        if (!stt.ok) {
+          log.warn("phantomchat: voice note but STT unavailable", {
+            persona: input.persona,
+            reason: stt.reason,
+          });
+          await transport
+            .sendMessage(senderHex, voiceUnavailableMessage(stt))
+            .catch(() => {});
+          return;
+        }
+        try {
+          const r = await withTimeout(
+            (async () => {
+              const audio = await fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
+                expectedSha256Hex: m.sha256,
+                signal: input.signal,
+              });
+              return transcribe(input.config, audio, m.mimeType);
+            })(),
+            input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
+          );
+          if (!r.ok) {
+            log.error("phantomchat: STT failed", {
+              persona: input.persona,
+              error: r.error,
+            });
+            await transport
+              .sendMessage(
+                senderHex,
+                "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
+              )
+              .catch(() => {});
+            return;
+          }
+          userMessage = r.text;
+          log.info("phantomchat: STT ok", {
+            persona: input.persona,
+            transcriptChars: r.text.length,
+          });
+        } catch (e) {
+          log.error("phantomchat: voice pipeline error", {
+            persona: input.persona,
+            error: (e as Error).message,
+          });
+          await transport
+            .sendMessage(
+              senderHex,
+              "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
+            )
+            .catch(() => {});
+          return;
+        }
+      } else {
+        // image / video / file — no extraction yet. Give the turn a marker so it
+        // can acknowledge instead of running on empty text.
+        userMessage = msg.text?.trim() ? msg.text : `[sent a ${m.kind}]`;
+      }
+    }
+
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the
     // trusted SECURITY_PERIMETER prompt block and skips the threat screen.
@@ -194,7 +280,7 @@ export async function runPhantomchatServer(
       for await (const chunk of runTurn({
         persona: input.persona,
         conversation: conversationKey,
-        userMessage: msg.text,
+        userMessage,
         agentDir: input.agentDir,
         harnesses,
         memory: input.memory,

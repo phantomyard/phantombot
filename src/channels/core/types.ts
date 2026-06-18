@@ -111,6 +111,25 @@ export interface ChannelMessage {
    * application-level delivery receipts (e.g. Telegram, which has its own).
    */
   messageId?: string;
+  /**
+   * INBOUND MEDIA (optional; currently only the phantomchat channel sets it).
+   *
+   * A voice note / attachment the sender wrapped as an AES-256-GCM encrypted
+   * file stored on Blossom; the key/iv travel inside the gift-wrap envelope.
+   * For a pure voice note `text` is empty and the turn driver (phantomchat
+   * server) fetches+decrypts the file and transcribes it into the user message
+   * before running the turn — mirroring the Telegram voice→STT path in
+   * core/engine. Absent for plain text messages.
+   */
+  media?: {
+    kind: "voice" | "image" | "video" | "file";
+    url: string;
+    sha256: string;
+    keyHex: string;
+    ivHex: string;
+    mimeType: string;
+    durationS?: number;
+  };
 }
 
 /**

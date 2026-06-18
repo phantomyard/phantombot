@@ -226,16 +226,46 @@ export function createPhantomchatChannel(
         //   - Legacy PhantomChat JSON envelope {type, content, id, nonce}.
         //   - Standard NIP-17: rumor.content IS the plain message text (what
         //     0xchat/Amethyst and the aligned PWA send). Resolved below.
-        let envelope: {id?: unknown; type?: unknown; content?: unknown; nonce?: unknown} | null = null;
+        let parsedContent: any = null;
         try {
-          const parsed = JSON.parse(rumor.content);
-          // Only OUR envelope has a string `type`. A plain-text body that happens
-          // to be JSON without a `type` falls through to the plain-text path.
-          if (parsed && typeof parsed === "object" && typeof parsed.type === "string") {
-            envelope = parsed;
-          }
+          const p = JSON.parse(rumor.content);
+          if (p && typeof p === "object") parsedContent = p;
         } catch {
           // not JSON → standard NIP-17 plain-text message (handled below)
+        }
+        // Only OUR text envelope has a string `type`. A plain-text body that
+        // happens to be JSON without a `type` falls through to the plain-text path.
+        const envelope: {id?: unknown; type?: unknown; content?: unknown; nonce?: unknown} | null =
+          parsedContent && typeof parsedContent.type === "string" ? parsedContent : null;
+
+        // Media envelope (voice / image / file): the PWA wraps an encrypted
+        // Blossom file as {url, sha256, key, iv, mediaType, duration, waveform}.
+        // It carries no `type`, so it isn't caught above — detect it here so the
+        // server fetches+decrypts (and, for voice, transcribes) instead of
+        // running a turn on the raw metadata JSON.
+        let media: ChannelMessage["media"] | undefined;
+        if (
+          parsedContent &&
+          typeof parsedContent.url === "string" &&
+          typeof parsedContent.sha256 === "string" &&
+          typeof parsedContent.key === "string" &&
+          typeof parsedContent.iv === "string" &&
+          typeof parsedContent.mediaType === "string"
+        ) {
+          const mt = parsedContent.mediaType;
+          media = {
+            kind: mt === "voice" || mt === "image" || mt === "video" ? mt : "file",
+            url: parsedContent.url,
+            sha256: parsedContent.sha256,
+            keyHex: parsedContent.key,
+            ivHex: parsedContent.iv,
+            mimeType:
+              typeof parsedContent.mimeType === "string"
+                ? parsedContent.mimeType
+                : "application/octet-stream",
+            durationS:
+              typeof parsedContent.duration === "number" ? parsedContent.duration : undefined,
+          };
         }
 
         // (6) LIVE-GATE. On (re)connect the relays replay up to 49h of stored
@@ -262,7 +292,13 @@ export function createPhantomchatChannel(
         // Resolve the message text + id from whichever shape arrived.
         let text: string;
         let messageId: string | undefined;
-        if (envelope) {
+        if (media) {
+          // Voice / media: no text body — the server fetches+decrypts (and, for
+          // voice, transcribes) before running the turn. Key the delivery
+          // receipt off the rumor id, same as a standard NIP-17 message.
+          text = "";
+          messageId = rumor.id;
+        } else if (envelope) {
           // Legacy envelope: only `text` envelopes become turns (reactions/etc. drop).
           if (envelope.type !== "text" || typeof envelope.content !== "string") {
             return;
@@ -309,6 +345,7 @@ export function createPhantomchatChannel(
             text,
             groupId,
             groupMemberHexes: memberHexes,
+            ...(media ? { media } : {}),
           });
           wake?.();
           return;
@@ -327,6 +364,7 @@ export function createPhantomchatChannel(
           senderId: senderHex,
           text,
           ...(messageId ? { messageId } : {}),
+          ...(media ? { media } : {}),
         });
         wake?.();
       };
