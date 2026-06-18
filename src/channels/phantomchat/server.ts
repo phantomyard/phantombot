@@ -23,9 +23,53 @@ import { runTurn } from "../../orchestrator/turn.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
 import { makeScreener } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
-import { TELEGRAM_REPLY_INSTRUCTION } from "../core/prompts.ts";
+import { TELEGRAM_REPLY_INSTRUCTION, voiceUnavailableMessage } from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import type { PhantomchatTransport } from "./transport.ts";
+import { sttSupport, transcribe } from "../../lib/audio.ts";
+import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
+import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
+import { inboxDir } from "../telegram/parse.ts";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+// Don't download absurdly large attachments. The harness reads from the inbox;
+// a multi-hundred-MB blob would blow memory + disk for little benefit.
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+// Map a mime type to a file extension for the inbox filename (the envelope
+// carries no original name). Falls back to the mime subtype, then the kind.
+function extForMime(mime: string, kind: string): string {
+  const m = ((mime || "").split(";")[0] ?? "").trim().toLowerCase();
+  const map: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "audio/ogg": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "application/pdf": "pdf",
+  };
+  if (map[m]) return map[m];
+  const sub = m.includes("/") ? m.slice(m.indexOf("/") + 1) : "";
+  return /^[a-z0-9]{1,8}$/.test(sub) ? sub : kind === "image" ? "jpg" : kind === "video" ? "mp4" : "bin";
+}
+
+// Bound the voice fetch+decrypt+transcribe step. A hung Blossom fetch or STT
+// request would otherwise never settle and wedge this peer's serial turn chain
+// forever (the Telegram engine guards its STT the same way).
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
 
 export interface RunPhantomchatServerInput {
   config: Config;
@@ -145,6 +189,124 @@ export async function runPhantomchatServer(
       void transport.sendDeliveryReceipt(senderHex, msg.messageId);
     }
 
+    // Route a short user-facing notice to the SAME place a reply would go: into
+    // the group when the message arrived via a group (reconstructing the member
+    // set exactly like the reply path), else a 1:1 DM. Without this, a group
+    // voice/media failure (STT unavailable/failed/errored) would surface
+    // privately to the sender instead of in the group conversation.
+    const sendNotice = (text: string): Promise<void> => {
+      if (msg.groupId) {
+        const others = new Set<string>(msg.groupMemberHexes ?? []);
+        others.add(senderHex.toLowerCase());
+        return transport.sendGroupMessage(msg.groupId, [...others], text);
+      }
+      return transport.sendMessage(senderHex, text);
+    };
+
+    // ===================== VOICE / MEDIA → TEXT =====================
+    // A voice note arrives as an encrypted Blossom file (msg.media) with an
+    // empty text body. Fetch + AES-256-GCM decrypt + transcribe so the turn
+    // reasons over the words — mirroring the Telegram voice→STT path
+    // (core/engine.processChatMessage). Done AFTER the auth gate so we never
+    // spend a paid STT call (or de-stealth) on a dropped stranger. Other media
+    // kinds carry no transcript yet, so the turn sees a short marker.
+    let userMessage = msg.text;
+    if (msg.media) {
+      const m = msg.media;
+      if (m.kind === "voice") {
+        const stt = sttSupport(input.config);
+        if (!stt.ok) {
+          log.warn("phantomchat: voice note but STT unavailable", {
+            persona: input.persona,
+            reason: stt.reason,
+          });
+          await sendNotice(voiceUnavailableMessage(stt)).catch(() => {});
+          return;
+        }
+        try {
+          const r = await withTimeout(
+            (async () => {
+              const audio = await fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
+                expectedSha256Hex: m.sha256,
+                signal: input.signal,
+              });
+              return transcribe(input.config, audio, m.mimeType);
+            })(),
+            input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
+          );
+          if (!r.ok) {
+            log.error("phantomchat: STT failed", {
+              persona: input.persona,
+              error: r.error,
+            });
+            await sendNotice(
+              "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
+            ).catch(() => {});
+            return;
+          }
+          userMessage = r.text;
+          log.info("phantomchat: STT ok", {
+            persona: input.persona,
+            transcriptChars: r.text.length,
+          });
+        } catch (e) {
+          log.error("phantomchat: voice pipeline error", {
+            persona: input.persona,
+            error: (e as Error).message,
+          });
+          await sendNotice(
+            "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
+          ).catch(() => {});
+          return;
+        }
+      } else {
+        // image / video / file: fetch + AES-GCM decrypt + save to the per-chat
+        // inbox, then hand the harness "[attached: <abs-path>]" so it can read
+        // the file — mirrors the Telegram attachment path
+        // (core/engine.processChatMessage). The harness decides what to do.
+        const caption = msg.text?.trim() ? msg.text + "\n\n" : "";
+        if (m.size !== undefined && m.size > MAX_ATTACHMENT_BYTES) {
+          log.warn("phantomchat: attachment over cap — not downloading", {
+            persona: input.persona,
+            kind: m.kind,
+            size: m.size,
+          });
+          userMessage = `${caption}[sent a ${m.kind} (~${Math.round(m.size / 1024 / 1024)} MB) — too large to fetch]`;
+        } else {
+          const convId = `phantomchat-${msg.groupId ? `group-${msg.groupId}` : senderHex}`;
+          try {
+            const data = await withTimeout(
+              fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
+                expectedSha256Hex: m.sha256,
+                signal: input.signal,
+              }),
+              input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
+            );
+            const dir = inboxDir(convId);
+            await mkdir(dir, { recursive: true });
+            const path = join(dir, `${m.sha256.slice(0, 16)}.${extForMime(m.mimeType, m.kind)}`);
+            await writeFile(path, data);
+            log.info("phantomchat: attachment saved", {
+              persona: input.persona,
+              kind: m.kind,
+              path,
+              bytes: data.byteLength,
+            });
+            userMessage = `${caption}[attached: ${path}]`;
+          } catch (e) {
+            log.error("phantomchat: attachment download failed", {
+              persona: input.persona,
+              kind: m.kind,
+              error: (e as Error).message,
+            });
+            userMessage = caption
+              ? msg.text!
+              : `[sent a ${m.kind}, but it couldn’t be downloaded]`;
+          }
+        }
+      }
+    }
+
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the
     // trusted SECURITY_PERIMETER prompt block and skips the threat screen.
@@ -194,7 +356,7 @@ export async function runPhantomchatServer(
       for await (const chunk of runTurn({
         persona: input.persona,
         conversation: conversationKey,
-        userMessage: msg.text,
+        userMessage,
         agentDir: input.agentDir,
         harnesses,
         memory: input.memory,

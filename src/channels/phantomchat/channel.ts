@@ -78,6 +78,11 @@ export const BACKFILL_POLL_MS = 15_000;
  */
 export const BACKFILL_POLL_WINDOW_SEC = 90;
 
+// Envelope `type` values that carry a Blossom file rather than plain text
+// (see chat-api.sendFileMessage / GroupAPI.sendFile in the PWA). Matches the
+// PWA's ChatMessageType media kinds.
+const MEDIA_ENVELOPE_TYPES = new Set(["voice", "image", "video", "gif", "file"]);
+
 /**
  * The application-level message envelope carried INSIDE a rumor's `content`,
  * as a JSON string. This is the wire contract with the PWA: the rumor content
@@ -226,16 +231,62 @@ export function createPhantomchatChannel(
         //   - Legacy PhantomChat JSON envelope {type, content, id, nonce}.
         //   - Standard NIP-17: rumor.content IS the plain message text (what
         //     0xchat/Amethyst and the aligned PWA send). Resolved below.
-        let envelope: {id?: unknown; type?: unknown; content?: unknown; nonce?: unknown} | null = null;
+        let parsedContent: any = null;
         try {
-          const parsed = JSON.parse(rumor.content);
-          // Only OUR envelope has a string `type`. A plain-text body that happens
-          // to be JSON without a `type` falls through to the plain-text path.
-          if (parsed && typeof parsed === "object" && typeof parsed.type === "string") {
-            envelope = parsed;
-          }
+          const p = JSON.parse(rumor.content);
+          if (p && typeof p === "object") parsedContent = p;
         } catch {
           // not JSON → standard NIP-17 plain-text message (handled below)
+        }
+        // Only OUR text envelope has a string `type`. A plain-text body that
+        // happens to be JSON without a `type` falls through to the plain-text path.
+        const envelope: {id?: unknown; type?: unknown; content?: unknown; nonce?: unknown; fileMetadata?: unknown} | null =
+          parsedContent && typeof parsedContent.type === "string" ? parsedContent : null;
+
+        // Media envelope. The PWA wraps media in the SAME typed envelope as
+        // text, with `type` = the media kind (voice/image/video/gif/file). Two
+        // wire shapes (see chat-api.sendFileMessage and GroupAPI.sendFile):
+        //   - DM:    envelope.content is a JSON STRING of the file metadata
+        //            ({url, sha256, key, iv, mediaType, duration, ...}).
+        //   - Group: envelope.fileMetadata is the metadata OBJECT
+        //            ({url, sha256, keyHex, ivHex, ...}); envelope.content is
+        //            the caption.
+        // Detect it BEFORE the `type !== "text"` reject below, else real voice
+        // notes / attachments are dropped. Accept both key/iv and keyHex/ivHex.
+        let media: ChannelMessage["media"] | undefined;
+        let mediaCaption = "";
+        if (envelope && MEDIA_ENVELOPE_TYPES.has(envelope.type as string)) {
+          let fm: any = null;
+          if (envelope.fileMetadata && typeof envelope.fileMetadata === "object") {
+            fm = envelope.fileMetadata; // group
+            if (typeof envelope.content === "string") mediaCaption = envelope.content;
+          } else if (typeof envelope.content === "string") {
+            try {
+              fm = JSON.parse(envelope.content); // DM (content is the metadata JSON string)
+            } catch {
+              fm = null;
+            }
+            if (fm && typeof fm.caption === "string") mediaCaption = fm.caption;
+          }
+          if (fm && typeof fm.url === "string" && typeof fm.sha256 === "string") {
+            const keyHex =
+              typeof fm.keyHex === "string" ? fm.keyHex : typeof fm.key === "string" ? fm.key : "";
+            const ivHex =
+              typeof fm.ivHex === "string" ? fm.ivHex : typeof fm.iv === "string" ? fm.iv : "";
+            if (keyHex && ivHex) {
+              const mt = typeof fm.mediaType === "string" ? fm.mediaType : (envelope.type as string);
+              media = {
+                kind: mt === "voice" || mt === "image" || mt === "video" ? mt : "file",
+                url: fm.url,
+                sha256: fm.sha256,
+                keyHex,
+                ivHex,
+                mimeType: typeof fm.mimeType === "string" ? fm.mimeType : "application/octet-stream",
+                durationS: typeof fm.duration === "number" ? fm.duration : undefined,
+                size: typeof fm.size === "number" ? fm.size : undefined,
+              };
+            }
+          }
         }
 
         // (6) LIVE-GATE. On (re)connect the relays replay up to 49h of stored
@@ -262,7 +313,15 @@ export function createPhantomchatChannel(
         // Resolve the message text + id from whichever shape arrived.
         let text: string;
         let messageId: string | undefined;
-        if (envelope) {
+        if (media) {
+          // Media: the body text is the caption (empty for a bare voice note);
+          // the server fetches+decrypts (and, for voice, transcribes) before the
+          // turn. Receipt off the envelope's app id (what the PWA's file
+          // delivery tracker keys on), falling back to the rumor id.
+          text = mediaCaption;
+          messageId =
+            typeof envelope!.id === "string" && envelope!.id ? (envelope!.id as string) : rumor.id;
+        } else if (envelope) {
           // Legacy envelope: only `text` envelopes become turns (reactions/etc. drop).
           if (envelope.type !== "text" || typeof envelope.content !== "string") {
             return;
@@ -309,6 +368,7 @@ export function createPhantomchatChannel(
             text,
             groupId,
             groupMemberHexes: memberHexes,
+            ...(media ? { media } : {}),
           });
           wake?.();
           return;
@@ -327,6 +387,7 @@ export function createPhantomchatChannel(
           senderId: senderHex,
           text,
           ...(messageId ? { messageId } : {}),
+          ...(media ? { media } : {}),
         });
         wake?.();
       };

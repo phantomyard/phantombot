@@ -375,3 +375,104 @@ describe("phantomchat channel — catch-up poll", () => {
     expect(received).toContain("recovered by poll");
   });
 });
+
+describe("phantomchat channel — voice / media intake", () => {
+  test("a DM voice envelope (metadata JSON in content) surfaces as media, not raw JSON", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Real DM wire shape (chat-api.sendFileMessage → sendMessage): a typed
+    // envelope whose `content` is the file-metadata JSON STRING (key/iv).
+    const fileMeta = {
+      url: "https://blossom.primal.net/b8447b96c67839dc9aa4632408a0d35375",
+      sha256: "b8447b96c67839dc9aa4632408a0d35375ad6d9c0f42ee6057a5be47eb074b03",
+      mimeType: "audio/ogg",
+      size: 26050,
+      key: "2d3574e50d989038d2b377601485960210a2f381068a49446b40f2e754f9adb8",
+      iv: "7bab87dee86e940684b2ff88",
+      mediaType: "voice",
+      duration: 9,
+      waveform: [0, 0, 8, 255, 255],
+    };
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "chat-99-0",
+      from: "peer",
+      to: ourPub,
+      type: "voice",
+      content: JSON.stringify(fileMeta),
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const m = got[0]!;
+    // Surfaced as MEDIA (so the server transcribes), NOT a turn over the JSON.
+    expect(m.text).toBe(""); // bare voice note has no caption
+    expect(m.media).toBeDefined();
+    expect(m.media!.kind).toBe("voice");
+    expect(m.media!.url).toBe(fileMeta.url);
+    expect(m.media!.sha256).toBe(fileMeta.sha256);
+    expect(m.media!.keyHex).toBe(fileMeta.key); // accepts `key`
+    expect(m.media!.ivHex).toBe(fileMeta.iv); // accepts `iv`
+    expect(m.media!.mimeType).toBe("audio/ogg");
+    expect(m.media!.durationS).toBe(9);
+    // Receipt keyed off the envelope's app id (PWA file delivery tracker).
+    expect(m.messageId).toBe("chat-99-0");
+  });
+});
+
+describe("phantomchat channel — attachment (non-voice) intake", () => {
+  test("a group image envelope (fileMetadata object + caption) surfaces as media", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Real group wire shape (GroupAPI.sendFile): `fileMetadata` OBJECT
+    // (keyHex/ivHex), with the caption in `content`.
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "grp-123-abc",
+      type: "image",
+      content: "check this out",
+      timestamp: Date.now(),
+      fileMetadata: {
+        url: "https://blossom.primal.net/deadbeefimg",
+        sha256: "deadbeef00000000000000000000000000000000000000000000000000000000",
+        mimeType: "image/jpeg",
+        size: 845123,
+        keyHex: "11".repeat(32),
+        ivHex: "22".repeat(12),
+        width: 1200,
+        height: 800,
+      },
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const m = got[0]!;
+    expect(m.text).toBe("check this out"); // caption preserved
+    expect(m.media?.kind).toBe("image");
+    expect(m.media?.url).toBe("https://blossom.primal.net/deadbeefimg");
+    expect(m.media?.keyHex).toBe("11".repeat(32)); // accepts `keyHex`
+    expect(m.media?.ivHex).toBe("22".repeat(12));
+    expect(m.media?.size).toBe(845123);
+  });
+});
