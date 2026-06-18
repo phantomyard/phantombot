@@ -678,6 +678,91 @@ describe("phantomchat group routing (HQ bug)", () => {
     expect(typingEvents.some((e) => e.content === "stop")).toBe(true);
   });
 
+  test("group voice note with STT unavailable: failure notice broadcasts to the GROUP, not a DM", async () => {
+    // Regression (review #187): the voice STT error paths early-returned with a
+    // 1:1 DM to the sender, so a group voice-note failure surfaced privately
+    // instead of in the group. The notice must go back into the group.
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const andrewHex = getPublicKey(andrewSk);
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-voice-fail";
+
+    // The turn must NOT run — STT-unavailable returns before the harness.
+    const harness = new ScriptedHarness("fake", [{ type: "done", finalText: "should not run" }]);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(botSk, ["wss://test.relay"], pool);
+    const channel = createPhantomchatChannel({ secretKey: botSk, publicKeyHex: botHex, transport });
+
+    // A GROUP voice note in the GroupAPI.sendFile shape (fileMetadata object).
+    const payload = JSON.stringify({
+      content: "",
+      type: "voice",
+      id: `grp-${Date.now()}-voice`,
+      timestamp: Date.now(),
+      fileMetadata: {
+        url: "https://blossom.primal.net/voicenote",
+        sha256: "ab".repeat(32),
+        keyHex: "11".repeat(32),
+        ivHex: "22".repeat(12),
+        mimeType: "audio/ogg",
+        size: 26050,
+        duration: 9,
+      },
+    });
+    const { wraps } = wrapGroupMessage(andrewSk, [botHex, memberHex], payload, groupId);
+    let inboundForBot: NTNostrEvent | undefined;
+    for (const w of wraps) {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        inboundForBot = w as NTNostrEvent;
+        break;
+      } catch {
+        /* not ours */
+      }
+    }
+    expect(inboundForBot).toBeDefined();
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config: baseConfig(), // voice.provider = "none" → STT unavailable
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      allowedHex: [andrewHex],
+      oneShot: true,
+      signal: ac.signal,
+    });
+    pool.feed(inboundForBot!);
+    await new Promise((r) => setTimeout(r, 100));
+    ac.abort();
+    await serverPromise;
+
+    // No turn ran (STT unavailable → early return).
+    expect(harness.invocations).toBe(0);
+
+    // The notice is a GROUP broadcast — 3 kind-1059 wraps (Andrew + member +
+    // Lena's self-wrap) carrying the group tag — NOT a 1:1 DM (2 wraps, no tag).
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
+    expect(replyWraps.length).toBe(3);
+    let andrewNotice: ReturnType<typeof unwrapNip17Message> | undefined;
+    for (const w of replyWraps) {
+      try {
+        andrewNotice = unwrapNip17Message(w as NTNostrEvent, andrewSk);
+        break;
+      } catch {
+        /* not for Andrew */
+      }
+    }
+    expect(andrewNotice).toBeDefined();
+    expect(andrewNotice!.tags.find((t) => t[0] === "group")).toEqual(["group", groupId]);
+    expect(JSON.parse(andrewNotice!.content).content.length).toBeGreaterThan(0);
+  });
+
   test("a plain DM still replies 1:1 (no group tag → unchanged DM behaviour)", async () => {
     const senderSk = generateSecretKey();
     const botSk = generateSecretKey();

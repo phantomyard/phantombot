@@ -189,6 +189,20 @@ export async function runPhantomchatServer(
       void transport.sendDeliveryReceipt(senderHex, msg.messageId);
     }
 
+    // Route a short user-facing notice to the SAME place a reply would go: into
+    // the group when the message arrived via a group (reconstructing the member
+    // set exactly like the reply path), else a 1:1 DM. Without this, a group
+    // voice/media failure (STT unavailable/failed/errored) would surface
+    // privately to the sender instead of in the group conversation.
+    const sendNotice = (text: string): Promise<void> => {
+      if (msg.groupId) {
+        const others = new Set<string>(msg.groupMemberHexes ?? []);
+        others.add(senderHex.toLowerCase());
+        return transport.sendGroupMessage(msg.groupId, [...others], text);
+      }
+      return transport.sendMessage(senderHex, text);
+    };
+
     // ===================== VOICE / MEDIA → TEXT =====================
     // A voice note arrives as an encrypted Blossom file (msg.media) with an
     // empty text body. Fetch + AES-256-GCM decrypt + transcribe so the turn
@@ -206,9 +220,7 @@ export async function runPhantomchatServer(
             persona: input.persona,
             reason: stt.reason,
           });
-          await transport
-            .sendMessage(senderHex, voiceUnavailableMessage(stt))
-            .catch(() => {});
+          await sendNotice(voiceUnavailableMessage(stt)).catch(() => {});
           return;
         }
         try {
@@ -227,12 +239,9 @@ export async function runPhantomchatServer(
               persona: input.persona,
               error: r.error,
             });
-            await transport
-              .sendMessage(
-                senderHex,
-                "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
-              )
-              .catch(() => {});
+            await sendNotice(
+              "🎙️ I couldn’t make out that voice note — the audio may be unclear or too quiet. Please try again, or type your message.",
+            ).catch(() => {});
             return;
           }
           userMessage = r.text;
@@ -245,12 +254,9 @@ export async function runPhantomchatServer(
             persona: input.persona,
             error: (e as Error).message,
           });
-          await transport
-            .sendMessage(
-              senderHex,
-              "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
-            )
-            .catch(() => {});
+          await sendNotice(
+            "⚠️ Something went wrong processing that voice note. Please try again in a moment, or type your message.",
+          ).catch(() => {});
           return;
         }
       } else {
