@@ -29,6 +29,35 @@ import type { PhantomchatTransport } from "./transport.ts";
 import { sttSupport, transcribe } from "../../lib/audio.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
+import { inboxDir } from "../telegram/parse.ts";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+// Don't download absurdly large attachments. The harness reads from the inbox;
+// a multi-hundred-MB blob would blow memory + disk for little benefit.
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+// Map a mime type to a file extension for the inbox filename (the envelope
+// carries no original name). Falls back to the mime subtype, then the kind.
+function extForMime(mime: string, kind: string): string {
+  const m = ((mime || "").split(";")[0] ?? "").trim().toLowerCase();
+  const map: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "audio/ogg": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "application/pdf": "pdf",
+  };
+  if (map[m]) return map[m];
+  const sub = m.includes("/") ? m.slice(m.indexOf("/") + 1) : "";
+  return /^[a-z0-9]{1,8}$/.test(sub) ? sub : kind === "image" ? "jpg" : kind === "video" ? "mp4" : "bin";
+}
 
 // Bound the voice fetch+decrypt+transcribe step. A hung Blossom fetch or STT
 // request would otherwise never settle and wedge this peer's serial turn chain
@@ -225,9 +254,50 @@ export async function runPhantomchatServer(
           return;
         }
       } else {
-        // image / video / file — no extraction yet. Give the turn a marker so it
-        // can acknowledge instead of running on empty text.
-        userMessage = msg.text?.trim() ? msg.text : `[sent a ${m.kind}]`;
+        // image / video / file: fetch + AES-GCM decrypt + save to the per-chat
+        // inbox, then hand the harness "[attached: <abs-path>]" so it can read
+        // the file — mirrors the Telegram attachment path
+        // (core/engine.processChatMessage). The harness decides what to do.
+        const caption = msg.text?.trim() ? msg.text + "\n\n" : "";
+        if (m.size !== undefined && m.size > MAX_ATTACHMENT_BYTES) {
+          log.warn("phantomchat: attachment over cap — not downloading", {
+            persona: input.persona,
+            kind: m.kind,
+            size: m.size,
+          });
+          userMessage = `${caption}[sent a ${m.kind} (~${Math.round(m.size / 1024 / 1024)} MB) — too large to fetch]`;
+        } else {
+          const convId = `phantomchat-${msg.groupId ? `group-${msg.groupId}` : senderHex}`;
+          try {
+            const data = await withTimeout(
+              fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
+                expectedSha256Hex: m.sha256,
+                signal: input.signal,
+              }),
+              input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
+            );
+            const dir = inboxDir(convId);
+            await mkdir(dir, { recursive: true });
+            const path = join(dir, `${m.sha256.slice(0, 16)}.${extForMime(m.mimeType, m.kind)}`);
+            await writeFile(path, data);
+            log.info("phantomchat: attachment saved", {
+              persona: input.persona,
+              kind: m.kind,
+              path,
+              bytes: data.byteLength,
+            });
+            userMessage = `${caption}[attached: ${path}]`;
+          } catch (e) {
+            log.error("phantomchat: attachment download failed", {
+              persona: input.persona,
+              kind: m.kind,
+              error: (e as Error).message,
+            });
+            userMessage = caption
+              ? msg.text!
+              : `[sent a ${m.kind}, but it couldn’t be downloaded]`;
+          }
+        }
       }
     }
 

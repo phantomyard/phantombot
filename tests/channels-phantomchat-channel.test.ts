@@ -424,3 +424,41 @@ describe("phantomchat channel — voice / media intake", () => {
     expect(m.messageId!.length).toBe(64);
   });
 });
+
+describe("phantomchat channel — attachment (non-voice) intake", () => {
+  test("an image envelope surfaces as media kind=image with size, not raw JSON", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const imgEnvelope = {
+      url: "https://blossom.primal.net/deadbeefimg",
+      sha256: "deadbeef00000000000000000000000000000000000000000000000000000000",
+      mimeType: "image/jpeg",
+      size: 845123,
+      key: "11".repeat(32),
+      iv: "22".repeat(12),
+      mediaType: "image",
+      width: 1200,
+      height: 800,
+    };
+    const { wrap } = wrapEnvelopeToUs(ourPub, imgEnvelope);
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const m = got[0]!;
+    expect(m.text).toBe("");
+    expect(m.media?.kind).toBe("image");
+    expect(m.media?.url).toBe(imgEnvelope.url);
+    expect(m.media?.keyHex).toBe(imgEnvelope.key);
+    expect(m.media?.size).toBe(845123);
+  });
+});

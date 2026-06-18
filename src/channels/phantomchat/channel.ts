@@ -265,6 +265,7 @@ export function createPhantomchatChannel(
                 : "application/octet-stream",
             durationS:
               typeof parsedContent.duration === "number" ? parsedContent.duration : undefined,
+            size: typeof parsedContent.size === "number" ? parsedContent.size : undefined,
           };
         }
 

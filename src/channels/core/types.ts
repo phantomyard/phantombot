@@ -129,6 +129,8 @@ export interface ChannelMessage {
     ivHex: string;
     mimeType: string;
     durationS?: number;
+    /** Plaintext byte size from the envelope (used to skip oversized downloads). */
+    size?: number;
   };
 }
 
