@@ -41,6 +41,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE",
+  "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS",
   "PHANTOMBOT_STATE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
@@ -535,12 +536,14 @@ limit = 5
 enabled = false
 interval = 30
 batch_size = 400
+flush_after_hours = 6
 `);
     const c = await loadConfig();
     expect(c.retrieval!.turnIndexing).toEqual({
       enabled: false,
       interval: 30,
       batchSize: 400,
+      flushAfterHours: 6,
     });
   });
 
@@ -550,15 +553,18 @@ batch_size = 400
 enabled = false
 interval = 30
 batch_size = 400
+flush_after_hours = 6
 `);
     process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_ENABLED = "true";
     process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_INTERVAL = "20";
     process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE = "50";
+    process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS = "1";
     const c = await loadConfig();
     expect(c.retrieval!.turnIndexing).toEqual({
       enabled: true,
       interval: 20,
       batchSize: 50,
+      flushAfterHours: 1,
     });
   });
 

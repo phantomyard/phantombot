@@ -107,12 +107,24 @@ export interface TurnIndexingSettings {
   interval: number;
   /** Max raw turn rows read from memory in one SQLite page. */
   batchSize: number;
+  /**
+   * Time-based safety net. Flush a conversation's unindexed tail when its
+   * oldest unindexed turn has aged past this many hours, even if the
+   * user-turn count hasn't reached `interval`. This drains sub-threshold
+   * tails (e.g. a conversation stuck at 19 turns) so recent chat stays
+   * semantically recallable instead of going invisible for days. The live
+   * service only flushes on a new message crossing the batch; the 30-min
+   * heartbeat applies this time-based drain across all conversations. Set
+   * to 0 to disable the time-based flush (count trigger only).
+   */
+  flushAfterHours: number;
 }
 
 export const DEFAULT_TURN_INDEXING: TurnIndexingSettings = {
   enabled: true,
   interval: 20,
   batchSize: 200,
+  flushAfterHours: 2,
 };
 
 /**
@@ -511,10 +523,16 @@ function buildTurnIndexingConfig(
     asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE) ??
     asInt(tomlTurnIndexing.batch_size) ??
     DEFAULT_TURN_INDEXING.batchSize;
+  const flushAfterHours =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS) ??
+    asInt(tomlTurnIndexing.flush_after_hours) ??
+    DEFAULT_TURN_INDEXING.flushAfterHours;
   return {
     enabled,
     interval: Math.max(1, Math.min(10_000, interval)),
     batchSize: Math.max(1, Math.min(5_000, batchSize)),
+    // 0 disables the time-based flush; otherwise clamp to a sane 1h..1yr.
+    flushAfterHours: Math.max(0, Math.min(8_760, flushAfterHours)),
   };
 }
 

@@ -29,6 +29,12 @@ export interface IndexConversationTurnsInput {
   conversation: string;
   memory: MemoryStore;
   settings: TurnIndexingSettings;
+  /**
+   * Force a flush of any unindexed tail regardless of the count or time
+   * triggers. Used by the operator backfill path (`memory index --turns`).
+   * A no-op when there is no unindexed tail.
+   */
+  force?: boolean;
 }
 
 export interface IndexConversationTurnsResult {
@@ -57,7 +63,36 @@ export async function indexConversationTurnsIfDue(
     ix = await MemoryIndex.open(memoryIndexPath(input.persona));
     const state = ix.turnIndexState(input.persona, input.conversation);
     const previousUserTurnsIndexed = state?.userTurnsIndexed ?? 0;
-    const due = userTurns - previousUserTurnsIndexed >= input.settings.interval;
+    const lastTurnId = state?.lastTurnId ?? 0;
+
+    // Primary trigger: enough new user turns have accrued (the batch).
+    let due = userTurns - previousUserTurnsIndexed >= input.settings.interval;
+
+    // Secondary triggers — only consulted when the count batch hasn't
+    // fired. Both need to know whether an unindexed tail actually exists,
+    // and (for the time trigger) how old its oldest turn is. One cheap
+    // single-row read of the head-of-tail answers both.
+    if (!due && (input.force || input.settings.flushAfterHours > 0)) {
+      const head = await input.memory.turnsAfterId(
+        input.persona,
+        input.conversation,
+        lastTurnId,
+        1,
+      );
+      if (head.length > 0) {
+        if (input.force) {
+          // Operator backfill: flush the tail unconditionally.
+          due = true;
+        } else {
+          // Time-based safety net: flush once the oldest unindexed turn has
+          // aged past flushAfterHours, even below the count threshold — so a
+          // conversation stuck at e.g. 19 turns still becomes recallable.
+          const ageMs = Date.now() - head[0]!.createdAt.getTime();
+          if (ageMs >= input.settings.flushAfterHours * 3_600_000) due = true;
+        }
+      }
+    }
+
     if (!due) {
       return {
         triggered: false,
@@ -164,6 +199,85 @@ export function makeTurnIndexer(
       memory,
       settings: turnIndexing,
     }).then(() => undefined);
+}
+
+export interface FlushDueConversationsInput {
+  config: Config;
+  persona: string;
+  memory: MemoryStore;
+  settings: TurnIndexingSettings;
+  /** Force-flush every conversation's tail regardless of count/age. */
+  force?: boolean;
+}
+
+export interface FlushDueConversationsResult {
+  /** How many conversations were scanned. */
+  conversations: number;
+  /** How many actually flushed a tail (triggered). */
+  triggered: number;
+  indexed: number;
+  embedded: number;
+  embeddingFailures: number;
+}
+
+/**
+ * Sweep every conversation for one persona and flush any tail that is due —
+ * by the count batch, by age (flushAfterHours), or unconditionally when
+ * `force` is set. This is the box-level drain the live service can't do on
+ * its own: the service only flushes a conversation when a new message in it
+ * crosses the batch, so a quiet sub-threshold tail would otherwise stay
+ * unembedded indefinitely. Called by the 30-min heartbeat (time-based) and
+ * `phantombot memory index --turns` (operator backfill, force).
+ *
+ * Never throws: indexConversationTurnsIfDue swallows its own errors per
+ * conversation, and a failure to enumerate conversations is logged and
+ * returns an empty summary. Safe to run from the mechanical heartbeat.
+ */
+export async function flushDueConversationTurns(
+  input: FlushDueConversationsInput,
+): Promise<FlushDueConversationsResult> {
+  const summary: FlushDueConversationsResult = {
+    conversations: 0,
+    triggered: 0,
+    indexed: 0,
+    embedded: 0,
+    embeddingFailures: 0,
+  };
+  if (!input.settings.enabled) return summary;
+
+  let conversations: string[];
+  try {
+    conversations = await input.memory.listConversations(input.persona);
+  } catch (e) {
+    log.warn("turn-index sweep: failed to list conversations", {
+      persona: input.persona,
+      error: (e as Error).message,
+    });
+    return summary;
+  }
+  summary.conversations = conversations.length;
+
+  for (const conversation of conversations) {
+    const r = await indexConversationTurnsIfDue({
+      config: input.config,
+      persona: input.persona,
+      conversation,
+      memory: input.memory,
+      settings: input.settings,
+      force: input.force,
+    });
+    if (r?.triggered) {
+      summary.triggered++;
+      summary.indexed += r.indexed;
+      summary.embedded += r.embedded;
+      summary.embeddingFailures += r.embeddingFailures;
+    }
+  }
+
+  if (summary.triggered > 0) {
+    log.info("turn-index sweep: flushed conversation tails", { ...summary });
+  }
+  return summary;
 }
 
 async function embedTurn(

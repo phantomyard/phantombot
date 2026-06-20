@@ -95,6 +95,12 @@ export interface MemoryStore {
   ): Promise<Turn[]>;
   /** Count user turns in a conversation. Used by predictable indexing triggers. */
   countUserTurns(persona: string, conversation: string): Promise<number>;
+  /**
+   * Distinct conversation keys that have at least one turn for this persona,
+   * sorted. Used by the turn-index sweep (heartbeat + `memory index --turns`)
+   * to find every conversation that might have an unindexed tail.
+   */
+  listConversations(persona: string): Promise<string[]>;
   /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /**
@@ -193,6 +199,7 @@ class SqliteMemoryStore implements MemoryStore {
   private appendCaptureStmt;
   private lastCaptureStmt;
   private countUserTurnsStmt;
+  private listConversationsStmt;
   private countTurnsSinceStmt;
   private countCapturesSinceStmt;
   private appendPairTxn;
@@ -259,6 +266,10 @@ class SqliteMemoryStore implements MemoryStore {
     this.countUserTurnsStmt = db.prepare(
       `SELECT COUNT(*) AS n FROM turns
        WHERE persona = ? AND conversation = ? AND role = 'user'`,
+    );
+    this.listConversationsStmt = db.prepare(
+      `SELECT DISTINCT conversation FROM turns
+       WHERE persona = ? ORDER BY conversation`,
     );
     this.countTurnsSinceStmt = db.prepare(
       `SELECT COUNT(*) AS n FROM turns
@@ -359,6 +370,13 @@ class SqliteMemoryStore implements MemoryStore {
       n: number;
     };
     return row.n;
+  }
+
+  async listConversations(persona: string): Promise<string[]> {
+    const rows = this.listConversationsStmt.all(persona) as Array<{
+      conversation: string;
+    }>;
+    return rows.map((r) => r.conversation);
   }
 
   async appendCapture(input: AppendCaptureInput): Promise<void> {

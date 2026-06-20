@@ -14,6 +14,8 @@ import { runHeartbeat } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { currentPlatform } from "../lib/platform.ts";
+import { openMemoryStore } from "../memory/store.ts";
+import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
 import {
   BunSystemctlRunner,
   buildSystemctlEnv,
@@ -72,6 +74,37 @@ export async function runHeartbeatCli(
     config,
     currentVersion: VERSION,
   });
+
+  // Drain sub-threshold conversation turn tails on the heartbeat's regular
+  // cadence. The live service only flushes a conversation when a new message
+  // crosses the 20-turn batch, so a quiet conversation stuck below it (e.g.
+  // 19 turns) would stay unembedded for days — recent chat goes invisible to
+  // recall. This time-based sweep (flushAfterHours) closes that gap for every
+  // conversation, mechanically, with no LLM call. Wrapped in try/catch so a
+  // turn-flush hiccup never breaks the primary heartbeat work.
+  try {
+    const turnIndexing = config.retrieval?.turnIndexing;
+    if (config.retrieval?.enabled && turnIndexing?.enabled) {
+      const store = await openMemoryStore(config.memoryDbPath);
+      try {
+        const flush = await flushDueConversationTurns({
+          config,
+          persona,
+          memory: store,
+          settings: turnIndexing,
+        });
+        if (flush.triggered > 0) {
+          log.info("heartbeat: flushed conversation turn tails", { ...flush });
+        }
+      } finally {
+        await store.close();
+      }
+    }
+  } catch (e) {
+    log.warn("heartbeat: turn-flush sweep threw unexpectedly", {
+      error: (e as Error).message,
+    });
+  }
 
   // Self-heal systemd units on the heartbeat's regular cadence. This
   // is the long-uptime cure for the broken-symlink class of bug — a

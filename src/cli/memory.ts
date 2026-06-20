@@ -39,6 +39,7 @@ import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
 
 function resolvePersonaDir(config: Config, persona?: string): {
   persona: string;
@@ -221,6 +222,13 @@ export interface RunIndexInput extends RunMemoryInput {
 export interface RunIndexInputV2 extends RunIndexInput {
   /** Skip the embedding pass even when a provider is configured. */
   noEmbed?: boolean;
+  /**
+   * Force-flush unindexed conversation turn tails across ALL conversations
+   * instead of (re)building the notes/KB index. This is the operator
+   * backfill path for the time-based turn flush — drains tails that are
+   * below the 20-turn batch and haven't aged into the heartbeat window yet.
+   */
+  flushTurns?: boolean;
 }
 
 export async function runMemoryIndex(
@@ -234,6 +242,40 @@ export async function runMemoryIndex(
   if (!existsSync(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
+  }
+
+  // `--turns`: force-flush conversation turn tails instead of the notes/KB
+  // index. Separate path — the FTS/embed work below is for memory/ + kb/
+  // files, which never touches the raw-turn index.
+  if (input.flushTurns) {
+    const turnIndexing = config.retrieval?.turnIndexing;
+    if (!config.retrieval?.enabled || !turnIndexing?.enabled) {
+      out.write(`turn indexing is disabled in config; nothing to flush\n`);
+      return 0;
+    }
+    const store = await openMemoryStore(config.memoryDbPath);
+    try {
+      const r = await flushDueConversationTurns({
+        config,
+        persona,
+        memory: store,
+        settings: turnIndexing,
+        force: true,
+      });
+      out.write(
+        `turn flush for '${persona}': ` +
+          `${r.triggered}/${r.conversations} conversation(s) flushed, ` +
+          `${r.indexed} turn(s) indexed` +
+          (r.embedded > 0 ? `, ${r.embedded} embedded` : "") +
+          (r.embeddingFailures > 0
+            ? `, ${r.embeddingFailures} embed failure(s)`
+            : "") +
+          `\n`,
+      );
+    } finally {
+      await store.close();
+    }
+    return 0;
   }
 
   const ix = await MemoryIndex.open(input.indexPath ?? memoryIndexPath(persona));
@@ -511,12 +553,14 @@ const indexCmd = defineCommand({
     persona: { type: "string", description: "Persona name." },
     rebuild: { type: "boolean", description: "Drop and re-index from scratch.", default: false },
     "no-embed": { type: "boolean", description: "Skip embedding pass (FTS only).", default: false },
+    turns: { type: "boolean", description: "Force-flush unindexed conversation turn tails (all conversations) instead of the notes/KB index.", default: false },
   },
   async run({ args }) {
     process.exitCode = await runMemoryIndex({
       persona: args.persona ? String(args.persona) : undefined,
       rebuild: Boolean(args.rebuild),
       noEmbed: Boolean(args["no-embed"]),
+      flushTurns: Boolean(args.turns),
     });
   },
 });
