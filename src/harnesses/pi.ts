@@ -24,6 +24,12 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import {
+  ENV_CODING_MODEL,
+  ENV_IMAGE_MODEL,
+  ENV_PRIMARY_MODEL,
+  type PiRoutingConfig,
+} from "../lib/piRouting.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -37,6 +43,38 @@ export interface PiHarnessConfig {
   bin: string;
   /** Maximum payload size in bytes (system prompt + rendered conversation). */
   maxPayloadBytes: number;
+  /**
+   * Resolved capability routing (env-over-TOML, from config.ts). When present
+   * it does two runtime things, both required for routing to actually take
+   * effect (a TOML-only install would otherwise be inert):
+   *   1. `primaryModel` pins the orchestrator model via `--model` on the Pi
+   *      CLI — without this the saved primary is never honored, Pi just uses
+   *      its own default.
+   *   2. all three resolved models are projected into the spawned Pi env
+   *      (PHANTOMBOT_PRIMARY/IMAGE/CODING_MODEL) so the bundled extension sees
+   *      them even when they live only in config.toml (the wizard's ~/.env
+   *      write would otherwise be the only path that reaches the child).
+   * Absent = no per-capability routing (Pi uses its configured default model).
+   */
+  routing?: PiRoutingConfig;
+}
+
+/**
+ * Project the resolved routing models onto a child-process env. Only DEFINED
+ * values are written; undefined keys are left untouched so a directly-exported
+ * env var is never clobbered (the wizard already clears stale keys at write
+ * time via computeRoutingWrites). Exported for testing.
+ */
+export function applyRoutingEnv(
+  env: Record<string, string | undefined>,
+  routing: PiRoutingConfig | undefined,
+): Record<string, string | undefined> {
+  if (!routing) return env;
+  const out = { ...env };
+  if (routing.primaryModel !== undefined) out[ENV_PRIMARY_MODEL] = routing.primaryModel;
+  if (routing.imageModel !== undefined) out[ENV_IMAGE_MODEL] = routing.imageModel;
+  if (routing.codingModel !== undefined) out[ENV_CODING_MODEL] = routing.codingModel;
+  return out;
 }
 
 export class PiHarness implements Harness {
@@ -90,6 +128,14 @@ export class PiHarness implements Harness {
       "--offline",
       "--no-session",
     ];
+    // Capability routing: pin the orchestrator model. Without this `--model`
+    // the saved primary is never honored — Pi falls back to its own default
+    // and the routing config is silently inert. The delegate models reach the
+    // extension via env (below), not argv.
+    const primaryModel = this.config.routing?.primaryModel;
+    if (primaryModel) {
+      args.push("--model", primaryModel);
+    }
     // Tool-less threat-judge mode. Per `pi --help`, `--no-tools` disables all
     // tools (built-in, extension, and custom) — true zero-tools, native flag,
     // no deny-list to maintain.
@@ -110,7 +156,12 @@ export class PiHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      env: withPersonaEnv(process.env, req.persona, req.conversation),
+      // Project resolved routing models into the child so the bundled
+      // extension sees them even on a TOML-only install (no ~/.env write).
+      env: applyRoutingEnv(
+        withPersonaEnv(process.env, req.persona, req.conversation),
+        this.config.routing,
+      ),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

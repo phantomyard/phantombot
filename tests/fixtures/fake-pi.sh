@@ -11,6 +11,8 @@
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
 #   argv     — echo argv (joined) as a text_delta, exit 0 (arg-shape test)
+#   env      — echo the PHANTOMBOT_*_MODEL env vars as a text_delta, exit 0
+#              (routing env-projection test)
 
 mode="${FAKE_PI_MODE:-normal}"
 
@@ -18,6 +20,12 @@ case "$mode" in
   argv)
     joined="$*"
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
+  env)
+    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-}"
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0
     ;;

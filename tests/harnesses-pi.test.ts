@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   PiHarness,
+  applyRoutingEnv,
   parsePiEvent,
   renderPayload,
 } from "../src/harnesses/pi.ts";
@@ -292,6 +293,80 @@ describe("PiHarness.invoke (subprocess)", () => {
       recoverable: true,
       error: expect.stringContaining("timed out"),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Capability routing — argv + env projection (PR #191 review blocker)
+// ---------------------------------------------------------------------------
+
+describe("applyRoutingEnv", () => {
+  test("returns the env unchanged when routing is undefined", () => {
+    const env = { FOO: "bar" };
+    expect(applyRoutingEnv(env, undefined)).toEqual(env);
+  });
+
+  test("projects only the defined models, leaving others untouched", () => {
+    const out = applyRoutingEnv(
+      { EXISTING: "keep" },
+      { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
+    );
+    expect(out).toEqual({
+      EXISTING: "keep",
+      PHANTOMBOT_PRIMARY_MODEL: "gpt-5.2",
+      PHANTOMBOT_CODING_MODEL: "qwen-coder",
+    });
+    // imageModel was undefined → key not written (no clobber).
+    expect(out).not.toHaveProperty("PHANTOMBOT_IMAGE_MODEL");
+  });
+
+  test("does not mutate the input env", () => {
+    const env = { A: "1" };
+    applyRoutingEnv(env, { primaryModel: "m" });
+    expect(env).toEqual({ A: "1" });
+  });
+});
+
+describe("PiHarness routing (subprocess)", () => {
+  const routed = (routing: { primaryModel?: string; imageModel?: string; codingModel?: string }) =>
+    new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
+
+  test("routing.primaryModel pins the orchestrator via --model", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(routed({ primaryModel: "gpt-5.2" }).invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--model gpt-5.2");
+  });
+
+  test("no routing → no --model flag", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--model");
+  });
+
+  test("resolved delegate models reach the spawned Pi env", async () => {
+    process.env.FAKE_PI_MODE = "env";
+    const chunks = await collect(
+      routed({
+        primaryModel: "gpt-5.2",
+        imageModel: "vision-x",
+        codingModel: "qwen-coder",
+      }).invoke(newRequest()),
+    );
+    const out = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(out).toContain("primary=gpt-5.2");
+    expect(out).toContain("image=vision-x");
+    expect(out).toContain("coding=qwen-coder");
   });
 });
 
