@@ -32,6 +32,9 @@ const ENV_KEYS = [
   "PHANTOMBOT_CLAUDE_FALLBACK_MODEL",
   "PHANTOMBOT_PI_BIN",
   "PHANTOMBOT_PI_MAX_PAYLOAD",
+  "PHANTOMBOT_PRIMARY_MODEL",
+  "PHANTOMBOT_IMAGE_MODEL",
+  "PHANTOMBOT_CODING_MODEL",
   "PHANTOMBOT_CODEX_BIN",
   "PHANTOMBOT_CODEX_MODEL",
   "PHANTOMBOT_RETRIEVAL_ENABLED",
@@ -101,6 +104,8 @@ describe("loadConfig — defaults (no file)", () => {
     expect(c.harnesses.pi).toEqual({
       bin: "pi",
       maxPayloadBytes: 1_500_000,
+      // No routing configured by default → field is undefined (optional).
+      routing: undefined,
     });
     expect(c.harnesses.codex).toEqual({
       bin: "codex",
@@ -200,6 +205,48 @@ bin = "/opt/pi"
     const c = await loadConfig();
 
     expect(c.harnesses.pi.bin).toBe("/opt/pi");
+  });
+
+  test("reads [harnesses.pi.routing] capability-routing models", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses.pi.routing]
+primary_model = "deepseek-v4-pro"
+image_model = "gpt-4o"
+coding_model = "gpt-5.2-codex"
+`,
+      "utf8",
+    );
+    const c = await loadConfig();
+    expect(c.harnesses.pi.routing).toEqual({
+      primaryModel: "deepseek-v4-pro",
+      imageModel: "gpt-4o",
+      codingModel: "gpt-5.2-codex",
+    });
+  });
+
+  test("PHANTOMBOT_*_MODEL env vars override [harnesses.pi.routing]", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses.pi.routing]
+primary_model = "toml-primary"
+image_model = "toml-image"
+`,
+      "utf8",
+    );
+    process.env.PHANTOMBOT_PRIMARY_MODEL = "env-primary";
+    const c = await loadConfig();
+    expect(c.harnesses.pi.routing?.primaryModel).toBe("env-primary");
+    expect(c.harnesses.pi.routing?.imageModel).toBe("toml-image");
+  });
+
+  test("routing is undefined when no routing keys are set", async () => {
+    const c = await loadConfig();
+    expect(c.harnesses.pi.routing).toBeUndefined();
   });
 
   test("reads Telegram streaming knobs from [channels.telegram.streaming]", async () => {
