@@ -40,6 +40,10 @@ import {
   type NightlyProgress,
   type NightlyState,
 } from "../lib/nightly.ts";
+import {
+  ensureRoutingExtension,
+  routingExtensionStatus,
+} from "../lib/piExtensionProvision.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
@@ -173,6 +177,18 @@ export interface DoctorReport {
   harnesses?: {
     path: string;
     checks: HarnessAvailability[];
+  };
+  /**
+   * Managed Pi capability-routing extension. Present only when the pi harness
+   * has routing configured. `present` = the owned dir + marker exist;
+   * `drifted` = the stamped source/routing.json no longer matches what this
+   * binary would write. `repaired` = we re-stamped it this run.
+   */
+  piExtension?: {
+    present: boolean;
+    drifted: boolean;
+    dir: string;
+    repaired?: boolean;
   };
   repair_needed: boolean;
   repair_reason?: string;
@@ -387,6 +403,34 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  // Managed Pi extension — only relevant when routing is configured. A
+  // missing or drifted owned dir is re-stamped when repair is enabled (the
+  // same self-healing pattern as the systemd units). Gated to the real
+  // `phantombot` binary, mirroring the harness/systemd/timer checks, so
+  // `bun test`/dev never read or stamp the dev box's real ~/.pi.
+  let piExtensionReport: DoctorReport["piExtension"] | undefined;
+  const piRouting = config.harnesses?.pi?.routing;
+  if (piRouting && basename(process.execPath) === "phantombot") {
+    const status = await routingExtensionStatus(piRouting);
+    let repaired = false;
+    if (repair && (!status.present || status.drifted)) {
+      try {
+        await ensureRoutingExtension(piRouting);
+        repaired = true;
+      } catch (e) {
+        log.warn("doctor: pi extension re-stamp failed", {
+          error: (e as Error).message,
+        });
+      }
+    }
+    piExtensionReport = {
+      present: status.present,
+      drifted: status.drifted,
+      dir: status.dir,
+      ...(repaired ? { repaired } : {}),
+    };
+  }
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -423,6 +467,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
+    ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
     repair_needed: needed,
     repair_reason: reason,
     repair_triggered: repairTriggered,
@@ -580,6 +625,30 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         missing.map((h) => `${h.id}: '${h.bin}' not found`).join("; ") +
           "\n" +
           "  → fix the harness install, set PHANTOMBOT_<HARNESS>_BIN to an absolute path, or put a stable shim on the service PATH\n",
+      );
+    }
+  }
+
+  if (piExtensionReport) {
+    const ok =
+      piExtensionReport.present &&
+      (!piExtensionReport.drifted || !!piExtensionReport.repaired);
+    out.write(`  pi extension: ${tick(ok)} — `);
+    if (!piExtensionReport.present) {
+      out.write(
+        piExtensionReport.repaired
+          ? `stamped managed capability-routing extension into ${piExtensionReport.dir}\n`
+          : `managed capability-routing extension missing at ${piExtensionReport.dir} — run \`phantombot doctor\` (or restart) to stamp it\n`,
+      );
+    } else if (piExtensionReport.drifted) {
+      out.write(
+        piExtensionReport.repaired
+          ? `re-stamped drifted capability-routing extension at ${piExtensionReport.dir}\n`
+          : `managed capability-routing extension drifted at ${piExtensionReport.dir} — run \`phantombot doctor\` to re-stamp\n`,
+      );
+    } else {
+      out.write(
+        `managed capability-routing extension present and current at ${piExtensionReport.dir}\n`,
       );
     }
   }

@@ -2,7 +2,8 @@
  * Tests for the capability-routing Pi extension's pure registration logic.
  * We test `planRouting` (which decides which tools register) directly, without
  * the @earendil-works Pi SDK on the import path — the extension's index.ts
- * (the SDK glue) is verified manually against a live pi via /reload.
+ * (the SDK glue + routing.json read) is verified manually against a live pi via
+ * /reload. `planRouting` now takes the parsed routing.json config object.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -14,9 +15,9 @@ import {
 describe("planRouting — tool registration decisions", () => {
   test("registers both tools when image and coding models are set", () => {
     const plan = planRouting({
-      PHANTOMBOT_PRIMARY_MODEL: "deepseek-v4-pro",
-      PHANTOMBOT_IMAGE_MODEL: "gpt-4o",
-      PHANTOMBOT_CODING_MODEL: "gpt-5.2-codex",
+      primaryModel: "deepseek-v4-pro",
+      imageModel: "gpt-4o",
+      codingModel: "gpt-5.2-codex",
     });
     expect(plan.registerLookAtImage).toBe(true);
     expect(plan.registerCoder).toBe(true);
@@ -26,9 +27,9 @@ describe("planRouting — tool registration decisions", () => {
 
   test("does NOT register look_at_image when image model is unset (multimodal primary)", () => {
     const plan = planRouting({
-      PHANTOMBOT_PRIMARY_MODEL: "gpt-5.2",
-      PHANTOMBOT_CODING_MODEL: "gpt-5.2-codex",
-      // no PHANTOMBOT_IMAGE_MODEL — primary is multimodal
+      primaryModel: "gpt-5.2",
+      codingModel: "gpt-5.2-codex",
+      // no imageModel — primary is multimodal
     });
     expect(plan.registerLookAtImage).toBe(false);
     expect(plan.registerCoder).toBe(true);
@@ -36,8 +37,8 @@ describe("planRouting — tool registration decisions", () => {
 
   test("treats empty string as unset", () => {
     const plan = planRouting({
-      PHANTOMBOT_IMAGE_MODEL: "",
-      PHANTOMBOT_CODING_MODEL: "   ",
+      imageModel: "",
+      codingModel: "   ",
     });
     expect(plan.registerLookAtImage).toBe(false);
     expect(plan.registerCoder).toBe(false);

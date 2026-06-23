@@ -6,8 +6,8 @@
  *
  *   look_at_image(path, question) — spawns the IMAGE model to answer a
  *       specific question about an image. Registered ONLY when the primary is
- *       NOT multimodal (the wizard sets PHANTOMBOT_IMAGE_MODEL only then; if a
- *       multimodal primary is in use the env var is unset and this tool never
+ *       NOT multimodal (the wizard records an `imageModel` in routing.json only
+ *       then; for a multimodal primary the key is absent and this tool never
  *       appears — the primary looks at the image itself).
  *
  *   coder(task) — spawns the CODING model as a fresh `pi` process with
@@ -19,22 +19,58 @@
  * primary→fallback harness chain (failover), which this extension does not
  * touch.
  *
- * Reads its config from the env-var contract (see src/lib/piRouting.ts and
- * ./tools.ts). phantombot's pi harness exports these env vars to the child pi
- * process, so the extension needs zero knowledge of phantombot's config files.
+ * Reads its config from a managed sibling data file `routing.json` in this
+ * extension's own directory (see ./tools.ts for the shape). The extension
+ * needs zero knowledge of phantombot's config files or env vars.
  *
- * Install: symlink this directory into ~/.pi/agent/extensions/ (survives
- * `pi update`, hot-reloads with /reload). See ./README.md.
+ * MANAGED SOURCE: this directory is OWNED by phantombot — it is stamped into
+ * ~/.pi/agent/extensions/capability-routing/ on every phantombot startup (and
+ * repaired by `phantombot doctor`), overwriting any local edits. To change the
+ * extension, edit pi-extension/capability-routing/ in the phantombot repo and
+ * regenerate the embedded assets (`bun run gen:pi-extension`). A manual symlink
+ * (see ./README.md) is only for extension development.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   coderDelegationPrompt,
   imageDelegationPrompt,
   planRouting,
+  type RoutingConfig,
 } from "./tools.ts";
 import { delegate, finalText, usageLine } from "./spawnPi.ts";
+
+/**
+ * Resolve this extension's own directory robustly across runtimes, then read
+ * and parse the managed `routing.json` sibling. On ANY error (file missing,
+ * unreadable, or invalid JSON) we default to `{}` — which registers no tools,
+ * the safe inert state.
+ */
+function loadRoutingConfig(): RoutingConfig {
+  let dir: string | undefined;
+  // Bun exposes the module dir directly.
+  const bunDir = (import.meta as { dir?: string }).dir;
+  if (typeof bunDir === "string" && bunDir.length > 0) {
+    dir = bunDir;
+  } else {
+    try {
+      dir = path.dirname(new URL(import.meta.url).pathname);
+    } catch {
+      dir = undefined;
+    }
+  }
+  if (!dir) return {};
+  try {
+    const raw = fs.readFileSync(path.join(dir, "routing.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as RoutingConfig) : {};
+  } catch {
+    return {};
+  }
+}
 
 const LookAtImageParams = Type.Object({
   path: Type.String({ description: "Absolute path to the image file to inspect." }),
@@ -52,7 +88,7 @@ const CoderParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
-  const plan = planRouting();
+  const plan = planRouting(loadRoutingConfig());
 
   if (plan.registerLookAtImage && plan.imageModel) {
     const imageModel = plan.imageModel;

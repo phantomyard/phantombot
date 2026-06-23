@@ -32,5 +32,5 @@ Anything the parent should know — assumptions, things left out of scope, risks
 
 > Note: the `model:` field above is a default/template. When this agent is
 > driven by the phantombot capability-routing extension, the model is pinned at
-> runtime from `PHANTOMBOT_CODING_MODEL` (see the env-var contract in the
+> runtime from the `codingModel` in the managed `routing.json` (see the
 > extension README), so editing it here only affects standalone `pi` use.

@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   PiHarness,
-  applyRoutingEnv,
   parsePiEvent,
   renderPayload,
 } from "../src/harnesses/pi.ts";
@@ -297,35 +296,10 @@ describe("PiHarness.invoke (subprocess)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Capability routing — argv + env projection (PR #191 review blocker)
+// Capability routing — argv pinning only. Delegate models no longer travel via
+// the child env; they reach the extension through the managed routing.json
+// (lib/piExtensionProvision.ts), so the spawned Pi env must NOT carry them.
 // ---------------------------------------------------------------------------
-
-describe("applyRoutingEnv", () => {
-  test("returns the env unchanged when routing is undefined", () => {
-    const env = { FOO: "bar" };
-    expect(applyRoutingEnv(env, undefined)).toEqual(env);
-  });
-
-  test("projects only the defined models, leaving others untouched", () => {
-    const out = applyRoutingEnv(
-      { EXISTING: "keep" },
-      { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
-    );
-    expect(out).toEqual({
-      EXISTING: "keep",
-      PHANTOMBOT_PRIMARY_MODEL: "gpt-5.2",
-      PHANTOMBOT_CODING_MODEL: "qwen-coder",
-    });
-    // imageModel was undefined → key not written (no clobber).
-    expect(out).not.toHaveProperty("PHANTOMBOT_IMAGE_MODEL");
-  });
-
-  test("does not mutate the input env", () => {
-    const env = { A: "1" };
-    applyRoutingEnv(env, { primaryModel: "m" });
-    expect(env).toEqual({ A: "1" });
-  });
-});
 
 describe("PiHarness routing (subprocess)", () => {
   const routed = (routing: { primaryModel?: string; imageModel?: string; codingModel?: string }) =>
@@ -351,8 +325,11 @@ describe("PiHarness routing (subprocess)", () => {
     expect(argv).not.toContain("--model");
   });
 
-  test("resolved delegate models reach the spawned Pi env", async () => {
+  test("delegate models are NOT projected into the spawned Pi env", async () => {
     process.env.FAKE_PI_MODE = "env";
+    // Make sure nothing in the ambient env spoofs the assertion.
+    delete process.env.PHANTOMBOT_IMAGE_MODEL;
+    delete process.env.PHANTOMBOT_CODING_MODEL;
     const chunks = await collect(
       routed({
         primaryModel: "gpt-5.2",
@@ -364,9 +341,12 @@ describe("PiHarness routing (subprocess)", () => {
       .filter((c) => c.type === "text")
       .map((c) => (c as { text: string }).text)
       .join("");
-    expect(out).toContain("primary=gpt-5.2");
-    expect(out).toContain("image=vision-x");
-    expect(out).toContain("coding=qwen-coder");
+    // Routing models reach the extension via the managed routing.json, not the
+    // child env, so the spawned process must not see them as env vars.
+    expect(out).not.toContain("image=vision-x");
+    expect(out).not.toContain("coding=qwen-coder");
+    expect(out).not.toContain("PHANTOMBOT_IMAGE_MODEL=vision-x");
+    expect(out).not.toContain("PHANTOMBOT_CODING_MODEL=qwen-coder");
   });
 });
 
