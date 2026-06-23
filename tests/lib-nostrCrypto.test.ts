@@ -13,6 +13,7 @@ import {
   getPublicKey,
   finalizeEvent,
   getEventHash,
+  verifyEvent,
 } from "nostr-tools/pure";
 
 import {
@@ -286,7 +287,10 @@ describe("PhantomChat Protocol v2 — wrapV2 / unwrapV2 roundtrip", () => {
     const { event, rumorId } = await wrapV2(senderSk, recipientHex, "hello v2");
 
     expect(event.kind).toBe(1059);
-    expect(event.pubkey).toBe(senderHex);
+    // event.pubkey is an ephemeral throwaway key — NOT the sender's real key.
+    // Sender authenticity lives inside the encrypted rumor (rumor.pubkey).
+    expect(event.pubkey).not.toBe(senderHex);
+    expect(event.pubkey).not.toBe(recipientHex);
     expect(event.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")).toBe(true);
 
     const rumor = await unwrapV2(event, recipientSk);
@@ -406,5 +410,102 @@ describe("PhantomChat Protocol v2 — wrapV2 / unwrapV2 roundtrip", () => {
     const ratio = nip17Ms / v2Ms;
     // v2 should be at least 3× faster (conservative; actual is ~6×+)
     expect(ratio).toBeGreaterThan(3);
+  });
+});
+
+// ==================== Cross-repo shared test vector ====================
+// This vector MUST match between phantombot and phantomchat. The deterministic
+// inner half (ECDH → HKDF → AES-256-GCM key) is byte-pinned. The outer
+// envelope is non-deterministic (ephemeral signing) so we assert it structurally.
+//
+// If this test diverges between repos, the protocol has drifted and DMs will
+// silently fail to decrypt.
+
+describe("PhantomChat Protocol v2 — cross-repo shared test vector", () => {
+  // Fixed keys derived from minimal byte patterns for reproducibility.
+  // NEVER use these in production — they're test-only.
+  const senderSk = Uint8Array.from(
+    Array.from({ length: 32 }, (_, i) => i + 1),
+  );
+  const recipientSk = Uint8Array.from(
+    Array.from({ length: 32 }, (_, i) => i + 2),
+  );
+  const senderPk = getPublicKey(senderSk);
+  const recipientPk = getPublicKey(recipientSk);
+
+  // Deterministic inner half — these bytes MUST match across repos
+  const EXPECTED_SYMMETRIC_KEY =
+    "755d636b4454176139ef3c5da483e5c79be25d2a98c10b84e459a3a6d3d520a7";
+  const EXPECTED_RUMOR_ID =
+    "1012a22578e51593cad513f022acd569452a8a22a3560e9af260049edcdc4435";
+  const PLAINTEXT = "test vector plaintext";
+  const FIXED_CREATED_AT = 1700000000;
+
+  test("symmetric key derivation matches cross-repo vector", async () => {
+    clearSymmetricKeyCache();
+    const { key } = await getSymmetricKey(senderSk, recipientPk);
+    // Export the raw key bytes for comparison
+    const raw = new Uint8Array(
+      await crypto.subtle.exportKey("raw", key),
+    );
+    expect(Buffer.from(raw).toString("hex")).toBe(EXPECTED_SYMMETRIC_KEY);
+  });
+
+  test("rumor id matches cross-repo vector for fixed timestamp", () => {
+    const rumor = {
+      kind: 14,
+      created_at: FIXED_CREATED_AT,
+      tags: [["p", recipientPk], ["v", "pc-v2"]],
+      content: PLAINTEXT,
+      pubkey: senderPk,
+    };
+    expect(getEventHash(rumor as never)).toBe(EXPECTED_RUMOR_ID);
+  });
+
+  test("full wrap/unwrap roundtrip with fixed keys produces correct rumor", async () => {
+    clearSymmetricKeyCache();
+    // Patch Date.now to get a predictable created_at in the rumor
+    const realDateNow = Date.now;
+    Date.now = () => FIXED_CREATED_AT * 1000;
+    try {
+      const { event, rumorId } = await wrapV2(senderSk, recipientPk, PLAINTEXT);
+
+      // Outer envelope: structural checks (non-deterministic due to ephemeral signing)
+      expect(event.kind).toBe(1059);
+      expect(event.pubkey).not.toBe(senderPk); // ephemeral, not sender
+      expect(event.pubkey).not.toBe(recipientPk);
+      expect(event.tags.some((t) => t[0] === "p" && t[1] === recipientPk)).toBe(true);
+      expect(event.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")).toBe(true);
+      // Signature is valid (signed by ephemeral key)
+      expect(verifyEvent(event as never)).toBe(true);
+
+      // Inner half: rumorId must match the pinned vector
+      expect(rumorId).toBe(EXPECTED_RUMOR_ID);
+
+      // Unwrap recovers the correct rumor
+      const rumor = await unwrapV2(event, recipientSk);
+      expect(rumor.content).toBe(PLAINTEXT);
+      expect(rumor.pubkey).toBe(senderPk);
+      expect(rumor.id).toBe(EXPECTED_RUMOR_ID);
+      expect(rumor.kind).toBe(14);
+      expect(rumor.created_at).toBe(FIXED_CREATED_AT);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("cross-party unwrap: recipient can decrypt what sender encrypted", async () => {
+    clearSymmetricKeyCache();
+    const realDateNow = Date.now;
+    Date.now = () => FIXED_CREATED_AT * 1000;
+    try {
+      const { event } = await wrapV2(senderSk, recipientPk, PLAINTEXT);
+      // Simulate the recipient receiving the event
+      const rumor = await unwrapV2(event, recipientSk);
+      expect(rumor.content).toBe(PLAINTEXT);
+      expect(rumor.pubkey).toBe(senderPk);
+    } finally {
+      Date.now = realDateNow;
+    }
   });
 });

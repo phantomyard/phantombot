@@ -217,9 +217,9 @@ export function wrapGroupMessage(
  * transport/parse error (log + move on). The `code` names the failed check.
  */
 export class GiftWrapVerificationError extends Error {
-  readonly code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id";
+  readonly code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id" | "no_matching_key";
   constructor(
-    code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id",
+    code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id" | "no_matching_key",
     message: string,
   ) {
     super(message);
@@ -367,6 +367,30 @@ export function clearSymmetricKeyCache(): void {
 }
 
 /**
+ * Try to decrypt ciphertext with every cached symmetric key. AES-GCM auth
+ * tag rejection is instant (~µs) so even 50+ cached keys is sub-millisecond.
+ *
+ * Returns the plaintext + the cache key (sorted pubkey pair) on success,
+ * or null if no key matched.
+ *
+ * Used by unwrapV2 because ephemeral envelope signing means event.pubkey
+ * is a throwaway key — we can't derive the symmetric key from it directly.
+ */
+async function decryptWithAnyCachedKey(
+  ciphertext: string,
+): Promise<{ plaintext: string; cacheKey: string } | null> {
+  for (const [cacheKey, symmetricKey] of symmetricKeyCache) {
+    try {
+      const plaintext = await decryptV2(ciphertext, symmetricKey);
+      return { plaintext, cacheKey };
+    } catch {
+      // Wrong key — AES-GCM auth tag mismatch, try next
+    }
+  }
+  return null;
+}
+
+/**
  * PhantomChat v2: encrypt plaintext with AES-256-GCM.
  * IV (12 bytes) prepended to ciphertext, all base64url-encoded.
  */
@@ -444,14 +468,18 @@ export async function wrapV2(
   // Encrypt rumor JSON with AES-256-GCM
   const encryptedContent = await encryptV2(JSON.stringify(rumorWithId), symmetricKey);
 
-  // Sign as kind-1059 with sender's real key (no ephemeral key)
+  // Sign outer event with a FRESH EPHEMERAL keypair per message (NIP-17
+  // parity). This prevents relays from building an A→B social graph from
+  // signed event.pubkey edges. Sender authenticity lives inside the encrypted
+  // rumor (rumor.pubkey), verified on unwrap via getEventHash + cache key.
+  const ephemeralSk = generateSecretKey();
   const eventTemplate = {
     kind: 1059,
     created_at: Math.floor(Date.now() / 1000),
     tags,
     content: encryptedContent,
   };
-  const event = finalizeEvent(eventTemplate, senderSk) as unknown as NTNostrEvent;
+  const event = finalizeEvent(eventTemplate, ephemeralSk) as unknown as NTNostrEvent;
 
   return { event, rumorId };
 }
@@ -464,7 +492,7 @@ export async function wrapV2(
  */
 export async function unwrapV2(
   event: NTNostrEvent,
-  recipientSk: Uint8Array,
+  _recipientSk: Uint8Array,
 ): Promise<{
   kind: number;
   content: string;
@@ -477,32 +505,28 @@ export async function unwrapV2(
     throw new GiftWrapVerificationError("wrap_sig", "v2 event signature invalid");
   }
 
-  // Determine counterparty for key derivation
-  const myPubkey = getPublicKey(recipientSk);
-  let counterpartyPubHex: string;
-  if (event.pubkey === myPubkey) {
-    // We're the sender (self-send) — use the p tag recipient
-    const pTag = event.tags?.find((t) => t[0] === "p");
-    if (!pTag) {
-      throw new GiftWrapVerificationError(
-        "pubkey_binding",
-        "v2 self-send event missing p tag",
-      );
-    }
-    counterpartyPubHex = pTag[1]!;
-  } else {
-    counterpartyPubHex = event.pubkey;
+  // Ephemeral envelope signing: event.pubkey is a throwaway key, not the
+  // real sender. We can't use it for key derivation. Instead, try all cached
+  // symmetric keys until one decrypts successfully (AES-GCM auth tag rejects
+  // wrong keys instantly). The cache key is the sorted pubkey pair, so after
+  // decrypt we verify rumor.pubkey matches one of them.
+  const result = await decryptWithAnyCachedKey(event.content);
+  if (!result) {
+    throw new GiftWrapVerificationError(
+      "no_matching_key",
+      "v2: no cached symmetric key could decrypt the content",
+    );
   }
-  const { key: symmetricKey } = await getSymmetricKey(recipientSk, counterpartyPubHex);
-
-  const rumorJson = await decryptV2(event.content, symmetricKey);
+  const { plaintext: rumorJson, cacheKey } = result;
   const rumor = JSON.parse(rumorJson) as UnsignedEvent;
 
-  // Anti-impersonation: rumor.pubkey must match event.pubkey
-  if (rumor.pubkey !== event.pubkey) {
+  // Anti-impersonation: rumor.pubkey must match one of the pubkeys in the
+  // cache pair (the two parties who share this symmetric key).
+  const [pk1, pk2] = cacheKey.split(":");
+  if (rumor.pubkey !== pk1 && rumor.pubkey !== pk2) {
     throw new GiftWrapVerificationError(
       "pubkey_binding",
-      `v2 rumor.pubkey (${rumor.pubkey?.slice(0, 8)}...) does not match event.pubkey (${event.pubkey?.slice(0, 8)}...)`,
+      `v2 rumor.pubkey (${rumor.pubkey?.slice(0, 8)}...) does not match either key in cache pair`,
     );
   }
 
