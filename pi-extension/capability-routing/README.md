@@ -46,7 +46,8 @@ The extension reads a single managed data file, `routing.json`, that lives
 {
   "primaryModel": "deepseek-v4-pro",
   "imageModel": "gpt-4o",
-  "codingModel": "gpt-5.2-codex"
+  "codingModel": "gpt-5.2-codex",
+  "codingProgress": true
 }
 ```
 
@@ -55,9 +56,32 @@ The extension reads a single managed data file, `routing.json`, that lives
 | `primaryModel` | Orchestrator model id (bare name as printed by `pi --list-models`). Informational to the extension — phantombot's pi harness pins it via `--model`. |
 | `imageModel` | Vision delegate. **Present only when the primary is not multimodal.** Absent ⇒ `look_at_image` not registered. |
 | `codingModel` | Coding delegate for `coder`. Absent ⇒ `coder` not registered. |
+| `codingProgress` | Opt-in. When `true` **and** a `codingModel` is set, `coder` streams its progress to Telegram (see below). Omitted/`false` ⇒ silent coder. Baked only when both conditions hold. |
 
 A blank/whitespace value is treated as absent. If `routing.json` is missing or
 unparseable the extension registers **nothing** (the safe inert default).
+
+### Coder progress streaming (opt-in)
+
+A `coder` call is a **synchronous, blocking** tool call: the primary model is
+parked until the coding child finishes, so a long job means a long silence. With
+`codingProgress: true`, the extension forwards the coding child's **own per-turn
+events** (Pi's `message_end` stream — assistant text + tool calls it makes) out
+to Telegram via `phantombot notify` as the job runs, e.g. `coder: 🛠️ edit — adding
+the retry guard`. No new tool contract, no async machinery — it just surfaces
+what Pi already emits.
+
+- **Throttled:** at most one notification per 15s; the first event always goes
+  through so you see work has started.
+- **Fire-and-forget:** each notification is a detached `phantombot notify`;
+  errors are swallowed, so progress can never slow or break the coding job.
+- **No double-report:** the final (terminal) turn is skipped — that text is the
+  answer the parent model already receives as the tool result.
+
+Off by default. Enable via the `phantombot harness` wizard ("Stream coder
+progress to Telegram?") or set `coding_progress = true` under
+`[harnesses.pi.routing]` in `config.toml` (env override:
+`PHANTOMBOT_CODING_PROGRESS=true`).
 
 > **Env vars are no longer used by this extension.** The old
 > `PHANTOMBOT_PRIMARY_MODEL` / `PHANTOMBOT_IMAGE_MODEL` / `PHANTOMBOT_CODING_MODEL`

@@ -49,6 +49,32 @@ describe("planRouting — tool registration decisions", () => {
     expect(plan.registerLookAtImage).toBe(false);
     expect(plan.registerCoder).toBe(false);
     expect(plan.primaryModel).toBeUndefined();
+    expect(plan.streamCoderProgress).toBe(false);
+  });
+});
+
+describe("planRouting — coder progress streaming", () => {
+  test("streams when codingProgress is true AND a coding model is set", () => {
+    const plan = planRouting({
+      codingModel: "gpt-5.2-codex",
+      codingProgress: true,
+    });
+    expect(plan.registerCoder).toBe(true);
+    expect(plan.streamCoderProgress).toBe(true);
+  });
+
+  test("does NOT stream when codingProgress is true but no coding model", () => {
+    // progress without a coder tool is meaningless — force-decoupled
+    const plan = planRouting({ codingProgress: true });
+    expect(plan.registerCoder).toBe(false);
+    expect(plan.streamCoderProgress).toBe(false);
+  });
+
+  test("does NOT stream when codingProgress is unset or false", () => {
+    expect(planRouting({ codingModel: "x" }).streamCoderProgress).toBe(false);
+    expect(
+      planRouting({ codingModel: "x", codingProgress: false }).streamCoderProgress,
+    ).toBe(false);
   });
 });
 

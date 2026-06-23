@@ -33,6 +33,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -41,7 +42,56 @@ import {
   planRouting,
   type RoutingConfig,
 } from "./tools.ts";
-import { delegate, finalText, usageLine } from "./spawnPi.ts";
+import { delegate, finalText, usageLine, type DelegateProgress } from "./spawnPi.ts";
+
+/** Minimum gap between coder progress notifications (anti-spam throttle). */
+const PROGRESS_MIN_INTERVAL_MS = 15_000;
+/** Max chars of assistant text carried into a progress notification. */
+const PROGRESS_TEXT_MAX = 160;
+
+/**
+ * Build a throttled progress sink that forwards the coder child's per-turn
+ * events to Telegram via `phantombot notify`. Returns undefined when streaming
+ * is off, so the delegate runs in its original silent mode.
+ *
+ * Design notes:
+ *  - Fire-and-forget: each notification is a detached `phantombot notify`
+ *    child; we never await it and swallow every error. Progress must never
+ *    slow down or break the actual coding job.
+ *  - Throttled: at most one notification per PROGRESS_MIN_INTERVAL_MS. The
+ *    first event always goes through (so the user sees work has started);
+ *    after that we coalesce.
+ *  - Skips the terminal turn: that text is the final answer, which the parent
+ *    model already receives as the tool result — no need to double-report it.
+ */
+function makeCoderProgressSink(
+  enabled: boolean,
+): ((ev: DelegateProgress) => void) | undefined {
+  if (!enabled) return undefined;
+  let lastSentAt = 0;
+  return (ev: DelegateProgress) => {
+    if (ev.terminal) return;
+    const now = Date.now();
+    if (lastSentAt !== 0 && now - lastSentAt < PROGRESS_MIN_INTERVAL_MS) return;
+
+    const bits: string[] = [];
+    if (ev.tools.length > 0) bits.push(`🛠️ ${ev.tools.join(", ")}`);
+    if (ev.text) bits.push(ev.text.slice(0, PROGRESS_TEXT_MAX));
+    const body = bits.join(" — ") || `working… (turn ${ev.turn})`;
+
+    try {
+      const child = spawn("phantombot", ["notify", "--message", `coder: ${body}`], {
+        stdio: "ignore",
+        detached: true,
+      });
+      child.on("error", () => {});
+      child.unref();
+      lastSentAt = now;
+    } catch {
+      /* notify is best-effort; never let it affect the delegation */
+    }
+  };
+}
 
 /**
  * Resolve this extension's own directory robustly across runtimes, then read
@@ -150,6 +200,7 @@ export default function (pi: ExtensionAPI) {
           tools: ["edit", "bash", "write"],
           cwd: params.cwd ?? ctx.cwd,
           signal,
+          onProgress: makeCoderProgressSink(plan.streamCoderProgress),
         });
         if (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted") {
           return {

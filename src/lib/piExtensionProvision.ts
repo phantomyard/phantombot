@@ -43,7 +43,12 @@ export interface ProvisionResult {
    *           there to remove (already in the desired empty state).
    */
   action: "created" | "updated" | "unchanged" | "removed" | "absent";
-  models: { primaryModel?: string; imageModel?: string; codingModel?: string };
+  models: {
+    primaryModel?: string;
+    imageModel?: string;
+    codingModel?: string;
+    codingProgress?: boolean;
+  };
   /** Relative paths of files we (re)wrote this run. */
   wrote: string[];
 }
@@ -93,18 +98,20 @@ export function hasRoutableCapability(
 /** Only the defined routing fields, in a stable key order, as a JSON object. */
 function routingModels(
   routing: PiRoutingConfig | undefined,
-): { primaryModel?: string; imageModel?: string; codingModel?: string } {
-  const out: {
-    primaryModel?: string;
-    imageModel?: string;
-    codingModel?: string;
-  } = {};
+): ProvisionResult["models"] {
+  const out: ProvisionResult["models"] = {};
   const primaryModel = clean(routing?.primaryModel);
   const imageModel = clean(routing?.imageModel);
   const codingModel = clean(routing?.codingModel);
   if (primaryModel !== undefined) out.primaryModel = primaryModel;
   if (imageModel !== undefined) out.imageModel = imageModel;
   if (codingModel !== undefined) out.codingModel = codingModel;
+  // codingProgress is a coder-only behavior flag — bake it ONLY when a coding
+  // model is present and the flag is on. Without a coding model there's no
+  // `coder` tool to stream, so the key is omitted to keep routing.json minimal.
+  if (codingModel !== undefined && routing?.codingProgress === true) {
+    out.codingProgress = true;
+  }
   return out;
 }
 

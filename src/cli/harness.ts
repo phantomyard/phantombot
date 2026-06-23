@@ -87,12 +87,19 @@ export async function applyRouting(
     // no image/coding model so a multimodal switch clears a stale entry.
     setRoutingKey(toml, "image_model", writes.toml.image_model);
     setRoutingKey(toml, "coding_model", writes.toml.coding_model);
+    // coding_progress: write only when on; otherwise delete so disabling it (or
+    // dropping the coding model) clears a stale flag rather than leaving it.
+    setRoutingKey(toml, "coding_progress", writes.toml.coding_progress);
   });
   await updateEnvFile(envPath, writes.env);
   return writes;
 }
 
-function setRoutingKey(toml: TomlObject, key: string, value: string | undefined): void {
+function setRoutingKey(
+  toml: TomlObject,
+  key: string,
+  value: string | boolean | undefined,
+): void {
   const routing = getIn(toml, ["harnesses", "pi", "routing"]) as
     | Record<string, unknown>
     | undefined;
@@ -295,10 +302,23 @@ async function runRoutingWizard(
   );
   if (codingModel === CANCELLED) return true;
 
+  // Progress streaming is a coder-only behavior, so only ask when a coding
+  // model is actually set. Off by default (silent coder, as before).
+  let codingProgress = false;
+  if (codingModel.trim()) {
+    const ans = await p.confirm({
+      message: "Stream coder progress to Telegram while it works?",
+      initialValue: current.codingProgress === true,
+    });
+    if (p.isCancel(ans)) return true;
+    codingProgress = ans;
+  }
+
   const choices: RoutingChoices = {
     primaryModel,
     imageModel,
     codingModel,
+    codingProgress,
     primaryMultimodal: multimodal,
   };
   const writes = await applyRouting(config.configPath, choices);
@@ -307,6 +327,7 @@ async function runRoutingWizard(
       `primary: ${writes.toml.primary_model}`,
       `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
       `coding:  ${writes.toml.coding_model ?? "(none)"}`,
+      `progress: ${writes.toml.coding_progress ? "on (streams to Telegram)" : "off"}`,
       "",
       `saved to ${config.configPath} and ${userEnvPath()}`,
     ].join("\n"),

@@ -39,6 +39,41 @@ export interface DelegateResult {
   errorMessage?: string;
 }
 
+/**
+ * A single per-turn progress event forwarded from the child as it streams.
+ * Emitted from the child's OWN json output (one per assistant `message_end`),
+ * so we surface exactly what Pi already reports — no invented protocol.
+ */
+export interface DelegateProgress {
+  /** 1-based assistant turn index within this delegation. */
+  turn: number;
+  /** Trimmed snippet of the assistant's text for this turn, if any. */
+  text?: string;
+  /** Tool names the assistant invoked this turn (edit, bash, write, …). */
+  tools: string[];
+  /** True once this turn carries a terminal stopReason (the final answer). */
+  terminal: boolean;
+}
+
+/**
+ * Best-effort extraction of tool-call names from an assistant message's content
+ * parts. Pi's exact part shape isn't pinned here (the extension runs against
+ * whatever pi-ai the host pi ships), so this reads defensively: anything that
+ * isn't a text part and exposes a string name is treated as a tool call.
+ */
+function toolNamesOf(msg: Message): string[] {
+  const names: string[] = [];
+  for (const part of (msg.content ?? []) as unknown[]) {
+    const p = part as { type?: string; name?: unknown; toolName?: unknown };
+    if (p.type === "text") continue;
+    const name = typeof p.name === "string" ? p.name
+      : typeof p.toolName === "string" ? p.toolName
+      : undefined;
+    if (name) names.push(name);
+  }
+  return names;
+}
+
 export interface DelegateOptions {
   /** Model id to pin via --model (bare name as printed by `pi --list-models`). */
   model: string;
@@ -52,6 +87,13 @@ export interface DelegateOptions {
   cwd?: string;
   /** Abort signal — propagated as SIGTERM/SIGKILL to the child. */
   signal?: AbortSignal;
+  /**
+   * Optional per-turn progress sink. Invoked as each assistant `message_end`
+   * arrives on the child's json stream. Kept side-effect-free here — the caller
+   * decides what to do (e.g. throttle + `phantombot notify`). Any throw is
+   * swallowed so a noisy sink can never break the delegation.
+   */
+  onProgress?: (ev: DelegateProgress) => void;
 }
 
 /**
@@ -157,6 +199,26 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
             if (!result.model && msg.model) result.model = msg.model;
             if (msg.stopReason) result.stopReason = msg.stopReason;
             if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+
+            if (opts.onProgress) {
+              let text: string | undefined;
+              for (const part of msg.content) {
+                if (part.type === "text" && part.text.trim()) {
+                  text = part.text.trim();
+                  break;
+                }
+              }
+              try {
+                opts.onProgress({
+                  turn: result.usage.turns,
+                  text,
+                  tools: toolNamesOf(msg),
+                  terminal: Boolean(msg.stopReason),
+                });
+              } catch {
+                /* a noisy sink must never break the delegation */
+              }
+            }
           }
         }
         if (event.type === "tool_result_end" && event.message) {
