@@ -17,7 +17,40 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Message } from "@earendil-works/pi-ai";
+
+/**
+ * Minimal structural shape of pi's assistant `Message`, declared locally
+ * instead of imported from `@earendil-works/pi-ai`. This extension is
+ * deliberately dependency-free: it is stamped into the host pi's extension
+ * directory and runs against whatever `pi-ai` that pi already ships, so the
+ * repo does not vendor `pi-ai` — importing its types here would break
+ * `tsc --noEmit`. We model only the fields we actually read, defensively, and
+ * the JSON we parse off pi's stream is widened into this shape at the boundary.
+ *
+ * Content parts are a small discriminated union: a `text` part (the only shape
+ * we read field-by-field) plus a generic non-text part for tool calls. The
+ * non-text discriminant value is nominal — code only ever compares against
+ * `"text"` — so it never participates in runtime branching.
+ */
+interface MessageUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: { total?: number };
+  totalTokens?: number;
+}
+type MessageContentPart =
+  | { type: "text"; text: string }
+  | { type: "toolCall"; name?: string; toolName?: string };
+export interface Message {
+  role: string;
+  content: MessageContentPart[];
+  usage?: MessageUsage;
+  model?: string;
+  stopReason?: string;
+  errorMessage?: string;
+}
 
 export interface DelegateUsage {
   input: number;
