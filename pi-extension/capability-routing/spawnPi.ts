@@ -459,28 +459,20 @@ export function formatToolCall(call: ToolCall): string {
 }
 
 /**
- * Build the human-readable progress line(s) for one streamed turn. Leads with
- * the model's own narration when present, appends a `— "narration"` tail to the
- * first tool line so the digest reads naturally, and falls back to verb+arg for
- * pure-tool turns. Returns [] for a turn with nothing worth reporting (e.g. an
- * empty/terminal turn) so the caller can simply skip it.
+ * Build the progress line(s) for one streamed turn — NARRATION ONLY.
+ *
+ * We surface only the coding model's own words (`ev.text`) so the stream reads
+ * exactly like the primary persona thinking out loud; no tool noise, no prefix.
+ * A pure-tool turn (work happened but the model said nothing) yields [] and the
+ * caller stays silent — so silent tool churn never reaches the user. Tool-call
+ * extraction (`toolCallsOf`/`formatToolCall`) is retained and still tested in
+ * case we want to reintroduce a verbose mode later.
  *
  * Pure and side-effect-free for unit testing.
  */
 export function formatProgressLines(ev: DelegateProgress): string[] {
   const narration = ev.text ? clip(ev.text, PROGRESS_TEXT_MAX) : undefined;
-  const toolLines = ev.toolCalls.map(formatToolCall);
-
-  if (toolLines.length === 0) {
-    return narration ? [`💬 ${narration}`] : [];
-  }
-
-  // Attach the narration to the first tool line so the model's intent and the
-  // action it took read as one thought: `✏️ edit auth.ts — "adding the guard"`.
-  if (narration) {
-    toolLines[0] = `${toolLines[0]} — "${narration}"`;
-  }
-  return toolLines;
+  return narration ? [narration] : [];
 }
 
 /**

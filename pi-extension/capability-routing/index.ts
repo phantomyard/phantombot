@@ -100,13 +100,6 @@ interface CoderProgressSink {
   onProgressEnd: () => void;
 }
 
-/** Short job label for the digest header — the cwd basename, else "coder". */
-function coderLabel(cwd: string | undefined): string {
-  if (!cwd) return "coder";
-  const base = path.basename(cwd.replace(/[\\/]+$/, ""));
-  return base || "coder";
-}
-
 /**
  * Build an ACCUMULATING progress sink that forwards the coder child's per-turn
  * events to the user via `phantombot notify`. Returns undefined when streaming
@@ -140,7 +133,6 @@ function coderLabel(cwd: string | undefined): string {
  */
 function makeCoderProgressSink(
   globalDefault: boolean,
-  label: string,
 ): CoderProgressSink {
   // Always built; gated per emit. An `on` /viewcoder override must be able to
   // force streaming even when globalDefault is off, and overrides can change
@@ -155,9 +147,10 @@ function makeCoderProgressSink(
   };
 
   // One detached, fire-and-forget `phantombot notify` per flushed digest.
-  // Channel-agnostic: notify fans out to every configured channel.
+  // Channel-agnostic: notify fans out to every configured channel. No prefix —
+  // the body is pure narration so it reads like the primary persona talking.
   const emit = (lines: string): void => {
-    const body = `coder(${label}):\n${lines}`;
+    const body = lines;
     try {
       const child = spawn("phantombot", ["notify", "--message", body], {
         stdio: "ignore",
@@ -292,14 +285,10 @@ export default function (pi: ExtensionAPI) {
       parameters: CoderParams,
       async execute(_id, params, signal, _onUpdate, ctx) {
         const cwd = params.cwd ?? ctx.cwd;
-        // Job label for the digest header, e.g. `coder(phantombot):`. The cwd
-        // basename ("which workspace") is the most useful at-a-glance handle;
-        // fall back to a generic "coder" when there's no usable cwd.
-        const label = coderLabel(cwd);
         // Build the streaming sink unconditionally so an `on` /viewcoder
         // override can force progress even when the global default is off; the
         // sink gates per emit. plan.streamCoderProgress is the global default.
-        const sink = makeCoderProgressSink(plan.streamCoderProgress, label);
+        const sink = makeCoderProgressSink(plan.streamCoderProgress);
         const r = await delegate({
           model: codingModel,
           task: coderDelegationPrompt(params.task),
