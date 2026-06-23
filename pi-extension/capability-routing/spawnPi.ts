@@ -61,6 +61,43 @@ export interface DelegateProgress {
  * whatever pi-ai the host pi ships), so this reads defensively: anything that
  * isn't a text part and exposes a string name is treated as a tool call.
  */
+/**
+ * Classify a turn's stopReason. Pi sets a stopReason on EVERY assistant turn,
+ * not just the last one: tool-use continuation turns carry `stopReason:
+ * "toolUse"`, while the run genuinely ends with `"stop"` (final answer),
+ * `"length"` (truncation), or an error/abort state. A turn is "terminal" only
+ * when it ENDS the delegation — i.e. any stopReason other than `"toolUse"`.
+ *
+ * This is the crux of progress streaming: the sink drops terminal turns (their
+ * text is the final answer the parent already gets as the tool result), so a
+ * naive `Boolean(stopReason)` would mis-flag every edit/bash/write turn as
+ * terminal and silently swallow exactly the progress worth reporting.
+ */
+export function isTerminalStop(stopReason: string | undefined): boolean {
+  return Boolean(stopReason) && stopReason !== "toolUse";
+}
+
+/**
+ * Build a per-turn progress event from a completed assistant message. Pure and
+ * side-effect-free so it can be unit-tested without spawning pi: extracts the
+ * first non-empty text snippet, the tool-call names, and the terminal flag.
+ */
+export function buildProgress(msg: Message, turn: number): DelegateProgress {
+  let text: string | undefined;
+  for (const part of msg.content) {
+    if (part.type === "text" && part.text.trim()) {
+      text = part.text.trim();
+      break;
+    }
+  }
+  return {
+    turn,
+    text,
+    tools: toolNamesOf(msg),
+    terminal: isTerminalStop(msg.stopReason),
+  };
+}
+
 function toolNamesOf(msg: Message): string[] {
   const names: string[] = [];
   for (const part of (msg.content ?? []) as unknown[]) {
@@ -201,20 +238,8 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
             if (msg.errorMessage) result.errorMessage = msg.errorMessage;
 
             if (opts.onProgress) {
-              let text: string | undefined;
-              for (const part of msg.content) {
-                if (part.type === "text" && part.text.trim()) {
-                  text = part.text.trim();
-                  break;
-                }
-              }
               try {
-                opts.onProgress({
-                  turn: result.usage.turns,
-                  text,
-                  tools: toolNamesOf(msg),
-                  terminal: Boolean(msg.stopReason),
-                });
+                opts.onProgress(buildProgress(msg, result.usage.turns));
               } catch {
                 /* a noisy sink must never break the delegation */
               }
