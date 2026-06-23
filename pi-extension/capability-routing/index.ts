@@ -51,8 +51,15 @@ const PROGRESS_TEXT_MAX = 160;
 
 /**
  * Build a throttled progress sink that forwards the coder child's per-turn
- * events to Telegram via `phantombot notify`. Returns undefined when streaming
+ * events to the user via `phantombot notify`. Returns undefined when streaming
  * is off, so the delegate runs in its original silent mode.
+ *
+ * Channel-agnostic by construction: the sink only shells out to `phantombot
+ * notify`, which fans the message out to the first owner of EVERY configured
+ * channel for the persona (Telegram + phantomchat today, any future channel as
+ * `notify` grows). This extension deliberately knows nothing about channels —
+ * it never touches Telegram (or any other channel) code directly, so progress
+ * automatically reaches whatever channels the persona has, not just Telegram.
  *
  * Design notes:
  *  - Fire-and-forget: each notification is a detached `phantombot notify`
