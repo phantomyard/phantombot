@@ -238,6 +238,15 @@ export interface RunDoctorInput {
   checkHarnesses?:
     | false
     | (() => Promise<DoctorReport["harnesses"] | undefined>);
+  /**
+   * Test seam for the managed Pi capability-routing extension check. Pass
+   * `false` to skip. Pass a function to substitute a fake report (bypassing
+   * the binary gate and the filesystem stamp/remove). In production this is
+   * undefined and doctor inspects the real `~/.pi/agent/extensions` dir.
+   */
+  checkPiExtension?:
+    | false
+    | (() => Promise<DoctorReport["piExtension"] | undefined>);
 }
 
 function decideRepair(
@@ -416,7 +425,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // real ~/.pi. Not gated on routing being set, so dropping routing also
   // triggers cleanup of a previously-stamped dir.
   let piExtensionReport: DoctorReport["piExtension"] | undefined;
-  if (basename(process.execPath) === "phantombot") {
+  if (input.checkPiExtension === false) {
+    // explicitly skipped by a test
+  } else if (input.checkPiExtension) {
+    piExtensionReport = await input.checkPiExtension();
+  } else if (basename(process.execPath) === "phantombot") {
     const piRouting = config.harnesses?.pi?.routing;
     const status = await routingExtensionStatus(piRouting);
     let repaired = false;
@@ -496,6 +509,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     (timersReport.heartbeat.stale || timersReport.tick.stale);
   const harnessesBroken =
     !!harnessReport && missingHarnesses(harnessReport.checks).length > 0;
+  // A drifted managed Pi extension (missing-but-wanted, stale, or
+  // present-but-unwanted) that wasn't repaired this run is a health failure,
+  // same as the systemd/timer/harness checks above. `repaired` is set only
+  // when this run actually re-stamped/removed it, so `--no-repair` leaves the
+  // drift visible and trips exit 1. NOTE: this is the `doctor` *CLI* exit code,
+  // a diagnostic signal for humans/CI — it does NOT gate the long-running
+  // service. `run.ts` calls doctor at startup but only logs a non-zero code
+  // (and provisioning is fire-and-forget, warn-only), so the daemon never dies
+  // on it. The "phantombot must never exit 1 so a revert can ship" invariant
+  // lives in the service path and stays intact.
+  const piExtensionBroken =
+    !!piExtensionReport &&
+    piExtensionReport.drifted &&
+    !piExtensionReport.repaired;
   const exitCode =
     needed && !repairTriggered
       ? 1
@@ -505,7 +532,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
           ? 1
           : harnessesBroken
             ? 1
-            : 0;
+            : piExtensionBroken
+              ? 1
+              : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
