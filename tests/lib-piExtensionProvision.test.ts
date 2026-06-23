@@ -76,6 +76,43 @@ describe("ensureRoutingExtension", () => {
     expect("imageModel" in routingJson).toBe(false);
   });
 
+  test("bakes codingProgress only when on AND a coding model is set", async () => {
+    await ensureRoutingExtension(
+      { primaryModel: "gpt-5.2", codingModel: "qwen-coder", codingProgress: true },
+      { home },
+    );
+    const routingJson = JSON.parse(
+      await readFile(join(extDir(home), "routing.json"), "utf8"),
+    );
+    expect(routingJson).toEqual({
+      primaryModel: "gpt-5.2",
+      codingModel: "qwen-coder",
+      codingProgress: true,
+    });
+  });
+
+  test("omits codingProgress when off, or when no coding model is set", async () => {
+    // progress off ⇒ key omitted
+    await ensureRoutingExtension(
+      { primaryModel: "gpt-5.2", codingModel: "qwen-coder", codingProgress: false },
+      { home },
+    );
+    let json = JSON.parse(
+      await readFile(join(extDir(home), "routing.json"), "utf8"),
+    );
+    expect("codingProgress" in json).toBe(false);
+
+    // progress true but image-only (no coding model) ⇒ key omitted (decoupled)
+    await ensureRoutingExtension(
+      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", codingProgress: true },
+      { home },
+    );
+    json = JSON.parse(
+      await readFile(join(extDir(home), "routing.json"), "utf8"),
+    );
+    expect("codingProgress" in json).toBe(false);
+  });
+
   test("image-only capability stamps the dir (coding unset)", async () => {
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", imageModel: "gpt-4o" },

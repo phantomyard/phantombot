@@ -43,24 +43,50 @@
 export const ENV_PRIMARY_MODEL = "PHANTOMBOT_PRIMARY_MODEL";
 export const ENV_IMAGE_MODEL = "PHANTOMBOT_IMAGE_MODEL";
 export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
+/**
+ * Opt-in progress streaming for the `coder` delegate. When truthy, the
+ * extension forwards the coding child's own per-turn events (assistant text +
+ * tool calls) out to Telegram via `phantombot notify`, throttled. Off by
+ * default — a `coder` call stays silent until it returns, exactly as before.
+ * Only meaningful alongside a coding model; ignored without one.
+ */
+export const ENV_CODING_PROGRESS = "PHANTOMBOT_CODING_PROGRESS";
 
 /**
- * The resolved routing config. All three are optional: undefined means "no
- * override — let Pi / the extension fall back to its default behavior". An
+ * The resolved routing config. All model fields are optional: undefined means
+ * "no override — let Pi / the extension fall back to its default behavior". An
  * absent imageModel specifically means the `look_at_image` tool will not be
  * registered (either because the primary is multimodal, or because routing is
- * off entirely).
+ * off entirely). `codingProgress` is the lone non-model knob: a behavior flag
+ * for the coding delegate, undefined ⇒ off.
  */
 export interface PiRoutingConfig {
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
+  /** Stream the coder child's per-turn progress to Telegram (default off). */
+  codingProgress?: boolean;
 }
 
 function clean(v: string | undefined): string | undefined {
   if (v === undefined) return undefined;
   const t = v.trim();
   return t.length > 0 ? t : undefined;
+}
+
+/**
+ * Coerce a config/env value to a boolean. Accepts real booleans (TOML) and the
+ * usual truthy/falsy strings (env). Unrecognized / blank ⇒ undefined so the
+ * env-over-TOML `??` chain falls through correctly.
+ */
+function cleanBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  if (typeof v !== "string") return undefined;
+  const t = v.trim().toLowerCase();
+  if (t === "") return undefined;
+  if (t === "1" || t === "true" || t === "yes" || t === "on") return true;
+  if (t === "0" || t === "false" || t === "no" || t === "off") return false;
+  return undefined;
 }
 
 /**
@@ -83,6 +109,8 @@ export function resolveRouting(
     primaryModel: clean(env[ENV_PRIMARY_MODEL]) ?? tomlStr("primary_model"),
     imageModel: clean(env[ENV_IMAGE_MODEL]) ?? tomlStr("image_model"),
     codingModel: clean(env[ENV_CODING_MODEL]) ?? tomlStr("coding_model"),
+    codingProgress:
+      cleanBool(env[ENV_CODING_PROGRESS]) ?? cleanBool(t["coding_progress"]),
   };
 }
 
@@ -97,6 +125,11 @@ export interface RoutingChoices {
   imageModel?: string;
   codingModel?: string;
   /**
+   * Stream the coder child's progress to Telegram. Only honored when a coding
+   * model is set (no coding model ⇒ no `coder` tool ⇒ nothing to stream).
+   */
+  codingProgress?: boolean;
+  /**
    * Whether the chosen primary accepts image input. When true, the image
    * model is DROPPED regardless of what `imageModel` holds — the central
    * "skip image model when multimodal" rule, applied in exactly one place.
@@ -107,7 +140,12 @@ export interface RoutingChoices {
 /** The concrete writes the wizard should persist. */
 export interface RoutingWrites {
   /** Values to set in config.toml's [harnesses.pi.routing]. */
-  toml: { primary_model: string; image_model?: string; coding_model?: string };
+  toml: {
+    primary_model: string;
+    image_model?: string;
+    coding_model?: string;
+    coding_progress?: boolean;
+  };
   /**
    * Env vars to write to ~/.env. A value of "" means UNSET (delete the key) —
    * matching `phantombot env unset` / updateEnvFile's empty-string semantics,
@@ -128,18 +166,26 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   const coding = clean(choices.codingModel);
   // Auto-skip: a multimodal primary never gets an image delegate.
   const image = choices.primaryMultimodal ? undefined : clean(choices.imageModel);
+  // Progress is a coder-only knob; without a coding model it's meaningless, so
+  // it's forced off (and any stale flag is cleared) when coding is unset.
+  const codingProgress = coding ? choices.codingProgress === true : false;
 
   const toml: RoutingWrites["toml"] = { primary_model: primary };
   if (image) toml.image_model = image;
   if (coding) toml.coding_model = coding;
+  // Only persist the flag when it's on — a bare `true` is meaningful, but we
+  // don't litter config.toml with `coding_progress = false`.
+  if (codingProgress) toml.coding_progress = true;
 
   // "" clears the key (updateEnvFile delete semantics). We always write all
-  // three keys so switching from a non-multimodal to a multimodal primary
-  // actively removes a stale PHANTOMBOT_IMAGE_MODEL rather than leaving it.
+  // keys so switching from a non-multimodal to a multimodal primary actively
+  // removes a stale PHANTOMBOT_IMAGE_MODEL, and disabling progress clears a
+  // stale PHANTOMBOT_CODING_PROGRESS rather than leaving it.
   const env: Record<string, string> = {
     [ENV_PRIMARY_MODEL]: primary,
     [ENV_IMAGE_MODEL]: image ?? "",
     [ENV_CODING_MODEL]: coding ?? "",
+    [ENV_CODING_PROGRESS]: codingProgress ? "true" : "",
   };
 
   return { toml, env };

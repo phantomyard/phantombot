@@ -17,7 +17,40 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Message } from "@earendil-works/pi-ai";
+
+/**
+ * Minimal structural shape of pi's assistant `Message`, declared locally
+ * instead of imported from `@earendil-works/pi-ai`. This extension is
+ * deliberately dependency-free: it is stamped into the host pi's extension
+ * directory and runs against whatever `pi-ai` that pi already ships, so the
+ * repo does not vendor `pi-ai` — importing its types here would break
+ * `tsc --noEmit`. We model only the fields we actually read, defensively, and
+ * the JSON we parse off pi's stream is widened into this shape at the boundary.
+ *
+ * Content parts are a small discriminated union: a `text` part (the only shape
+ * we read field-by-field) plus a generic non-text part for tool calls. The
+ * non-text discriminant value is nominal — code only ever compares against
+ * `"text"` — so it never participates in runtime branching.
+ */
+interface MessageUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: { total?: number };
+  totalTokens?: number;
+}
+type MessageContentPart =
+  | { type: "text"; text: string }
+  | { type: "toolCall"; name?: string; toolName?: string };
+export interface Message {
+  role: string;
+  content: MessageContentPart[];
+  usage?: MessageUsage;
+  model?: string;
+  stopReason?: string;
+  errorMessage?: string;
+}
 
 export interface DelegateUsage {
   input: number;
@@ -39,6 +72,78 @@ export interface DelegateResult {
   errorMessage?: string;
 }
 
+/**
+ * A single per-turn progress event forwarded from the child as it streams.
+ * Emitted from the child's OWN json output (one per assistant `message_end`),
+ * so we surface exactly what Pi already reports — no invented protocol.
+ */
+export interface DelegateProgress {
+  /** 1-based assistant turn index within this delegation. */
+  turn: number;
+  /** Trimmed snippet of the assistant's text for this turn, if any. */
+  text?: string;
+  /** Tool names the assistant invoked this turn (edit, bash, write, …). */
+  tools: string[];
+  /** True once this turn carries a terminal stopReason (the final answer). */
+  terminal: boolean;
+}
+
+/**
+ * Best-effort extraction of tool-call names from an assistant message's content
+ * parts. Pi's exact part shape isn't pinned here (the extension runs against
+ * whatever pi-ai the host pi ships), so this reads defensively: anything that
+ * isn't a text part and exposes a string name is treated as a tool call.
+ */
+/**
+ * Classify a turn's stopReason. Pi sets a stopReason on EVERY assistant turn,
+ * not just the last one: tool-use continuation turns carry `stopReason:
+ * "toolUse"`, while the run genuinely ends with `"stop"` (final answer),
+ * `"length"` (truncation), or an error/abort state. A turn is "terminal" only
+ * when it ENDS the delegation — i.e. any stopReason other than `"toolUse"`.
+ *
+ * This is the crux of progress streaming: the sink drops terminal turns (their
+ * text is the final answer the parent already gets as the tool result), so a
+ * naive `Boolean(stopReason)` would mis-flag every edit/bash/write turn as
+ * terminal and silently swallow exactly the progress worth reporting.
+ */
+export function isTerminalStop(stopReason: string | undefined): boolean {
+  return Boolean(stopReason) && stopReason !== "toolUse";
+}
+
+/**
+ * Build a per-turn progress event from a completed assistant message. Pure and
+ * side-effect-free so it can be unit-tested without spawning pi: extracts the
+ * first non-empty text snippet, the tool-call names, and the terminal flag.
+ */
+export function buildProgress(msg: Message, turn: number): DelegateProgress {
+  let text: string | undefined;
+  for (const part of msg.content) {
+    if (part.type === "text" && part.text.trim()) {
+      text = part.text.trim();
+      break;
+    }
+  }
+  return {
+    turn,
+    text,
+    tools: toolNamesOf(msg),
+    terminal: isTerminalStop(msg.stopReason),
+  };
+}
+
+function toolNamesOf(msg: Message): string[] {
+  const names: string[] = [];
+  for (const part of (msg.content ?? []) as unknown[]) {
+    const p = part as { type?: string; name?: unknown; toolName?: unknown };
+    if (p.type === "text") continue;
+    const name = typeof p.name === "string" ? p.name
+      : typeof p.toolName === "string" ? p.toolName
+      : undefined;
+    if (name) names.push(name);
+  }
+  return names;
+}
+
 export interface DelegateOptions {
   /** Model id to pin via --model (bare name as printed by `pi --list-models`). */
   model: string;
@@ -52,6 +157,13 @@ export interface DelegateOptions {
   cwd?: string;
   /** Abort signal — propagated as SIGTERM/SIGKILL to the child. */
   signal?: AbortSignal;
+  /**
+   * Optional per-turn progress sink. Invoked as each assistant `message_end`
+   * arrives on the child's json stream. Kept side-effect-free here — the caller
+   * decides what to do (e.g. throttle + `phantombot notify`). Any throw is
+   * swallowed so a noisy sink can never break the delegation.
+   */
+  onProgress?: (ev: DelegateProgress) => void;
 }
 
 /**
@@ -157,6 +269,14 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
             if (!result.model && msg.model) result.model = msg.model;
             if (msg.stopReason) result.stopReason = msg.stopReason;
             if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+
+            if (opts.onProgress) {
+              try {
+                opts.onProgress(buildProgress(msg, result.usage.turns));
+              } catch {
+                /* a noisy sink must never break the delegation */
+              }
+            }
           }
         }
         if (event.type === "tool_result_end" && event.message) {

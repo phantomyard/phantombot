@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   computeRoutingWrites,
   ENV_CODING_MODEL,
+  ENV_CODING_PROGRESS,
   ENV_IMAGE_MODEL,
   ENV_PRIMARY_MODEL,
   resolveRouting,
@@ -55,6 +56,54 @@ describe("resolveRouting", () => {
     expect(r.primaryModel).toBe("gpt-5.2");
     expect(r.imageModel).toBeUndefined();
   });
+
+  describe("codingProgress", () => {
+    test("reads a real TOML boolean", () => {
+      expect(resolveRouting({ coding_progress: true }, {}).codingProgress).toBe(
+        true,
+      );
+      expect(resolveRouting({ coding_progress: false }, {}).codingProgress).toBe(
+        false,
+      );
+    });
+
+    test("coerces env truthy/falsy strings", () => {
+      const on = ["true", "1", "yes", "on", "TRUE", " On "];
+      for (const v of on) {
+        expect(
+          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
+        ).toBe(true);
+      }
+      const off = ["false", "0", "no", "off"];
+      for (const v of off) {
+        expect(
+          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
+        ).toBe(false);
+      }
+    });
+
+    test("env wins over toml; blank env falls through to toml", () => {
+      expect(
+        resolveRouting(
+          { coding_progress: true },
+          { [ENV_CODING_PROGRESS]: "false" },
+        ).codingProgress,
+      ).toBe(false);
+      expect(
+        resolveRouting(
+          { coding_progress: true },
+          { [ENV_CODING_PROGRESS]: "   " },
+        ).codingProgress,
+      ).toBe(true);
+    });
+
+    test("undefined when unset / unrecognized", () => {
+      expect(resolveRouting({}, {}).codingProgress).toBeUndefined();
+      expect(
+        resolveRouting({}, { [ENV_CODING_PROGRESS]: "maybe" }).codingProgress,
+      ).toBeUndefined();
+    });
+  });
 });
 
 describe("computeRoutingWrites — multimodal auto-skip", () => {
@@ -95,5 +144,43 @@ describe("computeRoutingWrites — multimodal auto-skip", () => {
     expect(w.toml).toEqual({ primary_model: "deepseek-v4-pro" });
     expect(w.env[ENV_IMAGE_MODEL]).toBe("");
     expect(w.env[ENV_CODING_MODEL]).toBe("");
+    // no coding model ⇒ progress forced off and cleared
+    expect(w.toml.coding_progress).toBeUndefined();
+    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
+  });
+});
+
+describe("computeRoutingWrites — coder progress", () => {
+  test("persists coding_progress only when on AND a coding model is set", () => {
+    const w = computeRoutingWrites({
+      primaryModel: "gpt-5.2",
+      codingModel: "gpt-5.2-codex",
+      codingProgress: true,
+      primaryMultimodal: true,
+    });
+    expect(w.toml.coding_progress).toBe(true);
+    expect(w.env[ENV_CODING_PROGRESS]).toBe("true");
+  });
+
+  test("progress off ⇒ toml key omitted, env cleared to ''", () => {
+    const w = computeRoutingWrites({
+      primaryModel: "gpt-5.2",
+      codingModel: "gpt-5.2-codex",
+      codingProgress: false,
+      primaryMultimodal: true,
+    });
+    expect(w.toml.coding_progress).toBeUndefined();
+    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
+  });
+
+  test("progress true but no coding model ⇒ forced off (coupled to coder)", () => {
+    const w = computeRoutingWrites({
+      primaryModel: "gpt-5.2",
+      codingProgress: true,
+      primaryMultimodal: true,
+    });
+    expect(w.toml.coding_model).toBeUndefined();
+    expect(w.toml.coding_progress).toBeUndefined();
+    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
   });
 });

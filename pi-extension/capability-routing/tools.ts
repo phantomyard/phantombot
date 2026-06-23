@@ -28,6 +28,8 @@ export interface RoutingConfig {
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
+  /** Stream the coder child's per-turn progress to Telegram (default off). */
+  codingProgress?: boolean;
 }
 
 export interface RoutingPlan {
@@ -41,6 +43,12 @@ export interface RoutingPlan {
   registerLookAtImage: boolean;
   /** True when coder should be registered. */
   registerCoder: boolean;
+  /**
+   * True when the coder delegate should stream its progress out via
+   * `phantombot notify`. Only ever true when `registerCoder` is — progress
+   * without a coder tool is meaningless, so it's force-coupled here.
+   */
+  streamCoderProgress: boolean;
 }
 
 function clean(v: string | undefined): string | undefined {
@@ -56,12 +64,15 @@ function clean(v: string | undefined): string | undefined {
 export function planRouting(cfg: RoutingConfig): RoutingPlan {
   const imageModel = clean(cfg.imageModel);
   const codingModel = clean(cfg.codingModel);
+  const registerCoder = codingModel !== undefined;
   return {
     primaryModel: clean(cfg.primaryModel),
     imageModel,
     codingModel,
     registerLookAtImage: imageModel !== undefined,
-    registerCoder: codingModel !== undefined,
+    registerCoder,
+    // Progress is coupled to the coder tool existing — never stream without it.
+    streamCoderProgress: registerCoder && cfg.codingProgress === true,
   };
 }
 
