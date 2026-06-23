@@ -310,6 +310,7 @@ describe("ProgressBatcher — hybrid flush", () => {
       idleMs: 5000,
       emit: (body) => emitted.push(body),
       scheduler: sched,
+      flushFirst: false,
     });
     b.add(["✏️ edit auth.ts", "⚡ bash: npm test"]);
     expect(emitted).toEqual([]); // nothing yet — waiting for idle
@@ -327,6 +328,7 @@ describe("ProgressBatcher — hybrid flush", () => {
       idleMs: 5000,
       emit: (body) => emitted.push(body),
       scheduler: sched,
+      flushFirst: false,
     });
     b.add(["a", "b"]);
     expect(emitted).toEqual([]); // 2 < 3, still buffering
@@ -345,6 +347,7 @@ describe("ProgressBatcher — hybrid flush", () => {
       idleMs: 5000,
       emit: (body) => emitted.push(body),
       scheduler: sched,
+      flushFirst: false,
     });
     b.add(["📝 write routing.json"]);
     b.drain();
@@ -375,5 +378,42 @@ describe("ProgressBatcher — hybrid flush", () => {
     b.add([]);
     expect(sched.pending).toBeUndefined();
     expect(emitted).toEqual([]);
+  });
+
+  test("flushFirst (default): first add flushes immediately as the start signal", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+      // flushFirst defaults to true
+    });
+    b.add(["⚡ bash: npm test"]);
+    // Immediate — no waiting for idle/cap on the very first batch.
+    expect(emitted).toEqual(["⚡ bash: npm test"]);
+    expect(b.size).toBe(0);
+    expect(sched.pending).toBeUndefined();
+  });
+
+  test("flushFirst: subsequent adds fall back to digest batching", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+    });
+    b.add(["⚡ bash: step 1"]); // first → immediate
+    expect(emitted).toEqual(["⚡ bash: step 1"]);
+    b.add(["✏️ edit a.ts", "⚡ bash: step 2"]); // now batches
+    expect(emitted).toEqual(["⚡ bash: step 1"]); // still buffering
+    sched.fire(); // idle
+    expect(emitted).toEqual([
+      "⚡ bash: step 1",
+      "✏️ edit a.ts\n⚡ bash: step 2",
+    ]);
   });
 });

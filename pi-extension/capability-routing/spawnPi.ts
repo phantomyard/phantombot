@@ -518,6 +518,7 @@ const DEFAULT_SCHEDULER: IdleScheduler = {
 export class ProgressBatcher {
   private buf: string[] = [];
   private pending: { cancel(): void } | undefined;
+  private firstEmitted = false;
 
   constructor(
     private readonly opts: {
@@ -525,6 +526,15 @@ export class ProgressBatcher {
       idleMs: number;
       emit: (body: string) => void;
       scheduler?: IdleScheduler;
+      /**
+       * When true (default), the very first batch of lines flushes
+       * immediately instead of waiting for the idle/cap trigger. This
+       * restores the "work has started" signal at the top of a coder run —
+       * an active coder rarely idles `idleMs`, so without this the first
+       * digest can be 20-30s late and the run looks dead. Subsequent lines
+       * batch normally.
+       */
+      flushFirst?: boolean;
     },
   ) {}
 
@@ -532,6 +542,13 @@ export class ProgressBatcher {
   add(lines: string[]): void {
     if (lines.length === 0) return;
     for (const l of lines) this.buf.push(l);
+    // Start-of-run signal: flush the first batch immediately so the user
+    // sees the coder come alive, then fall back to digest batching.
+    if (!this.firstEmitted && (this.opts.flushFirst ?? true)) {
+      this.firstEmitted = true;
+      this.flush();
+      return;
+    }
     if (this.buf.length >= this.opts.maxLines) {
       this.flush();
       return;
