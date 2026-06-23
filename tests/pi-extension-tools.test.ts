@@ -387,6 +387,25 @@ describe("ProgressBatcher — hybrid flush", () => {
     expect(emitted).toEqual([]);
   });
 
+  test("clear() discards buffered lines so a later drain() is a no-op", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+      flushFirst: false,
+    });
+    b.add(["📝 write routing.json"]);
+    expect(b.size).toBe(1);
+    b.clear();
+    expect(b.size).toBe(0);
+    expect(sched.pending).toBeUndefined();
+    b.drain();
+    expect(emitted).toEqual([]);
+  });
+
   test("adding nothing is a no-op (empty turns don't arm a timer)", () => {
     const sched = new ManualScheduler();
     const emitted: string[] = [];

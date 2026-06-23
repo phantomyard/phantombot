@@ -572,6 +572,16 @@ export class ProgressBatcher {
     this.flush();
   }
 
+  /**
+   * Discard any buffered lines without emitting, cancelling the idle timer.
+   * Use when a per-conversation `/viewcoder off` override should suppress a
+   * later flush — clearing guarantees a subsequent drain() is a no-op.
+   */
+  clear(): void {
+    this.disarm();
+    this.buf.length = 0;
+  }
+
   /** Buffered line count, for tests/introspection. */
   get size(): number {
     return this.buf.length;

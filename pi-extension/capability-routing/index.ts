@@ -193,7 +193,13 @@ function makeCoderProgressSink(
   };
 
   const onProgressEnd = (): void => {
-    // Drain whatever's left so the tail is never lost.
+    // Honour a mid-job `/viewcoder off`: if streaming was disabled after lines
+    // were buffered, discard them rather than flushing a tail the user has
+    // already opted out of. Otherwise drain so the final lines are never lost.
+    if (!streamingEnabled()) {
+      batcher.clear();
+      return;
+    }
     batcher.drain();
   };
 
