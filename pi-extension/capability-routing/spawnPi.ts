@@ -584,6 +584,25 @@ export class ProgressBatcher {
 }
 
 /** One-line usage summary for surfacing cost back to the parent model. */
+/**
+ * Build the argv for the fire-and-forget `phantombot notify` that ships a
+ * coder-progress digest. Persona-scoped: bare `notify` targets the DEFAULT
+ * persona, which misroutes progress to the wrong owner on a multi-persona host
+ * (Kai/Lena/Jake share a box). When `persona` is set we forward
+ * `--persona <persona>` so the digest reaches the persona actually running this
+ * coder job; when it is unset we omit the flag so single-persona hosts keep
+ * their existing default behaviour. Pure + dependency-free so it's unit-tested
+ * without the host Pi SDK on the import path.
+ */
+export function notifyArgs(
+  persona: string | undefined,
+  body: string,
+): string[] {
+  return persona
+    ? ["notify", "--persona", persona, "--message", body]
+    : ["notify", "--message", body];
+}
+
 export function usageLine(r: DelegateResult): string {
   const u = r.usage;
   const parts = [`${u.turns} turn${u.turns === 1 ? "" : "s"}`];

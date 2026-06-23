@@ -16,12 +16,33 @@ import {
   formatProgressLines,
   formatToolCall,
   isTerminalStop,
+  notifyArgs,
   ProgressBatcher,
   toolCallsOf,
   type DelegateProgress,
   type IdleScheduler,
   type Message,
 } from "../pi-extension/capability-routing/spawnPi.ts";
+
+describe("notifyArgs — persona-scoped progress delivery", () => {
+  test("forwards --persona when PHANTOMBOT_PERSONA is set", () => {
+    expect(notifyArgs("lena", "doing the thing")).toEqual([
+      "notify",
+      "--persona",
+      "lena",
+      "--message",
+      "doing the thing",
+    ]);
+  });
+
+  test("omits --persona when persona is unset (single-persona host)", () => {
+    expect(notifyArgs(undefined, "doing the thing")).toEqual([
+      "notify",
+      "--message",
+      "doing the thing",
+    ]);
+  });
+});
 
 describe("planRouting — tool registration decisions", () => {
   test("registers both tools when image and coding models are set", () => {

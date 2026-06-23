@@ -47,6 +47,7 @@ import {
   delegate,
   finalText,
   formatProgressLines,
+  notifyArgs,
   ProgressBatcher,
   usageLine,
   type DelegateProgress,
@@ -149,10 +150,17 @@ function makeCoderProgressSink(
   // One detached, fire-and-forget `phantombot notify` per flushed digest.
   // Channel-agnostic: notify fans out to every configured channel. No prefix —
   // the body is pure narration so it reads like the primary persona talking.
+  //
+  // Persona-scoped: bare `notify` targets the DEFAULT persona, which misroutes
+  // progress to the wrong owner on a multi-persona host (Kai/Lena/Jake share a
+  // box). Forward PHANTOMBOT_PERSONA so the digest reaches the persona actually
+  // running this coder job. Omit the flag only when the env var is unset, so
+  // single-persona hosts keep their existing default behaviour.
   const emit = (lines: string): void => {
     const body = lines;
+    const args = notifyArgs(process.env.PHANTOMBOT_PERSONA, body);
     try {
-      const child = spawn("phantombot", ["notify", "--message", body], {
+      const child = spawn("phantombot", args, {
         stdio: "ignore",
         detached: true,
       });
