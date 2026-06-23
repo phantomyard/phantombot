@@ -22,6 +22,7 @@ import {
 } from "../src/channels/phantomchat/transport.ts";
 import {
   unwrapNip17Message,
+  unwrapV2,
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 
@@ -77,7 +78,7 @@ describe("phantomchat transport subscription wire shape", () => {
     );
 
     const seen: string[] = [];
-    transport.subscribeGiftWraps(getPublicKey(sk), (e) => seen.push(e.id));
+    transport.subscribeGiftWraps(getPublicKey(sk), (e) => { seen.push(e.id); });
     onEvent?.({ id: "abc", kind: 1059 } as NTNostrEvent);
     expect(seen).toEqual(["abc"]);
   });
@@ -343,7 +344,7 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(payload.to).toBeUndefined();
   });
 
-  test("sendMessage publishes a PLAIN-TEXT rumor (standard NIP-17, 0xchat-readable)", async () => {
+  test("sendMessage publishes a v2 encrypted event (AES-256-GCM)", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -368,26 +369,16 @@ describe("phantomchat transport subscription wire shape", () => {
 
     await transport.sendMessage(recipientHex, "hello from Lena");
 
-    // Recipient wrap + self-wrap.
-    expect(published.length).toBe(2);
-    expect(published.every((e) => e.kind === 1059)).toBe(true);
+    // v2: single event published (no self-wrap needed — no gift-wrap layering)
+    expect(published.length).toBe(1);
+    expect(published[0]!.kind).toBe(1059);
+    expect(published[0]!.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")).toBe(true);
 
-    // The recipient can unwrap and the rumor content is the RAW text — NOT a
-    // JSON envelope. This is what makes Lena's replies readable in 0xchat.
-    let unwrapped: ReturnType<typeof unwrapNip17Message> | undefined;
-    for (const w of published) {
-      try {
-        unwrapped = unwrapNip17Message(w as NTNostrEvent, recipientSk);
-        break;
-      } catch {
-        // wrong recipient for this wrap; try the next
-      }
-    }
-    expect(unwrapped).toBeDefined();
-    expect(unwrapped!.content).toBe("hello from Lena");
-    // Native NIP-17 metadata replaces the envelope fields.
-    expect(unwrapped!.pubkey).toBe(getPublicKey(botSk));
-    expect(unwrapped!.tags.find((t) => t[0] === "p")?.[1]).toBe(recipientHex);
+    // The recipient can unwrap with v2 and the content is the RAW text
+    const unwrapped = await unwrapV2(published[0] as NTNostrEvent, recipientSk);
+    expect(unwrapped.content).toBe("hello from Lena");
+    expect(unwrapped.pubkey).toBe(getPublicKey(botSk));
+    expect(unwrapped.tags.find((t) => t[0] === "p")?.[1]).toBe(recipientHex);
   });
 
   test("sendGroupMessage drops our own hex from the member list and dedupes", async () => {

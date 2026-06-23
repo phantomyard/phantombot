@@ -36,6 +36,10 @@ import {
   getEventHash,
   verifyEvent,
 } from "nostr-tools/pure";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
 
 /**
  * nostr-tools event shape used by the nip59/nip17 functions. We keep our own
@@ -213,9 +217,9 @@ export function wrapGroupMessage(
  * transport/parse error (log + move on). The `code` names the failed check.
  */
 export class GiftWrapVerificationError extends Error {
-  readonly code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id";
+  readonly code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id" | "no_matching_key";
   constructor(
-    code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id",
+    code: "wrap_sig" | "seal_sig" | "pubkey_binding" | "rumor_id" | "no_matching_key",
     message: string,
   ) {
     super(message);
@@ -300,6 +304,287 @@ export function unwrapNip17Message(
   };
 }
 
+// ==================== PhantomChat Protocol v2 — Symmetric Key ====================
+
+/**
+ * In-memory cache of derived AES-256-GCM symmetric keys, keyed by the sorted
+ * pair of hex public keys (ECDH is commutative: ECDH(skA, pkB) == ECDH(skB, pkA)).
+ *
+ * Populated lazily on first encrypt/decrypt per peer, wiped on logout.
+ */
+const symmetricKeyCache: Map<string, CryptoKey> = new Map();
+
+/**
+ * Derive or retrieve a cached AES-256-GCM symmetric key for a peer.
+ *
+ * One ECDH between `localSk` and `peerPubHex`, then HKDF-SHA256 with
+ * info="pc-v2" → 32-byte key. Both sides derive the same key independently.
+ *
+ * @returns `{ raw: Uint8Array; key: CryptoKey }` — raw unused in hot path
+ */
+export async function getSymmetricKey(
+  localSk: Uint8Array,
+  peerPubHex: string,
+): Promise<{ raw: Uint8Array; key: CryptoKey }> {
+  const localPubHex = getPublicKey(localSk);
+  const cacheKey =
+    localPubHex < peerPubHex
+      ? `${localPubHex}:${peerPubHex}`
+      : `${peerPubHex}:${localPubHex}`;
+
+  const cachedKey = symmetricKeyCache.get(cacheKey);
+  if (cachedKey) return { raw: new Uint8Array(0), key: cachedKey };
+
+  // ECDH: shared secret from (localSk, peerPub). noble/curves expects
+  // compressed pubkey (33 bytes with 02/03 prefix). Nostr x-only keys
+  // always use even y → prefix 0x02.
+  const peerPubBytes = new Uint8Array([0x02, ...hexToBytes(peerPubHex)]);
+  const sharedSecret = secp256k1.getSharedSecret(localSk, peerPubBytes);
+
+  // HKDF-SHA256 → 32-byte symmetric key. getSharedSecret returns a 33-byte
+  // compressed point (02/03 prefix + x-coordinate). The prefix byte differs
+  // depending on which side computes ECDH, so we MUST use only the 32-byte
+  // x-coordinate (shared_secret_x) to ensure both sides derive the same key.
+  const sharedSecretX = sharedSecret.slice(1);
+  const info = new TextEncoder().encode("pc-v2");
+  const rawKey = hkdf(sha256, sharedSecretX, undefined, info, 32);
+
+  // Copy to ArrayBuffer-backed Uint8Array for crypto.subtle compatibility
+  const rawKeyBuf = new Uint8Array([...rawKey]);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    rawKeyBuf,
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"],
+  );
+
+  symmetricKeyCache.set(cacheKey, key);
+  return { raw: rawKey, key };
+}
+
+/**
+ * Clear the symmetric key cache (call on logout/identity change).
+ */
+export function clearSymmetricKeyCache(): void {
+  symmetricKeyCache.clear();
+}
+
+/**
+ * Pre-derive and cache AES-256-GCM symmetric keys for a list of known peers.
+ * Call at startup (before subscription) so inbound v2 messages can be decrypted
+ * even though the sender used ephemeral envelope signing (event.pubkey is a
+ * throwaway key, so we can't derive from the event alone).
+ *
+ * Each peer is one ECDH + HKDF + importKey (~2ms). For 50 peers ≈ 100ms.
+ * Fire-and-forget is safe — any key derived before the first unwrap is tried
+ * will work; keys derived after will be picked up by subsequent unwraps.
+ */
+export async function warmSymmetricKeyCache(
+  localSk: Uint8Array,
+  peerPubHexes: string[],
+): Promise<void> {
+  await Promise.all(
+    peerPubHexes.map((peerPubHex) => getSymmetricKey(localSk, peerPubHex)),
+  );
+}
+
+/**
+ * Try to decrypt ciphertext with every cached symmetric key. AES-GCM auth
+ * tag rejection is instant (~µs) so even 50+ cached keys is sub-millisecond.
+ *
+ * Returns the plaintext + the cache key (sorted pubkey pair) on success,
+ * or null if no key matched.
+ *
+ * Used by unwrapV2 because ephemeral envelope signing means event.pubkey
+ * is a throwaway key — we can't derive the symmetric key from it directly.
+ */
+async function decryptWithAnyCachedKey(
+  ciphertext: string,
+): Promise<{ plaintext: string; cacheKey: string } | null> {
+  for (const [cacheKey, symmetricKey] of symmetricKeyCache) {
+    try {
+      const plaintext = await decryptV2(ciphertext, symmetricKey);
+      return { plaintext, cacheKey };
+    } catch {
+      // Wrong key — AES-GCM auth tag mismatch, try next
+    }
+  }
+  return null;
+}
+
+/**
+ * PhantomChat v2: encrypt plaintext with AES-256-GCM.
+ * IV (12 bytes) prepended to ciphertext, all base64url-encoded.
+ */
+export async function encryptV2(
+  plaintext: string,
+  symmetricKey: CryptoKey,
+): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plaintext);
+  const cipherBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    symmetricKey,
+    encoded,
+  );
+  const result = new Uint8Array(iv.length + new Uint8Array(cipherBuf).length);
+  result.set(iv, 0);
+  result.set(new Uint8Array(cipherBuf), iv.length);
+  return base64urlEncode(result);
+}
+
+/**
+ * PhantomChat v2: decrypt ciphertext with AES-256-GCM.
+ * Expects base64url-encoded data with 12-byte IV prepended.
+ */
+export async function decryptV2(
+  ciphertext: string,
+  symmetricKey: CryptoKey,
+): Promise<string> {
+  const data = base64urlDecode(ciphertext);
+  const iv = data.slice(0, 12);
+  const encrypted = data.slice(12);
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    symmetricKey,
+    encrypted,
+  );
+  return new TextDecoder().decode(plainBuf);
+}
+
+/**
+ * PhantomChat v2: wrap a message. Creates a kind-14 rumor, encrypts with
+ * AES-256-GCM, publishes as a signed kind-1059 event with ['v', 'pc-v2'] tag.
+ *
+ * Per-message cost: 1× AES-GCM + 1× Schnorr sign ≈ 1ms (vs NIP-17 ≈ 12ms).
+ *
+ * @param replyTo Optional reply reference {eventId, relayUrl?}
+ */
+export async function wrapV2(
+  senderSk: Uint8Array,
+  recipientPubHex: string,
+  content: string,
+  replyTo?: { eventId: string; relayUrl?: string },
+): Promise<{ event: NTNostrEvent; rumorId: string }> {
+  const senderPubHex = getPublicKey(senderSk);
+  const tags: string[][] = [["p", recipientPubHex], ["v", "pc-v2"]];
+  if (replyTo) {
+    tags.push(["e", replyTo.eventId, replyTo.relayUrl || "", "reply"]);
+  }
+
+  // Rumor (kind 14, unsigned) — same structure as NIP-17 rumor
+  const rumor = {
+    kind: 14,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content,
+    pubkey: senderPubHex,
+  };
+  const rumorId = getEventHash(rumor as never);
+  // Assign id after hashing — rumor type needs it for the signed event
+  const rumorWithId = { ...rumor, id: rumorId };
+
+  // Derive shared symmetric key (cached after first call per peer)
+  const { key: symmetricKey } = await getSymmetricKey(senderSk, recipientPubHex);
+
+  // Encrypt rumor JSON with AES-256-GCM
+  const encryptedContent = await encryptV2(JSON.stringify(rumorWithId), symmetricKey);
+
+  // Sign outer event with a FRESH EPHEMERAL keypair per message (NIP-17
+  // parity). This prevents relays from building an A→B social graph from
+  // signed event.pubkey edges. Sender authenticity lives inside the encrypted
+  // rumor (rumor.pubkey), verified on unwrap via getEventHash + cache key.
+  const ephemeralSk = generateSecretKey();
+  const eventTemplate = {
+    kind: 1059,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: encryptedContent,
+  };
+  const event = finalizeEvent(eventTemplate, ephemeralSk) as unknown as NTNostrEvent;
+
+  return { event, rumorId };
+}
+
+/**
+ * PhantomChat v2: unwrap a message. Verifies the kind-1059 signature, derives
+ * the shared symmetric key, and decrypts the content to recover the rumor.
+ *
+ * @throws {GiftWrapVerificationError} on invalid signature or impersonation
+ */
+export async function unwrapV2(
+  event: NTNostrEvent,
+  _recipientSk: Uint8Array,
+): Promise<{
+  kind: number;
+  content: string;
+  pubkey: string;
+  created_at: number;
+  tags: string[][];
+  id: string;
+}> {
+  if (!verifyEvent(event as never)) {
+    throw new GiftWrapVerificationError("wrap_sig", "v2 event signature invalid");
+  }
+
+  // Ephemeral envelope signing: event.pubkey is a throwaway key, not the
+  // real sender. We can't use it for key derivation. Instead, try all cached
+  // symmetric keys until one decrypts successfully (AES-GCM auth tag rejects
+  // wrong keys instantly). The cache key is the sorted pubkey pair, so after
+  // decrypt we verify rumor.pubkey matches one of them.
+  const result = await decryptWithAnyCachedKey(event.content);
+  if (!result) {
+    throw new GiftWrapVerificationError(
+      "no_matching_key",
+      "v2: no cached symmetric key could decrypt the content",
+    );
+  }
+  const { plaintext: rumorJson, cacheKey } = result;
+  const rumor = JSON.parse(rumorJson) as UnsignedEvent;
+
+  // Anti-impersonation: rumor.pubkey must be the counterparty (the other
+  // party in the shared-key pair) or our own pubkey for a genuine self-send.
+  // Binding to just the counterparty (not "either key") closes the window
+  // where a contact could craft rumor.pubkey = myPubkey for self-attribution.
+  const myPubHex = getPublicKey(_recipientSk);
+  const [pk1, pk2] = cacheKey.split(":");
+  const counterparty = pk1 === myPubHex ? pk2 : pk1;
+  if (rumor.pubkey !== counterparty && rumor.pubkey !== myPubHex) {
+    throw new GiftWrapVerificationError(
+      "pubkey_binding",
+      `v2 rumor.pubkey (${rumor.pubkey?.slice(0, 8)}...) does not match counterparty or self`,
+    );
+  }
+
+  // Verify rumor.id matches canonical content hash (prevents dedup/receipt poisoning)
+  const expectedId = getEventHash(rumor as never);
+  if (rumor.id !== expectedId) {
+    throw new GiftWrapVerificationError(
+      "rumor_id",
+      `v2 rumor.id (${rumor.id?.slice(0, 8)}...) does not match canonical hash (${expectedId.slice(0, 8)}...)`,
+    );
+  }
+
+  return rumor as {
+    kind: number;
+    content: string;
+    pubkey: string;
+    created_at: number;
+    tags: string[][];
+    id: string;
+  };
+}
+
+/**
+ * Check whether a Nostr event is a PhantomChat v2 message (has ['v', 'pc-v2'] tag).
+ */
+export function isV2Event(event: NTNostrEvent): boolean {
+  return (
+    event.tags?.some((t) => t[0] === "v" && t[1] === "pc-v2") ?? false
+  );
+}
+
 // ==================== Low-level pipeline ====================
 
 /**
@@ -377,4 +662,23 @@ export function createGiftWrap(
   };
 
   return finalizeEvent(wrapTemplate, ephemeralSk) as unknown as SignedEvent;
+}
+
+// ==================== Base64url helpers (NIP-44 compatible) ====================
+
+function base64urlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]!);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlDecode(str: string): Uint8Array {
+  let b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }

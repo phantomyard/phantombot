@@ -25,6 +25,7 @@ import {
 } from "../src/channels/phantomchat/transport.ts";
 import {
   unwrapNip17Message,
+  unwrapV2,
   wrapGroupMessage,
   wrapNip17Message,
   type NTNostrEvent,
@@ -172,6 +173,7 @@ async function runOnce(opts: {
     agentDir,
     persona: "phantom",
     channel,
+    secretKey: opts.botSk,
     allowedHex: opts.allowedHex,
     tofu: opts.tofu,
     persistTrust: opts.persistTrust,
@@ -212,33 +214,33 @@ describe("phantomchat auth gate", () => {
 
     expect(senderNpub.startsWith("npub1")).toBe(true);
     expect(harness.invocations).toBe(1);
-    // kind-1059 wraps: a delivery RECEIPT (post-gate, addressed to the sender)
-    // plus the two REPLY wraps (recipient + self). The pool may also carry
+    // kind-1059 events: a delivery RECEIPT (post-gate, NIP-17 gift-wrap)
+    // plus the v2 REPLY (single event, no self-wrap). The pool may also carry
     // ephemeral kind-20001 typing ticks (deferred timer, timing-dependent), so
-    // filter to the gift-wraps. Unwrap only those addressed to the sender (the
-    // self-reply wrap is encrypted to the bot and the sender can't read it).
-    const senderHex = getPublicKey(senderSk);
+    // filter to the kind-1059 events.
     const wraps = pool.published.filter((e) => e.kind === 1059);
-    expect(wraps.length).toBe(3);
+    expect(wraps.length).toBe(2);
 
-    const toSender = wraps.filter((w) =>
-      w.tags.some((t) => t[0] === "p" && t[1] === senderHex),
+    // Receipt is NIP-17 (gift-wrapped to sender); reply is v2 (AES-GCM).
+    const receiptWrap = wraps.find((w) =>
+      !w.tags.some((t) => t[0] === "v" && t[1] === "pc-v2"),
     );
-    const rumors = toSender.map((w) => unwrapNip17Message(w as NTNostrEvent, senderSk));
+    const replyWrap = wraps.find((w) =>
+      w.tags.some((t) => t[0] === "v" && t[1] === "pc-v2"),
+    );
+    expect(receiptWrap).toBeDefined();
+    expect(replyWrap).toBeDefined();
 
     // The delivery receipt references the inbound envelope id ("in-1") so the
     // PWA's DeliveryTracker can flip that exact message to "delivered".
-    const receipt = rumors.find((r) => r.tags.some((t) => t[0] === "receipt-type"));
-    expect(receipt).toBeDefined();
-    expect(receipt!.tags.find((t) => t[0] === "receipt-type")![1]).toBe("delivery");
-    expect(receipt!.tags.find((t) => t[0] === "e")![1]).toBe("in-1");
+    const receipt = unwrapNip17Message(receiptWrap! as NTNostrEvent, senderSk);
+    expect(receipt.tags.some((t) => t[0] === "receipt-type")).toBe(true);
+    expect(receipt.tags.find((t) => t[0] === "receipt-type")![1]).toBe("delivery");
+    expect(receipt.tags.find((t) => t[0] === "e")![1]).toBe("in-1");
 
-    // The recipient (original sender) can unwrap the reply and read "pong".
-    // The reply rumor content is now PLAIN TEXT (standard NIP-17, 0xchat-readable)
-    // — no longer a JSON envelope.
-    const reply = rumors.find((r) => !r.tags.some((t) => t[0] === "receipt-type"));
-    expect(reply).toBeDefined();
-    expect(reply!.content).toBe("pong");
+    // The recipient (original sender) can unwrap the v2 reply and read "pong".
+    const reply = await unwrapV2(replyWrap! as NTNostrEvent, senderSk);
+    expect(reply.content).toBe("pong");
   });
 
   test("non-allowed npub: message is dropped, no turn, no reply", async () => {
@@ -277,8 +279,8 @@ describe("phantomchat auth gate", () => {
     });
 
     expect(harness.invocations).toBe(1);
-    // delivery receipt + reply (recipient + self).
-    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(3);
+    // delivery receipt + v2 reply (single event, no self-wrap).
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
   });
 });
 
@@ -306,8 +308,8 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
     // First sender is trusted: turn runs, reply published, and the sender hex
     // is persisted (the run.ts callback would encode it to npub + clear tofu).
     expect(harness.invocations).toBe(1);
-    // delivery receipt + reply (recipient + self).
-    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(3);
+    // delivery receipt + v2 reply (single event, no self-wrap).
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
     expect(trusted).toEqual([getPublicKey(senderSk).toLowerCase()]);
   });
 
@@ -354,6 +356,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [],
       tofu: true,
       persistTrust: async (hex) => {
@@ -373,9 +376,9 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
 
     // Only the first sender ran + got a reply; the stranger was gated out.
     expect(harness.invocations).toBe(1);
-    // delivery receipt + reply (recipient + self) for the FIRST sender only;
+    // delivery receipt + v2 reply (single event, no self-wrap) for the FIRST sender only;
     // the gated-out stranger gets nothing (no receipt, no reply).
-    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(3);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
     expect(trusted).toEqual([getPublicKey(firstSk).toLowerCase()]);
   });
 });
@@ -603,6 +606,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [andrewHex], // Andrew is allowlisted
       oneShot: true,
       signal: ac.signal,
@@ -733,6 +737,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [andrewHex],
       oneShot: true,
       signal: ac.signal,
@@ -778,16 +783,15 @@ describe("phantomchat group routing (HQ bug)", () => {
       text: "hi in DM",
     });
 
-    // kind-1059 = delivery receipt + reply (recipient + self) = 3, and the
-    // REPLY rumor carries NO group tag (plain 1:1 DM behaviour unchanged).
-    const senderHex = getPublicKey(senderSk);
+    // kind-1059 = delivery receipt + v2 reply = 2 events. The
+    // REPLY event carries NO group tag (plain 1:1 DM behaviour unchanged).
     const wraps = pool.published.filter((e) => e.kind === 1059);
-    expect(wraps.length).toBe(3);
-    const reply = wraps
-      .filter((w) => w.tags.some((t) => t[0] === "p" && t[1] === senderHex))
-      .map((w) => unwrapNip17Message(w as NTNostrEvent, senderSk))
-      .find((r) => !r.tags.some((t) => t[0] === "receipt-type"));
-    expect(reply).toBeDefined();
-    expect(reply!.tags.find((t) => t[0] === "group")).toBeUndefined();
+    expect(wraps.length).toBe(2);
+    const replyWrap = wraps.find((w) =>
+      w.tags.some((t) => t[0] === "v" && t[1] === "pc-v2"),
+    );
+    expect(replyWrap).toBeDefined();
+    const reply = await unwrapV2(replyWrap! as NTNostrEvent, senderSk);
+    expect(reply.tags.find((t) => t[0] === "group")).toBeUndefined();
   });
 });

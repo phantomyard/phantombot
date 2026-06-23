@@ -544,6 +544,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             agentDir,
             persona: spec.persona,
             channel,
+            secretKey: identity.secretKey,
             allowedHex,
             tofu,
             // TOFU commit: encode the proven sender hex → npub and persist it to
