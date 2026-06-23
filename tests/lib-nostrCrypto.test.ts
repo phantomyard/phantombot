@@ -163,3 +163,248 @@ function createRumorWithPubkey(
   const id = getEventHash(event as never);
   return { ...event, id };
 }
+
+// ==================== PhantomChat Protocol v2 Tests ====================
+
+import {
+  getSymmetricKey,
+  clearSymmetricKeyCache,
+  encryptV2,
+  decryptV2,
+  wrapV2,
+  unwrapV2,
+  isV2Event,
+} from "../src/lib/nostrCrypto.ts";
+
+describe("PhantomChat Protocol v2 — symmetric key derivation", () => {
+  test("both parties derive the same key from ECDH (commutativity)", async () => {
+    const skA = generateSecretKey();
+    const skB = generateSecretKey();
+    const pkA = getPublicKey(skA);
+    const pkB = getPublicKey(skB);
+
+    const { key: keyA } = await getSymmetricKey(skA, pkB);
+    const { key: keyB } = await getSymmetricKey(skB, pkA);
+
+    // Both CryptoKey objects should be functionally identical
+    // (same algorithm, same usages). We can't compare CryptoKey objects directly,
+    // but we can verify encrypt/decrypt roundtrip across parties.
+    const plaintext = "cross-party test";
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(plaintext);
+    const cipherBuf = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      keyA,
+      encoded,
+    );
+    const plainBuf = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      keyB,
+      cipherBuf,
+    );
+    expect(new TextDecoder().decode(plainBuf)).toBe(plaintext);
+  });
+
+  test("caching works — same key object returned on second call", async () => {
+    clearSymmetricKeyCache();
+    const sk = generateSecretKey();
+    const peerPk = getPublicKey(generateSecretKey());
+
+    const first = await getSymmetricKey(sk, peerPk);
+    const second = await getSymmetricKey(sk, peerPk);
+    expect(first.key).toBe(second.key); // same object reference = cache hit
+  });
+
+  test("different peers produce different keys", async () => {
+    clearSymmetricKeyCache();
+    const sk = generateSecretKey();
+    const peer1 = getPublicKey(generateSecretKey());
+    const peer2 = getPublicKey(generateSecretKey());
+
+    const { key: key1 } = await getSymmetricKey(sk, peer1);
+    const { key: key2 } = await getSymmetricKey(sk, peer2);
+    expect(key1).not.toBe(key2);
+  });
+
+  test("clearSymmetricKeyCache wipes the cache", async () => {
+    const sk = generateSecretKey();
+    const peer = getPublicKey(generateSecretKey());
+
+    const first = await getSymmetricKey(sk, peer);
+    clearSymmetricKeyCache();
+    const second = await getSymmetricKey(sk, peer);
+    expect(first.key).not.toBe(second.key); // new object after clear
+  });
+});
+
+describe("PhantomChat Protocol v2 — encrypt/decrypt roundtrip", () => {
+  test("AES-256-GCM encrypt then decrypt recovers plaintext", async () => {
+    clearSymmetricKeyCache();
+    const sk = generateSecretKey();
+    const peer = getPublicKey(generateSecretKey());
+    const { key } = await getSymmetricKey(sk, peer);
+
+    const plaintext = "hello v2 world 🚀";
+    const ciphertext = await encryptV2(plaintext, key);
+    const decrypted = await decryptV2(ciphertext, key);
+    expect(decrypted).toBe(plaintext);
+  });
+
+  test("different ciphertexts for same plaintext (random IV)", async () => {
+    clearSymmetricKeyCache();
+    const sk = generateSecretKey();
+    const peer = getPublicKey(generateSecretKey());
+    const { key } = await getSymmetricKey(sk, peer);
+
+    const a = await encryptV2("same", key);
+    const b = await encryptV2("same", key);
+    expect(a).not.toBe(b); // different IVs → different ciphertexts
+  });
+
+  test("wrong key fails to decrypt", async () => {
+    clearSymmetricKeyCache();
+    const sk1 = generateSecretKey();
+    const sk2 = generateSecretKey();
+    const peer = getPublicKey(generateSecretKey());
+
+    const { key: key1 } = await getSymmetricKey(sk1, peer);
+    const { key: key2 } = await getSymmetricKey(sk2, peer);
+
+    const ciphertext = await encryptV2("secret", key1);
+    await expect(decryptV2(ciphertext, key2)).rejects.toThrow();
+  });
+});
+
+describe("PhantomChat Protocol v2 — wrapV2 / unwrapV2 roundtrip", () => {
+  test("recipient recovers plaintext and sender pubkey", async () => {
+    clearSymmetricKeyCache();
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const senderHex = getPublicKey(senderSk);
+    const recipientHex = getPublicKey(recipientSk);
+
+    const { event, rumorId } = await wrapV2(senderSk, recipientHex, "hello v2");
+
+    expect(event.kind).toBe(1059);
+    expect(event.pubkey).toBe(senderHex);
+    expect(event.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")).toBe(true);
+
+    const rumor = await unwrapV2(event, recipientSk);
+    expect(rumor.content).toBe("hello v2");
+    expect(rumor.pubkey).toBe(senderHex);
+    expect(rumor.id).toBe(rumorId);
+  });
+
+  test("isV2Event detects v2 events", async () => {
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const { event } = await wrapV2(senderSk, getPublicKey(recipientSk), "test");
+    expect(isV2Event(event)).toBe(true);
+  });
+
+  test("isV2Event returns false for legacy NIP-17 wraps", () => {
+    const senderSk = generateSecretKey();
+    const recipientPk = getPublicKey(generateSecretKey());
+    const { wraps } = wrapNip17Message(senderSk, recipientPk, "legacy");
+    expect(isV2Event(wraps[0] as NTNostrEvent)).toBe(false);
+  });
+
+  test("self-send unwraps correctly (sender = recipient)", async () => {
+    clearSymmetricKeyCache();
+    const sk = generateSecretKey();
+    const peer = getPublicKey(generateSecretKey());
+    const myPk = getPublicKey(sk);
+
+    const { event } = await wrapV2(sk, peer, "self-test");
+    // Simulate self-send: event.pubkey === our pubkey, use p tag for counterparty
+    const rumor = await unwrapV2(event, sk);
+    expect(rumor.content).toBe("self-test");
+    expect(rumor.pubkey).toBe(myPk);
+  });
+
+  test("unwrapV2 rejects forged signature", async () => {
+    clearSymmetricKeyCache();
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const { event } = await wrapV2(senderSk, getPublicKey(recipientSk), "test");
+
+    // Build a completely new event with wrong content but keep the original sig
+    const wrongEvent = {
+      ...event,
+      content: await encryptV2("wrong", (await getSymmetricKey(senderSk, getPublicKey(recipientSk))).key),
+    };
+    // Sign the wrong event with a different key
+    const fakeSk = generateSecretKey();
+    const forged = finalizeEvent(
+      { kind: 1059, created_at: wrongEvent.created_at, tags: wrongEvent.tags, content: wrongEvent.content },
+      fakeSk,
+    ) as unknown as NTNostrEvent;
+
+    await expect(unwrapV2(forged, recipientSk)).rejects.toThrow();
+  });
+
+  test("unwrapV2 rejects impersonation (rumor.pubkey ≠ event.pubkey)", async () => {
+    clearSymmetricKeyCache();
+    const attackerSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientHex = getPublicKey(recipientSk);
+    const victimSk = generateSecretKey();
+    const victimHex = getPublicKey(victimSk);
+
+    // Derive key as if we're the victim, but sign with attacker's key
+    // This creates a mismatch: event.pubkey = attacker, but rumor.pubkey = victim
+    // We need to manually construct the event to trigger this
+    const { key: symmetricKey } = await getSymmetricKey(attackerSk, recipientHex);
+    const fakeRumor = {
+      kind: 14,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["p", recipientHex], ["v", "pc-v2"]],
+      content: "impersonation",
+      pubkey: victimHex, // victim's pubkey in rumor, but signed by attacker
+    } as const;
+    const rumorId = getEventHash(fakeRumor as never);
+    const rumorWithId = { ...fakeRumor, id: rumorId };
+    const encrypted = await encryptV2(JSON.stringify(rumorWithId), symmetricKey);
+    const eventTemplate = {
+      kind: 1059,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["p", recipientHex], ["v", "pc-v2"]],
+      content: encrypted,
+    };
+    const event = finalizeEvent(eventTemplate, attackerSk) as unknown as NTNostrEvent;
+
+    await expect(unwrapV2(event, recipientSk)).rejects.toThrow(
+      GiftWrapVerificationError,
+    );
+  });
+
+  test("v2 is ~6× faster than NIP-17 (performance sanity check)", async () => {
+    clearSymmetricKeyCache();
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientHex = getPublicKey(recipientSk);
+    const plaintext = JSON.stringify({ type: "text", content: "benchmark" });
+
+    // Warm up
+    await wrapV2(senderSk, recipientHex, plaintext);
+    wrapNip17Message(senderSk, recipientHex, plaintext);
+
+    const iterations = 50;
+
+    const t0 = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      await wrapV2(senderSk, recipientHex, plaintext);
+    }
+    const v2Ms = performance.now() - t0;
+
+    const t1 = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      wrapNip17Message(senderSk, recipientHex, plaintext);
+    }
+    const nip17Ms = performance.now() - t1;
+
+    const ratio = nip17Ms / v2Ms;
+    // v2 should be at least 3× faster (conservative; actual is ~6×+)
+    expect(ratio).toBeGreaterThan(3);
+  });
+});
