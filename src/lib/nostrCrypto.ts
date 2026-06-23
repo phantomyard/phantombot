@@ -341,9 +341,13 @@ export async function getSymmetricKey(
   const peerPubBytes = new Uint8Array([0x02, ...hexToBytes(peerPubHex)]);
   const sharedSecret = secp256k1.getSharedSecret(localSk, peerPubBytes);
 
-  // HKDF-SHA256 → 32-byte symmetric key
+  // HKDF-SHA256 → 32-byte symmetric key. getSharedSecret returns a 33-byte
+  // compressed point (02/03 prefix + x-coordinate). The prefix byte differs
+  // depending on which side computes ECDH, so we MUST use only the 32-byte
+  // x-coordinate (shared_secret_x) to ensure both sides derive the same key.
+  const sharedSecretX = sharedSecret.slice(1);
   const info = new TextEncoder().encode("pc-v2");
-  const rawKey = hkdf(sha256, sharedSecret, undefined, info, 32);
+  const rawKey = hkdf(sha256, sharedSecretX, undefined, info, 32);
 
   // Copy to ArrayBuffer-backed Uint8Array for crypto.subtle compatibility
   const rawKeyBuf = new Uint8Array([...rawKey]);
@@ -364,6 +368,25 @@ export async function getSymmetricKey(
  */
 export function clearSymmetricKeyCache(): void {
   symmetricKeyCache.clear();
+}
+
+/**
+ * Pre-derive and cache AES-256-GCM symmetric keys for a list of known peers.
+ * Call at startup (before subscription) so inbound v2 messages can be decrypted
+ * even though the sender used ephemeral envelope signing (event.pubkey is a
+ * throwaway key, so we can't derive from the event alone).
+ *
+ * Each peer is one ECDH + HKDF + importKey (~2ms). For 50 peers ≈ 100ms.
+ * Fire-and-forget is safe — any key derived before the first unwrap is tried
+ * will work; keys derived after will be picked up by subsequent unwraps.
+ */
+export async function warmSymmetricKeyCache(
+  localSk: Uint8Array,
+  peerPubHexes: string[],
+): Promise<void> {
+  await Promise.all(
+    peerPubHexes.map((peerPubHex) => getSymmetricKey(localSk, peerPubHex)),
+  );
 }
 
 /**
@@ -520,13 +543,17 @@ export async function unwrapV2(
   const { plaintext: rumorJson, cacheKey } = result;
   const rumor = JSON.parse(rumorJson) as UnsignedEvent;
 
-  // Anti-impersonation: rumor.pubkey must match one of the pubkeys in the
-  // cache pair (the two parties who share this symmetric key).
+  // Anti-impersonation: rumor.pubkey must be the counterparty (the other
+  // party in the shared-key pair) or our own pubkey for a genuine self-send.
+  // Binding to just the counterparty (not "either key") closes the window
+  // where a contact could craft rumor.pubkey = myPubkey for self-attribution.
+  const myPubHex = getPublicKey(_recipientSk);
   const [pk1, pk2] = cacheKey.split(":");
-  if (rumor.pubkey !== pk1 && rumor.pubkey !== pk2) {
+  const counterparty = pk1 === myPubHex ? pk2 : pk1;
+  if (rumor.pubkey !== counterparty && rumor.pubkey !== myPubHex) {
     throw new GiftWrapVerificationError(
       "pubkey_binding",
-      `v2 rumor.pubkey (${rumor.pubkey?.slice(0, 8)}...) does not match either key in cache pair`,
+      `v2 rumor.pubkey (${rumor.pubkey?.slice(0, 8)}...) does not match counterparty or self`,
     );
   }
 

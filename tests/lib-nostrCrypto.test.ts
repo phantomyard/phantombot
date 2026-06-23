@@ -170,6 +170,7 @@ function createRumorWithPubkey(
 import {
   getSymmetricKey,
   clearSymmetricKeyCache,
+  warmSymmetricKeyCache,
   encryptV2,
   decryptV2,
   wrapV2,
@@ -435,7 +436,7 @@ describe("PhantomChat Protocol v2 — cross-repo shared test vector", () => {
 
   // Deterministic inner half — these bytes MUST match across repos
   const EXPECTED_SYMMETRIC_KEY =
-    "755d636b4454176139ef3c5da483e5c79be25d2a98c10b84e459a3a6d3d520a7";
+    "20be5fd3f2476eed59a6eeac45331d88e8f5a2204591f3604d57c87b1eada7fc";
   const EXPECTED_RUMOR_ID =
     "1012a22578e51593cad513f022acd569452a8a22a3560e9af260049edcdc4435";
   const PLAINTEXT = "test vector plaintext";
@@ -507,5 +508,29 @@ describe("PhantomChat Protocol v2 — cross-repo shared test vector", () => {
     } finally {
       Date.now = realDateNow;
     }
+  });
+
+  test("cold-cache unwrap: warm cache for known peer, then unwrap ephemeral-signed event", async () => {
+    // Simulates the bot startup flow:
+    // 1. Cache is empty (fresh process)
+    // 2. Server warms cache for known allowed peers
+    // 3. Inbound v2 DM arrives (ephemeral outer key) and can be decrypted
+    clearSymmetricKeyCache();
+
+    // Simulate sender producing a v2 event in their own process
+    // (their cache warming is irrelevant to us)
+    const { event, rumorId } = await wrapV2(senderSk, recipientPk, PLAINTEXT);
+
+    // Clear cache again — simulates the wrap happening in a different process
+    clearSymmetricKeyCache();
+
+    // Bot startup: warm cache for known peer (senderPk is in our allow-list)
+    await warmSymmetricKeyCache(recipientSk, [senderPk]);
+
+    // Inbound v2 DM arrives — unwrapV2 should find the warmed key
+    const rumor = await unwrapV2(event, recipientSk);
+    expect(rumor.content).toBe(PLAINTEXT);
+    expect(rumor.pubkey).toBe(senderPk);
+    expect(rumor.id).toBe(rumorId);
   });
 });

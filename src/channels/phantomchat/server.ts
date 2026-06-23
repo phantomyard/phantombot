@@ -28,6 +28,7 @@ import type { Channel, ChannelMessage } from "../core/types.ts";
 import type { PhantomchatTransport } from "./transport.ts";
 import { sttSupport, transcribe } from "../../lib/audio.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
+import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
 import { inboxDir } from "../telegram/parse.ts";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -103,6 +104,12 @@ export interface RunPhantomchatServerInput {
    * life of this process. Omitted in tests that don't exercise persistence.
    */
   persistTrust?: (senderHex: string) => Promise<void>;
+  /**
+   * Our secret key. Used to pre-derive symmetric keys for all allowed peers
+   * at startup (cache warming), so inbound v2 DMs can be decrypted even
+   * though the sender used ephemeral envelope signing.
+   */
+  secretKey: Uint8Array;
   /** Stop after draining the currently-available messages. For tests. */
   oneShot?: boolean;
   /** Signal to stop the loop cleanly (Ctrl-C / SIGTERM). */
@@ -131,6 +138,19 @@ export async function runPhantomchatServer(
   const allowedSet = new Set(input.allowedHex.map((h) => h.toLowerCase()));
   // TOFU is armed only when we start with an empty allowlist and tofu is on.
   let tofuArmed = allowedSet.size === 0 && input.tofu === true;
+
+  // ===================== CACHE WARMING =====================
+  // Pre-derive symmetric keys for all allowed peers so inbound v2 DMs
+  // (which use ephemeral envelope signing) can be decrypted immediately.
+  // Fire-and-forget: keys derived after the first unwrap will be picked up
+  // by subsequent unwraps.
+  if (allowedSet.size > 0) {
+    void warmSymmetricKeyCache(input.secretKey, [...allowedSet]).catch((e) => {
+      log.warn("phantomchat: cache warming failed (non-fatal)", {
+        error: (e as Error).message,
+      });
+    });
+  }
 
   const harnesses: Harness[] = [...input.harnesses];
 
@@ -163,6 +183,9 @@ export async function runPhantomchatServer(
       // dropped — JS single-threading makes this block atomic vs other peers.
       tofuArmed = false;
       allowedSet.add(lowerHex);
+      // Warm the symmetric key cache for this newly-trusted peer so future
+      // inbound v2 DMs can be decrypted without waiting for a send.
+      void warmSymmetricKeyCache(input.secretKey, [lowerHex]).catch(() => {});
       log.info("phantomchat: TOFU — trusted first sender and locked", {
         sender: senderHex.slice(0, 12) + "…",
       });

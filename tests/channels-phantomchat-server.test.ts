@@ -173,6 +173,7 @@ async function runOnce(opts: {
     agentDir,
     persona: "phantom",
     channel,
+    secretKey: opts.botSk,
     allowedHex: opts.allowedHex,
     tofu: opts.tofu,
     persistTrust: opts.persistTrust,
@@ -355,6 +356,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [],
       tofu: true,
       persistTrust: async (hex) => {
@@ -604,6 +606,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [andrewHex], // Andrew is allowlisted
       oneShot: true,
       signal: ac.signal,
@@ -734,6 +737,7 @@ describe("phantomchat group routing (HQ bug)", () => {
       agentDir,
       persona: "phantom",
       channel,
+      secretKey: botSk,
       allowedHex: [andrewHex],
       oneShot: true,
       signal: ac.signal,
