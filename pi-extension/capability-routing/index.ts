@@ -132,8 +132,16 @@ interface CoderProgressSink {
  * job is on when: override === "on", OR (override === undefined AND
  * globalDefault). override === "off" always wins (silent).
  */
+/** Short job label for the digest header — the cwd basename, else "coder". */
+function coderLabel(cwd: string | undefined): string {
+  if (!cwd) return "coder";
+  const base = path.basename(cwd.replace(/[\\/]+$/, ""));
+  return base || "coder";
+}
+
 function makeCoderProgressSink(
   globalDefault: boolean,
+  label: string,
 ): CoderProgressSink {
   // Always built; gated per emit. An `on` /viewcoder override must be able to
   // force streaming even when globalDefault is off, and overrides can change
@@ -148,8 +156,9 @@ function makeCoderProgressSink(
   };
 
   // One detached, fire-and-forget `phantombot notify` per flushed digest.
-  // Channel-agnostic: notify fans out to every configured channel. No prefix —
-  // the body is pure narration so it reads like the primary persona talking.
+  // Channel-agnostic: notify fans out to every configured channel. The digest
+  // carries a `coder(<label>):` header so the user can tell delegated coder
+  // work apart from the primary persona's own messages.
   //
   // Persona-scoped: bare `notify` targets the DEFAULT persona, which misroutes
   // progress to the wrong owner on a multi-persona host (Kai/Lena/Jake share a
@@ -157,7 +166,7 @@ function makeCoderProgressSink(
   // running this coder job. Omit the flag only when the env var is unset, so
   // single-persona hosts keep their existing default behaviour.
   const emit = (lines: string): void => {
-    const body = lines;
+    const body = `coder(${label}):\n${lines}`;
     const args = notifyArgs(process.env.PHANTOMBOT_PERSONA, body);
     try {
       const child = spawn("phantombot", args, {
@@ -293,10 +302,14 @@ export default function (pi: ExtensionAPI) {
       parameters: CoderParams,
       async execute(_id, params, signal, _onUpdate, ctx) {
         const cwd = params.cwd ?? ctx.cwd;
+        // Job label for the digest header, e.g. `coder(phantombot):`. The cwd
+        // basename ("which workspace") is the most useful at-a-glance handle;
+        // fall back to a generic "coder" when there's no usable cwd.
+        const label = coderLabel(cwd);
         // Build the streaming sink unconditionally so an `on` /viewcoder
         // override can force progress even when the global default is off; the
         // sink gates per emit. plan.streamCoderProgress is the global default.
-        const sink = makeCoderProgressSink(plan.streamCoderProgress);
+        const sink = makeCoderProgressSink(plan.streamCoderProgress, label);
         const r = await delegate({
           model: codingModel,
           task: coderDelegationPrompt(params.task),

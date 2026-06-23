@@ -255,7 +255,7 @@ describe("formatToolCall — friendly verb + meaningful arg", () => {
   });
 });
 
-describe("formatProgressLines — narration only", () => {
+describe("formatProgressLines — narration + tool digest", () => {
   const ev = (over: Partial<DelegateProgress>): DelegateProgress => ({
     turn: 1,
     text: undefined,
@@ -264,7 +264,7 @@ describe("formatProgressLines — narration only", () => {
     ...over,
   });
 
-  test("narration is surfaced verbatim, with no prefix and no tool noise", () => {
+  test("leads with narration appended to the first tool line", () => {
     const lines = formatProgressLines(
       ev({
         text: "adding the retry guard",
@@ -274,19 +274,22 @@ describe("formatProgressLines — narration only", () => {
         ],
       }),
     );
-    expect(lines).toEqual(["adding the retry guard"]);
+    expect(lines).toEqual([
+      '✏️ edit auth.ts — "adding the retry guard"',
+      "⚡ bash: npm test",
+    ]);
   });
 
-  test("pure-tool turn (no narration) yields nothing — caller stays silent", () => {
+  test("pure-tool turn (no narration) is just verb+arg lines", () => {
     const lines = formatProgressLines(
       ev({ toolCalls: [{ name: "write", input: { file_path: "routing.json" } }] }),
     );
-    expect(lines).toEqual([]);
+    expect(lines).toEqual(["📝 write routing.json"]);
   });
 
-  test("narration-only turn renders the words as-is (reads like the primary)", () => {
+  test("narration-only turn renders a speech line", () => {
     expect(formatProgressLines(ev({ text: "Let me think about this" }))).toEqual([
-      "Let me think about this",
+      "💬 Let me think about this",
     ]);
   });
 

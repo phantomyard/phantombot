@@ -459,20 +459,31 @@ export function formatToolCall(call: ToolCall): string {
 }
 
 /**
- * Build the progress line(s) for one streamed turn — NARRATION ONLY.
+ * Build the progress line(s) for one streamed turn — READABLE digest.
  *
- * We surface only the coding model's own words (`ev.text`) so the stream reads
- * exactly like the primary persona thinking out loud; no tool noise, no prefix.
- * A pure-tool turn (work happened but the model said nothing) yields [] and the
- * caller stays silent — so silent tool churn never reaches the user. Tool-call
- * extraction (`toolCallsOf`/`formatToolCall`) is retained and still tested in
- * case we want to reintroduce a verbose mode later.
+ * Surfaces the tool actions the coder took (`⚡ bash: npm test`, `✏️ edit
+ * auth.ts`) plus any narration. Tool lines guarantee the stream always shows
+ * life even when the coding model says nothing — which is why narration-only
+ * looked dead on tool-heavy runs like reviews. When the model DID narrate, the
+ * words are attached to the first tool line so intent and action read as one
+ * thought; a pure-narration turn renders a 💬 speech line on its own.
  *
  * Pure and side-effect-free for unit testing.
  */
 export function formatProgressLines(ev: DelegateProgress): string[] {
   const narration = ev.text ? clip(ev.text, PROGRESS_TEXT_MAX) : undefined;
-  return narration ? [narration] : [];
+  const toolLines = ev.toolCalls.map(formatToolCall);
+
+  if (toolLines.length === 0) {
+    return narration ? [`💬 ${narration}`] : [];
+  }
+
+  // Attach the narration to the first tool line so the model's intent and the
+  // action it took read as one thought: `✏️ edit auth.ts — "adding the guard"`.
+  if (narration) {
+    toolLines[0] = `${toolLines[0]} — "${narration}"`;
+  }
+  return toolLines;
 }
 
 /**
