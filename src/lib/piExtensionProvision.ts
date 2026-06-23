@@ -106,11 +106,15 @@ function routingModels(
   if (primaryModel !== undefined) out.primaryModel = primaryModel;
   if (imageModel !== undefined) out.imageModel = imageModel;
   if (codingModel !== undefined) out.codingModel = codingModel;
-  // codingProgress is a coder-only behavior flag — bake it ONLY when a coding
-  // model is present and the flag is on. Without a coding model there's no
-  // `coder` tool to stream, so the key is omitted to keep routing.json minimal.
-  if (codingModel !== undefined && routing?.codingProgress === true) {
-    out.codingProgress = true;
+  // codingProgress is a coder-only behavior flag — meaningless without a
+  // `coder` tool, so only consider it when a coding model is present. It is now
+  // ON BY DEFAULT: when a coding model is configured and the flag is not
+  // explicitly false, stream progress. An explicit false (config
+  // `coding_progress = false` / PHANTOMBOT_CODING_PROGRESS=0) wins and is baked
+  // as `false` so the extension can distinguish "explicitly off" from "default
+  // on" — both end up in routing.json, the extension's sole input.
+  if (codingModel !== undefined) {
+    out.codingProgress = routing?.codingProgress !== false;
   }
   return out;
 }

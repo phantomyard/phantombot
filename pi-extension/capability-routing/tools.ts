@@ -28,7 +28,12 @@ export interface RoutingConfig {
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
-  /** Stream the coder child's per-turn progress to Telegram (default off). */
+  /**
+   * Stream the coder child's per-turn progress out via `phantombot notify`
+   * (channel-agnostic — reaches every configured channel, not just Telegram).
+   * ON by default when a coding model is set; only an explicit `false` disables
+   * it. A per-conversation `/viewcoder` override can still flip it at runtime.
+   */
   codingProgress?: boolean;
 }
 
@@ -44,9 +49,11 @@ export interface RoutingPlan {
   /** True when coder should be registered. */
   registerCoder: boolean;
   /**
-   * True when the coder delegate should stream its progress out via
+   * Global default for whether the coder delegate streams its progress out via
    * `phantombot notify`. Only ever true when `registerCoder` is — progress
-   * without a coder tool is meaningless, so it's force-coupled here.
+   * without a coder tool is meaningless, so it's force-coupled here. A
+   * per-conversation `/viewcoder` override (read at emit time in index.ts) can
+   * override this default on or off.
    */
   streamCoderProgress: boolean;
 }
@@ -72,7 +79,12 @@ export function planRouting(cfg: RoutingConfig): RoutingPlan {
     registerLookAtImage: imageModel !== undefined,
     registerCoder,
     // Progress is coupled to the coder tool existing — never stream without it.
-    streamCoderProgress: registerCoder && cfg.codingProgress === true,
+    // ON BY DEFAULT: with a coder registered, stream unless codingProgress is
+    // explicitly false. phantombot bakes an explicit true/false into
+    // routing.json, but a missing key (older asset, hand-rolled config) now
+    // defaults to streaming. This is the GLOBAL default; a `/viewcoder` override
+    // for a conversation can still force it on/off at emit time in index.ts.
+    streamCoderProgress: registerCoder && cfg.codingProgress !== false,
   };
 }
 

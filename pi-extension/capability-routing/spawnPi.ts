@@ -42,7 +42,7 @@ interface MessageUsage {
 }
 type MessageContentPart =
   | { type: "text"; text: string }
-  | { type: "toolCall"; name?: string; toolName?: string };
+  | { type: "toolCall"; name?: string; toolName?: string; input?: unknown };
 export interface Message {
   role: string;
   content: MessageContentPart[];
@@ -73,6 +73,18 @@ export interface DelegateResult {
 }
 
 /**
+ * A single tool call the assistant made this turn, with its (best-effort)
+ * input so the progress sink can render the meaningful argument — the file
+ * being edited, the command being run — rather than just the bare tool name.
+ */
+export interface ToolCall {
+  /** Tool name (edit, bash, write, read, …), lowercased-as-reported. */
+  name: string;
+  /** The tool's input object, if pi reported one. Shape is tool-specific. */
+  input?: Record<string, unknown>;
+}
+
+/**
  * A single per-turn progress event forwarded from the child as it streams.
  * Emitted from the child's OWN json output (one per assistant `message_end`),
  * so we surface exactly what Pi already reports — no invented protocol.
@@ -82,8 +94,8 @@ export interface DelegateProgress {
   turn: number;
   /** Trimmed snippet of the assistant's text for this turn, if any. */
   text?: string;
-  /** Tool names the assistant invoked this turn (edit, bash, write, …). */
-  tools: string[];
+  /** Tool calls (name + input) the assistant invoked this turn. */
+  toolCalls: ToolCall[];
   /** True once this turn carries a terminal stopReason (the final answer). */
   terminal: boolean;
 }
@@ -126,22 +138,49 @@ export function buildProgress(msg: Message, turn: number): DelegateProgress {
   return {
     turn,
     text,
-    tools: toolNamesOf(msg),
+    toolCalls: toolCallsOf(msg),
     terminal: isTerminalStop(msg.stopReason),
   };
 }
 
-function toolNamesOf(msg: Message): string[] {
-  const names: string[] = [];
+/**
+ * Best-effort extraction of tool calls (name + input) from an assistant
+ * message's content parts. Pi's exact part shape isn't pinned here (the
+ * extension runs against whatever pi-ai the host pi ships), so this reads
+ * defensively: anything that isn't a text part and exposes a string name is
+ * treated as a tool call. The `input` (also seen as `arguments`/`args`/`params`
+ * across SDK versions) is captured when it's an object so the sink can render
+ * the meaningful argument; on anything unexpected the call still surfaces with
+ * just its name.
+ */
+export function toolCallsOf(msg: Message): ToolCall[] {
+  const calls: ToolCall[] = [];
   for (const part of (msg.content ?? []) as unknown[]) {
-    const p = part as { type?: string; name?: unknown; toolName?: unknown };
+    const p = part as {
+      type?: string;
+      name?: unknown;
+      toolName?: unknown;
+      input?: unknown;
+      arguments?: unknown;
+      args?: unknown;
+      params?: unknown;
+    };
     if (p.type === "text") continue;
-    const name = typeof p.name === "string" ? p.name
-      : typeof p.toolName === "string" ? p.toolName
-      : undefined;
-    if (name) names.push(name);
+    const name =
+      typeof p.name === "string"
+        ? p.name
+        : typeof p.toolName === "string"
+          ? p.toolName
+          : undefined;
+    if (!name) continue;
+    const rawInput = p.input ?? p.arguments ?? p.args ?? p.params;
+    const input =
+      rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+        ? (rawInput as Record<string, unknown>)
+        : undefined;
+    calls.push({ name, input });
   }
-  return names;
+  return calls;
 }
 
 export interface DelegateOptions {
@@ -164,6 +203,13 @@ export interface DelegateOptions {
    * swallowed so a noisy sink can never break the delegation.
    */
   onProgress?: (ev: DelegateProgress) => void;
+  /**
+   * Optional end-of-run hook, invoked once in `delegate()`'s `finally` block
+   * after the child exits (success, error, or abort). Lets a batching sink
+   * drain whatever it has buffered so the final lines are never lost. Any
+   * throw is swallowed, like onProgress.
+   */
+  onProgressEnd?: () => void;
 }
 
 /**
@@ -319,8 +365,212 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
     }
     return result;
   } finally {
+    // Drain any buffered progress before we return so the tail isn't lost.
+    if (opts.onProgressEnd) {
+      try {
+        opts.onProgressEnd();
+      } catch {
+        /* a noisy sink must never break the delegation */
+      }
+    }
     if (tmpPath) try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     if (tmpDir) try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
+  }
+}
+
+/** Max chars of a rendered tool argument (command/file) before we ellipsize. */
+const PROGRESS_ARG_MAX = 60;
+/** Max chars of the model's own narration carried into a progress line. */
+const PROGRESS_TEXT_MAX = 120;
+
+/** Collapse whitespace and clip to `max` chars with an ellipsis. */
+function clip(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max - 1).trimEnd() + "…" : flat;
+}
+
+/** basename without depending on node:path semantics for odd inputs. */
+function baseName(p: string): string {
+  const flat = p.replace(/[\\/]+$/, "");
+  const i = Math.max(flat.lastIndexOf("/"), flat.lastIndexOf("\\"));
+  return i >= 0 ? flat.slice(i + 1) : flat;
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+/**
+ * Render one tool call as a friendly verb + the meaningful argument, e.g.
+ *   `✏️ edit auth.ts`, `⚡ bash: npm test`, `📝 write routing.json`,
+ *   `📖 read config.toml`. Unknown tools fall back to `🔧 <name>` (with an arg
+ *   if one looks renderable). Never throws on missing/odd input.
+ */
+export function formatToolCall(call: ToolCall): string {
+  const name = (call.name || "tool").trim();
+  const lower = name.toLowerCase();
+  const input = call.input ?? {};
+  const file = str(input.file_path) ?? str(input.path) ?? str(input.filename);
+  const cmd = str(input.command) ?? str(input.cmd) ?? str(input.script);
+
+  switch (lower) {
+    case "edit":
+    case "str_replace":
+    case "str_replace_editor":
+      return file ? `✏️ edit ${baseName(file)}` : "✏️ edit";
+    case "write":
+    case "create":
+    case "create_file":
+      return file ? `📝 write ${baseName(file)}` : "📝 write";
+    case "read":
+    case "view":
+    case "cat":
+      return file ? `📖 read ${baseName(file)}` : "📖 read";
+    case "bash":
+    case "shell":
+    case "sh":
+    case "exec":
+    case "run":
+      return cmd ? `⚡ bash: ${clip(cmd, PROGRESS_ARG_MAX)}` : "⚡ bash";
+    case "grep":
+    case "search":
+    case "ripgrep": {
+      const q = str(input.pattern) ?? str(input.query) ?? str(input.q);
+      return q ? `🔎 ${lower}: ${clip(q, PROGRESS_ARG_MAX)}` : `🔎 ${lower}`;
+    }
+    case "glob":
+    case "find":
+    case "ls": {
+      const q = str(input.pattern) ?? str(input.path) ?? str(input.glob);
+      return q ? `📁 ${lower} ${clip(q, PROGRESS_ARG_MAX)}` : `📁 ${lower}`;
+    }
+    default: {
+      // Unknown tool: surface the name and the first renderable string arg.
+      const arg =
+        file ??
+        cmd ??
+        str(input.pattern) ??
+        str(input.query) ??
+        str(input.url) ??
+        str(input.name);
+      return arg ? `🔧 ${name}: ${clip(arg, PROGRESS_ARG_MAX)}` : `🔧 ${name}`;
+    }
+  }
+}
+
+/**
+ * Build the human-readable progress line(s) for one streamed turn. Leads with
+ * the model's own narration when present, appends a `— "narration"` tail to the
+ * first tool line so the digest reads naturally, and falls back to verb+arg for
+ * pure-tool turns. Returns [] for a turn with nothing worth reporting (e.g. an
+ * empty/terminal turn) so the caller can simply skip it.
+ *
+ * Pure and side-effect-free for unit testing.
+ */
+export function formatProgressLines(ev: DelegateProgress): string[] {
+  const narration = ev.text ? clip(ev.text, PROGRESS_TEXT_MAX) : undefined;
+  const toolLines = ev.toolCalls.map(formatToolCall);
+
+  if (toolLines.length === 0) {
+    return narration ? [`💬 ${narration}`] : [];
+  }
+
+  // Attach the narration to the first tool line so the model's intent and the
+  // action it took read as one thought: `✏️ edit auth.ts — "adding the guard"`.
+  if (narration) {
+    toolLines[0] = `${toolLines[0]} — "${narration}"`;
+  }
+  return toolLines;
+}
+
+/**
+ * A scheduled, cancellable idle callback. setTimeout-shaped by default;
+ * injectable so the batcher's idle-flush timing is unit-testable without real
+ * timers. `cancel()` must be idempotent.
+ */
+export interface IdleScheduler {
+  schedule(ms: number, fn: () => void): { cancel(): void };
+}
+
+const DEFAULT_SCHEDULER: IdleScheduler = {
+  schedule(ms, fn) {
+    const t = setTimeout(fn, ms);
+    if (typeof (t as { unref?: () => void }).unref === "function") {
+      (t as { unref: () => void }).unref();
+    }
+    return { cancel: () => clearTimeout(t) };
+  },
+};
+
+/**
+ * Hybrid-batching accumulator (Option C) for coder progress lines.
+ *
+ * Lines accumulate into a buffer and flush as ONE digest when EITHER:
+ *   (a) the coder has been idle `idleMs` since the last add, OR
+ *   (b) the buffer reaches `maxLines`
+ * — whichever comes first. `drain()` flushes whatever remains (call it from
+ * delegate()'s finally so the tail is never lost). `emit` receives the joined
+ * buffer body; it does the actual side-effect (e.g. `phantombot notify`).
+ *
+ * Pure of any I/O itself, and the idle clock is injected, so the flush triggers
+ * can be unit-tested deterministically.
+ */
+export class ProgressBatcher {
+  private buf: string[] = [];
+  private pending: { cancel(): void } | undefined;
+
+  constructor(
+    private readonly opts: {
+      maxLines: number;
+      idleMs: number;
+      emit: (body: string) => void;
+      scheduler?: IdleScheduler;
+    },
+  ) {}
+
+  /** Add zero or more lines; may trigger a line-cap flush immediately. */
+  add(lines: string[]): void {
+    if (lines.length === 0) return;
+    for (const l of lines) this.buf.push(l);
+    if (this.buf.length >= this.opts.maxLines) {
+      this.flush();
+      return;
+    }
+    this.arm();
+  }
+
+  /** Flush now if non-empty, cancelling any pending idle timer. */
+  flush(): void {
+    this.disarm();
+    if (this.buf.length === 0) return;
+    const body = this.buf.splice(0, this.buf.length).join("\n");
+    this.opts.emit(body);
+  }
+
+  /** End-of-run drain — alias for flush(), named for the finally-block intent. */
+  drain(): void {
+    this.flush();
+  }
+
+  /** Buffered line count, for tests/introspection. */
+  get size(): number {
+    return this.buf.length;
+  }
+
+  private arm(): void {
+    this.disarm();
+    const sched = this.opts.scheduler ?? DEFAULT_SCHEDULER;
+    this.pending = sched.schedule(this.opts.idleMs, () => {
+      this.pending = undefined;
+      this.flush();
+    });
+  }
+
+  private disarm(): void {
+    if (this.pending) {
+      this.pending.cancel();
+      this.pending = undefined;
+    }
   }
 }
 

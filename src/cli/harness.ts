@@ -303,12 +303,13 @@ async function runRoutingWizard(
   if (codingModel === CANCELLED) return true;
 
   // Progress streaming is a coder-only behavior, so only ask when a coding
-  // model is actually set. Off by default (silent coder, as before).
-  let codingProgress = false;
+  // model is actually set. ON by default now: stream unless the operator opts
+  // out (and unless an existing config explicitly turned it off).
+  let codingProgress = true;
   if (codingModel.trim()) {
     const ans = await p.confirm({
-      message: "Stream coder progress to Telegram while it works?",
-      initialValue: current.codingProgress === true,
+      message: "Stream coder progress to the chat while it works?",
+      initialValue: current.codingProgress !== false,
     });
     if (p.isCancel(ans)) return true;
     codingProgress = ans;
@@ -327,7 +328,7 @@ async function runRoutingWizard(
       `primary: ${writes.toml.primary_model}`,
       `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
       `coding:  ${writes.toml.coding_model ?? "(none)"}`,
-      `progress: ${writes.toml.coding_progress ? "on (streams to Telegram)" : "off"}`,
+      `progress: ${writes.toml.coding_progress ? "on (streams to chat)" : "off"}`,
       "",
       `saved to ${config.configPath} and ${userEnvPath()}`,
     ].join("\n"),

@@ -122,7 +122,7 @@ describe("applyRouting", () => {
     expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
   });
 
-  test("disabling coding_progress clears a previously-set flag (toml + env)", async () => {
+  test("disabling coding_progress persists an explicit false (toml + env)", async () => {
     await applyRouting(
       configPath,
       {
@@ -135,7 +135,9 @@ describe("applyRouting", () => {
     );
     expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
 
-    // Turn it off — both the toml key and the env var must be removed.
+    // Turn it off — with on-by-default, "off" must persist as an explicit
+    // false (in both toml and env) so it wins over the default, rather than
+    // being cleared and silently re-defaulting to on.
     await applyRouting(
       configPath,
       {
@@ -149,10 +151,8 @@ describe("applyRouting", () => {
     const routing = (
       (await readConfigToml(configPath)).harnesses as Record<string, any>
     ).pi.routing;
-    expect("coding_progress" in routing).toBe(false);
-    expect("PHANTOMBOT_CODING_PROGRESS" in (await loadEnvFile(envPath))).toBe(
-      false,
-    );
+    expect(routing.coding_progress).toBe(false);
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("false");
   });
 
   test("preserves unrelated config keys (does not clobber the chain)", async () => {

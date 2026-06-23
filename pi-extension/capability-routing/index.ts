@@ -35,6 +35,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   coderDelegationPrompt,
@@ -42,17 +43,74 @@ import {
   planRouting,
   type RoutingConfig,
 } from "./tools.ts";
-import { delegate, finalText, usageLine, type DelegateProgress } from "./spawnPi.ts";
+import {
+  delegate,
+  finalText,
+  formatProgressLines,
+  ProgressBatcher,
+  usageLine,
+  type DelegateProgress,
+} from "./spawnPi.ts";
 
-/** Minimum gap between coder progress notifications (anti-spam throttle). */
-const PROGRESS_MIN_INTERVAL_MS = 15_000;
-/** Max chars of assistant text carried into a progress notification. */
-const PROGRESS_TEXT_MAX = 160;
+/** Flush the buffer after this much idle time since the last event. */
+const PROGRESS_IDLE_FLUSH_MS = 5_000;
+/** Flush early once the buffer reaches this many lines, whichever comes first. */
+const PROGRESS_MAX_LINES = 10;
 
 /**
- * Build a throttled progress sink that forwards the coder child's per-turn
+ * Read the persistent `/viewcoder` override for this conversation, if any.
+ *
+ * The extension is dependency-free and cannot import phantombot's
+ * src/lib/viewCoder.ts, so it re-derives that store's path + JSON shape inline.
+ * Keep these in sync with src/lib/viewCoder.ts:
+ *   - path: $PHANTOMBOT_VIEW_CODER_STATE, else
+ *           ${XDG_STATE_HOME | ~/.local/state}/phantombot/view-coder-overrides.json
+ *   - key:  `${persona}\u0000${conversation}`
+ *   - entry: { mode: "on" | "off", touchedAt }
+ *
+ * Returns "on" | "off" when an override exists, else undefined (defer to the
+ * routing default). Any error (no env, missing/garbled file) ⇒ undefined.
+ */
+function viewCoderOverrideOf(): "on" | "off" | undefined {
+  const persona = process.env.PHANTOMBOT_PERSONA;
+  const conversation = process.env.PHANTOMBOT_CONVERSATION;
+  if (!persona || !conversation) return undefined;
+  const statePath =
+    process.env.PHANTOMBOT_VIEW_CODER_STATE ||
+    path.join(
+      process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
+      "phantombot",
+      "view-coder-overrides.json",
+    );
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<
+      string,
+      { mode?: unknown }
+    >;
+    const entry = parsed[`${persona}\u0000${conversation}`];
+    const mode = entry?.mode;
+    return mode === "on" || mode === "off" ? mode : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface CoderProgressSink {
+  onProgress: (ev: DelegateProgress) => void;
+  onProgressEnd: () => void;
+}
+
+/** Short job label for the digest header — the cwd basename, else "coder". */
+function coderLabel(cwd: string | undefined): string {
+  if (!cwd) return "coder";
+  const base = path.basename(cwd.replace(/[\\/]+$/, ""));
+  return base || "coder";
+}
+
+/**
+ * Build an ACCUMULATING progress sink that forwards the coder child's per-turn
  * events to the user via `phantombot notify`. Returns undefined when streaming
- * is off, so the delegate runs in its original silent mode.
+ * is off globally, so the delegate runs in its original silent mode.
  *
  * Channel-agnostic by construction: the sink only shells out to `phantombot
  * notify`, which fans the message out to the first owner of EVERY configured
@@ -62,42 +120,74 @@ const PROGRESS_TEXT_MAX = 160;
  * automatically reaches whatever channels the persona has, not just Telegram.
  *
  * Design notes:
- *  - Fire-and-forget: each notification is a detached `phantombot notify`
- *    child; we never await it and swallow every error. Progress must never
- *    slow down or break the actual coding job.
- *  - Throttled: at most one notification per PROGRESS_MIN_INTERVAL_MS. The
- *    first event always goes through (so the user sees work has started);
- *    after that we coalesce.
- *  - Skips the terminal turn: that text is the final answer, which the parent
+ *  - Per-conversation override: the persistent `/viewcoder` choice for this
+ *    conversation wins over the global default, re-read at EMIT time so a mid-
+ *    job toggle takes effect. `off` suppresses streaming; `on` forces it even
+ *    when the global default is off.
+ *  - Hybrid batching (Option C): lines accumulate into a buffer and flush as
+ *    ONE digest notify when EITHER the coder has been idle ~5s OR the buffer
+ *    reaches ~10 lines — whichever comes first. The `finally`-driven
+ *    onProgressEnd drains the tail so nothing is lost at the end.
+ *  - Fire-and-forget: each flush is a detached `phantombot notify`; we never
+ *    await it and swallow every error. Progress must never slow down or break
+ *    the actual coding job.
+ *  - Skips terminal turns: that text is the final answer, which the parent
  *    model already receives as the tool result — no need to double-report it.
+ *
+ * `globalDefault` is the routing.json `codingProgress` flag. Streaming for THIS
+ * job is on when: override === "on", OR (override === undefined AND
+ * globalDefault). override === "off" always wins (silent).
  */
 function makeCoderProgressSink(
-  enabled: boolean,
-): ((ev: DelegateProgress) => void) | undefined {
-  if (!enabled) return undefined;
-  let lastSentAt = 0;
-  return (ev: DelegateProgress) => {
-    if (ev.terminal) return;
-    const now = Date.now();
-    if (lastSentAt !== 0 && now - lastSentAt < PROGRESS_MIN_INTERVAL_MS) return;
+  globalDefault: boolean,
+  label: string,
+): CoderProgressSink {
+  // Always built; gated per emit. An `on` /viewcoder override must be able to
+  // force streaming even when globalDefault is off, and overrides can change
+  // mid-job, so the on/off decision is deferred to streamingEnabled() at each
+  // event rather than baked in here. The cost of an inert (suppressed) sink is
+  // negligible — it just never adds to the batcher and never flushes.
+  const streamingEnabled = (): boolean => {
+    const override = viewCoderOverrideOf();
+    if (override === "on") return true;
+    if (override === "off") return false;
+    return globalDefault;
+  };
 
-    const bits: string[] = [];
-    if (ev.tools.length > 0) bits.push(`🛠️ ${ev.tools.join(", ")}`);
-    if (ev.text) bits.push(ev.text.slice(0, PROGRESS_TEXT_MAX));
-    const body = bits.join(" — ") || `working… (turn ${ev.turn})`;
-
+  // One detached, fire-and-forget `phantombot notify` per flushed digest.
+  // Channel-agnostic: notify fans out to every configured channel.
+  const emit = (lines: string): void => {
+    const body = `coder(${label}):\n${lines}`;
     try {
-      const child = spawn("phantombot", ["notify", "--message", `coder: ${body}`], {
+      const child = spawn("phantombot", ["notify", "--message", body], {
         stdio: "ignore",
         detached: true,
       });
       child.on("error", () => {});
       child.unref();
-      lastSentAt = now;
     } catch {
       /* notify is best-effort; never let it affect the delegation */
     }
   };
+
+  const batcher = new ProgressBatcher({
+    maxLines: PROGRESS_MAX_LINES,
+    idleMs: PROGRESS_IDLE_FLUSH_MS,
+    emit,
+  });
+
+  const onProgress = (ev: DelegateProgress): void => {
+    if (ev.terminal) return;
+    if (!streamingEnabled()) return;
+    batcher.add(formatProgressLines(ev));
+  };
+
+  const onProgressEnd = (): void => {
+    // Drain whatever's left so the tail is never lost.
+    batcher.drain();
+  };
+
+  return { onProgress, onProgressEnd };
 }
 
 /**
@@ -201,13 +291,23 @@ export default function (pi: ExtensionAPI) {
       ].join(" "),
       parameters: CoderParams,
       async execute(_id, params, signal, _onUpdate, ctx) {
+        const cwd = params.cwd ?? ctx.cwd;
+        // Job label for the digest header, e.g. `coder(phantombot):`. The cwd
+        // basename ("which workspace") is the most useful at-a-glance handle;
+        // fall back to a generic "coder" when there's no usable cwd.
+        const label = coderLabel(cwd);
+        // Build the streaming sink unconditionally so an `on` /viewcoder
+        // override can force progress even when the global default is off; the
+        // sink gates per emit. plan.streamCoderProgress is the global default.
+        const sink = makeCoderProgressSink(plan.streamCoderProgress, label);
         const r = await delegate({
           model: codingModel,
           task: coderDelegationPrompt(params.task),
           tools: ["edit", "bash", "write"],
-          cwd: params.cwd ?? ctx.cwd,
+          cwd,
           signal,
-          onProgress: makeCoderProgressSink(plan.streamCoderProgress),
+          onProgress: sink.onProgress,
+          onProgressEnd: sink.onProgressEnd,
         });
         if (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted") {
           return {

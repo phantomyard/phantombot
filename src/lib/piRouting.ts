@@ -167,25 +167,31 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   // Auto-skip: a multimodal primary never gets an image delegate.
   const image = choices.primaryMultimodal ? undefined : clean(choices.imageModel);
   // Progress is a coder-only knob; without a coding model it's meaningless, so
-  // it's forced off (and any stale flag is cleared) when coding is unset.
-  const codingProgress = coding ? choices.codingProgress === true : false;
+  // it's forced off when coding is unset. WITH a coding model it is ON BY
+  // DEFAULT: stream unless the operator explicitly chose false. (The wizard
+  // always passes an explicit boolean; this `!== false` default matters for
+  // callers that leave it undefined.)
+  const codingProgress = coding ? choices.codingProgress !== false : false;
 
   const toml: RoutingWrites["toml"] = { primary_model: primary };
   if (image) toml.image_model = image;
   if (coding) toml.coding_model = coding;
-  // Only persist the flag when it's on — a bare `true` is meaningful, but we
-  // don't litter config.toml with `coding_progress = false`.
-  if (codingProgress) toml.coding_progress = true;
+  // Persist the flag explicitly whenever a coding model is set so the on/off
+  // choice survives — including an explicit `coding_progress = false`, which
+  // must win over the new default-on. Without a coding model the key is dropped
+  // (nothing to stream).
+  if (coding) toml.coding_progress = codingProgress;
 
   // "" clears the key (updateEnvFile delete semantics). We always write all
   // keys so switching from a non-multimodal to a multimodal primary actively
-  // removes a stale PHANTOMBOT_IMAGE_MODEL, and disabling progress clears a
-  // stale PHANTOMBOT_CODING_PROGRESS rather than leaving it.
+  // removes a stale PHANTOMBOT_IMAGE_MODEL. For progress, write "true"/"false"
+  // when a coding model is set (so an explicit off persists), and clear it when
+  // there's no coding model.
   const env: Record<string, string> = {
     [ENV_PRIMARY_MODEL]: primary,
     [ENV_IMAGE_MODEL]: image ?? "",
     [ENV_CODING_MODEL]: coding ?? "",
-    [ENV_CODING_PROGRESS]: codingProgress ? "true" : "",
+    [ENV_CODING_PROGRESS]: coding ? (codingProgress ? "true" : "false") : "",
   };
 
   return { toml, env };

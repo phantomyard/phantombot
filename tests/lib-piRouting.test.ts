@@ -117,6 +117,8 @@ describe("computeRoutingWrites — multimodal auto-skip", () => {
     expect(w.toml).toEqual({
       primary_model: "gpt-5.2",
       coding_model: "gpt-5.2-codex",
+      // coding model set + progress unspecified ⇒ on by default
+      coding_progress: true,
     });
     expect(w.toml.image_model).toBeUndefined();
     // env writes "" for image → unset (clears any stale value)
@@ -162,15 +164,17 @@ describe("computeRoutingWrites — coder progress", () => {
     expect(w.env[ENV_CODING_PROGRESS]).toBe("true");
   });
 
-  test("progress off ⇒ toml key omitted, env cleared to ''", () => {
+  test("explicit progress off ⇒ toml key written false (persists over default-on), env 'false'", () => {
     const w = computeRoutingWrites({
       primaryModel: "gpt-5.2",
       codingModel: "gpt-5.2-codex",
       codingProgress: false,
       primaryMultimodal: true,
     });
-    expect(w.toml.coding_progress).toBeUndefined();
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
+    // Must persist as an explicit false so it wins over the on-by-default,
+    // rather than being omitted and silently re-defaulting to on.
+    expect(w.toml.coding_progress).toBe(false);
+    expect(w.env[ENV_CODING_PROGRESS]).toBe("false");
   });
 
   test("progress true but no coding model ⇒ forced off (coupled to coder)", () => {

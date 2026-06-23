@@ -11,7 +11,17 @@ import {
   imageDelegationPrompt,
   planRouting,
 } from "../pi-extension/capability-routing/tools.ts";
-import { buildProgress, isTerminalStop } from "../pi-extension/capability-routing/spawnPi.ts";
+import {
+  buildProgress,
+  formatProgressLines,
+  formatToolCall,
+  isTerminalStop,
+  ProgressBatcher,
+  toolCallsOf,
+  type DelegateProgress,
+  type IdleScheduler,
+  type Message,
+} from "../pi-extension/capability-routing/spawnPi.ts";
 
 describe("planRouting — tool registration decisions", () => {
   test("registers both tools when image and coding models are set", () => {
@@ -71,8 +81,12 @@ describe("planRouting — coder progress streaming", () => {
     expect(plan.streamCoderProgress).toBe(false);
   });
 
-  test("does NOT stream when codingProgress is unset or false", () => {
-    expect(planRouting({ codingModel: "x" }).streamCoderProgress).toBe(false);
+  test("streams by DEFAULT when codingProgress is unset but a coding model is set", () => {
+    // On by default: a coding model with no explicit flag now streams.
+    expect(planRouting({ codingModel: "x" }).streamCoderProgress).toBe(true);
+  });
+
+  test("an explicit false wins over the default-on", () => {
     expect(
       planRouting({ codingModel: "x", codingProgress: false }).streamCoderProgress,
     ).toBe(false);
@@ -119,7 +133,7 @@ describe("coder progress — terminal vs tool-use continuation", () => {
     expect(ev.terminal).toBe(false); // sink forwards it ⇒ notifies
     expect(ev.turn).toBe(3);
     expect(ev.text).toBe("Patching the validation path");
-    expect(ev.tools).toEqual(["edit", "bash"]);
+    expect(ev.toolCalls.map((c) => c.name)).toEqual(["edit", "bash"]);
   });
 
   test("the final answer (stop) IS terminal — sink skips it", () => {
@@ -135,5 +149,231 @@ describe("coder progress — terminal vs tool-use continuation", () => {
     expect(isTerminalStop("toolUse")).toBe(false);
     expect(isTerminalStop("stop")).toBe(true);
     expect(isTerminalStop(undefined)).toBe(false); // in-flight turn, no reason yet
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Readable formatting (Option 3): tool calls carry their input
+// ---------------------------------------------------------------------------
+
+describe("toolCallsOf — captures name + input", () => {
+  const msg = (parts: unknown[]) =>
+    ({ role: "assistant", content: parts }) as unknown as Message;
+
+  test("captures input objects, ignoring text parts", () => {
+    const calls = toolCallsOf(
+      msg([
+        { type: "text", text: "narration" },
+        { type: "tool_use", name: "edit", input: { file_path: "/a/auth.ts" } },
+        { type: "tool_use", name: "bash", input: { command: "npm test" } },
+      ]),
+    );
+    expect(calls).toEqual([
+      { name: "edit", input: { file_path: "/a/auth.ts" } },
+      { name: "bash", input: { command: "npm test" } },
+    ]);
+  });
+
+  test("tolerates alternate field names (toolName / arguments) and missing input", () => {
+    const calls = toolCallsOf(
+      msg([
+        { type: "tool_use", toolName: "write", arguments: { path: "x.ts" } },
+        { type: "tool_use", name: "read" }, // no input at all
+      ]),
+    );
+    expect(calls[0]).toEqual({ name: "write", input: { path: "x.ts" } });
+    expect(calls[1]).toEqual({ name: "read", input: undefined });
+  });
+
+  test("non-object input is dropped rather than crashing", () => {
+    const calls = toolCallsOf(
+      msg([{ type: "tool_use", name: "bash", input: "not an object" }]),
+    );
+    expect(calls).toEqual([{ name: "bash", input: undefined }]);
+  });
+});
+
+describe("formatToolCall — friendly verb + meaningful arg", () => {
+  test("edit / write / read render the file basename", () => {
+    expect(formatToolCall({ name: "edit", input: { file_path: "/repo/src/auth.ts" } })).toBe(
+      "✏️ edit auth.ts",
+    );
+    expect(formatToolCall({ name: "write", input: { file_path: "routing.json" } })).toBe(
+      "📝 write routing.json",
+    );
+    expect(formatToolCall({ name: "read", input: { path: "/etc/config.toml" } })).toBe(
+      "📖 read config.toml",
+    );
+  });
+
+  test("bash renders the command snippet", () => {
+    expect(formatToolCall({ name: "bash", input: { command: "npm test" } })).toBe(
+      "⚡ bash: npm test",
+    );
+  });
+
+  test("long args are truncated with an ellipsis", () => {
+    const out = formatToolCall({
+      name: "bash",
+      input: { command: "x".repeat(200) },
+    });
+    expect(out.length).toBeLessThan(80);
+    expect(out).toContain("…");
+  });
+
+  test("unknown tools fall back to a wrench + first renderable arg", () => {
+    expect(formatToolCall({ name: "frobnicate", input: { url: "https://x" } })).toBe(
+      "🔧 frobnicate: https://x",
+    );
+    expect(formatToolCall({ name: "mystery" })).toBe("🔧 mystery");
+  });
+
+  test("missing input never crashes", () => {
+    expect(formatToolCall({ name: "edit" })).toBe("✏️ edit");
+    expect(formatToolCall({ name: "bash" })).toBe("⚡ bash");
+  });
+});
+
+describe("formatProgressLines — narration + tool digest", () => {
+  const ev = (over: Partial<DelegateProgress>): DelegateProgress => ({
+    turn: 1,
+    text: undefined,
+    toolCalls: [],
+    terminal: false,
+    ...over,
+  });
+
+  test("leads with narration appended to the first tool line", () => {
+    const lines = formatProgressLines(
+      ev({
+        text: "adding the retry guard",
+        toolCalls: [
+          { name: "edit", input: { file_path: "auth.ts" } },
+          { name: "bash", input: { command: "npm test" } },
+        ],
+      }),
+    );
+    expect(lines).toEqual([
+      '✏️ edit auth.ts — "adding the retry guard"',
+      "⚡ bash: npm test",
+    ]);
+  });
+
+  test("pure-tool turn (no narration) is just verb+arg lines", () => {
+    const lines = formatProgressLines(
+      ev({ toolCalls: [{ name: "write", input: { file_path: "routing.json" } }] }),
+    );
+    expect(lines).toEqual(["📝 write routing.json"]);
+  });
+
+  test("narration-only turn renders a speech line", () => {
+    expect(formatProgressLines(ev({ text: "Let me think about this" }))).toEqual([
+      "💬 Let me think about this",
+    ]);
+  });
+
+  test("empty turn yields no lines (caller skips it)", () => {
+    expect(formatProgressLines(ev({}))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hybrid batching (Option C): flush on idle OR line-cap, drain at end
+// ---------------------------------------------------------------------------
+
+/** Manual scheduler: holds the pending idle callback so tests can fire it. */
+class ManualScheduler implements IdleScheduler {
+  pending: (() => void) | undefined;
+  lastMs: number | undefined;
+  schedule(ms: number, fn: () => void): { cancel(): void } {
+    this.lastMs = ms;
+    this.pending = fn;
+    return {
+      cancel: () => {
+        this.pending = undefined;
+      },
+    };
+  }
+  fire(): void {
+    const fn = this.pending;
+    this.pending = undefined;
+    fn?.();
+  }
+}
+
+describe("ProgressBatcher — hybrid flush", () => {
+  test("flushes ONE digest when the idle timer fires", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+    });
+    b.add(["✏️ edit auth.ts", "⚡ bash: npm test"]);
+    expect(emitted).toEqual([]); // nothing yet — waiting for idle
+    expect(sched.lastMs).toBe(5000);
+    sched.fire(); // coder went idle
+    expect(emitted).toEqual(["✏️ edit auth.ts\n⚡ bash: npm test"]);
+    expect(b.size).toBe(0);
+  });
+
+  test("flushes early when the buffer hits the line cap (whichever first)", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 3,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+    });
+    b.add(["a", "b"]);
+    expect(emitted).toEqual([]); // 2 < 3, still buffering
+    b.add(["c"]); // hits the cap → immediate flush
+    expect(emitted).toEqual(["a\nb\nc"]);
+    // The idle timer was cancelled by the cap flush — firing it is a no-op.
+    sched.fire();
+    expect(emitted).toEqual(["a\nb\nc"]);
+  });
+
+  test("drain() flushes the remaining tail so nothing is lost at the end", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+    });
+    b.add(["📝 write routing.json"]);
+    b.drain();
+    expect(emitted).toEqual(["📝 write routing.json"]);
+  });
+
+  test("drain() on an empty buffer emits nothing", () => {
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: new ManualScheduler(),
+    });
+    b.drain();
+    expect(emitted).toEqual([]);
+  });
+
+  test("adding nothing is a no-op (empty turns don't arm a timer)", () => {
+    const sched = new ManualScheduler();
+    const emitted: string[] = [];
+    const b = new ProgressBatcher({
+      maxLines: 10,
+      idleMs: 5000,
+      emit: (body) => emitted.push(body),
+      scheduler: sched,
+    });
+    b.add([]);
+    expect(sched.pending).toBeUndefined();
+    expect(emitted).toEqual([]);
   });
 });

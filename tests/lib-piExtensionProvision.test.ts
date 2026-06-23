@@ -38,9 +38,13 @@ describe("ensureRoutingExtension", () => {
     };
     const r = await ensureRoutingExtension(routing, { home });
 
+    // coding model set + progress unspecified ⇒ on by default, so the baked
+    // models gain codingProgress: true.
+    const expectedModels = { ...routing, codingProgress: true };
+
     expect(r.action).toBe("created");
     expect(r.dir).toBe(extDir(home));
-    expect(r.models).toEqual(routing);
+    expect(r.models).toEqual(expectedModels);
 
     // Every embedded source file is present and carries the managed banner.
     for (const rel of Object.keys(PI_EXTENSION_FILES)) {
@@ -50,11 +54,11 @@ describe("ensureRoutingExtension", () => {
       expect(content).toContain("MANAGED BY PHANTOMBOT");
     }
 
-    // routing.json holds exactly the provided models.
+    // routing.json holds exactly the provided models (+ default-on progress).
     const routingJson = JSON.parse(
       await readFile(join(extDir(home), "routing.json"), "utf8"),
     );
-    expect(routingJson).toEqual(routing);
+    expect(routingJson).toEqual(expectedModels);
 
     // Marker exists.
     expect(existsSync(join(extDir(home), ".phantombot-managed"))).toBe(true);
@@ -72,6 +76,8 @@ describe("ensureRoutingExtension", () => {
     expect(routingJson).toEqual({
       primaryModel: "gpt-5.2",
       codingModel: "qwen-coder",
+      // coding model set + progress unspecified ⇒ on by default
+      codingProgress: true,
     });
     expect("imageModel" in routingJson).toBe(false);
   });
@@ -91,8 +97,9 @@ describe("ensureRoutingExtension", () => {
     });
   });
 
-  test("omits codingProgress when off, or when no coding model is set", async () => {
-    // progress off ⇒ key omitted
+  test("explicit progress off bakes false; no coding model omits the key", async () => {
+    // progress explicitly off ⇒ baked as false (must persist so the extension,
+    // which defaults absent ⇒ on, can see the override and stay quiet)
     await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "qwen-coder", codingProgress: false },
       { home },
@@ -100,7 +107,7 @@ describe("ensureRoutingExtension", () => {
     let json = JSON.parse(
       await readFile(join(extDir(home), "routing.json"), "utf8"),
     );
-    expect("codingProgress" in json).toBe(false);
+    expect(json.codingProgress).toBe(false);
 
     // progress true but image-only (no coding model) ⇒ key omitted (decoupled)
     await ensureRoutingExtension(
@@ -178,6 +185,8 @@ describe("ensureRoutingExtension", () => {
     expect(routingJson).toEqual({
       primaryModel: "gpt-5.2",
       codingModel: "qwen-coder",
+      // coding model set + progress unspecified ⇒ on by default
+      codingProgress: true,
     });
   });
 
