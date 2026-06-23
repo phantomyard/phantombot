@@ -13,7 +13,7 @@
  * vars. See pi-extension/capability-routing/{index,tools}.ts for the consumer.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,7 +36,13 @@ const MANAGED_NOTE =
 
 export interface ProvisionResult {
   dir: string;
-  action: "created" | "updated" | "unchanged";
+  /**
+   * created/updated/unchanged → we stamped (≥1 routable capability configured).
+   * removed → a routable capability is no longer configured and we deleted the
+   *           previously-stamped dir. absent → nothing to stamp and nothing was
+   *           there to remove (already in the desired empty state).
+   */
+  action: "created" | "updated" | "unchanged" | "removed" | "absent";
   models: { primaryModel?: string; imageModel?: string; codingModel?: string };
   /** Relative paths of files we (re)wrote this run. */
   wrote: string[];
@@ -60,6 +66,30 @@ function withManagedHeader(rel: string, content: string): string {
   return `// ${MANAGED_NOTE}\n${content}`;
 }
 
+/** Trim; blank ⇒ undefined. Mirrors the extension's own clean() in tools.ts. */
+function clean(v: string | undefined): string | undefined {
+  if (v === undefined) return undefined;
+  const t = v.trim();
+  return t.length > 0 ? t : undefined;
+}
+
+/**
+ * The extension earns its place on disk ONLY when at least one ROUTABLE
+ * capability is configured — an image model (registers `look_at_image`) or a
+ * coding model (registers `coder`). These are independent capabilities; either
+ * one on its own is enough to keep the dir. A bare `primaryModel` registers no
+ * tool, so it does NOT by itself justify provisioning — when neither image nor
+ * coding is set the managed dir is removed rather than left inert.
+ */
+export function hasRoutableCapability(
+  routing: PiRoutingConfig | undefined,
+): boolean {
+  return (
+    clean(routing?.imageModel) !== undefined ||
+    clean(routing?.codingModel) !== undefined
+  );
+}
+
 /** Only the defined routing fields, in a stable key order, as a JSON object. */
 function routingModels(
   routing: PiRoutingConfig | undefined,
@@ -69,9 +99,12 @@ function routingModels(
     imageModel?: string;
     codingModel?: string;
   } = {};
-  if (routing?.primaryModel !== undefined) out.primaryModel = routing.primaryModel;
-  if (routing?.imageModel !== undefined) out.imageModel = routing.imageModel;
-  if (routing?.codingModel !== undefined) out.codingModel = routing.codingModel;
+  const primaryModel = clean(routing?.primaryModel);
+  const imageModel = clean(routing?.imageModel);
+  const codingModel = clean(routing?.codingModel);
+  if (primaryModel !== undefined) out.primaryModel = primaryModel;
+  if (imageModel !== undefined) out.imageModel = imageModel;
+  if (codingModel !== undefined) out.codingModel = codingModel;
   return out;
 }
 
@@ -127,14 +160,31 @@ async function readIfExists(p: string): Promise<string | undefined> {
   }
 }
 
+/** Remove the managed extension dir entirely. Idempotent: a no-op if absent. */
+export async function removeRoutingExtension(
+  opts: ProvisionOpts = {},
+): Promise<{ removed: boolean; dir: string }> {
+  const home = opts.home ?? os.homedir();
+  const dir = extensionDir(home);
+  if (!existsSync(dir)) return { removed: false, dir };
+  await rm(dir, { recursive: true, force: true });
+  return { removed: true, dir };
+}
+
 /**
- * Ensure the managed extension is present and current. Idempotent: writes each
- * desired file only when missing or different. The marker's hash + the content
- * comparison together cover both source drift and routing.json drift.
+ * Ensure the managed extension matches the desired state for this routing
+ * config. Idempotent.
  *
- * When `routing` is undefined we still stamp the source files but write an
- * empty `routing.json` ({}) so the extension registers nothing — keeping the
- * managed dir coherent rather than half-present.
+ * Per-capability rule: the dir is stamped when at least one routable capability
+ * (image and/or coding model) is configured, and the baked `routing.json`
+ * carries only the capabilities that are set — so the extension registers
+ * `look_at_image` and/or `coder` independently. When NEITHER capability is set
+ * (undefined routing, or only a primaryModel) there is nothing to route, so the
+ * managed dir is removed rather than left as an inert empty shell.
+ *
+ * When stamping, writes each desired file only when missing or different; the
+ * marker's hash + content comparison cover both source drift and routing.json
+ * drift.
  */
 export async function ensureRoutingExtension(
   routing: PiRoutingConfig | undefined,
@@ -142,6 +192,14 @@ export async function ensureRoutingExtension(
 ): Promise<ProvisionResult> {
   const home = opts.home ?? os.homedir();
   const dir = extensionDir(home);
+
+  // No routable capability ⇒ the extension would register no tools. Remove any
+  // previously-stamped dir instead of leaving an inert shell behind.
+  if (!hasRoutableCapability(routing)) {
+    const { removed } = await removeRoutingExtension({ home });
+    return { dir, action: removed ? "removed" : "absent", models: {}, wrote: [] };
+  }
+
   const existedBefore = existsSync(dir);
 
   const { files, models } = desiredFiles(routing);
@@ -180,34 +238,53 @@ export async function ensureRoutingExtension(
 
 /**
  * Non-writing health check for `phantombot doctor`.
- *   present  = the dir + marker file exist.
- *   drifted  = the marker hash != the current assets hash, OR routing.json
- *              differs from desired, OR any embedded source file differs.
+ *   shouldExist = a routable capability (image and/or coding) is configured, so
+ *                 the managed dir is supposed to be present.
+ *   present     = the dir + marker file exist.
+ *   drifted     = on-disk state doesn't match desired. When shouldExist:
+ *                 marker hash != current assets hash, OR routing.json differs
+ *                 from desired, OR any embedded source file differs, OR it's
+ *                 missing. When !shouldExist: the dir exists at all (it must be
+ *                 removed). The doctor repairs by stamping or removing per
+ *                 shouldExist.
  */
 export async function routingExtensionStatus(
   routing: PiRoutingConfig | undefined,
   opts: ProvisionOpts = {},
-): Promise<{ present: boolean; drifted: boolean; dir: string }> {
+): Promise<{
+  shouldExist: boolean;
+  present: boolean;
+  drifted: boolean;
+  dir: string;
+}> {
   const home = opts.home ?? os.homedir();
   const dir = extensionDir(home);
+  const shouldExist = hasRoutableCapability(routing);
+
+  // No capability ⇒ desired state is absence. Any leftover dir (even a partial
+  // one) is drift that the doctor should remove.
+  if (!shouldExist) {
+    const exists = existsSync(dir);
+    return { shouldExist, present: exists, drifted: exists, dir };
+  }
 
   const markerRaw = await readIfExists(path.join(dir, MARKER_FILE));
   const present = existsSync(dir) && markerRaw !== undefined;
   if (!present) {
-    return { present: false, drifted: true, dir };
+    return { shouldExist, present: false, drifted: true, dir };
   }
 
   if (readMarkerHash(markerRaw) !== PI_EXTENSION_ASSETS_HASH) {
-    return { present: true, drifted: true, dir };
+    return { shouldExist, present: true, drifted: true, dir };
   }
 
   const { files } = desiredFiles(routing);
   for (const [rel, content] of files) {
     const current = await readIfExists(path.join(dir, rel));
     if (current !== content) {
-      return { present: true, drifted: true, dir };
+      return { shouldExist, present: true, drifted: true, dir };
     }
   }
 
-  return { present: true, drifted: false, dir };
+  return { shouldExist, present: true, drifted: false, dir };
 }

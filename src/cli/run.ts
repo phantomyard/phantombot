@@ -374,10 +374,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }),
   );
 
-  // Self-provision the managed Pi capability-routing extension: stamp the
-  // embedded source + a routing.json baked from config into the owned
-  // ~/.pi/agent/extensions/capability-routing/ dir. Fire-and-forget so a slow
-  // or failing filesystem never blocks startup. `doctor` re-stamps on drift.
+  // Self-provision the managed Pi capability-routing extension: when a routable
+  // capability (image and/or coding model) is configured, stamp the embedded
+  // source + a routing.json baked from config into the owned
+  // ~/.pi/agent/extensions/capability-routing/ dir; when none is configured,
+  // remove any previously-stamped dir. Fire-and-forget so a slow or failing
+  // filesystem never blocks startup. `doctor` re-stamps/removes on drift.
   // Gated to the real `phantombot` binary (same gate doctor uses for its
   // filesystem-touching checks) so `bun test`/dev never stamp the dev box's
   // real ~/.pi.

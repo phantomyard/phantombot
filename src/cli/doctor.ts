@@ -42,6 +42,7 @@ import {
 } from "../lib/nightly.ts";
 import {
   ensureRoutingExtension,
+  removeRoutingExtension,
   routingExtensionStatus,
 } from "../lib/piExtensionProvision.ts";
 import { currentPlatform } from "../lib/platform.ts";
@@ -179,12 +180,15 @@ export interface DoctorReport {
     checks: HarnessAvailability[];
   };
   /**
-   * Managed Pi capability-routing extension. Present only when the pi harness
-   * has routing configured. `present` = the owned dir + marker exist;
-   * `drifted` = the stamped source/routing.json no longer matches what this
-   * binary would write. `repaired` = we re-stamped it this run.
+   * Managed Pi capability-routing extension. `shouldExist` = a routable
+   * capability (image and/or coding model) is configured, so the owned dir is
+   * supposed to be on disk; when false the desired state is absence.
+   * `present` = the owned dir + marker exist; `drifted` = on-disk state no
+   * longer matches desired (needs a re-stamp when shouldExist, or removal when
+   * not). `repaired` = we stamped or removed it this run.
    */
   piExtension?: {
+    shouldExist: boolean;
     present: boolean;
     drifted: boolean;
     dir: string;
@@ -403,27 +407,35 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
-  // Managed Pi extension — only relevant when routing is configured. A
-  // missing or drifted owned dir is re-stamped when repair is enabled (the
-  // same self-healing pattern as the systemd units). Gated to the real
-  // `phantombot` binary, mirroring the harness/systemd/timer checks, so
-  // `bun test`/dev never read or stamp the dev box's real ~/.pi.
+  // Managed Pi extension. When a routable capability (image and/or coding) is
+  // configured the owned dir is stamped/re-stamped on drift; when none is
+  // configured the desired state is absence, so a leftover dir is removed.
+  // Either way it self-heals when repair is enabled (the same pattern as the
+  // systemd units). Gated to the real `phantombot` binary, mirroring the
+  // harness/systemd/timer checks, so `bun test`/dev never touch the dev box's
+  // real ~/.pi. Not gated on routing being set, so dropping routing also
+  // triggers cleanup of a previously-stamped dir.
   let piExtensionReport: DoctorReport["piExtension"] | undefined;
-  const piRouting = config.harnesses?.pi?.routing;
-  if (piRouting && basename(process.execPath) === "phantombot") {
+  if (basename(process.execPath) === "phantombot") {
+    const piRouting = config.harnesses?.pi?.routing;
     const status = await routingExtensionStatus(piRouting);
     let repaired = false;
-    if (repair && (!status.present || status.drifted)) {
+    if (repair && status.drifted) {
       try {
-        await ensureRoutingExtension(piRouting);
+        if (status.shouldExist) {
+          await ensureRoutingExtension(piRouting);
+        } else {
+          await removeRoutingExtension();
+        }
         repaired = true;
       } catch (e) {
-        log.warn("doctor: pi extension re-stamp failed", {
+        log.warn("doctor: pi extension repair failed", {
           error: (e as Error).message,
         });
       }
     }
     piExtensionReport = {
+      shouldExist: status.shouldExist,
       present: status.present,
       drifted: status.drifted,
       dir: status.dir,
@@ -630,26 +642,45 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
 
   if (piExtensionReport) {
-    const ok =
-      piExtensionReport.present &&
-      (!piExtensionReport.drifted || !!piExtensionReport.repaired);
-    out.write(`  pi extension: ${tick(ok)} — `);
-    if (!piExtensionReport.present) {
-      out.write(
-        piExtensionReport.repaired
-          ? `stamped managed capability-routing extension into ${piExtensionReport.dir}\n`
-          : `managed capability-routing extension missing at ${piExtensionReport.dir} — run \`phantombot doctor\` (or restart) to stamp it\n`,
-      );
-    } else if (piExtensionReport.drifted) {
-      out.write(
-        piExtensionReport.repaired
-          ? `re-stamped drifted capability-routing extension at ${piExtensionReport.dir}\n`
-          : `managed capability-routing extension drifted at ${piExtensionReport.dir} — run \`phantombot doctor\` to re-stamp\n`,
-      );
+    const r = piExtensionReport;
+    if (!r.shouldExist) {
+      // Desired state is absence (no routable capability configured). Healthy
+      // when the dir is gone, or we removed it this run.
+      const ok = !r.present || !!r.repaired;
+      out.write(`  pi extension: ${tick(ok)} — `);
+      if (!r.present) {
+        out.write(
+          `no routing capability configured; managed capability-routing extension correctly absent\n`,
+        );
+      } else if (r.repaired) {
+        out.write(
+          `removed stale capability-routing extension at ${r.dir} (no routing capability configured)\n`,
+        );
+      } else {
+        out.write(
+          `stale capability-routing extension present at ${r.dir} but no routing capability configured — run \`phantombot doctor\` to remove it\n`,
+        );
+      }
     } else {
-      out.write(
-        `managed capability-routing extension present and current at ${piExtensionReport.dir}\n`,
-      );
+      const ok = r.present && (!r.drifted || !!r.repaired);
+      out.write(`  pi extension: ${tick(ok)} — `);
+      if (!r.present) {
+        out.write(
+          r.repaired
+            ? `stamped managed capability-routing extension into ${r.dir}\n`
+            : `managed capability-routing extension missing at ${r.dir} — run \`phantombot doctor\` (or restart) to stamp it\n`,
+        );
+      } else if (r.drifted) {
+        out.write(
+          r.repaired
+            ? `re-stamped drifted capability-routing extension at ${r.dir}\n`
+            : `managed capability-routing extension drifted at ${r.dir} — run \`phantombot doctor\` to re-stamp\n`,
+        );
+      } else {
+        out.write(
+          `managed capability-routing extension present and current at ${r.dir}\n`,
+        );
+      }
     }
   }
 
