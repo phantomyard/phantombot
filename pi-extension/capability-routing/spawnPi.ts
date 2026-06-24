@@ -186,6 +186,24 @@ export function toolCallsOf(msg: Message): ToolCall[] {
 export interface DelegateOptions {
   /** Model id to pin via --model (bare name as printed by `pi --list-models`). */
   model: string;
+  /**
+   * Pi provider for this delegate (e.g. "openrouter", "openai"), threaded onto
+   * `--provider`. MUST match the api-key's provider: Pi's `--provider` defaults
+   * to google, so an OpenRouter key with no `--provider openrouter` is fired at
+   * the wrong endpoint and auth fails. Sourced from the ACTIVE harness's routing
+   * config (relayed via env by the parent pi), NOT a shared ambient env var —
+   * that's what keeps a primary-Pi→OpenRouter / fallback-Pi→OpenAI box from
+   * colliding two providers in one process namespace. Omit ⇒ no `--provider`
+   * (Pi falls back to its own default, google).
+   */
+  provider?: string;
+  /**
+   * Per-turn Pi api-key, threaded onto `--api-key` exactly like the model is
+   * threaded onto `--model` — never persisted into Pi's own auth store. Omit ⇒
+   * no `--api-key`, and Pi falls back to its own env / local-store settings
+   * (the "install later, no key" path). Pairs with `provider` above.
+   */
+  apiKey?: string;
   /** Comma-list passed to --tools. Omit/empty = pi's default tool set. */
   tools?: string[];
   /** Extra system prompt appended via --append-system-prompt (written to a temp file). */
@@ -363,9 +381,32 @@ export function delegateFailureText(kind: string, r: DelegateResult): string {
   return text;
 }
 
-export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
+/**
+ * Build the leading (static) argv for a delegate `pi` invocation: the model,
+ * the provider/api-key auth pair, and the optional tool list — everything
+ * BEFORE the per-run `--append-system-prompt` and the positional task. Pure and
+ * exported so the auth threading is unit-testable without spawning a process.
+ *
+ * The provider + api-key are threaded as a PAIR, scoped to this delegate's
+ * active harness: Pi's `--provider` defaults to google, so a non-google key
+ * (e.g. OpenRouter) with no matching `--provider` is fired at the wrong endpoint
+ * and auth fails. Either omitted ⇒ its flag is dropped and Pi falls back to its
+ * own default / local store for that piece.
+ */
+export function buildDelegateBaseArgs(
+  opts: Pick<DelegateOptions, "model" | "provider" | "apiKey" | "tools">,
+): string[] {
   const args: string[] = ["--mode", "json", "-p", "--no-session", "--model", opts.model];
+  const provider = opts.provider?.trim();
+  if (provider) args.push("--provider", provider);
+  const apiKey = opts.apiKey?.trim();
+  if (apiKey) args.push("--api-key", apiKey);
   if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+  return args;
+}
+
+export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
+  const args: string[] = buildDelegateBaseArgs(opts);
 
   const result: DelegateResult = {
     exitCode: 0,

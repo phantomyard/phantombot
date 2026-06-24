@@ -74,6 +74,30 @@ const PROGRESS_MAX_LINES = 10;
 const DELEGATE_IDLE_TIMEOUT_MS = 240_000;
 
 /**
+ * The active harness's Pi provider + api-key, relayed from the parent pi via
+ * env (PHANTOMBOT_PI_PROVIDER / PHANTOMBOT_PI_API_KEY). The parent harness sets
+ * these into THIS process's environment when it spawns us, scoped to whichever
+ * pi harness is running this turn — so a box with a primary Pi→OpenRouter and a
+ * fallback Pi→OpenAI never collides two providers in one namespace: each pi
+ * subtree carries exactly its own pair. We thread them onto the delegate child
+ * as `--provider`/`--api-key` flags (see spawnPi.ts) rather than leaning on
+ * ambient env, so the bare child can't guess the wrong provider. Blank ⇒
+ * undefined (the flag is omitted and Pi uses its own default/local store).
+ *
+ * The extension is dependency-free and cannot import src/lib/piRouting.ts, so
+ * the env-var names are duplicated here as string literals; keep them in sync
+ * with ENV_PI_PROVIDER / ENV_PI_API_KEY in src/lib/piRouting.ts.
+ */
+function piAuthFromEnv(): { provider?: string; apiKey?: string } {
+  const provider = process.env.PHANTOMBOT_PI_PROVIDER?.trim();
+  const apiKey = process.env.PHANTOMBOT_PI_API_KEY?.trim();
+  return {
+    provider: provider ? provider : undefined,
+    apiKey: apiKey ? apiKey : undefined,
+  };
+}
+
+/**
  * Read the persistent `/viewcoder` override for this conversation, if any.
  *
  * The extension is dependency-free and cannot import phantombot's
@@ -283,8 +307,11 @@ export default function (pi: ExtensionAPI) {
       ].join(" "),
       parameters: LookAtImageParams,
       async execute(_id, params, signal) {
+        const { provider, apiKey } = piAuthFromEnv();
         const r = await delegate({
           model: imageModel,
+          provider,
+          apiKey,
           task: imageDelegationPrompt(params.path, params.question),
           // Vision Q&A doesn't need edit/bash/write; keep it tool-light.
           tools: ["read"],
@@ -330,8 +357,11 @@ export default function (pi: ExtensionAPI) {
         // override can force progress even when the global default is off; the
         // sink gates per emit. plan.streamCoderProgress is the global default.
         const sink = makeCoderProgressSink(plan.streamCoderProgress, label);
+        const { provider, apiKey } = piAuthFromEnv();
         const r = await delegate({
           model: codingModel,
+          provider,
+          apiKey,
           task: coderDelegationPrompt(params.task),
           tools: ["edit", "bash", "write"],
           cwd,

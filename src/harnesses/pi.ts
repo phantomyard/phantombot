@@ -33,7 +33,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import { ENV_PI_API_KEY, type PiRoutingConfig } from "../lib/piRouting.ts";
+import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
@@ -203,11 +203,27 @@ export class PiHarness implements Harness {
       payloadBytes: totalBytes,
     });
 
+    // Relay THIS harness's provider + api-key into the child env so the bundled
+    // capability-routing extension threads them onto its OWN delegate children
+    // (look_at_image / coder) as `--provider`/`--api-key`. Delegate MODELS still
+    // travel via the managed routing.json, but the auth PAIR is per-turn and
+    // scoped to the active harness — projecting it here (rather than leaning on a
+    // shared ambient env var) is what keeps a primary-Pi→OpenRouter /
+    // fallback-Pi→OpenAI box from colliding two providers in one namespace: each
+    // pi subtree inherits exactly its own pair. We set the provider explicitly
+    // (it was previously only an argv flag, invisible to the extension) and
+    // re-assert the api-key so the child sees the value we just resolved. An
+    // empty string CLEARS the key — so a harness with no provider/key actively
+    // unsets any stale ambient value rather than leaking it into the subtree.
+    // Clone, never mutate in place: withPersonaEnv returns the SAME process.env
+    // reference when there's no persona/conversation, so assigning onto it would
+    // clobber the parent's global env. The spread guarantees a fresh object.
+    const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation) };
+    childEnv[ENV_PI_PROVIDER] = provider ?? "";
+    childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      // Delegate models reach the bundled extension via the managed
-      // routing.json (lib/piExtensionProvision.ts), NOT via child env.
-      env: withPersonaEnv(process.env, req.persona, req.conversation),
+      env: childEnv,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

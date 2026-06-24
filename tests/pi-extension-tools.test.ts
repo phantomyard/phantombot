@@ -12,6 +12,7 @@ import {
   planRouting,
 } from "../pi-extension/capability-routing/tools.ts";
 import {
+  buildDelegateBaseArgs,
   buildProgress,
   delegateFailureText,
   formatProgressLines,
@@ -44,6 +45,46 @@ function result(over: Partial<DelegateResult> = {}): DelegateResult {
 function assistantText(text: string): Message {
   return { role: "assistant", content: [{ type: "text", text }] };
 }
+
+describe("buildDelegateBaseArgs — provider/api-key threading for delegates", () => {
+  const argsOf = (over: Parameters<typeof buildDelegateBaseArgs>[0]) =>
+    buildDelegateBaseArgs(over).join(" ");
+
+  test("model is always pinned via --model", () => {
+    expect(argsOf({ model: "z-ai/glm-5.2" })).toContain("--model z-ai/glm-5.2");
+  });
+
+  test("provider + api-key are threaded as a pair (OpenRouter routes to openrouter, NOT google)", () => {
+    const a = argsOf({ model: "z-ai/glm-5.2", provider: "openrouter", apiKey: "sk-or-1" });
+    expect(a).toContain("--provider openrouter");
+    expect(a).not.toContain("--provider google");
+    expect(a).toContain("--api-key sk-or-1");
+  });
+
+  test("a different harness can carry a different provider (openai), no collision", () => {
+    const a = argsOf({ model: "gpt-5.2", provider: "openai", apiKey: "sk-oa-2" });
+    expect(a).toContain("--provider openai");
+    expect(a).toContain("--api-key sk-oa-2");
+    expect(a).not.toContain("openrouter");
+  });
+
+  test("no provider/key → neither flag (Pi falls back to its own default/store)", () => {
+    const a = argsOf({ model: "gpt-5.2" });
+    expect(a).not.toContain("--provider");
+    expect(a).not.toContain("--api-key");
+  });
+
+  test("blank provider/key are treated as absent (trimmed away)", () => {
+    const a = argsOf({ model: "gpt-5.2", provider: "  ", apiKey: "  " });
+    expect(a).not.toContain("--provider");
+    expect(a).not.toContain("--api-key");
+  });
+
+  test("tools are appended after the auth pair", () => {
+    const a = argsOf({ model: "m", provider: "openai", apiKey: "k", tools: ["read"] });
+    expect(a).toContain("--tools read");
+  });
+});
 
 describe("isDelegateFailure — tool-boundary failure detection", () => {
   test("clean exit with no/benign stopReason is success", () => {

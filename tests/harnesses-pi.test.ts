@@ -451,6 +451,50 @@ describe("PiHarness routing (subprocess)", () => {
     expect(out).not.toContain("PHANTOMBOT_CODING_MODEL=qwen-coder");
   });
 
+  test("the active harness's provider + api-key ARE projected into the child env (for the extension's delegates)", async () => {
+    // The capability-routing extension runs INSIDE this spawned pi and threads
+    // the pair onto its OWN delegate children. It reads them from this env, so
+    // the harness must project ITS provider/key here — scoped to this harness,
+    // not a shared ambient var — so a primary-Pi→OpenRouter / fallback-Pi→OpenAI
+    // box never collides two providers in one namespace.
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-openrouter-key";
+    try {
+      const out = (
+        await collect(
+          routed({ provider: "openrouter", primaryModel: "z-ai/glm-5.2" }).invoke(
+            newRequest(),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("provider=openrouter");
+      expect(out).toContain("apikey=sk-openrouter-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("no provider/key → the child env actively CLEARS the pair (no stale ambient leak)", async () => {
+    process.env.FAKE_PI_MODE = "env";
+    // Spoof a stale ambient value: the harness must overwrite it to empty, not
+    // leak it into a subtree that didn't configure a provider.
+    process.env.PHANTOMBOT_PI_PROVIDER = "stale-google";
+    delete process.env.PHANTOMBOT_PI_API_KEY;
+    try {
+      const out = (await collect(routed({ primaryModel: "gpt-5.2" }).invoke(newRequest())))
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("provider= ");
+      expect(out).not.toContain("provider=stale-google");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_PROVIDER;
+    }
+  });
+
   test("PHANTOMBOT_PI_API_KEY is threaded onto --api-key per turn", async () => {
     process.env.FAKE_PI_MODE = "argv";
     process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
