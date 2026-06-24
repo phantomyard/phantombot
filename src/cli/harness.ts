@@ -34,6 +34,7 @@ import {
 import {
   computeRoutingWrites,
   ENV_PI_API_KEY,
+  resolvePiApiKeyWrite,
   resolveRouting,
   resolveRoutingProvider,
   type RoutingChoices,
@@ -371,9 +372,22 @@ async function configurePi(
     message: `${keyLabel} (passed per-turn; blank to keep current / use Pi's own)`,
   });
   if (p.isCancel(apiKey)) return true;
-  if (apiKey.trim()) {
-    await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: apiKey.trim() });
+  // Blank means "keep current" ONLY when the provider is unchanged. The api-key
+  // is provider-scoped (threaded onto `--api-key` alongside `--provider`), so a
+  // blank key after a provider switch/clear must DROP the stale key — otherwise
+  // the old provider's key is fired at the new `--provider` and auth fails. The
+  // decision is a pure, tested function; here we just enact it.
+  const keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
+  if (keyWrite.action === "set") {
+    await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: keyWrite.value });
     p.note(`saved ${ENV_PI_API_KEY} to ${userEnvPath()}`, "Pi API key");
+  } else if (keyWrite.action === "clear") {
+    await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: "" });
+    p.note(
+      `provider changed and no new key entered — cleared the stale ${ENV_PI_API_KEY} ` +
+        `so Pi falls back to its own local store`,
+      "Pi API key",
+    );
   }
 
   // Straight into custom routing — Pi is already the chosen harness, so we don't

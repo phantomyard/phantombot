@@ -128,6 +128,44 @@ export function resolveRoutingProvider(
 }
 
 /**
+ * Decide what the harness wizard should do with PHANTOMBOT_PI_API_KEY after the
+ * key prompt, given the key the operator typed and whether the provider
+ * changed.
+ *
+ * The key prompt treats blank as "keep whatever's already in ~/.env" — but that
+ * is ONLY safe when the provider is unchanged. The api-key is provider-scoped:
+ * it's threaded per-turn onto `pi --api-key` ALONGSIDE `pi --provider`, and Pi's
+ * `--provider` defaults to google, so a key from the OLD provider fired at a NEW
+ * `--provider` (or at no provider) auth-fails. So if the operator switched
+ * providers (or cleared the provider to "(none)") and left the key blank, the
+ * stale key MUST be cleared — Pi then falls back to its own local store, the
+ * documented "no per-turn key" path. A blank key with an UNCHANGED provider is
+ * the genuine "keep current" case and is preserved untouched (so re-running the
+ * wizard without retyping the key on an already-configured box is a no-op).
+ *
+ *   - non-blank key            → set it (a freshly entered key always wins)
+ *   - blank + provider changed → clear the stale key
+ *   - blank + provider same    → keep the current key
+ *
+ * Pure and exported so the decision is unit-tested without driving the TUI.
+ */
+export type PiApiKeyWrite =
+  | { action: "set"; value: string }
+  | { action: "clear" }
+  | { action: "keep" };
+
+export function resolvePiApiKeyWrite(
+  enteredKey: string,
+  newProvider: string | undefined,
+  currentProvider: string | undefined,
+): PiApiKeyWrite {
+  const entered = enteredKey.trim();
+  if (entered) return { action: "set", value: entered };
+  const providerChanged = clean(newProvider) !== clean(currentProvider);
+  return providerChanged ? { action: "clear" } : { action: "keep" };
+}
+
+/**
  * Resolve routing config with phantombot's standard precedence:
  * env var > config.toml > unset. `toml` is the parsed
  * `[harnesses.pi.routing]` sub-table (may be empty / undefined).

@@ -5,6 +5,7 @@ import {
   ENV_IMAGE_MODEL,
   ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
+  resolvePiApiKeyWrite,
   resolveRouting,
   resolveRoutingProvider,
 } from "../src/lib/piRouting.ts";
@@ -180,5 +181,64 @@ describe("resolveRoutingProvider — explicit (none) clears, skipped keeps", () 
 
   test("explicit '' with no current provider stays cleared", () => {
     expect(resolveRoutingProvider("", undefined)).toBe("");
+  });
+});
+
+describe("resolvePiApiKeyWrite — blank key only kept when provider unchanged", () => {
+  test("a freshly entered key is always set (trimmed)", () => {
+    expect(resolvePiApiKeyWrite("  sk-new  ", "openai", "openrouter")).toEqual({
+      action: "set",
+      value: "sk-new",
+    });
+  });
+
+  test("an entered key wins even when the provider is unchanged", () => {
+    expect(resolvePiApiKeyWrite("sk-new", "openrouter", "openrouter")).toEqual({
+      action: "set",
+      value: "sk-new",
+    });
+  });
+
+  test("blank key + unchanged provider keeps the current key", () => {
+    expect(resolvePiApiKeyWrite("", "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("blank key + whitespace-only key + unchanged provider keeps", () => {
+    expect(resolvePiApiKeyWrite("   ", "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("THE REGRESSION: blank key + switched provider clears the stale key", () => {
+    // Operator had openrouter + an openrouter key, reruns the wizard, switches to
+    // openai and leaves the key blank. The old key must NOT survive — threading it
+    // onto `--provider openai` auth-fails.
+    expect(resolvePiApiKeyWrite("", "openai", "openrouter")).toEqual({
+      action: "clear",
+    });
+  });
+
+  test("blank key + provider cleared to (none) clears the stale key", () => {
+    // "(none)" arrives as "" from the picker; that's a provider change from
+    // openrouter → no provider, so the openrouter key must go.
+    expect(resolvePiApiKeyWrite("", "", "openrouter")).toEqual({
+      action: "clear",
+    });
+  });
+
+  test("blank key + no provider before or after is a no-op keep", () => {
+    expect(resolvePiApiKeyWrite("", "", undefined)).toEqual({ action: "keep" });
+    expect(resolvePiApiKeyWrite("", undefined, undefined)).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("provider compare ignores surrounding whitespace", () => {
+    // " openrouter " and "openrouter" are the same provider → keep.
+    expect(resolvePiApiKeyWrite("", " openrouter ", "openrouter")).toEqual({
+      action: "keep",
+    });
   });
 });
