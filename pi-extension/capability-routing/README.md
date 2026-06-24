@@ -21,13 +21,16 @@ good orchestrator as the primary and let it hand off:
 | `look_at_image(path, question)` | `routing.json` has `imageModel` | Spawns the image model to answer a **specific question** about an image (question-driven, not a one-shot describe). Returns the answer + usage. |
 | `coder(task, cwd?)` | `routing.json` has `codingModel` | Spawns the coding model as a **fresh `pi` process** with `edit,bash,write` for a coarse-grained job. Returns the result + usage/cost. |
 
-### Multimodal auto-skip (the key behavior)
+### Always-on image delegate (the key behavior)
 
-When the chosen **primary** model already accepts image input, phantombot's
-`harness` wizard omits `imageModel` from the baked `routing.json`. This
-extension then does **not** register `look_at_image` — the primary can see
-images itself, so a separate vision delegate would be dead weight. You only ever
-see `look_at_image` when the primary is text-only.
+phantombot's `harness` wizard keeps an `imageModel` set whenever routing is
+configured — an explicit pick, or (when the **primary** is itself vision-capable
+and no pick is made) the **primary model** as the default. So this extension
+registers `look_at_image` even for a multimodal primary. The tool's
+**description** tells a model that can already see images NOT to call it — so a
+vision primary won't, while a **text-only coding model swapped in for a code
+turn** still has a vision delegate to reach for. `look_at_image` is omitted only
+when the operator explicitly picks "(none)" for the image model.
 
 ### Coarse-grained coder caveat
 
@@ -54,7 +57,7 @@ The extension reads a single managed data file, `routing.json`, that lives
 | Key | Meaning |
 |-----|---------|
 | `primaryModel` | Orchestrator model id (bare name as printed by `pi --list-models`). Informational to the extension — phantombot's pi harness pins it via `--model`. |
-| `imageModel` | Vision delegate. **Present only when the primary is not multimodal.** Absent ⇒ `look_at_image` not registered. |
+| `imageModel` | Vision delegate. **Set whenever routing is configured** — an explicit pick, or the primary itself when the primary is vision-capable. Absent only when the operator picked "(none)" ⇒ `look_at_image` not registered. |
 | `codingModel` | Coding delegate for `coder`. Absent ⇒ `coder` not registered. |
 | `codingProgress` | Opt-in. When `true` **and** a `codingModel` is set, `coder` streams its progress to Telegram (see below). Omitted/`false` ⇒ silent coder. Baked only when both conditions hold. |
 

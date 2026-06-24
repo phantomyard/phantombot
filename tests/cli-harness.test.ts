@@ -2,7 +2,26 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyHarnessChain, whichBinary } from "../src/cli/harness.ts";
+import {
+  applyHarnessChain,
+  piInstallCommand,
+  SUPPORTED_HARNESSES,
+  whichBinary,
+} from "../src/cli/harness.ts";
+
+describe("Pi-default wizard wiring", () => {
+  test("Pi is the default primary (first in SUPPORTED_HARNESSES)", () => {
+    expect(SUPPORTED_HARNESSES[0]).toBe("pi");
+  });
+
+  test("piInstallCommand is the official user-space installer", () => {
+    expect(piInstallCommand()).toEqual([
+      "sh",
+      "-c",
+      "curl -fsSL https://pi.dev/install.sh | sh",
+    ]);
+  });
+});
 
 let workdir: string;
 

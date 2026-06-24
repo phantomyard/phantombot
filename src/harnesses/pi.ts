@@ -13,9 +13,12 @@
  *     tool_execution_end, turn_end,
  *     extension_*) → ignored        (the done chunk is emitted from process exit)
  *
- * Auth (OAuth-on-host model): phantombot does NOT pass --api-key. Pi
- * resolves credentials from its own configured state (~/.config/pi/ or
- * similar). `phantombot doctor` surfaces failure if Pi isn't configured.
+ * Auth (per-turn, with local-store fallback): when PHANTOMBOT_PI_API_KEY is
+ * set, phantombot threads it onto `--api-key` per turn (the same way it threads
+ * `--model`) — never persisting it into Pi's own auth store. When it's UNSET,
+ * phantombot passes no `--api-key` and Pi falls back to its own env / local
+ * store settings, so an "install later, no key" or legacy install keeps working.
+ * `phantombot doctor` surfaces failure if neither path yields credentials.
  *
  * ARG_MAX guard: declares maxPayloadBytes so the orchestrator's fallback
  * skips Pi for oversized turns. Internal precheck mirrors that so a
@@ -24,7 +27,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import type { PiRoutingConfig } from "../lib/piRouting.ts";
+import { ENV_PI_API_KEY, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
@@ -155,17 +158,32 @@ export class PiHarness implements Harness {
     if (req.toolsMode === "none") {
       args.push("--no-tools");
     }
+
+    // Re-source ~/.env so secrets saved by the agent on the previous turn
+    // (`phantombot env set FOO bar`) are visible here without a daemon
+    // restart — and so the Pi API key below is read fresh. See envBootstrap.ts
+    // for the sticky-vs-reloadable rules.
+    await reloadEnvFiles();
+
+    // Per-turn Pi auth: thread the API key onto `--api-key` exactly the way the
+    // model is threaded onto `--model`. We do NOT persist it into Pi's own auth
+    // store — Phantomops owns key storage; this just relays whatever is in the
+    // env this turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒
+    // pass it (wins); ABSENT ⇒ omit the flag so Pi falls back to its OWN env /
+    // local store settings (the "install later, no key" path keeps legacy
+    // installs working); neither ⇒ Pi errors as usual. Must precede the
+    // positional payload below.
+    const piApiKey = process.env[ENV_PI_API_KEY]?.trim();
+    if (piApiKey) {
+      args.push("--api-key", piApiKey);
+    }
+
     // Payload is the LAST positional arg (pi reads it from argv, not stdin).
     args.push(payload);
     log.debug("pi.invoke spawning", {
       bin: this.config.bin,
       payloadBytes: totalBytes,
     });
-
-    // Re-source ~/.env so secrets saved by the agent on the previous turn
-    // (`phantombot env set FOO bar`) are visible here without a daemon
-    // restart. See envBootstrap.ts for the sticky-vs-reloadable rules.
-    await reloadEnvFiles();
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,

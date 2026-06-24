@@ -18,10 +18,13 @@
  *   }
  *
  * Every key is optional. The KEY rule: when `imageModel` is absent/empty,
- * `look_at_image` is NOT registered. phantombot omits it precisely when the
- * primary model is multimodal (it can see images itself), so a multimodal
- * primary gets no redundant vision tool. Env vars are NOT read by the
- * extension anymore — routing.json is the sole input.
+ * `look_at_image` is NOT registered. phantombot now keeps `imageModel` set
+ * whenever routing is configured — an explicit pick, or the primary itself when
+ * the primary is multimodal — so `look_at_image` is registered even for a
+ * vision-capable primary. The tool's DESCRIPTION (see index.ts) tells a model
+ * that can already see images not to call it, so a multimodal primary won't,
+ * while a text-only coding model swapped in for a code turn still can. Env vars
+ * are NOT read by the extension — routing.json is the sole input.
  */
 
 export interface RoutingConfig {

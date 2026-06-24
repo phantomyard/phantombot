@@ -19,11 +19,14 @@
  *                                "gpt-5.2" or "~anthropic/claude-opus-latest").
  *                                Empty / unset = "use Pi's configured default"
  *                                (no override; the extension routes nothing).
- *   PHANTOMBOT_IMAGE_MODEL     — the vision delegate. SET ONLY when the primary
- *                                is NOT multimodal. When the primary already
- *                                accepts image input, this is intentionally
- *                                left UNSET so the extension does not register
- *                                `look_at_image` (the primary looks itself).
+ *   PHANTOMBOT_IMAGE_MODEL     — the vision delegate. ALWAYS set when routing is
+ *                                configured: an explicit pick, or — when the
+ *                                primary is itself multimodal and no pick was
+ *                                made — the PRIMARY model id. We keep it set even
+ *                                for a vision primary so a text-only coding
+ *                                delegate (after a coding-brain swap) still has a
+ *                                `look_at_image` tool; the tool's description
+ *                                tells vision-capable models not to use it.
  *   PHANTOMBOT_CODING_MODEL    — the coding delegate spawned by `coder`.
  *
  * The same values are mirrored into config.toml under
@@ -43,6 +46,21 @@
 export const ENV_PRIMARY_MODEL = "PHANTOMBOT_PRIMARY_MODEL";
 export const ENV_IMAGE_MODEL = "PHANTOMBOT_IMAGE_MODEL";
 export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
+/**
+ * The Pi provider API key, threaded per-turn onto `pi --api-key <key>` exactly
+ * the way the model is threaded onto `--model` — NOT persisted into Pi's own
+ * auth store (~/.pi). Phantomops owns long-term key storage in production; here
+ * the wizard's "configure now" path may stash one in ~/.env so a single box can
+ * run standalone. The contract is a graceful three-tier fallback for auth:
+ *   1. this env var present  → `--api-key` is passed (wins).
+ *   2. absent                → no `--api-key`; Pi falls back to its OWN env vars
+ *                              / local store settings (the "install later, no
+ *                              key" path — legacy installs keep working).
+ *   3. neither               → Pi errors as it normally would.
+ * Empty / unset ⇒ omit the flag (tier 2). Never written by computeRoutingWrites;
+ * it's collected separately by the wizard and read directly in harnesses/pi.ts.
+ */
+export const ENV_PI_API_KEY = "PHANTOMBOT_PI_API_KEY";
 /**
  * Opt-in progress streaming for the `coder` delegate. When truthy, the
  * extension forwards the coding child's own per-turn events (assistant text +
@@ -129,12 +147,6 @@ export interface RoutingChoices {
    * model is set (no coding model ⇒ no `coder` tool ⇒ nothing to stream).
    */
   codingProgress?: boolean;
-  /**
-   * Whether the chosen primary accepts image input. When true, the image
-   * model is DROPPED regardless of what `imageModel` holds — the central
-   * "skip image model when multimodal" rule, applied in exactly one place.
-   */
-  primaryMultimodal: boolean;
 }
 
 /** The concrete writes the wizard should persist. */
@@ -164,8 +176,15 @@ export interface RoutingWrites {
 export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   const primary = choices.primaryModel.trim();
   const coding = clean(choices.codingModel);
-  // Auto-skip: a multimodal primary never gets an image delegate.
-  const image = choices.primaryMultimodal ? undefined : clean(choices.imageModel);
+  // The image model is exactly what the operator selected — no auto-drop, no
+  // auto-default applied here. This REPLACES the old multimodal auto-skip (which
+  // dropped the image model for a vision primary). The "always have an image
+  // model" behavior now lives in the wizard, which pre-selects the primary as
+  // the default image model when the primary is vision-capable — so a text-only
+  // coding delegate (after a coding-brain swap) always has a look_at_image to
+  // call. An explicit "(none)" is honored: a vision primary that opts out simply
+  // sees images itself. Optional ⇒ undefined.
+  const image = clean(choices.imageModel);
   // Progress is a coder-only knob; without a coding model it's meaningless, so
   // it's forced off when coding is unset. WITH a coding model it is ON BY
   // DEFAULT: stream unless the operator explicitly chose false. (The wizard

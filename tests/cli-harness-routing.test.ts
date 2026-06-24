@@ -28,7 +28,6 @@ describe("applyRouting", () => {
         primaryModel: "deepseek-v4-pro",
         imageModel: "gpt-4o",
         codingModel: "gpt-5.2-codex",
-        primaryMultimodal: false,
       },
       envPath,
     );
@@ -52,14 +51,15 @@ describe("applyRouting", () => {
     expect(env.PHANTOMBOT_CODING_MODEL).toBe("gpt-5.2-codex");
   });
 
-  test("multimodal primary omits image model from toml and env", async () => {
+  test("vision primary KEEPS the image model (no auto-skip)", async () => {
+    // The wizard defaults the image pick to the vision primary, so the image
+    // model commonly equals the primary — and it must be persisted, not dropped.
     await applyRouting(
       configPath,
       {
         primaryModel: "gpt-5.2",
-        imageModel: "gpt-4o",
+        imageModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
-        primaryMultimodal: true,
       },
       envPath,
     );
@@ -69,31 +69,27 @@ describe("applyRouting", () => {
     ).pi.routing;
     expect(routing.primary_model).toBe("gpt-5.2");
     expect(routing.coding_model).toBe("gpt-5.2-codex");
-    expect("image_model" in routing).toBe(false);
+    expect(routing.image_model).toBe("gpt-5.2");
 
     const env = await loadEnvFile(envPath);
     expect(env.PHANTOMBOT_PRIMARY_MODEL).toBe("gpt-5.2");
-    // "" deletes the key in updateEnvFile, so it must be absent.
-    expect("PHANTOMBOT_IMAGE_MODEL" in env).toBe(false);
+    expect(env.PHANTOMBOT_IMAGE_MODEL).toBe("gpt-5.2");
   });
 
-  test("switching to a multimodal primary clears a previously-set image model", async () => {
-    // First: text-only primary with an image model.
+  test("explicit (none) image model clears a previously-set one", async () => {
+    // First: an image model is set.
     await applyRouting(
       configPath,
-      {
-        primaryModel: "deepseek-v4-pro",
-        imageModel: "gpt-4o",
-        primaryMultimodal: false,
-      },
+      { primaryModel: "deepseek-v4-pro", imageModel: "gpt-4o" },
       envPath,
     );
     expect((await loadEnvFile(envPath)).PHANTOMBOT_IMAGE_MODEL).toBe("gpt-4o");
 
-    // Then: switch to a multimodal primary — the stale image model must go.
+    // Then: operator picks "(none)" for the image model — undefined — which must
+    // clear the stale value in both toml and env.
     await applyRouting(
       configPath,
-      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", primaryMultimodal: true },
+      { primaryModel: "gpt-5.2", imageModel: undefined },
       envPath,
     );
 
@@ -111,7 +107,6 @@ describe("applyRouting", () => {
         primaryModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
         codingProgress: true,
-        primaryMultimodal: true,
       },
       envPath,
     );
@@ -129,7 +124,6 @@ describe("applyRouting", () => {
         primaryModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
         codingProgress: true,
-        primaryMultimodal: true,
       },
       envPath,
     );
@@ -144,7 +138,6 @@ describe("applyRouting", () => {
         primaryModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
         codingProgress: false,
-        primaryMultimodal: true,
       },
       envPath,
     );
@@ -160,7 +153,7 @@ describe("applyRouting", () => {
     await applyHarnessChain(configPath, ["pi", "claude"]);
     await applyRouting(
       configPath,
-      { primaryModel: "gpt-5.2", primaryMultimodal: true },
+      { primaryModel: "gpt-5.2" },
       envPath,
     );
     const toml = await readConfigToml(configPath);

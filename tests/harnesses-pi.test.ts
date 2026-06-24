@@ -395,6 +395,32 @@ describe("PiHarness routing (subprocess)", () => {
     expect(out).not.toContain("PHANTOMBOT_IMAGE_MODEL=vision-x");
     expect(out).not.toContain("PHANTOMBOT_CODING_MODEL=qwen-coder");
   });
+
+  test("PHANTOMBOT_PI_API_KEY is threaded onto --api-key per turn", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
+    try {
+      const chunks = await collect(mkHarness().invoke(newRequest()));
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain("--api-key sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("no PHANTOMBOT_PI_API_KEY → no --api-key flag (Pi falls back to its own store)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    delete process.env.PHANTOMBOT_PI_API_KEY;
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--api-key");
+  });
 });
 
 describe("PiHarness ARG_MAX precheck", () => {

@@ -15,7 +15,11 @@ import {
   type TomlObject,
   updateConfigToml,
 } from "../lib/configWriter.ts";
-import { harnessBin, whichBinary } from "../lib/harnessAvailability.ts";
+import {
+  harnessBin,
+  resolveHarnessBinary,
+  whichBinary,
+} from "../lib/harnessAvailability.ts";
 import {
   defaultServiceControl,
   restartCommand,
@@ -29,6 +33,7 @@ import {
 } from "../lib/piModels.ts";
 import {
   computeRoutingWrites,
+  ENV_PI_API_KEY,
   resolveRouting,
   type RoutingChoices,
 } from "../lib/piRouting.ts";
@@ -39,12 +44,27 @@ import { saveHarnessBins } from "../state.ts";
 export { whichBinary } from "../lib/harnessAvailability.ts";
 
 export type HarnessId = "claude" | "pi" | "gemini" | "codex";
+// Pi is listed FIRST so it is the default primary in the wizard (both the
+// pre-selected option and the SUPPORTED_HARNESSES[0] fallback). Pi is
+// phantombot's reference harness — capability routing, the coding-brain swap,
+// and the vision delegate are all Pi features — so a fresh install should land
+// on Pi unless the operator deliberately picks another.
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
-  "claude",
   "pi",
+  "claude",
   "gemini",
   "codex",
 ];
+
+/**
+ * The official Pi installer invocation — user-space, no sudo. Returned as an
+ * argv array (not a shell string) so callers spawn it explicitly; it is pure
+ * and unit-tested so the wizard's shell-out stays a thin wrapper. The installer
+ * itself (pi.dev/install.sh) runs Pi's own onboarding into the user prefix.
+ */
+export function piInstallCommand(): string[] {
+  return ["sh", "-c", "curl -fsSL https://pi.dev/install.sh | sh"];
+}
 
 export async function detectAvailability(
   config: Config,
@@ -69,9 +89,9 @@ export async function applyHarnessChain(
 /**
  * Persist the capability-routing choices: write the `[harnesses.pi.routing]`
  * sub-table to config.toml AND the PHANTOMBOT_*_MODEL env vars to ~/.env. The
- * multimodal auto-skip is applied inside `computeRoutingWrites`, so by the time
- * we get here the image model is already dropped when the primary is
- * multimodal. Returns the computed writes so callers/tests can assert.
+ * image model is whatever the wizard collected (it pre-selects the primary as
+ * the default image model when the primary is vision-capable). Returns the
+ * computed writes so callers/tests can assert.
  *
  * `envPath` is injectable for tests (defaults to ~/.env via userEnvPath()).
  */
@@ -153,12 +173,24 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
       label: id,
       hint: availability[id] ? availability[id] : "not on PATH (will fail)",
     })),
+    // Pi is the default (SUPPORTED_HARNESSES[0]); an existing config wins.
     initialValue:
       (config.harnesses.chain[0] as HarnessId) ?? SUPPORTED_HARNESSES[0],
   });
   if (p.isCancel(primary)) {
     p.cancel("cancelled");
     return 1;
+  }
+
+  // If Pi is the primary, configure it right here — offer to install when it's
+  // missing (the install can put it on PATH, so the fallback picker below then
+  // shows it as available), then run the now/later → API key → routing flow.
+  if (primary === "pi") {
+    const cancelled = await configurePi(config, availability, "primary");
+    if (cancelled) {
+      p.cancel("cancelled");
+      return 1;
+    }
   }
 
   const fallbackOptions: Array<{
@@ -184,6 +216,19 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     return 1;
   }
 
+  // Pi as the FALLBACK gets the exact same treatment as when it's primary —
+  // install offer, now/later, its own API key, and a full routing pass — so the
+  // fallback can point at a different provider/model entirely, not just reuse
+  // the primary's. (When Pi is the primary it was already handled above; it can
+  // only appear once in the chain, so this never double-runs.)
+  if (fallbackPick === "pi") {
+    const cancelled = await configurePi(config, availability, "fallback");
+    if (cancelled) {
+      p.cancel("cancelled");
+      return 1;
+    }
+  }
+
   const chain: HarnessId[] = [primary as HarnessId];
   if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
 
@@ -193,21 +238,128 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     "Saved",
   );
 
-  // Capability routing is Pi-specific (it's driven by a Pi extension), so only
-  // offer the wizard step when pi is somewhere in the chain. Failover (the
-  // chain above) is untouched by any of this.
-  if (chain.includes("pi")) {
-    const cancelled = await runRoutingWizard(config, availability.pi);
-    if (cancelled) {
-      p.cancel("cancelled");
-      return 1;
-    }
-  }
-
   await maybePromptRestart(svc);
 
   p.outro("done");
   return 0;
+}
+
+/**
+ * Run the official Pi installer (user-space, no sudo). stdout/stdin inherit so
+ * the operator goes through Pi's own onboarding live; stderr is captured for the
+ * failure note. Injectable for tests via the `runner` param. Returns whether it
+ * exited cleanly.
+ */
+export type InstallRunner = (cmd: string[]) => Promise<{
+  exitCode: number;
+  stderr: string;
+}>;
+
+const defaultInstallRunner: InstallRunner = async (cmd) => {
+  const [bin, ...rest] = cmd;
+  const proc = Bun.spawn([bin!, ...rest], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "pipe",
+  });
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  return { exitCode, stderr };
+};
+
+async function installPi(
+  runner: InstallRunner = defaultInstallRunner,
+): Promise<boolean> {
+  const r = await runner(piInstallCommand());
+  if (r.exitCode === 0) return true;
+  p.note(
+    `pi install exited ${r.exitCode}.\n${(r.stderr || "(no stderr)").trim()}`,
+    "Install failed",
+  );
+  return false;
+}
+
+/**
+ * Configure Pi when it's chosen as a harness (primary OR fallback). Steps:
+ *   1. If Pi isn't on PATH, offer to run the official installer, then redetect
+ *      (and update the shared `availability` map so the caller's later prompts
+ *      see the freshly-installed binary).
+ *   2. Ask "configure now or later?". LATER ⇒ stop here (binary present but
+ *      unconfigured is fine — Pi falls back to its own local-store settings when
+ *      no per-turn key is threaded).
+ *   3. NOW ⇒ collect the Pi API key (stored in ~/.env as PHANTOMBOT_PI_API_KEY,
+ *      threaded per-turn onto `--api-key`; NOT written into Pi's own store), then
+ *      run the custom routing wizard directly (no "use defaults?" detour).
+ *
+ * `availability` is mutated in place when an install succeeds. Returns `true`
+ * only when the operator cancelled outright (Esc), so the caller can abort.
+ */
+async function configurePi(
+  config: Config,
+  availability: Record<HarnessId, string | undefined>,
+  role: "primary" | "fallback",
+): Promise<boolean> {
+  if (!availability.pi) {
+    const doInstall = await p.confirm({
+      message: `Pi isn't installed. Install it now (official installer, user-space)?`,
+      initialValue: true,
+    });
+    if (p.isCancel(doInstall)) return true;
+    if (doInstall) {
+      const ok = await installPi();
+      if (ok) {
+        // Redetect against the broad search path (Pi may land in ~/.local/bin or
+        // ~/.pi/agent/bin, not the current process PATH).
+        const resolved = await resolveHarnessBinary("pi");
+        availability.pi = resolved.path;
+        await saveHarnessBins(availability);
+        p.note(
+          availability.pi
+            ? `pi installed: ${availability.pi}`
+            : "pi installed, but not yet detected on the search path — you can still configure routing by hand below.",
+          "Install",
+        );
+      }
+    }
+  }
+
+  const when = await p.select<"now" | "later">({
+    message: `Configure Pi (${role}) now, or later?`,
+    options: [
+      { value: "now", label: "now", hint: "API key + model routing" },
+      {
+        value: "later",
+        label: "later",
+        hint: "skip — Pi uses its own local-store settings until configured",
+      },
+    ],
+    initialValue: "now",
+  });
+  if (p.isCancel(when)) return true;
+  if (when === "later") {
+    p.note(
+      "skipped Pi config. With no per-turn API key set, Pi falls back to its own\n" +
+        "local-store settings; re-run `phantombot harness` to configure it later.",
+      "Pi: later",
+    );
+    return false;
+  }
+
+  // NOW: collect the API key first. Blank = leave whatever's already in ~/.env
+  // (or nothing) — we never force a key, because the local-store fallback covers
+  // the absent case.
+  const apiKey = await p.password({
+    message: "Pi API key (passed per-turn; blank to keep current / use Pi's own)",
+  });
+  if (p.isCancel(apiKey)) return true;
+  if (apiKey.trim()) {
+    await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: apiKey.trim() });
+    p.note(`saved ${ENV_PI_API_KEY} to ${userEnvPath()}`, "Pi API key");
+  }
+
+  // Straight into custom routing — Pi is already the chosen harness, so we don't
+  // re-ask "use defaults?"; we go collect primary / image / coding models.
+  return runRoutingWizard(config, availability.pi, { forceCustom: true });
 }
 
 /**
@@ -228,6 +380,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 async function runRoutingWizard(
   config: Config,
   piBin: string | undefined,
+  opts: { forceCustom?: boolean } = {},
 ): Promise<boolean> {
   const toml = await readConfigToml(config.configPath);
   const current = resolveRouting(
@@ -236,23 +389,28 @@ async function runRoutingWizard(
       | undefined,
   );
 
-  const useDefaults = await p.confirm({
-    message: "Model: use configured defaults?",
-    // Default = no override when nothing is configured yet, otherwise keep the
-    // existing routing. Either way the safe answer leaves things as they are.
-    initialValue: current.primaryModel === undefined,
-  });
-  if (p.isCancel(useDefaults)) return true;
-  if (useDefaults) {
-    p.note(
-      current.primaryModel
-        ? `keeping: primary=${current.primaryModel}` +
-            (current.imageModel ? ` image=${current.imageModel}` : "") +
-            (current.codingModel ? ` coding=${current.codingModel}` : "")
-        : "no per-capability routing — Pi uses its configured default model",
-      "Routing",
-    );
-    return false;
+  // `forceCustom` (the "configure now" path) goes straight into per-capability
+  // model selection — Pi is already the chosen harness, so the "use defaults?"
+  // detour would be redundant. Otherwise we offer it as before.
+  if (!opts.forceCustom) {
+    const useDefaults = await p.confirm({
+      message: "Model: use configured defaults?",
+      // Default = no override when nothing is configured yet, otherwise keep the
+      // existing routing. Either way the safe answer leaves things as they are.
+      initialValue: current.primaryModel === undefined,
+    });
+    if (p.isCancel(useDefaults)) return true;
+    if (useDefaults) {
+      p.note(
+        current.primaryModel
+          ? `keeping: primary=${current.primaryModel}` +
+              (current.imageModel ? ` image=${current.imageModel}` : "") +
+              (current.codingModel ? ` coding=${current.codingModel}` : "")
+          : "no per-capability routing — Pi uses its configured default model",
+        "Routing",
+      );
+      return false;
+    }
   }
 
   // Custom routing: query pi for the live model list so the picker only shows
@@ -267,38 +425,42 @@ async function runRoutingWizard(
     );
   }
 
+  // Primary is OPTIONAL: "(none)" leaves Pi on its own default model (the
+  // "default install" path) with no override.
   const primaryModel = await pickModel(
-    "Primary model (orchestrator)",
+    "Primary model (orchestrator) — (none) keeps Pi's default",
     models,
     current.primaryModel,
+    { allowNone: true },
   );
   if (primaryModel === CANCELLED) return true;
 
   const multimodal = primaryIsMultimodal(models, primaryModel);
 
-  // THE auto-skip: a multimodal primary needs no image delegate, so we don't
-  // even ask. The extension keys off the (now-unset) PHANTOMBOT_IMAGE_MODEL.
-  let imageModel: string | undefined;
-  if (multimodal) {
-    p.note(
-      `${primaryModel} accepts image input — skipping the image model.\n` +
-        "The look_at_image tool won't be registered; the primary sees images itself.",
-      "Multimodal primary",
-    );
-  } else {
-    const picked = await pickModel(
-      "Image model (vision delegate for look_at_image)",
-      models.filter((m) => m.supportsImages),
-      current.imageModel,
-    );
-    if (picked === CANCELLED) return true;
-    imageModel = picked;
-  }
+  // Image model is ALWAYS offered now (no auto-skip). When the primary is itself
+  // vision-capable we pre-select the primary as the default image model — that's
+  // the "always have an image model" rule: a text-only coding model swapped in
+  // for a code turn always has a look_at_image delegate to call. It's still
+  // OPTIONAL: "(none)" omits it (a vision primary just sees images itself). When
+  // multimodal, offer the full model list (so the primary is selectable);
+  // otherwise restrict to vision-capable models.
+  const imageInitial =
+    current.imageModel ?? (multimodal && primaryModel ? primaryModel : undefined);
+  const imageModelPick = await pickModel(
+    "Image model (vision delegate for look_at_image)",
+    multimodal ? models : models.filter((m) => m.supportsImages),
+    imageInitial,
+    { allowNone: true },
+  );
+  if (imageModelPick === CANCELLED) return true;
+  const imageModel = imageModelPick || undefined;
 
+  // Coding model is OPTIONAL: "(none)" means no coder swap / no coder tool.
   const codingModel = await pickModel(
-    "Coding model (delegate for the coder tool)",
+    "Coding model (delegate for the coder tool / coding-brain swap)",
     models,
     current.codingModel,
+    { allowNone: true },
   );
   if (codingModel === CANCELLED) return true;
 
@@ -320,7 +482,6 @@ async function runRoutingWizard(
     imageModel,
     codingModel,
     codingProgress,
-    primaryMultimodal: multimodal,
   };
   const writes = await applyRouting(config.configPath, choices);
   p.note(
@@ -348,26 +509,38 @@ async function pickModel(
   message: string,
   models: readonly PiModel[],
   initial: string | undefined,
+  opts: { allowNone?: boolean } = {},
 ): Promise<string | typeof CANCELLED> {
   if (models.length === 0) {
     const r = await p.text({
-      message,
+      message: opts.allowNone ? `${message} (blank = none)` : message,
       placeholder: "e.g. gpt-5.2",
       initialValue: initial ?? "",
     });
     if (p.isCancel(r)) return CANCELLED;
     return r.trim();
   }
-  const r = await p.select<string>({
-    message,
-    options: models.map((m) => ({
+  // When optional, prepend a "(none)" sentinel (value "") so the operator can
+  // omit this capability. computeRoutingWrites treats "" / undefined as unset.
+  const NONE = "";
+  const options = [
+    ...(opts.allowNone
+      ? [{ value: NONE, label: "(none)", hint: "no override" }]
+      : []),
+    ...models.map((m) => ({
       value: modelId(m),
       label: `${m.provider}/${m.model}`,
       hint: m.supportsImages ? "vision" : undefined,
     })),
-    initialValue:
-      initial && models.some((m) => modelId(m) === initial)
-        ? initial
+  ];
+  const known = initial && models.some((m) => modelId(m) === initial);
+  const r = await p.select<string>({
+    message,
+    options,
+    initialValue: known
+      ? initial
+      : opts.allowNone
+        ? NONE
         : modelId(models[0]!),
   });
   if (p.isCancel(r)) return CANCELLED;

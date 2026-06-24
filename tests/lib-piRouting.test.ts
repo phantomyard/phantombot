@@ -106,42 +106,52 @@ describe("resolveRouting", () => {
   });
 });
 
-describe("computeRoutingWrites — multimodal auto-skip", () => {
-  test("multimodal primary DROPS the image model in both toml and env", () => {
+describe("computeRoutingWrites — image model honored as-is (no auto-skip)", () => {
+  test("image model is KEPT even when the primary is vision-capable", () => {
+    // The old multimodal auto-drop is gone: whatever the wizard collected is
+    // persisted. (The wizard defaults the image pick TO the primary for a vision
+    // primary, so this is the common shape — an image model that equals primary.)
     const w = computeRoutingWrites({
       primaryModel: "gpt-5.2",
-      imageModel: "gpt-4o", // user picked one, but...
+      imageModel: "gpt-5.2", // wizard defaulted image → the vision primary
       codingModel: "gpt-5.2-codex",
-      primaryMultimodal: true, // ...primary is multimodal → skip
     });
     expect(w.toml).toEqual({
       primary_model: "gpt-5.2",
+      image_model: "gpt-5.2",
       coding_model: "gpt-5.2-codex",
-      // coding model set + progress unspecified ⇒ on by default
       coding_progress: true,
     });
-    expect(w.toml.image_model).toBeUndefined();
-    // env writes "" for image → unset (clears any stale value)
-    expect(w.env[ENV_IMAGE_MODEL]).toBe("");
+    expect(w.env[ENV_IMAGE_MODEL]).toBe("gpt-5.2");
     expect(w.env[ENV_PRIMARY_MODEL]).toBe("gpt-5.2");
     expect(w.env[ENV_CODING_MODEL]).toBe("gpt-5.2-codex");
   });
 
-  test("text-only primary KEEPS the image model", () => {
+  test("a distinct image model is kept verbatim", () => {
     const w = computeRoutingWrites({
       primaryModel: "deepseek-v4-pro",
       imageModel: "gpt-4o",
       codingModel: "gpt-5.2-codex",
-      primaryMultimodal: false,
     });
     expect(w.toml.image_model).toBe("gpt-4o");
     expect(w.env[ENV_IMAGE_MODEL]).toBe("gpt-4o");
   });
 
+  test("explicit (none) image — undefined — is honored: unset in env and toml", () => {
+    // A vision primary that opts out of look_at_image: the wizard passes
+    // undefined, and we DON'T re-default it back to the primary.
+    const w = computeRoutingWrites({
+      primaryModel: "gpt-5.2",
+      imageModel: undefined,
+      codingModel: "gpt-5.2-codex",
+    });
+    expect(w.toml.image_model).toBeUndefined();
+    expect(w.env[ENV_IMAGE_MODEL]).toBe("");
+  });
+
   test("omitted coding/image models produce unset env and absent toml keys", () => {
     const w = computeRoutingWrites({
       primaryModel: "deepseek-v4-pro",
-      primaryMultimodal: false,
     });
     expect(w.toml).toEqual({ primary_model: "deepseek-v4-pro" });
     expect(w.env[ENV_IMAGE_MODEL]).toBe("");
@@ -158,7 +168,6 @@ describe("computeRoutingWrites — coder progress", () => {
       primaryModel: "gpt-5.2",
       codingModel: "gpt-5.2-codex",
       codingProgress: true,
-      primaryMultimodal: true,
     });
     expect(w.toml.coding_progress).toBe(true);
     expect(w.env[ENV_CODING_PROGRESS]).toBe("true");
@@ -169,7 +178,6 @@ describe("computeRoutingWrites — coder progress", () => {
       primaryModel: "gpt-5.2",
       codingModel: "gpt-5.2-codex",
       codingProgress: false,
-      primaryMultimodal: true,
     });
     // Must persist as an explicit false so it wins over the on-by-default,
     // rather than being omitted and silently re-defaulting to on.
@@ -181,7 +189,6 @@ describe("computeRoutingWrites — coder progress", () => {
     const w = computeRoutingWrites({
       primaryModel: "gpt-5.2",
       codingProgress: true,
-      primaryMultimodal: true,
     });
     expect(w.toml.coding_model).toBeUndefined();
     expect(w.toml.coding_progress).toBeUndefined();

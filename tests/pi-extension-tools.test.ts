@@ -134,11 +134,15 @@ describe("planRouting — tool registration decisions", () => {
     expect(plan.codingModel).toBe("gpt-5.2-codex");
   });
 
-  test("does NOT register look_at_image when image model is unset (multimodal primary)", () => {
+  test("does NOT register look_at_image when image model is unset (operator opted out)", () => {
+    // The extension keys purely off imageModel presence. phantombot now keeps an
+    // image model set whenever routing is configured (defaulting to the primary
+    // for a vision primary), so this unset case means the operator explicitly
+    // picked "(none)" — and then look_at_image must not register.
     const plan = planRouting({
       primaryModel: "gpt-5.2",
       codingModel: "gpt-5.2-codex",
-      // no imageModel — primary is multimodal
+      // no imageModel — operator chose "(none)"
     });
     expect(plan.registerLookAtImage).toBe(false);
     expect(plan.registerCoder).toBe(true);

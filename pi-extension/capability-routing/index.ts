@@ -275,7 +275,10 @@ export default function (pi: ExtensionAPI) {
       label: "Look at image",
       description: [
         "Delegate a vision question to a multimodal image model and get the answer.",
-        "Use this when you (the primary model) cannot see images yourself.",
+        "ONLY for models that cannot see images themselves: if YOU already accept",
+        "image input, do NOT use this tool — read the image directly instead, it is",
+        "faster and cheaper. This exists so a text-only model (e.g. a coding model",
+        "swapped in for a code turn) still has a way to ask about an image.",
         "Ask a specific question — this is question-driven, not a blind describe.",
       ].join(" "),
       parameters: LookAtImageParams,
