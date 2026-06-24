@@ -229,6 +229,17 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     return { type: "progress", note: toolName ? `tool: ${toolName}` : "tool" };
   }
 
+  // tool_execution_update is fired while a tool is mid-run, carrying its
+  // partial result. The capability-routing `coder` tool emits these (via pi's
+  // onUpdate) as its child makes real progress, so the PRIMARY stays visibly
+  // alive while it's blocked awaiting the delegate. Surface a payload-less
+  // heartbeat (no partialResult leak, no spurious bubble flush) — piActivity
+  // classifies it as in-tool activity so it RESETS the idle watchdog. Only ever
+  // emitted on genuine child output, so a wedged tool still trips the idle kill.
+  if (obj.type === "tool_execution_update") {
+    return { type: "heartbeat" };
+  }
+
   if (obj.type !== "message_update") return undefined;
 
   const ame = obj.assistantMessageEvent;
@@ -263,13 +274,20 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   return undefined;
 }
 
-function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
+export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
   if (chunk.type === "text" || chunk.type === "done") return "productive";
   if (typeof parsed !== "object" || parsed === null) {
     return chunk.type === "heartbeat" ? "model" : "productive";
   }
   const obj = parsed as Record<string, unknown>;
-  if (obj.type === "tool_execution_start") return "tool";
+  // tool_execution_start AND _update are both genuine in-tool activity: the
+  // update only fires when the running tool reports real progress (e.g. the
+  // coder delegate forwarding its child's output). Classifying as "tool" resets
+  // the idle timer while keeping toolRunning set, so a long-but-working tool
+  // stays alive without a generic model heartbeat being able to do the same.
+  if (obj.type === "tool_execution_start" || obj.type === "tool_execution_update") {
+    return "tool";
+  }
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
     // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.

@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import {
   PiHarness,
   parsePiEvent,
+  piActivity,
   renderPayload,
 } from "../src/harnesses/pi.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
@@ -113,6 +114,20 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "progress", note: "tool" });
   });
 
+  test("emits a payload-less heartbeat for tool_execution_update (coder liveness)", () => {
+    // The coder delegate forwards its child's progress via pi's onUpdate, which
+    // surfaces as tool_execution_update. We keep the primary alive without
+    // leaking the partialResult into a bubble.
+    const c = parsePiEvent({
+      type: "tool_execution_update",
+      toolName: "coder",
+      toolCallId: "abc",
+      args: {},
+      partialResult: { content: [{ type: "text", text: "coder: working…" }] },
+    });
+    expect(c).toEqual({ type: "heartbeat" });
+  });
+
   test("emits progress for toolcall_* / tool_use_* assistantMessageEvent (not heartbeat)", () => {
     for (const ameType of [
       // pi 0.79.x names
@@ -187,6 +202,38 @@ describe("parsePiEvent", () => {
     expect(parsePiEvent({ type: 42 })).toBeUndefined();
     // message_update with no assistantMessageEvent
     expect(parsePiEvent({ type: "message_update" })).toBeUndefined();
+  });
+});
+
+describe("piActivity — idle-watchdog classification", () => {
+  test("tool_execution_update counts as in-tool activity (resets the idle timer)", () => {
+    // Crux of 'keep the primary fed': the heartbeat chunk would otherwise be
+    // classified 'model', which does NOT reset the timer once a tool is running.
+    // Forcing 'tool' is what lets a long-but-working coder stay alive.
+    const parsed = { type: "tool_execution_update", toolName: "coder" };
+    const chunk = parsePiEvent(parsed)!;
+    expect(chunk).toEqual({ type: "heartbeat" });
+    expect(piActivity(parsed, chunk)).toBe("tool");
+  });
+
+  test("tool_execution_start is in-tool activity", () => {
+    const parsed = { type: "tool_execution_start", toolName: "coder" };
+    expect(piActivity(parsed, parsePiEvent(parsed)!)).toBe("tool");
+  });
+
+  test("a plain thinking heartbeat stays 'model' (must NOT reset a running tool)", () => {
+    const parsed = {
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0 },
+      message: {},
+    };
+    expect(piActivity(parsed, { type: "heartbeat" })).toBe("model");
+  });
+
+  test("text output is productive", () => {
+    expect(piActivity({ type: "message_update" }, { type: "text", text: "hi" })).toBe(
+      "productive",
+    );
   });
 });
 

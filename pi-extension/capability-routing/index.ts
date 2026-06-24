@@ -317,7 +317,7 @@ export default function (pi: ExtensionAPI) {
         "Expensive startup — use for big self-contained chunks, not chatty calls.",
       ].join(" "),
       parameters: CoderParams,
-      async execute(_id, params, signal, _onUpdate, ctx) {
+      async execute(_id, params, signal, onUpdate, ctx) {
         const cwd = params.cwd ?? ctx.cwd;
         // Job label for the digest header, e.g. `coder(phantombot):`. The cwd
         // basename ("which workspace") is the most useful at-a-glance handle;
@@ -340,6 +340,16 @@ export default function (pi: ExtensionAPI) {
           // kills the whole turn (and mis-fires a harness fallback). The coder
           // is a TOOL; a tool failure must stay inside the tool boundary.
           idleTimeoutMs: DELEGATE_IDLE_TIMEOUT_MS,
+          // Keep the PRIMARY fed: while the coder runs, the primary is blocked
+          // awaiting this tool and emits nothing of its own, so its idle
+          // watchdog would kill the turn even though the coder is working.
+          // Forward the coder's liveness through pi's onUpdate — the primary
+          // emits a `tool_execution_update` the harness counts as in-tool
+          // activity, resetting the watchdog. Fired only on real child output,
+          // so a wedged coder still hits the idle timeout above.
+          onActivity: onUpdate
+            ? () => onUpdate({ content: [{ type: "text", text: `coder(${label}): working…` }] })
+            : undefined,
         });
         if (isDelegateFailure(r)) {
           return {

@@ -229,6 +229,20 @@ export interface DelegateOptions {
    * for a child that stays just-chatty-enough to dodge the idle timeout forever.
    */
   hardTimeoutMs?: number;
+  /**
+   * Liveness hook fired (THROTTLED — at most once per `activityThrottleMs`) on
+   * raw child output. The caller uses it to keep the PRIMARY pi's own idle
+   * watchdog fed while the delegate runs: a coder tool calls pi's `onUpdate`
+   * here, which makes the primary emit a `tool_execution_update` the harness
+   * counts as in-tool activity. Without it a long-but-WORKING coder would still
+   * starve the primary's watchdog (the primary is blocked awaiting the tool and
+   * emits nothing on its own). Fired only on REAL child output, so a genuinely
+   * wedged child still trips the idle timeout — this is liveness, not a fake
+   * heartbeat. Any throw is swallowed.
+   */
+  onActivity?: () => void;
+  /** Min ms between `onActivity` fires. Default 4000. */
+  activityThrottleMs?: number;
 }
 
 /**
@@ -403,13 +417,30 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
           if (!proc.killed) proc.kill("SIGKILL");
         }, 5000));
       };
-      // Reset the idle window on every raw chunk from the child (stdout OR
-      // stderr). Wired into both data handlers below.
+      // Liveness throttle: forward the child's aliveness to the primary's
+      // watchdog at most once per activityThrottleMs (see onActivity).
+      const activityThrottleMs = opts.activityThrottleMs ?? 4000;
+      let lastActivityFire = 0;
+      // Called on every raw chunk from the child (stdout OR stderr). Resets the
+      // idle window and forwards (throttled) liveness to the caller.
       const onChildActivity = (): void => {
-        if (opts.idleTimeoutMs === undefined || timedOut || aborted) return;
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => killTimedOut("idle"), opts.idleTimeoutMs);
-        unrefTimer(idleTimer);
+        if (timedOut || aborted) return;
+        if (opts.idleTimeoutMs !== undefined) {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => killTimedOut("idle"), opts.idleTimeoutMs);
+          unrefTimer(idleTimer);
+        }
+        if (opts.onActivity) {
+          const now = Date.now();
+          if (now - lastActivityFire >= activityThrottleMs) {
+            lastActivityFire = now;
+            try {
+              opts.onActivity();
+            } catch {
+              /* a noisy liveness hook must never break the delegation */
+            }
+          }
+        }
       };
       if (opts.idleTimeoutMs !== undefined) {
         idleTimer = setTimeout(() => killTimedOut("idle"), opts.idleTimeoutMs);
