@@ -32,6 +32,10 @@ import {
   applyViewCoderRequest,
   normalizeViewCoderRequest,
 } from "../lib/viewCoder.ts";
+import {
+  applyCoderSwapRequest,
+  normalizeCoderSwapRequest,
+} from "../lib/coderSwap.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { DEFAULT_HISTORY_LIMIT } from "../orchestrator/turn.ts";
 import { VERSION } from "../version.ts";
@@ -138,6 +142,14 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
     command: "viewcoder",
     description: "Stream coder progress here: on | off | default",
   },
+  {
+    command: "coder",
+    description: "Force the coding brain on for this chat (off | default to revert)",
+  },
+  {
+    command: "nocoder",
+    description: "Force the coding brain off here — never auto-swap",
+  },
   { command: "help", description: "Show this command list" },
 ];
 
@@ -220,6 +232,11 @@ export async function handleSlashCommand(
       return handleRestart(ctx);
     case "/viewcoder":
       return await handleViewCoder(arg, ctx);
+    case "/coder":
+      // Bare `/coder` forces on; `/coder off|default` is also accepted.
+      return await handleCoderSwap(arg || "on", ctx);
+    case "/nocoder":
+      return await handleCoderSwap("off", ctx);
     case "/start":
     case "/help":
       return { reply: HELP };
@@ -345,6 +362,56 @@ async function handleViewCoder(
       : request === "off"
         ? "coder progress: off for this chat — the coder will work quietly here"
         : "coder progress: reset to the configured default for this chat";
+  return { reply };
+}
+
+/**
+ * /coder [on|off|default] and /nocoder — per-conversation manual override of the
+ * coding-brain auto-swap.
+ *
+ * Normally the Pi harness decides per turn, via a free CRS-style score over the
+ * user message, whether to swap its primary model to the configured coding model
+ * (a "probable coding job"). This override pins that decision for THIS chat:
+ *   - on      → always use the coding brain here (skip scoring)
+ *   - off     → never auto-swap here (stay on the primary)
+ *   - default → clear the override; defer to the scorer again
+ *
+ * Persistent (no idle expiry), mirroring /viewcoder. `/coder` with no arg forces
+ * on; `/nocoder` is sugar for `/coder off`.
+ */
+async function handleCoderSwap(
+  arg: string,
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  const request = normalizeCoderSwapRequest(arg.toLowerCase());
+  if (!request) {
+    return {
+      reply:
+        "usage: /coder on|off|default  (or /nocoder)\n" +
+        "  on      — always use the coding brain in this chat\n" +
+        "  off     — never auto-swap here (stay on the primary)\n" +
+        "  default — let the scorer decide each turn",
+    };
+  }
+
+  await applyCoderSwapRequest({
+    persona: ctx.persona,
+    conversation: ctx.conversation,
+    request,
+  });
+  log.info("commands: /coder", {
+    chatId: ctx.chatId,
+    persona: ctx.persona,
+    conversation: ctx.conversation,
+    request,
+  });
+
+  const reply =
+    request === "on"
+      ? "coding brain: forced ON for this chat — every turn uses the coding model"
+      : request === "off"
+        ? "coding brain: forced OFF for this chat — no auto-swap, stays on the primary"
+        : "coding brain: reset to auto — the scorer decides each turn";
   return { reply };
 }
 

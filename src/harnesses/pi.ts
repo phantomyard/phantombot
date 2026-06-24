@@ -25,6 +25,7 @@
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import type { PiRoutingConfig } from "../lib/piRouting.ts";
+import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -109,7 +110,42 @@ export class PiHarness implements Harness {
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
     // extension via env (below), not argv.
-    const primaryModel = this.config.routing?.primaryModel;
+    //
+    // Coding-brain auto-swap: for a SUBSTANTIAL coding turn we don't delegate to
+    // the `coder` tool (cold child, no memory/history/images) — we swap THIS
+    // turn's primary to the configured coding model. Because pi runs
+    // `--print --no-session` and phantombot rebuilds the full context every
+    // turn, the coding model inherits memory + history + images natively. The
+    // decision is a free, stateless CRS-style score over the user message (plus
+    // a persistent /coder|/nocoder override), so it re-evaluates every turn and
+    // flips back to the primary the moment the work stops being code. We never
+    // swap the tool-less threat judge (toolsMode "none") — it must stay on the
+    // configured primary and never gain capability.
+    let primaryModel = this.config.routing?.primaryModel;
+    if (req.toolsMode !== "none" && this.config.routing?.codingModel) {
+      const override =
+        req.persona && req.conversation
+          ? await getCoderSwapOverride({
+              persona: req.persona,
+              conversation: req.conversation,
+            })
+          : undefined;
+      const decision = resolveSwapModel({
+        text: req.userMessage,
+        override,
+        primaryModel: this.config.routing.primaryModel,
+        codingModel: this.config.routing.codingModel,
+      });
+      primaryModel = decision.model;
+      if (decision.swapped) {
+        log.info("pi.invoke coder-swap active", {
+          persona: req.persona,
+          conversation: req.conversation,
+          model: decision.model,
+          reason: decision.reason,
+        });
+      }
+    }
     if (primaryModel) {
       args.push("--model", primaryModel);
     }
