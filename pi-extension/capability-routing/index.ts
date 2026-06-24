@@ -260,7 +260,7 @@ const LookAtImageParams = Type.Object({
 const CoderParams = Type.Object({
   task: Type.String({
     description:
-      "A PR/MR-scoped coding task or review. Coarse-grained — each call spawns a fresh, expensive process, so send a big self-contained chunk, not a quick question.",
+      "A SUBSTANTIAL, PR/MR-scoped coding task or review across a real/large codebase — not routine bash, API calls, or single-file peeks you'd run yourself. Coarse-grained: each call spawns a fresh, expensive process, so send a big self-contained chunk, not a quick question.",
   }),
   cwd: Type.Optional(Type.String({ description: "Working directory for the coding agent." })),
 });
@@ -312,9 +312,11 @@ export default function (pi: ExtensionAPI) {
       name: "coder",
       label: "Coder",
       description: [
-        "Delegate a PR/MR-scoped coding job or review to a coding-specialist model.",
-        "Coarse-grained: spawns a fresh pi process (edit,bash,write) with an isolated context.",
-        "Expensive startup — use for big self-contained chunks, not chatty calls.",
+        "Delegate SUBSTANTIAL code work to a coding-specialist model — reviewing or analyzing a PR/MR, or making non-trivial edits across a real codebase.",
+        "Use it when the work is complicated or spans many files: hand it the whole PR-scoped task and judge its findings, rather than reading every diff yourself.",
+        "NOT for routine work you do directly — your own bash commands, API calls, single-file peeks, quick greps, or one-line questions stay with you.",
+        "Rule of thumb: if it's a PR/MR-backed request or a large/complex codebase, delegate; if it's a normal tool call you'd run yourself, just run it.",
+        "Coarse-grained: spawns a fresh pi process (edit,bash,write) with an isolated context. Startup is expensive — batch a whole self-contained chunk into one call, never chatty micro-questions.",
       ].join(" "),
       parameters: CoderParams,
       async execute(_id, params, signal, onUpdate, ctx) {
