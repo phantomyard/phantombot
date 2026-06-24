@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   computeRoutingWrites,
   ENV_CODING_MODEL,
-  ENV_CODING_PROGRESS,
   ENV_IMAGE_MODEL,
+  ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
+  resolvePiApiKeyWrite,
   resolveRouting,
+  resolveRoutingProvider,
 } from "../src/lib/piRouting.ts";
 
 describe("resolveRouting", () => {
@@ -57,134 +59,186 @@ describe("resolveRouting", () => {
     expect(r.imageModel).toBeUndefined();
   });
 
-  describe("codingProgress", () => {
-    test("reads a real TOML boolean", () => {
-      expect(resolveRouting({ coding_progress: true }, {}).codingProgress).toBe(
-        true,
+  describe("provider", () => {
+    test("reads provider from env over toml", () => {
+      const r = resolveRouting(
+        { provider: "openai" },
+        { [ENV_PI_PROVIDER]: "openrouter" },
       );
-      expect(resolveRouting({ coding_progress: false }, {}).codingProgress).toBe(
-        false,
-      );
+      expect(r.provider).toBe("openrouter");
     });
 
-    test("coerces env truthy/falsy strings", () => {
-      const on = ["true", "1", "yes", "on", "TRUE", " On "];
-      for (const v of on) {
-        expect(
-          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
-        ).toBe(true);
-      }
-      const off = ["false", "0", "no", "off"];
-      for (const v of off) {
-        expect(
-          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
-        ).toBe(false);
-      }
+    test("falls back to toml when env blank; trims", () => {
+      expect(resolveRouting({ provider: "xai" }, {}).provider).toBe("xai");
+      expect(
+        resolveRouting({ provider: "xai" }, { [ENV_PI_PROVIDER]: "  " }).provider,
+      ).toBe("xai");
+      expect(
+        resolveRouting({}, { [ENV_PI_PROVIDER]: "  deepseek  " }).provider,
+      ).toBe("deepseek");
     });
 
-    test("env wins over toml; blank env falls through to toml", () => {
-      expect(
-        resolveRouting(
-          { coding_progress: true },
-          { [ENV_CODING_PROGRESS]: "false" },
-        ).codingProgress,
-      ).toBe(false);
-      expect(
-        resolveRouting(
-          { coding_progress: true },
-          { [ENV_CODING_PROGRESS]: "   " },
-        ).codingProgress,
-      ).toBe(true);
-    });
-
-    test("undefined when unset / unrecognized", () => {
-      expect(resolveRouting({}, {}).codingProgress).toBeUndefined();
-      expect(
-        resolveRouting({}, { [ENV_CODING_PROGRESS]: "maybe" }).codingProgress,
-      ).toBeUndefined();
+    test("undefined when unset", () => {
+      expect(resolveRouting({}, {}).provider).toBeUndefined();
     });
   });
+
 });
 
-describe("computeRoutingWrites — multimodal auto-skip", () => {
-  test("multimodal primary DROPS the image model in both toml and env", () => {
+describe("computeRoutingWrites — image model honored as-is (no auto-skip)", () => {
+  test("image model is KEPT even when the primary is vision-capable", () => {
+    // The old multimodal auto-drop is gone: whatever the wizard collected is
+    // persisted. (The wizard defaults the image pick TO the primary for a vision
+    // primary, so this is the common shape — an image model that equals primary.)
     const w = computeRoutingWrites({
       primaryModel: "gpt-5.2",
-      imageModel: "gpt-4o", // user picked one, but...
+      imageModel: "gpt-5.2", // wizard defaulted image → the vision primary
       codingModel: "gpt-5.2-codex",
-      primaryMultimodal: true, // ...primary is multimodal → skip
     });
     expect(w.toml).toEqual({
       primary_model: "gpt-5.2",
+      image_model: "gpt-5.2",
       coding_model: "gpt-5.2-codex",
-      // coding model set + progress unspecified ⇒ on by default
-      coding_progress: true,
     });
-    expect(w.toml.image_model).toBeUndefined();
-    // env writes "" for image → unset (clears any stale value)
-    expect(w.env[ENV_IMAGE_MODEL]).toBe("");
+    expect(w.env[ENV_IMAGE_MODEL]).toBe("gpt-5.2");
     expect(w.env[ENV_PRIMARY_MODEL]).toBe("gpt-5.2");
     expect(w.env[ENV_CODING_MODEL]).toBe("gpt-5.2-codex");
   });
 
-  test("text-only primary KEEPS the image model", () => {
+  test("a distinct image model is kept verbatim", () => {
     const w = computeRoutingWrites({
       primaryModel: "deepseek-v4-pro",
       imageModel: "gpt-4o",
       codingModel: "gpt-5.2-codex",
-      primaryMultimodal: false,
     });
     expect(w.toml.image_model).toBe("gpt-4o");
     expect(w.env[ENV_IMAGE_MODEL]).toBe("gpt-4o");
   });
 
+  test("explicit (none) image — undefined — is honored: unset in env and toml", () => {
+    // A vision primary that opts out of look_at_image: the wizard passes
+    // undefined, and we DON'T re-default it back to the primary.
+    const w = computeRoutingWrites({
+      primaryModel: "gpt-5.2",
+      imageModel: undefined,
+      codingModel: "gpt-5.2-codex",
+    });
+    expect(w.toml.image_model).toBeUndefined();
+    expect(w.env[ENV_IMAGE_MODEL]).toBe("");
+  });
+
   test("omitted coding/image models produce unset env and absent toml keys", () => {
     const w = computeRoutingWrites({
       primaryModel: "deepseek-v4-pro",
-      primaryMultimodal: false,
     });
     expect(w.toml).toEqual({ primary_model: "deepseek-v4-pro" });
     expect(w.env[ENV_IMAGE_MODEL]).toBe("");
     expect(w.env[ENV_CODING_MODEL]).toBe("");
-    // no coding model ⇒ progress forced off and cleared
-    expect(w.toml.coding_progress).toBeUndefined();
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
   });
 });
 
-describe("computeRoutingWrites — coder progress", () => {
-  test("persists coding_progress only when on AND a coding model is set", () => {
+describe("computeRoutingWrites — provider", () => {
+  test("provider is written to toml AND env when set", () => {
     const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingModel: "gpt-5.2-codex",
-      codingProgress: true,
-      primaryMultimodal: true,
+      provider: "openrouter",
+      primaryModel: "z-ai/glm-5.2",
     });
-    expect(w.toml.coding_progress).toBe(true);
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("true");
+    expect(w.toml.provider).toBe("openrouter");
+    expect(w.env[ENV_PI_PROVIDER]).toBe("openrouter");
   });
 
-  test("explicit progress off ⇒ toml key written false (persists over default-on), env 'false'", () => {
-    const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingModel: "gpt-5.2-codex",
-      codingProgress: false,
-      primaryMultimodal: true,
-    });
-    // Must persist as an explicit false so it wins over the on-by-default,
-    // rather than being omitted and silently re-defaulting to on.
-    expect(w.toml.coding_progress).toBe(false);
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("false");
+  test("absent provider ⇒ toml key omitted, env cleared (\"\")", () => {
+    const w = computeRoutingWrites({ primaryModel: "gpt-5.2" });
+    expect(w.toml.provider).toBeUndefined();
+    expect(w.env[ENV_PI_PROVIDER]).toBe("");
   });
 
-  test("progress true but no coding model ⇒ forced off (coupled to coder)", () => {
-    const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingProgress: true,
-      primaryMultimodal: true,
+  test("blank provider is treated as unset", () => {
+    const w = computeRoutingWrites({ provider: "   ", primaryModel: "gpt-5.2" });
+    expect(w.toml.provider).toBeUndefined();
+    expect(w.env[ENV_PI_PROVIDER]).toBe("");
+  });
+});
+
+describe("resolveRoutingProvider — explicit (none) clears, skipped keeps", () => {
+  test("explicit '' ((none)) overrides an existing provider (clears it)", () => {
+    // The regression: choosing "(none)" with openrouter already set must NOT
+    // fall back to openrouter.
+    expect(resolveRoutingProvider("", "openrouter")).toBe("");
+  });
+
+  test("a chosen provider name wins over the current one", () => {
+    expect(resolveRoutingProvider("openai", "openrouter")).toBe("openai");
+  });
+
+  test("undefined (step skipped) keeps the current provider", () => {
+    expect(resolveRoutingProvider(undefined, "openrouter")).toBe("openrouter");
+  });
+
+  test("undefined with no current provider stays unset", () => {
+    expect(resolveRoutingProvider(undefined, undefined)).toBeUndefined();
+  });
+
+  test("explicit '' with no current provider stays cleared", () => {
+    expect(resolveRoutingProvider("", undefined)).toBe("");
+  });
+});
+
+describe("resolvePiApiKeyWrite — blank key only kept when provider unchanged", () => {
+  test("a freshly entered key is always set (trimmed)", () => {
+    expect(resolvePiApiKeyWrite("  sk-new  ", "openai", "openrouter")).toEqual({
+      action: "set",
+      value: "sk-new",
     });
-    expect(w.toml.coding_model).toBeUndefined();
-    expect(w.toml.coding_progress).toBeUndefined();
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
+  });
+
+  test("an entered key wins even when the provider is unchanged", () => {
+    expect(resolvePiApiKeyWrite("sk-new", "openrouter", "openrouter")).toEqual({
+      action: "set",
+      value: "sk-new",
+    });
+  });
+
+  test("blank key + unchanged provider keeps the current key", () => {
+    expect(resolvePiApiKeyWrite("", "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("blank key + whitespace-only key + unchanged provider keeps", () => {
+    expect(resolvePiApiKeyWrite("   ", "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("THE REGRESSION: blank key + switched provider clears the stale key", () => {
+    // Operator had openrouter + an openrouter key, reruns the wizard, switches to
+    // openai and leaves the key blank. The old key must NOT survive — threading it
+    // onto `--provider openai` auth-fails.
+    expect(resolvePiApiKeyWrite("", "openai", "openrouter")).toEqual({
+      action: "clear",
+    });
+  });
+
+  test("blank key + provider cleared to (none) clears the stale key", () => {
+    // "(none)" arrives as "" from the picker; that's a provider change from
+    // openrouter → no provider, so the openrouter key must go.
+    expect(resolvePiApiKeyWrite("", "", "openrouter")).toEqual({
+      action: "clear",
+    });
+  });
+
+  test("blank key + no provider before or after is a no-op keep", () => {
+    expect(resolvePiApiKeyWrite("", "", undefined)).toEqual({ action: "keep" });
+    expect(resolvePiApiKeyWrite("", undefined, undefined)).toEqual({
+      action: "keep",
+    });
+  });
+
+  test("provider compare ignores surrounding whitespace", () => {
+    // " openrouter " and "openrouter" are the same provider → keep.
+    expect(resolvePiApiKeyWrite("", " openrouter ", "openrouter")).toEqual({
+      action: "keep",
+    });
   });
 });

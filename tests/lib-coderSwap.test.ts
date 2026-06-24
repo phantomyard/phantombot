@@ -2,7 +2,7 @@
  * Unit tests for the coding-brain auto-swap (src/lib/coderSwap.ts):
  *   - scoreCodingIntent: CRS-style weighted scorer (distinct dedup, EN/ES/NL)
  *   - resolveSwapModel: override precedence + threshold decision
- *   - the persistent per-conversation /coder|/nocoder override store
+ *   - the persistent per-conversation /coder override store
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";

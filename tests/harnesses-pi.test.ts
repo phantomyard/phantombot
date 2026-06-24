@@ -6,7 +6,7 @@
  *   - One ARG_MAX guard test (synthetic — confirms the precheck fires).
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   PiHarness,
@@ -14,6 +14,7 @@ import {
   piActivity,
   renderPayload,
 } from "../src/harnesses/pi.ts";
+import * as envBootstrap from "../src/lib/envBootstrap.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
@@ -243,13 +244,31 @@ describe("piActivity — idle-watchdog classification", () => {
 
 let originalMode: string | undefined;
 
+// Hermetic env-file isolation. PiHarness.invoke() calls reloadEnvFiles(), which
+// re-sources ~/.env and $XDG_CONFIG_HOME/phantombot/.env into process.env. On
+// any machine that ACTUALLY has Pi configured (a dev box, or Lena), those files
+// carry a real PHANTOMBOT_PI_API_KEY / PHANTOMBOT_PI_PROVIDER — which the reload
+// would silently re-inject, undoing the `delete process.env...` these tests rely
+// on and breaking the "no key → no --api-key flag" / "clears stale provider"
+// assertions off the test author's machine. Redirecting env vars can't fix the
+// `~/.env` arm because Bun caches os.homedir() at startup. So stub the reload to
+// a no-op: these tests assert argv / child-env construction against process.env,
+// NOT the reconcile behavior (lib-envBootstrap.test.ts covers that with injected
+// paths). The spy makes every invoke read exactly the process.env the test set.
+let reloadSpy: ReturnType<typeof spyOn> | undefined;
+
 beforeEach(() => {
   originalMode = process.env.FAKE_PI_MODE;
+  reloadSpy = spyOn(envBootstrap, "reloadEnvFiles").mockResolvedValue({
+    updated: [],
+    removed: [],
+  });
 });
 
 afterEach(() => {
   if (originalMode === undefined) delete process.env.FAKE_PI_MODE;
   else process.env.FAKE_PI_MODE = originalMode;
+  reloadSpy?.mockRestore();
 });
 
 const mkHarness = (overrides: Partial<{ maxPayloadBytes: number }> = {}) =>
@@ -349,8 +368,12 @@ describe("PiHarness.invoke (subprocess)", () => {
 // ---------------------------------------------------------------------------
 
 describe("PiHarness routing (subprocess)", () => {
-  const routed = (routing: { primaryModel?: string; imageModel?: string; codingModel?: string }) =>
-    new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
+  const routed = (routing: {
+    provider?: string;
+    primaryModel?: string;
+    imageModel?: string;
+    codingModel?: string;
+  }) => new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
 
   test("routing.primaryModel pins the orchestrator via --model", async () => {
     process.env.FAKE_PI_MODE = "argv";
@@ -360,6 +383,57 @@ describe("PiHarness routing (subprocess)", () => {
       .map((c) => (c as { text: string }).text)
       .join("");
     expect(argv).toContain("--model gpt-5.2");
+  });
+
+  test("routing.provider is threaded onto --provider (OpenRouter routes to openrouter, NOT google)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(
+      routed({ provider: "openrouter", primaryModel: "z-ai/glm-5.2" }).invoke(
+        newRequest(),
+      ),
+    );
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    // The whole point: without --provider, Pi defaults to google and an
+    // OpenRouter key fails. The provider must be pinned explicitly.
+    expect(argv).toContain("--provider openrouter");
+    expect(argv).not.toContain("--provider google");
+    expect(argv).toContain("--model z-ai/glm-5.2");
+  });
+
+  test("no provider → no --provider flag (Pi uses its own default)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(routed({ primaryModel: "gpt-5.2" }).invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--provider");
+  });
+
+  test("provider is threaded even after a coding-brain swap (one provider covers all models)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    // A coding-triggering message should swap primary → coding model, but the
+    // single --provider must still apply (both models share the provider).
+    const chunks = await collect(
+      routed({
+        provider: "openrouter",
+        primaryModel: "mimo-v2.5",
+        codingModel: "z-ai/glm-5.2",
+      }).invoke(
+        newRequest({
+          userMessage: "review this pull request https://github.com/x/y/pull/1",
+        }),
+      ),
+    );
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--provider openrouter");
+    expect(argv).toContain("--model z-ai/glm-5.2");
   });
 
   test("no routing → no --model flag", async () => {
@@ -394,6 +468,87 @@ describe("PiHarness routing (subprocess)", () => {
     expect(out).not.toContain("coding=qwen-coder");
     expect(out).not.toContain("PHANTOMBOT_IMAGE_MODEL=vision-x");
     expect(out).not.toContain("PHANTOMBOT_CODING_MODEL=qwen-coder");
+  });
+
+  test("the active harness's provider + api-key ARE projected into the child env (for the extension's delegates)", async () => {
+    // The capability-routing extension runs INSIDE this spawned pi and threads
+    // the pair onto its OWN delegate children. It reads them from this env, so
+    // the harness must project ITS provider/key here — scoped to this harness,
+    // not a shared ambient var — so a primary-Pi→OpenRouter / fallback-Pi→OpenAI
+    // box never collides two providers in one namespace.
+    process.env.FAKE_PI_MODE = "env";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-openrouter-key";
+    try {
+      const out = (
+        await collect(
+          routed({ provider: "openrouter", primaryModel: "z-ai/glm-5.2" }).invoke(
+            newRequest(),
+          ),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("provider=openrouter");
+      expect(out).toContain("apikey=sk-openrouter-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("no provider/key → the child env actively CLEARS the pair (no stale ambient leak)", async () => {
+    process.env.FAKE_PI_MODE = "env";
+    // Spoof a stale ambient value: the harness must overwrite it to empty, not
+    // leak it into a subtree that didn't configure a provider.
+    process.env.PHANTOMBOT_PI_PROVIDER = "stale-google";
+    delete process.env.PHANTOMBOT_PI_API_KEY;
+    try {
+      const out = (await collect(routed({ primaryModel: "gpt-5.2" }).invoke(newRequest())))
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(out).toContain("provider= ");
+      expect(out).not.toContain("provider=stale-google");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_PROVIDER;
+    }
+  });
+
+  test("PHANTOMBOT_PI_API_KEY is threaded onto --api-key per turn", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-test-key";
+    try {
+      const chunks = await collect(mkHarness().invoke(newRequest()));
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain("--api-key sk-test-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
+  test("no PHANTOMBOT_PI_API_KEY → no --api-key flag (Pi falls back to its own store)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    delete process.env.PHANTOMBOT_PI_API_KEY;
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--api-key");
+  });
+
+  test("invoke re-sources env files each turn (reloadEnvFiles is called)", async () => {
+    // The reload is stubbed for hermeticity (see top-of-file note), so lock in
+    // the guarantee it stands for: phantombot re-sources ~/.env per turn so a
+    // secret saved last turn (`phantombot env set`) is visible without a daemon
+    // restart. If a refactor ever drops the call, this fails instead of silently
+    // regressing behind the stub.
+    process.env.FAKE_PI_MODE = "argv";
+    await collect(mkHarness().invoke(newRequest()));
+    expect(reloadSpy).toHaveBeenCalled();
   });
 });
 

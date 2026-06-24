@@ -628,6 +628,7 @@ function buildPiRoutingConfig(
   const tomlRouting = (tomlPi.routing ?? {}) as Record<string, unknown>;
   const resolved = resolveRouting(tomlRouting);
   if (
+    resolved.provider === undefined &&
     resolved.primaryModel === undefined &&
     resolved.imageModel === undefined &&
     resolved.codingModel === undefined

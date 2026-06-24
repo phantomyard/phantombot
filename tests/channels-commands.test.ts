@@ -18,10 +18,6 @@ import {
 } from "../src/channels/commands.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
-import { getViewCoderOverride } from "../src/lib/viewCoder.ts";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 class StubHarness implements Harness {
   constructor(
@@ -488,87 +484,6 @@ describe("/restart", () => {
 // ---------------------------------------------------------------------------
 // Internal helpers exposed for testability
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// /viewcoder
-// ---------------------------------------------------------------------------
-
-describe("/viewcoder", () => {
-  const SAVED = process.env.PHANTOMBOT_VIEW_CODER_STATE;
-  let vcDir: string;
-
-  beforeEach(async () => {
-    vcDir = await mkdtemp(join(tmpdir(), "phantombot-vc-cmd-"));
-    process.env.PHANTOMBOT_VIEW_CODER_STATE = join(vcDir, "state.json");
-  });
-  afterEach(async () => {
-    if (SAVED === undefined) delete process.env.PHANTOMBOT_VIEW_CODER_STATE;
-    else process.env.PHANTOMBOT_VIEW_CODER_STATE = SAVED;
-    await rm(vcDir, { recursive: true, force: true });
-  });
-
-  test("is recognized (not null) and listed in /help", async () => {
-    const help = await handleSlashCommand("/help", ctx());
-    expect(help!.reply).toContain("/viewcoder");
-  });
-
-  test("/viewcoder off persists an off override for this conversation", async () => {
-    const r = await handleSlashCommand("/viewcoder off", ctx());
-    expect(r).not.toBeNull();
-    expect(r!.reply).toContain("off");
-    expect(
-      await getViewCoderOverride({
-        persona: "phantom",
-        conversation: "telegram:42",
-      }),
-    ).toBe("off");
-  });
-
-  test("/viewcoder on persists an on override", async () => {
-    const r = await handleSlashCommand("/viewcoder on", ctx());
-    expect(r!.reply).toContain("on");
-    expect(
-      await getViewCoderOverride({
-        persona: "phantom",
-        conversation: "telegram:42",
-      }),
-    ).toBe("on");
-  });
-
-  test("/viewcoder default clears the override", async () => {
-    await handleSlashCommand("/viewcoder on", ctx());
-    const r = await handleSlashCommand("/viewcoder default", ctx());
-    expect(r!.reply).toContain("default");
-    expect(
-      await getViewCoderOverride({
-        persona: "phantom",
-        conversation: "telegram:42",
-      }),
-    ).toBeUndefined();
-  });
-
-  test("a bad arg returns usage instead of mutating state", async () => {
-    const r = await handleSlashCommand("/viewcoder maybe", ctx());
-    expect(r!.reply).toContain("usage:");
-    expect(
-      await getViewCoderOverride({
-        persona: "phantom",
-        conversation: "telegram:42",
-      }),
-    ).toBeUndefined();
-  });
-
-  test("scoped per conversation — different chats don't collide", async () => {
-    await handleSlashCommand("/viewcoder off", ctx({ conversation: "telegram:1" }));
-    await handleSlashCommand("/viewcoder on", ctx({ conversation: "telegram:2" }));
-    expect(
-      await getViewCoderOverride({ persona: "phantom", conversation: "telegram:1" }),
-    ).toBe("off");
-    expect(
-      await getViewCoderOverride({ persona: "phantom", conversation: "telegram:2" }),
-    ).toBe("on");
-  });
-});
 
 describe("nominalContextWindow", () => {
   test("returns sensible defaults per harness id", () => {

@@ -13,9 +13,18 @@
  *     tool_execution_end, turn_end,
  *     extension_*) → ignored        (the done chunk is emitted from process exit)
  *
- * Auth (OAuth-on-host model): phantombot does NOT pass --api-key. Pi
- * resolves credentials from its own configured state (~/.config/pi/ or
- * similar). `phantombot doctor` surfaces failure if Pi isn't configured.
+ * Auth (per-turn, with local-store fallback): when PHANTOMBOT_PI_API_KEY is
+ * set, phantombot threads it onto `--api-key` per turn (the same way it threads
+ * `--model`) — never persisting it into Pi's own auth store. When it's UNSET,
+ * phantombot passes no `--api-key` and Pi falls back to its own env / local
+ * store settings, so an "install later, no key" or legacy install keeps working.
+ * `phantombot doctor` surfaces failure if neither path yields credentials.
+ *
+ * Provider: the configured routing provider is threaded onto `--provider` every
+ * turn. This is REQUIRED for a non-google key to work — Pi's `--provider`
+ * defaults to google, so an OpenRouter key with no `--provider openrouter` is
+ * sent to the wrong endpoint and fails. The wizard scopes all routed models to
+ * one provider, so a single `--provider` is correct even after a coding swap.
  *
  * ARG_MAX guard: declares maxPayloadBytes so the orchestrator's fallback
  * skips Pi for oversized turns. Internal precheck mirrors that so a
@@ -24,7 +33,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import type { PiRoutingConfig } from "../lib/piRouting.ts";
+import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
@@ -117,7 +126,7 @@ export class PiHarness implements Harness {
     // `--print --no-session` and phantombot rebuilds the full context every
     // turn, the coding model inherits memory + history + images natively. The
     // decision is a free, stateless CRS-style score over the user message (plus
-    // a persistent /coder|/nocoder override), so it re-evaluates every turn and
+    // a persistent /coder override), so it re-evaluates every turn and
     // flips back to the primary the moment the work stops being code. We never
     // swap the tool-less threat judge (toolsMode "none") — it must stay on the
     // configured primary and never gain capability.
@@ -146,6 +155,18 @@ export class PiHarness implements Harness {
         });
       }
     }
+    // Pin the provider for whichever model is active this turn. Pi's `--provider`
+    // DEFAULTS TO GOOGLE, so a non-google api-key (e.g. OpenRouter) handed over
+    // without this is fired at the wrong endpoint → auth failure. The wizard
+    // scopes all routed models (primary + image + coding) to ONE provider, so a
+    // single `--provider` is correct even after a coding-brain swap. Absent ⇒
+    // omit the flag and let Pi use its own default. Read from the static routing
+    // config (like the model), not per-turn env, since the provider is a config
+    // choice that pairs with the saved models.
+    const provider = this.config.routing?.provider;
+    if (provider) {
+      args.push("--provider", provider);
+    }
     if (primaryModel) {
       args.push("--model", primaryModel);
     }
@@ -155,6 +176,26 @@ export class PiHarness implements Harness {
     if (req.toolsMode === "none") {
       args.push("--no-tools");
     }
+
+    // Re-source ~/.env so secrets saved by the agent on the previous turn
+    // (`phantombot env set FOO bar`) are visible here without a daemon
+    // restart — and so the Pi API key below is read fresh. See envBootstrap.ts
+    // for the sticky-vs-reloadable rules.
+    await reloadEnvFiles();
+
+    // Per-turn Pi auth: thread the API key onto `--api-key` exactly the way the
+    // model is threaded onto `--model`. We do NOT persist it into Pi's own auth
+    // store — Phantomops owns key storage; this just relays whatever is in the
+    // env this turn. Three-tier fallback (see ENV_PI_API_KEY): key present ⇒
+    // pass it (wins); ABSENT ⇒ omit the flag so Pi falls back to its OWN env /
+    // local store settings (the "install later, no key" path keeps legacy
+    // installs working); neither ⇒ Pi errors as usual. Must precede the
+    // positional payload below.
+    const piApiKey = process.env[ENV_PI_API_KEY]?.trim();
+    if (piApiKey) {
+      args.push("--api-key", piApiKey);
+    }
+
     // Payload is the LAST positional arg (pi reads it from argv, not stdin).
     args.push(payload);
     log.debug("pi.invoke spawning", {
@@ -162,16 +203,27 @@ export class PiHarness implements Harness {
       payloadBytes: totalBytes,
     });
 
-    // Re-source ~/.env so secrets saved by the agent on the previous turn
-    // (`phantombot env set FOO bar`) are visible here without a daemon
-    // restart. See envBootstrap.ts for the sticky-vs-reloadable rules.
-    await reloadEnvFiles();
-
+    // Relay THIS harness's provider + api-key into the child env so the bundled
+    // capability-routing extension threads them onto its OWN delegate children
+    // (look_at_image / coder) as `--provider`/`--api-key`. Delegate MODELS still
+    // travel via the managed routing.json, but the auth PAIR is per-turn and
+    // scoped to the active harness — projecting it here (rather than leaning on a
+    // shared ambient env var) is what keeps a primary-Pi→OpenRouter /
+    // fallback-Pi→OpenAI box from colliding two providers in one namespace: each
+    // pi subtree inherits exactly its own pair. We set the provider explicitly
+    // (it was previously only an argv flag, invisible to the extension) and
+    // re-assert the api-key so the child sees the value we just resolved. An
+    // empty string CLEARS the key — so a harness with no provider/key actively
+    // unsets any stale ambient value rather than leaking it into the subtree.
+    // Clone, never mutate in place: withPersonaEnv returns the SAME process.env
+    // reference when there's no persona/conversation, so assigning onto it would
+    // clobber the parent's global env. The spread guarantees a fresh object.
+    const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation) };
+    childEnv[ENV_PI_PROVIDER] = provider ?? "";
+    childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      // Delegate models reach the bundled extension via the managed
-      // routing.json (lib/piExtensionProvision.ts), NOT via child env.
-      env: withPersonaEnv(process.env, req.persona, req.conversation),
+      env: childEnv,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

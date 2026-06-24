@@ -7,6 +7,7 @@
  * re-reads the 5 source files from disk and asserts byte-equality with the
  * generated constants (and that the hash recomputes), failing CI on drift.
  */
+// NOTE: keep FILES in sync with scripts/genPiExtensionAssets.ts.
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -20,7 +21,7 @@ import {
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXT_DIR = join(REPO_ROOT, "pi-extension", "capability-routing");
 
-const FILES = ["index.ts", "tools.ts", "spawnPi.ts", "README.md", "agents/coder.md"];
+const FILES = ["index.ts", "tools.ts", "spawnPi.ts", "README.md"];
 
 function hashEntries(entries: Array<[string, string]>): string {
   const h = createHash("sha256");
@@ -39,7 +40,7 @@ describe("piExtensionAssets.generated", () => {
       const onDisk = readFileSync(join(EXT_DIR, rel), "utf8");
       expect(PI_EXTENSION_FILES[rel]).toBe(onDisk);
     }
-    // No stray keys beyond the 5 we embed.
+    // No stray keys beyond the ones we embed.
     expect(Object.keys(PI_EXTENSION_FILES).sort()).toEqual([...FILES].sort());
   });
 

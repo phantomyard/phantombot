@@ -2,7 +2,7 @@
  * Tests for the managed Pi capability-routing extension provisioner.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,9 +38,12 @@ describe("ensureRoutingExtension", () => {
     };
     const r = await ensureRoutingExtension(routing, { home });
 
-    // coding model set + progress unspecified ⇒ on by default, so the baked
-    // models gain codingProgress: true.
-    const expectedModels = { ...routing, codingProgress: true };
+    // The coding model is NOT baked into routing.json — it drives the per-turn
+    // coding-brain swap, not any tool the extension registers.
+    const expectedModels = {
+      primaryModel: "deepseek-v4-pro",
+      imageModel: "gpt-4o",
+    };
 
     expect(r.action).toBe("created");
     expect(r.dir).toBe(extDir(home));
@@ -54,7 +57,7 @@ describe("ensureRoutingExtension", () => {
       expect(content).toContain("MANAGED BY PHANTOMBOT");
     }
 
-    // routing.json holds exactly the provided models (+ default-on progress).
+    // routing.json holds exactly the primary + image models (no coding fields).
     const routingJson = JSON.parse(
       await readFile(join(extDir(home), "routing.json"), "utf8"),
     );
@@ -64,65 +67,21 @@ describe("ensureRoutingExtension", () => {
     expect(existsSync(join(extDir(home), ".phantombot-managed"))).toBe(true);
   });
 
-  test("only the set capability is written to routing.json (coding only)", async () => {
-    // coding capability set, image unset → coder registers, look_at_image does not.
-    await ensureRoutingExtension(
+  test("coding model alone (no image) does not create the dir", async () => {
+    // The coding model drives the swap, not the extension's look_at_image tool,
+    // so it no longer justifies provisioning the managed dir.
+    const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
       { home },
     );
-    const routingJson = JSON.parse(
-      await readFile(join(extDir(home), "routing.json"), "utf8"),
-    );
-    expect(routingJson).toEqual({
-      primaryModel: "gpt-5.2",
-      codingModel: "qwen-coder",
-      // coding model set + progress unspecified ⇒ on by default
-      codingProgress: true,
-    });
-    expect("imageModel" in routingJson).toBe(false);
+    expect(r.action).toBe("absent");
+    expect(r.wrote).toEqual([]);
+    expect(existsSync(extDir(home))).toBe(false);
   });
 
-  test("bakes codingProgress only when on AND a coding model is set", async () => {
-    await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", codingModel: "qwen-coder", codingProgress: true },
-      { home },
-    );
-    const routingJson = JSON.parse(
-      await readFile(join(extDir(home), "routing.json"), "utf8"),
-    );
-    expect(routingJson).toEqual({
-      primaryModel: "gpt-5.2",
-      codingModel: "qwen-coder",
-      codingProgress: true,
-    });
-  });
-
-  test("explicit progress off bakes false; no coding model omits the key", async () => {
-    // progress explicitly off ⇒ baked as false (must persist so the extension,
-    // which defaults absent ⇒ on, can see the override and stay quiet)
-    await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", codingModel: "qwen-coder", codingProgress: false },
-      { home },
-    );
-    let json = JSON.parse(
-      await readFile(join(extDir(home), "routing.json"), "utf8"),
-    );
-    expect(json.codingProgress).toBe(false);
-
-    // progress true but image-only (no coding model) ⇒ key omitted (decoupled)
-    await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", codingProgress: true },
-      { home },
-    );
-    json = JSON.parse(
-      await readFile(join(extDir(home), "routing.json"), "utf8"),
-    );
-    expect("codingProgress" in json).toBe(false);
-  });
-
-  test("image-only capability stamps the dir (coding unset)", async () => {
+  test("image capability stamps the dir; coding fields are not baked", async () => {
     const r = await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", imageModel: "gpt-4o" },
+      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", codingModel: "qwen-coder" },
       { home },
     );
     expect(r.action).toBe("created");
@@ -131,6 +90,7 @@ describe("ensureRoutingExtension", () => {
     );
     expect(routingJson).toEqual({ primaryModel: "gpt-5.2", imageModel: "gpt-4o" });
     expect("codingModel" in routingJson).toBe(false);
+    expect("codingProgress" in routingJson).toBe(false);
   });
 
   test("no routable capability (primaryModel only) does not create the dir", async () => {
@@ -155,47 +115,56 @@ describe("ensureRoutingExtension", () => {
     expect(existsSync(extDir(home))).toBe(false);
   });
 
-  test("dropping all capabilities removes a previously-stamped dir (action 'removed')", async () => {
+  test("dropping the image model removes a previously-stamped dir (action 'removed')", async () => {
     await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
+      { primaryModel: "gpt-5.2", imageModel: "gpt-4o" },
       { home },
     );
     expect(existsSync(extDir(home))).toBe(true);
 
-    const r = await ensureRoutingExtension({ primaryModel: "gpt-5.2" }, { home });
-    expect(r.action).toBe("removed");
-    expect(existsSync(extDir(home))).toBe(false);
-  });
-
-  test("removing one capability keeps the dir and re-bakes routing.json", async () => {
-    await ensureRoutingExtension(
-      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", codingModel: "qwen-coder" },
-      { home },
-    );
-    // Drop image, keep coding → dir stays, routing.json loses imageModel.
     const r = await ensureRoutingExtension(
       { primaryModel: "gpt-5.2", codingModel: "qwen-coder" },
       { home },
     );
-    expect(r.action).toBe("updated");
-    expect(existsSync(extDir(home))).toBe(true);
-    const routingJson = JSON.parse(
-      await readFile(join(extDir(home), "routing.json"), "utf8"),
-    );
-    expect(routingJson).toEqual({
-      primaryModel: "gpt-5.2",
-      codingModel: "qwen-coder",
-      // coding model set + progress unspecified ⇒ on by default
-      codingProgress: true,
-    });
+    expect(r.action).toBe("removed");
+    expect(existsSync(extDir(home))).toBe(false);
   });
 
   test("second run on identical input returns action 'unchanged'", async () => {
-    const routing = { primaryModel: "gpt-5.2", codingModel: "qwen-coder" };
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
     await ensureRoutingExtension(routing, { home });
     const second = await ensureRoutingExtension(routing, { home });
     expect(second.action).toBe("unchanged");
     expect(second.wrote).toEqual([]);
+  });
+
+  test("prunes a stale orphan file (e.g. agents/coder.md) left from a prior asset set", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+
+    // Simulate a host stamped by an OLDER phantombot whose embedded asset set
+    // still shipped the coder agent file. It must NOT survive a re-stamp.
+    const stalePath = join(extDir(home), "agents", "coder.md");
+    await mkdir(join(extDir(home), "agents"), { recursive: true });
+    await writeFile(stalePath, "<!-- stale coder agent -->\n", "utf8");
+    expect(existsSync(stalePath)).toBe(true);
+
+    const r = await ensureRoutingExtension(routing, { home });
+    expect(r.action).toBe("updated");
+    expect(r.pruned).toContain("agents/coder.md");
+    expect(existsSync(stalePath)).toBe(false);
+    // The now-empty agents/ dir is cleaned up too.
+    expect(existsSync(join(extDir(home), "agents"))).toBe(false);
+    // Desired files are untouched.
+    expect(existsSync(join(extDir(home), "routing.json"))).toBe(true);
+  });
+
+  test("a clean second run prunes nothing and stays 'unchanged'", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+    const second = await ensureRoutingExtension(routing, { home });
+    expect(second.action).toBe("unchanged");
+    expect(second.pruned).toEqual([]);
   });
 
   test("mutating a stamped file then re-running restores it (action 'updated')", async () => {
@@ -216,7 +185,7 @@ describe("ensureRoutingExtension", () => {
 
 describe("routingExtensionStatus", () => {
   test("should-exist but missing on a fresh temp home → drifted", async () => {
-    const status = await routingExtensionStatus({ codingModel: "x" }, { home });
+    const status = await routingExtensionStatus({ imageModel: "gpt-4o" }, { home });
     expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(false);
     expect(status.drifted).toBe(true);
@@ -230,8 +199,15 @@ describe("routingExtensionStatus", () => {
     expect(status.drifted).toBe(false);
   });
 
+  test("coding model alone does not make the extension should-exist", async () => {
+    const status = await routingExtensionStatus({ codingModel: "x" }, { home });
+    expect(status.shouldExist).toBe(false);
+    expect(status.present).toBe(false);
+    expect(status.drifted).toBe(false);
+  });
+
   test("present + not drifted after a clean provision", async () => {
-    const routing = { primaryModel: "gpt-5.2", codingModel: "qwen-coder" };
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
     await ensureRoutingExtension(routing, { home });
     const status = await routingExtensionStatus(routing, { home });
     expect(status.shouldExist).toBe(true);
@@ -240,7 +216,7 @@ describe("routingExtensionStatus", () => {
   });
 
   test("reports drifted=true after a source file is mutated", async () => {
-    const routing = { primaryModel: "gpt-5.2", codingModel: "qwen-coder" };
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
     await ensureRoutingExtension(routing, { home });
     await writeFile(join(extDir(home), "index.ts"), "// tampered\n", "utf8");
     const status = await routingExtensionStatus(routing, { home });
@@ -248,11 +224,22 @@ describe("routingExtensionStatus", () => {
     expect(status.drifted).toBe(true);
   });
 
+  test("reports drifted=true when a stale orphan file is present", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+    // Plant an orphan that is NOT in the desired set.
+    await writeFile(join(extDir(home), "stale-orphan.md"), "x\n", "utf8");
+    const status = await routingExtensionStatus(routing, { home });
+    expect(status.shouldExist).toBe(true);
+    expect(status.present).toBe(true);
+    expect(status.drifted).toBe(true);
+  });
+
   test("reports drifted=true when routing.json no longer matches desired", async () => {
-    await ensureRoutingExtension({ codingModel: "qwen-coder" }, { home });
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
     // Ask about a different (still-capable) routing config → routing.json differs.
     const status = await routingExtensionStatus(
-      { codingModel: "different-coder" },
+      { imageModel: "different-image" },
       { home },
     );
     expect(status.shouldExist).toBe(true);
@@ -260,8 +247,8 @@ describe("routingExtensionStatus", () => {
     expect(status.drifted).toBe(true);
   });
 
-  test("stamped, then all capabilities dropped → drifted (needs removal)", async () => {
-    await ensureRoutingExtension({ codingModel: "qwen-coder" }, { home });
+  test("stamped, then the image model dropped → drifted (needs removal)", async () => {
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
     const status = await routingExtensionStatus({ primaryModel: "x" }, { home });
     expect(status.shouldExist).toBe(false);
     expect(status.present).toBe(true);
@@ -270,19 +257,20 @@ describe("routingExtensionStatus", () => {
 });
 
 describe("hasRoutableCapability", () => {
-  test("true when image or coding set; false otherwise", () => {
+  test("true only when an image model is set", () => {
     expect(hasRoutableCapability({ imageModel: "gpt-4o" })).toBe(true);
-    expect(hasRoutableCapability({ codingModel: "qwen-coder" })).toBe(true);
+    // A coding model drives the swap, not a tool — it does not justify the dir.
+    expect(hasRoutableCapability({ codingModel: "qwen-coder" })).toBe(false);
     expect(hasRoutableCapability({ primaryModel: "gpt-5.2" })).toBe(false);
     expect(hasRoutableCapability(undefined)).toBe(false);
     // Blank/whitespace models do not count.
-    expect(hasRoutableCapability({ codingModel: "  " })).toBe(false);
+    expect(hasRoutableCapability({ imageModel: "  " })).toBe(false);
   });
 });
 
 describe("removeRoutingExtension", () => {
   test("removes a stamped dir; idempotent when already absent", async () => {
-    await ensureRoutingExtension({ codingModel: "qwen-coder" }, { home });
+    await ensureRoutingExtension({ imageModel: "gpt-4o" }, { home });
     expect(existsSync(extDir(home))).toBe(true);
 
     const first = await removeRoutingExtension({ home });

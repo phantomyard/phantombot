@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyRouting } from "../src/cli/harness.ts";
+import { resolveRoutingProvider } from "../src/lib/piRouting.ts";
 import { loadEnvFile } from "../src/lib/envFile.ts";
 import { readConfigToml } from "../src/lib/configWriter.ts";
 
@@ -28,7 +29,6 @@ describe("applyRouting", () => {
         primaryModel: "deepseek-v4-pro",
         imageModel: "gpt-4o",
         codingModel: "gpt-5.2-codex",
-        primaryMultimodal: false,
       },
       envPath,
     );
@@ -52,14 +52,15 @@ describe("applyRouting", () => {
     expect(env.PHANTOMBOT_CODING_MODEL).toBe("gpt-5.2-codex");
   });
 
-  test("multimodal primary omits image model from toml and env", async () => {
+  test("vision primary KEEPS the image model (no auto-skip)", async () => {
+    // The wizard defaults the image pick to the vision primary, so the image
+    // model commonly equals the primary — and it must be persisted, not dropped.
     await applyRouting(
       configPath,
       {
         primaryModel: "gpt-5.2",
-        imageModel: "gpt-4o",
+        imageModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
-        primaryMultimodal: true,
       },
       envPath,
     );
@@ -69,31 +70,48 @@ describe("applyRouting", () => {
     ).pi.routing;
     expect(routing.primary_model).toBe("gpt-5.2");
     expect(routing.coding_model).toBe("gpt-5.2-codex");
-    expect("image_model" in routing).toBe(false);
+    expect(routing.image_model).toBe("gpt-5.2");
 
     const env = await loadEnvFile(envPath);
     expect(env.PHANTOMBOT_PRIMARY_MODEL).toBe("gpt-5.2");
-    // "" deletes the key in updateEnvFile, so it must be absent.
-    expect("PHANTOMBOT_IMAGE_MODEL" in env).toBe(false);
+    expect(env.PHANTOMBOT_IMAGE_MODEL).toBe("gpt-5.2");
   });
 
-  test("switching to a multimodal primary clears a previously-set image model", async () => {
-    // First: text-only primary with an image model.
+  test("provider persists to toml + env, and (none) clears a previously-set one", async () => {
     await applyRouting(
       configPath,
-      {
-        primaryModel: "deepseek-v4-pro",
-        imageModel: "gpt-4o",
-        primaryMultimodal: false,
-      },
+      { provider: "openrouter", primaryModel: "z-ai/glm-5.2" },
+      envPath,
+    );
+    let routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect(routing.provider).toBe("openrouter");
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_PI_PROVIDER).toBe("openrouter");
+
+    // Switch back to Pi's default provider (undefined) — must clear both stores.
+    await applyRouting(configPath, { primaryModel: "gpt-5.2" }, envPath);
+    routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect("provider" in routing).toBe(false);
+    expect("PHANTOMBOT_PI_PROVIDER" in (await loadEnvFile(envPath))).toBe(false);
+  });
+
+  test("explicit (none) image model clears a previously-set one", async () => {
+    // First: an image model is set.
+    await applyRouting(
+      configPath,
+      { primaryModel: "deepseek-v4-pro", imageModel: "gpt-4o" },
       envPath,
     );
     expect((await loadEnvFile(envPath)).PHANTOMBOT_IMAGE_MODEL).toBe("gpt-4o");
 
-    // Then: switch to a multimodal primary — the stale image model must go.
+    // Then: operator picks "(none)" for the image model — undefined — which must
+    // clear the stale value in both toml and env.
     await applyRouting(
       configPath,
-      { primaryModel: "gpt-5.2", imageModel: "gpt-4o", primaryMultimodal: true },
+      { primaryModel: "gpt-5.2", imageModel: undefined },
       envPath,
     );
 
@@ -104,55 +122,52 @@ describe("applyRouting", () => {
     expect("PHANTOMBOT_IMAGE_MODEL" in (await loadEnvFile(envPath))).toBe(false);
   });
 
-  test("coding_progress on: persists to toml + env alongside the coding model", async () => {
+  test("existing provider → configure now → choose (none) → provider removed from toml + env", async () => {
+    // Reproduces the review regression end-to-end through the wizard's two seams:
+    // the provider-resolution decision (resolveRoutingProvider) and the
+    // persistence (applyRouting). With openrouter already configured, the picker
+    // returning "" for "(none)" must clear the provider, NOT fall back to it.
     await applyRouting(
       configPath,
-      {
-        primaryModel: "gpt-5.2",
-        codingModel: "gpt-5.2-codex",
-        codingProgress: true,
-        primaryMultimodal: true,
-      },
+      { provider: "openrouter", primaryModel: "z-ai/glm-5.2" },
       envPath,
     );
+    const current = "openrouter";
+
+    // Operator re-runs "configure now" and selects "(none)" → pickProvider yields
+    // "". The wizard resolves the provider it will persist:
+    const resolved = resolveRoutingProvider("", current);
+    expect(resolved).toBe(""); // explicit clear, NOT "openrouter"
+
+    await applyRouting(
+      configPath,
+      { provider: resolved, primaryModel: "gpt-5.2" },
+      envPath,
+    );
+
     const routing = (
       (await readConfigToml(configPath)).harnesses as Record<string, any>
     ).pi.routing;
-    expect(routing.coding_progress).toBe(true);
-    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
+    expect("provider" in routing).toBe(false);
+    expect("PHANTOMBOT_PI_PROVIDER" in (await loadEnvFile(envPath))).toBe(false);
   });
 
-  test("disabling coding_progress persists an explicit false (toml + env)", async () => {
+  test("coding_model: persists to toml + env", async () => {
     await applyRouting(
       configPath,
       {
         primaryModel: "gpt-5.2",
         codingModel: "gpt-5.2-codex",
-        codingProgress: true,
-        primaryMultimodal: true,
-      },
-      envPath,
-    );
-    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
-
-    // Turn it off — with on-by-default, "off" must persist as an explicit
-    // false (in both toml and env) so it wins over the default, rather than
-    // being cleared and silently re-defaulting to on.
-    await applyRouting(
-      configPath,
-      {
-        primaryModel: "gpt-5.2",
-        codingModel: "gpt-5.2-codex",
-        codingProgress: false,
-        primaryMultimodal: true,
       },
       envPath,
     );
     const routing = (
       (await readConfigToml(configPath)).harnesses as Record<string, any>
     ).pi.routing;
-    expect(routing.coding_progress).toBe(false);
-    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("false");
+    expect(routing.coding_model).toBe("gpt-5.2-codex");
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_MODEL).toBe(
+      "gpt-5.2-codex",
+    );
   });
 
   test("preserves unrelated config keys (does not clobber the chain)", async () => {
@@ -160,7 +175,7 @@ describe("applyRouting", () => {
     await applyHarnessChain(configPath, ["pi", "claude"]);
     await applyRouting(
       configPath,
-      { primaryModel: "gpt-5.2", primaryMultimodal: true },
+      { primaryModel: "gpt-5.2" },
       envPath,
     );
     const toml = await readConfigToml(configPath);
