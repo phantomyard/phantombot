@@ -6,7 +6,7 @@
  *   - One ARG_MAX guard test (synthetic — confirms the precheck fires).
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { resolve } from "node:path";
 import {
   PiHarness,
@@ -14,6 +14,7 @@ import {
   piActivity,
   renderPayload,
 } from "../src/harnesses/pi.ts";
+import * as envBootstrap from "../src/lib/envBootstrap.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 
 const FAKE_PI = resolve(__dirname, "fixtures/fake-pi.sh");
@@ -243,13 +244,31 @@ describe("piActivity — idle-watchdog classification", () => {
 
 let originalMode: string | undefined;
 
+// Hermetic env-file isolation. PiHarness.invoke() calls reloadEnvFiles(), which
+// re-sources ~/.env and $XDG_CONFIG_HOME/phantombot/.env into process.env. On
+// any machine that ACTUALLY has Pi configured (a dev box, or Lena), those files
+// carry a real PHANTOMBOT_PI_API_KEY / PHANTOMBOT_PI_PROVIDER — which the reload
+// would silently re-inject, undoing the `delete process.env...` these tests rely
+// on and breaking the "no key → no --api-key flag" / "clears stale provider"
+// assertions off the test author's machine. Redirecting env vars can't fix the
+// `~/.env` arm because Bun caches os.homedir() at startup. So stub the reload to
+// a no-op: these tests assert argv / child-env construction against process.env,
+// NOT the reconcile behavior (lib-envBootstrap.test.ts covers that with injected
+// paths). The spy makes every invoke read exactly the process.env the test set.
+let reloadSpy: ReturnType<typeof spyOn> | undefined;
+
 beforeEach(() => {
   originalMode = process.env.FAKE_PI_MODE;
+  reloadSpy = spyOn(envBootstrap, "reloadEnvFiles").mockResolvedValue({
+    updated: [],
+    removed: [],
+  });
 });
 
 afterEach(() => {
   if (originalMode === undefined) delete process.env.FAKE_PI_MODE;
   else process.env.FAKE_PI_MODE = originalMode;
+  reloadSpy?.mockRestore();
 });
 
 const mkHarness = (overrides: Partial<{ maxPayloadBytes: number }> = {}) =>
@@ -519,6 +538,17 @@ describe("PiHarness routing (subprocess)", () => {
       .map((c) => (c as { text: string }).text)
       .join("");
     expect(argv).not.toContain("--api-key");
+  });
+
+  test("invoke re-sources env files each turn (reloadEnvFiles is called)", async () => {
+    // The reload is stubbed for hermeticity (see top-of-file note), so lock in
+    // the guarantee it stands for: phantombot re-sources ~/.env per turn so a
+    // secret saved last turn (`phantombot env set`) is visible without a daemon
+    // restart. If a refactor ever drops the call, this fails instead of silently
+    // regressing behind the stub.
+    process.env.FAKE_PI_MODE = "argv";
+    await collect(mkHarness().invoke(newRequest()));
+    expect(reloadSpy).toHaveBeenCalled();
   });
 });
 
