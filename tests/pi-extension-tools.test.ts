@@ -13,17 +13,93 @@ import {
 } from "../pi-extension/capability-routing/tools.ts";
 import {
   buildProgress,
+  delegateFailureText,
   formatProgressLines,
   formatToolCall,
   toolIcon,
+  isDelegateFailure,
   isTerminalStop,
+  lastProgressText,
   notifyArgs,
   ProgressBatcher,
   toolCallsOf,
   type DelegateProgress,
+  type DelegateResult,
   type IdleScheduler,
   type Message,
 } from "../pi-extension/capability-routing/spawnPi.ts";
+
+/** Minimal DelegateResult builder for the failure-surfacing tests. */
+function result(over: Partial<DelegateResult> = {}): DelegateResult {
+  return {
+    exitCode: 0,
+    messages: [],
+    stderr: "",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    ...over,
+  };
+}
+
+/** Assistant message carrying a single text part. */
+function assistantText(text: string): Message {
+  return { role: "assistant", content: [{ type: "text", text }] };
+}
+
+describe("isDelegateFailure — tool-boundary failure detection", () => {
+  test("clean exit with no/benign stopReason is success", () => {
+    expect(isDelegateFailure(result({ exitCode: 0 }))).toBe(false);
+    expect(isDelegateFailure(result({ exitCode: 0, stopReason: "stop" }))).toBe(false);
+    expect(isDelegateFailure(result({ exitCode: 0, stopReason: "toolUse" }))).toBe(false);
+  });
+
+  test("non-zero exit, error, aborted, and timeout are failures", () => {
+    expect(isDelegateFailure(result({ exitCode: 1 }))).toBe(true);
+    expect(isDelegateFailure(result({ stopReason: "error" }))).toBe(true);
+    expect(isDelegateFailure(result({ stopReason: "aborted" }))).toBe(true);
+    expect(isDelegateFailure(result({ stopReason: "timeout" }))).toBe(true);
+  });
+});
+
+describe("lastProgressText — partial work for a timeout report", () => {
+  test("returns the most recent non-empty assistant text", () => {
+    const msgs: Message[] = [
+      assistantText("first"),
+      assistantText("   "), // blank — skipped
+      assistantText("running the migration"),
+    ];
+    expect(lastProgressText(msgs)).toBe("running the migration");
+  });
+
+  test("empty string when there is nothing usable", () => {
+    expect(lastProgressText([])).toBe("");
+    expect(lastProgressText([assistantText("  ")])).toBe("");
+  });
+});
+
+describe("delegateFailureText — tested-failure result the primary can iterate on", () => {
+  test("non-timeout failure surfaces reason + detail, no retry nudge", () => {
+    const text = delegateFailureText("coder", result({ exitCode: 2, stderr: "boom" }));
+    expect(text).toContain("coder failed (exit 2): boom");
+    expect(text).not.toContain("recover from");
+  });
+
+  test("timeout failure includes the last progress and an explicit retry nudge", () => {
+    const r = result({
+      stopReason: "timeout",
+      errorMessage: "no output for 240s (likely wedged on a tool call)",
+      messages: [assistantText("patched the auth guard, now running tests")],
+    });
+    const text = delegateFailureText("coder", r);
+    expect(text).toContain("coder failed (timeout): no output for 240s");
+    expect(text).toContain("patched the auth guard, now running tests");
+    expect(text).toContain("call coder again");
+  });
+
+  test("timeout with no partial output says so plainly", () => {
+    const text = delegateFailureText("coder", result({ stopReason: "timeout" }));
+    expect(text).toContain("no usable output before it was stopped");
+  });
+});
 
 describe("notifyArgs — persona-scoped progress delivery", () => {
   test("forwards --persona when PHANTOMBOT_PERSONA is set", () => {

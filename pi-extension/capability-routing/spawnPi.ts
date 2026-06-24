@@ -210,6 +210,25 @@ export interface DelegateOptions {
    * throw is swallowed, like onProgress.
    */
   onProgressEnd?: () => void;
+  /**
+   * Idle timeout (ms). If the child produces NO output (neither stdout nor
+   * stderr) for this long, it is treated as WEDGED: killed (SIGTERM → SIGKILL)
+   * and the call returns with `stopReason: "timeout"` instead of hanging.
+   *
+   * This is the TOOL BOUNDARY. A delegate is a tool the primary called, like
+   * bash; when it wedges it must surface as a tested failure the primary can
+   * iterate on — NOT an unbounded hang that starves the primary's own idle
+   * watchdog until the whole turn is killed and (wrongly) treated as a primary
+   * failure. Set this comfortably UNDER the primary's idle window so the tool
+   * returns first. Omit to disable (legacy unbounded behaviour).
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Hard wall-clock cap (ms). Kills the child after this long regardless of
+   * output. Omit to disable (rely on the parent's hard cap). Belt-and-braces
+   * for a child that stays just-chatty-enough to dodge the idle timeout forever.
+   */
+  hardTimeoutMs?: number;
 }
 
 /**
@@ -236,6 +255,18 @@ function emptyUsage(): DelegateUsage {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+/**
+ * Detach a timer from the event loop's ref-count so a pending idle/hard timeout
+ * can never keep the process alive on its own. Guards `unref` defensively — the
+ * timer handle is typed `number` under some lib configs even though Node's real
+ * return value carries `unref()`.
+ */
+function unrefTimer(t: ReturnType<typeof setTimeout>): void {
+  if (typeof (t as { unref?: () => void }).unref === "function") {
+    (t as { unref: () => void }).unref();
+  }
+}
+
 /** Write the appended system prompt to a temp file; pi reads it by path. */
 function writePromptTempFile(prompt: string): { dir: string; filePath: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "phantombot-route-"));
@@ -255,6 +286,67 @@ export function finalText(messages: Message[]): string {
     }
   }
   return "";
+}
+
+/**
+ * Most recent NON-EMPTY assistant text the delegate produced. Unlike
+ * `finalText` (which returns the last assistant block even if blank), this
+ * skips blank turns so a timeout report can show the last thing the coder
+ * actually said before it stalled. Empty string when there's nothing.
+ */
+export function lastProgressText(messages: Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role === "assistant") {
+      for (const part of msg.content) {
+        if (part.type === "text" && part.text.trim()) return part.text.trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * True when a delegation FAILED: a non-zero exit, or a failure stopReason —
+ * `error`, `aborted`, or a `timeout` we imposed at the tool boundary. The tool
+ * surfaces these via `delegateFailureText` as an isError result so the primary
+ * iterates. A clean `stop`/`toolUse`/undefined stopReason with exit 0 is success.
+ */
+export function isDelegateFailure(r: DelegateResult): boolean {
+  return (
+    r.exitCode !== 0 ||
+    r.stopReason === "error" ||
+    r.stopReason === "aborted" ||
+    r.stopReason === "timeout"
+  );
+}
+
+/**
+ * Build the tool-result failure string for a failed/timed-out delegation.
+ * Never throws.
+ *
+ * This is the user-facing half of the TOOL BOUNDARY: a delegate that failed —
+ * including a wedge we killed via the idle/hard timeout — returns this string as
+ * a normal (isError) tool result so the PRIMARY can read it and iterate, exactly
+ * like a non-zero bash exit. On a timeout we also surface the last thing the
+ * delegate managed to say and an explicit nudge to retry-or-report, so the
+ * primary treats it as a recoverable tool failure rather than a dead end.
+ */
+export function delegateFailureText(kind: string, r: DelegateResult): string {
+  const reason = r.stopReason ?? `exit ${r.exitCode}`;
+  const detail = r.errorMessage || r.stderr.trim() || "no output";
+  let text = `${kind} failed (${reason}): ${detail}`;
+  if (r.stopReason === "timeout") {
+    const partial = lastProgressText(r.messages);
+    text += partial
+      ? `\n\nLast progress before it was stopped: ${clip(partial, 280)}`
+      : `\n\nIt produced no usable output before it was stopped.`;
+    text +=
+      `\n\nThis is a TOOL failure you can recover from — treat it like a failed ` +
+      `command: refine the task (smaller scope, clearer steps) and call ${kind} ` +
+      `again, or report back what you tried and where it stalled.`;
+  }
+  return text;
 }
 
 export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
@@ -281,6 +373,7 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
     args.push(opts.task);
 
     let aborted = false;
+    let timedOut: "idle" | "hard" | undefined;
     const exitCode = await new Promise<number>((resolve) => {
       const inv = getPiInvocation(args);
       const proc = spawn(inv.command, inv.args, {
@@ -288,6 +381,44 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
+
+      // ── Tool-boundary timeouts ────────────────────────────────────────────
+      // A wedged child must return a tested failure, not hang forever (see
+      // DelegateOptions.idleTimeoutMs). The idle timer resets on ANY raw output
+      // from the child; the hard timer never resets. On expiry we kill the
+      // child and record `timedOut` so the post-await block sets a `timeout`
+      // stopReason the tool surfaces to the primary.
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      let hardTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearTimers = (): void => {
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
+        if (hardTimer) { clearTimeout(hardTimer); hardTimer = undefined; }
+      };
+      const killTimedOut = (which: "idle" | "hard"): void => {
+        if (timedOut || aborted) return;
+        timedOut = which;
+        clearTimers();
+        proc.kill("SIGTERM");
+        unrefTimer(setTimeout(() => {
+          if (!proc.killed) proc.kill("SIGKILL");
+        }, 5000));
+      };
+      // Reset the idle window on every raw chunk from the child (stdout OR
+      // stderr). Wired into both data handlers below.
+      const onChildActivity = (): void => {
+        if (opts.idleTimeoutMs === undefined || timedOut || aborted) return;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => killTimedOut("idle"), opts.idleTimeoutMs);
+        unrefTimer(idleTimer);
+      };
+      if (opts.idleTimeoutMs !== undefined) {
+        idleTimer = setTimeout(() => killTimedOut("idle"), opts.idleTimeoutMs);
+        unrefTimer(idleTimer);
+      }
+      if (opts.hardTimeoutMs !== undefined) {
+        hardTimer = setTimeout(() => killTimedOut("hard"), opts.hardTimeoutMs);
+        unrefTimer(hardTimer);
+      }
 
       let buffer = "";
       const processLine = (line: string) => {
@@ -331,19 +462,25 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
       };
 
       proc.stdout.on("data", (data) => {
+        onChildActivity();
         buffer += data.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) processLine(line);
       });
       proc.stderr.on("data", (data) => {
+        onChildActivity();
         result.stderr += data.toString();
       });
       proc.on("close", (code) => {
+        clearTimers();
         if (buffer.trim()) processLine(buffer);
         resolve(code ?? 0);
       });
-      proc.on("error", () => resolve(1));
+      proc.on("error", () => {
+        clearTimers();
+        resolve(1);
+      });
 
       if (opts.signal) {
         const kill = () => {
@@ -362,6 +499,14 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
     if (aborted) {
       result.stopReason = "aborted";
       result.errorMessage = "delegation aborted";
+    } else if (timedOut) {
+      result.stopReason = "timeout";
+      const ms = timedOut === "idle" ? opts.idleTimeoutMs! : opts.hardTimeoutMs!;
+      const secs = Math.round(ms / 1000);
+      result.errorMessage =
+        timedOut === "idle"
+          ? `no output for ${secs}s (likely wedged on a tool call)`
+          : `exceeded the ${secs}s hard time cap`;
     }
     return result;
   } finally {

@@ -45,7 +45,9 @@ import {
 } from "./tools.ts";
 import {
   delegate,
+  delegateFailureText,
   finalText,
+  isDelegateFailure,
   formatProgressLines,
   notifyArgs,
   ProgressBatcher,
@@ -57,6 +59,19 @@ import {
 const PROGRESS_IDLE_FLUSH_MS = 5_000;
 /** Flush early once the buffer reaches this many lines, whichever comes first. */
 const PROGRESS_MAX_LINES = 10;
+
+/**
+ * Idle bound for a delegate child (ms): if it produces NO output for this long
+ * it's treated as wedged, killed, and returned to the primary as a tested
+ * failure (see spawnPi.ts DelegateOptions.idleTimeoutMs).
+ *
+ * MUST sit comfortably under phantombot's PRIMARY idle watchdog (default 300s),
+ * so a wedged delegate returns a tool result BEFORE the primary's own watchdog
+ * trips and kills the whole turn — which would (wrongly) look like a primary
+ * failure and trigger a harness fallback. 240s leaves ~60s of headroom for the
+ * tool to return, the primary to emit its next turn, and iterate.
+ */
+const DELEGATE_IDLE_TIMEOUT_MS = 240_000;
 
 /**
  * Read the persistent `/viewcoder` override for this conversation, if any.
@@ -271,17 +286,13 @@ export default function (pi: ExtensionAPI) {
           // Vision Q&A doesn't need edit/bash/write; keep it tool-light.
           tools: ["read"],
           signal,
+          // Bound the delegate so a wedged vision call returns a tested failure
+          // instead of hanging until the primary's own watchdog kills the turn.
+          idleTimeoutMs: DELEGATE_IDLE_TIMEOUT_MS,
         });
-        if (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted") {
+        if (isDelegateFailure(r)) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `look_at_image failed (${r.stopReason ?? `exit ${r.exitCode}`}): ${
-                  r.errorMessage || r.stderr || "no output"
-                }`,
-              },
-            ],
+            content: [{ type: "text", text: delegateFailureText("look_at_image", r) }],
             details: { model: imageModel, usage: r.usage },
             isError: true,
           };
@@ -324,17 +335,15 @@ export default function (pi: ExtensionAPI) {
           signal,
           onProgress: sink.onProgress,
           onProgressEnd: sink.onProgressEnd,
+          // Bound the coder so a wedged run returns a tested failure the primary
+          // can iterate on, instead of hanging until the primary's own watchdog
+          // kills the whole turn (and mis-fires a harness fallback). The coder
+          // is a TOOL; a tool failure must stay inside the tool boundary.
+          idleTimeoutMs: DELEGATE_IDLE_TIMEOUT_MS,
         });
-        if (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted") {
+        if (isDelegateFailure(r)) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `coder failed (${r.stopReason ?? `exit ${r.exitCode}`}): ${
-                  r.errorMessage || r.stderr || "no output"
-                }`,
-              },
-            ],
+            content: [{ type: "text", text: delegateFailureText("coder", r) }],
             details: { model: codingModel, usage: r.usage },
             isError: true,
           };
