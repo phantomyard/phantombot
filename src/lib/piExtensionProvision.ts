@@ -13,7 +13,7 @@
  * vars. See pi-extension/capability-routing/{index,tools}.ts for the consumer.
  */
 
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,6 +49,13 @@ export interface ProvisionResult {
   };
   /** Relative paths of files we (re)wrote this run. */
   wrote: string[];
+  /**
+   * Relative paths of orphaned files we DELETED this run — files left over from
+   * a previous embedded asset set that are no longer in `desiredFiles()` (e.g. a
+   * removed `agents/coder.md`). The managed dir is OWNED by phantombot, so stale
+   * files are pruned rather than left behind.
+   */
+  pruned: string[];
 }
 
 export interface ProvisionOpts {
@@ -157,6 +164,54 @@ async function readIfExists(p: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * Recursively list every FILE under `dir` as a relative path (POSIX-style "/",
+ * matching the keys of `PI_EXTENSION_FILES`). Returns [] if the dir is absent.
+ */
+async function listFilesRecursive(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(rel: string): Promise<void> {
+    const abs = rel === "" ? dir : path.join(dir, rel);
+    let entries;
+    try {
+      entries = await readdir(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const childRel = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        await walk(childRel);
+      } else {
+        out.push(childRel);
+      }
+    }
+  }
+  await walk("");
+  return out;
+}
+
+/** Remove empty subdirectories under `root` (bottom-up). Leaves `root` itself. */
+async function pruneEmptyDirs(root: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const child = path.join(root, e.name);
+    await pruneEmptyDirs(child);
+    try {
+      const remaining = await readdir(child);
+      if (remaining.length === 0) await rm(child, { recursive: true, force: true });
+    } catch {
+      // ignore — race or already gone
+    }
+  }
+}
+
 /** Remove the managed extension dir entirely. Idempotent: a no-op if absent. */
 export async function removeRoutingExtension(
   opts: ProvisionOpts = {},
@@ -193,7 +248,13 @@ export async function ensureRoutingExtension(
   // previously-stamped dir instead of leaving an inert shell behind.
   if (!hasRoutableCapability(routing)) {
     const { removed } = await removeRoutingExtension({ home });
-    return { dir, action: removed ? "removed" : "absent", models: {}, wrote: [] };
+    return {
+      dir,
+      action: removed ? "removed" : "absent",
+      models: {},
+      wrote: [],
+      pruned: [],
+    };
   }
 
   const existedBefore = existsSync(dir);
@@ -223,13 +284,29 @@ export async function ensureRoutingExtension(
     wrote.push(MARKER_FILE);
   }
 
+  // Prune orphans: files left over from a PREVIOUS embedded asset set that are
+  // no longer desired (e.g. an `agents/coder.md` removed when the coder tool was
+  // dropped). The managed dir is OWNED by phantombot — anything not in the
+  // desired set + marker is stale and must go, or `phantombot doctor` would
+  // forever report a dir it can't make match desired.
+  const allowed = new Set<string>([...files.keys(), MARKER_FILE]);
+  const pruned: string[] = [];
+  for (const rel of await listFilesRecursive(dir)) {
+    if (!allowed.has(rel)) {
+      await rm(path.join(dir, rel), { force: true });
+      pruned.push(rel);
+    }
+  }
+  if (pruned.length > 0) await pruneEmptyDirs(dir);
+
+  const changed = wrote.length > 0 || pruned.length > 0;
   const action: ProvisionResult["action"] = !existedBefore
     ? "created"
-    : wrote.length > 0
+    : changed
       ? "updated"
       : "unchanged";
 
-  return { dir, action, models, wrote };
+  return { dir, action, models, wrote, pruned };
 }
 
 /**
@@ -278,6 +355,16 @@ export async function routingExtensionStatus(
   for (const [rel, content] of files) {
     const current = await readIfExists(path.join(dir, rel));
     if (current !== content) {
+      return { shouldExist, present: true, drifted: true, dir };
+    }
+  }
+
+  // Orphaned files (on disk but not in the desired set + marker) are drift too —
+  // e.g. a stale `agents/coder.md`. The doctor repairs by re-stamping, which now
+  // prunes them.
+  const allowed = new Set<string>([...files.keys(), MARKER_FILE]);
+  for (const rel of await listFilesRecursive(dir)) {
+    if (!allowed.has(rel)) {
       return { shouldExist, present: true, drifted: true, dir };
     }
   }

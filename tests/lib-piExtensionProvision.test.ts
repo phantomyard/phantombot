@@ -2,7 +2,7 @@
  * Tests for the managed Pi capability-routing extension provisioner.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,6 +138,35 @@ describe("ensureRoutingExtension", () => {
     expect(second.wrote).toEqual([]);
   });
 
+  test("prunes a stale orphan file (e.g. agents/coder.md) left from a prior asset set", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+
+    // Simulate a host stamped by an OLDER phantombot whose embedded asset set
+    // still shipped the coder agent file. It must NOT survive a re-stamp.
+    const stalePath = join(extDir(home), "agents", "coder.md");
+    await mkdir(join(extDir(home), "agents"), { recursive: true });
+    await writeFile(stalePath, "<!-- stale coder agent -->\n", "utf8");
+    expect(existsSync(stalePath)).toBe(true);
+
+    const r = await ensureRoutingExtension(routing, { home });
+    expect(r.action).toBe("updated");
+    expect(r.pruned).toContain("agents/coder.md");
+    expect(existsSync(stalePath)).toBe(false);
+    // The now-empty agents/ dir is cleaned up too.
+    expect(existsSync(join(extDir(home), "agents"))).toBe(false);
+    // Desired files are untouched.
+    expect(existsSync(join(extDir(home), "routing.json"))).toBe(true);
+  });
+
+  test("a clean second run prunes nothing and stays 'unchanged'", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+    const second = await ensureRoutingExtension(routing, { home });
+    expect(second.action).toBe("unchanged");
+    expect(second.pruned).toEqual([]);
+  });
+
   test("mutating a stamped file then re-running restores it (action 'updated')", async () => {
     const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
     await ensureRoutingExtension(routing, { home });
@@ -191,6 +220,17 @@ describe("routingExtensionStatus", () => {
     await ensureRoutingExtension(routing, { home });
     await writeFile(join(extDir(home), "index.ts"), "// tampered\n", "utf8");
     const status = await routingExtensionStatus(routing, { home });
+    expect(status.present).toBe(true);
+    expect(status.drifted).toBe(true);
+  });
+
+  test("reports drifted=true when a stale orphan file is present", async () => {
+    const routing = { primaryModel: "gpt-5.2", imageModel: "gpt-4o" };
+    await ensureRoutingExtension(routing, { home });
+    // Plant an orphan that is NOT in the desired set.
+    await writeFile(join(extDir(home), "stale-orphan.md"), "x\n", "utf8");
+    const status = await routingExtensionStatus(routing, { home });
+    expect(status.shouldExist).toBe(true);
     expect(status.present).toBe(true);
     expect(status.drifted).toBe(true);
   });
