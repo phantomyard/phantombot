@@ -32,5 +32,18 @@ export function redactForLog(text: string): string {
         /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK|KEY)[A-Z0-9_]*)\s*=\s*([^\s"'`]+)/gi,
         "$1=[REDACTED]",
       )
+      // The same idea for SERIALIZED JSON. The central logger redacts the
+      // already-stringified line (see lib/logger.ts), so a structured field
+      // like `{ TELEGRAM_BOT_TOKEN: "…" }` reaches us as
+      // `"TELEGRAM_BOT_TOKEN":"…"` — the quotes break the `=`/`:`-adjacency
+      // the free-text rule above needs, so a credential-bearing KEY would
+      // otherwise leak its value verbatim. Match a quoted credential-looking
+      // key, then a full JSON string value (escaped quotes and all) or a bare
+      // scalar, and swap the value for a quoted sentinel so the line stays
+      // valid JSON.
+      .replace(
+        /("[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK|KEY)[A-Z0-9_]*"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*|true|false|null)/gi,
+        '$1"[REDACTED]"',
+      )
   );
 }

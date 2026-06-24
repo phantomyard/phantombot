@@ -3,7 +3,20 @@
  *
  * Replace with pino / winston / etc. if you outgrow this. The interface here
  * is intentionally narrow so the swap stays small.
+ *
+ * Secrets: every line is passed through `redactForLog` before it hits a
+ * stream. This is the single choke-point the redactor's own docstring
+ * promises ("anything that lands in a log line") — without it, a token
+ * echoed into an `error` field (e.g. `log.warn("…", { error: e.message })`)
+ * would be written to disk verbatim. Redacting the serialized line (rather
+ * than each field) covers `msg`, every field value, and nested objects in
+ * one pass — including credential-bearing JSON keys (e.g. a
+ * `{ TELEGRAM_BOT_TOKEN: "…" }` field that serializes to
+ * `"TELEGRAM_BOT_TOKEN":"…"`), not just free-text `NAME=value` strings.
+ * Replacement strings are quote/backslash-free, so the JSON stays valid.
  */
+
+import { redactForLog } from "./redact.ts";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -26,7 +39,7 @@ function emit(level: LogLevel, msg: string, fields?: Record<string, unknown>): v
   };
   // stderr for warn/error so log shippers can split if desired.
   const stream = level === "warn" || level === "error" ? process.stderr : process.stdout;
-  stream.write(JSON.stringify(line) + "\n");
+  stream.write(redactForLog(JSON.stringify(line)) + "\n");
 }
 
 export const log = {
