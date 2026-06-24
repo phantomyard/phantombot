@@ -349,8 +349,12 @@ describe("PiHarness.invoke (subprocess)", () => {
 // ---------------------------------------------------------------------------
 
 describe("PiHarness routing (subprocess)", () => {
-  const routed = (routing: { primaryModel?: string; imageModel?: string; codingModel?: string }) =>
-    new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
+  const routed = (routing: {
+    provider?: string;
+    primaryModel?: string;
+    imageModel?: string;
+    codingModel?: string;
+  }) => new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
 
   test("routing.primaryModel pins the orchestrator via --model", async () => {
     process.env.FAKE_PI_MODE = "argv";
@@ -360,6 +364,57 @@ describe("PiHarness routing (subprocess)", () => {
       .map((c) => (c as { text: string }).text)
       .join("");
     expect(argv).toContain("--model gpt-5.2");
+  });
+
+  test("routing.provider is threaded onto --provider (OpenRouter routes to openrouter, NOT google)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(
+      routed({ provider: "openrouter", primaryModel: "z-ai/glm-5.2" }).invoke(
+        newRequest(),
+      ),
+    );
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    // The whole point: without --provider, Pi defaults to google and an
+    // OpenRouter key fails. The provider must be pinned explicitly.
+    expect(argv).toContain("--provider openrouter");
+    expect(argv).not.toContain("--provider google");
+    expect(argv).toContain("--model z-ai/glm-5.2");
+  });
+
+  test("no provider → no --provider flag (Pi uses its own default)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const chunks = await collect(routed({ primaryModel: "gpt-5.2" }).invoke(newRequest()));
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).not.toContain("--provider");
+  });
+
+  test("provider is threaded even after a coding-brain swap (one provider covers all models)", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    // A coding-triggering message should swap primary → coding model, but the
+    // single --provider must still apply (both models share the provider).
+    const chunks = await collect(
+      routed({
+        provider: "openrouter",
+        primaryModel: "mimo-v2.5",
+        codingModel: "z-ai/glm-5.2",
+      }).invoke(
+        newRequest({
+          userMessage: "review this pull request https://github.com/x/y/pull/1",
+        }),
+      ),
+    );
+    const argv = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(argv).toContain("--provider openrouter");
+    expect(argv).toContain("--model z-ai/glm-5.2");
   });
 
   test("no routing → no --model flag", async () => {

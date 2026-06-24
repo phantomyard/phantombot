@@ -4,6 +4,7 @@ import {
   ENV_CODING_MODEL,
   ENV_CODING_PROGRESS,
   ENV_IMAGE_MODEL,
+  ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
   resolveRouting,
 } from "../src/lib/piRouting.ts";
@@ -55,6 +56,30 @@ describe("resolveRouting", () => {
     );
     expect(r.primaryModel).toBe("gpt-5.2");
     expect(r.imageModel).toBeUndefined();
+  });
+
+  describe("provider", () => {
+    test("reads provider from env over toml", () => {
+      const r = resolveRouting(
+        { provider: "openai" },
+        { [ENV_PI_PROVIDER]: "openrouter" },
+      );
+      expect(r.provider).toBe("openrouter");
+    });
+
+    test("falls back to toml when env blank; trims", () => {
+      expect(resolveRouting({ provider: "xai" }, {}).provider).toBe("xai");
+      expect(
+        resolveRouting({ provider: "xai" }, { [ENV_PI_PROVIDER]: "  " }).provider,
+      ).toBe("xai");
+      expect(
+        resolveRouting({}, { [ENV_PI_PROVIDER]: "  deepseek  " }).provider,
+      ).toBe("deepseek");
+    });
+
+    test("undefined when unset", () => {
+      expect(resolveRouting({}, {}).provider).toBeUndefined();
+    });
   });
 
   describe("codingProgress", () => {
@@ -159,6 +184,29 @@ describe("computeRoutingWrites — image model honored as-is (no auto-skip)", ()
     // no coding model ⇒ progress forced off and cleared
     expect(w.toml.coding_progress).toBeUndefined();
     expect(w.env[ENV_CODING_PROGRESS]).toBe("");
+  });
+});
+
+describe("computeRoutingWrites — provider", () => {
+  test("provider is written to toml AND env when set", () => {
+    const w = computeRoutingWrites({
+      provider: "openrouter",
+      primaryModel: "z-ai/glm-5.2",
+    });
+    expect(w.toml.provider).toBe("openrouter");
+    expect(w.env[ENV_PI_PROVIDER]).toBe("openrouter");
+  });
+
+  test("absent provider ⇒ toml key omitted, env cleared (\"\")", () => {
+    const w = computeRoutingWrites({ primaryModel: "gpt-5.2" });
+    expect(w.toml.provider).toBeUndefined();
+    expect(w.env[ENV_PI_PROVIDER]).toBe("");
+  });
+
+  test("blank provider is treated as unset", () => {
+    const w = computeRoutingWrites({ provider: "   ", primaryModel: "gpt-5.2" });
+    expect(w.toml.provider).toBeUndefined();
+    expect(w.env[ENV_PI_PROVIDER]).toBe("");
   });
 });
 

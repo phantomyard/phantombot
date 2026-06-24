@@ -47,6 +47,20 @@ export const ENV_PRIMARY_MODEL = "PHANTOMBOT_PRIMARY_MODEL";
 export const ENV_IMAGE_MODEL = "PHANTOMBOT_IMAGE_MODEL";
 export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
 /**
+ * The Pi PROVIDER (e.g. "openrouter", "openai", "xai", "deepseek"), threaded
+ * per-turn onto `pi --provider <name>` alongside the model and api-key. This is
+ * the lynchpin that makes a per-turn api-key correct: `pi --provider` DEFAULTS
+ * TO GOOGLE, so an OpenRouter key handed to Pi without `--provider openrouter`
+ * is fired at the wrong endpoint and auth fails. The provider also SCOPES the
+ * wizard: the operator picks it first, the key prompt is labelled by it, and the
+ * model pickers only show that provider's models — so the single per-turn
+ * `--provider` is always right no matter which model (primary OR the swapped-in
+ * coding model) is active that turn. Not a secret, so it lives in BOTH config.toml
+ * (`[harnesses.pi.routing].provider`) and ~/.env, exactly like the model ids.
+ * Empty / unset ⇒ omit `--provider` (Pi falls back to its own default, google).
+ */
+export const ENV_PI_PROVIDER = "PHANTOMBOT_PI_PROVIDER";
+/**
  * The Pi provider API key, threaded per-turn onto `pi --api-key <key>` exactly
  * the way the model is threaded onto `--model` — NOT persisted into Pi's own
  * auth store (~/.pi). Phantomops owns long-term key storage in production; here
@@ -79,6 +93,12 @@ export const ENV_CODING_PROGRESS = "PHANTOMBOT_CODING_PROGRESS";
  * for the coding delegate, undefined ⇒ off.
  */
 export interface PiRoutingConfig {
+  /**
+   * Provider name for all routed models (e.g. "openrouter"). Threaded onto
+   * `--provider` every turn; without it Pi defaults to google and a non-google
+   * api-key fails. undefined ⇒ no `--provider` (Pi's own default).
+   */
+  provider?: string;
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
@@ -124,6 +144,7 @@ export function resolveRouting(
     return typeof v === "string" ? clean(v) : undefined;
   };
   return {
+    provider: clean(env[ENV_PI_PROVIDER]) ?? tomlStr("provider"),
     primaryModel: clean(env[ENV_PRIMARY_MODEL]) ?? tomlStr("primary_model"),
     imageModel: clean(env[ENV_IMAGE_MODEL]) ?? tomlStr("image_model"),
     codingModel: clean(env[ENV_CODING_MODEL]) ?? tomlStr("coding_model"),
@@ -138,6 +159,12 @@ export function resolveRouting(
  * when the primary is multimodal.
  */
 export interface RoutingChoices {
+  /**
+   * Provider for all the models below (e.g. "openrouter"). The wizard collects
+   * it first and filters every model picker to it, so one provider covers
+   * primary + image + coding. undefined ⇒ no `--provider` override.
+   */
+  provider?: string;
   primaryModel: string;
   /** May be set even for a multimodal primary; auto-skip discards it. */
   imageModel?: string;
@@ -153,6 +180,7 @@ export interface RoutingChoices {
 export interface RoutingWrites {
   /** Values to set in config.toml's [harnesses.pi.routing]. */
   toml: {
+    provider?: string;
     primary_model: string;
     image_model?: string;
     coding_model?: string;
@@ -175,6 +203,7 @@ export interface RoutingWrites {
  */
 export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   const primary = choices.primaryModel.trim();
+  const provider = clean(choices.provider);
   const coding = clean(choices.codingModel);
   // The image model is exactly what the operator selected — no auto-drop, no
   // auto-default applied here. This REPLACES the old multimodal auto-skip (which
@@ -193,6 +222,7 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   const codingProgress = coding ? choices.codingProgress !== false : false;
 
   const toml: RoutingWrites["toml"] = { primary_model: primary };
+  if (provider) toml.provider = provider;
   if (image) toml.image_model = image;
   if (coding) toml.coding_model = coding;
   // Persist the flag explicitly whenever a coding model is set so the on/off
@@ -207,6 +237,7 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
   // when a coding model is set (so an explicit off persists), and clear it when
   // there's no coding model.
   const env: Record<string, string> = {
+    [ENV_PI_PROVIDER]: provider ?? "",
     [ENV_PRIMARY_MODEL]: primary,
     [ENV_IMAGE_MODEL]: image ?? "",
     [ENV_CODING_MODEL]: coding ?? "",

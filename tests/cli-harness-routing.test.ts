@@ -76,6 +76,27 @@ describe("applyRouting", () => {
     expect(env.PHANTOMBOT_IMAGE_MODEL).toBe("gpt-5.2");
   });
 
+  test("provider persists to toml + env, and (none) clears a previously-set one", async () => {
+    await applyRouting(
+      configPath,
+      { provider: "openrouter", primaryModel: "z-ai/glm-5.2" },
+      envPath,
+    );
+    let routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect(routing.provider).toBe("openrouter");
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_PI_PROVIDER).toBe("openrouter");
+
+    // Switch back to Pi's default provider (undefined) — must clear both stores.
+    await applyRouting(configPath, { primaryModel: "gpt-5.2" }, envPath);
+    routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect("provider" in routing).toBe(false);
+    expect("PHANTOMBOT_PI_PROVIDER" in (await loadEnvFile(envPath))).toBe(false);
+  });
+
   test("explicit (none) image model clears a previously-set one", async () => {
     // First: an image model is set.
     await applyRouting(

@@ -20,6 +20,12 @@
  * store settings, so an "install later, no key" or legacy install keeps working.
  * `phantombot doctor` surfaces failure if neither path yields credentials.
  *
+ * Provider: the configured routing provider is threaded onto `--provider` every
+ * turn. This is REQUIRED for a non-google key to work — Pi's `--provider`
+ * defaults to google, so an OpenRouter key with no `--provider openrouter` is
+ * sent to the wrong endpoint and fails. The wizard scopes all routed models to
+ * one provider, so a single `--provider` is correct even after a coding swap.
+ *
  * ARG_MAX guard: declares maxPayloadBytes so the orchestrator's fallback
  * skips Pi for oversized turns. Internal precheck mirrors that so a
  * direct invoke() with a too-large payload still fails recoverably.
@@ -148,6 +154,18 @@ export class PiHarness implements Harness {
           reason: decision.reason,
         });
       }
+    }
+    // Pin the provider for whichever model is active this turn. Pi's `--provider`
+    // DEFAULTS TO GOOGLE, so a non-google api-key (e.g. OpenRouter) handed over
+    // without this is fired at the wrong endpoint → auth failure. The wizard
+    // scopes all routed models (primary + image + coding) to ONE provider, so a
+    // single `--provider` is correct even after a coding-brain swap. Absent ⇒
+    // omit the flag and let Pi use its own default. Read from the static routing
+    // config (like the model), not per-turn env, since the provider is a config
+    // choice that pairs with the saved models.
+    const provider = this.config.routing?.provider;
+    if (provider) {
+      args.push("--provider", provider);
     }
     if (primaryModel) {
       args.push("--model", primaryModel);

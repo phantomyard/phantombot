@@ -103,6 +103,9 @@ export async function applyRouting(
   const writes = computeRoutingWrites(choices);
   await updateConfigToml(configPath, (toml) => {
     setIn(toml, ["harnesses", "pi", "routing", "primary_model"], writes.toml.primary_model);
+    // Provider: drop the key when none was chosen so a switch back to Pi's
+    // default clears a stale provider (mirrors the env "" = unset semantics).
+    setRoutingKey(toml, "provider", writes.toml.provider);
     // Mirror the env "" = unset semantics into TOML: drop the key when there's
     // no image/coding model so a multimodal switch clears a stale entry.
     setRoutingKey(toml, "image_model", writes.toml.image_model);
@@ -345,11 +348,29 @@ async function configurePi(
     return false;
   }
 
-  // NOW: collect the API key first. Blank = leave whatever's already in ~/.env
-  // (or nothing) — we never force a key, because the local-store fallback covers
-  // the absent case.
+  // NOW: provider FIRST. Pi's `--provider` defaults to google, so a key is
+  // meaningless until we know which provider it's FOR — and the provider also
+  // scopes the key prompt label and the model pickers. Query the model catalog
+  // once here: it yields both the provider list AND the models the routing
+  // wizard will filter, so we don't shell out to `pi --list-models` twice.
+  const models = availability.pi ? await listPiModels(availability.pi) : [];
+  const currentRouting = resolveRouting(
+    getIn(await readConfigToml(config.configPath), [
+      "harnesses",
+      "pi",
+      "routing",
+    ]) as Record<string, unknown> | undefined,
+  );
+  const provider = await pickProvider(models, currentRouting.provider);
+  if (provider === CANCELLED) return true;
+
+  // Collect the API key, LABELLED by the chosen provider so it's unambiguous
+  // what to paste ("openrouter API key:" vs a bare "Pi API key:"). Blank =
+  // leave whatever's already in ~/.env (or nothing) — we never force a key,
+  // because the local-store fallback covers the absent case.
+  const keyLabel = provider ? `${provider} API key` : "Pi API key";
   const apiKey = await p.password({
-    message: "Pi API key (passed per-turn; blank to keep current / use Pi's own)",
+    message: `${keyLabel} (passed per-turn; blank to keep current / use Pi's own)`,
   });
   if (p.isCancel(apiKey)) return true;
   if (apiKey.trim()) {
@@ -358,8 +379,13 @@ async function configurePi(
   }
 
   // Straight into custom routing — Pi is already the chosen harness, so we don't
-  // re-ask "use defaults?"; we go collect primary / image / coding models.
-  return runRoutingWizard(config, availability.pi, { forceCustom: true });
+  // re-ask "use defaults?"; we go collect primary / image / coding models, all
+  // filtered to the chosen provider. Reuse the catalog we already fetched.
+  return runRoutingWizard(config, availability.pi, {
+    forceCustom: true,
+    provider: provider || undefined,
+    models,
+  });
 }
 
 /**
@@ -380,7 +406,13 @@ async function configurePi(
 async function runRoutingWizard(
   config: Config,
   piBin: string | undefined,
-  opts: { forceCustom?: boolean } = {},
+  opts: {
+    forceCustom?: boolean;
+    /** Provider chosen by configurePi; scopes the model pickers + is persisted. */
+    provider?: string;
+    /** Pre-fetched `pi --list-models` catalog (avoids a second shell-out). */
+    models?: readonly PiModel[];
+  } = {},
 ): Promise<boolean> {
   const toml = await readConfigToml(config.configPath);
   const current = resolveRouting(
@@ -413,17 +445,24 @@ async function runRoutingWizard(
     }
   }
 
-  // Custom routing: query pi for the live model list so the picker only shows
-  // models that are actually available. Falls back to free-text if pi can't be
-  // queried (not installed, or output unparseable).
-  const models = piBin ? await listPiModels(piBin) : [];
-  if (models.length === 0) {
+  // Custom routing: use the catalog configurePi already fetched, else query pi
+  // now so the picker only shows models that are actually available. Falls back
+  // to free-text if pi can't be queried (not installed, or output unparseable).
+  const allModels = opts.models ?? (piBin ? await listPiModels(piBin) : []);
+  if (allModels.length === 0) {
     p.note(
       "Couldn't read `pi --list-models` — entering model ids by hand.\n" +
         "Use the bare name as printed by `pi --list-models` (e.g. gpt-5.2).",
       "Routing",
     );
   }
+  // Scope every model picker to the chosen provider: a single per-turn
+  // `--provider` is only correct if primary + image + coding all come from that
+  // one provider. With no provider (or no catalog) we show everything.
+  const provider = opts.provider ?? current.provider;
+  const models = provider
+    ? allModels.filter((m) => m.provider === provider)
+    : allModels;
 
   // Primary is OPTIONAL: "(none)" leaves Pi on its own default model (the
   // "default install" path) with no override.
@@ -478,6 +517,7 @@ async function runRoutingWizard(
   }
 
   const choices: RoutingChoices = {
+    provider,
     primaryModel,
     imageModel,
     codingModel,
@@ -486,6 +526,7 @@ async function runRoutingWizard(
   const writes = await applyRouting(config.configPath, choices);
   p.note(
     [
+      `provider: ${writes.toml.provider ?? "(none — Pi's default)"}`,
       `primary: ${writes.toml.primary_model}`,
       `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
       `coding:  ${writes.toml.coding_model ?? "(none)"}`,
@@ -499,6 +540,43 @@ async function runRoutingWizard(
 }
 
 const CANCELLED = Symbol("cancelled");
+
+/**
+ * Provider picker. The provider is asked BEFORE the API key (Pi's `--provider`
+ * defaults to google, so the key is meaningless without it) and BEFORE the model
+ * pickers (it scopes them). Options are the distinct `provider` values from the
+ * `pi --list-models` catalog. "(none)" leaves Pi on its own default provider.
+ * Falls back to free-text when the catalog is unavailable. Returns the chosen
+ * provider name ("" = none), or CANCELLED on abort.
+ */
+async function pickProvider(
+  models: readonly PiModel[],
+  initial: string | undefined,
+): Promise<string | typeof CANCELLED> {
+  const providers = [...new Set(models.map((m) => m.provider))].sort();
+  if (providers.length === 0) {
+    const r = await p.text({
+      message: "Pi provider (e.g. openrouter, openai) — blank = Pi's default",
+      placeholder: "openrouter",
+      initialValue: initial ?? "",
+    });
+    if (p.isCancel(r)) return CANCELLED;
+    return r.trim();
+  }
+  const NONE = "";
+  const options = [
+    { value: NONE, label: "(none)", hint: "Pi's default provider (google)" },
+    ...providers.map((pr) => ({ value: pr, label: pr })),
+  ];
+  const known = initial !== undefined && providers.includes(initial);
+  const r = await p.select<string>({
+    message: "Provider (scopes the API key + model list)",
+    options,
+    initialValue: known ? initial : NONE,
+  });
+  if (p.isCancel(r)) return CANCELLED;
+  return r;
+}
 
 /**
  * Single model picker. Shows a select of available models when we have the
