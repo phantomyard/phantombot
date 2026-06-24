@@ -459,31 +459,38 @@ export function formatToolCall(call: ToolCall): string {
 }
 
 /**
- * Build the progress line(s) for one streamed turn — READABLE digest.
+ * The leading emoji of a rendered tool line (e.g. `⚡` for bash, `✏️` for edit).
+ * Used to give a narration line the look of the action that produced it without
+ * the verbose verb+arg tail. Never throws.
+ */
+export function toolIcon(call: ToolCall): string {
+  return formatToolCall(call).split(" ")[0] ?? "🔧";
+}
+
+/**
+ * Build the progress line(s) for one streamed turn — NARRATION with tool icon.
  *
- * Surfaces the tool actions the coder took (`⚡ bash: npm test`, `✏️ edit
- * auth.ts`) plus any narration. Tool lines guarantee the stream always shows
- * life even when the coding model says nothing — which is why narration-only
- * looked dead on tool-heavy runs like reviews. When the model DID narrate, the
- * words are attached to the first tool line so intent and action read as one
- * thought; a pure-narration turn renders a 💬 speech line on its own.
+ * Surfaces ONLY the coder's own words (the model's narration), prefixed with the
+ * emoji of the tool it was running so the stream stays pretty and tool-flavoured
+ * (`⚡ running the test suite`, `✏️ adding the retry guard`). Turns where the
+ * coder said nothing are SKIPPED entirely — no verb+arg noise, only lines that
+ * carry words. A pure-narration turn (no tool) renders a 💬 speech line.
  *
  * Pure and side-effect-free for unit testing.
  */
 export function formatProgressLines(ev: DelegateProgress): string[] {
   const narration = ev.text ? clip(ev.text, PROGRESS_TEXT_MAX) : undefined;
-  const toolLines = ev.toolCalls.map(formatToolCall);
 
-  if (toolLines.length === 0) {
-    return narration ? [`💬 ${narration}`] : [];
-  }
+  // Only lines with words show. A silent tool-only turn is dropped.
+  if (!narration) return [];
 
-  // Attach the narration to the first tool line so the model's intent and the
-  // action it took read as one thought: `✏️ edit auth.ts — "adding the guard"`.
-  if (narration) {
-    toolLines[0] = `${toolLines[0]} — "${narration}"`;
+  // Prefix the narration with the first tool's emoji so it reads as one
+  // tool-flavoured thought: `⚡ running the test suite`. No tool → speech line.
+  const firstCall = ev.toolCalls[0];
+  if (firstCall) {
+    return [`${toolIcon(firstCall)} ${narration}`];
   }
-  return toolLines;
+  return [`💬 ${narration}`];
 }
 
 /**

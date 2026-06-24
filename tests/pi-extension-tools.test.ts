@@ -15,6 +15,7 @@ import {
   buildProgress,
   formatProgressLines,
   formatToolCall,
+  toolIcon,
   isTerminalStop,
   notifyArgs,
   ProgressBatcher,
@@ -255,7 +256,7 @@ describe("formatToolCall — friendly verb + meaningful arg", () => {
   });
 });
 
-describe("formatProgressLines — narration + tool digest", () => {
+describe("formatProgressLines — narration with tool icon", () => {
   const ev = (over: Partial<DelegateProgress>): DelegateProgress => ({
     turn: 1,
     text: undefined,
@@ -264,7 +265,7 @@ describe("formatProgressLines — narration + tool digest", () => {
     ...over,
   });
 
-  test("leads with narration appended to the first tool line", () => {
+  test("prefixes narration with the first tool's emoji only", () => {
     const lines = formatProgressLines(
       ev({
         text: "adding the retry guard",
@@ -274,17 +275,25 @@ describe("formatProgressLines — narration + tool digest", () => {
         ],
       }),
     );
-    expect(lines).toEqual([
-      '✏️ edit auth.ts — "adding the retry guard"',
-      "⚡ bash: npm test",
-    ]);
+    expect(lines).toEqual(["✏️ adding the retry guard"]);
   });
 
-  test("pure-tool turn (no narration) is just verb+arg lines", () => {
+  test("uses the bash emoji when bash leads", () => {
     const lines = formatProgressLines(
-      ev({ toolCalls: [{ name: "write", input: { file_path: "routing.json" } }] }),
+      ev({
+        text: "running the test suite",
+        toolCalls: [{ name: "bash", input: { command: "npm test" } }],
+      }),
     );
-    expect(lines).toEqual(["📝 write routing.json"]);
+    expect(lines).toEqual(["⚡ running the test suite"]);
+  });
+
+  test("silent tool-only turn is dropped entirely", () => {
+    expect(
+      formatProgressLines(
+        ev({ toolCalls: [{ name: "write", input: { file_path: "routing.json" } }] }),
+      ),
+    ).toEqual([]);
   });
 
   test("narration-only turn renders a speech line", () => {
@@ -295,6 +304,15 @@ describe("formatProgressLines — narration + tool digest", () => {
 
   test("empty turn yields no lines (caller skips it)", () => {
     expect(formatProgressLines(ev({}))).toEqual([]);
+  });
+});
+
+describe("toolIcon — leading emoji of a tool line", () => {
+  test("extracts the verb emoji", () => {
+    expect(toolIcon({ name: "bash", input: { command: "npm test" } })).toBe("⚡");
+    expect(toolIcon({ name: "edit", input: { file_path: "auth.ts" } })).toBe("✏️");
+    expect(toolIcon({ name: "read", input: { path: "x.ts" } })).toBe("📖");
+    expect(toolIcon({ name: "mystery" })).toBe("🔧");
   });
 });
 
