@@ -13,8 +13,7 @@
  *     "primaryModel":  "...",   // informational; the extension does NOT switch
  *                               //   the primary itself — phantombot's pi harness
  *                               //   passes --model. Surfaced for logging only.
- *     "imageModel":    "...",   // present ⇒ register look_at_image (vision delegate)
- *     "codingModel":   "..."    // present ⇒ register coder         (coding delegate)
+ *     "imageModel":    "..."    // present ⇒ register look_at_image (vision delegate)
  *   }
  *
  * Every key is optional. The KEY rule: when `imageModel` is absent/empty,
@@ -30,14 +29,6 @@
 export interface RoutingConfig {
   primaryModel?: string;
   imageModel?: string;
-  codingModel?: string;
-  /**
-   * Stream the coder child's per-turn progress out via `phantombot notify`
-   * (channel-agnostic — reaches every configured channel, not just Telegram).
-   * ON by default when a coding model is set; only an explicit `false` disables
-   * it. A per-conversation `/viewcoder` override can still flip it at runtime.
-   */
-  codingProgress?: boolean;
 }
 
 export interface RoutingPlan {
@@ -45,20 +36,8 @@ export interface RoutingPlan {
   primaryModel?: string;
   /** Image model id; when present, register look_at_image. */
   imageModel?: string;
-  /** Coding model id; when present, register coder. */
-  codingModel?: string;
   /** True when look_at_image should be registered. */
   registerLookAtImage: boolean;
-  /** True when coder should be registered. */
-  registerCoder: boolean;
-  /**
-   * Global default for whether the coder delegate streams its progress out via
-   * `phantombot notify`. Only ever true when `registerCoder` is — progress
-   * without a coder tool is meaningless, so it's force-coupled here. A
-   * per-conversation `/viewcoder` override (read at emit time in index.ts) can
-   * override this default on or off.
-   */
-  streamCoderProgress: boolean;
 }
 
 function clean(v: string | undefined): string | undefined {
@@ -73,21 +52,10 @@ function clean(v: string | undefined): string | undefined {
  */
 export function planRouting(cfg: RoutingConfig): RoutingPlan {
   const imageModel = clean(cfg.imageModel);
-  const codingModel = clean(cfg.codingModel);
-  const registerCoder = codingModel !== undefined;
   return {
     primaryModel: clean(cfg.primaryModel),
     imageModel,
-    codingModel,
     registerLookAtImage: imageModel !== undefined,
-    registerCoder,
-    // Progress is coupled to the coder tool existing — never stream without it.
-    // ON BY DEFAULT: with a coder registered, stream unless codingProgress is
-    // explicitly false. phantombot bakes an explicit true/false into
-    // routing.json, but a missing key (older asset, hand-rolled config) now
-    // defaults to streaming. This is the GLOBAL default; a `/viewcoder` override
-    // for a conversation can still force it on/off at emit time in index.ts.
-    streamCoderProgress: registerCoder && cfg.codingProgress !== false,
   };
 }
 
@@ -105,24 +73,5 @@ export function imageDelegationPrompt(imagePath: string, question: string): stri
     "Look at the image and answer the question directly and concisely.",
     "If the image does not contain enough information to answer, say so plainly.",
     "Do not pad the answer with a full description unless the question asks for one.",
-  ].join("\n");
-}
-
-/**
- * System prompt for a coding delegation. Coarse-grained: this is a fresh,
- * expensive process, so the task should be a PR/MR-scoped chunk or a review,
- * not a chatty micro-edit.
- */
-export function coderDelegationPrompt(task: string): string {
-  return [
-    "You are a coding specialist operating in an isolated context for a PR/MR-scoped job.",
-    "You have edit, bash, and write tools. Work autonomously to completion.",
-    "",
-    "This delegation is coarse-grained — you were spawned as a fresh process for a",
-    "substantial chunk of work, not a quick question. Finish the whole task before returning.",
-    "",
-    `Task: ${task}`,
-    "",
-    "When done, report: what changed (file paths), key functions/types touched, and any caveats.",
   ].join("\n");
 }

@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   computeRoutingWrites,
   ENV_CODING_MODEL,
-  ENV_CODING_PROGRESS,
   ENV_IMAGE_MODEL,
   ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
@@ -82,53 +81,6 @@ describe("resolveRouting", () => {
     });
   });
 
-  describe("codingProgress", () => {
-    test("reads a real TOML boolean", () => {
-      expect(resolveRouting({ coding_progress: true }, {}).codingProgress).toBe(
-        true,
-      );
-      expect(resolveRouting({ coding_progress: false }, {}).codingProgress).toBe(
-        false,
-      );
-    });
-
-    test("coerces env truthy/falsy strings", () => {
-      const on = ["true", "1", "yes", "on", "TRUE", " On "];
-      for (const v of on) {
-        expect(
-          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
-        ).toBe(true);
-      }
-      const off = ["false", "0", "no", "off"];
-      for (const v of off) {
-        expect(
-          resolveRouting({}, { [ENV_CODING_PROGRESS]: v }).codingProgress,
-        ).toBe(false);
-      }
-    });
-
-    test("env wins over toml; blank env falls through to toml", () => {
-      expect(
-        resolveRouting(
-          { coding_progress: true },
-          { [ENV_CODING_PROGRESS]: "false" },
-        ).codingProgress,
-      ).toBe(false);
-      expect(
-        resolveRouting(
-          { coding_progress: true },
-          { [ENV_CODING_PROGRESS]: "   " },
-        ).codingProgress,
-      ).toBe(true);
-    });
-
-    test("undefined when unset / unrecognized", () => {
-      expect(resolveRouting({}, {}).codingProgress).toBeUndefined();
-      expect(
-        resolveRouting({}, { [ENV_CODING_PROGRESS]: "maybe" }).codingProgress,
-      ).toBeUndefined();
-    });
-  });
 });
 
 describe("computeRoutingWrites — image model honored as-is (no auto-skip)", () => {
@@ -145,7 +97,6 @@ describe("computeRoutingWrites — image model honored as-is (no auto-skip)", ()
       primary_model: "gpt-5.2",
       image_model: "gpt-5.2",
       coding_model: "gpt-5.2-codex",
-      coding_progress: true,
     });
     expect(w.env[ENV_IMAGE_MODEL]).toBe("gpt-5.2");
     expect(w.env[ENV_PRIMARY_MODEL]).toBe("gpt-5.2");
@@ -181,9 +132,6 @@ describe("computeRoutingWrites — image model honored as-is (no auto-skip)", ()
     expect(w.toml).toEqual({ primary_model: "deepseek-v4-pro" });
     expect(w.env[ENV_IMAGE_MODEL]).toBe("");
     expect(w.env[ENV_CODING_MODEL]).toBe("");
-    // no coding model ⇒ progress forced off and cleared
-    expect(w.toml.coding_progress).toBeUndefined();
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
   });
 });
 
@@ -207,39 +155,5 @@ describe("computeRoutingWrites — provider", () => {
     const w = computeRoutingWrites({ provider: "   ", primaryModel: "gpt-5.2" });
     expect(w.toml.provider).toBeUndefined();
     expect(w.env[ENV_PI_PROVIDER]).toBe("");
-  });
-});
-
-describe("computeRoutingWrites — coder progress", () => {
-  test("persists coding_progress only when on AND a coding model is set", () => {
-    const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingModel: "gpt-5.2-codex",
-      codingProgress: true,
-    });
-    expect(w.toml.coding_progress).toBe(true);
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("true");
-  });
-
-  test("explicit progress off ⇒ toml key written false (persists over default-on), env 'false'", () => {
-    const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingModel: "gpt-5.2-codex",
-      codingProgress: false,
-    });
-    // Must persist as an explicit false so it wins over the on-by-default,
-    // rather than being omitted and silently re-defaulting to on.
-    expect(w.toml.coding_progress).toBe(false);
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("false");
-  });
-
-  test("progress true but no coding model ⇒ forced off (coupled to coder)", () => {
-    const w = computeRoutingWrites({
-      primaryModel: "gpt-5.2",
-      codingProgress: true,
-    });
-    expect(w.toml.coding_model).toBeUndefined();
-    expect(w.toml.coding_progress).toBeUndefined();
-    expect(w.env[ENV_CODING_PROGRESS]).toBe("");
   });
 });

@@ -30,7 +30,6 @@ const FILES = [
   "tools.ts",
   "spawnPi.ts",
   "README.md",
-  "agents/coder.md",
 ] as const;
 
 function hashEntries(entries: Array<[string, string]>): string {

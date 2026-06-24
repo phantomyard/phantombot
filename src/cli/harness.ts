@@ -110,9 +110,6 @@ export async function applyRouting(
     // no image/coding model so a multimodal switch clears a stale entry.
     setRoutingKey(toml, "image_model", writes.toml.image_model);
     setRoutingKey(toml, "coding_model", writes.toml.coding_model);
-    // coding_progress: write only when on; otherwise delete so disabling it (or
-    // dropping the coding model) clears a stale flag rather than leaving it.
-    setRoutingKey(toml, "coding_progress", writes.toml.coding_progress);
   });
   await updateEnvFile(envPath, writes.env);
   return writes;
@@ -494,34 +491,20 @@ async function runRoutingWizard(
   if (imageModelPick === CANCELLED) return true;
   const imageModel = imageModelPick || undefined;
 
-  // Coding model is OPTIONAL: "(none)" means no coder swap / no coder tool.
+  // Coding model is OPTIONAL: "(none)" means no coding-brain swap.
   const codingModel = await pickModel(
-    "Coding model (delegate for the coder tool / coding-brain swap)",
+    "Coding model (coding-brain swap)",
     models,
     current.codingModel,
     { allowNone: true },
   );
   if (codingModel === CANCELLED) return true;
 
-  // Progress streaming is a coder-only behavior, so only ask when a coding
-  // model is actually set. ON by default now: stream unless the operator opts
-  // out (and unless an existing config explicitly turned it off).
-  let codingProgress = true;
-  if (codingModel.trim()) {
-    const ans = await p.confirm({
-      message: "Stream coder progress to the chat while it works?",
-      initialValue: current.codingProgress !== false,
-    });
-    if (p.isCancel(ans)) return true;
-    codingProgress = ans;
-  }
-
   const choices: RoutingChoices = {
     provider,
     primaryModel,
     imageModel,
     codingModel,
-    codingProgress,
   };
   const writes = await applyRouting(config.configPath, choices);
   p.note(
@@ -530,7 +513,6 @@ async function runRoutingWizard(
       `primary: ${writes.toml.primary_model}`,
       `image:   ${writes.toml.image_model ?? "(none — primary is multimodal)"}`,
       `coding:  ${writes.toml.coding_model ?? "(none)"}`,
-      `progress: ${writes.toml.coding_progress ? "on (streams to chat)" : "off"}`,
       "",
       `saved to ${config.configPath} and ${userEnvPath()}`,
     ].join("\n"),

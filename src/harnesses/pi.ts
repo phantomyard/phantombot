@@ -126,7 +126,7 @@ export class PiHarness implements Harness {
     // `--print --no-session` and phantombot rebuilds the full context every
     // turn, the coding model inherits memory + history + images natively. The
     // decision is a free, stateless CRS-style score over the user message (plus
-    // a persistent /coder|/nocoder override), so it re-evaluates every turn and
+    // a persistent /coder override), so it re-evaluates every turn and
     // flips back to the primary the moment the work stops being code. We never
     // swap the tool-less threat judge (toolsMode "none") — it must stay on the
     // configured primary and never gain capability.

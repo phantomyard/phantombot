@@ -37,17 +37,15 @@ const MANAGED_NOTE =
 export interface ProvisionResult {
   dir: string;
   /**
-   * created/updated/unchanged → we stamped (≥1 routable capability configured).
-   * removed → a routable capability is no longer configured and we deleted the
-   *           previously-stamped dir. absent → nothing to stamp and nothing was
-   *           there to remove (already in the desired empty state).
+   * created/updated/unchanged → we stamped (an image model is configured).
+   * removed → no image model is configured and we deleted the previously-stamped
+   *           dir. absent → nothing to stamp and nothing was there to remove
+   *           (already in the desired empty state).
    */
   action: "created" | "updated" | "unchanged" | "removed" | "absent";
   models: {
     primaryModel?: string;
     imageModel?: string;
-    codingModel?: string;
-    codingProgress?: boolean;
   };
   /** Relative paths of files we (re)wrote this run. */
   wrote: string[];
@@ -79,20 +77,17 @@ function clean(v: string | undefined): string | undefined {
 }
 
 /**
- * The extension earns its place on disk ONLY when at least one ROUTABLE
- * capability is configured — an image model (registers `look_at_image`) or a
- * coding model (registers `coder`). These are independent capabilities; either
- * one on its own is enough to keep the dir. A bare `primaryModel` registers no
- * tool, so it does NOT by itself justify provisioning — when neither image nor
- * coding is set the managed dir is removed rather than left inert.
+ * The extension earns its place on disk ONLY when an IMAGE model is configured
+ * — that's what registers `look_at_image`, the extension's sole tool. A bare
+ * `primaryModel` (or a coding model, which drives the per-turn coding-brain swap
+ * in harnesses/pi.ts, not a tool) registers nothing, so it does NOT justify
+ * provisioning — when no image model is set the managed dir is removed rather
+ * than left inert.
  */
 export function hasRoutableCapability(
   routing: PiRoutingConfig | undefined,
 ): boolean {
-  return (
-    clean(routing?.imageModel) !== undefined ||
-    clean(routing?.codingModel) !== undefined
-  );
+  return clean(routing?.imageModel) !== undefined;
 }
 
 /** Only the defined routing fields, in a stable key order, as a JSON object. */
@@ -102,20 +97,11 @@ function routingModels(
   const out: ProvisionResult["models"] = {};
   const primaryModel = clean(routing?.primaryModel);
   const imageModel = clean(routing?.imageModel);
-  const codingModel = clean(routing?.codingModel);
   if (primaryModel !== undefined) out.primaryModel = primaryModel;
   if (imageModel !== undefined) out.imageModel = imageModel;
-  if (codingModel !== undefined) out.codingModel = codingModel;
-  // codingProgress is a coder-only behavior flag — meaningless without a
-  // `coder` tool, so only consider it when a coding model is present. It is now
-  // ON BY DEFAULT: when a coding model is configured and the flag is not
-  // explicitly false, stream progress. An explicit false (config
-  // `coding_progress = false` / PHANTOMBOT_CODING_PROGRESS=0) wins and is baked
-  // as `false` so the extension can distinguish "explicitly off" from "default
-  // on" — both end up in routing.json, the extension's sole input.
-  if (codingModel !== undefined) {
-    out.codingProgress = routing?.codingProgress !== false;
-  }
+  // The coding model is deliberately NOT stamped into routing.json: it drives
+  // the per-turn coding-brain swap in harnesses/pi.ts, not any tool the
+  // extension registers, so the extension has no use for it.
   return out;
 }
 
@@ -186,12 +172,11 @@ export async function removeRoutingExtension(
  * Ensure the managed extension matches the desired state for this routing
  * config. Idempotent.
  *
- * Per-capability rule: the dir is stamped when at least one routable capability
- * (image and/or coding model) is configured, and the baked `routing.json`
- * carries only the capabilities that are set — so the extension registers
- * `look_at_image` and/or `coder` independently. When NEITHER capability is set
- * (undefined routing, or only a primaryModel) there is nothing to route, so the
- * managed dir is removed rather than left as an inert empty shell.
+ * Rule: the dir is stamped when an IMAGE model is configured (that's what
+ * registers `look_at_image`, the extension's sole tool). When no image model is
+ * set (undefined routing, or only a primary/coding model) there is nothing for
+ * the extension to do, so the managed dir is removed rather than left as an
+ * inert empty shell.
  *
  * When stamping, writes each desired file only when missing or different; the
  * marker's hash + content comparison cover both source drift and routing.json
@@ -204,7 +189,7 @@ export async function ensureRoutingExtension(
   const home = opts.home ?? os.homedir();
   const dir = extensionDir(home);
 
-  // No routable capability ⇒ the extension would register no tools. Remove any
+  // No image model ⇒ the extension would register no tools. Remove any
   // previously-stamped dir instead of leaving an inert shell behind.
   if (!hasRoutableCapability(routing)) {
     const { removed } = await removeRoutingExtension({ home });
@@ -215,7 +200,7 @@ export async function ensureRoutingExtension(
 
   const { files, models } = desiredFiles(routing);
 
-  await mkdir(path.join(dir, "agents"), { recursive: true });
+  await mkdir(dir, { recursive: true });
 
   const wrote: string[] = [];
   for (const [rel, content] of files) {
@@ -249,8 +234,8 @@ export async function ensureRoutingExtension(
 
 /**
  * Non-writing health check for `phantombot doctor`.
- *   shouldExist = a routable capability (image and/or coding) is configured, so
- *                 the managed dir is supposed to be present.
+ *   shouldExist = an image model is configured, so the managed dir is supposed
+ *                 to be present.
  *   present     = the dir + marker file exist.
  *   drifted     = on-disk state doesn't match desired. When shouldExist:
  *                 marker hash != current assets hash, OR routing.json differs
@@ -272,7 +257,7 @@ export async function routingExtensionStatus(
   const dir = extensionDir(home);
   const shouldExist = hasRoutableCapability(routing);
 
-  // No capability ⇒ desired state is absence. Any leftover dir (even a partial
+  // No image model ⇒ desired state is absence. Any leftover dir (even a partial
   // one) is drift that the doctor should remove.
   if (!shouldExist) {
     const exists = existsSync(dir);

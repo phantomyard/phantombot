@@ -29,10 +29,6 @@ import { defaultServiceControl } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
 import {
-  applyViewCoderRequest,
-  normalizeViewCoderRequest,
-} from "../lib/viewCoder.ts";
-import {
   applyCoderSwapRequest,
   normalizeCoderSwapRequest,
 } from "../lib/coderSwap.ts";
@@ -139,16 +135,8 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
   { command: "update", description: "Install the latest phantombot release" },
   { command: "restart", description: "Restart the phantombot service" },
   {
-    command: "viewcoder",
-    description: "Stream coder progress here: on | off | default",
-  },
-  {
     command: "coder",
     description: "Force the coding brain on for this chat (off | default to revert)",
-  },
-  {
-    command: "nocoder",
-    description: "Force the coding brain off here — never auto-swap",
   },
   { command: "help", description: "Show this command list" },
 ];
@@ -230,13 +218,9 @@ export async function handleSlashCommand(
       return await handleUpdate(ctx);
     case "/restart":
       return handleRestart(ctx);
-    case "/viewcoder":
-      return await handleViewCoder(arg, ctx);
     case "/coder":
       // Bare `/coder` forces on; `/coder off|default` is also accepted.
       return await handleCoderSwap(arg || "on", ctx);
-    case "/nocoder":
-      return await handleCoderSwap("off", ctx);
     case "/start":
     case "/help":
       return { reply: HELP };
@@ -314,59 +298,7 @@ function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
 }
 
 /**
- * /viewcoder on|off|default — per-conversation override for streaming the
- * `coder` delegate's live progress into THIS chat.
- *
- * Persistent (no idle expiry): once set, the choice sticks until changed. The
- * override wins over the global routing default that `phantombot harness`
- * bakes into routing.json:
- *   - on      → force streaming on here even if the default is off
- *   - off     → suppress streaming here even if the default is on
- *   - default → defer to the routing default
- *
- * Channel-agnostic: this only mutates the shared per-conversation override
- * store. The capability-routing Pi extension reads it at emit time keyed by
- * persona+conversation, so the effect reaches whatever channels the persona
- * has — it is not Telegram-specific.
- */
-async function handleViewCoder(
-  arg: string,
-  ctx: SlashCommandContext,
-): Promise<SlashCommandResult> {
-  const request = normalizeViewCoderRequest(arg.toLowerCase());
-  if (!request) {
-    return {
-      reply:
-        "usage: /viewcoder on|off|default\n" +
-        "  on      — stream coder progress into this chat\n" +
-        "  off     — keep this chat quiet while the coder works\n" +
-        "  default — follow the configured default",
-    };
-  }
-
-  await applyViewCoderRequest({
-    persona: ctx.persona,
-    conversation: ctx.conversation,
-    request,
-  });
-  log.info("commands: /viewcoder", {
-    chatId: ctx.chatId,
-    persona: ctx.persona,
-    conversation: ctx.conversation,
-    request,
-  });
-
-  const reply =
-    request === "on"
-      ? "coder progress: on for this chat — you'll see what it's doing as it works"
-      : request === "off"
-        ? "coder progress: off for this chat — the coder will work quietly here"
-        : "coder progress: reset to the configured default for this chat";
-  return { reply };
-}
-
-/**
- * /coder [on|off|default] and /nocoder — per-conversation manual override of the
+ * /coder [on|off|default] — per-conversation manual override of the
  * coding-brain auto-swap.
  *
  * Normally the Pi harness decides per turn, via a free CRS-style score over the
@@ -376,8 +308,8 @@ async function handleViewCoder(
  *   - off     → never auto-swap here (stay on the primary)
  *   - default → clear the override; defer to the scorer again
  *
- * Persistent (no idle expiry), mirroring /viewcoder. `/coder` with no arg forces
- * on; `/nocoder` is sugar for `/coder off`.
+ * Persistent (no idle expiry). `/coder` with no arg forces on; use `/coder off`
+ * to disable the swap for this chat.
  */
 async function handleCoderSwap(
   arg: string,
@@ -387,7 +319,7 @@ async function handleCoderSwap(
   if (!request) {
     return {
       reply:
-        "usage: /coder on|off|default  (or /nocoder)\n" +
+        "usage: /coder on|off|default\n" +
         "  on      — always use the coding brain in this chat\n" +
         "  off     — never auto-swap here (stay on the primary)\n" +
         "  default — let the scorer decide each turn",
