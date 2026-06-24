@@ -8,6 +8,7 @@
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 
 import {
   HttpTelegramTransport,
@@ -55,6 +56,7 @@ import { notifyPostRestartIfPending } from "../lib/updateNotify.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
+import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
 
 export interface RunInput {
   config?: Config;
@@ -372,6 +374,32 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }),
   );
 
+  // Self-provision the managed Pi capability-routing extension: when a routable
+  // capability (image and/or coding model) is configured, stamp the embedded
+  // source + a routing.json baked from config into the owned
+  // ~/.pi/agent/extensions/capability-routing/ dir; when none is configured,
+  // remove any previously-stamped dir. Fire-and-forget so a slow or failing
+  // filesystem never blocks startup. `doctor` re-stamps/removes on drift.
+  // Gated to the real `phantombot` binary (same gate doctor uses for its
+  // filesystem-touching checks) so `bun test`/dev never stamp the dev box's
+  // real ~/.pi.
+  if (basename(process.execPath) === "phantombot") {
+    ensureRoutingExtension(config.harnesses?.pi?.routing).then(
+      (r) => {
+        if (r.action !== "unchanged") {
+          log.info("run: provisioned pi capability-routing extension", {
+            action: r.action,
+            dir: r.dir,
+          });
+        }
+      },
+      (e: unknown) =>
+        log.warn("run: pi extension provision failed", {
+          error: (e as Error).message,
+        }),
+    );
+  }
+
   const ac = new AbortController();
   const onSig = () => ac.abort();
   process.on("SIGINT", onSig);
@@ -516,6 +544,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             agentDir,
             persona: spec.persona,
             channel,
+            secretKey: identity.secretKey,
             allowedHex,
             tofu,
             // TOFU commit: encode the proven sender hex → npub and persist it to

@@ -24,12 +24,8 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
-import {
-  ENV_CODING_MODEL,
-  ENV_IMAGE_MODEL,
-  ENV_PRIMARY_MODEL,
-  type PiRoutingConfig,
-} from "../lib/piRouting.ts";
+import type { PiRoutingConfig } from "../lib/piRouting.ts";
+import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -45,36 +41,18 @@ export interface PiHarnessConfig {
   maxPayloadBytes: number;
   /**
    * Resolved capability routing (env-over-TOML, from config.ts). When present
-   * it does two runtime things, both required for routing to actually take
-   * effect (a TOML-only install would otherwise be inert):
+   * it does ONE runtime thing in this harness:
    *   1. `primaryModel` pins the orchestrator model via `--model` on the Pi
    *      CLI — without this the saved primary is never honored, Pi just uses
    *      its own default.
-   *   2. all three resolved models are projected into the spawned Pi env
-   *      (PHANTOMBOT_PRIMARY/IMAGE/CODING_MODEL) so the bundled extension sees
-   *      them even when they live only in config.toml (the wizard's ~/.env
-   *      write would otherwise be the only path that reaches the child).
+   * The DELEGATE models (image/coding) do NOT travel via the child env anymore.
+   * They reach the bundled extension through the managed `routing.json` that
+   * phantombot stamps into ~/.pi/agent/extensions/capability-routing/ on
+   * startup (see lib/piExtensionProvision.ts). That makes a TOML-only install
+   * fully self-provisioning — no env projection, no manual symlink.
    * Absent = no per-capability routing (Pi uses its configured default model).
    */
   routing?: PiRoutingConfig;
-}
-
-/**
- * Project the resolved routing models onto a child-process env. Only DEFINED
- * values are written; undefined keys are left untouched so a directly-exported
- * env var is never clobbered (the wizard already clears stale keys at write
- * time via computeRoutingWrites). Exported for testing.
- */
-export function applyRoutingEnv(
-  env: Record<string, string | undefined>,
-  routing: PiRoutingConfig | undefined,
-): Record<string, string | undefined> {
-  if (!routing) return env;
-  const out = { ...env };
-  if (routing.primaryModel !== undefined) out[ENV_PRIMARY_MODEL] = routing.primaryModel;
-  if (routing.imageModel !== undefined) out[ENV_IMAGE_MODEL] = routing.imageModel;
-  if (routing.codingModel !== undefined) out[ENV_CODING_MODEL] = routing.codingModel;
-  return out;
 }
 
 export class PiHarness implements Harness {
@@ -132,7 +110,42 @@ export class PiHarness implements Harness {
     // the saved primary is never honored — Pi falls back to its own default
     // and the routing config is silently inert. The delegate models reach the
     // extension via env (below), not argv.
-    const primaryModel = this.config.routing?.primaryModel;
+    //
+    // Coding-brain auto-swap: for a SUBSTANTIAL coding turn we don't delegate to
+    // the `coder` tool (cold child, no memory/history/images) — we swap THIS
+    // turn's primary to the configured coding model. Because pi runs
+    // `--print --no-session` and phantombot rebuilds the full context every
+    // turn, the coding model inherits memory + history + images natively. The
+    // decision is a free, stateless CRS-style score over the user message (plus
+    // a persistent /coder|/nocoder override), so it re-evaluates every turn and
+    // flips back to the primary the moment the work stops being code. We never
+    // swap the tool-less threat judge (toolsMode "none") — it must stay on the
+    // configured primary and never gain capability.
+    let primaryModel = this.config.routing?.primaryModel;
+    if (req.toolsMode !== "none" && this.config.routing?.codingModel) {
+      const override =
+        req.persona && req.conversation
+          ? await getCoderSwapOverride({
+              persona: req.persona,
+              conversation: req.conversation,
+            })
+          : undefined;
+      const decision = resolveSwapModel({
+        text: req.userMessage,
+        override,
+        primaryModel: this.config.routing.primaryModel,
+        codingModel: this.config.routing.codingModel,
+      });
+      primaryModel = decision.model;
+      if (decision.swapped) {
+        log.info("pi.invoke coder-swap active", {
+          persona: req.persona,
+          conversation: req.conversation,
+          model: decision.model,
+          reason: decision.reason,
+        });
+      }
+    }
     if (primaryModel) {
       args.push("--model", primaryModel);
     }
@@ -156,12 +169,9 @@ export class PiHarness implements Harness {
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
-      // Project resolved routing models into the child so the bundled
-      // extension sees them even on a TOML-only install (no ~/.env write).
-      env: applyRoutingEnv(
-        withPersonaEnv(process.env, req.persona, req.conversation),
-        this.config.routing,
-      ),
+      // Delegate models reach the bundled extension via the managed
+      // routing.json (lib/piExtensionProvision.ts), NOT via child env.
+      env: withPersonaEnv(process.env, req.persona, req.conversation),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -255,6 +265,17 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     return { type: "progress", note: toolName ? `tool: ${toolName}` : "tool" };
   }
 
+  // tool_execution_update is fired while a tool is mid-run, carrying its
+  // partial result. The capability-routing `coder` tool emits these (via pi's
+  // onUpdate) as its child makes real progress, so the PRIMARY stays visibly
+  // alive while it's blocked awaiting the delegate. Surface a payload-less
+  // heartbeat (no partialResult leak, no spurious bubble flush) — piActivity
+  // classifies it as in-tool activity so it RESETS the idle watchdog. Only ever
+  // emitted on genuine child output, so a wedged tool still trips the idle kill.
+  if (obj.type === "tool_execution_update") {
+    return { type: "heartbeat" };
+  }
+
   if (obj.type !== "message_update") return undefined;
 
   const ame = obj.assistantMessageEvent;
@@ -289,13 +310,20 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   return undefined;
 }
 
-function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
+export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivity {
   if (chunk.type === "text" || chunk.type === "done") return "productive";
   if (typeof parsed !== "object" || parsed === null) {
     return chunk.type === "heartbeat" ? "model" : "productive";
   }
   const obj = parsed as Record<string, unknown>;
-  if (obj.type === "tool_execution_start") return "tool";
+  // tool_execution_start AND _update are both genuine in-tool activity: the
+  // update only fires when the running tool reports real progress (e.g. the
+  // coder delegate forwarding its child's output). Classifying as "tool" resets
+  // the idle timer while keeping toolRunning set, so a long-but-working tool
+  // stays alive without a generic model heartbeat being able to do the same.
+  if (obj.type === "tool_execution_start" || obj.type === "tool_execution_update") {
+    return "tool";
+  }
   const ame = obj.assistantMessageEvent;
   if (isObject(ame) && typeof ame.type === "string") {
     // pi 0.79.x: `tool_use_*` → `toolcall_*`. Accept both.

@@ -22,7 +22,7 @@ import {
   createRumor,
   createSeal,
   wrapGroupMessage,
-  wrapNip17Message,
+  wrapV2,
   type NTNostrEvent as WrapEvent,
 } from "../../lib/nostrCrypto.ts";
 
@@ -145,7 +145,7 @@ export interface PhantomchatTransport extends ChannelTransport {
    */
   subscribeGiftWraps(
     ourPubHex: string,
-    onWrap: (event: NTNostrEvent) => void,
+    onWrap: (event: NTNostrEvent) => void | Promise<void>,
     onEose?: () => void,
   ): { close(): void };
   /**
@@ -249,7 +249,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
 
   subscribeGiftWraps(
     ourPubHex: string,
-    onWrap: (event: NTNostrEvent) => void,
+    onWrap: (event: NTNostrEvent) => void | Promise<void>,
     onEose?: () => void,
   ): { close(): void } {
     const filter: NostrFilter = {
@@ -271,7 +271,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     return this.pool.subscribeMany(this.relays, filter, {
       onevent: (event) => {
         try {
-          onWrap(event);
+          const result = onWrap(event);
+          // Handle async callbacks — catch errors from the promise
+          if (result && typeof result === "object" && "catch" in result) {
+            result.catch((e) => {
+              log.warn("phantomchat: onWrap handler rejected", {
+                error: (e as Error).message,
+              });
+            });
+          }
         } catch (e) {
           log.warn("phantomchat: onWrap handler threw", {
             error: (e as Error).message,
@@ -367,14 +375,12 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * with stock clients and the PWA's GroupAPI still expects that shape.
    */
   async sendMessage(conversationId: string, text: string): Promise<void> {
-    const { wraps } = wrapNip17Message(
+    const { event } = await wrapV2(
       this.ourSecretKey,
       conversationId,
       text,
     );
-    for (const wrap of wraps) {
-      await this.publishWrap(wrap as unknown as NTNostrEvent);
-    }
+    await this.publishWrap(event as unknown as NTNostrEvent);
   }
 
   /**

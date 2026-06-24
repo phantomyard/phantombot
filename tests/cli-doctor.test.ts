@@ -785,3 +785,91 @@ describe("runDoctor harness availability", () => {
     expect(JSON.parse(out.text).harnesses.checks[0].resolved).toBeUndefined();
   });
 });
+
+describe("runDoctor pi extension health check", () => {
+  // Nightly is healthy in every case here, so the exit code is driven solely
+  // by the managed Pi capability-routing extension report.
+  beforeEach(async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+  });
+
+  const isolate = {
+    checkSystemd: false as const,
+    checkTimers: false as const,
+    checkHarnesses: false as const,
+  };
+
+  test("drifted + not repaired (--no-repair) → WARN and exit 1", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      repair: false,
+      ...isolate,
+      checkPiExtension: async () => ({
+        shouldExist: true,
+        present: false,
+        drifted: true,
+        dir: "/home/x/.pi/agent/extensions/capability-routing",
+      }),
+    });
+    // Unrepaired drift is a health failure, same class as systemd/harness.
+    expect(code).toBe(1);
+    expect(out.text).toContain("pi extension: WARN");
+  });
+
+  test("drifted but repaired this run → ok and exit 0", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkPiExtension: async () => ({
+        shouldExist: true,
+        present: true,
+        drifted: true,
+        dir: "/home/x/.pi/agent/extensions/capability-routing",
+        repaired: true,
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("pi extension: ok");
+  });
+
+  test("healthy extension (present, no drift) → exit 0", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkPiExtension: async () => ({
+        shouldExist: true,
+        present: true,
+        drifted: false,
+        dir: "/home/x/.pi/agent/extensions/capability-routing",
+      }),
+    });
+    expect(code).toBe(0);
+  });
+
+  test("stale dir present but no capability, --no-repair → WARN and exit 1", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      repair: false,
+      ...isolate,
+      checkPiExtension: async () => ({
+        shouldExist: false,
+        present: true,
+        drifted: true,
+        dir: "/home/x/.pi/agent/extensions/capability-routing",
+      }),
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("pi extension: WARN");
+  });
+});

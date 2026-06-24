@@ -4,24 +4,38 @@
  * Kept separate from index.ts (the @earendil-works/* glue) so it can be
  * unit-tested from phantombot's `bun test` without the Pi SDK on the import
  * path — the tests import THIS file and assert which tools should register
- * given an env snapshot.
+ * given a routing config object.
  *
- * Reads the env-var contract documented in src/lib/piRouting.ts:
- *   PHANTOMBOT_IMAGE_MODEL  → register look_at_image (vision delegate)
- *   PHANTOMBOT_CODING_MODEL → register coder         (coding delegate)
- *   PHANTOMBOT_PRIMARY_MODEL → informational (the extension does not switch
- *                              the primary itself; phantombot's pi harness
- *                              passes --model — but we surface it for logging)
+ * The config comes from a managed sibling data file `routing.json` that
+ * phantombot stamps into the extension directory (see index.ts). Its shape:
  *
- * The KEY rule: when PHANTOMBOT_IMAGE_MODEL is unset/empty, `look_at_image` is
- * NOT registered. The wizard leaves it unset precisely when the primary model
- * is multimodal (it can see images itself), so a multimodal primary gets no
- * redundant vision tool.
+ *   {
+ *     "primaryModel":  "...",   // informational; the extension does NOT switch
+ *                               //   the primary itself — phantombot's pi harness
+ *                               //   passes --model. Surfaced for logging only.
+ *     "imageModel":    "...",   // present ⇒ register look_at_image (vision delegate)
+ *     "codingModel":   "..."    // present ⇒ register coder         (coding delegate)
+ *   }
+ *
+ * Every key is optional. The KEY rule: when `imageModel` is absent/empty,
+ * `look_at_image` is NOT registered. phantombot omits it precisely when the
+ * primary model is multimodal (it can see images itself), so a multimodal
+ * primary gets no redundant vision tool. Env vars are NOT read by the
+ * extension anymore — routing.json is the sole input.
  */
 
-export const ENV_PRIMARY_MODEL = "PHANTOMBOT_PRIMARY_MODEL";
-export const ENV_IMAGE_MODEL = "PHANTOMBOT_IMAGE_MODEL";
-export const ENV_CODING_MODEL = "PHANTOMBOT_CODING_MODEL";
+export interface RoutingConfig {
+  primaryModel?: string;
+  imageModel?: string;
+  codingModel?: string;
+  /**
+   * Stream the coder child's per-turn progress out via `phantombot notify`
+   * (channel-agnostic — reaches every configured channel, not just Telegram).
+   * ON by default when a coding model is set; only an explicit `false` disables
+   * it. A per-conversation `/viewcoder` override can still flip it at runtime.
+   */
+  codingProgress?: boolean;
+}
 
 export interface RoutingPlan {
   /** Primary model id, if pinned. Informational. */
@@ -34,6 +48,14 @@ export interface RoutingPlan {
   registerLookAtImage: boolean;
   /** True when coder should be registered. */
   registerCoder: boolean;
+  /**
+   * Global default for whether the coder delegate streams its progress out via
+   * `phantombot notify`. Only ever true when `registerCoder` is — progress
+   * without a coder tool is meaningless, so it's force-coupled here. A
+   * per-conversation `/viewcoder` override (read at emit time in index.ts) can
+   * override this default on or off.
+   */
+  streamCoderProgress: boolean;
 }
 
 function clean(v: string | undefined): string | undefined {
@@ -43,20 +65,26 @@ function clean(v: string | undefined): string | undefined {
 }
 
 /**
- * Decide which routing tools to register from the environment. `env` is
- * injectable for tests; defaults to process.env.
+ * Decide which routing tools to register from the parsed routing.json config.
+ * Each field is normalized (trimmed; blank ⇒ undefined) before deciding.
  */
-export function planRouting(
-  env: Record<string, string | undefined> = process.env,
-): RoutingPlan {
-  const imageModel = clean(env[ENV_IMAGE_MODEL]);
-  const codingModel = clean(env[ENV_CODING_MODEL]);
+export function planRouting(cfg: RoutingConfig): RoutingPlan {
+  const imageModel = clean(cfg.imageModel);
+  const codingModel = clean(cfg.codingModel);
+  const registerCoder = codingModel !== undefined;
   return {
-    primaryModel: clean(env[ENV_PRIMARY_MODEL]),
+    primaryModel: clean(cfg.primaryModel),
     imageModel,
     codingModel,
     registerLookAtImage: imageModel !== undefined,
-    registerCoder: codingModel !== undefined,
+    registerCoder,
+    // Progress is coupled to the coder tool existing — never stream without it.
+    // ON BY DEFAULT: with a coder registered, stream unless codingProgress is
+    // explicitly false. phantombot bakes an explicit true/false into
+    // routing.json, but a missing key (older asset, hand-rolled config) now
+    // defaults to streaming. This is the GLOBAL default; a `/viewcoder` override
+    // for a conversation can still force it on/off at emit time in index.ts.
+    streamCoderProgress: registerCoder && cfg.codingProgress !== false,
   };
 }
 

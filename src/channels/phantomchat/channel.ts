@@ -34,6 +34,8 @@ import type {
 import {
   GiftWrapVerificationError,
   unwrapNip17Message,
+  unwrapV2,
+  isV2Event,
   type NTNostrEvent,
 } from "../../lib/nostrCrypto.ts";
 import type { PhantomchatTransport } from "./transport.ts";
@@ -188,17 +190,19 @@ export function createPhantomchatChannel(
         return true;
       };
 
-      const onWrap = (event: NTNostrEvent): void => {
+      const onWrap = async (event: NTNostrEvent): Promise<void> => {
         // (1) Dedup by wrap event id — relays re-deliver the identical wrap.
         if (!remember(seenWrapIds, event.id)) return;
 
-        let rumor: ReturnType<typeof unwrapNip17Message>;
+        let rumor: Awaited<ReturnType<typeof unwrapNip17Message>>;
         try {
-          // (2) Verifying unwrap. Throws GiftWrapVerificationError on any
-          // forged/tampered layer — we drop those silently (debug-logged):
-          // a hostile relay or attacker shouldn't produce noise, let alone
-          // a turn.
-          rumor = unwrapNip17Message(event, secretKey);
+          // Verifying unwrap. V2 events use AES-GCM with shared symmetric key;
+          // legacy events use NIP-17 gift-wrap. Both verify sender identity.
+          if (isV2Event(event)) {
+            rumor = await unwrapV2(event, secretKey);
+          } else {
+            rumor = unwrapNip17Message(event, secretKey);
+          }
         } catch (e) {
           if (e instanceof GiftWrapVerificationError) {
             log.debug("phantomchat: dropping unverifiable gift-wrap", {

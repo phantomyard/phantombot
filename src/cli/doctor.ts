@@ -40,6 +40,11 @@ import {
   type NightlyProgress,
   type NightlyState,
 } from "../lib/nightly.ts";
+import {
+  ensureRoutingExtension,
+  removeRoutingExtension,
+  routingExtensionStatus,
+} from "../lib/piExtensionProvision.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
@@ -174,6 +179,21 @@ export interface DoctorReport {
     path: string;
     checks: HarnessAvailability[];
   };
+  /**
+   * Managed Pi capability-routing extension. `shouldExist` = a routable
+   * capability (image and/or coding model) is configured, so the owned dir is
+   * supposed to be on disk; when false the desired state is absence.
+   * `present` = the owned dir + marker exist; `drifted` = on-disk state no
+   * longer matches desired (needs a re-stamp when shouldExist, or removal when
+   * not). `repaired` = we stamped or removed it this run.
+   */
+  piExtension?: {
+    shouldExist: boolean;
+    present: boolean;
+    drifted: boolean;
+    dir: string;
+    repaired?: boolean;
+  };
   repair_needed: boolean;
   repair_reason?: string;
   repair_triggered: boolean;
@@ -218,6 +238,15 @@ export interface RunDoctorInput {
   checkHarnesses?:
     | false
     | (() => Promise<DoctorReport["harnesses"] | undefined>);
+  /**
+   * Test seam for the managed Pi capability-routing extension check. Pass
+   * `false` to skip. Pass a function to substitute a fake report (bypassing
+   * the binary gate and the filesystem stamp/remove). In production this is
+   * undefined and doctor inspects the real `~/.pi/agent/extensions` dir.
+   */
+  checkPiExtension?:
+    | false
+    | (() => Promise<DoctorReport["piExtension"] | undefined>);
 }
 
 function decideRepair(
@@ -387,6 +416,46 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  // Managed Pi extension. When a routable capability (image and/or coding) is
+  // configured the owned dir is stamped/re-stamped on drift; when none is
+  // configured the desired state is absence, so a leftover dir is removed.
+  // Either way it self-heals when repair is enabled (the same pattern as the
+  // systemd units). Gated to the real `phantombot` binary, mirroring the
+  // harness/systemd/timer checks, so `bun test`/dev never touch the dev box's
+  // real ~/.pi. Not gated on routing being set, so dropping routing also
+  // triggers cleanup of a previously-stamped dir.
+  let piExtensionReport: DoctorReport["piExtension"] | undefined;
+  if (input.checkPiExtension === false) {
+    // explicitly skipped by a test
+  } else if (input.checkPiExtension) {
+    piExtensionReport = await input.checkPiExtension();
+  } else if (basename(process.execPath) === "phantombot") {
+    const piRouting = config.harnesses?.pi?.routing;
+    const status = await routingExtensionStatus(piRouting);
+    let repaired = false;
+    if (repair && status.drifted) {
+      try {
+        if (status.shouldExist) {
+          await ensureRoutingExtension(piRouting);
+        } else {
+          await removeRoutingExtension();
+        }
+        repaired = true;
+      } catch (e) {
+        log.warn("doctor: pi extension repair failed", {
+          error: (e as Error).message,
+        });
+      }
+    }
+    piExtensionReport = {
+      shouldExist: status.shouldExist,
+      present: status.present,
+      drifted: status.drifted,
+      dir: status.dir,
+      ...(repaired ? { repaired } : {}),
+    };
+  }
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -423,6 +492,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
+    ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
     repair_needed: needed,
     repair_reason: reason,
     repair_triggered: repairTriggered,
@@ -439,6 +509,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     (timersReport.heartbeat.stale || timersReport.tick.stale);
   const harnessesBroken =
     !!harnessReport && missingHarnesses(harnessReport.checks).length > 0;
+  // A drifted managed Pi extension (missing-but-wanted, stale, or
+  // present-but-unwanted) that wasn't repaired this run is a health failure,
+  // same as the systemd/timer/harness checks above. `repaired` is set only
+  // when this run actually re-stamped/removed it, so `--no-repair` leaves the
+  // drift visible and trips exit 1. NOTE: this is the `doctor` *CLI* exit code,
+  // a diagnostic signal for humans/CI — it does NOT gate the long-running
+  // service. `run.ts` calls doctor at startup but only logs a non-zero code
+  // (and provisioning is fire-and-forget, warn-only), so the daemon never dies
+  // on it. The "phantombot must never exit 1 so a revert can ship" invariant
+  // lives in the service path and stays intact.
+  const piExtensionBroken =
+    !!piExtensionReport &&
+    piExtensionReport.drifted &&
+    !piExtensionReport.repaired;
   const exitCode =
     needed && !repairTriggered
       ? 1
@@ -448,7 +532,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
           ? 1
           : harnessesBroken
             ? 1
-            : 0;
+            : piExtensionBroken
+              ? 1
+              : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
@@ -581,6 +667,49 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
           "\n" +
           "  → fix the harness install, set PHANTOMBOT_<HARNESS>_BIN to an absolute path, or put a stable shim on the service PATH\n",
       );
+    }
+  }
+
+  if (piExtensionReport) {
+    const r = piExtensionReport;
+    if (!r.shouldExist) {
+      // Desired state is absence (no routable capability configured). Healthy
+      // when the dir is gone, or we removed it this run.
+      const ok = !r.present || !!r.repaired;
+      out.write(`  pi extension: ${tick(ok)} — `);
+      if (!r.present) {
+        out.write(
+          `no routing capability configured; managed capability-routing extension correctly absent\n`,
+        );
+      } else if (r.repaired) {
+        out.write(
+          `removed stale capability-routing extension at ${r.dir} (no routing capability configured)\n`,
+        );
+      } else {
+        out.write(
+          `stale capability-routing extension present at ${r.dir} but no routing capability configured — run \`phantombot doctor\` to remove it\n`,
+        );
+      }
+    } else {
+      const ok = r.present && (!r.drifted || !!r.repaired);
+      out.write(`  pi extension: ${tick(ok)} — `);
+      if (!r.present) {
+        out.write(
+          r.repaired
+            ? `stamped managed capability-routing extension into ${r.dir}\n`
+            : `managed capability-routing extension missing at ${r.dir} — run \`phantombot doctor\` (or restart) to stamp it\n`,
+        );
+      } else if (r.drifted) {
+        out.write(
+          r.repaired
+            ? `re-stamped drifted capability-routing extension at ${r.dir}\n`
+            : `managed capability-routing extension drifted at ${r.dir} — run \`phantombot doctor\` to re-stamp\n`,
+        );
+      } else {
+        out.write(
+          `managed capability-routing extension present and current at ${r.dir}\n`,
+        );
+      }
     }
   }
 

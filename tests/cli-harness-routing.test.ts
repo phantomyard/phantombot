@@ -104,6 +104,57 @@ describe("applyRouting", () => {
     expect("PHANTOMBOT_IMAGE_MODEL" in (await loadEnvFile(envPath))).toBe(false);
   });
 
+  test("coding_progress on: persists to toml + env alongside the coding model", async () => {
+    await applyRouting(
+      configPath,
+      {
+        primaryModel: "gpt-5.2",
+        codingModel: "gpt-5.2-codex",
+        codingProgress: true,
+        primaryMultimodal: true,
+      },
+      envPath,
+    );
+    const routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect(routing.coding_progress).toBe(true);
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
+  });
+
+  test("disabling coding_progress persists an explicit false (toml + env)", async () => {
+    await applyRouting(
+      configPath,
+      {
+        primaryModel: "gpt-5.2",
+        codingModel: "gpt-5.2-codex",
+        codingProgress: true,
+        primaryMultimodal: true,
+      },
+      envPath,
+    );
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("true");
+
+    // Turn it off — with on-by-default, "off" must persist as an explicit
+    // false (in both toml and env) so it wins over the default, rather than
+    // being cleared and silently re-defaulting to on.
+    await applyRouting(
+      configPath,
+      {
+        primaryModel: "gpt-5.2",
+        codingModel: "gpt-5.2-codex",
+        codingProgress: false,
+        primaryMultimodal: true,
+      },
+      envPath,
+    );
+    const routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect(routing.coding_progress).toBe(false);
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_CODING_PROGRESS).toBe("false");
+  });
+
   test("preserves unrelated config keys (does not clobber the chain)", async () => {
     const { applyHarnessChain } = await import("../src/cli/harness.ts");
     await applyHarnessChain(configPath, ["pi", "claude"]);
