@@ -35,6 +35,7 @@ import {
   computeRoutingWrites,
   ENV_PI_API_KEY,
   resolveRouting,
+  resolveRoutingProvider,
   type RoutingChoices,
 } from "../lib/piRouting.ts";
 import { updateEnvFile } from "../lib/envFile.ts";
@@ -378,9 +379,13 @@ async function configurePi(
   // Straight into custom routing — Pi is already the chosen harness, so we don't
   // re-ask "use defaults?"; we go collect primary / image / coding models, all
   // filtered to the chosen provider. Reuse the catalog we already fetched.
+  // Pass the picker's answer through VERBATIM — including "" for "(none)". The
+  // "" is the explicit "clear the provider" sentinel; collapsing it to undefined
+  // here (the old `provider || undefined`) made runRoutingWizard fall back to the
+  // existing provider, so "(none)" could never clear a previously-set one.
   return runRoutingWizard(config, availability.pi, {
     forceCustom: true,
-    provider: provider || undefined,
+    provider,
     models,
   });
 }
@@ -405,7 +410,11 @@ async function runRoutingWizard(
   piBin: string | undefined,
   opts: {
     forceCustom?: boolean;
-    /** Provider chosen by configurePi; scopes the model pickers + is persisted. */
+    /**
+     * Provider chosen by configurePi; scopes the model pickers + is persisted.
+     * `""` means the operator explicitly chose "(none)" (clear the provider);
+     * `undefined` means the step was skipped, so keep the current provider.
+     */
     provider?: string;
     /** Pre-fetched `pi --list-models` catalog (avoids a second shell-out). */
     models?: readonly PiModel[];
@@ -456,7 +465,8 @@ async function runRoutingWizard(
   // Scope every model picker to the chosen provider: a single per-turn
   // `--provider` is only correct if primary + image + coding all come from that
   // one provider. With no provider (or no catalog) we show everything.
-  const provider = opts.provider ?? current.provider;
+  // "" (explicit "(none)") clears; undefined (step skipped) keeps current.
+  const provider = resolveRoutingProvider(opts.provider, current.provider);
   const models = provider
     ? allModels.filter((m) => m.provider === provider)
     : allModels;

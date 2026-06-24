@@ -6,6 +6,7 @@ import {
   ENV_PI_PROVIDER,
   ENV_PRIMARY_MODEL,
   resolveRouting,
+  resolveRoutingProvider,
 } from "../src/lib/piRouting.ts";
 
 describe("resolveRouting", () => {
@@ -155,5 +156,29 @@ describe("computeRoutingWrites — provider", () => {
     const w = computeRoutingWrites({ provider: "   ", primaryModel: "gpt-5.2" });
     expect(w.toml.provider).toBeUndefined();
     expect(w.env[ENV_PI_PROVIDER]).toBe("");
+  });
+});
+
+describe("resolveRoutingProvider — explicit (none) clears, skipped keeps", () => {
+  test("explicit '' ((none)) overrides an existing provider (clears it)", () => {
+    // The regression: choosing "(none)" with openrouter already set must NOT
+    // fall back to openrouter.
+    expect(resolveRoutingProvider("", "openrouter")).toBe("");
+  });
+
+  test("a chosen provider name wins over the current one", () => {
+    expect(resolveRoutingProvider("openai", "openrouter")).toBe("openai");
+  });
+
+  test("undefined (step skipped) keeps the current provider", () => {
+    expect(resolveRoutingProvider(undefined, "openrouter")).toBe("openrouter");
+  });
+
+  test("undefined with no current provider stays unset", () => {
+    expect(resolveRoutingProvider(undefined, undefined)).toBeUndefined();
+  });
+
+  test("explicit '' with no current provider stays cleared", () => {
+    expect(resolveRoutingProvider("", undefined)).toBe("");
   });
 });

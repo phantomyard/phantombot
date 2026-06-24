@@ -104,6 +104,30 @@ function clean(v: string | undefined): string | undefined {
 }
 
 /**
+ * Decide which provider the routing wizard should persist, given the provider
+ * picker's answer and the currently-configured provider.
+ *
+ * `picked` is exactly what `pickProvider` returned, carried verbatim:
+ *   - a provider name → set it
+ *   - `""` ((none))   → the operator EXPLICITLY cleared the provider, so we
+ *                       return `""` (which `computeRoutingWrites`/`applyRouting`
+ *                       turn into a delete of both the TOML key and the env var)
+ *   - `undefined`     → the provider step was SKIPPED (e.g. the standalone
+ *                       fallback path doesn't re-ask), so keep `current`
+ *
+ * The crucial distinction is `""` (explicit clear) vs `undefined` (skipped):
+ * the old wiring collapsed the picker's `""` to `undefined` before this point,
+ * so choosing "(none)" could never clear an existing provider — it always fell
+ * back to `current`.
+ */
+export function resolveRoutingProvider(
+  picked: string | undefined,
+  current: string | undefined,
+): string | undefined {
+  return picked ?? current;
+}
+
+/**
  * Resolve routing config with phantombot's standard precedence:
  * env var > config.toml > unset. `toml` is the parsed
  * `[harnesses.pi.routing]` sub-table (may be empty / undefined).

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyRouting } from "../src/cli/harness.ts";
+import { resolveRoutingProvider } from "../src/lib/piRouting.ts";
 import { loadEnvFile } from "../src/lib/envFile.ts";
 import { readConfigToml } from "../src/lib/configWriter.ts";
 
@@ -119,6 +120,36 @@ describe("applyRouting", () => {
     ).pi.routing;
     expect("image_model" in routing).toBe(false);
     expect("PHANTOMBOT_IMAGE_MODEL" in (await loadEnvFile(envPath))).toBe(false);
+  });
+
+  test("existing provider → configure now → choose (none) → provider removed from toml + env", async () => {
+    // Reproduces the review regression end-to-end through the wizard's two seams:
+    // the provider-resolution decision (resolveRoutingProvider) and the
+    // persistence (applyRouting). With openrouter already configured, the picker
+    // returning "" for "(none)" must clear the provider, NOT fall back to it.
+    await applyRouting(
+      configPath,
+      { provider: "openrouter", primaryModel: "z-ai/glm-5.2" },
+      envPath,
+    );
+    const current = "openrouter";
+
+    // Operator re-runs "configure now" and selects "(none)" → pickProvider yields
+    // "". The wizard resolves the provider it will persist:
+    const resolved = resolveRoutingProvider("", current);
+    expect(resolved).toBe(""); // explicit clear, NOT "openrouter"
+
+    await applyRouting(
+      configPath,
+      { provider: resolved, primaryModel: "gpt-5.2" },
+      envPath,
+    );
+
+    const routing = (
+      (await readConfigToml(configPath)).harnesses as Record<string, any>
+    ).pi.routing;
+    expect("provider" in routing).toBe(false);
+    expect("PHANTOMBOT_PI_PROVIDER" in (await loadEnvFile(envPath))).toBe(false);
   });
 
   test("coding_model: persists to toml + env", async () => {
