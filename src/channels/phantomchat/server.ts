@@ -12,7 +12,12 @@
  *     ("checking your calendar…") is sent as its own bubbles before tool calls
  *     (toolNarration ON), so the user sees live progress instead of one long
  *     wait. Each bubble is its own NIP-17 wrap.
- *   - No slash commands, voice, or attachments (groups ARE supported).
+ *   - Slash commands (/stop, /reset, /status, /harness, /coder, /update,
+ *     /restart, /help) work via the shared `handleSlashCommand` dispatcher,
+ *     handled inline so /stop reaches a turn hung in the per-peer chain.
+ *     DM-only (group "/…" lines fall through to a normal turn). No Telegram
+ *     `setMyCommands` menu — Nostr has no command-registration API.
+ *   - No voice or attachments (groups ARE supported).
  *   - The trust perimeter gates on the CRYPTOGRAPHIC sender (rumor.pubkey,
  *     surfaced as `senderId`), never on the envelope `from` field.
  */
@@ -27,12 +32,17 @@ import { runTurn } from "../../orchestrator/turn.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
 import { makeScreener } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
+import {
+  type ActiveTurnHandle,
+  handleSlashCommand,
+} from "../commands.ts";
 import { TELEGRAM_REPLY_INSTRUCTION, voiceUnavailableMessage } from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import {
   splitIntoSegments,
   StreamSegmenter,
 } from "../streamSegmenter.ts";
+import type { ServiceControl } from "../../lib/systemd.ts";
 import type { PhantomchatTransport } from "./transport.ts";
 import { sttSupport, transcribe } from "../../lib/audio.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
@@ -126,6 +136,14 @@ export interface RunPhantomchatServerInput {
   secretKey: Uint8Array;
   /** Stop after draining the currently-available messages. For tests. */
   oneShot?: boolean;
+  /**
+   * ServiceControl override for the `/restart` slash command's afterSend.
+   * Production leaves this undefined and `/restart` picks up
+   * `defaultServiceControl()`; tests inject a stub so a `bun test` run never
+   * invokes the host's real systemctl restart. Mirrors the Telegram engine's
+   * input seam.
+   */
+  serviceControl?: ServiceControl;
   /** Signal to stop the loop cleanly (Ctrl-C / SIGTERM). */
   signal?: AbortSignal;
   out?: WriteSink;
@@ -168,20 +186,30 @@ export async function runPhantomchatServer(
 
   const harnesses: Harness[] = [...input.harnesses];
 
+  // Wall-clock when the server came up, for the /status uptime line.
+  const serverStartedAt = Date.now();
+
+  // In-flight turns keyed by conversationId (senderHex for a DM, `group:<id>`
+  // for a group). A /stop or /reset slash command looks the peer up here and
+  // aborts its controller; /status reads startTime + lastProgressNote. Mirrors
+  // the Telegram engine's `activeTurns` map.
+  const activeTurns = new Map<string, ActiveTurnHandle>();
+
   // Per-peer promise chain so messages from one peer stay strictly ordered.
   const chains = new Map<string, Promise<void>>();
   const inFlight = new Set<Promise<void>>();
 
-  const handle = async (msg: ChannelMessage): Promise<void> => {
+  // ===================== AUTH GATE =====================
+  // Gate on the CRYPTOGRAPHIC sender (rumor.pubkey, carried as senderId — the
+  // verifying unwrap proved it equals seal.pubkey and is signature-checked).
+  // The envelope `from` field is NEVER consulted here: it's attacker-
+  // controllable plaintext. A sender not in the allowlist is dropped SILENTLY
+  // (info log only) — no reply, so the bot doesn't become an oracle that
+  // confirms its own pubkey is live to strangers. Returns false to drop.
+  // Factored out so both the regular turn path (`handle`) and the inline slash
+  // path (`runSlash`) apply the identical gate.
+  const authorize = (msg: ChannelMessage): boolean => {
     const senderHex = msg.senderId;
-
-    // ===================== AUTH GATE =====================
-    // Gate on the CRYPTOGRAPHIC sender (rumor.pubkey, carried as senderId — the
-    // verifying unwrap proved it equals seal.pubkey and is signature-checked).
-    // The envelope `from` field is NEVER consulted here: it's attacker-
-    // controllable plaintext. A sender not in the allowlist is dropped SILENTLY
-    // (info log only) — no reply, so the bot doesn't become an oracle that
-    // confirms its own pubkey is live to strangers.
     const lowerHex = senderHex.toLowerCase();
     if (allowedSet.size > 0) {
       // Locked allowlist (configured, or already claimed by TOFU).
@@ -189,7 +217,7 @@ export async function runPhantomchatServer(
         log.info("phantomchat: dropping message from non-allowed sender", {
           sender: senderHex.slice(0, 12) + "…",
         });
-        return;
+        return false;
       }
     } else if (tofuArmed) {
       // TRUST-ON-FIRST-USE. Claim this sender SYNCHRONOUSLY (before any await)
@@ -213,6 +241,13 @@ export async function runPhantomchatServer(
       }
     }
     // else: empty set + tofu off = open bot — answer anyone (caller warned).
+    return true;
+  };
+
+  const handle = async (msg: ChannelMessage): Promise<void> => {
+    const senderHex = msg.senderId;
+
+    if (!authorize(msg)) return;
 
     // ===================== DELIVERY RECEIPT =====================
     // The sender just passed the auth gate, so acknowledging receipt to them is
@@ -462,6 +497,21 @@ export async function runPhantomchatServer(
       sendTypingTick();
       void flushNarration();
     }, 2000);
+
+    // Register this turn so a /stop or /reset slash command can abort it and
+    // /status can read its elapsed time + latest progress note. The turn aborts
+    // on EITHER the server's shutdown signal OR this per-turn controller (which
+    // /stop fires). Keyed by conversationId, exactly the key the slash path
+    // looks up.
+    const controller = new AbortController();
+    const turnHandle: ActiveTurnHandle = {
+      controller,
+      startTime: Date.now(),
+    };
+    activeTurns.set(msg.conversationId, turnHandle);
+    const turnSignal = input.signal
+      ? AbortSignal.any([input.signal, controller.signal])
+      : controller.signal;
     try {
       for await (const chunk of runTurn({
         persona: input.persona,
@@ -472,7 +522,7 @@ export async function runPhantomchatServer(
         memory: input.memory,
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
-        signal: input.signal,
+        signal: turnSignal,
         // The trust grant — see the auth gate above. Always true here because
         // we already dropped non-allowlisted senders.
         trusted: true,
@@ -528,6 +578,9 @@ export async function runPhantomchatServer(
           await flushNarration();
         }
         if (chunk.type === "progress") {
+          // Surface the latest progress note on the turn handle so /status can
+          // show "running: <tool>" in real time.
+          turnHandle.lastProgressNote = chunk.note.slice(0, 500);
           // A tool is about to run. Text emitted since the last boundary that
           // the splitter hasn't already sent as a final bubble is progress
           // narration ("checking your calendar…"): buffer it for the timed
@@ -547,6 +600,11 @@ export async function runPhantomchatServer(
       });
       return;
     } finally {
+      // Deregister the turn (only if we're still the registered one — a later
+      // turn for this peer could have replaced us).
+      if (activeTurns.get(msg.conversationId) === turnHandle) {
+        activeTurns.delete(msg.conversationId);
+      }
       // Stop the typing refresh whether the turn succeeded, errored, or the
       // early-return above fired, then publish an explicit STOP so the PWA
       // clears the dots AT ONCE instead of waiting out its 6s auto-expiry (the
@@ -571,6 +629,11 @@ export async function runPhantomchatServer(
     // shot path did: a group reply is reconstructed from the inbound rumor
     // (inbound p-tags ∪ { sender }) since the bridge holds no group DB, and
     // sendGroupMessage adds our self-wrap and defensively drops our own hex.
+    //
+    // If the turn was aborted (/stop or /reset), don't emit a trailing partial:
+    // the command already sent its own confirmation and any streamed bubbles
+    // stand on their own.
+    if (controller.signal.aborted) return;
     const fullReply = finalReply ?? streamedReply;
     let outText: string;
     if (fullReply.trim().length === 0) {
@@ -591,6 +654,65 @@ export async function runPhantomchatServer(
       if (i < finalSegments.length - 1 && streaming.bubbleDelayMs > 0) {
         await sleep(streaming.bubbleDelayMs);
       }
+    }
+  };
+
+  // A DM whose text begins with "/" is a candidate control command. Media
+  // messages and group messages never take the slash path (see runSlash).
+  const isControlCommand = (msg: ChannelMessage): boolean =>
+    !msg.groupId && !msg.media && msg.text.trim().startsWith("/");
+
+  // Slash commands (/stop, /reset, /status, /harness, /coder, /help, …) are
+  // handled INLINE — bypassing the per-peer turn chain — so /stop can abort a
+  // turn that is currently hung in that chain (a queued /stop would never run
+  // until the very turn it is meant to kill had finished). DM-only: group slash
+  // semantics (who may /reset the shared thread, /status broadcast noise) are
+  // out of scope, so in a group a "/…" line falls through to a normal turn.
+  // Unknown commands (handleSlashCommand → null) also fall through to a normal
+  // turn, since some personas treat e.g. /remember as plain input.
+  const runSlash = async (msg: ChannelMessage): Promise<void> => {
+    if (!authorize(msg)) return;
+    const senderHex = msg.senderId;
+    const result = await handleSlashCommand(msg.text, {
+      chatId: msg.conversationId,
+      persona: input.persona,
+      // Must match handle()'s DM conversationKey EXACTLY so /reset and /coder
+      // target the same persisted history. senderId is already lowercase hex
+      // (the channel lowercases rumor.pubkey).
+      conversation: `phantomchat:${senderHex}`,
+      memory: input.memory,
+      // Same array runTurn uses, so /harness reordering sticks for next turn.
+      harnesses,
+      startedAt: serverStartedAt,
+      activeTurn: activeTurns.get(msg.conversationId),
+      config: input.config,
+      serviceControl: input.serviceControl,
+      // No @username concept on Nostr, and slash handling is DM-only, so there
+      // is nothing to disambiguate — leave botUsername undefined.
+    }).catch((e: unknown) => {
+      log.warn("phantomchat: slash command failed", {
+        error: (e as Error).message,
+        sender: senderHex.slice(0, 12) + "…",
+      });
+      return undefined; // error: drop (don't run a failed command as a turn)
+    });
+
+    if (result === undefined) return; // errored — already logged
+    if (result === null) {
+      // Not a command we own — run it as a normal turn instead.
+      enqueue(msg);
+      return;
+    }
+    try {
+      await transport.sendMessage(senderHex, result.reply);
+      // /update and /restart fire their side effect AFTER the reply lands, so
+      // the user sees "restarting…" before the process is SIGTERM'd.
+      if (result.afterSend) await result.afterSend();
+    } catch (e) {
+      log.warn("phantomchat: slash reply send failed", {
+        error: (e as Error).message,
+        sender: senderHex.slice(0, 12) + "…",
+      });
     }
   };
 
@@ -623,7 +745,15 @@ export async function runPhantomchatServer(
   // the signal; listen()'s loop drains its queue and completes, so this
   // for-await ends naturally and we fall through to draining inFlight.
   for await (const msg of channel.listen(input.signal)) {
-    enqueue(msg);
+    if (isControlCommand(msg)) {
+      // Handle inline (off the per-peer chain) but still track it in inFlight
+      // so oneShot tests and clean shutdown wait for it to settle.
+      const p = runSlash(msg);
+      inFlight.add(p);
+      void p.finally(() => inFlight.delete(p));
+    } else {
+      enqueue(msg);
+    }
   }
 
   // Drain in-flight turns so callers (and tests) can assert on what was sent

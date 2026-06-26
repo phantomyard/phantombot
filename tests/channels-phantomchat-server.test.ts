@@ -1026,3 +1026,270 @@ describe("phantomchat streaming bubbles", () => {
     expect(andrewContents).toEqual(["Hello team.", "Working on it now."]);
   });
 });
+
+/**
+ * Slash commands (PR: Telegram-style /commands on phantomchat). The shared
+ * `handleSlashCommand` dispatcher is wired into the phantomchat server, handled
+ * inline (off the per-peer turn chain) so /stop reaches a hung turn. DM-only.
+ *
+ * Replies are sent via transport.sendMessage (a v2 wrap), so `dmBubbles` reads
+ * them. Recognized commands never invoke the harness; unknown commands fall
+ * through to a normal turn.
+ */
+
+const slashSleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+/** A harness that emits one text chunk then blocks until its signal aborts —
+ *  lets a test hold a turn "in flight" so /stop has something to abort. */
+class BlockingHarness implements Harness {
+  invocations = 0;
+  constructor(public readonly id: string) {}
+  async available(): Promise<boolean> {
+    return true;
+  }
+  async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    this.invocations++;
+    yield { type: "text", text: "working" };
+    await new Promise<void>((resolve) => {
+      if (req.signal?.aborted) return resolve();
+      req.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    // No `done` — the turn was interrupted, nothing to finalize.
+  }
+}
+
+/**
+ * Start a long-lived phantomchat server (oneShot off) and return handles to
+ * feed messages mid-run and to stop it. Needed for /stop and /reset, which
+ * require a turn to be in flight / already persisted before the command lands —
+ * the single-shot `runOnce` can't express that ordering.
+ */
+function makeServer(opts: {
+  botSk: Uint8Array;
+  allowedHex: string[];
+  harness: Harness;
+  serviceControl?: import("../src/lib/systemd.ts").ServiceControl;
+}): { pool: FakePool; feed: (sk: Uint8Array, text: string) => void; stop: () => Promise<void> } {
+  const botHex = getPublicKey(opts.botSk);
+  const pool = new FakePool();
+  const transport = new SimplePoolPhantomchatTransport(
+    opts.botSk,
+    ["wss://test.relay"],
+    pool,
+  );
+  const channel = createPhantomchatChannel({
+    secretKey: opts.botSk,
+    publicKeyHex: botHex,
+    transport,
+  });
+  const ac = new AbortController();
+  const done = runPhantomchatServer({
+    config: baseConfig(),
+    memory,
+    harnesses: [opts.harness],
+    agentDir,
+    persona: "phantom",
+    channel,
+    secretKey: opts.botSk,
+    allowedHex: opts.allowedHex,
+    serviceControl: opts.serviceControl,
+    oneShot: false,
+    signal: ac.signal,
+  });
+  let n = 0;
+  const feed = (sk: Uint8Array, text: string) => {
+    const envelope = JSON.stringify({
+      id: `slash-${++n}`,
+      from: getPublicKey(sk),
+      to: botHex,
+      type: "text",
+      content: text,
+      timestamp: Date.now(),
+    });
+    const { wraps } = wrapNip17Message(sk, botHex, envelope);
+    pool.feed(wraps[0] as NTNostrEvent);
+  };
+  const stop = async () => {
+    ac.abort();
+    await done;
+  };
+  return { pool, feed, stop };
+}
+
+describe("phantomchat slash commands", () => {
+  test("/help lists the commands and runs no turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "/help",
+    });
+    expect(harness.invocations).toBe(0);
+    const replies = await dmBubbles(pool, senderSk);
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toContain("available commands");
+    expect(replies[0]).toContain("/stop");
+    expect(replies[0]).toContain("/reset");
+  });
+
+  test("/status reports harness + uptime + idle, runs no turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "/status",
+    });
+    expect(harness.invocations).toBe(0);
+    const r = (await dmBubbles(pool, senderSk))[0]!;
+    expect(r).toContain("harness: fake");
+    expect(r).toContain("uptime:");
+    expect(r).toMatch(/active:\s+no/);
+  });
+
+  test("/harness with no arg lists the chain, runs no turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "/harness",
+    });
+    expect(harness.invocations).toBe(0);
+    const r = (await dmBubbles(pool, senderSk))[0]!;
+    expect(r).toContain("→ fake");
+  });
+
+  test("unknown /command falls through to a normal turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "noted" },
+    ]);
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "/remember buy milk",
+    });
+    // Not a command we own → runTurn handled it.
+    expect(harness.invocations).toBe(1);
+    expect(await dmBubbles(pool, senderSk)).toContain("noted");
+  });
+
+  test("a non-allowed sender's /status is dropped (no reply)", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const otherSk = generateSecretKey(); // the only allowed key
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(otherSk)],
+      harness,
+      text: "/status",
+    });
+    expect(harness.invocations).toBe(0);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(0);
+  });
+
+  test("/stop aborts an in-flight turn", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new BlockingHarness("fake");
+    const srv = makeServer({
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+    });
+    srv.feed(senderSk, "do a long thing");
+    await slashSleep(120); // let the turn register + block
+    srv.feed(senderSk, "/stop");
+    await slashSleep(120);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    const replies = await dmBubbles(srv.pool, senderSk);
+    expect(replies.some((r) => r.startsWith("stopped (was running"))).toBe(true);
+  });
+
+  test("/reset clears the conversation history", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const conversation = `phantomchat:${getPublicKey(senderSk)}`;
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hi there" },
+    ]);
+    const srv = makeServer({
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+    });
+    srv.feed(senderSk, "hello"); // a normal turn persists history for this peer
+    await slashSleep(150);
+    expect(
+      (await memory.recentTurns("phantom", conversation, 50)).length,
+    ).toBeGreaterThan(0);
+    srv.feed(senderSk, "/reset");
+    await slashSleep(120);
+    await srv.stop();
+
+    const replies = await dmBubbles(srv.pool, senderSk);
+    expect(
+      replies.some((r) => /^reset: cleared \d+ turns? from this chat/.test(r)),
+    ).toBe(true);
+    // History is empty afterwards.
+    expect((await memory.recentTurns("phantom", conversation, 50)).length).toBe(
+      0,
+    );
+  });
+
+  test("/restart replies then fires serviceControl.restart via afterSend", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    let restarted = false;
+    const serviceControl = {
+      isActive: async () => true,
+      restart: async () => {
+        restarted = true;
+        return { ok: true };
+      },
+    } as unknown as import("../src/lib/systemd.ts").ServiceControl;
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const srv = makeServer({
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      serviceControl,
+    });
+    srv.feed(senderSk, "/restart");
+    await slashSleep(120);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(0);
+    expect(restarted).toBe(true);
+    expect(await dmBubbles(srv.pool, senderSk)).toContain("restarting…");
+  });
+});
