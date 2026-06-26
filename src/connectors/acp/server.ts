@@ -17,6 +17,9 @@
 
 import { createInterface } from "node:readline";
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { type Config, loadConfig, personaDir } from "../../config.ts";
@@ -41,6 +44,11 @@ import {
 } from "./protocol.ts";
 import { SessionRegistry } from "./session.ts";
 import { runBridgeTurn } from "./turnBridge.ts";
+import { inboxDir, extensionFromMime } from "../../channels/telegram/parse.ts";
+
+/** Cap on a single pasted image — base64 decodes to ~10 MB. Guards against a
+ * client streaming an unbounded data URL into memory. */
+const ACP_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /** Max turns replayed to the editor on session/load. */
 const ACP_SESSION_REPLAY_LIMIT = 1000;
@@ -130,7 +138,10 @@ export async function runAcpServer(
         agentCapabilities: {
           loadSession: true,
           promptCapabilities: {
-            image: false,
+            // Pasted/attached images are decoded to the per-workspace inbox and
+            // handed to the harness as `[attached: <path>]` (same path Telegram
+            // photos take). Audio stays off — voice is a separate channel.
+            image: true,
             audio: false,
             embeddedContext: true,
           },
@@ -200,14 +211,22 @@ export async function runAcpServer(
     const blocks: AcpContentBlock[] = Array.isArray(p.prompt)
       ? (p.prompt as AcpContentBlock[])
       : [];
-    const { userMessage, referenceContext } = flattenPromptBlocks(blocks);
+    const { userMessage, referenceContext, images } = flattenPromptBlocks(blocks);
 
-    if (!userMessage.trim()) {
+    // Decode pasted/attached images to the inbox and append the
+    // `[attached: <path>]` lines the harness reads. Image-only prompts (no
+    // typed text) are valid — the attachment line carries the content.
+    const attachmentLines = await persistAcpImages(session.conversation, images, log);
+    const finalMessage = attachmentLines.length
+      ? [userMessage, ...attachmentLines].filter((s) => s.length > 0).join("\n\n")
+      : userMessage;
+
+    if (!finalMessage.trim()) {
       send(
         jsonRpcError(
           id,
           JSON_RPC.INVALID_PARAMS,
-          "prompt contained no text content",
+          "prompt contained no text or image content",
         ),
       );
       return;
@@ -228,7 +247,7 @@ export async function runAcpServer(
         {
           persona: session.persona,
           conversation: session.conversation,
-          userMessage,
+          userMessage: finalMessage,
           agentDir,
           workingDir: session.cwd,
           harnesses: harnesses!,
@@ -383,16 +402,23 @@ export async function runAcpServer(
  *     reference context returned via `referenceContext` (the DATA), kept
  *     SEPARATE from the instruction. This is the one real injection vector,
  *     so it is NEVER concatenated into userMessage.
- *   - image / audio → ignored in v1.
+ *   - image → collected (base64 data) and returned in `images` so the caller
+ *     can decode them to the inbox and hand the harness `[attached: <path>]`.
+ *   - audio → still ignored (voice is a separate channel).
+ *
+ * Image data is DATA, not instruction — it's written to a file and referenced
+ * by path; it never gets concatenated into `userMessage`.
  *
  * Exported for direct unit testing of the flatten contract.
  */
 export function flattenPromptBlocks(blocks: AcpContentBlock[]): {
   userMessage: string;
   referenceContext: string | undefined;
+  images: { data: string; mimeType: string | undefined }[];
 } {
   const textParts: string[] = [];
   const refParts: string[] = [];
+  const images: { data: string; mimeType: string | undefined }[] = [];
 
   for (const block of blocks) {
     if (!block || typeof block !== "object") continue;
@@ -406,8 +432,12 @@ export function flattenPromptBlocks(blocks: AcpContentBlock[]): {
       const uri = block.uri ?? block.name ?? "(unknown)";
       const body = block.text ?? "";
       refParts.push(body ? `### ${uri}\n${body}`.trimEnd() : `### ${uri}`);
+    } else if (block.type === "image") {
+      if (typeof block.data === "string" && block.data.length > 0) {
+        images.push({ data: block.data, mimeType: block.mimeType });
+      }
     }
-    // image / audio intentionally ignored in v1.
+    // audio intentionally ignored — voice is a separate channel.
   }
 
   const userMessage = textParts.join("\n").trim();
@@ -417,5 +447,48 @@ export function flattenPromptBlocks(blocks: AcpContentBlock[]): {
         refParts.join("\n\n")
       : undefined;
 
-  return { userMessage, referenceContext };
+  return { userMessage, referenceContext, images };
+}
+
+/**
+ * Decode ACP image blocks to the per-workspace inbox and return the
+ * `[attached: <abs-path>]` lines the harness reads (same convention Telegram
+ * photos use — the harness's vision path resolves them by absolute path).
+ * Oversized or undecodable images degrade to an explanatory line rather than
+ * throwing, so one bad paste never sinks the whole turn.
+ */
+async function persistAcpImages(
+  conversation: string,
+  images: { data: string; mimeType: string | undefined }[],
+  log: (msg: string) => void,
+): Promise<string[]> {
+  if (images.length === 0) return [];
+  const dir = inboxDir(conversation);
+  await mkdir(dir, { recursive: true });
+  const lines: string[] = [];
+  for (const img of images) {
+    try {
+      // ACP clients may send a bare base64 string or a full data: URL.
+      const b64 = img.data.includes(",") ? img.data.slice(img.data.indexOf(",") + 1) : img.data;
+      const bytes = Buffer.from(b64, "base64");
+      if (bytes.byteLength === 0) {
+        lines.push("[attached image but it was empty / undecodable]");
+        continue;
+      }
+      if (bytes.byteLength > ACP_MAX_IMAGE_BYTES) {
+        const mb = (bytes.byteLength / 1024 / 1024).toFixed(1);
+        lines.push(`[attached image too large to process: ${mb} MB > 10 MB cap]`);
+        continue;
+      }
+      const sha = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+      const path = join(dir, `${sha}${extensionFromMime(img.mimeType)}`);
+      await writeFile(path, bytes);
+      log(`saved pasted image (${bytes.byteLength} bytes) → ${path}`);
+      lines.push(`[attached: ${path}]`);
+    } catch (e) {
+      log(`failed to save pasted image: ${(e as Error).message}`);
+      lines.push("[attached image but it couldn't be saved]");
+    }
+  }
+  return lines;
 }

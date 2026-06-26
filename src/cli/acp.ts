@@ -29,7 +29,11 @@ const installZedCmd = defineCommand({
   },
   async run() {
     const result = installZed({ binaryPath: process.execPath });
-    process.exitCode = result.code;
+    // `installZed` is a one-shot synchronous file write with no pending async
+    // work, but importing the ACP server pulls in modules that hold the event
+    // loop open (env-reload + memory handles), so a natural exit hangs after
+    // printing success. Force a clean exit once the write is done.
+    process.exit(result.code);
   },
 });
 
