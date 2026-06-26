@@ -296,7 +296,6 @@ function createChatParticipant(
   participant.followupProvider = {
     provideFollowups(
       _result: PhantombotChatResult,
-      _context: vscode.ChatContext,
       _token: vscode.CancellationToken,
     ) {
       return [
@@ -411,7 +410,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Command to check phantombot status
   context.subscriptions.push(
     vscode.commands.registerCommand("phantombot.checkStatus", async () => {
-      const { spawn } = await import("child_process");
+      const { spawn } = require("child_process") as typeof import("child_process");
       const bin = resolvePhantombot();
 
       return new Promise<void>((resolve) => {
