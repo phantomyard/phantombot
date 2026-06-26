@@ -3,18 +3,22 @@
  *
  * The phantomchat analogue of `runTelegramServer`: consume the channel's
  * inbound stream (`channel.listen()`), apply the AUTH GATE, run the
- * channel-agnostic `runTurn`, accumulate the full reply, and publish it back
- * as a NIP-17 DM. It runs ALONGSIDE the Telegram listeners (see cli/run.ts).
+ * channel-agnostic `runTurn`, and stream the reply back as a sequence of
+ * NIP-17 bubbles. It runs ALONGSIDE the Telegram listeners (see cli/run.ts).
  *
  * Differences from Telegram, by design:
- *   - No streaming / segmenting. Nostr DMs are single messages, so we
- *     accumulate the whole reply and send it once (toolNarration OFF).
- *   - No slash commands, groups, voice, or attachments.
+ *   - Same streaming model as Telegram: the reply is split into markdown-aware
+ *     bubbles by the shared StreamSegmenter and progress narration
+ *     ("checking your calendar…") is sent as its own bubbles before tool calls
+ *     (toolNarration ON), so the user sees live progress instead of one long
+ *     wait. Each bubble is its own NIP-17 wrap.
+ *   - No slash commands, voice, or attachments (groups ARE supported).
  *   - The trust perimeter gates on the CRYPTOGRAPHIC sender (rumor.pubkey,
  *     surfaced as `senderId`), never on the envelope `from` field.
  */
 
 import type { Config } from "../../config.ts";
+import { DEFAULT_TELEGRAM_STREAMING } from "../../config.ts";
 import type { Harness } from "../../harnesses/types.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
@@ -25,6 +29,10 @@ import { makeScreener } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
 import { TELEGRAM_REPLY_INSTRUCTION, voiceUnavailableMessage } from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
+import {
+  splitIntoSegments,
+  StreamSegmenter,
+} from "../streamSegmenter.ts";
 import type { PhantomchatTransport } from "./transport.ts";
 import { sttSupport, transcribe } from "../../lib/audio.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
@@ -37,6 +45,12 @@ import { join } from "node:path";
 // Don't download absurdly large attachments. The harness reads from the inbox;
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+// Local sleep — spaces out consecutive bubbles so the PWA renders them as a
+// readable sequence rather than a single burst (mirrors core/engine.ts).
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Map a mime type to a file extension for the inbox filename (the envelope
 // carries no original name). Falls back to the mime subtype, then the kind.
@@ -344,10 +358,27 @@ export async function runPhantomchatServer(
       ? `phantomchat:group:${msg.groupId}`
       : `phantomchat:${senderHex}`;
 
-    let reply = "";
-    // Typing indicator. Unlike Telegram's streaming engine (which refreshes the
-    // indicator on every chunk), this loop sends a single message at the end —
-    // so we drive the typing tick ourselves. The PWA shows three-dots on each
+    const streaming =
+      input.config.telegramStreaming ?? DEFAULT_TELEGRAM_STREAMING;
+    const segmenterOptions = {
+      maxSentences: streaming.bubbleMaxSentences,
+      maxChars: streaming.bubbleMaxChars,
+    };
+    // Streaming accumulators — mirror core/engine.ts so the PWA gets the same
+    // progressive bubbles Telegram does. `streamedReply` is the running sum of
+    // text chunks; `consumedReplyChars` is the prefix already delivered as a
+    // final bubble OR classified as progress narration and dropped from the
+    // answer; `narrationBuffer` holds classified narration awaiting the timed
+    // flush; `finalSegmenter` is the markdown-aware live splitter.
+    let streamedReply = "";
+    let consumedReplyChars = 0;
+    let narrationBuffer = "";
+    let finalSegmenter = new StreamSegmenter(segmenterOptions);
+    let finalCandidateText = "";
+    let finalCandidateSentChars = 0;
+    let finalReply: string | undefined;
+    let lastNarrationFlushAt = Date.now();
+    // Typing indicator. The PWA shows three-dots on each
     // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
     // every 2s for the whole turn. A plain interval (rather than per-chunk)
     // keeps the dots alive through long tool-call gaps where runTurn emits no
@@ -374,7 +405,63 @@ export async function runPhantomchatServer(
         ? void transport.sendGroupTyping(msg.groupId, groupTypingMembers!)
         : void transport.sendTyping(senderHex);
     const firstTypingTick = setTimeout(sendTypingTick, 0);
-    const typingTimer = setInterval(sendTypingTick, 2000);
+
+    // Publish one chat bubble — a progress/narration line or a slice of the
+    // final answer — routed to the group broadcast or the 1:1 DM exactly like
+    // the final reply path. groupTypingMembers is the same set the reply path
+    // broadcasts to (inbound p-tags ∪ { sender }). Best-effort: a failed bubble
+    // is logged, not thrown, so one dropped progress line never aborts the turn.
+    const sendBubble = async (text: string): Promise<void> => {
+      if (text.trim().length === 0) return;
+      try {
+        if (msg.groupId) {
+          await transport.sendGroupMessage(
+            msg.groupId,
+            groupTypingMembers!,
+            text,
+          );
+        } else {
+          // transport.sendMessage NIP-17-wraps the plaintext to `senderHex`
+          // and publishes both wraps. conversationId === recipient hex pubkey.
+          await transport.sendMessage(senderHex, text);
+        }
+      } catch (e) {
+        log.warn("phantomchat: bubble send failed", {
+          error: (e as Error).message,
+          sender: senderHex.slice(0, 12) + "…",
+        });
+      }
+    };
+
+    // Flush coalesced progress narration on a clock (like core/engine.ts), not
+    // on every tool boundary — tool boundaries classify preceding text as
+    // narration; this decides when that text becomes a bubble. Driven by both
+    // the typing interval below and the chunk boundaries in the loop.
+    const flushNarration = async (force = false): Promise<void> => {
+      if (narrationBuffer.trim().length === 0) return;
+      const now = Date.now();
+      if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {
+        return;
+      }
+      const pending = narrationBuffer;
+      narrationBuffer = "";
+      lastNarrationFlushAt = now;
+      await sendBubble(pending);
+    };
+
+    const resetFinalCandidate = (): void => {
+      finalSegmenter = new StreamSegmenter(segmenterOptions);
+      finalCandidateText = "";
+      finalCandidateSentChars = 0;
+    };
+
+    // Refresh the typing dots every 2s AND flush any pending narration, so a
+    // long tool run (during which runTurn emits no chunks) still surfaces the
+    // "working on…" line buffered before the tool started.
+    const typingTimer = setInterval(() => {
+      sendTypingTick();
+      void flushNarration();
+    }, 2000);
     try {
       for await (const chunk of runTurn({
         persona: input.persona,
@@ -416,12 +503,42 @@ export async function runPhantomchatServer(
         // is on a phone-style chat client here too. No voice overlay (Nostr
         // DMs are text only).
         systemPromptSuffix: TELEGRAM_REPLY_INSTRUCTION,
-        // No live stream to fill: we send one message at the end, so pre-tool
-        // narration would just bloat the reply.
-        toolNarration: false,
+        // Pre-tool narration ON: the user now sees streamed bubbles, so a
+        // "checking your calendar…" line before a tool call usefully fills the
+        // silence — same as Telegram's text-out path.
+        toolNarration: true,
       })) {
-        if (chunk.type === "text") reply += chunk.text;
-        if (chunk.type === "done") reply = chunk.finalText;
+        if (chunk.type === "text") {
+          streamedReply += chunk.text;
+          finalCandidateText += chunk.text;
+          // Markdown-aware splitter: emit only completed sentence/block
+          // boundaries as bubbles; partial text stays buffered until it is.
+          const { segments } = finalSegmenter.push(chunk.text);
+          for (const segment of segments) {
+            await sendBubble(segment);
+            consumedReplyChars += segment.length;
+            finalCandidateSentChars += segment.length;
+            if (streaming.bubbleDelayMs > 0) {
+              await sleep(streaming.bubbleDelayMs);
+            }
+          }
+        }
+        if (chunk.type === "heartbeat") {
+          // Tool completed or model is thinking — a chance to surface narration.
+          await flushNarration();
+        }
+        if (chunk.type === "progress") {
+          // A tool is about to run. Text emitted since the last boundary that
+          // the splitter hasn't already sent as a final bubble is progress
+          // narration ("checking your calendar…"): buffer it for the timed
+          // flush, then consume it so it is not duplicated in the final answer.
+          const unsent = finalCandidateText.slice(finalCandidateSentChars);
+          if (unsent.trim().length > 0) narrationBuffer += unsent;
+          consumedReplyChars = streamedReply.length;
+          resetFinalCandidate();
+          await flushNarration();
+        }
+        if (chunk.type === "done") finalReply = chunk.finalText;
       }
     } catch (e) {
       log.warn("phantomchat: turn failed", {
@@ -443,38 +560,37 @@ export async function runPhantomchatServer(
       }
     }
 
-    const finalReply = reply.trim();
-    if (finalReply.length === 0) return;
+    // After live streaming, send only what the user hasn't seen yet. If the
+    // consumed prefix matches the authoritative reply, send just the suffix; if
+    // the harness reformatted (prefix mismatch), send the whole thing, accepting
+    // some duplication over truncating. Mirrors core/engine.ts. Empty outText is
+    // intentional silence — progress/final bubbles already delivered everything,
+    // or the reply was genuinely empty (original behaviour: stay silent).
+    //
+    // sendBubble routes group-broadcast vs 1:1 DM exactly like the old single-
+    // shot path did: a group reply is reconstructed from the inbound rumor
+    // (inbound p-tags ∪ { sender }) since the bridge holds no group DB, and
+    // sendGroupMessage adds our self-wrap and defensively drops our own hex.
+    const fullReply = finalReply ?? streamedReply;
+    let outText: string;
+    if (fullReply.trim().length === 0) {
+      outText = "";
+    } else if (
+      consumedReplyChars > 0 &&
+      fullReply.startsWith(streamedReply.slice(0, consumedReplyChars))
+    ) {
+      outText = fullReply.slice(consumedReplyChars);
+    } else {
+      outText = fullReply;
+    }
+    if (outText.trim().length === 0) return;
 
-    try {
-      if (msg.groupId) {
-        // GROUP REPLY. Broadcast back into the group instead of DMing the
-        // sender (the HQ bug was replying 1:1). The bridge holds no group DB, so
-        // the outbound member set is reconstructed from the inbound rumor:
-        //
-        //   full group  = inbound p-tags ∪ { sender }      (the PWA omits the
-        //                                                    sender from its own
-        //                                                    p-tags)
-        //   others (us excluded) = full group \ { us }
-        //
-        // wrapGroupMessage adds OUR self-wrap, so we pass it everyone-but-us.
-        // (sendGroupMessage defensively drops our own hex if it appears here.)
-        const others = new Set<string>(msg.groupMemberHexes ?? []);
-        // Add the original sender back: the PWA omits the sender from its own
-        // p-tags, so without this the sender wouldn't receive our reply.
-        others.add(senderHex.toLowerCase());
-        const memberHexes = [...others];
-        await transport.sendGroupMessage(msg.groupId, memberHexes, finalReply);
-      } else {
-        // transport.sendMessage NIP-17-wraps the plaintext to `senderHex` and
-        // publishes both wraps. conversationId === recipient hex pubkey.
-        await transport.sendMessage(senderHex, finalReply);
+    const finalSegments = splitIntoSegments(outText, segmenterOptions);
+    for (let i = 0; i < finalSegments.length; i++) {
+      await sendBubble(finalSegments[i]!);
+      if (i < finalSegments.length - 1 && streaming.bubbleDelayMs > 0) {
+        await sleep(streaming.bubbleDelayMs);
       }
-    } catch (e) {
-      log.warn("phantomchat: reply publish failed", {
-        error: (e as Error).message,
-        sender: senderHex.slice(0, 12) + "…",
-      });
     }
   };
 

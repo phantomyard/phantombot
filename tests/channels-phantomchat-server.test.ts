@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
-import { type Config } from "../src/config.ts";
+import {
+  type Config,
+  DEFAULT_TELEGRAM_STREAMING,
+  type TelegramStreamingSettings,
+} from "../src/config.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import { createPhantomchatChannel } from "../src/channels/phantomchat/channel.ts";
@@ -139,6 +143,12 @@ async function runOnce(opts: {
   text: string;
   tofu?: boolean;
   persistTrust?: (senderHex: string) => Promise<void>;
+  // Override the streaming config (bubble sizing / delays). Streaming tests set
+  // bubbleMaxSentences=1 + bubbleDelayMs=0 + narrationFlushMs=0 so each sentence
+  // is its own bubble and narration flushes at once — deterministic and fast.
+  streaming?: TelegramStreamingSettings;
+  // How long to let listen() enqueue + the handler drain before aborting.
+  waitMs?: number;
 }): Promise<FakePool> {
   const botHex = getPublicKey(opts.botSk);
   const pool = new FakePool();
@@ -165,9 +175,12 @@ async function runOnce(opts: {
   });
   const { wraps } = wrapNip17Message(opts.senderSk, botHex, envelope);
 
+  const config = baseConfig();
+  if (opts.streaming) config.telegramStreaming = opts.streaming;
+
   const ac = new AbortController();
   const serverPromise = runPhantomchatServer({
-    config: baseConfig(),
+    config,
     memory,
     harnesses: [opts.harness],
     agentDir,
@@ -185,7 +198,7 @@ async function runOnce(opts: {
   pool.feed(wraps[0] as NTNostrEvent);
   // Give the microtask queue a tick so the channel enqueues the message before
   // we abort the listen loop.
-  await new Promise((r) => setTimeout(r, 80));
+  await new Promise((r) => setTimeout(r, opts.waitMs ?? 80));
   ac.abort();
   await serverPromise;
 
@@ -793,5 +806,223 @@ describe("phantomchat group routing (HQ bug)", () => {
     expect(replyWrap).toBeDefined();
     const reply = await unwrapV2(replyWrap! as NTNostrEvent, senderSk);
     expect(reply.tags.find((t) => t[0] === "group")).toBeUndefined();
+  });
+});
+
+/**
+ * Streaming progress bubbles (PR #197). The phantomchat channel now consumes
+ * runTurn's chunks the way Telegram does: text is split into markdown-aware
+ * bubbles by the shared StreamSegmenter, pre-tool narration is flushed as its
+ * own bubble, and the post-loop send emits only the not-yet-seen suffix.
+ *
+ * The existing auth/group tests above use single-`done` scripts, which produce
+ * exactly one bubble through the same path. These exercise the multi-chunk
+ * streaming behaviour directly. All use a 1-sentence-per-bubble config with no
+ * delays so each sentence is its own bubble and narration flushes at once —
+ * deterministic and fast.
+ */
+const STREAM_ONE_PER_SENTENCE: TelegramStreamingSettings = {
+  ...DEFAULT_TELEGRAM_STREAMING,
+  bubbleMaxSentences: 1,
+  bubbleDelayMs: 0,
+  narrationFlushMs: 0,
+};
+
+/** Trimmed contents of the v2 reply bubbles a DM recipient can unwrap, in order. */
+async function dmBubbles(
+  pool: FakePool,
+  recipientSk: Uint8Array,
+): Promise<string[]> {
+  const v2 = pool.published.filter(
+    (e) =>
+      e.kind === 1059 && e.tags.some((t) => t[0] === "v" && t[1] === "pc-v2"),
+  );
+  const out: string[] = [];
+  for (const w of v2) {
+    const r = await unwrapV2(w as NTNostrEvent, recipientSk);
+    out.push(r.content.trim());
+  }
+  return out;
+}
+
+describe("phantomchat streaming bubbles", () => {
+  test("multi-sentence reply streams as one bubble per sentence", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "First sentence. Second sentence. Third sentence." },
+      {
+        type: "done",
+        finalText: "First sentence. Second sentence. Third sentence.",
+      },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "go",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    expect(await dmBubbles(pool, senderSk)).toEqual([
+      "First sentence.",
+      "Second sentence.",
+      "Third sentence.",
+    ]);
+  });
+
+  test("text before a progress chunk is flushed as a separate narration bubble", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // "Checking your calendar" has no sentence terminator, so the segmenter
+    // never sends it as a final bubble. The progress chunk classifies it as
+    // narration and the (unthrottled) flush sends it as its own bubble.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Checking your calendar" },
+      { type: "progress", note: "running calendar tool" },
+      { type: "text", text: "You are free at 3pm." },
+      {
+        type: "done",
+        finalText: "Checking your calendarYou are free at 3pm.",
+      },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "am I free at 3?",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    // Narration bubble first, answer second — and the narration is consumed,
+    // not duplicated into the final answer.
+    expect(await dmBubbles(pool, senderSk)).toEqual([
+      "Checking your calendar",
+      "You are free at 3pm.",
+    ]);
+  });
+
+  test("final send emits only the unseen suffix (no duplicated bubbles)", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // "First. " is streamed live; the done chunk's authoritative finalText is
+    // longer. The post-loop send must emit only "Second.", not the whole reply.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "First. " },
+      { type: "done", finalText: "First. Second." },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "go",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    expect(await dmBubbles(pool, senderSk)).toEqual(["First.", "Second."]);
+  });
+
+  test("group reply streams as multiple group broadcasts", async () => {
+    const andrewSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const memberSk = generateSecretKey();
+    const andrewHex = getPublicKey(andrewSk);
+    const botHex = getPublicKey(botSk);
+    const memberHex = getPublicKey(memberSk);
+    const groupId = "hq-stream-test";
+
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Hello team. Working on it now." },
+      { type: "done", finalText: "Hello team. Working on it now." },
+    ]);
+
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+
+    const payload = JSON.stringify({
+      content: "status?",
+      type: "text",
+      id: `grp-${Date.now()}-stream`,
+      timestamp: Date.now(),
+    });
+    const { wraps } = wrapGroupMessage(
+      andrewSk,
+      [botHex, memberHex],
+      payload,
+      groupId,
+    );
+    let inboundForBot: NTNostrEvent | undefined;
+    for (const w of wraps) {
+      try {
+        unwrapNip17Message(w as NTNostrEvent, botSk);
+        inboundForBot = w as NTNostrEvent;
+        break;
+      } catch {
+        /* not ours */
+      }
+    }
+    expect(inboundForBot).toBeDefined();
+
+    const config = baseConfig();
+    config.telegramStreaming = STREAM_ONE_PER_SENTENCE;
+
+    const ac = new AbortController();
+    const serverPromise = runPhantomchatServer({
+      config,
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      channel,
+      secretKey: botSk,
+      allowedHex: [andrewHex],
+      oneShot: true,
+      signal: ac.signal,
+    });
+    pool.feed(inboundForBot!);
+    await new Promise((r) => setTimeout(r, 150));
+    ac.abort();
+    await serverPromise;
+
+    // Two sentences → two group broadcasts. Each broadcast is one wrap per
+    // OTHER member (Andrew + member) + Lena's self-wrap = 3 wraps, so two
+    // broadcasts = 6 kind-1059 reply wraps.
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
+    expect(replyWraps.length).toBe(6);
+
+    // Andrew can unwrap exactly one wrap per broadcast; the two he reads are
+    // the two sentences, in order, each carrying the group tag.
+    const andrewContents: string[] = [];
+    for (const w of replyWraps) {
+      try {
+        const m = unwrapNip17Message(w as NTNostrEvent, andrewSk);
+        expect(m.tags.find((t) => t[0] === "group")).toEqual([
+          "group",
+          groupId,
+        ]);
+        andrewContents.push(JSON.parse(m.content).content.trim());
+      } catch {
+        /* not for Andrew */
+      }
+    }
+    expect(andrewContents).toEqual(["Hello team.", "Working on it now."]);
   });
 });
