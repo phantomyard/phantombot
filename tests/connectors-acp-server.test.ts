@@ -547,6 +547,11 @@ describe("ACP server — session/load", () => {
     const reply = out.objects().find((o) => o.id === 1);
     expect(reply).toBeDefined();
     expect("result" in reply).toBe(true);
+    // The result MUST be a LoadSessionResponse struct, never null — Zed's Rust
+    // client fails deserialization on null ("expected struct
+    // LoadSessionResponse"), killing the agent on startup / reopening a thread.
+    expect(reply.result).not.toBeNull();
+    expect(typeof reply.result).toBe("object");
   });
 });
 

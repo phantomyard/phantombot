@@ -194,7 +194,12 @@ export async function runAcpServer(
             };
       send(update);
     }
-    send(jsonRpcResult(id, null));
+    // ACP requires session/load to return a LoadSessionResponse struct, NOT
+    // null. Zed's Rust client deserializes the result into the struct and
+    // fails hard on null ("invalid type: null, expected struct
+    // LoadSessionResponse"), which kills the agent on startup and whenever an
+    // old thread is reopened. `modes: null` is the valid empty form.
+    send(jsonRpcResult(id, { modes: null }));
   }
 
   async function handleSessionPrompt(id: JsonRpcId, params: unknown): Promise<void> {
