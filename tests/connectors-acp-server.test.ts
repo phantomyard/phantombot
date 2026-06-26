@@ -160,7 +160,7 @@ describe("ACP server — initialize", () => {
     expect(reply.result.authMethods).toEqual([]);
     expect(reply.result.agentCapabilities.loadSession).toBe(true);
     expect(reply.result.agentCapabilities.promptCapabilities).toEqual({
-      image: false,
+      image: true,
       audio: false,
       embeddedContext: true,
     });
@@ -314,6 +314,129 @@ describe("ACP server — session/prompt", () => {
     // Resource lands in the system prompt as labelled reference data.
     expect(req.systemPrompt).toContain("reference data");
     expect(req.systemPrompt).toContain("rm -rf");
+  });
+
+  test("pasted image is decoded to the inbox and handed to the harness as [attached: <path>]", async () => {
+    // Inbox resolves under XDG_DATA_HOME — pin it into the temp workdir so the
+    // test writes nothing to the real inbox.
+    const prevXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg");
+    try {
+      const harness = new ScriptedHarness("h", () => [
+        { type: "done", finalText: "I see it" },
+      ]);
+      const cwd = "/home/dev/proj-img";
+      const conversation = conversationForCwd(cwd);
+      const input = new PassThrough();
+      const captured = new CapturingOut();
+      const done = runAcpServer({
+        config,
+        memory,
+        harnesses: [harness],
+        input,
+        output: captured as any,
+        logErr: new CapturingErr(),
+      });
+      input.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "session/new",
+          params: { cwd },
+        }) + "\n",
+      );
+      await new Promise((r) => setImmediate(r));
+      const sid = captured.objects().find((o) => o.id === 1).result.sessionId;
+      // "hello" base64 — small, valid PNG-labelled payload.
+      const b64 = Buffer.from("hello-image-bytes").toString("base64");
+      input.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "session/prompt",
+          params: {
+            sessionId: sid,
+            prompt: [
+              { type: "text", text: "what is this?" },
+              { type: "image", data: b64, mimeType: "image/png" },
+            ],
+          },
+        }) + "\n",
+      );
+      await new Promise((r) => setImmediate(r));
+      input.end();
+      await done;
+
+      const req = harness.lastRequest!;
+      // The harness gets the typed text AND a path reference to the saved image.
+      expect(req.userMessage).toContain("what is this?");
+      expect(req.userMessage).toMatch(/\[attached: .*\.png\]/);
+      // Raw base64 is NEVER concatenated into the instruction.
+      expect(req.userMessage).not.toContain(b64);
+      // The file actually landed in the per-workspace inbox and round-trips.
+      const m = req.userMessage.match(/\[attached: (.*\.png)\]/);
+      expect(m).not.toBeNull();
+      const savedPath = m![1]!;
+      expect(savedPath).toContain(join("phantombot", "inbox", conversation));
+      const { readFile } = await import("node:fs/promises");
+      expect((await readFile(savedPath)).toString()).toBe("hello-image-bytes");
+
+      const promptReply = captured.objects().find((o) => o.id === 2);
+      expect(promptReply.result.stopReason).toBe("end_turn");
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdg;
+    }
+  });
+
+  test("image-only prompt (no typed text) is accepted, not rejected as empty", async () => {
+    const prevXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(workdir, "xdg2");
+    try {
+      const harness = new ScriptedHarness("h", () => [
+        { type: "done", finalText: "ok" },
+      ]);
+      const cwd = "/home/dev/proj-imgonly";
+      const input = new PassThrough();
+      const captured = new CapturingOut();
+      const done = runAcpServer({
+        config,
+        memory,
+        harnesses: [harness],
+        input,
+        output: captured as any,
+        logErr: new CapturingErr(),
+      });
+      input.write(
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }) + "\n",
+      );
+      await new Promise((r) => setImmediate(r));
+      const sid = captured.objects().find((o) => o.id === 1).result.sessionId;
+      input.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "session/prompt",
+          params: {
+            sessionId: sid,
+            prompt: [
+              { type: "image", data: Buffer.from("x").toString("base64"), mimeType: "image/jpeg" },
+            ],
+          },
+        }) + "\n",
+      );
+      await new Promise((r) => setImmediate(r));
+      input.end();
+      await done;
+
+      const promptReply = captured.objects().find((o) => o.id === 2);
+      // Not an INVALID_PARAMS error — the attachment carries the content.
+      expect(promptReply.result?.stopReason).toBe("end_turn");
+      expect(harness.lastRequest?.userMessage).toMatch(/\[attached: .*\.jpg\]/);
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prevXdg;
+    }
   });
 });
 

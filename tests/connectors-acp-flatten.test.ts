@@ -3,7 +3,8 @@
  *
  * `text` blocks become the trusted `userMessage`; `resource` / `resource_link`
  * blocks (Zed @-mentions) land in labelled reference context — NEVER
- * concatenated into the instruction. image/audio are ignored in v1.
+ * concatenated into the instruction. `image` blocks are collected (decoded to
+ * the inbox by the caller); `audio` is still ignored.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -62,15 +63,29 @@ describe("flattenPromptBlocks", () => {
     expect(referenceContext).toContain("# Title");
   });
 
-  test("image / audio blocks are ignored in v1", () => {
+  test("image blocks are collected (data is NOT merged into the instruction); audio ignored", () => {
     const blocks: AcpContentBlock[] = [
       { type: "text", text: "hi" },
-      { type: "image", data: "base64...", mimeType: "image/png" },
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
       { type: "audio", data: "base64...", mimeType: "audio/wav" },
     ];
-    const { userMessage, referenceContext } = flattenPromptBlocks(blocks);
+    const { userMessage, referenceContext, images } = flattenPromptBlocks(blocks);
     expect(userMessage).toBe("hi");
     expect(referenceContext).toBeUndefined();
+    // Image DATA stays out of the trusted instruction.
+    expect(userMessage).not.toContain("aGVsbG8=");
+    expect(images).toHaveLength(1);
+    expect(images[0]).toEqual({ data: "aGVsbG8=", mimeType: "image/png" });
+  });
+
+  test("image block with empty/absent data is skipped", () => {
+    const blocks: AcpContentBlock[] = [
+      { type: "text", text: "look" },
+      { type: "image", data: "", mimeType: "image/png" },
+      { type: "image", mimeType: "image/png" },
+    ];
+    const { images } = flattenPromptBlocks(blocks);
+    expect(images).toHaveLength(0);
   });
 
   test("no text blocks → empty userMessage (caller rejects)", () => {
