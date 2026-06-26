@@ -26,6 +26,7 @@ describe("phantombot CLI dispatcher", () => {
       "editor-context-server",
       "embedding",
       "env",
+      "extension",
       "harness",
       "heartbeat",
       "init",
