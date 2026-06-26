@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "jsonc-parser";
 
-import { installZed } from "../src/connectors/acp/installZed.ts";
+import {
+  defaultZedSettingsPath,
+  installZed,
+} from "../src/connectors/acp/installZed.ts";
 
 class Sink {
   buf = "";
@@ -36,6 +39,30 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
+});
+
+describe("defaultZedSettingsPath", () => {
+  const saved = process.env.XDG_CONFIG_HOME;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = saved;
+  });
+
+  test("resolves under ~/.config/zed on every platform (incl. macOS)", () => {
+    delete process.env.XDG_CONFIG_HOME;
+    const p = defaultZedSettingsPath();
+    // The macOS bug was returning Library/Application Support — Zed never reads
+    // that. It must be the .config/zed path everywhere.
+    expect(p.endsWith(join(".config", "zed", "settings.json"))).toBe(true);
+    expect(p).not.toContain("Application Support");
+  });
+
+  test("honours XDG_CONFIG_HOME", () => {
+    process.env.XDG_CONFIG_HOME = "/tmp/xdg-test";
+    expect(defaultZedSettingsPath()).toBe(
+      join("/tmp/xdg-test", "zed", "settings.json"),
+    );
+  });
 });
 
 describe("installZed — JSONC preservation", () => {

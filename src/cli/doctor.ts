@@ -46,6 +46,11 @@ import {
   routingExtensionStatus,
 } from "../lib/piExtensionProvision.ts";
 import { currentPlatform } from "../lib/platform.ts";
+import {
+  editorConnectorBroken,
+  reconcileEditorConnectors,
+  type EditorConnectorResult,
+} from "../connectors/acp/autoInstall.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
@@ -194,6 +199,16 @@ export interface DoctorReport {
     dir: string;
     repaired?: boolean;
   };
+  /**
+   * ACP editor registrations (Zed today; VS Code when PR2 lands). One entry per
+   * supported editor: `not-detected` (editor not installed), `current` (already
+   * registered with this binary), `registered`/`updated` (reconciled this run),
+   * `stale` (needs work but --no-repair so nothing written), `error` (e.g.
+   * unparseable settings — the data-loss guard refused to touch it). Gated to
+   * the real `phantombot` binary so dev/test never writes the dev box's editor
+   * settings.
+   */
+  editorConnectors?: EditorConnectorResult[];
   repair_needed: boolean;
   repair_reason?: string;
   repair_triggered: boolean;
@@ -247,6 +262,16 @@ export interface RunDoctorInput {
   checkPiExtension?:
     | false
     | (() => Promise<DoctorReport["piExtension"] | undefined>);
+  /**
+   * Test seam for the ACP editor-connector reconcile. Pass `false` to skip.
+   * Pass a function (it receives whether repair is enabled) to substitute a
+   * fake report, bypassing the binary gate and any real settings writes. In
+   * production this is undefined and doctor reconciles the real editor settings
+   * (writing when repair is on, reporting only when --no-repair).
+   */
+  checkEditorConnectors?:
+    | false
+    | ((repair: boolean) => DoctorReport["editorConnectors"]);
 }
 
 function decideRepair(
@@ -456,6 +481,24 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     };
   }
 
+  // ACP editor connectors. With repair on (the default), doctor actively
+  // (re)registers phantombot into any detected editor — the same self-heal as
+  // the pi extension / systemd checks, and a second entry point besides
+  // startup so Andrew never runs `acp install` by hand. With --no-repair it
+  // only reports drift. Gated to the real `phantombot` binary so dev/test never
+  // writes the dev box's editor settings.
+  let editorConnectors: DoctorReport["editorConnectors"];
+  if (input.checkEditorConnectors === false) {
+    // explicitly skipped by a test
+  } else if (input.checkEditorConnectors) {
+    editorConnectors = input.checkEditorConnectors(repair);
+  } else if (basename(process.execPath) === "phantombot") {
+    editorConnectors = reconcileEditorConnectors({
+      binaryPath: process.execPath,
+      repair,
+    });
+  }
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -493,6 +536,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ...(timersReport ? { timers: timersReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
     ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
+    ...(editorConnectors ? { editorConnectors } : {}),
     repair_needed: needed,
     repair_reason: reason,
     repair_triggered: repairTriggered,
@@ -523,6 +567,14 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     !!piExtensionReport &&
     piExtensionReport.drifted &&
     !piExtensionReport.repaired;
+  // A detected editor that's still un-registered (or whose settings couldn't be
+  // parsed) after this run is a health failure — same diagnostic-only exit code
+  // as the checks above (it never gates the daemon; run.ts only logs it).
+  // `stale` only appears under --no-repair; `error` means the data-loss guard
+  // refused to touch a malformed settings file. `registered`/`updated` are
+  // successful heals, not failures.
+  const editorConnectorsBroken =
+    !!editorConnectors && editorConnectors.some(editorConnectorBroken);
   const exitCode =
     needed && !repairTriggered
       ? 1
@@ -534,7 +586,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
             ? 1
             : piExtensionBroken
               ? 1
-              : 0;
+              : editorConnectorsBroken
+                ? 1
+                : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
@@ -709,6 +763,39 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         out.write(
           `managed capability-routing extension present and current at ${r.dir}\n`,
         );
+      }
+    }
+  }
+
+  if (editorConnectors && editorConnectors.length > 0) {
+    for (const e of editorConnectors) {
+      const ok = !editorConnectorBroken(e);
+      out.write(`  editor (${e.editor}): ${tick(ok)} — `);
+      switch (e.action) {
+        case "not-detected":
+          out.write("not installed on this machine; nothing to register\n");
+          break;
+        case "current":
+          out.write(`registered and current in ${e.settingsPath}\n`);
+          break;
+        case "registered":
+          out.write(`registered phantombot in ${e.settingsPath}\n`);
+          break;
+        case "updated":
+          out.write(
+            `updated phantombot registration (binary path changed) in ${e.settingsPath}\n`,
+          );
+          break;
+        case "stale":
+          out.write(
+            `registration missing or out of date in ${e.settingsPath} — run \`phantombot doctor\` (without --no-repair) or restart to fix\n`,
+          );
+          break;
+        case "error":
+          out.write(
+            `could not register in ${e.settingsPath}${e.error ? ` — ${e.error}` : ""}\n`,
+          );
+          break;
       }
     }
   }
