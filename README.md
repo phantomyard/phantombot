@@ -24,7 +24,6 @@ Supported harnesses:
 - [Command Reference](#command-reference)
 - [Telegram](#telegram)
 - [PhantomChat (Alpha)](#phantomchat-alpha)
-- [Editor Extensions](#editor-extensions)
 - [Group Chats](#group-chats)
 - [Voice Replies](#voice-replies)
 - [Scheduled Tasks](#scheduled-tasks)
@@ -200,8 +199,6 @@ Interactive setup:
 | `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel — **Alpha** |
 | `phantombot voice` | Configure TTS/STT providers |
 | `phantombot embedding` | Configure semantic memory |
-| `phantombot extension vscode` | Install the VS Code chat participant extension |
-| `phantombot extension zed` | Configure Zed's context server for Phantombot |
 
 Runtime:
 
@@ -349,107 +346,6 @@ sender** (`rumor.pubkey`), never the attacker-controllable envelope `from`.
 Relays come from a shared canonical list and can be edited by re-running the
 command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
 for the app itself and the wire-protocol details.
-
-## Editor Extensions
-
-Phantombot connects to VS Code and Zed, routing your editor's assistant through
-your agent — same persona, memory, tools, and model routing as your Telegram
-bot.
-
-Why an extension and not a naked harness plugin: Phantombot's persona already
-knows your preferences, your codebase decisions, and your standards. The editor
-doesn't need to re-explain context every turn — your agent carries it. That
-means fewer prompts, less context repetition, and near-zero hallucinations on
-codebase-specific questions because the agent has owner-trained judgment about
-what's right and wrong for your project.
-
-### Quick Install
-
-```bash
-# VS Code
-phantombot extension vscode
-
-# Zed
-phantombot extension zed
-```
-
-### VS Code
-
-The `phantombot extension vscode` command downloads and installs the Phantombot
-chat participant. After installation:
-
-1. Restart VS Code.
-2. Open the Chat panel (`Cmd+Shift+I` or `Ctrl+Shift+I`).
-3. Type `@phantombot` to talk to your agent.
-
-The extension automatically harvests context from your active file, selection,
-diagnostics, and open workspace files. Slash commands available:
-
-- `/code` — code-focused model routing
-- `/vision` — image/screenshot analysis
-- `/fast` — lightweight questions
-- `/reason` — architecture and deep reasoning
-
-Configuration in VS Code settings:
-
-| Setting | Default | Purpose |
-|---|---|---|
-| `phantombot.persona` | `""` | Persona override |
-| `phantombot.path` | `"phantombot"` | Path to the phantombot binary |
-| `phantombot.autoContext` | `true` | Auto-include file context and diagnostics |
-| `phantombot.maxContextFiles` | `10` | Max open files in workspace context |
-
-### Zed
-
-The `phantombot extension zed` command configures Zed's context server to route
-through your Phantombot agent. After installation:
-
-1. Restart Zed.
-2. Open the Assistant Panel (`Cmd+?` or `Ctrl+?`).
-3. Phantombot tools appear automatically.
-
-Available tools:
-
-- **phantombot_ask** — general questions through your agent
-- **phantombot_explain** — explain selected code
-- **phantombot_fix** — fix code issues with diagnostics
-- **phantombot_review** — code review for quality, bugs, security
-
-### How It Works
-
-```
-Editor Assistant Panel
-        │
-        │  stdio (MCP protocol or Chat Participant API)
-        ▼
-Phantombot (phantombot editor)
-        │
-        │  Full persona + memory + harness chain
-        │  trusted: true (local CLI = same OS user)
-        ▼
-Response streamed back to editor
-```
-
-The extension is a thin context-gathering surface. All intelligence — memory,
-tools, persona, model routing — lives in the phantombot binary. The editor
-extension never sees your credentials or harness keys.
-
-### Model Routing
-
-Phantombot automatically picks the right model based on content:
-
-- Screenshots/images → vision model
-- Code edits → coding model  
-- Simple questions → fast model
-- Architecture → reasoning model
-
-You can also hint via slash commands (`/code`, `/vision`, `/fast`, `/reason`).
-
-### Requirements
-
-- Phantombot installed and on PATH (`phantombot --version`)
-- At least one harness configured (`phantombot harness`)
-- VS Code 1.89+ (for chat participant API) or Zed 0.135+ (for context servers)
 
 ## Group Chats
 

@@ -1,7 +1,0 @@
-{
-  "name": "Phantombot",
-  "version": "0.1.0",
-  "schema_version": 1,
-  "description": "Route Zed's assistant through your Phantombot agent — same persona, memory, tools, and model routing as your Telegram/PhantomChat bot.",
-  "repository": "https://github.com/phantomyard/phantombot"
-}
