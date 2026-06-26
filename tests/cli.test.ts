@@ -22,6 +22,8 @@ describe("phantombot CLI dispatcher", () => {
     expect(names).toEqual([
       "ask",
       "doctor",
+      "editor",
+      "editor-context-server",
       "embedding",
       "env",
       "harness",

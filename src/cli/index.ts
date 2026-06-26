@@ -40,6 +40,8 @@ import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import voiceCmd from "./voice.ts";
 import replyModeCmd from "./replyMode.ts";
+import editorCmd from "./editor.ts";
+import editorContextServerCmd from "./editorContextServer.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -70,5 +72,7 @@ export const mainCommand = defineCommand({
     update: updateCmd,
     voice: voiceCmd,
     "reply-mode": replyModeCmd,
+    editor: editorCmd,
+    "editor-context-server": editorContextServerCmd,
   },
 });
