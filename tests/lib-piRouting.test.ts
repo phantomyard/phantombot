@@ -211,6 +211,22 @@ describe("resolvePiApiKeyWrite — blank key only kept when provider unchanged",
     });
   });
 
+  test("THE REGRESSION: undefined key (TUI blank submit) keeps, never throws", () => {
+    // @clack returns undefined (not "") when the user submits a blank line, so the
+    // resolver must treat undefined/null as blank — an unguarded .trim() threw
+    // "undefined is not an object" and forced the user to retype the key every run.
+    expect(resolvePiApiKeyWrite(undefined, "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+    expect(resolvePiApiKeyWrite(null, "openrouter", "openrouter")).toEqual({
+      action: "keep",
+    });
+    // undefined key + switched provider still clears the stale key.
+    expect(resolvePiApiKeyWrite(undefined, "openai", "openrouter")).toEqual({
+      action: "clear",
+    });
+  });
+
   test("THE REGRESSION: blank key + switched provider clears the stale key", () => {
     // Operator had openrouter + an openrouter key, reruns the wizard, switches to
     // openai and leaves the key blank. The old key must NOT survive — threading it
