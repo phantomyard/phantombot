@@ -14,6 +14,7 @@ import {
   HttpTelegramTransport,
   runTelegramServer,
 } from "../channels/telegram.ts";
+import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
@@ -521,7 +522,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         const displayName =
           spec.persona.charAt(0).toUpperCase() + spec.persona.slice(1);
         void transport
-          .publishProfile({ name: displayName, bot: true })
+          // Advertise the same slash commands the channel handles (the
+          // setMyCommands analogue) so the PWA can render the /-typeahead menu.
+          .publishProfile({
+            name: displayName,
+            bot: true,
+            commands: TELEGRAM_BOT_COMMANDS,
+          })
           .then(() =>
             out.write(
               `  [phantomchat:${spec.persona}] published profile '${displayName}' (bot)\n`,

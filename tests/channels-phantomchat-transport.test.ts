@@ -152,6 +152,40 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(meta.name).toBe("Lena");
     expect(meta.display_name).toBe("Lena");
     expect(meta.bot).toBe(true);
+    // No commands passed → no `commands` key (the PWA shows no menu).
+    expect("commands" in meta).toBe(false);
+  });
+
+  test("publishProfile embeds the advertised slash commands in the kind-0", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const commands = [
+      { command: "help", description: "Show this command list" },
+      { command: "stop", description: "Abort the current turn" },
+    ];
+    await transport.publishProfile({ name: "Lena", bot: true, commands });
+
+    const meta = JSON.parse(published[0]!.content);
+    // The PWA reads `commands` (bare names, no leading slash — bot_info shape)
+    // and renders the /-typeahead menu from it.
+    expect(meta.commands).toEqual(commands);
   });
 
   test("sendTyping with stop=true publishes the STOP content marker", async () => {

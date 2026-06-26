@@ -344,16 +344,34 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   /**
    * Publish this identity's NIP-01 kind-0 profile. The content is the standard
    * metadata JSON: `name`/`display_name` (so the PWA shows e.g. "Lena" not the
-   * npub) plus NIP-24 `bot: true` to mark the account automated. Signed with our
-   * key and published to all relays the same best-effort way as a wrap.
+   * npub) plus NIP-24 `bot: true` to mark the account automated, and optionally
+   * a `commands` array so the PWA can render the slash-command `/`-typeahead
+   * menu (the decentralized setMyCommands). Signed with our key and published to
+   * all relays the same best-effort way as a wrap.
    */
-  async publishProfile(metadata: { name: string; bot?: boolean; about?: string }): Promise<void> {
+  async publishProfile(metadata: {
+    name: string;
+    bot?: boolean;
+    about?: string;
+    /**
+     * Slash commands to advertise, `{command, description}` with the bare
+     * command name (no leading slash) — the same shape Telegram's setMyCommands
+     * / bot_info uses. Published in the kind-0 content under a `commands` key so
+     * a client (the PhantomChat PWA) can render the `/`-typeahead menu. This is
+     * the decentralized analogue of setMyCommands: the bot owns the list. kind-0
+     * content is freeform JSON, so other Nostr clients simply ignore the field.
+     */
+    commands?: Array<{ command: string; description: string }>;
+  }): Promise<void> {
     const content = JSON.stringify({
       name: metadata.name,
       display_name: metadata.name,
       // NIP-24: flags the account as (partly) automated so clients can badge it.
       bot: metadata.bot ?? true,
       ...(metadata.about ? { about: metadata.about } : {}),
+      ...(metadata.commands && metadata.commands.length > 0
+        ? { commands: metadata.commands }
+        : {}),
     });
     const event = finalizeEvent(
       { kind: 0, created_at: Math.floor(Date.now() / 1000), tags: [], content },
