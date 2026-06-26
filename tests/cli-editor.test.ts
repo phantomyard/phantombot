@@ -106,17 +106,19 @@ describe("editor", () => {
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it("includes active file context in enriched message", async () => {
+  it("passes user message as-is (instruction) and context separately (data)", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "editor-test-"));
     await setupPersona(tmp);
     const { sink } = captureSink();
 
-    let receivedMessage = "";
+    let receivedUserMessage = "";
+    let receivedSystemPrompt = "";
     const capturingHarness = {
       id: "fake",
       available: async () => true,
       async *invoke(req: any) {
-        receivedMessage = req.userMessage;
+        receivedUserMessage = req.userMessage;
+        receivedSystemPrompt = req.systemPrompt ?? "";
         yield { type: "text" as const, text: "Got it" };
         yield { type: "done" as const, finalText: "Got it", meta: {} };
       },
@@ -137,24 +139,29 @@ describe("editor", () => {
       err: sink,
     });
 
-    expect(receivedMessage).toContain("src/app.ts");
-    expect(receivedMessage).toContain("typescript");
-    expect(receivedMessage).toContain("what's wrong here?");
+    // User message is pure — just what the user typed
+    expect(receivedUserMessage).toBe("what's wrong here?");
+    // Context is in systemPrompt (via systemPromptSuffix) — NOT in userMessage
+    expect(receivedSystemPrompt).toContain("src/app.ts");
+    expect(receivedSystemPrompt).toContain("typescript");
+    expect(receivedSystemPrompt).toContain("reference data");
 
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it("includes diagnostics in enriched message", async () => {
+  it("includes diagnostics in context (not in user message)", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "editor-test-"));
     await setupPersona(tmp);
     const { sink } = captureSink();
 
-    let receivedMessage = "";
+    let receivedUserMessage = "";
+    let receivedSystemPrompt = "";
     const capturingHarness = {
       id: "fake",
       available: async () => true,
       async *invoke(req: any) {
-        receivedMessage = req.userMessage;
+        receivedUserMessage = req.userMessage;
+        receivedSystemPrompt = req.systemPrompt ?? "";
         yield { type: "text" as const, text: "Fixed" };
         yield { type: "done" as const, finalText: "Fixed", meta: {} };
       },
@@ -179,8 +186,11 @@ describe("editor", () => {
       err: sink,
     });
 
-    expect(receivedMessage).toContain("Type 'string' is not assignable");
-    expect(receivedMessage).toContain("ERROR");
+    // User message is pure
+    expect(receivedUserMessage).toBe("fix this");
+    // Diagnostics are in context
+    expect(receivedSystemPrompt).toContain("Type 'string' is not assignable");
+    expect(receivedSystemPrompt).toContain("ERROR");
 
     await rm(tmp, { recursive: true, force: true });
   });
@@ -262,17 +272,19 @@ describe("editor", () => {
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it("model hint is included in enriched message", async () => {
+  it("model hint appears in context (not as instruction)", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "editor-test-"));
     await setupPersona(tmp);
     const { sink } = captureSink();
 
-    let receivedMessage = "";
+    let receivedUserMessage = "";
+    let receivedSystemPrompt = "";
     const capturingHarness = {
       id: "fake",
       available: async () => true,
       async *invoke(req: any) {
-        receivedMessage = req.userMessage;
+        receivedUserMessage = req.userMessage;
+        receivedSystemPrompt = req.systemPrompt ?? "";
         yield { type: "text" as const, text: "ok" };
         yield { type: "done" as const, finalText: "ok", meta: {} };
       },
@@ -289,22 +301,28 @@ describe("editor", () => {
       err: sink,
     });
 
-    expect(receivedMessage).toContain("vision");
+    // User message is pure
+    expect(receivedUserMessage).toBe("look at this screenshot");
+    // Model hint is in context as a suggestion
+    expect(receivedSystemPrompt).toContain("vision");
+    expect(receivedSystemPrompt).toContain("consider using");
 
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it("attached files appear in enriched message", async () => {
+  it("attached files appear in context (not in user message)", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "editor-test-"));
     await setupPersona(tmp);
     const { sink } = captureSink();
 
-    let receivedMessage = "";
+    let receivedUserMessage = "";
+    let receivedSystemPrompt = "";
     const capturingHarness = {
       id: "fake",
       available: async () => true,
       async *invoke(req: any) {
-        receivedMessage = req.userMessage;
+        receivedUserMessage = req.userMessage;
+        receivedSystemPrompt = req.systemPrompt ?? "";
         yield { type: "text" as const, text: "ok" };
         yield { type: "done" as const, finalText: "ok", meta: {} };
       },
@@ -323,8 +341,11 @@ describe("editor", () => {
       err: sink,
     });
 
-    expect(receivedMessage).toContain("config.toml");
-    expect(receivedMessage).toContain("port = 8080");
+    // User message is pure
+    expect(receivedUserMessage).toBe("review this config");
+    // Attached file is in context
+    expect(receivedSystemPrompt).toContain("config.toml");
+    expect(receivedSystemPrompt).toContain("port = 8080");
 
     await rm(tmp, { recursive: true, force: true });
   });

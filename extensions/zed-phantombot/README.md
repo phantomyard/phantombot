@@ -18,15 +18,13 @@ Add to your Zed `settings.json` (`Cmd+,` → Open Settings (JSON)):
 {
   "context_servers": {
     "phantombot": {
-      "command": "node",
-      "args": ["/path/to/phantombot/extensions/zed-phantombot/server/index.js"],
+      "command": "phantombot",
+      "args": ["editor-context-server"],
       "settings": {}
     }
   }
 }
 ```
-
-Replace the path with your actual phantombot install location.
 
 ### Option 2: Zed Extension (when published)
 
@@ -64,7 +62,7 @@ Zed Assistant Panel
         │
         │  JSON-RPC (MCP protocol) over stdio
         ▼
-Phantombot MCP Server (this extension)
+Phantombot MCP Server (`phantombot editor-context-server`)
         │
         │  child_process.spawn("phantombot", ["editor"])
         │  stdin: JSON context payload
@@ -75,26 +73,26 @@ Phantombot CLI (trusted: true, full persona + tools)
 
 ## Architecture
 
-- **MCP Server** (`server/index.js`) — bridges Zed's context server protocol to `phantombot editor`. Pure JavaScript, no build step.
+- **MCP Server** (`phantombot editor-context-server`) — built into the phantombot binary. No external files, no path resolution. Self-contained MCP protocol handling on stdio.
 - **CLI Backend** (`phantombot editor`) — the actual integration point. Reads JSON from stdin, streams response to stdout. Trusted by default (local invocation = same OS user).
 - **Persona Engine** — SOUL.md, memory, tools, model routing. All the intelligence lives here.
 
 ## Development
 
-### Testing the MCP server directly
-
-```bash
-# List tools
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node server/index.js
-
-# Ask a question
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"phantombot_ask","arguments":{"message":"hello"}}}' | node server/index.js
-```
-
 ### Testing via phantombot editor directly
 
 ```bash
 echo '{"message":"explain this function","activeFile":{"path":"src/app.ts","language":"typescript","content":"function add(a: number, b: number) { return a + b; }"}}' | phantombot editor
+```
+
+### Testing the MCP server directly
+
+```bash
+# List tools
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | phantombot editor-context-server
+
+# Ask a question
+echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"phantombot_ask","arguments":{"message":"hello"}}}' | phantombot editor-context-server
 ```
 
 ## Troubleshooting
@@ -111,3 +109,5 @@ echo '{"message":"explain this function","activeFile":{"path":"src/app.ts","lang
 - [ ] Inline chat integration (select code → "Ask Phantombot")
 - [ ] Diagnostic-aware fixes (click error → "Fix with Phantombot")
 - [ ] Screenshot/diagram attachment support via vision model routing
+- [ ] Image base64 plumbing through harnesses
+- [ ] Model routing via `modelHint` (currently a prose hint, needs backend plumbing)

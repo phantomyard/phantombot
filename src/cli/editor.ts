@@ -14,6 +14,13 @@
  * The threat judge is skipped. This is a separate command with a clear
  * trust boundary, not a flag on `ask`.
  *
+ * Instruction/data separation: the user's typed message is the instruction
+ * (passed as `userMessage`, trusted). All auto-harvested context (active file,
+ * diagnostics, attachments, workspace) is delivered as reference data in
+ * `systemPromptSuffix` — clearly labeled as context, not instruction.
+ * This prevents injection via file contents (e.g. a malicious comment in an
+ * open file becoming part of the trusted command).
+ *
  * Exit codes:
  *   0  success
  *   1  generic failure (harness error, payload parse error)
@@ -22,6 +29,7 @@
  */
 
 import { defineCommand } from "citty";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -34,6 +42,12 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
+
+// ── Constants ─────────────────────────────────────────────────────────
+
+/** Maximum size of stdin payload (10 MB). Protects against OOM from large
+ *  attached files or accidental piped output. */
+const MAX_STDIN_BYTES = 10 * 1024 * 1024;
 
 // ── Payload types ──────────────────────────────────────────────────────
 
@@ -82,13 +96,17 @@ export interface EditorPayload {
   /** Diagnostics from the editor. */
   diagnostics?: EditorDiagnostics[];
 
-  /** Attached images (screenshots, diagrams). Base64-encoded. */
+  /** Attached images (screenshots, diagrams). Base64-encoded.
+   *  NOTE: image plumbing into harnesses is a follow-up — currently passed
+   *  as a text note in the context block. */
   images?: EditorImage[];
 
   /** Attached files (dragged into chat). */
   attachedFiles?: EditorAttachedFile[];
 
-  /** Model routing hint. Backend decides, but editor can suggest. */
+  /** Model routing hint. Backend decides, but editor can suggest.
+   *  NOTE: model selection plumbing is a follow-up — currently passed as
+   *  a prose hint in the context block. */
   modelHint?: "vision" | "code" | "fast" | "reasoning";
 
   /** Conversation ID. Auto-derived from workspace if omitted. */
@@ -109,11 +127,14 @@ export type EditorOutputChunk =
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /**
- * Build a rich context message from the editor payload. This wraps the
- * user's raw message with file context, diagnostics, and attachments so
- * the harness has everything it needs in a single prompt.
+ * Build a context block from harvested editor data. This is delivered as
+ * reference material via `systemPromptSuffix` — NOT concatenated into the
+ * user's typed message. The user's message is the instruction; this is data.
+ *
+ * This separation prevents injection: a malicious comment in an open file
+ * cannot become part of the trusted command.
  */
-function buildEnrichedMessage(payload: EditorPayload): string {
+function buildEditorContext(payload: EditorPayload): string {
   const parts: string[] = [];
 
   // Active file context
@@ -144,8 +165,8 @@ function buildEnrichedMessage(payload: EditorPayload): string {
     }
   }
 
-  // Images (note presence — actual base60 data goes via the message, not here,
-  // because harnesses handle images at the API level, not in prompt text)
+  // Images (note presence — actual base64 data plumbing is a follow-up;
+  // harnesses handle images at the API level, not in prompt text)
   if (payload.images && payload.images.length > 0) {
     parts.push(
       `## Attached images: ${payload.images.map((i) => i.mime).join(", ")}`,
@@ -160,30 +181,29 @@ function buildEnrichedMessage(payload: EditorPayload): string {
     );
   }
 
-  // Model hint (as an instruction, not metadata)
+  // Model hint (as a suggestion, not a command — the backend routes)
   if (payload.modelHint) {
-    parts.push(`## Model hint: use the ${payload.modelHint} model for this turn`);
+    parts.push(`## Model hint: consider using the ${payload.modelHint} model for this turn`);
   }
 
-  // The actual user message
-  parts.push(`## Request\n${payload.message}`);
-
-  return parts.join("\n\n");
+  return parts.length > 0
+    ? "## Editor context (reference data — not user instruction)\n\n" + parts.join("\n\n")
+    : "";
 }
 
 /**
  * Derive a conversation ID from the workspace root. This scopes
  * multi-turn history per-project so different workspaces don't collide.
+ * Uses SHA-256 for collision resistance.
  */
 function deriveConversationId(payload: EditorPayload): string {
   if (payload.conversationId) return payload.conversationId;
   if (payload.workspace?.root) {
-    // Simple hash of the workspace path for a stable, short ID
-    let hash = 0;
-    for (let i = 0; i < payload.workspace.root.length; i++) {
-      hash = ((hash << 5) - hash + payload.workspace.root.charCodeAt(i)) | 0;
-    }
-    return `editor:${Math.abs(hash).toString(36)}`;
+    const hash = createHash("sha256")
+      .update(payload.workspace.root)
+      .digest("hex")
+      .slice(0, 12);
+    return `editor:${hash}`;
   }
   return "editor:default";
 }
@@ -248,7 +268,13 @@ export async function runEditor(input: RunEditorInput): Promise<number> {
   const ownsMemory = !input.memory;
 
   const conversation = deriveConversationId(payload);
-  const enrichedMessage = buildEnrichedMessage(payload);
+  const editorContext = buildEditorContext(payload);
+
+  // The user's typed message is the INSTRUCTION — passed as-is, trusted.
+  // The editor context is DATA — delivered via systemPromptSuffix, clearly
+  // labeled as reference material. This separation prevents injection:
+  // a malicious comment in a file can't become part of the trusted command.
+  const userMessage = payload.message;
 
   // Set the working directory to the workspace root if available, so
   // harness tools (file ops, git, tests) resolve relative to the project.
@@ -265,7 +291,8 @@ export async function runEditor(input: RunEditorInput): Promise<number> {
     for await (const chunk of runTurn({
       persona,
       conversation,
-      userMessage: enrichedMessage,
+      userMessage,
+      systemPromptSuffix: editorContext || undefined,
       agentDir,
       harnesses,
       memory,
@@ -361,8 +388,18 @@ export default defineCommand({
     }
 
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
     for await (const chunk of process.stdin) {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      totalBytes += buf.length;
+      if (totalBytes > MAX_STDIN_BYTES) {
+        process.stderr.write(
+          `phantombot editor: stdin exceeds ${MAX_STDIN_BYTES / (1024 * 1024)}MB limit\n`,
+        );
+        process.exitCode = 3;
+        return;
+      }
+      chunks.push(buf);
     }
     const raw = Buffer.concat(chunks).toString("utf8").trim();
 
