@@ -1,0 +1,67 @@
+{
+  "name": "phantombot",
+  "displayName": "Phantombot",
+  "description": "Route VS Code's assistant through your Phantombot agent — same persona, memory, tools, and model routing as your Telegram/PhantomChat bot.",
+  "version": "0.1.0",
+  "publisher": "phantomyard",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.89.0"
+  },
+  "categories": ["Chat"],
+  "keywords": ["ai", "assistant", "phantombot", "chat", "coding"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "phantombot",
+        "name": "phantombot",
+        "fullName": "Phantombot",
+        "description": "Ask your Phantombot agent — same persona, memory, and tools as your Telegram bot.",
+        " locations": ["panel", "editor"]
+      }
+    ],
+    "configuration": {
+      "title": "Phantombot",
+      "properties": {
+        "phantombot.persona": {
+          "type": "string",
+          "default": "",
+          "description": "Persona override (default: the configured default persona)."
+        },
+        "phantombot.path": {
+          "type": "string",
+          "default": "phantombot",
+          "description": "Path to the phantombot binary. Default: 'phantombot' on PATH."
+        },
+        "phantombot.autoContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include active file context and diagnostics."
+        },
+        "phantombot.maxContextFiles": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum number of open files to include in workspace context."
+        },
+        "phantombot.conversationPersistence": {
+          "type": "boolean",
+          "default": true,
+          "description": "Persist conversation history across VS Code sessions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.89.0",
+    "typescript": "^5.5.0"
+  }
+}
