@@ -6,8 +6,10 @@
  * Background (see src/snapEnv.ts): a STRICT SNAP VS Code (Ubuntu App Center)
  * redirects `$HOME` into the snap sandbox, whose phantombot persona store is
  * empty, so plain `phantombot acp` exits 2 ("no other personas exist"). The fix
- * pins PHANTOMBOT_PERSONAS_DIR + PHANTOMBOT_CONFIG back to the REAL home via
- * `$SNAP_REAL_HOME`.
+ * pins ONLY PHANTOMBOT_CONFIG back to the REAL home via `$SNAP_REAL_HOME`;
+ * loadConfig then resolves personas_dir from that config (default OR custom), so
+ * PHANTOMBOT_PERSONAS_DIR is deliberately left unset to avoid overriding a custom
+ * persona root.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -16,7 +18,6 @@ import {
   configPathFor,
   isHomeRedirected,
   isSnapConfined,
-  personasDirFor,
   snapAwareSpawnEnv,
   type EnvMap,
 } from "../src/snapEnv.ts";
@@ -80,17 +81,20 @@ describe("snapAwareSpawnEnv — the fix", () => {
     expect(out.PHANTOMBOT_CONFIG).toBeUndefined();
   });
 
-  test("strict-snap env gets absolute overrides pinned to the REAL home", () => {
+  test("strict-snap env pins ONLY PHANTOMBOT_CONFIG to the REAL home", () => {
     const out = snapAwareSpawnEnv(strictSnapEnv());
 
-    // The fix: persona/config resolution is pinned back to the REAL home, NOT
-    // the empty redirected snap home — this is what prevents the exit-2 crash.
-    expect(out.PHANTOMBOT_PERSONAS_DIR).toBe(personasDirFor(REAL_HOME));
+    // The fix: config resolution is pinned back to the REAL home, NOT the empty
+    // redirected snap home — this is what prevents the exit-2 crash. loadConfig
+    // then resolves personas_dir from that config.
     expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
 
-    // Both are absolute and under the real home, NOT under the snap sandbox.
-    expect(out.PHANTOMBOT_PERSONAS_DIR!.startsWith(REAL_HOME + "/")).toBe(true);
-    expect(out.PHANTOMBOT_PERSONAS_DIR).not.toContain("/snap/");
+    // PHANTOMBOT_PERSONAS_DIR is deliberately NOT set: it would override a custom
+    // `personas_dir` in config.toml and silently break custom persona roots.
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
+
+    // The config is absolute and under the real home, NOT under the snap sandbox.
+    expect(out.PHANTOMBOT_CONFIG!.startsWith(REAL_HOME + "/")).toBe(true);
     expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
   });
 
@@ -98,33 +102,39 @@ describe("snapAwareSpawnEnv — the fix", () => {
     const env = strictSnapEnv();
     const out = snapAwareSpawnEnv(env);
     expect(out).not.toBe(env);
-    expect(env.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
     expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
+    expect(env.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
-  test("respects an explicit user override — does not clobber it", () => {
+  test("respects an explicit PHANTOMBOT_CONFIG override — does not clobber it", () => {
     const out = snapAwareSpawnEnv(
       strictSnapEnv({
-        PHANTOMBOT_PERSONAS_DIR: "/custom/personas",
         PHANTOMBOT_CONFIG: "/custom/config.toml",
       }),
     );
-    expect(out.PHANTOMBOT_PERSONAS_DIR).toBe("/custom/personas");
     expect(out.PHANTOMBOT_CONFIG).toBe("/custom/config.toml");
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
-  test("a blank/whitespace override is treated as unset and gets pinned", () => {
+  test("a blank/whitespace PHANTOMBOT_CONFIG is treated as unset and gets pinned", () => {
     const out = snapAwareSpawnEnv(
-      strictSnapEnv({ PHANTOMBOT_PERSONAS_DIR: "   ", PHANTOMBOT_CONFIG: "" }),
+      strictSnapEnv({ PHANTOMBOT_CONFIG: "" }),
     );
-    expect(out.PHANTOMBOT_PERSONAS_DIR).toBe(personasDirFor(REAL_HOME));
+    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
+  });
+
+  test("an explicit PHANTOMBOT_PERSONAS_DIR is passed through untouched", () => {
+    // We never set it ourselves, but if the user/env already has one we must not
+    // strip it — pass it straight through.
+    const out = snapAwareSpawnEnv(
+      strictSnapEnv({ PHANTOMBOT_PERSONAS_DIR: "/custom/personas" }),
+    );
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBe("/custom/personas");
     expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
   });
 
-  test("path helpers build phantombot's default absolute layout", () => {
-    expect(personasDirFor(REAL_HOME)).toBe(
-      "/home/alice/.local/share/phantombot/personas",
-    );
+  test("config path helper builds phantombot's default absolute layout", () => {
     expect(configPathFor(REAL_HOME)).toBe(
       "/home/alice/.config/phantombot/config.toml",
     );

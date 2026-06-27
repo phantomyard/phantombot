@@ -95,15 +95,18 @@ describe("installZed — JSONC preservation", () => {
     expect(parsed.theme).toBe("One Dark");
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
     expect(parsed.agent_servers.Phantombot.args).toEqual(["acp"]);
-    // The registered env now bakes in absolute persona/config overrides so the
-    // spawned `phantombot acp` always reads the real store (insurance against a
-    // redirected child `$HOME`/`$XDG_*`, the strict-snap class of bug).
+    // The registered env now bakes in an absolute PHANTOMBOT_CONFIG override so
+    // the spawned `phantombot acp` always reads the real config.toml (insurance
+    // against a redirected child `$HOME`/`$XDG_*`, the strict-snap class of bug).
     expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_CONFIG).toMatch(
       /\/phantombot\/config\.toml$/,
     );
-    expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_PERSONAS_DIR).toMatch(
-      /\/phantombot\/personas$/,
-    );
+    // PHANTOMBOT_PERSONAS_DIR is deliberately NOT baked in: it would override a
+    // custom `personas_dir` in config.toml and silently break custom persona
+    // roots. loadConfig resolves personas_dir from PHANTOMBOT_CONFIG instead.
+    expect(
+      parsed.agent_servers.Phantombot.env.PHANTOMBOT_PERSONAS_DIR,
+    ).toBeUndefined();
   });
 
   test("backup of the original is created", async () => {

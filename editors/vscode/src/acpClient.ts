@@ -346,8 +346,10 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
     // but under a STRICT SNAP (Ubuntu App Center VS Code) `$HOME` is redirected
     // into the snap sandbox, whose persona/config store is empty, so plain
     // `phantombot acp` exits 2 ("no other personas exist"). snapAwareSpawnEnv
-    // pins PHANTOMBOT_PERSONAS_DIR + PHANTOMBOT_CONFIG back to the REAL home
-    // (via $SNAP_REAL_HOME) when — and only when — we're snap-confined.
+    // pins PHANTOMBOT_CONFIG back to the REAL home (via $SNAP_REAL_HOME) when —
+    // and only when — we're snap-confined; loadConfig then resolves personas_dir
+    // from that config (default OR custom), so PHANTOMBOT_PERSONAS_DIR is left
+    // unset to avoid overriding a custom persona root.
     env: snapAwareSpawnEnv(process.env) as NodeJS.ProcessEnv,
   });
 
