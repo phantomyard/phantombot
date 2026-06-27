@@ -20,6 +20,7 @@ import { defineCommand } from "citty";
 
 import { runAcpServer } from "../connectors/acp/server.ts";
 import { installZed } from "../connectors/acp/installZed.ts";
+import { installVscode } from "../connectors/acp/installVscode.ts";
 
 const installZedCmd = defineCommand({
   meta: {
@@ -37,13 +38,34 @@ const installZedCmd = defineCommand({
   },
 });
 
+const installVscodeCmd = defineCommand({
+  meta: {
+    name: "vscode",
+    description:
+      "Install phantombot's first-party VS Code extension (bundled .vsix) via the `code` CLI — idempotent + version-aware. Skips cleanly if VS Code isn't installed.",
+  },
+  async run() {
+    const result = installVscode();
+    // Unlike Zed (a settings merge), VS Code installs OUR extension via the
+    // `code` CLI; print the human-readable outcome line for both success and
+    // the "code CLI not found" / failure cases.
+    const sink = result.code === 0 ? process.stdout : process.stderr;
+    sink.write(`phantombot acp install vscode: ${result.message}\n`);
+    // Same event-loop caveat as installZed: importing the ACP server keeps the
+    // loop open, so force a clean exit once the install is done.
+    process.exit(result.code);
+  },
+});
+
 const installCmd = defineCommand({
   meta: {
     name: "install",
-    description: "Install the ACP registration into an editor's settings.",
+    description:
+      "Install the ACP registration into a detected editor (zed: settings merge; vscode: first-party extension).",
   },
   subCommands: {
     zed: installZedCmd,
+    vscode: installVscodeCmd,
   },
 });
 

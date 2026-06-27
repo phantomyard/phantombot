@@ -200,11 +200,12 @@ export interface DoctorReport {
     repaired?: boolean;
   };
   /**
-   * ACP editor registrations (Zed today; VS Code when PR2 lands). One entry per
-   * supported editor: `not-detected` (editor not installed), `current` (already
-   * registered with this binary), `registered`/`updated` (reconciled this run),
+   * ACP editor registrations (Zed via a settings.json merge; VS Code via its
+   * bundled first-party extension installed through the `code` CLI). One entry
+   * per supported editor: `not-detected` (editor not installed), `current`
+   * (already registered/current), `registered`/`updated` (reconciled this run),
    * `stale` (needs work but --no-repair so nothing written), `error` (e.g.
-   * unparseable settings — the data-loss guard refused to touch it). Gated to
+   * unparseable settings, or `code --install-extension` failed). Gated to
    * the real `phantombot` binary so dev/test never writes the dev box's editor
    * settings.
    */
