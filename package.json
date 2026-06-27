@@ -14,6 +14,7 @@
     "test": "bun test",
     "typecheck": "bun tsc --noEmit",
     "gen:pi-extension": "bun scripts/genPiExtensionAssets.ts",
+    "gen:vscode-vsix": "bun scripts/genVscodeVsix.ts",
     "build": "bun run build:x64",
     "build:x64": "mkdir -p dist && bun build --compile --target=bun-linux-x64-baseline ./src/index.ts --outfile dist/phantombot",
     "build:arm64": "mkdir -p dist && bun build --compile --target=bun-linux-arm64 ./src/index.ts --outfile dist/phantombot-arm64"

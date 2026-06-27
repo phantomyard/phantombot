@@ -30,6 +30,11 @@ import { parse } from "jsonc-parser";
 
 import type { WriteSink } from "../../lib/io.ts";
 import { defaultZedSettingsPath, installZed } from "./installZed.ts";
+import {
+  checkVscode,
+  installVscode,
+  type VscodeInstallResult,
+} from "./installVscode.ts";
 
 /** A sink that drops everything — keeps reconcile silent on stdout/stderr. */
 const SILENT: WriteSink = { write: () => true };
@@ -56,22 +61,44 @@ export interface EditorConnectorResult {
 }
 
 /**
- * One supported editor. Kept tiny + data-driven so VS Code (PR2) slots in by
- * adding a second entry — the reconcile loop below is editor-agnostic.
+ * One supported editor. Kept tiny + data-driven so the reconcile loop below is
+ * editor-agnostic.
+ *
+ * There are two shapes of editor, both error-isolated by the loop:
+ *
+ *   1. SETTINGS editors (Zed) — phantombot registers itself by merging a key
+ *      into the editor's settings.json. These implement
+ *      `settingsPath`/`detectionDir`/`currentCommand`/`install`; the loop owns
+ *      the detect → compare(binaryPath) → write idempotency.
+ *
+ *   2. SELF-DRIVEN editors (VS Code) — there is NO native ACP and NO
+ *      settings-only registration, so phantombot ships its own extension and
+ *      installs it via the `code` CLI. The settings model doesn't fit (the
+ *      "desired state" is a bundled extension version, not a binary path), so
+ *      these implement `reconcile()` and fully own their own detect →
+ *      version-compare → install logic, returning a ready EditorConnectorResult.
+ *      `reconcile` takes precedence; when present the loop just calls it
+ *      (still wrapped in try/catch for isolation).
  */
 export interface EditorSpec {
   id: string;
-  /** Resolve this editor's settings.json path. */
-  settingsPath(): string;
+  /**
+   * Self-driven editors implement this and own their whole flow. When present,
+   * the other (settings-model) fields are ignored.
+   */
+  reconcile?: (opts: { repair: boolean; out: WriteSink; err: WriteSink }) =>
+    EditorConnectorResult;
+  /** Resolve this editor's settings.json path. (settings editors) */
+  settingsPath?(): string;
   /**
    * Directory whose existence signals the editor is present. Defaults to the
-   * settings file's parent dir (e.g. ~/.config/zed).
+   * settings file's parent dir (e.g. ~/.config/zed). (settings editors)
    */
-  detectionDir(settingsPath: string): string;
-  /** Read the phantombot command currently registered, if any. */
-  currentCommand(settingsPath: string): string | undefined;
-  /** Perform the idempotent registration write. Returns a 0/1 code. */
-  install(binaryPath: string, out?: WriteSink, err?: WriteSink): { code: number };
+  detectionDir?(settingsPath: string): string;
+  /** Read the phantombot command currently registered, if any. (settings editors) */
+  currentCommand?(settingsPath: string): string | undefined;
+  /** Perform the idempotent registration write. Returns a 0/1 code. (settings editors) */
+  install?(binaryPath: string, out?: WriteSink, err?: WriteSink): { code: number };
 }
 
 /** Best-effort read of `agent_servers.Phantombot.command` from JSONC settings. */
@@ -99,8 +126,58 @@ export const ZED_EDITOR: EditorSpec = {
   install: (binaryPath, out, err) => installZed({ binaryPath, out, err }),
 };
 
+/**
+ * Map an installVscode/checkVscode result onto the shared EditorConnectorResult
+ * vocabulary so VS Code shows up in `doctor` exactly like Zed. There's no
+ * settings file, so `settingsPath` carries the resolved `code` CLI (or "" when
+ * not detected) for a useful diagnostic line.
+ *
+ * In REPAIR mode the result came from installVscode (work was done): `installed`
+ * → registered, `updated` → updated. In REPORT-ONLY mode the result came from
+ * checkVscode (no work done): `installed`/`updated` both mean "drift that a
+ * repair would fix" → reported as `stale` so doctor flags it without claiming
+ * we changed anything.
+ */
+export function vscodeResultToConnector(
+  r: VscodeInstallResult,
+  repair: boolean,
+): EditorConnectorResult {
+  const settingsPath = r.codeCommand ?? "";
+  switch (r.action) {
+    case "not-detected":
+      return { editor: "vscode", action: "not-detected", settingsPath };
+    case "current":
+      return { editor: "vscode", action: "current", settingsPath };
+    case "installed":
+      return {
+        editor: "vscode",
+        action: repair ? "registered" : "stale",
+        settingsPath,
+      };
+    case "updated":
+      return {
+        editor: "vscode",
+        action: repair ? "updated" : "stale",
+        settingsPath,
+      };
+    case "error":
+      return {
+        editor: "vscode",
+        action: "error",
+        settingsPath,
+        error: r.message,
+      };
+  }
+}
+
+export const VSCODE_EDITOR: EditorSpec = {
+  id: "vscode",
+  reconcile: ({ repair }) =>
+    vscodeResultToConnector(repair ? installVscode() : checkVscode(), repair),
+};
+
 /** Editors phantombot knows how to register itself into. */
-export const KNOWN_EDITORS: EditorSpec[] = [ZED_EDITOR];
+export const KNOWN_EDITORS: EditorSpec[] = [ZED_EDITOR, VSCODE_EDITOR];
 
 export interface ReconcileOptions {
   /** Absolute path to the phantombot binary the editor should spawn. */
@@ -129,6 +206,31 @@ export function reconcileEditorConnectors(
   for (const editor of editors) {
     let settingsPath = "";
     try {
+      // Self-driven editors (VS Code) own their whole detect → version-check →
+      // install flow and return a ready result. Still wrapped by this try/catch
+      // for isolation, but they never use the settings-file machinery below.
+      if (editor.reconcile) {
+        results.push(
+          editor.reconcile({
+            repair,
+            out: opts.out ?? SILENT,
+            err: opts.err ?? SILENT,
+          }),
+        );
+        continue;
+      }
+
+      // ── Settings-model editors (Zed) from here down. ──
+      if (
+        !editor.settingsPath ||
+        !editor.detectionDir ||
+        !editor.currentCommand ||
+        !editor.install
+      ) {
+        throw new Error(
+          `editor "${editor.id}" is neither reconcile-driven nor a complete settings editor`,
+        );
+      }
       settingsPath = editor.settingsPath();
 
       // Detection: only touch editors actually present on this machine.

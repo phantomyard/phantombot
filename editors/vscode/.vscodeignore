@@ -7,3 +7,5 @@ tsconfig.json
 **/*.map
 node_modules/**
 .gitignore
+bun.lock
+bun.lockb
