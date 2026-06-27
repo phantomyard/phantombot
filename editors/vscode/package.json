@@ -2,7 +2,7 @@
   "name": "phantombot-vscode",
   "displayName": "phantombot",
   "description": "Chat with phantombot — your personality-first agent — in VS Code's native Chat panel via an embedded ACP client.",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "publisher": "phantomyard",
   "private": true,
   "license": "MIT",
@@ -12,19 +12,48 @@
     "directory": "editors/vscode"
   },
   "engines": {
-    "vscode": "^1.93.0"
+    "vscode": "^1.124.0"
   },
   "categories": [
     "AI",
     "Chat"
   ],
+  "enabledApiProposals": [
+    "chatSessionsProvider",
+    "chatParticipantPrivate",
+    "chatReferenceBinaryData"
+  ],
   "activationEvents": [
+    "onStartupFinished",
     "onChatParticipant:phantombot.chat",
+    "onChatSession:phantombot",
     "onCommand:phantombot.chat.open",
     "onCommand:phantombot.chat.askAboutSelection"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "chatSessions": [
+      {
+        "type": "phantombot",
+        "name": "phantombot",
+        "displayName": "Phantombot",
+        "description": "Your personality-first agent — persona, memory and tools live server-side.",
+        "icon": "$(hubot)",
+        "welcomeTitle": "Phantombot",
+        "welcomeMessage": "Chat with phantombot. Persona, memory and tools live server-side, so history and context persist across sessions.",
+        "inputPlaceholder": "Message phantombot…",
+        "capabilities": {
+          "supportsFileAttachments": true,
+          "supportsImageAttachments": true
+        }
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "phantombot",
+        "displayName": "Phantombot"
+      }
+    ],
     "chatParticipants": [
       {
         "id": "phantombot.chat",
@@ -97,7 +126,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.93.0",
+    "@types/vscode": "^1.104.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   }

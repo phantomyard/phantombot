@@ -20,6 +20,7 @@ import {
   dataHomeFor,
   isHomeRedirected,
   isSnapConfined,
+  realHomeFor,
   snapAwareSpawnEnv,
   type EnvMap,
 } from "../src/snapEnv.ts";
@@ -40,18 +41,57 @@ function strictSnapEnv(extra: EnvMap = {}): EnvMap {
   };
 }
 
+/**
+ * The env a CLASSIC-snap-confined `phantombot acp` child gets — the confinement
+ * Ubuntu's `code` snap actually ships with. `$HOME` stays REAL, `$SNAP_REAL_HOME`
+ * is ABSENT, but `$XDG_*` are still redirected into the per-snap sandbox. This is
+ * the case the original `isSnapConfined` (which required `$SNAP_REAL_HOME`) wrongly
+ * skipped — the real-world exit-2 reproduction Andrew hit on his X1 Carbon.
+ */
+function classicSnapEnv(extra: EnvMap = {}): EnvMap {
+  return {
+    HOME: REAL_HOME,
+    SNAP: "/snap/code/247",
+    // NOTE: no SNAP_REAL_HOME under classic confinement.
+    XDG_CONFIG_HOME: `${SNAP_HOME}/.config`,
+    XDG_DATA_HOME: `${SNAP_HOME}/.local/share`,
+    ...extra,
+  };
+}
+
 /** The env a NATIVE install (.deb / Zed) sees — real home, no snap vars. */
 function nativeEnv(extra: EnvMap = {}): EnvMap {
   return { HOME: REAL_HOME, PATH: "/usr/bin", ...extra };
 }
 
 describe("isSnapConfined", () => {
-  test("true only when BOTH $SNAP and $SNAP_REAL_HOME are set", () => {
+  test("true whenever $SNAP is set — strict OR classic confinement", () => {
     expect(isSnapConfined(strictSnapEnv())).toBe(true);
+    // The regression fix: classic snaps (no $SNAP_REAL_HOME) must be detected too.
+    expect(isSnapConfined(classicSnapEnv())).toBe(true);
+    expect(isSnapConfined({ SNAP: "/snap/code/158" })).toBe(true);
+  });
+
+  test("false when not in a snap, or $SNAP is blank", () => {
     expect(isSnapConfined(nativeEnv())).toBe(false);
-    expect(isSnapConfined({ SNAP: "/snap/code/158" })).toBe(false);
     expect(isSnapConfined({ SNAP_REAL_HOME: REAL_HOME })).toBe(false);
-    expect(isSnapConfined({ SNAP: "  ", SNAP_REAL_HOME: REAL_HOME })).toBe(false);
+    expect(isSnapConfined({ SNAP: "  " })).toBe(false);
+    expect(isSnapConfined({})).toBe(false);
+  });
+});
+
+describe("realHomeFor", () => {
+  test("prefers $SNAP_REAL_HOME (strict snap, where $HOME is redirected)", () => {
+    expect(realHomeFor(strictSnapEnv())).toBe(REAL_HOME);
+  });
+
+  test("falls back to $HOME when $SNAP_REAL_HOME is absent (classic snap)", () => {
+    expect(realHomeFor(classicSnapEnv())).toBe(REAL_HOME);
+  });
+
+  test("undefined when neither is usable", () => {
+    expect(realHomeFor({ SNAP: "/snap/code/247" })).toBeUndefined();
+    expect(realHomeFor({ SNAP_REAL_HOME: "  ", HOME: "  " })).toBeUndefined();
   });
 });
 
@@ -98,6 +138,23 @@ describe("snapAwareSpawnEnv — the fix", () => {
     // The config is absolute and under the real home, NOT under the snap sandbox.
     expect(out.PHANTOMBOT_CONFIG!.startsWith(REAL_HOME + "/")).toBe(true);
     expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
+  });
+
+  test("CLASSIC-snap env pins config + XDG dirs to the REAL home via $HOME — the X1 Carbon exit-2 repro", () => {
+    // Reproduces Andrew's actual failure: Ubuntu's `code` is a CLASSIC snap, so
+    // $HOME is real but $XDG_DATA_HOME is redirected into the empty sandbox store.
+    // The old isSnapConfined skipped this (no $SNAP_REAL_HOME) → no fix → exit 2.
+    const out = snapAwareSpawnEnv(classicSnapEnv());
+
+    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.XDG_DATA_HOME).toBe(dataHomeFor(REAL_HOME));
+    expect(out.XDG_CONFIG_HOME).toBe(configHomeFor(REAL_HOME));
+
+    // Resolved store is the real, populated one — NOT the snap sandbox.
+    expect(out.XDG_DATA_HOME).not.toContain("/snap/");
+    expect(out.XDG_CONFIG_HOME).not.toContain("/snap/");
+    expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
   test("DEFAULT install (no personas_dir): restores XDG_DATA_HOME so loadConfig's default store resolves to the REAL home — the blocker Kai flagged", () => {

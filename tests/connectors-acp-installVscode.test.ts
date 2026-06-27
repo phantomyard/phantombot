@@ -30,6 +30,13 @@ import {
   type RunResult,
   type VscodeDeps,
 } from "../src/connectors/acp/installVscode.ts";
+// The staged .vsix filename is derived from the generated asset, NOT the
+// injected bundledVersion — reference the constant so a version bump never
+// breaks these path assertions again.
+import { VSCODE_VSIX_FILENAME } from "../src/lib/vscodeExtensionAsset.generated.ts";
+
+/** Where installVscode stages the .vsix in tests (posix tmp + phantombot- prefix). */
+const STAGED_VSIX_POSIX = `/tmp/phantombot-${VSCODE_VSIX_FILENAME}`;
 
 /** A recording fake of the `code` CLI + fs seam. */
 interface FakeOpts {
@@ -211,9 +218,9 @@ describe("installVscode idempotency + actions", () => {
     expect(r.action).toBe("installed");
     expect(r.code).toBe(0);
     expect(writes).toHaveLength(1);
-    expect(writes[0]!.path).toBe("/tmp/phantombot-phantombot-vscode-0.1.0.vsix");
+    expect(writes[0]!.path).toBe(STAGED_VSIX_POSIX);
     expect(writes[0]!.bytes.byteLength).toBeGreaterThan(0); // real vsix bytes
-    expect(cleaned).toContain("/tmp/phantombot-phantombot-vscode-0.1.0.vsix");
+    expect(cleaned).toContain(STAGED_VSIX_POSIX);
   });
 
   test("older installed → updated", () => {
@@ -247,7 +254,7 @@ describe("installVscode idempotency + actions", () => {
     expect(r.action).toBe("installed");
     const staged = writes[0]!.path;
     expect(staged).toContain("\\"); // win32 separators
-    expect(staged.endsWith("phantombot-phantombot-vscode-0.1.0.vsix")).toBe(true);
+    expect(staged.endsWith(`phantombot-${VSCODE_VSIX_FILENAME}`)).toBe(true);
   });
 
   test("`code --install-extension` failure → error (code 1), not a throw", () => {
@@ -256,7 +263,7 @@ describe("installVscode idempotency + actions", () => {
       responses: {
         "code --version": OK("1.90.0"),
         "code --list-extensions --show-versions": OK(""),
-        "code --install-extension /tmp/phantombot-phantombot-vscode-0.1.0.vsix --force":
+        [`code --install-extension ${STAGED_VSIX_POSIX} --force`]:
           FAIL(1, "no marketplace"),
       },
     });

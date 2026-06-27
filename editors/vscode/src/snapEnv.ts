@@ -1,27 +1,37 @@
 /**
  * Snap-aware environment pinning for the spawned `phantombot acp` subprocess.
  *
- * THE BUG THIS FIXES (exit 2 under the Ubuntu App Center / strict-snap VS Code):
+ * THE BUG THIS FIXES (exit 2 under the snap-packaged VS Code):
  *
- *   When VS Code is installed as a STRICT SNAP (the one Ubuntu's App Center
- *   ships), snapd confines the editor — and every process it spawns — into the
- *   snap sandbox. Inside that sandbox `$HOME` is REDIRECTED from the user's real
- *   home (`/home/alice`) to a per-snap data dir (`/home/alice/snap/code/current`).
- *   phantombot resolves its persona/config store from `$HOME`/`$XDG_*` at
- *   runtime (see src/config.ts: xdgConfigHome/xdgDataHome ultimately fall back to
- *   the redirected `$HOME`). That redirected store is EMPTY — no personas were
- *   ever installed there — so `phantombot acp` finds zero personas and exits 2
- *   with "no other personas exist", killing the editor connector on first use.
+ *   When VS Code is installed as a SNAP, snapd redirects the XDG base dirs of the
+ *   editor — and every process it spawns — into a per-snap sandbox. This happens
+ *   under BOTH confinement modes, and the difference between them is exactly what
+ *   the original fix got wrong:
  *
- *   A NATIVE install (e.g. the .deb, or Zed) sees the real `$HOME`, so it finds
- *   the real persona store and works — which is exactly the asymmetry observed.
+ *     - STRICT snap: `$HOME` itself is redirected to `/home/alice/snap/code/<rev>`,
+ *       and snapd sets `$SNAP_REAL_HOME=/home/alice` so the real home is still
+ *       recoverable.
+ *     - CLASSIC snap (what Ubuntu's `code` snap actually ships): `$HOME` STAYS at
+ *       the real `/home/alice` and `$SNAP_REAL_HOME` is NOT set — BUT snapd still
+ *       redirects `$XDG_DATA_HOME`/`$XDG_CONFIG_HOME` to
+ *       `/home/alice/snap/code/<rev>/.local/share` (and `/.config`).
+ *
+ *   phantombot resolves its persona/config store from `$XDG_DATA_HOME` at runtime
+ *   (see src/config.ts: xdgDataHome → personas_dir/memory/state). Under EITHER snap
+ *   mode that resolves into the empty sandbox store — no personas were ever
+ *   installed there — so `phantombot acp` finds zero personas and exits 2 with
+ *   "no other personas exist", killing the editor connector on first use.
+ *
+ *   A NATIVE install (e.g. the .deb, or Zed) sees real `$XDG_*`, so it finds the
+ *   real persona store and works — which is exactly the asymmetry observed.
  *
  * THE FIX:
  *
- *   snapd exposes the real (un-redirected) home via `$SNAP_REAL_HOME` and signals
- *   "we are inside a snap" via `$SNAP` (the path to the mounted snap). When we
- *   detect a snap, we PIN phantombot's store resolution back to the real home with
- *   two complementary moves:
+ *   snapd signals "we are inside a snap" via `$SNAP` (the path to the mounted
+ *   snap) under BOTH confinement modes. The real (un-redirected) home is then
+ *   `$SNAP_REAL_HOME` if present (strict) or `$HOME` itself (classic) — see
+ *   `realHomeFor`. When we detect a snap, we PIN phantombot's store resolution
+ *   back to the real home with two complementary moves:
  *
  *     1. PHANTOMBOT_CONFIG = <real home>/.config/phantombot/config.toml
  *        — so loadConfig reads the REAL config.toml, not the empty redirected one.
@@ -77,13 +87,41 @@ export type EnvMap = Record<string, string | undefined>;
 
 /**
  * True iff we're running inside a snap sandbox. snapd sets `$SNAP` (the absolute
- * path to the mounted snap, e.g. `/snap/code/158`) for every confined process,
- * and `$SNAP_REAL_HOME` to the user's un-redirected home. We require BOTH: `$SNAP`
- * proves confinement, `$SNAP_REAL_HOME` is what we need to actually rebuild paths.
+ * path to the mounted snap, e.g. `/snap/code/158`) for EVERY confined process,
+ * whether the snap uses STRICT or CLASSIC confinement — so `$SNAP` alone is the
+ * reliable signal that we're inside a snap.
+ *
+ * We deliberately do NOT also require `$SNAP_REAL_HOME` here. That was the
+ * original bug: `$SNAP_REAL_HOME` is only populated under STRICT confinement
+ * (where `$HOME` itself is redirected). A CLASSIC snap (the confinement Ubuntu's
+ * `code` snap actually ships with) leaves `$HOME` at the real home and does NOT
+ * set `$SNAP_REAL_HOME` — yet it STILL redirects `$XDG_DATA_HOME`/`$XDG_CONFIG_HOME`
+ * into the per-snap sandbox (`$HOME/snap/code/<rev>/.local/share`). That empties
+ * phantombot's persona store just like the strict case, so `phantombot acp` exits
+ * 2 with "no other personas exist". Requiring `$SNAP_REAL_HOME` made the fix skip
+ * exactly the classic-snap case that bites real users. We now detect on `$SNAP`
+ * and derive the real home separately (see `realHomeFor`).
  */
 export function isSnapConfined(env: EnvMap): boolean {
-  return Boolean(env.SNAP && env.SNAP.trim()) &&
-    Boolean(env.SNAP_REAL_HOME && env.SNAP_REAL_HOME.trim());
+  return Boolean(env.SNAP && env.SNAP.trim());
+}
+
+/**
+ * The user's REAL (un-redirected) home, however the snap exposes it:
+ *
+ *   - STRICT snap: `$HOME` is redirected into the sandbox, but snapd hands us the
+ *     real home in `$SNAP_REAL_HOME` — use that.
+ *   - CLASSIC snap: `$SNAP_REAL_HOME` is absent and `$HOME` is already the real
+ *     home (only `$XDG_*` got redirected) — use `$HOME`.
+ *
+ * Returns `undefined` if neither is usable (we then make no changes).
+ */
+export function realHomeFor(env: EnvMap): string | undefined {
+  const real = env.SNAP_REAL_HOME?.trim();
+  if (real) return real;
+  const home = env.HOME?.trim();
+  if (home) return home;
+  return undefined;
 }
 
 /**
@@ -136,7 +174,9 @@ export function configHomeFor(realHome: string): string {
 export function snapAwareSpawnEnv(env: EnvMap): EnvMap {
   if (!isSnapConfined(env)) return env;
 
-  const realHome = env.SNAP_REAL_HOME!.trim();
+  const realHome = realHomeFor(env);
+  if (!realHome) return env;
+
   const next: EnvMap = { ...env };
 
   // Respect an explicit PHANTOMBOT_CONFIG — snapd never sets it, so its presence
