@@ -118,6 +118,40 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(typeof ev.sig).toBe("string");
   });
 
+  test("sendRecording publishes a kind-20001 with the 'recording' content marker", async () => {
+    const published: NTNostrEvent[] = [];
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        return { close() {} };
+      },
+      publish(_relays, event) {
+        published.push(event);
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const recipient = getPublicKey(generateSecretKey());
+    await transport.sendRecording(recipient);
+
+    expect(published.length).toBe(1);
+    const ev = published[0]!;
+    // Same ephemeral typing channel, but the "recording" marker tells the PWA
+    // to show the native "recording voice" activity instead of typing dots.
+    expect(ev.kind).toBe(20001);
+    expect(ev.pubkey).toBe(getPublicKey(sk));
+    expect(ev.content).toBe("recording");
+    expect(ev.tags).toEqual([["p", recipient]]);
+    expect(typeof ev.sig).toBe("string");
+  });
+
   test("publishProfile publishes a signed kind-0 with the display name + bot:true", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {

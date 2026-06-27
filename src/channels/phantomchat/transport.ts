@@ -27,7 +27,10 @@ import {
 } from "../../lib/nostrCrypto.ts";
 import { encryptFileBytes } from "./fileEncrypt.ts";
 import { uploadToBlossom } from "./blossomUpload.ts";
-import { oggOpusDurationSeconds } from "./oggOpusDuration.ts";
+import {
+  oggOpusDurationSeconds,
+  oggOpusWaveformBase64,
+} from "./oggOpusDuration.ts";
 
 /**
  * The five default public relays the PhantomChat PWA uses. phantombot must be
@@ -63,6 +66,14 @@ export const NOSTR_KIND_TYPING = 20001;
  */
 export const TYPING_CONTENT_START = "";
 export const TYPING_CONTENT_STOP = "stop";
+/**
+ * "Recording voice" marker. A kind-20001 with this content tells the PWA to
+ * show the native "recording voice" activity (sendMessageRecordAudioAction)
+ * instead of the generic "typing" dots — so a voice reply being synthesized
+ * reads as a voice action, mirroring Telegram. Same lifecycle as START (the
+ * STOP marker still clears it).
+ */
+export const TYPING_CONTENT_RECORDING = "recording";
 
 /**
  * How far back (seconds) the live gift-wrap subscription's `since` reaches. With
@@ -443,6 +454,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // length instead of 0:00. 0 ⇒ unparseable; omit and let the player fall
     // back rather than stamp a bogus length.
     const durationS = oggOpusDurationSeconds(audio);
+    // Amplitude envelope (base64, 5-bit Telegram packing) so the bubble draws
+    // the little bars. Derived from Opus packet sizes — a cheap container walk,
+    // no decode. "" ⇒ unparseable; omit and let the bubble show length-only.
+    const waveform = oggOpusWaveformBase64(audio);
     const fileMeta = JSON.stringify({
       url,
       sha256: enc.sha256Hex,
@@ -453,6 +468,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       // Authoritative media class so the receiver never re-guesses voice vs file.
       mediaType: "voice",
       ...(durationS > 0 ? { duration: durationS } : {}),
+      ...(waveform ? { waveform } : {}),
     });
     const envelope = JSON.stringify({
       id: `pc-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
@@ -467,12 +483,28 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * "Recording voice" indicator. Nostr carries no distinct record vs type
-   * signal, so we reuse the ephemeral typing tick — the PWA shows activity
-   * while the reply is synthesized. Best-effort; never throws.
+   * "Recording voice" indicator. Same ephemeral kind-20001 tick as typing, but
+   * the content marker is `"recording"` so the PWA renders the native
+   * "recording voice" activity instead of the generic dots. Best-effort; never
+   * throws (the engine fires this every couple seconds while synthesizing).
    */
   async sendRecording(conversationId: string): Promise<void> {
-    await this.sendTyping(conversationId);
+    try {
+      const event = finalizeEvent(
+        {
+          kind: NOSTR_KIND_TYPING,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", conversationId]],
+          content: TYPING_CONTENT_RECORDING,
+        },
+        this.ourSecretKey,
+      );
+      await this.publishWrap(event as unknown as NTNostrEvent);
+    } catch (e) {
+      log.debug("phantomchat: sendRecording publish failed", {
+        error: (e as Error).message,
+      });
+    }
   }
 
   /**

@@ -5,7 +5,31 @@
  * is pinned without shipping a binary fixture.
  */
 import { describe, expect, test } from "bun:test";
-import { oggOpusDurationSeconds } from "../src/channels/phantomchat/oggOpusDuration.ts";
+import {
+  oggOpusDurationSeconds,
+  oggOpusWaveformBase64,
+} from "../src/channels/phantomchat/oggOpusDuration.ts";
+
+/**
+ * Mirror of the PWA's `decodeWaveform` (phantomchat audio.ts) — proves the bytes
+ * we pack decode back to the same 5-bit values the bubble renderer reads.
+ */
+function decodeWaveform(bytes: Uint8Array): number[] {
+  const valueCount = ((bytes.length * 8) / 5) | 0;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out: number[] = [];
+  for (let i = 0; i < valueCount; i++) {
+    const byteIndex = ((i * 5) / 8) | 0;
+    const bitShift = (i * 5) % 8;
+    // getUint16 may read one byte past the end on the final value; pad to be safe.
+    const lo = bytes[byteIndex] ?? 0;
+    const hi = bytes[byteIndex + 1] ?? 0;
+    const value = lo | (hi << 8);
+    out.push((value >> bitShift) & 0x1f);
+    void view;
+  }
+  return out;
+}
 
 /** Build one Ogg page. Each segment payload must be < 255 bytes (no lacing). */
 function oggPage(granule: bigint, headerType: number, segments: Buffer[]): Buffer {
@@ -67,5 +91,45 @@ describe("oggOpusDurationSeconds", () => {
   test("returns 0 for non-Ogg input", () => {
     expect(oggOpusDurationSeconds(Buffer.from("not an ogg stream at all"))).toBe(0);
     expect(oggOpusDurationSeconds(Buffer.alloc(0))).toBe(0);
+  });
+});
+
+describe("oggOpusWaveformBase64", () => {
+  test("returns '' for non-Ogg input", () => {
+    expect(oggOpusWaveformBase64(Buffer.from("nope"))).toBe("");
+    expect(oggOpusWaveformBase64(Buffer.alloc(0))).toBe("");
+  });
+
+  test("tracks packet sizes: loud frames peak, quiet frames dip", () => {
+    // Two header pages (OpusHead + a tags stand-in) get dropped, then an audio
+    // page whose 4 segments alternate quiet/loud (10 vs 200 bytes).
+    const head = oggPage(0n, 0x02, [opusHead(0)]);
+    const tags = oggPage(0n, 0x00, [Buffer.alloc(8, 0)]);
+    const audio = oggPage(BigInt(48000), 0x04, [
+      Buffer.alloc(10, 1),
+      Buffer.alloc(200, 1),
+      Buffer.alloc(10, 1),
+      Buffer.alloc(200, 1),
+    ]);
+    const b64 = oggOpusWaveformBase64(Buffer.concat([head, tags, audio]), 4);
+    expect(b64.length).toBeGreaterThan(0);
+    const values = decodeWaveform(new Uint8Array(Buffer.from(b64, "base64")));
+    // 4 buckets, nearest-neighbour: quiet, loud, quiet, loud.
+    // 200 normalises to 31; 10/200*31 ≈ 1.55 → 2.
+    expect(values.slice(0, 4)).toEqual([2, 31, 2, 31]);
+  });
+
+  test("packs the default 100 bars into 63 bytes", () => {
+    const head = oggPage(0n, 0x02, [opusHead(0)]);
+    const tags = oggPage(0n, 0x00, [Buffer.alloc(8, 0)]);
+    const segs = Array.from({ length: 20 }, (_, i) => Buffer.alloc(20 + i * 5, 1));
+    const audio = oggPage(BigInt(48000), 0x04, segs);
+    const b64 = oggOpusWaveformBase64(Buffer.concat([head, tags, audio]));
+    const bytes = Buffer.from(b64, "base64");
+    expect(bytes.length).toBe(Math.ceil((100 * 5) / 8)); // 63
+    // Every bar is filled (nearest-neighbour upsampling, no comb gaps) and the
+    // peak normalises to the full 5-bit range.
+    const values = decodeWaveform(new Uint8Array(bytes));
+    expect(Math.max(...values)).toBe(31);
   });
 });
