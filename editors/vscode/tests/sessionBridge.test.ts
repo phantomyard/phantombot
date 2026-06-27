@@ -67,9 +67,9 @@ describe("makeReplayCollector — history rehydration", () => {
 
   test("coalesces consecutive same-role chunks (defensive against streamed turns)", () => {
     const { handlers, turns } = makeReplayCollector();
-    handlers.onUpdate?.(agentChunk("part one "));
+    handlers.onUpdate?.(agentChunk("part one"));
     handlers.onUpdate?.(agentChunk("part two"));
-    expect(turns).toEqual([{ role: "assistant", text: "part one part two" }]);
+    expect(turns).toEqual([{ role: "assistant", text: "part one\n\npart two" }]);
   });
 
   test("ignores tool_call updates and empty text", () => {

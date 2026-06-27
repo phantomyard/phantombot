@@ -81,7 +81,9 @@ export function makeReplayCollector(): {
     if (!text) return;
     const last = turns[turns.length - 1];
     if (last && last.role === role) {
-      last.text += text;
+      // Separate with a blank line so two distinct same-role turns never glue
+      // into one bubble (defensive — today the server alternates roles).
+      last.text += `\n\n${text}`;
       return;
     }
     turns.push({ role, text });
@@ -125,7 +127,7 @@ export function promptBlocksFromRequest(
 
   const trimmed = text.trim();
   if (trimmed.length > 0) {
-    blocks.push({ type: "text", text });
+    blocks.push({ type: "text", text: trimmed });
   }
 
   for (const att of attachments) {
