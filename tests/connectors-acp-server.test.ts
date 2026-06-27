@@ -585,3 +585,93 @@ describe("ACP server — bad input", () => {
     expect(reply.error.code).toBe(-32700);
   });
 });
+
+describe("ACP server — persona resolution & self-heal", () => {
+  let pdir: string;
+  let savedStateEnv: string | undefined;
+  let healConfig: Config;
+
+  beforeEach(async () => {
+    pdir = await mkdtemp(join(tmpdir(), "phantombot-acp-persona-"));
+    savedStateEnv = process.env.PHANTOMBOT_STATE;
+    process.env.PHANTOMBOT_STATE = join(pdir, "state.json");
+    healConfig = {
+      defaultPersona: "phantom", // built-in default whose dir is NOT created
+      harnessIdleTimeoutMs: 5000,
+      harnessHardTimeoutMs: 5000,
+      personasDir: join(pdir, "personas"),
+      memoryDbPath: join(pdir, "memory.sqlite"),
+      configPath: join(pdir, "config.toml"),
+      harnesses: {
+        chain: ["claude"],
+        claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+        pi: { bin: "pi", maxPayloadBytes: 1 },
+        gemini: { bin: "gemini", model: "" },
+      },
+      channels: {},
+      embeddings: { provider: "none" },
+      voice: { provider: "none" },
+    };
+  });
+
+  afterEach(async () => {
+    if (savedStateEnv === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = savedStateEnv;
+    await rm(pdir, { recursive: true, force: true });
+  });
+
+  // Run the server to completion with an immediately-closed input stream.
+  // Returns the exit code and captured stderr. Injects a harness so harness
+  // resolution is skipped — we're exercising the persona gate only.
+  async function runToClose(persona?: string): Promise<{ code: number; err: string }> {
+    const input = new PassThrough();
+    const errSink = new CapturingErr();
+    const done = runAcpServer({
+      config: healConfig,
+      memory,
+      harnesses: [new ScriptedHarness("h", () => [])],
+      input,
+      output: new CapturingOut() as any,
+      logErr: errSink,
+      ...(persona !== undefined ? { persona } : {}),
+    });
+    input.end();
+    const code = await done;
+    return { code, err: errSink.buf };
+  }
+
+  test("no --persona: heals to an existing persona when default dir is missing", async () => {
+    // 'phantom' (the default) has no dir; only 'robbie' exists on disk.
+    const robbie = join(pdir, "personas", "robbie");
+    await mkdir(robbie, { recursive: true });
+    await writeFile(join(robbie, "BOOT.md"), "# Robbie\n", "utf8");
+
+    const { code, err } = await runToClose();
+
+    expect(code).toBe(0); // started cleanly, no exit-2 config error
+    expect(err).toContain("healed default_persona");
+    expect(err).toContain("robbie");
+  });
+
+  test("no --persona + zero personas on disk: hard-errors with exit 2", async () => {
+    await mkdir(join(pdir, "personas"), { recursive: true }); // empty dir
+
+    const { code, err } = await runToClose();
+
+    expect(code).toBe(2);
+    expect(err).toContain("no other personas exist");
+  });
+
+  test("explicit --persona that doesn't exist still hard-errors with exit 2", async () => {
+    // A real persona exists, but the user explicitly asked for a missing one —
+    // we honor their choice and error rather than silently substituting.
+    const robbie = join(pdir, "personas", "robbie");
+    await mkdir(robbie, { recursive: true });
+    await writeFile(join(robbie, "BOOT.md"), "# Robbie\n", "utf8");
+
+    const { code, err } = await runToClose("ghost");
+
+    expect(code).toBe(2);
+    expect(err).toContain("persona 'ghost' not found");
+  });
+});

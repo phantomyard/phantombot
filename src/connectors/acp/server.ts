@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { type Config, loadConfig, personaDir } from "../../config.ts";
+import { healDefaultPersonaIfBroken } from "../../lib/personaDefault.ts";
 import { buildHarnessChain } from "../../harnesses/buildChain.ts";
 import { resolveHarnessBinsForConfig } from "../../lib/harnessAvailability.ts";
 import type { Harness } from "../../harnesses/types.ts";
@@ -91,11 +92,31 @@ export async function runAcpServer(
   const logErr: WriteSink = options.logErr ?? process.stderr;
 
   let config = options.config ?? (await loadConfig());
-  const persona = options.persona ?? config.defaultPersona;
-  const agentDir = personaDir(config, persona);
+  // Resolve the persona. An explicit `--persona NAME` is honored verbatim and
+  // hard-errors if missing (the user named a specific one). When no persona is
+  // given we fall back to `config.defaultPersona`, and if that dir doesn't exist
+  // we self-heal to any persona on disk — mirroring `phantombot run` — so a fresh
+  // box (whose built-in default `phantom` dir was never created) still starts the
+  // editor over ACP instead of dying with exit 2. Only hard-error if there are
+  // genuinely zero personas to fall back to.
+  let persona = options.persona ?? config.defaultPersona;
+  let agentDir = personaDir(config, persona);
   if (!existsSync(agentDir)) {
-    logErr.write(`phantombot acp: persona '${persona}' not found at ${agentDir}\n`);
-    return 2;
+    if (options.persona !== undefined) {
+      logErr.write(`phantombot acp: persona '${persona}' not found at ${agentDir}\n`);
+      return 2;
+    }
+    const healed = await healDefaultPersonaIfBroken(config, logErr);
+    if (!healed) {
+      logErr.write(
+        `phantombot acp: default persona '${persona}' not found at ${agentDir} ` +
+          "and no other personas exist.\nCreate one with `phantombot persona`.\n",
+      );
+      return 2;
+    }
+    persona = healed;
+    config.defaultPersona = healed;
+    agentDir = personaDir(config, persona);
   }
 
   let harnesses = options.harnesses;
