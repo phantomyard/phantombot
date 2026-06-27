@@ -1,0 +1,9 @@
+# Source + tooling — only ship the bundled extension + manifest + readme.
+src/**
+tests/**
+tsconfig.json
+.vscodeignore
+**/*.ts
+**/*.map
+node_modules/**
+.gitignore
