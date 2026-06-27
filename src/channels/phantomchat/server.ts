@@ -36,7 +36,11 @@ import {
   type ActiveTurnHandle,
   handleSlashCommand,
 } from "../commands.ts";
-import { TELEGRAM_REPLY_INSTRUCTION, voiceUnavailableMessage } from "../core/prompts.ts";
+import {
+  TELEGRAM_REPLY_INSTRUCTION,
+  VOICE_REPLY_INSTRUCTION,
+  voiceUnavailableMessage,
+} from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import {
   splitIntoSegments,
@@ -44,7 +48,17 @@ import {
 } from "../streamSegmenter.ts";
 import type { ServiceControl } from "../../lib/systemd.ts";
 import type { PhantomchatTransport } from "./transport.ts";
-import { sttSupport, transcribe } from "../../lib/audio.ts";
+import { sttSupport, synthesize, transcribe, ttsSupported } from "../../lib/audio.ts";
+import {
+  clearReplyModeOverride,
+  DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+  getReplyModeOverride,
+  normalizeReplyModeRequest,
+  type ReplyMode,
+  type ReplyModeRequest,
+  setReplyModeOverride,
+  touchReplyModeOverride,
+} from "../../lib/replyMode.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
@@ -413,6 +427,34 @@ export async function runPhantomchatServer(
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
     let lastNarrationFlushAt = Date.now();
+    let requestedReplyMode: ReplyModeRequest | undefined;
+
+    // Reply-modality routing (mirrors core/engine.ts). Default: mirror the
+    // input — a voice note in → a voice note back, text in → text out. An
+    // override set via `phantombot reply-mode text|voice` (10-min idle TTL,
+    // keyed on conversationKey) wins. Voice replies are DM-only: group egress
+    // (sendGroupMessage) is text, and TTS must be configured.
+    const inputWasVoice = msg.media?.kind === "voice";
+    let modalityOverride: ReplyMode | undefined = msg.groupId
+      ? undefined
+      : await touchReplyModeOverride({
+          persona: input.persona,
+          conversation: conversationKey,
+          ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+        });
+    const resolveWillReplyWithVoice = (
+      override: ReplyMode | undefined,
+    ): boolean => {
+      if (msg.groupId) return false;
+      const wantsVoice =
+        override === "voice"
+          ? true
+          : override === "text"
+            ? false
+            : inputWasVoice;
+      return wantsVoice && ttsSupported(input.config);
+    };
+    let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
     // Typing indicator. The PWA shows three-dots on each
     // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
     // every 2s for the whole turn. A plain interval (rather than per-chunk)
@@ -438,7 +480,9 @@ export async function runPhantomchatServer(
     const sendTypingTick = () =>
       msg.groupId
         ? void transport.sendGroupTyping(msg.groupId, groupTypingMembers!)
-        : void transport.sendTyping(senderHex);
+        : willReplyWithVoice
+          ? void transport.sendRecording(senderHex)
+          : void transport.sendTyping(senderHex);
     const firstTypingTick = setTimeout(sendTypingTick, 0);
 
     // Publish one chat bubble — a progress/narration line or a slice of the
@@ -550,26 +594,33 @@ export async function runPhantomchatServer(
           input.memory,
         ),
         // Reuse Telegram's short-reply / plan-then-confirm guidance — the user
-        // is on a phone-style chat client here too. No voice overlay (Nostr
-        // DMs are text only).
-        systemPromptSuffix: TELEGRAM_REPLY_INSTRUCTION,
-        // Pre-tool narration ON: the user now sees streamed bubbles, so a
-        // "checking your calendar…" line before a tool call usefully fills the
-        // silence — same as Telegram's text-out path.
-        toolNarration: true,
+        // is on a phone-style chat client here too. Stack the voice overlay
+        // (short, no-markdown, TTS-friendly) when this reply will be spoken.
+        systemPromptSuffix: willReplyWithVoice
+          ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+          : TELEGRAM_REPLY_INSTRUCTION,
+        // Pre-tool narration ON for text-out: the user sees streamed bubbles,
+        // so a "checking your calendar…" line usefully fills the silence. OFF
+        // for voice-out: the reply is synthesized once at the end, so narration
+        // would only lengthen the spoken output.
+        toolNarration: !willReplyWithVoice,
       })) {
         if (chunk.type === "text") {
           streamedReply += chunk.text;
-          finalCandidateText += chunk.text;
-          // Markdown-aware splitter: emit only completed sentence/block
-          // boundaries as bubbles; partial text stays buffered until it is.
-          const { segments } = finalSegmenter.push(chunk.text);
-          for (const segment of segments) {
-            await sendBubble(segment);
-            consumedReplyChars += segment.length;
-            finalCandidateSentChars += segment.length;
-            if (streaming.bubbleDelayMs > 0) {
-              await sleep(streaming.bubbleDelayMs);
+          // Voice-out: don't stream text bubbles — the whole reply is
+          // synthesized once at the end. Just keep accumulating streamedReply.
+          if (!willReplyWithVoice) {
+            finalCandidateText += chunk.text;
+            // Markdown-aware splitter: emit only completed sentence/block
+            // boundaries as bubbles; partial text stays buffered until it is.
+            const { segments } = finalSegmenter.push(chunk.text);
+            for (const segment of segments) {
+              await sendBubble(segment);
+              consumedReplyChars += segment.length;
+              finalCandidateSentChars += segment.length;
+              if (streaming.bubbleDelayMs > 0) {
+                await sleep(streaming.bubbleDelayMs);
+              }
             }
           }
         }
@@ -591,7 +642,10 @@ export async function runPhantomchatServer(
           resetFinalCandidate();
           await flushNarration();
         }
-        if (chunk.type === "done") finalReply = chunk.finalText;
+        if (chunk.type === "done") {
+          finalReply = chunk.finalText;
+          requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);
+        }
       }
     } catch (e) {
       log.warn("phantomchat: turn failed", {
@@ -646,6 +700,69 @@ export async function runPhantomchatServer(
     } else {
       outText = fullReply;
     }
+
+    // Persist a model-requested reply-mode change (via meta.replyMode) for
+    // future turns, mirroring core/engine.ts.
+    if (!msg.groupId) {
+      if (requestedReplyMode === "default") {
+        await clearReplyModeOverride({
+          persona: input.persona,
+          conversation: conversationKey,
+        });
+      } else if (requestedReplyMode) {
+        await setReplyModeOverride({
+          persona: input.persona,
+          conversation: conversationKey,
+          mode: requestedReplyMode,
+        });
+      }
+      // Re-read the override after the harness finishes so a mid-turn
+      // `phantombot reply-mode voice|text` call affects THIS reply too. Never
+      // switch INTO voice once text bubbles have already streamed — that would
+      // mix wire formats and duplicate content for one answer.
+      modalityOverride = await getReplyModeOverride({
+        persona: input.persona,
+        conversation: conversationKey,
+        ttlMs: DEFAULT_REPLY_MODE_OVERRIDE_TTL_MS,
+      });
+      willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+      if (willReplyWithVoice && consumedReplyChars > 0) {
+        willReplyWithVoice = false;
+      }
+    }
+
+    // Voice-out: synthesize the full reply (split into short clips so a long
+    // answer doesn't hit the TTS size limit) and send each as a voice note. On
+    // any synth failure, fall back to text for the remainder. Text streaming is
+    // disabled in voice mode, so there's nothing to dedupe — send fullReply.
+    if (willReplyWithVoice && fullReply.trim().length > 0) {
+      const voiceSegments = splitIntoSegments(fullReply, {
+        maxSentences: streaming.voiceMaxSentences,
+        maxChars: streaming.bubbleMaxChars,
+      });
+      for (const segment of voiceSegments) {
+        const r = await synthesize(input.config, segment);
+        if (r.ok) {
+          try {
+            await transport.sendVoice(senderHex, r.audio.data, r.audio.mime);
+          } catch (e) {
+            log.warn("phantomchat: sendVoice failed; falling back to text", {
+              error: (e as Error).message,
+            });
+            await sendBubble(fullReply);
+            break;
+          }
+        } else {
+          log.warn("phantomchat: TTS failed; falling back to text", {
+            error: r.error,
+          });
+          await sendBubble(fullReply);
+          break;
+        }
+      }
+      return;
+    }
+
     if (outText.trim().length === 0) return;
 
     const finalSegments = splitIntoSegments(outText, segmenterOptions);

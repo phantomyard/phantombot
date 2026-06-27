@@ -25,6 +25,8 @@ import {
   wrapV2,
   type NTNostrEvent as WrapEvent,
 } from "../../lib/nostrCrypto.ts";
+import { encryptFileBytes } from "./fileEncrypt.ts";
+import { uploadToBlossom } from "./blossomUpload.ts";
 
 /**
  * The five default public relays the PhantomChat PWA uses. phantombot must be
@@ -205,6 +207,15 @@ export interface PhantomchatTransport extends ChannelTransport {
     memberHexes: string[],
     stop?: boolean,
   ): Promise<void>;
+  /**
+   * Send a voice note to a 1:1 DM. `audio` is the synthesized OGG/Opus bytes;
+   * the transport AES-256-GCM encrypts them, uploads the ciphertext to Blossom,
+   * and gift-wraps a `type:"voice"` envelope so the PWA renders a playable
+   * bubble. DM-only — group voice is not supported.
+   */
+  sendVoice(conversationId: string, audio: Buffer, mime: string): Promise<void>;
+  /** Show a "recording voice" activity indicator (best-effort). */
+  sendRecording(conversationId: string): Promise<void>;
   /**
    * Send a NIP-17 delivery receipt for a received DM back to its sender so the
    * sender's PWA lights the second ("delivered") tick AND stops its always-on
@@ -399,6 +410,63 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       text,
     );
     await this.publishWrap(event as unknown as NTNostrEvent);
+  }
+
+  /**
+   * Voice egress (1:1 DM). Mirrors the PWA's send-file pipeline in reverse of
+   * blossomFetch: AES-256-GCM encrypt the audio, upload the ciphertext to
+   * Blossom, then NIP-17-wrap a `type:"voice"` DM envelope whose `content` is
+   * the JSON file-metadata blob the PWA's extractFileMetadata reads
+   * (`{url, sha256, key, iv, mimeType, size, mediaType:"voice"}`). The rumor is
+   * a kind-14 like text (the PWA's receive path accepts kind-14 media — see
+   * chat-api-receive.ts extractFileMetadata). `conversationId` is the recipient
+   * hex pubkey.
+   */
+  async sendVoice(
+    conversationId: string,
+    audio: Buffer,
+    mime: string,
+  ): Promise<void> {
+    const mimeType = mime || "audio/ogg";
+    const enc = encryptFileBytes(audio);
+    const { url } = await uploadToBlossom(
+      enc.ciphertext,
+      enc.sha256Hex,
+      this.ourSecretKey,
+      mimeType,
+    );
+    // File metadata travels INSIDE the envelope's `content` (a JSON string), so
+    // the recipient JSON.parses the envelope, then JSON.parses content → meta.
+    // `size` is the PLAINTEXT byte count (matches the PWA's blob.size).
+    const fileMeta = JSON.stringify({
+      url,
+      sha256: enc.sha256Hex,
+      mimeType,
+      size: audio.length,
+      key: enc.keyHex,
+      iv: enc.ivHex,
+      // Authoritative media class so the receiver never re-guesses voice vs file.
+      mediaType: "voice",
+    });
+    const envelope = JSON.stringify({
+      id: `pc-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
+      from: this.ourPubHex,
+      to: conversationId,
+      type: "voice",
+      content: fileMeta,
+      timestamp: Date.now(),
+    });
+    const { event } = await wrapV2(this.ourSecretKey, conversationId, envelope);
+    await this.publishWrap(event as unknown as NTNostrEvent);
+  }
+
+  /**
+   * "Recording voice" indicator. Nostr carries no distinct record vs type
+   * signal, so we reuse the ephemeral typing tick — the PWA shows activity
+   * while the reply is synthesized. Best-effort; never throws.
+   */
+  async sendRecording(conversationId: string): Promise<void> {
+    await this.sendTyping(conversationId);
   }
 
   /**
