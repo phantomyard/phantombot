@@ -15,7 +15,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  configHomeFor,
   configPathFor,
+  dataHomeFor,
   isHomeRedirected,
   isSnapConfined,
   snapAwareSpawnEnv,
@@ -81,7 +83,7 @@ describe("snapAwareSpawnEnv — the fix", () => {
     expect(out.PHANTOMBOT_CONFIG).toBeUndefined();
   });
 
-  test("strict-snap env pins ONLY PHANTOMBOT_CONFIG to the REAL home", () => {
+  test("strict-snap env pins config + XDG dirs to the REAL home", () => {
     const out = snapAwareSpawnEnv(strictSnapEnv());
 
     // The fix: config resolution is pinned back to the REAL home, NOT the empty
@@ -96,6 +98,38 @@ describe("snapAwareSpawnEnv — the fix", () => {
     // The config is absolute and under the real home, NOT under the snap sandbox.
     expect(out.PHANTOMBOT_CONFIG!.startsWith(REAL_HOME + "/")).toBe(true);
     expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
+  });
+
+  test("DEFAULT install (no personas_dir): restores XDG_DATA_HOME so loadConfig's default store resolves to the REAL home — the blocker Kai flagged", () => {
+    // This is the case PHANTOMBOT_CONFIG alone did NOT cover: a config.toml with
+    // no explicit personas_dir falls back to join(xdgDataHome(),"phantombot",
+    // "personas") in loadConfig. Under strict snap XDG_DATA_HOME is redirected to
+    // the empty sandbox store → exit 2. We must hand the child a real XDG_DATA_HOME.
+    const out = snapAwareSpawnEnv(strictSnapEnv());
+
+    expect(out.XDG_DATA_HOME).toBe(dataHomeFor(REAL_HOME));
+    expect(out.XDG_CONFIG_HOME).toBe(configHomeFor(REAL_HOME));
+
+    // Forced back under the real home, NOT the snap sandbox.
+    expect(out.XDG_DATA_HOME).toBe("/home/alice/.local/share");
+    expect(out.XDG_DATA_HOME).not.toContain("/snap/");
+    expect(out.XDG_CONFIG_HOME).not.toContain("/snap/");
+
+    // Still no PHANTOMBOT_PERSONAS_DIR: custom personas_dir in config.toml wins.
+    expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
+  });
+
+  test("FORCES XDG dirs over snapd's redirected sandbox values", () => {
+    // snapd always populates XDG_* with redirected sandbox paths; the redirected
+    // value IS the bug, so we override rather than respect it.
+    const out = snapAwareSpawnEnv(
+      strictSnapEnv({
+        XDG_DATA_HOME: `${SNAP_HOME}/.local/share`,
+        XDG_CONFIG_HOME: `${SNAP_HOME}/.config`,
+      }),
+    );
+    expect(out.XDG_DATA_HOME).toBe(dataHomeFor(REAL_HOME));
+    expect(out.XDG_CONFIG_HOME).toBe(configHomeFor(REAL_HOME));
   });
 
   test("returns a NEW object; never mutates the caller's env", () => {
@@ -138,5 +172,10 @@ describe("snapAwareSpawnEnv — the fix", () => {
     expect(configPathFor(REAL_HOME)).toBe(
       "/home/alice/.config/phantombot/config.toml",
     );
+  });
+
+  test("XDG path helpers build phantombot's default absolute layout", () => {
+    expect(dataHomeFor(REAL_HOME)).toBe("/home/alice/.local/share");
+    expect(configHomeFor(REAL_HOME)).toBe("/home/alice/.config");
   });
 });
