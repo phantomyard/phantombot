@@ -1,0 +1,178 @@
+/**
+ * phantombot VS Code extension — `activate()` registers the `@phantombot` chat
+ * participant in VS Code's native Chat panel and bridges every turn to an
+ * embedded ACP client (a spawned `phantombot acp` subprocess).
+ *
+ * This is the ONLY module that imports `vscode`. Everything it leans on
+ * (binary resolution, the ACP client, the prompt bridge) is pure and unit
+ * tested under `bun test` with no `vscode` dependency. extension.ts is the thin
+ * glue: resolve the binary, lazily spawn one ACP client per workspace, open a
+ * session keyed on the workspace folder, and route chat requests through the
+ * bridge.
+ *
+ * PR2 will bundle this as a `.vsix` and auto-install it via
+ * reconcileEditorConnectors() (a VS Code EditorSpec slots beside ZED_EDITOR).
+ * Nothing here precludes that — the binary the editor spawns is exactly the one
+ * the connector will register.
+ */
+
+import * as vscode from "vscode";
+
+import { AcpClient } from "./acpClient.ts";
+import {
+  notFoundMessage,
+  resolvePhantombotBinary,
+  type ResolveResult,
+} from "./binaryResolver.ts";
+import { bridgePromptToStream } from "./participant.ts";
+
+const PARTICIPANT_ID = "phantombot.chat";
+
+/**
+ * One ACP client + session per workspace folder. The session id is opaque to
+ * us; phantombot keys its memory on the cwd (see session.ts), so reopening the
+ * same workspace lands in the same conversation server-side.
+ */
+interface WorkspaceConn {
+  client: AcpClient;
+  sessionId: string;
+  cwd: string;
+}
+
+export function activate(context: vscode.ExtensionContext): void {
+  const output = vscode.window.createOutputChannel("phantombot");
+  context.subscriptions.push(output);
+
+  // workspace cwd → live connection, spawned lazily on first prompt.
+  const conns = new Map<string, WorkspaceConn>();
+
+  const disposeAll = () => {
+    for (const [, conn] of conns) conn.client.dispose();
+    conns.clear();
+  };
+  context.subscriptions.push({ dispose: disposeAll });
+
+  const handler: vscode.ChatRequestHandler = async (
+    request,
+    _ctx,
+    stream,
+    token,
+  ) => {
+    const cwd = currentWorkspaceCwd();
+
+    let conn: WorkspaceConn;
+    try {
+      conn = await ensureConnection(cwd, output, conns, context);
+    } catch (e) {
+      const msg = (e as Error).message;
+      stream.markdown(`**phantombot could not start.**\n\n${msg}`);
+      output.appendLine(`[activate] connection failed: ${msg}`);
+      return { errorDetails: { message: msg } };
+    }
+
+    try {
+      const { stopReason } = await bridgePromptToStream({
+        client: conn.client,
+        sessionId: conn.sessionId,
+        request: { prompt: request.prompt },
+        stream: {
+          markdown: (v) => stream.markdown(v),
+          progress: (v) => stream.progress(v),
+        },
+        token: {
+          isCancellationRequested: token.isCancellationRequested,
+          onCancellationRequested: (l) => token.onCancellationRequested(l),
+        },
+      });
+      if (stopReason === "refusal") {
+        stream.markdown("\n\n_(phantombot declined this turn.)_");
+      }
+      return {};
+    } catch (e) {
+      // The subprocess died mid-turn, or the agent errored. Surface it — never
+      // a silent hang. Drop the dead connection so the next turn respawns.
+      const msg = (e as Error).message;
+      conn.client.dispose();
+      conns.delete(conn.cwd);
+      stream.markdown(`\n\n**phantombot error:** ${msg}`);
+      output.appendLine(`[prompt] ${msg}`);
+      return { errorDetails: { message: msg } };
+    }
+  };
+
+  const participant = vscode.chat.createChatParticipant(PARTICIPANT_ID, handler);
+  // Icon ships with the extension; falls back to the default robot if absent.
+  participant.iconPath = new vscode.ThemeIcon("hubot");
+  context.subscriptions.push(participant);
+
+  output.appendLine("phantombot chat participant registered (@phantombot).");
+}
+
+export function deactivate(): void {
+  // Subscriptions (incl. the disposeAll hook) are torn down by VS Code.
+}
+
+/** Resolve the workspace cwd, falling back to the home dir when none is open. */
+function currentWorkspaceCwd(): string {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (folder) return folder.uri.fsPath;
+  return process.cwd();
+}
+
+/**
+ * Lazily spawn + handshake an ACP client for a workspace, caching it. On any
+ * failure (binary not found, handshake error) this throws with an actionable
+ * message — the caller renders it into the panel.
+ */
+async function ensureConnection(
+  cwd: string,
+  output: vscode.OutputChannel,
+  conns: Map<string, WorkspaceConn>,
+  _context: vscode.ExtensionContext,
+): Promise<WorkspaceConn> {
+  const existing = conns.get(cwd);
+  if (existing) return existing;
+
+  const resolved = resolveBinaryOrThrow(output);
+  output.appendLine(
+    `[activate] using phantombot at ${resolved.path} (via ${resolved.source})`,
+  );
+
+  const persona = vscode.workspace
+    .getConfiguration("phantombot")
+    .get<string>("persona");
+
+  const client = new AcpClient({
+    binaryPath: resolved.path,
+    persona: persona && persona.trim() ? persona.trim() : undefined,
+    cwd,
+    onDiagnostic: (text) => output.append(text.endsWith("\n") ? text : text + "\n"),
+  });
+
+  await client.initialize();
+  const sessionId = await client.newSession(cwd);
+
+  const conn: WorkspaceConn = { client, sessionId, cwd };
+  conns.set(cwd, conn);
+  return conn;
+}
+
+/** Resolve the binary from settings/PATH/install-locations or throw. */
+function resolveBinaryOrThrow(output: vscode.OutputChannel): ResolveResult {
+  const configuredPath = vscode.workspace
+    .getConfiguration("phantombot")
+    .get<string>("binaryPath");
+
+  const resolved = resolvePhantombotBinary({
+    platform: process.platform,
+    env: process.env,
+    configuredPath: configuredPath || undefined,
+  });
+
+  if (!resolved) {
+    const msg = notFoundMessage(process.platform);
+    output.appendLine(`[activate] ${msg}`);
+    throw new Error(msg);
+  }
+  return resolved;
+}

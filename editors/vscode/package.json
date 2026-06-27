@@ -1,0 +1,64 @@
+{
+  "name": "phantombot-vscode",
+  "displayName": "phantombot",
+  "description": "Chat with phantombot — your personality-first agent — in VS Code's native Chat panel via an embedded ACP client.",
+  "version": "0.1.0",
+  "publisher": "phantomyard",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phantomyard/phantombot.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onChatParticipant:phantombot.chat"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "phantombot.chat",
+        "name": "phantombot",
+        "fullName": "phantombot",
+        "description": "Ask phantombot — persona, memory and tools live server-side.",
+        "isSticky": true
+      }
+    ],
+    "configuration": {
+      "title": "phantombot",
+      "properties": {
+        "phantombot.binaryPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `phantombot` binary. Leave empty to auto-discover via PATH and common install locations."
+        },
+        "phantombot.persona": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Persona to bind the ACP session to (passed as `--persona`). Leave empty to use phantombot's configured default persona."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "bun run build",
+    "build": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18",
+    "watch": "bun run build -- --watch --sourcemap",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./tests"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.93.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
