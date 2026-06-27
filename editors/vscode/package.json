@@ -19,7 +19,9 @@
     "Chat"
   ],
   "activationEvents": [
-    "onChatParticipant:phantombot.chat"
+    "onChatParticipant:phantombot.chat",
+    "onCommand:phantombot.chat.open",
+    "onCommand:phantombot.chat.askAboutSelection"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -32,6 +34,44 @@
         "isSticky": true
       }
     ],
+    "commands": [
+      {
+        "command": "phantombot.chat.open",
+        "title": "Chat with Phantombot",
+        "category": "phantombot",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "phantombot.chat.askAboutSelection",
+        "title": "Ask Phantombot about this",
+        "category": "phantombot"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "phantombot.chat.open"
+        },
+        {
+          "command": "phantombot.chat.askAboutSelection",
+          "when": "editorTextFocus"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "phantombot.chat.open",
+          "when": "view == workbench.panel.chat.view.copilot",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "phantombot.chat.askAboutSelection",
+          "when": "editorTextFocus",
+          "group": "phantombot@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "phantombot",
       "properties": {

@@ -25,8 +25,13 @@ import {
   type ResolveResult,
 } from "./binaryResolver.ts";
 import { bridgePromptToStream } from "./participant.ts";
+import { askAboutSelectionQuery, openChatQuery } from "./commands.ts";
 
 const PARTICIPANT_ID = "phantombot.chat";
+
+/** Command ids — mirrored in package.json `contributes.commands`. */
+const CMD_OPEN_CHAT = "phantombot.chat.open";
+const CMD_ASK_SELECTION = "phantombot.chat.askAboutSelection";
 
 /**
  * One ACP client + session per workspace folder. The session id is opaque to
@@ -105,11 +110,45 @@ export function activate(context: vscode.ExtensionContext): void {
   participant.iconPath = new vscode.ThemeIcon("hubot");
   context.subscriptions.push(participant);
 
-  output.appendLine("phantombot chat participant registered (@phantombot).");
+  // ── Discoverability commands (Command Palette / title-bar / context menu). ──
+  // All three funnel through VS Code's built-in `workbench.action.chat.open`,
+  // which opens the native Chat panel pre-filled with `query` — so the user
+  // lands in a turn already addressed to `@phantombot`.
+  const openChat = (query: string) =>
+    vscode.commands.executeCommand("workbench.action.chat.open", { query });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(CMD_OPEN_CHAT, () => openChat(openChatQuery())),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(CMD_ASK_SELECTION, () => {
+      const editor = vscode.window.activeTextEditor;
+      const doc = editor?.document;
+      const selectedText =
+        editor && doc ? doc.getText(editor.selection) : "";
+      const query = askAboutSelectionQuery({
+        selectedText,
+        languageId: doc?.languageId,
+        fileName: doc ? baseName(doc.uri.fsPath) : undefined,
+      });
+      return openChat(query);
+    }),
+  );
+
+  output.appendLine(
+    "phantombot chat participant registered (@phantombot) + commands.",
+  );
 }
 
 export function deactivate(): void {
   // Subscriptions (incl. the disposeAll hook) are torn down by VS Code.
+}
+
+/** Last path segment of an fs path, separator-agnostic (POSIX + win32). */
+function baseName(fsPath: string): string {
+  const parts = fsPath.split(/[\\/]/);
+  return parts[parts.length - 1] || fsPath;
 }
 
 /** Resolve the workspace cwd, falling back to the home dir when none is open. */

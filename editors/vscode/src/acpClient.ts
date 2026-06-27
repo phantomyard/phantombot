@@ -27,6 +27,7 @@
 
 import { spawn } from "node:child_process";
 
+import { snapAwareSpawnEnv } from "./snapEnv.ts";
 import {
   ACP_PROTOCOL_VERSION,
   allocId,
@@ -341,8 +342,13 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
   const child = spawn(bin, args, {
     cwd: options.cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    // Inherit env so phantombot finds its config/secrets exactly as on a TTY.
-    env: process.env,
+    // Inherit env so phantombot finds its config/secrets exactly as on a TTY —
+    // but under a STRICT SNAP (Ubuntu App Center VS Code) `$HOME` is redirected
+    // into the snap sandbox, whose persona/config store is empty, so plain
+    // `phantombot acp` exits 2 ("no other personas exist"). snapAwareSpawnEnv
+    // pins PHANTOMBOT_PERSONAS_DIR + PHANTOMBOT_CONFIG back to the REAL home
+    // (via $SNAP_REAL_HOME) when — and only when — we're snap-confined.
+    env: snapAwareSpawnEnv(process.env) as NodeJS.ProcessEnv,
   });
 
   let stdoutBuf = "";

@@ -33,6 +33,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
+import { xdgConfigHome, xdgDataHome } from "../../config.ts";
 import type { WriteSink } from "../../lib/io.ts";
 
 export interface InstallZedOptions {
@@ -53,13 +54,40 @@ export interface InstallZedResult {
   backupPath?: string;
 }
 
+/**
+ * Absolute persona/config overrides to bake into the registered `env` block.
+ *
+ * The installer runs as the REAL user, on a NATIVE phantombot install, so it
+ * knows the real absolute persona/config paths — exactly the paths
+ * config.ts::loadConfig resolves by default. Baking them in pins Zed's spawned
+ * `phantombot acp` to the real store even if Zed (or a future snap/flatpak Zed)
+ * ever spawns it with a redirected `$HOME`/`$XDG_*` — the same class of bug that
+ * breaks the strict-snap VS Code. We honour `$XDG_CONFIG_HOME`/`$XDG_DATA_HOME`
+ * here precisely because config.ts does, so the override always agrees with the
+ * default resolution on a normal box (and is therefore a no-op there, just an
+ * insurance policy against a redirected child env).
+ */
+export function phantombotEnvOverrides(): {
+  PHANTOMBOT_CONFIG: string;
+  PHANTOMBOT_PERSONAS_DIR: string;
+} {
+  return {
+    PHANTOMBOT_CONFIG: join(xdgConfigHome(), "phantombot", "config.toml"),
+    PHANTOMBOT_PERSONAS_DIR: join(
+      xdgDataHome(),
+      "phantombot",
+      "personas",
+    ),
+  };
+}
+
 /** The block phantombot owns under `agent_servers`. */
 export function phantombotAgentServerBlock(binaryPath: string): {
   command: string;
   args: string[];
   env: Record<string, string>;
 } {
-  return { command: binaryPath, args: ["acp"], env: {} };
+  return { command: binaryPath, args: ["acp"], env: phantombotEnvOverrides() };
 }
 
 /**

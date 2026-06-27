@@ -95,7 +95,15 @@ describe("installZed — JSONC preservation", () => {
     expect(parsed.theme).toBe("One Dark");
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
     expect(parsed.agent_servers.Phantombot.args).toEqual(["acp"]);
-    expect(parsed.agent_servers.Phantombot.env).toEqual({});
+    // The registered env now bakes in absolute persona/config overrides so the
+    // spawned `phantombot acp` always reads the real store (insurance against a
+    // redirected child `$HOME`/`$XDG_*`, the strict-snap class of bug).
+    expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_CONFIG).toMatch(
+      /\/phantombot\/config\.toml$/,
+    );
+    expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_PERSONAS_DIR).toMatch(
+      /\/phantombot\/personas$/,
+    );
   });
 
   test("backup of the original is created", async () => {
