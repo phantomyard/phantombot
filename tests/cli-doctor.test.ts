@@ -873,3 +873,99 @@ describe("runDoctor pi extension health check", () => {
     expect(out.text).toContain("pi extension: WARN");
   });
 });
+
+describe("runDoctor — editor connectors", () => {
+  beforeEach(async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+  });
+
+  const isolate = {
+    checkSystemd: false as const,
+    checkTimers: false as const,
+    checkHarnesses: false as const,
+    checkPiExtension: false as const,
+  };
+
+  test("editor not installed → ok and exit 0", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkEditorConnectors: () => [
+        { editor: "zed", action: "not-detected", settingsPath: "/x/zed" },
+      ],
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("editor (zed): ok");
+    expect(out.text).toContain("not installed");
+  });
+
+  test("already current → ok and exit 0", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkEditorConnectors: () => [
+        { editor: "zed", action: "current", settingsPath: "/x/zed" },
+      ],
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("editor (zed): ok");
+  });
+
+  test("registered this run → ok and exit 0", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkEditorConnectors: () => [
+        { editor: "zed", action: "registered", settingsPath: "/x/zed" },
+      ],
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("registered phantombot");
+  });
+
+  test("stale under --no-repair → WARN and exit 1", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      repair: false,
+      ...isolate,
+      checkEditorConnectors: (repair) => {
+        // doctor must pass repair through so report-only mode reports drift.
+        expect(repair).toBe(false);
+        return [{ editor: "zed", action: "stale", settingsPath: "/x/zed" }];
+      },
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("editor (zed): WARN");
+  });
+
+  test("unparseable settings (error) → WARN and exit 1", async () => {
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      ...isolate,
+      checkEditorConnectors: () => [
+        {
+          editor: "zed",
+          action: "error",
+          settingsPath: "/x/zed",
+          error: "settings file not parseable as JSONC — left untouched",
+        },
+      ],
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("editor (zed): WARN");
+    expect(out.text).toContain("not parseable");
+  });
+});

@@ -155,11 +155,14 @@ export type PiApiKeyWrite =
   | { action: "keep" };
 
 export function resolvePiApiKeyWrite(
-  enteredKey: string,
+  enteredKey: string | undefined | null,
   newProvider: string | undefined,
   currentProvider: string | undefined,
 ): PiApiKeyWrite {
-  const entered = enteredKey.trim();
+  // The TUI prompt returns undefined (not "") when the user submits a blank
+  // line, so guard before trimming — an unguarded .trim() threw
+  // "undefined is not an object" and forced the user to retype the key.
+  const entered = (enteredKey ?? "").trim();
   if (entered) return { action: "set", value: entered };
   const providerChanged = clean(newProvider) !== clean(currentProvider);
   return providerChanged ? { action: "clear" } : { action: "keep" };

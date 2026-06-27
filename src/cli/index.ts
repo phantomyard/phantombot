@@ -20,6 +20,7 @@
 import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
 import askCmd from "./ask.ts";
+import acpCmd from "./acp.ts";
 import personaCmd from "./persona.ts";
 import telegramCmd from "./telegram.ts";
 import phantomchatCmd from "./phantomchat.ts";
@@ -60,6 +61,7 @@ export const mainCommand = defineCommand({
     uninstall: uninstallCmd,
     run: runCmd,
     ask: askCmd,
+    acp: acpCmd,
     memory: memoryCmd,
     notify: notifyCmd,
     heartbeat: heartbeatCmd,

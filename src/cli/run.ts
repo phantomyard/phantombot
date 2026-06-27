@@ -58,6 +58,7 @@ import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
 import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
+import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
 export interface RunInput {
   config?: Config;
@@ -399,6 +400,42 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           error: (e as Error).message,
         }),
     );
+  }
+
+  // Auto-register phantombot into any detected editor (Zed today; VS Code when
+  // PR2 lands) so Andrew never has to run `acp install` by hand. Idempotent:
+  // only writes when the registration is missing or points at a different
+  // binary path (e.g. just updated), so it doesn't churn on every startup.
+  // Fully error-isolated — `reconcileEditorConnectors` never throws and this is
+  // best-effort, so a broken editor settings file can NEVER block startup or a
+  // self-update. `doctor` re-reconciles on demand. Gated to the real
+  // `phantombot` binary (same gate as the pi extension) so `bun run`/dev never
+  // writes to the dev box's real ~/.config/zed.
+  if (basename(process.execPath) === "phantombot") {
+    try {
+      for (const r of reconcileEditorConnectors({
+        binaryPath: process.execPath,
+      })) {
+        if (r.action === "registered" || r.action === "updated") {
+          log.info("run: registered phantombot as ACP agent", {
+            editor: r.editor,
+            action: r.action,
+            settings: r.settingsPath,
+          });
+        } else if (r.action === "error") {
+          log.warn("run: editor connector registration failed", {
+            editor: r.editor,
+            error: r.error,
+          });
+        }
+      }
+    } catch (e) {
+      // Defensive: reconcile is internally guarded, but startup must survive
+      // anything here regardless.
+      log.warn("run: editor connector reconcile threw", {
+        error: (e as Error).message,
+      });
+    }
   }
 
   const ac = new AbortController();
