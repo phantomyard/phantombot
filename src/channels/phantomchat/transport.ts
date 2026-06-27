@@ -27,6 +27,7 @@ import {
 } from "../../lib/nostrCrypto.ts";
 import { encryptFileBytes } from "./fileEncrypt.ts";
 import { uploadToBlossom } from "./blossomUpload.ts";
+import { oggOpusDurationSeconds } from "./oggOpusDuration.ts";
 
 /**
  * The five default public relays the PhantomChat PWA uses. phantombot must be
@@ -438,6 +439,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // File metadata travels INSIDE the envelope's `content` (a JSON string), so
     // the recipient JSON.parses the envelope, then JSON.parses content → meta.
     // `size` is the PLAINTEXT byte count (matches the PWA's blob.size).
+    // Playback duration (seconds) so the recipient's bubble shows the real
+    // length instead of 0:00. 0 ⇒ unparseable; omit and let the player fall
+    // back rather than stamp a bogus length.
+    const durationS = oggOpusDurationSeconds(audio);
     const fileMeta = JSON.stringify({
       url,
       sha256: enc.sha256Hex,
@@ -447,6 +452,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       iv: enc.ivHex,
       // Authoritative media class so the receiver never re-guesses voice vs file.
       mediaType: "voice",
+      ...(durationS > 0 ? { duration: durationS } : {}),
     });
     const envelope = JSON.stringify({
       id: `pc-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`,
