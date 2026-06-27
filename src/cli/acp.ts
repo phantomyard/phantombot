@@ -5,6 +5,7 @@
  *   phantombot acp                 run the ACP stdio server (Zed spawns this)
  *   phantombot acp --persona NAME  …bound to a specific persona
  *   phantombot acp install zed     write the Zed settings.json registration
+ *   phantombot acp install vscode  install the first-party VS Code extension (.vsix)
  *
  * The connector sits BESIDE the channel layer: it calls runTurn directly with
  * `trusted: true`. The principal is the local OS user who launched Zed — they
@@ -73,7 +74,7 @@ export default defineCommand({
   meta: {
     name: "acp",
     description:
-      "Run phantombot as an ACP agent server over stdio (Zed spawns this). Use `acp install zed` to register it.",
+      "Run phantombot as an ACP agent server over stdio (Zed spawns this). Use `acp install zed` (settings merge) or `acp install vscode` (first-party extension) to register it with an editor.",
   },
   args: {
     persona: {
