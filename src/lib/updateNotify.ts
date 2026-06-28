@@ -80,6 +80,16 @@ export interface PendingUpdate {
    */
   chatId?: number;
   /**
+   * Channel-neutral conversation key of the chat that issued `/update`,
+   * e.g. "telegram:42" or "phantomchat:<64-hex>". This is the AUTHORITATIVE
+   * routing field — `chatId` above only works for Telegram (a numeric id),
+   * so a PhantomChat-origin `/update` (whose conversation id is a hex pubkey)
+   * used to coerce to NaN→null and wrongly fall back to a Telegram broadcast.
+   * The post-restart notify reads the prefix here to pick the right channel.
+   * Optional so markers written by older binaries still parse.
+   */
+  conversation?: string;
+  /**
    * Persona whose Telegram bot handled `/update`. Used after restart to
    * send the confirmation through the same bot in hybrid default+persona
    * configs. Optional so markers written by older versions still work.
@@ -128,7 +138,9 @@ export async function readPendingUpdate(
       typeof parsed?.targetTag !== "string" ||
       typeof parsed?.previousVersion !== "string" ||
       typeof parsed?.writtenAt !== "string" ||
-      (parsed.persona !== undefined && typeof parsed.persona !== "string")
+      (parsed.persona !== undefined && typeof parsed.persona !== "string") ||
+      (parsed.conversation !== undefined &&
+        typeof parsed.conversation !== "string")
     ) {
       log.warn("updateNotify: pending-update marker missing required fields", {
         path,
@@ -249,6 +261,12 @@ export interface RunUpdateFlowInput {
    * post-restart notify lands in the same DM the request came from.
    */
   chatId: number;
+  /**
+   * Channel-neutral conversation key that issued `/update`
+   * (e.g. "telegram:42" or "phantomchat:<hex>"). Authoritative router for
+   * the post-restart notify; `chatId` alone can't address a PhantomChat DM.
+   */
+  conversation?: string;
   /** Persona whose Telegram listener handled `/update`. */
   persona?: string;
   fetchImpl?: typeof fetch;
@@ -333,6 +351,7 @@ export async function runUpdateFlow(
       targetVersion: release.version,
       targetTag: release.tag,
       chatId: input.chatId,
+      conversation: input.conversation,
       persona: input.persona,
       previousVersion: input.currentVersion,
       writtenAt: new Date().toISOString(),
@@ -557,13 +576,56 @@ export interface NotifyPostRestartInput {
 }
 
 export interface NotifyPostRestartResult {
-  /** "no_marker" | "success_notified" | "failure_notified" | "no_telegram" */
+  /** "no_marker" | "success_notified" | "failure_notified" | "no_telegram"
+   *  | "deferred_other_channel" */
   status:
     | "no_marker"
     | "success_notified"
     | "failure_notified"
-    | "no_telegram";
+    | "no_telegram"
+    /**
+     * The marker was raised by a non-Telegram channel (e.g. PhantomChat).
+     * The Telegram notify deliberately leaves the marker UNTOUCHED — neither
+     * sending nor clearing — so the owning channel's own post-restart notify
+     * (see `notifyPhantomchatPostRestart`) can deliver the confirmation to the
+     * right conversation. Returning instead of broadcasting to Telegram is the
+     * fix for "`/update` from PhantomChat replied on Telegram".
+     */
+    | "deferred_other_channel";
   marker?: PendingUpdate;
+}
+
+/**
+ * Which channel a pending-update marker should be confirmed back on. Derived
+ * from the channel-neutral `conversation` key (e.g. "phantomchat:<hex>").
+ * Legacy markers without `conversation` (or with a "telegram:" prefix, or a
+ * numeric chatId) are Telegram — that's the only channel older binaries and
+ * the heartbeat path ever wrote.
+ */
+export function pendingUpdateChannel(
+  marker: Pick<PendingUpdate, "conversation">,
+): "telegram" | "phantomchat" | "other" {
+  const conv = marker.conversation;
+  if (!conv) return "telegram";
+  if (conv.startsWith("phantomchat:")) return "phantomchat";
+  if (conv.startsWith("telegram:")) return "telegram";
+  return "other";
+}
+
+/**
+ * The success/failure line shown after a restart. Shared by every channel's
+ * post-restart notify so PhantomChat and Telegram render identically.
+ */
+export function renderPostRestartMessage(
+  marker: PendingUpdate,
+  currentVersion: string,
+): { success: boolean; message: string } {
+  const success = marker.targetVersion === currentVersion;
+  const message = success
+    ? `✅ Updated to ${marker.targetTag} (was v${marker.previousVersion}). Back online.`
+    : `⚠️ Update to ${marker.targetTag} didn't take — still on v${currentVersion}. ` +
+      `Check phantombot logs and try /update again.`;
+  return { success, message };
 }
 
 /**
@@ -585,6 +647,14 @@ export async function notifyPostRestartIfPending(
 ): Promise<NotifyPostRestartResult> {
   const marker = await readPendingUpdate(input.pendingPath);
   if (!marker) return { status: "no_marker" };
+
+  // Non-Telegram origin (e.g. PhantomChat): leave the marker in place so the
+  // owning channel's post-restart notify routes the confirmation back to the
+  // conversation that asked. Do NOT clear and do NOT broadcast to Telegram —
+  // that broadcast was the "/update from PhantomChat answered on Telegram" bug.
+  if (pendingUpdateChannel(marker) === "phantomchat") {
+    return { status: "deferred_other_channel", marker };
+  }
 
   // Pick the account that drives this notify. New markers include the
   // persona that handled `/update`, so hybrid default+persona configs can
@@ -613,11 +683,10 @@ export async function notifyPostRestartIfPending(
     input.createTransport?.(adminAccount) ??
     new HttpTelegramTransport(adminAccount.token);
 
-  const success = marker.targetVersion === input.currentVersion;
-  const message = success
-    ? `✅ Updated to ${marker.targetTag} (was v${marker.previousVersion}). Back online.`
-    : `⚠️ Update to ${marker.targetTag} didn't take — still on v${input.currentVersion}. ` +
-      `Check phantombot logs and try /update again.`;
+  const { success, message } = renderPostRestartMessage(
+    marker,
+    input.currentVersion,
+  );
 
   // Recipient rule: explicit chatId from the marker wins; fall back to
   // broadcasting to allowed_user_ids when the marker came from a non-
@@ -642,6 +711,95 @@ export async function notifyPostRestartIfPending(
 
   await clearPendingUpdate(input.pendingPath);
 
+  return {
+    status: success ? "success_notified" : "failure_notified",
+    marker,
+  };
+}
+
+/* -------------------------------------------------------------------------- *
+ * Compose: post-restart confirmation on startup — PhantomChat origin
+ * -------------------------------------------------------------------------- */
+
+/** Minimal transport seam: just enough to DM a hex pubkey. The real
+ *  SimplePoolPhantomchatTransport satisfies this; tests pass a fake. */
+export interface PhantomchatNotifyTransport {
+  sendMessage(conversationId: string, text: string): Promise<void>;
+}
+
+export interface NotifyPhantomchatPostRestartInput {
+  /** This persona's name; must match the marker's `persona` to claim it. */
+  persona: string;
+  /** Transport bound to this persona's identity + relays. */
+  transport: PhantomchatNotifyTransport;
+  currentVersion: string;
+  pendingPath?: string;
+}
+
+export interface NotifyPhantomchatPostRestartResult {
+  /**
+   *  "no_marker"        — nothing pending
+   *  "not_phantomchat"  — marker exists but isn't a PhantomChat origin
+   *  "not_this_persona" — PhantomChat marker, but a different persona owns it
+   *  "success_notified" / "failure_notified" — sent + cleared
+   */
+  status:
+    | "no_marker"
+    | "not_phantomchat"
+    | "not_this_persona"
+    | "success_notified"
+    | "failure_notified";
+  marker?: PendingUpdate;
+}
+
+/**
+ * PhantomChat counterpart to `notifyPostRestartIfPending`. Run once per
+ * PhantomChat persona at startup (after its relay transport is built). It
+ * claims a pending-update marker ONLY when the marker came from PhantomChat
+ * AND names this persona, then DMs the success/failure line straight back to
+ * the originating pubkey over Nostr — the conversation `/update` was typed in —
+ * and clears the marker so no other listener re-sends it.
+ *
+ * Multi-persona safety: a marker whose `persona` is someone else's is left
+ * untouched ("not_this_persona") so the persona that actually handled `/update`
+ * is the one that confirms it. Telegram-origin markers are ignored here and
+ * handled by `notifyPostRestartIfPending`.
+ */
+export async function notifyPhantomchatPostRestart(
+  input: NotifyPhantomchatPostRestartInput,
+): Promise<NotifyPhantomchatPostRestartResult> {
+  const marker = await readPendingUpdate(input.pendingPath);
+  if (!marker) return { status: "no_marker" };
+  if (pendingUpdateChannel(marker) !== "phantomchat") {
+    return { status: "not_phantomchat", marker };
+  }
+  // A PhantomChat marker should always name the persona that handled it, so a
+  // multi-persona box only lets the right listener claim it. If persona is
+  // unset (shouldn't happen for new markers) we don't guess — leave it.
+  if (!marker.persona || marker.persona !== input.persona) {
+    return { status: "not_this_persona", marker };
+  }
+
+  // conversation is "phantomchat:<hex>"; the recipient is the bare hex pubkey.
+  const recipientHex = (marker.conversation ?? "").slice("phantomchat:".length);
+  const { success, message } = renderPostRestartMessage(
+    marker,
+    input.currentVersion,
+  );
+
+  try {
+    await input.transport.sendMessage(recipientHex, message);
+  } catch (e) {
+    log.warn("updateNotify: phantomchat post-restart notify send failed", {
+      persona: input.persona,
+      error: (e as Error).message,
+    });
+    // Send failed — leave the marker in place so a later restart can retry.
+    // There's exactly one recipient here, so retry can't double-spam a group.
+    return { status: success ? "success_notified" : "failure_notified", marker };
+  }
+
+  await clearPendingUpdate(input.pendingPath);
   return {
     status: success ? "success_notified" : "failure_notified",
     marker,

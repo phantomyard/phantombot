@@ -165,9 +165,9 @@ describe("shouldAutoOpenSession", () => {
     expect(shouldAutoOpenSession("never", false)).toBe(false);
   });
 
-  test('"ifPreviouslyOpened" tracks the remembered state', () => {
-    expect(shouldAutoOpenSession("ifPreviouslyOpened", true)).toBe(true);
-    expect(shouldAutoOpenSession("ifPreviouslyOpened", false)).toBe(false);
+  test('"ifUsedBefore" tracks whether phantombot has ever been opened', () => {
+    expect(shouldAutoOpenSession("ifUsedBefore", true)).toBe(true);
+    expect(shouldAutoOpenSession("ifUsedBefore", false)).toBe(false);
   });
 
   test("unknown setting falls back to the sticky default policy", () => {

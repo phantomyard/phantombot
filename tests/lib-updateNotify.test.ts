@@ -23,7 +23,9 @@ import type { ServiceControl } from "../src/lib/systemd.ts";
 import {
   checkAndNotifyOnce,
   clearPendingUpdate,
+  notifyPhantomchatPostRestart,
   notifyPostRestartIfPending,
+  pendingUpdateChannel,
   readLastNotified,
   readPendingUpdate,
   runUpdateFlow,
@@ -935,5 +937,243 @@ describe("notifyPostRestartIfPending", () => {
     });
     expect(r.status).toBe("success_notified");
     expect(transport.sent.map((s) => s.chatId)).toEqual(["777"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PhantomChat /update routing (regression)
+//
+// The bug: `/update` typed in the PhantomChat PWA replied "✅ Updated to vX"
+// on Telegram instead of back in PhantomChat. Root cause — the marker only
+// carried a numeric Telegram chatId; a PhantomChat conversation id is a hex
+// pubkey, so `Number(hex)` → NaN → serialized null → the Telegram notify fell
+// through to broadcasting to the allowlist. These tests lock in the fix:
+//   1. the marker carries the channel-neutral `conversation` key;
+//   2. the Telegram notify DEFERS (doesn't send, doesn't clear) a PhantomChat
+//      marker so it can't leak onto Telegram;
+//   3. the PhantomChat notifier sends the confirmation back to the originating
+//      pubkey over its own transport and clears the marker.
+// ---------------------------------------------------------------------------
+
+const PC_HEX =
+  "abc123def456abc123def456abc123def456abc123def456abc123def4560000";
+
+/** Minimal fake of the PhantomChat transport seam — records DM sends. */
+class FakePhantomchatTransport {
+  sent: Array<{ to: string; text: string }> = [];
+  shouldThrow = false;
+  async sendMessage(conversationId: string, text: string): Promise<void> {
+    if (this.shouldThrow) throw new Error("relay down");
+    this.sent.push({ to: conversationId, text });
+  }
+}
+
+describe("pendingUpdateChannel", () => {
+  test("legacy marker without conversation → telegram", () => {
+    expect(pendingUpdateChannel({})).toBe("telegram");
+  });
+  test("telegram: prefix → telegram", () => {
+    expect(pendingUpdateChannel({ conversation: "telegram:42" })).toBe(
+      "telegram",
+    );
+  });
+  test("phantomchat: prefix → phantomchat", () => {
+    expect(
+      pendingUpdateChannel({ conversation: `phantomchat:${PC_HEX}` }),
+    ).toBe("phantomchat");
+  });
+});
+
+describe("runUpdateFlow persists the conversation key into the marker", () => {
+  test("PhantomChat-origin /update writes conversation + persona, NaN chatId", async () => {
+    const r = await runUpdateFlow({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      // commands.ts does Number(ctx.chatId); for a hex pubkey that's NaN —
+      // exactly the case that used to silently fall back to Telegram.
+      chatId: Number(PC_HEX),
+      conversation: `phantomchat:${PC_HEX}`,
+      persona: "lena",
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: fakeSvc().svc,
+      runUpdateImpl: fakeRunUpdate(0),
+      pendingPath,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    expect(r.restart).toBeDefined();
+    const marker = await readPendingUpdate(pendingPath);
+    expect(marker?.conversation).toBe(`phantomchat:${PC_HEX}`);
+    expect(marker?.persona).toBe("lena");
+  });
+});
+
+describe("notifyPostRestartIfPending defers PhantomChat markers", () => {
+  test("a PhantomChat marker is NOT sent to Telegram and is NOT cleared", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: `phantomchat:${PC_HEX}`,
+        persona: "lena",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakeTransport();
+    const r = await notifyPostRestartIfPending({
+      config: baseConfig(), // Telegram IS configured — the bug's trigger
+      currentVersion: "1.0.99",
+      transport,
+      pendingPath,
+    });
+    // The regression: must NOT broadcast on Telegram…
+    expect(r.status).toBe("deferred_other_channel");
+    expect(transport.sent.length).toBe(0);
+    // …and must leave the marker for the PhantomChat path to claim.
+    expect(await readPendingUpdate(pendingPath)).not.toBeUndefined();
+  });
+});
+
+describe("notifyPhantomchatPostRestart", () => {
+  test("matching persona + success → DMs the originating pubkey, clears marker", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: `phantomchat:${PC_HEX}`,
+        persona: "lena",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakePhantomchatTransport();
+    const r = await notifyPhantomchatPostRestart({
+      persona: "lena",
+      transport,
+      currentVersion: "1.0.99",
+      pendingPath,
+    });
+    expect(r.status).toBe("success_notified");
+    expect(transport.sent.length).toBe(1);
+    // Sent to the bare hex pubkey (no "phantomchat:" prefix).
+    expect(transport.sent[0]!.to).toBe(PC_HEX);
+    expect(transport.sent[0]!.text).toContain("✅");
+    expect(transport.sent[0]!.text).toContain("v1.0.99");
+    expect(await readPendingUpdate(pendingPath)).toBeUndefined();
+  });
+
+  test("version mismatch → failure DM, marker cleared", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: `phantomchat:${PC_HEX}`,
+        persona: "lena",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakePhantomchatTransport();
+    const r = await notifyPhantomchatPostRestart({
+      persona: "lena",
+      transport,
+      currentVersion: "1.0.42", // didn't take
+      pendingPath,
+    });
+    expect(r.status).toBe("failure_notified");
+    expect(transport.sent[0]!.text).toContain("⚠️");
+    expect(await readPendingUpdate(pendingPath)).toBeUndefined();
+  });
+
+  test("different persona → leaves marker untouched (the right listener claims it)", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: `phantomchat:${PC_HEX}`,
+        persona: "lena",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakePhantomchatTransport();
+    const r = await notifyPhantomchatPostRestart({
+      persona: "kai", // a different persona's listener
+      transport,
+      currentVersion: "1.0.99",
+      pendingPath,
+    });
+    expect(r.status).toBe("not_this_persona");
+    expect(transport.sent.length).toBe(0);
+    // Marker stays so Lena's listener can still confirm it.
+    expect(await readPendingUpdate(pendingPath)).not.toBeUndefined();
+  });
+
+  test("a Telegram-origin marker is ignored here (not_phantomchat), left for the Telegram path", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: "telegram:42",
+        chatId: 42,
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakePhantomchatTransport();
+    const r = await notifyPhantomchatPostRestart({
+      persona: "lena",
+      transport,
+      currentVersion: "1.0.99",
+      pendingPath,
+    });
+    expect(r.status).toBe("not_phantomchat");
+    expect(transport.sent.length).toBe(0);
+    expect(await readPendingUpdate(pendingPath)).not.toBeUndefined();
+  });
+
+  test("send failure → marker preserved for a later retry", async () => {
+    await writePendingUpdate(
+      {
+        targetVersion: "1.0.99",
+        targetTag: "v1.0.99",
+        conversation: `phantomchat:${PC_HEX}`,
+        persona: "lena",
+        previousVersion: "1.0.42",
+        writtenAt: "2026-06-28T00:00:00Z",
+      },
+      pendingPath,
+    );
+    const transport = new FakePhantomchatTransport();
+    transport.shouldThrow = true;
+    const r = await notifyPhantomchatPostRestart({
+      persona: "lena",
+      transport,
+      currentVersion: "1.0.99",
+      pendingPath,
+    });
+    // Still reports the would-be outcome, but keeps the marker (one recipient,
+    // so a retry can't double-spam).
+    expect(r.status).toBe("success_notified");
+    expect(await readPendingUpdate(pendingPath)).not.toBeUndefined();
+  });
+
+  test("no marker → no-op", async () => {
+    const transport = new FakePhantomchatTransport();
+    const r = await notifyPhantomchatPostRestart({
+      persona: "lena",
+      transport,
+      currentVersion: "1.0.99",
+      pendingPath,
+    });
+    expect(r.status).toBe("no_marker");
+    expect(transport.sent.length).toBe(0);
   });
 });

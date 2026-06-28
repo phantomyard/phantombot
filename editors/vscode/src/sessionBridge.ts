@@ -79,33 +79,39 @@ export function resolveSessionCandidates(
 }
 
 /** How the extension behaves on startup re: auto-opening the phantombot session. */
-export type OpenOnStartup = "never" | "ifPreviouslyOpened" | "always";
+export type OpenOnStartup = "never" | "ifUsedBefore" | "always";
 
 /**
  * Decide whether to auto-open the phantombot chat session when VS Code starts.
  *
  * Pure policy so it's unit-tested without a `vscode` host:
- *  - `"always"`   → open every launch.
- *  - `"never"`    → never auto-open (button / palette only).
- *  - `"ifPreviouslyOpened"` (default) → open only when the user had the
- *    phantombot session open in a previous session — the "sticky" behaviour:
- *    pick it once and it keeps coming back, leave it closed and it stays out of
- *    your way.
+ *  - `"always"`       → open every launch.
+ *  - `"never"`        → never auto-open (button / palette only).
+ *  - `"ifUsedBefore"` (default) → open once the user has opened phantombot at
+ *    least once before — the "sticky" behaviour: pick it once and it keeps
+ *    coming back. To stop it, switch this setting to `"never"`.
+ *
+ * NOTE: this deliberately tracks "ever opened", not "was open at last shutdown".
+ * VS Code's chat-session surface opens in the sidebar (a view, not an editor
+ * tab), so there's no reliable close/last-window-state signal to honour a true
+ * "reopen only if it was open when I quit" policy — promising that would be a
+ * lie. "Ever opened" is the honest, robust contract and matches the actual ask
+ * ("be there if I picked it before").
  */
 export function shouldAutoOpenSession(
   setting: OpenOnStartup,
-  wasPreviouslyOpened: boolean,
+  usedBefore: boolean,
 ): boolean {
   switch (setting) {
     case "always":
       return true;
     case "never":
       return false;
-    case "ifPreviouslyOpened":
-      return wasPreviouslyOpened;
+    case "ifUsedBefore":
+      return usedBefore;
     default:
       // Unknown value (e.g. a future/typo'd setting) → safest is the default policy.
-      return wasPreviouslyOpened;
+      return usedBefore;
   }
 }
 

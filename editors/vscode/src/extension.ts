@@ -51,8 +51,8 @@ const PARTICIPANT_ID = "phantombot";
 /** Command id for the "open phantombot chat" button / palette entry / keybinding. */
 const OPEN_SESSION_COMMAND = "phantombot.openSession";
 
-/** globalState key remembering whether the phantombot session was last open. */
-const STICKY_KEY = "phantombot.sessionWasOpen";
+/** globalState key remembering whether the phantombot session has ever been opened. */
+const STICKY_KEY = "phantombot.everOpened";
 
 /**
  * The per-type open commands (`…openNewSessionSidebar.phantombot`, etc.) only
@@ -172,7 +172,8 @@ export function activate(context: vscode.ExtensionContext): void {
           ?.trim() ?? "",
       participant,
       participantId: PARTICIPANT_ID,
-      // Remember that phantombot was opened so we can re-open it next launch.
+      // Remember that phantombot has been opened so we can re-open it on future
+      // launches (the "ifUsedBefore" sticky default).
       onSessionOpened: () => {
         void context.globalState.update(STICKY_KEY, true);
       },
@@ -292,8 +293,8 @@ function delay(ms: number): Promise<void> {
 
 /**
  * On startup, auto-open phantombot per the `phantombot.openOnStartup` setting
- * (default: only if it was open last time — the "sticky" behaviour). Best-effort
- * and isolated from activation failures.
+ * (default: only once it has been opened at least once before — the "sticky"
+ * behaviour). Best-effort and isolated from activation failures.
  */
 async function maybeAutoOpen(
   context: vscode.ExtensionContext,
@@ -303,11 +304,11 @@ async function maybeAutoOpen(
     const setting =
       vscode.workspace
         .getConfiguration("phantombot")
-        .get<OpenOnStartup>("openOnStartup") ?? "ifPreviouslyOpened";
-    const wasOpen = context.globalState.get<boolean>(STICKY_KEY, false);
-    if (!shouldAutoOpenSession(setting, wasOpen)) return;
+        .get<OpenOnStartup>("openOnStartup") ?? "ifUsedBefore";
+    const usedBefore = context.globalState.get<boolean>(STICKY_KEY, false);
+    if (!shouldAutoOpenSession(setting, usedBefore)) return;
     output.appendLine(
-      `[startup] auto-opening phantombot (openOnStartup=${setting}, wasOpen=${wasOpen}).`,
+      `[startup] auto-opening phantombot (openOnStartup=${setting}, usedBefore=${usedBefore}).`,
     );
     await openPhantombotSession(output, { waitForCommand: true });
   } catch (e) {
