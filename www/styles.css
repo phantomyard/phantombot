@@ -383,3 +383,129 @@ footer {
     color: var(--muted);
     font-size: 1.1rem;
 }
+
+/* ============================================================
+   ADDITIVE BLOCK — editor extensions, Pi routing, channels.
+   Append-only. No rules above this line were modified.
+   ============================================================ */
+.editors,
+.pi-routing,
+.compounds,
+.phantomchat {
+    margin-bottom: 8rem;
+}
+
+.section-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 1rem;
+}
+
+.section-intro {
+    color: var(--muted);
+    font-size: 1.15rem;
+    max-width: 720px;
+    margin-bottom: 2.5rem;
+}
+
+.section-intro a {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+.shot-cap {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-top: 1rem;
+    max-width: 760px;
+}
+
+.editor-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 2rem;
+    margin-top: 3rem;
+}
+
+.editor-benefits {
+    margin-top: 4rem;
+}
+
+/* Primary | Vision | Coder pills */
+.swap-pills {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    margin: 2.5rem 0 3rem;
+}
+
+.pill {
+    display: flex;
+    flex-direction: column;
+    font-family: var(--font-mono);
+    font-weight: bold;
+    font-size: 1.1rem;
+    padding: 1rem 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #0d1117;
+}
+
+.pill small {
+    font-weight: 400;
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 0.4rem;
+}
+
+.pill-arrow {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 1.4rem;
+}
+
+.pi-principles {
+    margin-top: 4rem;
+}
+
+/* Channels */
+.channel-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 0.25rem 0.8rem;
+    margin-bottom: 1.2rem;
+}
+
+.channel-note {
+    margin-top: 2rem;
+    font-family: var(--font-sans);
+    color: var(--muted);
+    max-width: 760px;
+}
+
+.channel-note strong {
+    color: var(--fg);
+}
+
+@media (max-width: 768px) {
+    .swap-pills {
+        justify-content: center;
+    }
+
+    .pill-arrow {
+        transform: rotate(90deg);
+    }
+}
