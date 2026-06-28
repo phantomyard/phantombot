@@ -156,7 +156,31 @@ export interface RetrievalSettings {
   minScore: number;
   /** Derived index over raw conversation turns, searched alongside memory/kb. */
   turnIndexing: TurnIndexingSettings;
+  /**
+   * OKF link-graph expansion for the no-embeddings (BM25-only) path. When a
+   * persona has no Gemini key, fielded BM25 hits are augmented with concepts
+   * reachable via markdown links from those hits — the keyword-only stand-in
+   * for semantic spread. Ignored when embeddings are configured (the hybrid
+   * vector path is used instead, so Gemini users are unaffected).
+   */
+  graphExpansion: GraphExpansionSettings;
 }
+
+/** OKF link-graph expansion knobs (BM25-only retrieval path). */
+export interface GraphExpansionSettings {
+  /** Master switch for graph expansion on the FTS-only path. */
+  enabled: boolean;
+  /** Hops to walk out from each lexical hit. */
+  hops: number;
+  /** Max neighbour concepts to fold in per retrieval. */
+  maxAdd: number;
+}
+
+export const DEFAULT_GRAPH_EXPANSION: GraphExpansionSettings = {
+  enabled: true,
+  hops: 1,
+  maxAdd: 3,
+};
 
 export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   enabled: true,
@@ -164,6 +188,7 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   maxTokens: 1500,
   minScore: 0,
   turnIndexing: DEFAULT_TURN_INDEXING,
+  graphExpansion: DEFAULT_GRAPH_EXPANSION,
 };
 
 export interface TelegramStreamingSettings {
@@ -520,6 +545,34 @@ function buildRetrievalConfig(
     maxTokens: Math.max(0, maxTokens),
     minScore,
     turnIndexing: buildTurnIndexingConfig(tomlTurnIndexing),
+    graphExpansion: buildGraphExpansionConfig(
+      (tomlRetrieval.graph_expansion ?? {}) as Record<string, unknown>,
+    ),
+  };
+}
+
+function buildGraphExpansionConfig(
+  toml: Record<string, unknown>,
+): GraphExpansionSettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_GRAPH_EXPANSION_ENABLED) ??
+    asBool(toml.enabled) ??
+    DEFAULT_GRAPH_EXPANSION.enabled;
+  const hops =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_GRAPH_HOPS) ??
+    asInt(toml.hops) ??
+    DEFAULT_GRAPH_EXPANSION.hops;
+  const maxAdd =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_GRAPH_MAX_ADD) ??
+    asInt(toml.max_add) ??
+    DEFAULT_GRAPH_EXPANSION.maxAdd;
+  return {
+    enabled,
+    // 1..3 hops keeps expansion local; beyond that the graph fans out into
+    // noise. maxAdd is floored at 0 (disables) and capped to keep token cost
+    // bounded.
+    hops: Math.max(1, Math.min(3, hops)),
+    maxAdd: Math.max(0, Math.min(20, maxAdd)),
   };
 }
 

@@ -100,17 +100,29 @@ export async function retrieveContext(
         });
     }
 
+    // Gemini path: hybrid (BM25 + vector via RRF), unchanged. No-embeddings
+    // path: fielded BM25 plus OKF link-graph expansion (the superpower) when
+    // enabled — so keyword-only personas get semantic-ish spread for free.
+    const ge = opts.settings.graphExpansion;
     const hits = queryVec
       ? ix.hybridSearch(query, queryVec, {
           scope: "all",
           limit: opts.settings.limit,
           conversation: opts.conversation,
         })
-      : ix.search(query, {
-          scope: "all",
-          limit: opts.settings.limit,
-          conversation: opts.conversation,
-        });
+      : ge?.enabled
+        ? ix.searchExpanded(query, {
+            scope: "all",
+            limit: opts.settings.limit,
+            conversation: opts.conversation,
+            hops: ge.hops,
+            maxAdd: ge.maxAdd,
+          })
+        : ix.search(query, {
+            scope: "all",
+            limit: opts.settings.limit,
+            conversation: opts.conversation,
+          });
 
     return formatRetrieved(hits, opts.settings);
   } catch (e) {
@@ -169,7 +181,8 @@ export function formatRetrieved(
   let out = header;
   let included = 0;
   for (const h of usable) {
-    const block = `\n\n## ${h.path}\n${cleanSnippet(h.snippet)}`;
+    const label = h.expanded ? ` ${h.path} (linked concept)` : ` ${h.path}`;
+    const block = `\n\n##${label}\n${cleanSnippet(h.snippet)}`;
     // Always include at least one hit (so a single long snippet isn't
     // silently dropped); after that, respect the budget.
     if (included > 0 && out.length + block.length > budgetChars) break;

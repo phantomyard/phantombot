@@ -114,15 +114,25 @@ export async function runMemorySearch(
       else err.write(`(query embed failed: ${r.error}; falling back to FTS-only)\n`);
     }
 
+    // No-embeddings path gets OKF link-graph expansion when enabled, matching
+    // turn-time auto-retrieval; the hybrid (Gemini) path is unchanged.
+    const ge = config.retrieval?.graphExpansion;
     const hits = queryVec
       ? ix.hybridSearch(input.query, queryVec, {
           scope: input.scope,
           limit: input.limit,
         })
-      : ix.search(input.query, {
-          scope: input.scope,
-          limit: input.limit,
-        });
+      : ge?.enabled !== false
+        ? ix.searchExpanded(input.query, {
+            scope: input.scope,
+            limit: input.limit,
+            hops: ge?.hops,
+            maxAdd: ge?.maxAdd,
+          })
+        : ix.search(input.query, {
+            scope: input.scope,
+            limit: input.limit,
+          });
     out.write(JSON.stringify({ persona, query: input.query, results: hits }, null, 2));
     out.write("\n");
   } finally {
@@ -481,7 +491,7 @@ export async function indexAfterCapture(
 // ---------------------------------------------------------------------------
 
 const searchCmd = defineCommand({
-  meta: { name: "search", description: "Hybrid (FTS5 today; +vec in phase 25) search across memory/ and kb/." },
+  meta: { name: "search", description: "Search memory/ and kb/: hybrid BM25+vector when Gemini embeddings are set, else OKF field-weighted BM25 with link-graph expansion." },
   args: {
     query: {
       type: "positional",

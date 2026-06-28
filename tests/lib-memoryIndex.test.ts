@@ -8,10 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MemoryIndex,
+  NOTES_SCHEMA_VERSION,
+  resolveMdLink,
   sanitizeFtsQuery,
   turnPath,
   walkMarkdown,
 } from "../src/lib/memoryIndex.ts";
+import { Database } from "bun:sqlite";
 import type { Turn } from "../src/memory/store.ts";
 
 let workdir: string;
@@ -310,5 +313,159 @@ describe("MemoryIndex.rebuild", () => {
     await note("kb/concepts/B.md", "second");
     const r = await ix.rebuild(personaDir);
     expect(r.indexed).toBe(2);
+  });
+});
+
+describe("resolveMdLink", () => {
+  test("resolves relative targets against the linking note", () => {
+    expect(resolveMdLink("kb/infra/dns.md", "../ops/ns.md")).toBe(
+      "kb/ops/ns.md",
+    );
+    expect(resolveMdLink("kb/infra/dns.md", "vault")).toBe("kb/infra/vault.md");
+    expect(resolveMdLink("kb/a.md", "./b.md")).toBe("kb/b.md");
+  });
+
+  test("rejects external URLs and tree escapes", () => {
+    expect(resolveMdLink("kb/a.md", "https://x.com")).toBeNull();
+    expect(resolveMdLink("kb/a.md", "/etc/passwd")).toBeNull();
+    expect(resolveMdLink("kb/a.md", "../../etc/passwd")).toBeNull();
+  });
+});
+
+describe("BM25F field weighting", () => {
+  test("a title/tag match outranks a body-only match", async () => {
+    // Note A mentions "kubernetes" only deep in the body.
+    await note(
+      "kb/concepts/a.md",
+      "---\ntitle: Grocery list\n---\n# Grocery list\n" +
+        "milk eggs bread. an aside about kubernetes maybe.\n",
+    );
+    // Note B has it as the title + a tag — the authoritative concept.
+    await note(
+      "kb/concepts/b.md",
+      "---\ntitle: Kubernetes\ntags: [kubernetes, infra]\n---\n" +
+        "# Kubernetes\nour cluster notes.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const hits = ix.search("kubernetes", { scope: "kb", limit: 5 });
+    expect(hits[0]?.path).toBe("kb/concepts/b.md");
+  });
+
+  test("a query that matches only an alias still finds the note", async () => {
+    await note(
+      "kb/concepts/creds.md",
+      "---\ntitle: Secret Rotation\naliases: [credential cycling]\n---\n" +
+        "# Secret Rotation\nrun the playbook.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const hits = ix.search("credential cycling", { scope: "kb" });
+    expect(hits.map((h) => h.path)).toContain("kb/concepts/creds.md");
+  });
+});
+
+describe("MemoryIndex.searchExpanded (OKF link-graph)", () => {
+  test("pulls in a linked neighbour that did not match lexically", async () => {
+    // Seed matches "postgres"; neighbour is about backups and links nowhere
+    // near the query term, but is reachable via a markdown link.
+    await note(
+      "kb/infra/postgres.md",
+      "---\ntitle: Postgres\n---\n# Postgres\n" +
+        "Primary datastore. See [backups](backups.md).\n",
+    );
+    await note(
+      "kb/infra/backups.md",
+      "---\ntitle: Backups\n---\n# Backups\n" +
+        "Nightly snapshots to cold storage.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const plain = ix.search("postgres", { scope: "kb" }).map((h) => h.path);
+    expect(plain).toContain("kb/infra/postgres.md");
+    expect(plain).not.toContain("kb/infra/backups.md");
+
+    const expanded = ix.searchExpanded("postgres", { scope: "kb", maxAdd: 3 });
+    const byPath = new Map(expanded.map((h) => [h.path, h]));
+    expect(byPath.has("kb/infra/backups.md")).toBe(true);
+    expect(byPath.get("kb/infra/backups.md")?.expanded).toBe(true);
+    // The real lexical hit is never displaced and not flagged expanded.
+    expect(byPath.get("kb/infra/postgres.md")?.expanded).toBeUndefined();
+  });
+
+  test("inbound links expand too (neighbour links TO the hit)", async () => {
+    await note(
+      "kb/infra/dns.md",
+      "---\ntitle: DNS\n---\n# DNS\nname resolution notes.\n",
+    );
+    await note(
+      "kb/infra/cutover.md",
+      "---\ntitle: Cutover\n---\n# Cutover\nplan that references [dns](dns.md).\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const expanded = ix
+      .searchExpanded("resolution", { scope: "kb", maxAdd: 3 })
+      .map((h) => h.path);
+    expect(expanded).toContain("kb/infra/dns.md");
+    expect(expanded).toContain("kb/infra/cutover.md");
+  });
+
+  test("maxAdd 0 disables expansion", async () => {
+    await note("kb/infra/a.md", "# A\nalpha links to [b](b.md)\n");
+    await note("kb/infra/b.md", "# B\nbravo\n");
+    await ix.refreshStale(personaDir);
+    const hits = ix.searchExpanded("alpha", { scope: "kb", maxAdd: 0 });
+    expect(hits.every((h) => !h.expanded)).toBe(true);
+  });
+});
+
+describe("notes-schema self-heal", () => {
+  test("a legacy v1 single-column index is rebuilt on open", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-mi-heal-"));
+    const idxPath = join(dir, "index.sqlite");
+    const pdir = join(dir, "persona");
+    await mkdir(join(pdir, "kb"), { recursive: true });
+    await writeFile(
+      join(pdir, "kb", "x.md"),
+      "---\ntitle: Widget\n---\n# Widget\nthe widget concept.\n",
+    );
+
+    // Hand-build a pre-OKF (v1) index: old single-column `notes`, a stale
+    // `files` row, and no meta version.
+    const raw = new Database(idxPath, { create: true });
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec(
+      "CREATE VIRTUAL TABLE notes USING fts5(path UNINDEXED, scope UNINDEXED, content, tokenize = 'porter unicode61');",
+    );
+    raw.exec(
+      "CREATE TABLE files (path TEXT PRIMARY KEY, scope TEXT, mtime_ms INTEGER, size INTEGER, indexed_at TEXT);",
+    );
+    raw
+      .prepare(
+        "INSERT INTO files (path, scope, mtime_ms, size, indexed_at) VALUES (?,?,?,?,?)",
+      )
+      .run("kb/x.md", "kb", 1, 1, new Date().toISOString());
+    raw.close();
+
+    // Opening through MemoryIndex must detect the stale schema, drop+rebuild,
+    // and then index the note with the new fielded columns.
+    const healed = await MemoryIndex.open(idxPath);
+    try {
+      await healed.refreshStale(pdir);
+      const hits = healed.search("widget", { scope: "kb" });
+      expect(hits.map((h) => h.path)).toContain("kb/x.md");
+      const ver = (
+        healed as unknown as {
+          db: { query: (s: string) => { get: () => { value: string } | null } };
+        }
+      ).db
+        .query("SELECT value FROM meta WHERE key = 'notes_schema_version'")
+        .get();
+      expect(Number(ver?.value)).toBe(NOTES_SCHEMA_VERSION);
+    } finally {
+      healed.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
   DEFAULT_TELEGRAM_STREAMING,
   DEFAULT_TURN_INDEXING,
@@ -555,6 +556,7 @@ min_score = 0.25
       maxTokens: 3000,
       minScore: 0.25,
       turnIndexing: DEFAULT_TURN_INDEXING,
+      graphExpansion: DEFAULT_GRAPH_EXPANSION,
     });
   });
 
@@ -575,6 +577,7 @@ limit = 5
       maxTokens: 2200,
       minScore: 0.4,
       turnIndexing: DEFAULT_TURN_INDEXING,
+      graphExpansion: DEFAULT_GRAPH_EXPANSION,
     });
   });
 
