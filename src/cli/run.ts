@@ -336,15 +336,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     );
   }
   // Gentle, one-time heads-up that semantic search is off. Embeddings are
-  // optional — memory still works on keyword (BM25) search — so this is an
-  // informational line, not a warning, and never blocks startup.
+  // optional — memory still works on OKF field-weighted BM25 with link-graph
+  // expansion — so this is an informational line, not a warning, and never
+  // blocks startup.
   const semanticSearch =
     config.embeddings?.provider === "gemini" &&
     !!config.embeddings?.gemini?.apiKey;
   if (!semanticSearch) {
     out.write(
-      "  memory: semantic (vector) search OFF — keyword search active. " +
-        "Optional: run `phantombot embedding` to enable.\n",
+      "  memory: semantic (vector) search OFF — OKF field-weighted BM25 + " +
+        "link-graph expansion active. Optional: run `phantombot embedding` to add Gemini.\n",
     );
     // Threat screening itself does NOT depend on this key — the judge runs
     // on your PRIMARY harness (whichever of claude/pi/gemini/codex), which is

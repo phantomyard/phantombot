@@ -210,8 +210,9 @@ export default defineCommand({
 
     // 4. Optional: semantic memory search.
     // Gated behind its own confirm (default OFF) so it never blocks a quick
-    // install — memory search works out of the box on keyword (FTS5/BM25)
-    // matching. This step exists purely to *expose* the option during setup;
+    // install — memory search works out of the box on OKF field-weighted
+    // BM25 with link-graph expansion. This step exists purely to *expose* the
+    // semantic option during setup;
     // skipping it is a fully-supported, fully-working configuration.
     // Like the install step below, it's a separate skippable confirmation
     // rather than part of runInitFlow. We call runEmbedding in `embedded`
@@ -222,12 +223,13 @@ export default defineCommand({
     // failure must never abort the wizard before install.
     p.log.step("Semantic Memory Search (optional)");
     p.note(
-      "Phantombot's memory search works out of the box using keyword matching.\n" +
-      "Adding an embeddings provider also enables SEMANTIC search — finding\n" +
-      "memories by meaning, not just exact words (e.g. \"how do I pay tax\"\n" +
-      "matches a note titled \"VAT filing steps\"). It's optional and free for\n" +
-      "typical use on Gemini's free tier. You can always enable it later with\n" +
-      "`phantombot embedding`.",
+      "Phantombot's memory search works out of the box on OKF field-weighted\n" +
+      "BM25 with link-graph expansion — the Open Knowledge Format superpowers\n" +
+      "(frontmatter field weighting, tag/alias vocabulary, concept-graph walk).\n" +
+      "Adding a Gemini embeddings provider layers SEMANTIC search on top — finding\n" +
+      "memories by meaning, not just words (e.g. \"how do I pay tax\" matches a note\n" +
+      "titled \"VAT filing steps\"). It's optional and free for typical use on\n" +
+      "Gemini's free tier. You can always enable it later with `phantombot embedding`.",
       "What this improves"
     );
     const wantEmbeddings = await p.confirm({

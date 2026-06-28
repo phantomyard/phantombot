@@ -639,7 +639,8 @@ describe("runDoctor embeddings status line", () => {
     });
     expect(code).toBe(0);
     expect(out.text).toContain(
-      "embeddings: semantic (vector) search off — keyword (BM25) search active",
+      "embeddings: semantic (vector) search off — OKF field-weighted BM25 " +
+        "+ link-graph expansion active",
     );
     expect(out.text).toContain("phantombot embedding");
     // Crucially, NOT a WARN — the marker must never appear on this line.

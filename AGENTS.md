@@ -69,7 +69,7 @@ phantombot/
 │   │   ├── turn.ts           # one-turn coordinator (persona → memory → screen → harness → persist)
 │   │   ├── fallback.ts       # harness chain (primary → fallback)
 │   │   ├── screen.ts         # makeScreener: threat-screen wiring for UNTRUSTED turns (see "Security perimeter")
-│   │   ├── retrieval.ts      # makeRetriever: semantic recall of prior turns/memory for the prompt
+│   │   ├── retrieval.ts      # makeRetriever: hybrid (Gemini) or OKF BM25F + link-graph recall of prior turns/memory for the prompt
 │   │   ├── recovery.ts       # generateRecoveryReply: graceful user-facing message on harness failure
 │   │   └── turnIndexer.ts    # makeTurnIndexer: embeds persisted turns for later retrieval
 │   ├── channels/             # channel-agnostic core + per-channel adapters (see "Channel layer")
@@ -131,7 +131,9 @@ phantombot/
 │       ├── githubReleases.ts updateNotify.ts    # latest-release discovery + post-update notify
 │       ├── audio.ts          # TTS/STT dispatch (ElevenLabs/OpenAI/Azure Edge)
 │       ├── voice.ts telegramApi.ts personaScaffold.ts personaTemplate.ts personaArchive.ts personaDefault.ts
-│       ├── memoryIndex.ts heartbeat.ts nightly.ts embedJob.ts geminiEmbed.ts
+│       ├── memoryIndex.ts   # FTS5 store: OKF field-weighted BM25F + link-graph expansion (no-Gemini path), hybrid RRF when embeddings present
+│       ├── okf.ts           # Open Knowledge Format parser: frontmatter/body/headings/links (powers BM25F columns + concept graph)
+│       ├── heartbeat.ts nightly.ts embedJob.ts geminiEmbed.ts
 │       └── runLock.ts        # single-instance lock (prevents two `phantombot run` on one box)
 ├── agents/
 │   └── phantom/              # placeholder persona used by tests

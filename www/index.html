@@ -213,7 +213,7 @@
                 </div>
                 <div class="card">
                     <h3>Persistent Memory</h3>
-                    <p>Local SQLite turn store with hybrid search. Your agents remember every decision, lesson, and preference across sessions.</p>
+                    <p>Local SQLite store in the <a href="https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/">Open Knowledge Format</a>, with hybrid <strong>Gemini-embedding</strong> + BM25 search. Your agents remember every decision, lesson, and preference across sessions.</p>
                 </div>
                 <div class="card">
                     <h3>Survivor Mode</h3>
@@ -223,6 +223,11 @@
         </section>
 
         <section class="features-detailed">
+            <div class="feature">
+                <h3>Open Knowledge Format memory</h3>
+                <p>Phantombot stores memory in the <a href="https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/">Open Knowledge Format</a> &mdash; Google Cloud's open, vendor-neutral standard for the knowledge AI agents consume: atomic markdown notes with structured frontmatter, linked into a concept graph. No lock-in, no proprietary blob &mdash; your Phantom's mind is portable, readable, and yours.</p>
+                <p>Because the knowledge is <em>structured</em>, search is sharp out of the box: <strong>field-weighted BM25</strong> (a hit in a title or tag outranks one buried in prose), tag&nbsp;&amp; alias controlled vocabulary, and <strong>concept-graph expansion</strong> that walks the links to pull in related notes a bare keyword query would miss &mdash; all with zero API keys. Add a <strong>Gemini embeddings</strong> key and it upgrades to true <strong>hybrid semantic search</strong>: meaning-aware vector recall fused with lexical BM25 via reciprocal-rank fusion, so &ldquo;how do I pay tax&rdquo; finds your note titled &ldquo;VAT filing steps.&rdquo;</p>
+            </div>
             <div class="feature">
                 <h3>Personas</h3>
                 <p>Switch identities with a single command. Memory is partitioned, so each persona keeps its own private history forever. Create, import, and switch seamlessly.</p>

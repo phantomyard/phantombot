@@ -5,7 +5,10 @@
  * /embedContent once, writes the result to [embeddings] in config.toml.
  *
  * No-key (provider=none) is a real choice: phantombot's memory search
- * still works, just on FTS5/BM25 only — no semantic similarity.
+ * still works on OKF field-weighted BM25 with link-graph expansion — the
+ * Open Knowledge Format superpowers (frontmatter field weighting, tag/alias
+ * controlled vocabulary, concept-graph walk). No semantic similarity, but a
+ * markedly stronger lexical recall than plain keyword search.
  */
 
 import { defineCommand } from "citty";
@@ -95,7 +98,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       "Existing config",
     );
   } else if (!embedded && existing.provider === "none") {
-    p.note(`provider:  none (FTS5/BM25 search only)`, "Existing config");
+    p.note(
+      `provider:  none (OKF field-weighted BM25 + link-graph expansion)`,
+      "Existing config",
+    );
   }
 
   // The Gemini key powers semantic memory search AND the threat judge's
@@ -126,7 +132,8 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       },
       {
         value: "none",
-        label: "None — keyword/BM25 search only",
+        label: "None — OKF field-weighted BM25 + link-graph expansion",
+        hint: "no API key · Open Knowledge Format superpowers, lexical only",
       },
       { value: "cancel", label: "Cancel" },
     ],
@@ -141,9 +148,10 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     await applyEmbeddingConfig(config.configPath, { provider: "none" });
     p.note(
       `provider set to "none"\n` +
-        `search will use FTS5/BM25 only\n` +
+        `search uses OKF field-weighted BM25 + link-graph expansion\n` +
+        `(frontmatter weighting, tag/alias vocabulary, concept-graph walk)\n` +
         `threat screening stays ACTIVE (runs on your primary harness); judge ` +
-        `briefing recall is keyword-only — semantic recall recommended for production`,
+        `briefing recall is lexical-only — Gemini semantic recall recommended for production`,
       "Saved",
     );
     if (!embedded) {

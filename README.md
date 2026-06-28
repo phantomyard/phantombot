@@ -21,9 +21,13 @@ for you to stitch together. What comes back is coherent and accountable,
 because one Phantom — with its own memory and judgment — saw it through.
 
 **It compounds.** Every Phantom keeps a private, local memory of your
-decisions, lessons, people, and standing preferences, embedded and searchable
-by *meaning* (Gemini embeddings + hybrid vector/keyword retrieval), not just
-exact keywords. It doesn't reset between sessions; it accumulates. So the
+decisions, lessons, people, and standing preferences, authored in the
+**[Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)**
+(OKF — Google Cloud's open standard for agent knowledge) and searchable by
+*meaning* with Gemini embeddings + hybrid vector/keyword retrieval. No Gemini
+key? Memory still gets superpowers: OKF **field-weighted BM25** plus
+**concept-graph expansion** — far sharper than plain keyword search. It doesn't
+reset between sessions; it accumulates. So the
 longer a Phantom works with you, the more it understands your code and your
 world — and complex projects and long-lived codebases need *less* prompting
 and *less* re-explaining over time, exactly where most assistants fall off.
@@ -782,9 +786,9 @@ request: that simply never runs.)
 
 > **Recommended for production environments.** Threat screening itself needs no
 > extra configuration — it runs on your primary harness, which is always
-> present. A Gemini key ([`phantombot embedding`](#semantic-search)) only
+> present. A Gemini key ([`phantombot embedding`](#memory-search-okf-superpowers-by-default-gemini-semantic-on-top)) only
 > sharpens the judge's **briefing recall** (decisions/people/norms): without it,
-> recall falls back to keyword-only, which is a quality degrade, not a security
+> recall falls back to OKF field-weighted BM25 (lexical), which is a quality degrade, not a security
 > hole — screening still runs. Screening is **not** a wall —
 > a sufficiently clever injection can still fool an LLM judge, just as it can
 > fool a human — but it filters the obvious majority and puts a human beat in
@@ -847,11 +851,31 @@ phantombot memory list kb
 phantombot memory index --rebuild
 ```
 
-### Semantic Search
+### Memory search: OKF superpowers by default, Gemini semantic on top
 
-Keyword search works by default. Semantic search is optional and recommended.
-It uses Gemini embeddings so memory retrieval can match meaning, not just exact
-words.
+Phantombot stores memory in the **[Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)**
+(OKF) — Google Cloud's open, vendor-neutral standard for the knowledge AI
+agents consume: atomic markdown files with YAML frontmatter, linked into a
+concept graph. Because the knowledge is *structured*, the default no-key search
+path is much stronger than plain keyword matching:
+
+- **Field-weighted BM25 (BM25F)** — frontmatter `title`, `tags`, and `aliases`
+  are indexed as their own weighted columns, so a hit in a title or tag
+  outranks the same word buried in prose.
+- **Tag / alias controlled vocabulary** — author-time synonyms collapse the
+  vocabulary-mismatch gap (e.g. "credential cycling" finds a note titled
+  "Secret Rotation").
+- **Concept-graph expansion** — after the lexical match, Phantombot walks the
+  OKF link graph one hop (outbound *and* inbound) and folds in connected
+  concepts a bare-keyword query would miss. A keyword-only stand-in for the
+  "semantic spread" embeddings give you — with **zero API keys**.
+
+This is the default. Every phantom gets it for free, no setup.
+
+**Add Gemini embeddings** (optional, recommended for production) to layer true
+**semantic** retrieval on top — matching by *meaning*, not just words. With a
+key, search becomes **hybrid**: OKF field-weighted BM25 *and* vector similarity,
+fused with reciprocal-rank fusion.
 
 Enable it:
 
@@ -872,7 +896,8 @@ model = "gemini-embedding-001"
 dims = 1536
 ```
 
-Without embeddings, search degrades cleanly to FTS-only.
+Without embeddings, search degrades cleanly to OKF field-weighted BM25 with
+link-graph expansion — never to plain keyword.
 
 ### Nightly and Doctor
 

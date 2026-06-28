@@ -8,7 +8,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 
 1. **Hosts persona files.** Reads `BOOT.md` / `SOUL.md` / `IDENTITY.md`, optional `MEMORY.md`, optional `tools.md` / `AGENTS.md` from `$XDG_DATA_HOME/phantombot/personas/<name>/`.
 2. **Receives one user message** via `phantombot ask "msg"` or via the REPL line loop in `phantombot chat`.
-3. **Builds a turn context** for the configured agent: persona + recent memory + the new user message. (Vector retrieval slot is reserved but unused in v1.)
+3. **Builds a turn context** for the configured agent: persona + recent memory + retrieved knowledge + the new user message. Retrieval runs over an [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/) store: **OKF field-weighted BM25 with link-graph expansion** by default, upgrading to **hybrid BM25 + Gemini-embedding vector search** (reciprocal-rank fusion) when an embeddings provider is configured.
 4. **Hands the turn to a harness.** Spawns `claude --print --output-format stream-json` (or `pi --print --mode json`) as a subprocess. Persona goes via `--system-prompt`. The user-side payload (history + new message) goes via stdin (claude) or argv (pi).
 5. **Streams the harness's stdout** back to the user. Text chunks land on stdout as they arrive; the trailing newline marks end-of-reply.
 6. **Falls back** to the next harness in the chain on recoverable error (rate limit, transient network, oversize payload pre-skip).
@@ -18,7 +18,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 
 - Translate `tools[]` arrays into anything. Each harness brings its own tools.
 - Enforce permission gates on tool calls. The harness handles that — Claude is run with `--permission-mode bypassPermissions`.
-- Implement vector retrieval, embeddings, RAG. The slot in the system prompt is empty in v1; if needed later, prefer SQLite FTS5 before reaching for sqlite-vec or embeddings.
+- *(Updated since v1.)* Retrieval is now implemented: SQLite FTS5 provides OKF field-weighted BM25 + link-graph expansion as the always-on baseline, with optional Gemini embeddings adding a hybrid vector leg. There is no RAG framework dependency — it's plain FTS5 + a local vector table.
 - Run a web UI, dashboard, status page, or admin panel.
 - Listen on chat channels (Telegram / Signal / Google Chat). The original skeleton was built for that; the current shape is CLI only. Channels can be added later without rearchitecting.
 - Hold API keys. OAuth-on-host: claude / pi are configured separately on the operator's machine and read their own credentials at spawn time.

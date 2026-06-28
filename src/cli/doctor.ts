@@ -638,8 +638,8 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   out.write(
     semanticSearch
       ? `  embeddings: semantic (vector) search ON — provider '${embProvider}'\n`
-      : "  embeddings: semantic (vector) search off — keyword (BM25) search " +
-        "active. Optional: enable with `phantombot embedding`\n",
+      : "  embeddings: semantic (vector) search off — OKF field-weighted BM25 " +
+        "+ link-graph expansion active. Optional: add Gemini with `phantombot embedding`\n",
   );
   if (needed) {
     out.write(`  repair: ${reason}\n`);
