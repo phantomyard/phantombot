@@ -14,6 +14,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { buildToolNote } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -151,7 +152,8 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
     if (typeof item !== "object" || item === null) return undefined;
     const it = item as Record<string, unknown>;
     if (typeof it.type === "string" && it.type.includes("tool")) {
-      return { type: "progress", note: "tool" };
+      const name = typeof it.name === "string" ? it.name : undefined;
+      return { type: "progress", note: buildToolNote(name, it) };
     }
     // Non-tool starts are still useful liveness signals while the model is
     // preparing output, but they should not flush user-visible narration.
@@ -165,7 +167,8 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
       return { type: "text", text: it.text };
     }
     if (typeof it.type === "string" && it.type.includes("tool")) {
-      return { type: "progress", note: "tool" };
+      const name = typeof it.name === "string" ? it.name : undefined;
+      return { type: "progress", note: buildToolNote(name, it) };
     }
     return { type: "heartbeat" };
   }

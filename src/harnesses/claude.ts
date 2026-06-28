@@ -49,6 +49,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { buildToolNote } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -357,6 +358,7 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
 
   let text = "";
   let toolName: string | undefined;
+  let toolInput: unknown;
   let sawOtherNonText = false;
   for (const part of content) {
     if (typeof part === "object" && part !== null) {
@@ -365,13 +367,14 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
         text += p.text;
       } else if (p.type === "tool_use") {
         toolName = typeof p.name === "string" ? p.name : toolName ?? "tool";
+        toolInput = p.input;
       } else if (typeof p.type === "string") {
         sawOtherNonText = true;
       }
     }
   }
   if (text) return { type: "text", text };
-  if (toolName) return { type: "progress", note: `tool: ${toolName}` };
+  if (toolName) return { type: "progress", note: buildToolNote(toolName, toolInput) };
   if (sawOtherNonText) return { type: "heartbeat" };
   return undefined;
 }

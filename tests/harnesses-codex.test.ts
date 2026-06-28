@@ -66,11 +66,18 @@ describe("parseCodexEvent", () => {
     expect(parseCodexEvent({ type: "turn.started" })).toEqual({ type: "heartbeat" });
   });
 
-  test("item.started tool -> progress", () => {
+  test("item.started tool -> progress (now captures the tool name; #218)", () => {
     expect(parseCodexEvent({
       type: "item.started",
       item: { type: "tool_call", name: "shell" },
-    })).toEqual({ type: "progress", note: "tool" });
+    })).toEqual({ type: "progress", note: "tool: shell" });
+  });
+
+  test("item.started tool with a command surfaces it in the title (#218)", () => {
+    expect(parseCodexEvent({
+      type: "item.started",
+      item: { type: "tool_call", name: "shell", command: ["git", "status"] },
+    })).toEqual({ type: "progress", note: "shell: git status" });
   });
 
   test("turn.completed -> done-shaped stats carrier", () => {
