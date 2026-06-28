@@ -1,12 +1,51 @@
 # Phantombot
 
-Phantombot is a personality-first Telegram agent runner. It gives a terminal
-AI harness a durable identity, memory, Telegram presence, scheduled tasks,
-voice replies, and atomic self-updates.
+Phantombot gives a terminal AI harness a durable soul: one persistent
+identity, long-term memory with semantic search, and a presence that reaches
+you across PhantomChat, Telegram, and your editor — the same persona and
+memory behind every surface.
 
-It does not implement a model abstraction or a tool-calling layer. The harness
-already knows how to use its own tools, so phantombot provides the surrounding
-agent runtime and lets the harness do the work.
+**It is LLM-agnostic and swaps brains without losing the thread.** Running on
+the recommended [Pi](https://pi.dev) harness, a single conversation routes the
+*right model for the moment* — a fast, personable Primary for everyday talk, a
+Vision model when you share an image, and a heavyweight Coder when the work
+turns to code — all inside one continuous turn. Because the harness rebuilds
+the full context every turn (persona + history + retrieved memory + images),
+the coding brain inherits everything natively. No lossy hand-off, no losing
+the plot mid-task.
+
+**It owns the work — it doesn't scatter it.** Phantombot is one continuous
+agent that holds a task end to end. It does not shard your request across a
+swarm of throwaway sub-agents that hand back half-finished, unvetted output
+for you to stitch together. What comes back is coherent and accountable,
+because one Phantom — with its own memory and judgment — saw it through.
+
+**It compounds.** Every Phantom keeps a private, local memory of your
+decisions, lessons, people, and standing preferences, embedded and searchable
+by *meaning* (Gemini embeddings + hybrid vector/keyword retrieval), not just
+exact keywords. It doesn't reset between sessions; it accumulates. So the
+longer a Phantom works with you, the more it understands your code and your
+world — and complex projects and long-lived codebases need *less* prompting
+and *less* re-explaining over time, exactly where most assistants fall off.
+
+Under the hood it stays out of the harness's way: it implements no rival
+tool-calling layer. The harness already knows how to use Bash, files, SSH, and
+the browser — Phantombot provides the surrounding runtime (identity, memory,
+channels, scheduling, voice, atomic self-update) and lets the harness do the
+work.
+
+**One soul, every channel:**
+
+- **[PhantomChat](https://github.com/phantomyard/phantomchat)** — an
+  end-to-end-encrypted (Nostr) text and voice DM channel, on desktop and
+  mobile. The recommended way to talk to your Phantom; onboard at
+  [chat.phantomyard.ai](https://chat.phantomyard.ai).
+- **Telegram** — first-class text, voice, group, and attachment I/O, right
+  from your pocket.
+- **[VS Code & Zed extensions](#editors-vs-code--zed)** — the same persona,
+  memory, and judgment inside your editor's chat panel over ACP. Pick
+  *Phantombot* from the agent list and code with an agent that already knows
+  your repo, your decisions, and you.
 
 Supported harnesses:
 
