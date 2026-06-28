@@ -33,6 +33,7 @@ import {
 import {
   pickOpenSessionCommand,
   promptBlocksFromRequest,
+  resolveSessionCreated,
   shouldAutoOpenSession,
   SIDEBAR_OPEN_COMMAND,
   EDITOR_OPEN_COMMAND,
@@ -53,6 +54,9 @@ const OPEN_SESSION_COMMAND = "phantombot.openSession";
 
 /** globalState key remembering whether the phantombot session has ever been opened. */
 const STICKY_KEY = "phantombot.everOpened";
+
+/** globalState key prefix for the stable per-resource session `created` time. */
+const CREATED_KEY_PREFIX = "phantombot.sessionCreated:";
 
 /**
  * The per-type open commands (`…openNewSessionSidebar.phantombot`, etc.) only
@@ -172,6 +176,19 @@ export function activate(context: vscode.ExtensionContext): void {
           ?.trim() ?? "",
       participant,
       participantId: PARTICIPANT_ID,
+      // Stable per-resource `created` time, persisted in globalState so the
+      // session's age stays put across list refreshes (and never defaults to
+      // the epoch, which newer VS Code renders as "57 yrs ago" + auto-archives).
+      sessionCreatedAt: (key) =>
+        resolveSessionCreated(
+          key,
+          {
+            get: (k) => context.globalState.get<number>(CREATED_KEY_PREFIX + k),
+            set: (k, v) =>
+              void context.globalState.update(CREATED_KEY_PREFIX + k, v),
+          },
+          Date.now(),
+        ),
       // Remember that phantombot has been opened so we can re-open it on future
       // launches (the "ifUsedBefore" sticky default).
       onSessionOpened: () => {

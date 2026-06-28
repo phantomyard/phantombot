@@ -58,6 +58,12 @@ export interface SessionProviderDeps {
   /** Participant id (used when constructing history turns). */
   participantId: string;
   /**
+   * Stable `created` timestamp (ms since epoch) for a session resource key.
+   * Feeds `ChatSessionItem.timing.created`; without it VS Code defaults to the
+   * epoch and newer builds render "57 yrs ago" then auto-archive the session.
+   */
+  sessionCreatedAt(key: string): number;
+  /**
    * Called whenever the user opens the phantombot session (its content is
    * provided). Lets the host remember the session was open so it can be
    * auto-reopened on the next launch (the "sticky" behaviour). Optional.
@@ -142,15 +148,19 @@ export function registerChatSessionProvider(
         deps.workspaceFolders(),
         deps.currentCwd(),
       );
-      return candidates.map((f) => ({
-        resource: vscode.Uri.from({
-          scheme: SESSION_SCHEME,
-          path: sessionResourcePath(f.cwd),
-        }),
-        label: f.name,
-        iconPath: new vscode.ThemeIcon("hubot"),
-        description: desc,
-      }));
+      return candidates.map((f) => {
+        const path = sessionResourcePath(f.cwd);
+        return {
+          resource: vscode.Uri.from({ scheme: SESSION_SCHEME, path }),
+          label: f.name,
+          iconPath: new vscode.ThemeIcon("hubot"),
+          description: desc,
+          // Populate a real `created` time. Omitting `timing` lets VS Code
+          // default it to epoch 0 → "57 yrs ago" → auto-archived out of the
+          // active list on newer builds (the Mac symptom).
+          timing: { created: deps.sessionCreatedAt(path) },
+        };
+      });
     },
   };
 

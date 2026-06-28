@@ -6,7 +6,7 @@
       "name": "phantombot-vscode",
       "devDependencies": {
         "@types/node": "^20.0.0",
-        "@types/vscode": "^1.93.0",
+        "@types/vscode": "^1.104.0",
         "esbuild": "^0.24.0",
         "typescript": "^5.7.0",
       },

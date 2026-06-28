@@ -31,6 +31,16 @@ describe("manifest / participant invariants", () => {
     expect(sessions[0].canDelegate).toBe(true);
   });
 
+  test("declares supportsAutoModel to clear the entitlement 'Upgrade' gate", () => {
+    // VS Code 1.126+ greys out canDelegate session types behind an "Upgrade"
+    // gate for Copilot Free/Edu plans. The picker gate fn (WLo in the bundle)
+    // returns "not locked" when supportsAutoModelForSessionType(type) is true,
+    // which reads this contribution flag. We route to phantombot's own backend
+    // and ignore VS Code's model picker, so "auto model" is honest for us — and
+    // it clears the gate WITHOUT touching canDelegate (button + sticky survive).
+    expect(sessions[0].supportsAutoModel).toBe(true);
+  });
+
   test("PARTICIPANT_ID equals the chat-session type", () => {
     const sessionType = sessions[0].type;
     const m = extensionSrc.match(/const PARTICIPANT_ID = "([^"]+)"/);
