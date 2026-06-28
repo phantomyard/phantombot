@@ -102,6 +102,15 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "progress", note: "tool: bash" });
   });
 
+  test("tool_execution_start surfaces args in the note when present (#218)", () => {
+    const c = parsePiEvent({
+      type: "tool_execution_start",
+      toolName: "bash",
+      args: { command: "npm test" },
+    });
+    expect(c).toEqual({ type: "progress", note: "bash: npm test" });
+  });
+
   test("emits progress for tool_execution_start (legacy 0.67.x tool_name field)", () => {
     const c = parsePiEvent({
       type: "tool_execution_start",

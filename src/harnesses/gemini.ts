@@ -38,6 +38,7 @@
 
 import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import { buildToolNote } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -266,7 +267,8 @@ export function parseGeminiEvent(parsed: unknown): HarnessChunk | undefined {
   if (type === "tool_use") {
     const name =
       typeof obj.tool_name === "string" ? obj.tool_name : "(unknown tool)";
-    return { type: "progress", note: `tool: ${name}` };
+    const args = obj.args ?? obj.parameters ?? obj.tool_input ?? obj.input;
+    return { type: "progress", note: buildToolNote(name, args) };
   }
 
   if (type === "tool_result") {

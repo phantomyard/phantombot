@@ -35,6 +35,7 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
+import { buildToolNote } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -319,7 +320,8 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
         : typeof obj.tool_name === "string"
           ? obj.tool_name
           : undefined;
-    return { type: "progress", note: toolName ? `tool: ${toolName}` : "tool" };
+    const args = obj.args ?? obj.input;
+    return { type: "progress", note: buildToolNote(toolName, args) };
   }
 
   // tool_execution_update is fired while a tool is mid-run, carrying its

@@ -151,6 +151,18 @@ describe("parseStreamJson", () => {
     expect(c).toEqual({ type: "progress", note: "tool: Bash" });
   });
 
+  test("progress note surfaces the tool input when present (#218)", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Bash", input: { command: "git status" } },
+        ],
+      },
+    });
+    expect(c).toEqual({ type: "progress", note: "Bash: git status" });
+  });
+
   test("heartbeat for thinking blocks (no flush — mirrors pi.ts)", () => {
     const c = parseStreamJson({
       type: "assistant",

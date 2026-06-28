@@ -119,6 +119,17 @@ describe("parseGeminiEvent", () => {
     ).toEqual({ type: "progress", note: "tool: run_shell_command" });
   });
 
+  test("tool_use → progress note surfaces parameters when present (#218)", () => {
+    expect(
+      parseGeminiEvent({
+        type: "tool_use",
+        tool_name: "run_shell_command",
+        tool_id: "x",
+        parameters: { command: "ls -la" },
+      }),
+    ).toEqual({ type: "progress", note: "run_shell_command: ls -la" });
+  });
+
   test("tool_use without tool_name → progress with placeholder", () => {
     const c = parseGeminiEvent({ type: "tool_use" });
     expect(c?.type).toBe("progress");
