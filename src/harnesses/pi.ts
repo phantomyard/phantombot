@@ -144,6 +144,11 @@ export class PiHarness implements Harness {
         override,
         primaryModel: this.config.routing.primaryModel,
         codingModel: this.config.routing.codingModel,
+        // Pass conversation history so the current message is judged IN CONTEXT
+        // (recency-decayed ratio over recent USER turns) rather than alone — a
+        // natural-language follow-up mid-review no longer drops the coding brain.
+        // History is already rebuilt for buildPayload() below, so this is free.
+        history: req.history,
       });
       primaryModel = decision.model;
       if (decision.swapped) {

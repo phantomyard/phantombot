@@ -135,20 +135,234 @@ export interface CodingScore {
 }
 
 /**
- * Score a piece of text for "probable coding job" intent. Pure, allocation-
- * light, no I/O. Each distinct signal contributes its weight at most once.
+ * One turn's coding intent, with the HARD lane split out from the soft weights.
+ *
+ * The context scorer (scoreCodingContext) needs these two facets *separately*:
+ *   - `soft` (the 1s and 2s) feeds the recency-decayed RATIO that answers "how
+ *     code-focused is the recent conversation, as a proportion?".
+ *   - `hard` (a PR/MR URL or "pull request" phrase) must NOT be folded into that
+ *     ratio — a 100-weight signal would peg the ratio at ~100% and defeat it.
+ *     Instead HARD rides its own decay lane so an unambiguous "review this PR"
+ *     carries the swap through a few natural-language follow-ups, then releases.
  */
-export function scoreCodingIntent(text: string): CodingScore {
-  if (!text) return { score: 0, hits: [] };
-  let score = 0;
+export interface TurnIntent {
+  /** Sum of distinct SOFT (non-HARD) signal weights. */
+  soft: number;
+  /** True if any HARD signal (PR/MR URL or phrase) matched. */
+  hard: boolean;
+  /** Ids of every signal that matched (each once), for logging/debug. */
+  hits: string[];
+}
+
+/**
+ * Analyze a single piece of text, separating the HARD lane from soft weights.
+ * Pure, allocation-light, no I/O. Each distinct signal contributes once.
+ */
+export function analyzeTurn(text: string): TurnIntent {
+  if (!text) return { soft: 0, hard: false, hits: [] };
+  let soft = 0;
+  let hard = false;
   const hits: string[] = [];
   for (const sig of SIGNALS) {
     if (sig.pattern.test(text)) {
-      score += sig.weight;
       hits.push(sig.id);
+      if (sig.weight >= HARD) hard = true;
+      else soft += sig.weight;
     }
   }
-  return { score, hits };
+  return { soft, hard, hits };
+}
+
+/**
+ * Score a piece of text for "probable coding job" intent. Pure, allocation-
+ * light, no I/O. Each distinct signal contributes its weight at most once.
+ *
+ * Retained for the single-message (history-free) path and for callers that want
+ * the flat CRS sum. The combined score folds a HARD hit back in as `HARD`.
+ */
+export function scoreCodingIntent(text: string): CodingScore {
+  const t = analyzeTurn(text);
+  return { score: t.soft + (t.hard ? HARD : 0), hits: t.hits };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Context-window scoring (decayed ratio with a smoothing prior)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Why a context window at all?
+ *   The flat per-message scorer flips back to the primary the moment a turn
+ *   reads like chat — even mid-review. Real follow-ups ("what about the error
+ *   handling in the second commit?") are natural language with few code tokens,
+ *   so scored in isolation they fall under threshold and yank the coding brain
+ *   away while you're plainly still in a coding job. We want the LAST message
+ *   judged IN CONTEXT of the recent turns, not alone.
+ *
+ * Why NOT a flat sum over the last N turns?
+ *   A flat window re-introduces stuck-mode: after a long coding session "what's
+ *   for dinner?" still sees a window stuffed with code signals and stays pinned.
+ *   The whole virtue of the original design is self-correction; we must keep it.
+ *
+ * The model (one gate + three lanes, all recency-decayed):
+ *   RECENCY DECAY — a turn at `age` (0 = current message) is weighted
+ *   `decay^age`. Recent turns dominate; old ones fade. This is what keeps
+ *   self-correction alive instead of the stuck-mode a flat window would cause.
+ *
+ *   ELIGIBILITY GATE (the key to flip-back) — the soft lanes only fire when the
+ *   CURRENT message itself has SOME coding flavor (`soft > 0` or `hard`). A
+ *   pure-chat message ("what's for dinner?") is ineligible, so a window stuffed
+ *   with old coding turns can't pin the brain — you flip back the instant the
+ *   topic genuinely moves off code. Context only ever helps a message that is
+ *   itself at least a little code-shaped (a real follow-up), never pure chat.
+ *
+ *   Lane 1 — HARD carry: an in-window HARD hit (PR/MR URL or phrase) carries
+ *   `decay^age` and trips the swap until it decays below `hardReleaseFloor`, so
+ *   an unambiguous "review this PR" survives a few code-ish follow-ups, then
+ *   releases. (Lowest floor → longest carry; PR review is the headline case.)
+ *
+ *   Lane 2 — ANCHOR carry: a recent CLEARLY-coding turn (`soft >= saturation`,
+ *   e.g. "refactor the auth code in src") carries `decay^age` until below
+ *   `carryFloor`, so a non-PR coding turn still holds the brain across an
+ *   immediate follow-up.
+ *
+ *   Lane 3 — RATIO (Andrew's "percentage, not a fixed number"): the PROPORTION
+ *   of recent decayed attention that is coding. Each turn's soft score is
+ *   normalized to [0,1] (`>= saturation` counts as a fully-coding turn = 1.0),
+ *   and `intensity = Σ(decay^age · norm) / (Σ decay^age + k)`. The SMOOTHING
+ *   PRIOR `k` is what makes "1 turn ≠ 20 turns": early on `k` dominates the
+ *   denominator so noise can't clear the bar; deep into a sustained session `k`
+ *   is small relative to accumulated weight and the true ratio shows through.
+ *   Not a different threshold — confidence that scales with evidence.
+ *
+ * SWAP iff the current turn is eligible AND any lane fires. (`current.hard` is
+ * covered by lane 1 with carry = 1.)
+ *
+ * Equivalence to the old behavior on a SINGLE turn: with the defaults a lone
+ * message swaps iff it's a HARD hit or its soft score >= saturation (3) — i.e.
+ * the legacy "trip at 3" line. A lone borderline turn (soft 2, e.g. "show me
+ * the repo") stays on the primary, exactly as before. The window only ever
+ * *adds* carry/ratio context; it never makes a strong single message score
+ * lower.
+ */
+export interface ContextConfig {
+  /** Per-turn recency multiplier; weight at age a is decay^a. 0 < decay < 1. */
+  decay: number;
+  /** Max recent USER turns to consider (current message included). */
+  window: number;
+  /** Soft score at which a turn counts as "fully coding" (normalized to 1.0). */
+  saturation: number;
+  /** Decayed coding proportion at/above which the ratio lane swaps. */
+  ratioThreshold: number;
+  /** Smoothing pseudo-count `k` added to the denominator (evidence prior). */
+  prior: number;
+  /** Decayed presence below which the soft-ANCHOR carry lane releases. */
+  carryFloor: number;
+  /** Decayed presence below which the HARD carry lane releases. */
+  hardReleaseFloor: number;
+}
+
+/**
+ * Defaults chosen so a lone coding message still swaps at soft ≥ 3 (legacy
+ * parity); a soft anchor carries through ~1 follow-up (0.5^1 ≥ 0.3 > 0.5^2); a
+ * PR link carries ~3 follow-ups before releasing (0.5^3 ≥ 0.1 > 0.5^4); and the
+ * window is short enough that 0.5^window ≈ 0 (turns past ~6 are noise).
+ */
+export const CONTEXT_DEFAULTS: ContextConfig = {
+  decay: 0.5,
+  window: 6,
+  saturation: 3,
+  ratioThreshold: 0.3,
+  prior: 2,
+  carryFloor: 0.3,
+  hardReleaseFloor: 0.1,
+};
+
+export interface ContextScore {
+  /** Final decision: swap to the coding brain this turn. */
+  swap: boolean;
+  /** Which lane decided (eligibility / hard-carry / anchor-carry / ratio). */
+  reason: string;
+  /** True when the CURRENT message has coding flavor (gate for the soft lanes). */
+  eligible: boolean;
+  /** Ratio-lane decayed coding proportion in [0, 1). */
+  intensity: number;
+  /** Ratio-lane bar that `intensity` is compared against. */
+  ratioThreshold: number;
+  /** Decayed HARD presence (max decay^age over in-window HARD hits). */
+  hardCarry: number;
+  /** Decayed soft-anchor presence (max decay^age over `soft >= saturation` turns). */
+  anchorCarry: number;
+  /** Per-turn breakdown (age 0 = current message), newest last. */
+  perTurn: Array<{
+    age: number;
+    soft: number;
+    hard: boolean;
+    weight: number;
+    norm: number;
+  }>;
+}
+
+/**
+ * Score recent USER turns for a coding-brain swap. `userTexts` is oldest→newest
+ * with the current message LAST; assistant turns are excluded by the caller (the
+ * coding model emits code-heavy prose, so scoring its replies would bias the
+ * ratio toward staying swapped — stuck-mode by the back door).
+ */
+export function scoreCodingContext(
+  userTexts: string[],
+  cfg: ContextConfig = CONTEXT_DEFAULTS,
+): ContextScore {
+  const win = userTexts.slice(-cfg.window);
+  const n = win.length;
+  let codingSum = 0;
+  let totalWeight = 0;
+  let hardCarry = 0;
+  let anchorCarry = 0;
+  let current: TurnIntent = { soft: 0, hard: false, hits: [] };
+  const perTurn: ContextScore["perTurn"] = [];
+  for (let i = 0; i < n; i++) {
+    const age = n - 1 - i; // last element is the current message (age 0)
+    const weight = cfg.decay ** age;
+    const t = analyzeTurn(win[i] ?? "");
+    if (age === 0) current = t;
+    const norm = cfg.saturation > 0 ? Math.min(1, t.soft / cfg.saturation) : 0;
+    codingSum += weight * norm;
+    totalWeight += weight;
+    if (t.hard) hardCarry = Math.max(hardCarry, weight);
+    if (t.hard || t.soft >= cfg.saturation) anchorCarry = Math.max(anchorCarry, weight);
+    perTurn.push({ age, soft: t.soft, hard: t.hard, weight, norm });
+  }
+  const intensity = totalWeight > 0 ? codingSum / (totalWeight + cfg.prior) : 0;
+
+  // The current message must itself be at least a little code-shaped, else we
+  // flip back to the primary no matter how coding-heavy the recent history was.
+  const eligible = current.soft > 0 || current.hard;
+  const hardSwap = hardCarry >= cfg.hardReleaseFloor;
+  const anchorSwap = anchorCarry >= cfg.carryFloor;
+  const ratioSwap = intensity >= cfg.ratioThreshold;
+  const swap = eligible && (hardSwap || anchorSwap || ratioSwap);
+
+  let reason: string;
+  if (!eligible) {
+    reason = "ineligible:current-not-code";
+  } else if (hardSwap) {
+    reason = `hard-carry:${hardCarry.toFixed(2)}>=${cfg.hardReleaseFloor}`;
+  } else if (anchorSwap) {
+    reason = `anchor-carry:${anchorCarry.toFixed(2)}>=${cfg.carryFloor}`;
+  } else {
+    reason = `intensity:${intensity.toFixed(2)}${ratioSwap ? ">=" : "<"}${cfg.ratioThreshold}`;
+  }
+
+  return {
+    swap,
+    reason,
+    eligible,
+    intensity,
+    ratioThreshold: cfg.ratioThreshold,
+    hardCarry,
+    anchorCarry,
+    perTurn,
+  };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -166,22 +380,44 @@ export interface SwapDecision {
   score: number;
 }
 
+/** Minimal structural shape of a prior turn (decoupled from harness types). */
+export interface ConversationTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 /**
  * Decide which model the Pi harness should pin for this turn.
  *
  * Precedence: a manual `/coder`/`/nocoder` override always wins; otherwise the
  * scorer decides. With NO coding model configured there is nothing to swap to,
  * so we always return the primary (and never claim a swap).
+ *
+ * Two scoring paths:
+ *   - `history` PROVIDED ⇒ context-window scoring (scoreCodingContext): the
+ *     current message is judged alongside recent USER turns, recency-decayed,
+ *     as a ratio with a smoothing prior. This is the production path (pi.ts
+ *     always has history) — it fixes the "follow-up loses the brain" failure.
+ *   - `history` ABSENT ⇒ legacy flat per-message scorer vs an absolute
+ *     `threshold`. Kept for history-free callers and back-compat.
+ *
+ * `score` in the returned decision is the legacy flat sum for the *current*
+ * message either way (handy for logs); the context path's real numbers live in
+ * `reason` (intensity / hard-carry).
  */
 export function resolveSwapModel(input: {
   text: string;
   override?: CoderSwapMode;
   primaryModel?: string;
   codingModel?: string;
+  /** Absolute threshold for the legacy (history-free) path. */
   threshold?: number;
+  /** Prior turns oldest→newest; presence selects the context-window path. */
+  history?: ConversationTurn[];
+  /** Optional overrides for the context-window dials. */
+  context?: Partial<ContextConfig>;
 }): SwapDecision {
-  const { text, override, primaryModel, codingModel } = input;
-  const threshold = input.threshold ?? CODER_SWAP_THRESHOLD;
+  const { text, override, primaryModel, codingModel, history } = input;
 
   if (!codingModel) {
     return { model: primaryModel, swapped: false, reason: "no-coding-model", score: 0 };
@@ -192,13 +428,32 @@ export function resolveSwapModel(input: {
   if (override === "on") {
     return { model: codingModel, swapped: true, reason: "override:on", score: 0 };
   }
-  const { score } = scoreCodingIntent(text);
-  const swapped = score >= threshold;
+
+  // Legacy flat-sum path: no history available.
+  if (history === undefined) {
+    const threshold = input.threshold ?? CODER_SWAP_THRESHOLD;
+    const { score } = scoreCodingIntent(text);
+    const swapped = score >= threshold;
+    return {
+      model: swapped ? codingModel : primaryModel,
+      swapped,
+      reason: `score:${score}/${threshold}`,
+      score,
+    };
+  }
+
+  // Context-window path: judge the current message alongside recent USER turns.
+  const cfg = { ...CONTEXT_DEFAULTS, ...input.context };
+  const userTexts = [
+    ...history.filter((t) => t.role === "user").map((t) => t.text),
+    text,
+  ];
+  const ctx = scoreCodingContext(userTexts, cfg);
   return {
-    model: swapped ? codingModel : primaryModel,
-    swapped,
-    reason: `score:${score}/${threshold}`,
-    score,
+    model: ctx.swap ? codingModel : primaryModel,
+    swapped: ctx.swap,
+    reason: ctx.reason,
+    score: scoreCodingIntent(text).score,
   };
 }
 
