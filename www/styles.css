@@ -598,3 +598,26 @@ footer {
         width: 100%;
     }
 }
+
+/* Additive: PhantomChat onboarding CTA button */
+.onboard-cta {
+    display: inline-block;
+    margin: 1.4rem 0 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #0d1117;
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 0.7rem 1.4rem;
+    text-decoration: none;
+    transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.onboard-cta:hover,
+.onboard-cta:focus-visible {
+    background: transparent;
+    color: var(--accent);
+    transform: translateY(-1px);
+}

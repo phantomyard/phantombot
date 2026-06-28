@@ -23,7 +23,9 @@ Supported harnesses:
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
 - [Telegram](#telegram)
-- [PhantomChat (Alpha)](#phantomchat-alpha)
+- [PhantomChat](#phantomchat)
+- [Editors: VS Code & Zed](#editors-vs-code--zed)
+- [Pi Capability Routing](#pi-capability-routing)
 - [Group Chats](#group-chats)
 - [Voice Replies](#voice-replies)
 - [Scheduled Tasks](#scheduled-tasks)
@@ -53,7 +55,8 @@ Phantombot keeps the parts a personal assistant actually needs:
 
 - A persistent persona loaded from markdown.
 - Telegram text, group, attachment, and voice I/O.
-- A [PhantomChat](https://github.com/phantomyard/phantomchat) (Nostr, end-to-end-encrypted) DM channel — **Alpha**, runs alongside Telegram.
+- A [PhantomChat](https://github.com/phantomyard/phantomchat) (Nostr, end-to-end-encrypted) DM channel, running alongside Telegram. Onboard at [chat.phantomyard.ai](https://chat.phantomyard.ai).
+- First-party [VS Code and Zed extensions](#editors-vs-code--zed) — the same persona, memory, and judgment, right inside your editor over ACP.
 - Rolling conversation context.
 - Durable markdown memory and KB.
 - Scheduled tasks.
@@ -196,9 +199,11 @@ Interactive setup:
 | `phantombot persona` | Create, import, restore, or switch personas |
 | `phantombot harness` | Choose harness chain |
 | `phantombot telegram` | Configure Telegram token and allowlist |
-| `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel — **Alpha** |
+| `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel |
 | `phantombot voice` | Configure TTS/STT providers |
 | `phantombot embedding` | Configure semantic memory |
+| `phantombot acp install zed` | Register phantombot as an ACP agent in Zed |
+| `phantombot acp install vscode` | Install the first-party VS Code extension |
 
 Runtime:
 
@@ -314,13 +319,12 @@ bubble_delay_ms = 800
 voice_max_sentences = 3
 ```
 
-## PhantomChat (Alpha)
+## PhantomChat
 
-> **Status: Alpha.** PhantomChat works end-to-end today — you can DM a persona
-> from the app and get replies in its voice, with the same trust model as
-> Telegram — but it still needs polish (delivery-receipt edge cases, richer
-> media, and broader client interop are actively being smoothed out). Treat it
-> as a preview alongside the stable Telegram channel rather than a finished one.
+> **Onboard at [chat.phantomyard.ai](https://chat.phantomyard.ai).** That's the
+> live PhantomChat app — open it on desktop or mobile, create your account, and
+> start a DM with your persona using the npub the bot prints below. PhantomChat
+> is our recommended channel; Telegram remains fully supported and first-class.
 
 [PhantomChat](https://github.com/phantomyard/phantomchat) is a decentralized,
 end-to-end-encrypted messenger built on [Nostr](https://nostr.com) (NIP-17
@@ -346,6 +350,70 @@ sender** (`rumor.pubkey`), never the attacker-controllable envelope `from`.
 Relays come from a shared canonical list and can be edited by re-running the
 command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
 for the app itself and the wire-protocol details.
+
+## Editors: VS Code & Zed
+
+Your Phantom runs **inside your editor** as a first-class agent over the
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com) — VS Code and
+Zed both supported. It's the *same* Phantom: one persona, one memory store, one
+set of tools, served from your machine. Start a thread in the editor, pick it
+up later from PhantomChat or Telegram — there's only ever one soul behind all
+the surfaces.
+
+```bash
+phantombot acp install zed       # merge the ACP registration into Zed's settings.json
+phantombot acp install vscode    # install the bundled first-party VS Code extension (.vsix)
+```
+
+Both installers are idempotent and version-aware: Zed gets a JSONC-safe
+settings merge (your original is backed up), and VS Code installs the bundled
+extension through the `code` CLI, skipping cleanly if the editor isn't present.
+
+The connector sits **beside** the channel layer — it calls the turn engine
+directly with `trusted: true`. The principal is the local OS user who launched
+the editor; they already have full filesystem access to everything phantombot
+owns, so the untrusted-input threat judge is skipped for this surface.
+
+Why it's better for real coding work:
+
+- **Less prompting.** The editor extension carries your repo and editing
+  context, so you re-explain far less per turn.
+- **Built for complex projects.** Persona, memory, and tools live server-side
+  and persist across sessions — the longer a Phantom works with you, the more
+  it knows about your codebase, your conventions, and you. That accumulated
+  context sharpens its judgment, raises its confidence, and cuts hallucinations
+  and misaligned decisions.
+- **One soul, every surface.** Editor, phone, terminal — same persona and
+  memory behind all of them.
+
+## Pi Capability Routing
+
+The recommended [Pi](https://pi.dev) harness routes **one brain per job**
+within a single turn — Primary, Vision, and Coder — instead of forcing one
+model to do everything:
+
+- **Primary** — the orchestrator model that runs the turn and holds the thread.
+- **Vision** — when the primary isn't multimodal, image work is delegated to an
+  image model via a `look_at_image` tool registered by the bundled Pi
+  extension. A multimodal primary keeps vision in-house and the delegate is
+  skipped.
+- **Coder** — for substantial code work, phantombot swaps the primary's
+  `--model` to your configured coding model **for that turn only**. Because the
+  Pi harness rebuilds the full context every turn (system prompt + history +
+  retrieved memory + images), the coding model inherits all of it natively — no
+  lossy hand-off to an isolated sub-agent.
+
+The coder swap is decided by a [ModSecurity-CRS-style](https://coreruleset.org)
+weighted scorer that reads the recent conversation **in context** (a
+recency-decayed window with a small-sample prior), not just the latest message.
+That keeps a Phantom on the coding brain through natural follow-ups in a review,
+then releases it the moment the topic moves off code — stateless and
+self-correcting, no sticky mode. Force it with `/coder`, disable with
+`/nocoder`, or clear back to scoring with `/coder default`.
+
+Configure all three roles with the `phantombot harness` wizard; the choices are
+mirrored into `config.toml` under `[harnesses.pi.routing]` and visible to
+`phantombot doctor`.
 
 ## Group Chats
 
