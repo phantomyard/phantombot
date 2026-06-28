@@ -56,6 +56,28 @@ export function cwdFromResourcePath(path: string): string {
   return path;
 }
 
+/** A workspace folder candidate that backs one chat-session item. */
+export interface SessionCandidate {
+  cwd: string;
+  name: string;
+}
+
+/**
+ * Resolve the chat-session items to surface in the sessions list.
+ *
+ * One item per open workspace folder. When none are open (an empty window or a
+ * folderless `.code-workspace`), fall back to a single item bound to the active
+ * cwd so phantombot is always visible — matching how Claude/Copilot-CLI behave.
+ */
+export function resolveSessionCandidates(
+  folders: SessionCandidate[],
+  fallbackCwd: string,
+  fallbackName = "phantombot",
+): SessionCandidate[] {
+  if (folders.length > 0) return folders;
+  return [{ cwd: fallbackCwd, name: fallbackName }];
+}
+
 /** A single replayed history turn, role-tagged. */
 export interface ReplayTurn {
   role: "user" | "assistant";
