@@ -523,3 +523,32 @@ footer {
     margin: 2rem auto;
     padding: 0;
 }
+
+/* PhantomChat showcase: desktop + mobile + desktop, side by side */
+.phantomchat-showcase {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 1.5rem;
+    margin-top: 3rem;
+}
+
+.phantomchat-showcase .terminal-window {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 300px;
+}
+
+.phantomchat-showcase .iphone-frame {
+    flex: 0 0 auto;
+    max-width: 210px;
+    margin: 0;
+}
+
+@media (max-width: 768px) {
+    .phantomchat-showcase .terminal-window {
+        flex-basis: 100%;
+        max-width: 420px;
+    }
+}
