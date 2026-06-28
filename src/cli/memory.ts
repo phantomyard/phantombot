@@ -122,7 +122,7 @@ export async function runMemorySearch(
           scope: input.scope,
           limit: input.limit,
         })
-      : ge?.enabled !== false
+      : ge?.enabled
         ? ix.searchExpanded(input.query, {
             scope: input.scope,
             limit: input.limit,

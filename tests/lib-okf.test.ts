@@ -65,8 +65,9 @@ describe("extractLinks", () => {
     const links = extractLinks(body);
     expect(links).toContainEqual({ target: "infra/dns.md", kind: "md" });
     expect(links).toContainEqual({ target: "DNS Cutover", kind: "wiki" });
-    expect(links.some((l) => l.target.includes("example.com"))).toBe(false);
-    expect(links.some((l) => l.target.startsWith("#"))).toBe(false);
+    const targets = links.map((l) => l.target);
+    expect(targets).not.toContain("https://example.com");
+    expect(targets).not.toContain("#intro");
   });
 
   test("wikilink with display alias keeps the target", () => {

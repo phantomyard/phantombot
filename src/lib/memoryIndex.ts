@@ -130,7 +130,7 @@ export function rrfMerge(
  * (title / tags / aliases / headings / body) for BM25F, and `note_links` was
  * added for graph-walk expansion.
  */
-export const NOTES_SCHEMA_VERSION = 2;
+export const NOTES_SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -350,7 +350,9 @@ export class MemoryIndex {
           f.mtimeMs,
           f.size,
           doc.title,
-          doc.aliases.join(" ").toLowerCase(),
+          // Newline-delimited (not space-joined) so multi-word aliases like
+          // "credential cycling" survive intact for wiki-target resolution.
+          doc.aliases.join("\n").toLowerCase(),
           new Date().toISOString(),
         );
       for (const link of doc.links) {
@@ -370,7 +372,66 @@ export class MemoryIndex {
       }
       indexed++;
     }
+    // Resolve wikilink targets to concrete paths now that every changed note
+    // is in the files table. Done as a post-pass (not inline) so forward
+    // references — a note that [[links]] to one indexed later — still resolve,
+    // and so both outbound and inbound lookups can rely on target_path. Only
+    // runs when something changed, since unchanged runs can't add new targets.
+    if (indexed > 0 || removed > 0) this.resolveWikiLinks();
     return { indexed, removed };
+  }
+
+  /**
+   * Fill in `target_path` for every wikilink by matching its raw target
+   * against indexed notes' basename, title, or aliases. (Markdown links are
+   * resolved by relative path inline at insert time.) Idempotent: re-resolves
+   * the whole wiki link set so links that pointed at a now-renamed/-deleted
+   * note get repaired or cleared. This is what lets a note pull in the notes
+   * that wikilink *to* it — inbound lookup keys on target_path, so unresolved
+   * wikilinks are invisible to it.
+   */
+  private resolveWikiLinks(): void {
+    const nameIndex = this.buildNameIndex();
+    const rows = this.db
+      .query(
+        "SELECT rowid, target_raw FROM note_links WHERE kind = 'wiki'",
+      )
+      .all() as Array<{ rowid: number; target_raw: string }>;
+    const upd = this.db.prepare(
+      "UPDATE note_links SET target_path = ? WHERE rowid = ?",
+    );
+    for (const r of rows) {
+      const key = r.target_raw.trim().toLowerCase().replace(/\.md$/, "");
+      upd.run(key ? (nameIndex.get(key) ?? null) : null, r.rowid);
+    }
+  }
+
+  /**
+   * Lowercased name → indexed path map for wiki-target resolution. Built once
+   * per resolve pass (not per link) to avoid an O(files) scan per wikilink.
+   * Precedence basename > title > alias; first writer wins for stable results.
+   */
+  private buildNameIndex(): Map<string, string> {
+    const map = new Map<string, string>();
+    const rows = this.db
+      .query("SELECT path, title, aliases FROM files")
+      .all() as Array<{ path: string; title: string; aliases: string }>;
+    const add = (key: string, path: string) => {
+      const k = key.trim().toLowerCase();
+      if (k && !map.has(k)) map.set(k, path);
+    };
+    for (const r of rows) {
+      add(
+        posix.basename(r.path.replace(/\\/g, "/")).replace(/\.md$/i, ""),
+        r.path,
+      );
+    }
+    for (const r of rows) if (r.title) add(r.title, r.path);
+    for (const r of rows) {
+      // files.aliases is newline-delimited so multi-word aliases stay intact.
+      for (const a of r.aliases.split("\n")) if (a) add(a, r.path);
+    }
+    return map;
   }
 
   // -------------------------------------------------------------
@@ -750,36 +811,32 @@ export class MemoryIndex {
     return found;
   }
 
-  /** Concrete indexed paths linked to/from `src` (outbound + inbound). */
+  /**
+   * Concrete indexed paths linked to/from `src` (outbound + inbound). Both
+   * markdown and wikilink targets are resolved to concrete paths at index time
+   * (see resolveWikiLinks), so both directions simply key on target_path — no
+   * per-query table scan, and inbound wikilinks resolve symmetrically.
+   */
   private linkedPaths(src: string): string[] {
     const out = new Set<string>();
 
-    // Outbound: resolved markdown targets are direct; wikilinks resolve by
-    // basename / title / alias against the files table.
+    // Outbound: this note's links whose target resolved to an indexed note.
     const outboundRows = this.db
       .query(
-        "SELECT target_raw, kind, target_path FROM note_links WHERE src_path = ?",
+        "SELECT target_path FROM note_links WHERE src_path = ? AND target_path IS NOT NULL",
       )
-      .all(src) as Array<{
-      target_raw: string;
-      kind: string;
-      target_path: string | null;
-    }>;
+      .all(src) as Array<{ target_path: string }>;
     for (const r of outboundRows) {
-      if (r.target_path && this.pathExists(r.target_path)) {
-        out.add(r.target_path);
-        continue;
-      }
-      const resolved = this.resolveWikiTarget(r.target_raw);
-      if (resolved) out.add(resolved);
+      if (this.pathExists(r.target_path)) out.add(r.target_path);
     }
 
-    // Inbound: notes that link to this one by resolved markdown path.
+    // Inbound: notes whose (markdown OR wiki) link resolved to this one.
     const inboundRows = this.db
       .query("SELECT src_path FROM note_links WHERE target_path = ?")
       .all(src) as Array<{ src_path: string }>;
     for (const r of inboundRows) out.add(r.src_path);
 
+    out.delete(src);
     return [...out];
   }
 
@@ -788,29 +845,6 @@ export class MemoryIndex {
       this.db.prepare("SELECT 1 FROM files WHERE path = ? LIMIT 1").get(path) !=
       null
     );
-  }
-
-  /**
-   * Resolve a wikilink / unresolved link target to an indexed note path by
-   * matching, case-insensitively: file basename (with/without .md), title, or
-   * any alias. Returns the first match or undefined.
-   */
-  private resolveWikiTarget(target: string): string | undefined {
-    const t = target.trim().toLowerCase().replace(/\.md$/, "");
-    if (!t) return undefined;
-    const rows = this.db
-      .query("SELECT path, title, aliases FROM files")
-      .all() as Array<{ path: string; title: string; aliases: string }>;
-    for (const r of rows) {
-      const base = posix
-        .basename(r.path.replace(/\\/g, "/"))
-        .replace(/\.md$/i, "")
-        .toLowerCase();
-      if (base === t) return r.path;
-      if (r.title && r.title.toLowerCase() === t) return r.path;
-      if (r.aliases && r.aliases.split(/\s+/).includes(t)) return r.path;
-    }
-    return undefined;
   }
 
   /** Build a SearchHit for a known indexed path (no lexical scores). */

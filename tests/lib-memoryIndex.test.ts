@@ -418,6 +418,76 @@ describe("MemoryIndex.searchExpanded (OKF link-graph)", () => {
     const hits = ix.searchExpanded("alpha", { scope: "kb", maxAdd: 0 });
     expect(hits.every((h) => !h.expanded)).toBe(true);
   });
+
+  test("inbound wikilinks expand (a note that [[wikilinks]] TO the hit)", async () => {
+    // The target note matches lexically; the note that wikilinks to it does
+    // NOT. Before the fix, wiki targets were never resolved to target_path so
+    // inbound lookup (which keys on target_path) could never find them.
+    await note(
+      "kb/infra/store.md",
+      "---\ntitle: Credential Store\n---\n# Credential Store\nwhere secrets live.\n",
+    );
+    await note(
+      "kb/infra/rotate.md",
+      "---\ntitle: Rotate\n---\n# Rotate\nsee [[Credential Store]] for the vault.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const plain = ix.search("secrets", { scope: "kb" }).map((h) => h.path);
+    expect(plain).toContain("kb/infra/store.md");
+    expect(plain).not.toContain("kb/infra/rotate.md");
+
+    const expanded = ix
+      .searchExpanded("secrets", { scope: "kb", maxAdd: 3 })
+      .map((h) => h.path);
+    expect(expanded).toContain("kb/infra/rotate.md");
+  });
+
+  test("wikilinks resolve multi-word aliases", async () => {
+    // `[[credential cycling]]` must resolve to the note that declares
+    // `aliases: [credential cycling]`. The old space-joined alias storage +
+    // whitespace split could never match a multi-word alias.
+    await note(
+      "kb/infra/rotation.md",
+      "---\ntitle: Secret Rotation\naliases: [credential cycling]\n---\n" +
+        "# Secret Rotation\nrun the playbook.\n",
+    );
+    await note(
+      "kb/infra/onboard.md",
+      "---\ntitle: Onboarding\n---\n# Onboarding\n" +
+        "new hires must read [[credential cycling]] first. xyzzy.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const plain = ix.search("xyzzy", { scope: "kb" }).map((h) => h.path);
+    expect(plain).toContain("kb/infra/onboard.md");
+    expect(plain).not.toContain("kb/infra/rotation.md");
+
+    const expanded = ix
+      .searchExpanded("xyzzy", { scope: "kb", maxAdd: 3 })
+      .map((h) => h.path);
+    expect(expanded).toContain("kb/infra/rotation.md");
+  });
+
+  test("forward-referenced wikilink resolves after its target is indexed", async () => {
+    // The linking note is indexed before its target exists; a later refresh
+    // adds the target. The post-pass must repair the dangling wiki link.
+    await note(
+      "kb/infra/plan.md",
+      "---\ntitle: Plan\n---\n# Plan\nfollow [[Runbook]]. zzplan.\n",
+    );
+    await ix.refreshStale(personaDir);
+    await note(
+      "kb/infra/runbook.md",
+      "---\ntitle: Runbook\n---\n# Runbook\nthe steps.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const expanded = ix
+      .searchExpanded("zzplan", { scope: "kb", maxAdd: 3 })
+      .map((h) => h.path);
+    expect(expanded).toContain("kb/infra/runbook.md");
+  });
 });
 
 describe("notes-schema self-heal", () => {
