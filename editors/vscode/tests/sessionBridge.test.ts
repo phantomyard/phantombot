@@ -16,6 +16,7 @@ import {
   makeReplayCollector,
   mintSessionId,
   promptBlocksFromRequest,
+  resolveSessionCandidates,
   sessionResourcePath,
   type SessionAttachment,
 } from "../src/sessionBridge.ts";
@@ -123,6 +124,28 @@ describe("promptBlocksFromRequest — text + attachments → ACP blocks", () => 
 
   test("empty everything yields no blocks", () => {
     expect(promptBlocksFromRequest("", [])).toEqual([]);
+  });
+});
+
+describe("resolveSessionCandidates", () => {
+  test("one item per open workspace folder", () => {
+    const folders = [
+      { cwd: "/home/me/proj-a", name: "proj-a" },
+      { cwd: "/home/me/proj-b", name: "proj-b" },
+    ];
+    expect(resolveSessionCandidates(folders, "/fallback")).toEqual(folders);
+  });
+
+  test("folderless window falls back to a single cwd-bound item", () => {
+    expect(resolveSessionCandidates([], "/home/me")).toEqual([
+      { cwd: "/home/me", name: "phantombot" },
+    ]);
+  });
+
+  test("fallback name is customisable", () => {
+    expect(resolveSessionCandidates([], "/home/me", "home")).toEqual([
+      { cwd: "/home/me", name: "home" },
+    ]);
   });
 });
 

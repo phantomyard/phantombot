@@ -27,6 +27,7 @@ import {
   makeReplayCollector,
   mintSessionId,
   promptBlocksFromRequest,
+  resolveSessionCandidates,
   sessionResourcePath,
   SESSION_SCHEME,
   SESSION_TYPE,
@@ -129,7 +130,13 @@ export function registerChatSessionProvider(
     provideChatSessionItems() {
       const persona = deps.personaLabel();
       const desc = persona ? `phantombot · ${persona}` : "phantombot";
-      return deps.workspaceFolders().map((f) => ({
+      // One session per open folder, with a folderless fallback so phantombot
+      // stays visible in an empty window or a folderless `.code-workspace`.
+      const candidates = resolveSessionCandidates(
+        deps.workspaceFolders(),
+        deps.currentCwd(),
+      );
+      return candidates.map((f) => ({
         resource: vscode.Uri.from({
           scheme: SESSION_SCHEME,
           path: sessionResourcePath(f.cwd),
