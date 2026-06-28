@@ -524,8 +524,11 @@ footer {
     padding: 0;
 }
 
-/* PhantomChat showcase: desktop + mobile + desktop, side by side */
-.phantomchat-showcase {
+/* Even-height showcases: desktop + mobile side by side, all images same height.
+   Desktops are landscape, phones portrait, so we equalise the rendered IMAGE
+   height and let widths follow each image's own aspect ratio. */
+.phantomchat-showcase,
+.telegram-showcase {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
@@ -534,21 +537,58 @@ footer {
     margin-top: 3rem;
 }
 
-.phantomchat-showcase .terminal-window {
-    flex: 1 1 0;
-    min-width: 0;
-    max-width: 300px;
+.phantomchat-showcase {
+    --shot-h: 210px;
 }
 
-.phantomchat-showcase .iphone-frame {
+.telegram-showcase {
+    --shot-h: 360px;
+}
+
+.phantomchat-showcase .terminal-window,
+.telegram-showcase .terminal-window,
+.phantomchat-showcase .iphone-frame,
+.telegram-showcase .iphone-frame {
     flex: 0 0 auto;
-    max-width: 210px;
+    min-width: 0;
+    max-width: none;
     margin: 0;
 }
 
+.phantomchat-showcase .terminal-body,
+.telegram-showcase .terminal-body {
+    display: flex;
+}
+
+.phantomchat-showcase .screenshot,
+.telegram-showcase .screenshot,
+.phantomchat-showcase .iphone-frame .screenshot,
+.telegram-showcase .iphone-frame .screenshot {
+    height: var(--shot-h);
+    width: auto;
+}
+
 @media (max-width: 768px) {
-    .phantomchat-showcase .terminal-window {
+    .phantomchat-showcase,
+    .telegram-showcase {
+        --shot-h: auto;
+    }
+
+    .phantomchat-showcase .terminal-window,
+    .telegram-showcase .terminal-window {
         flex-basis: 100%;
         max-width: 420px;
+    }
+
+    .phantomchat-showcase .screenshot,
+    .telegram-showcase .screenshot {
+        height: auto;
+        width: 100%;
+    }
+
+    .phantomchat-showcase .iphone-frame .screenshot,
+    .telegram-showcase .iphone-frame .screenshot {
+        height: auto;
+        width: 100%;
     }
 }
