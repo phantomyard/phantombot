@@ -53,7 +53,10 @@ import {
   defaultLockPath,
   isLockHandle,
 } from "../lib/runLock.ts";
-import { notifyPostRestartIfPending } from "../lib/updateNotify.ts";
+import {
+  notifyPhantomchatPostRestart,
+  notifyPostRestartIfPending,
+} from "../lib/updateNotify.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
@@ -551,6 +554,33 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           publicKeyHex: identity.publicKeyHex,
           transport,
         });
+        // Post-restart confirmation for a `/update` that was issued FROM
+        // PhantomChat. The Telegram notify above deliberately deferred any
+        // phantomchat-origin marker; this routes "✅ Updated to vX" back to the
+        // exact DM it was typed in, over this persona's own relays. Best-effort
+        // + detached so a relay hiccup never delays the listener coming up.
+        void notifyPhantomchatPostRestart({
+          persona: spec.persona,
+          transport,
+          currentVersion: VERSION,
+        })
+          .then((r) => {
+            if (
+              r.status === "success_notified" ||
+              r.status === "failure_notified"
+            ) {
+              log.info("run: phantomchat post-restart notify", {
+                status: r.status,
+                persona: spec.persona,
+                targetTag: r.marker?.targetTag,
+              });
+            }
+          })
+          .catch((e) =>
+            log.warn(`phantomchat[${spec.persona}]: post-restart notify threw`, {
+              error: (e as Error).message,
+            }),
+          );
         // Register/refresh this persona's public profile (NIP-01 kind 0) so the
         // PWA shows a real name ("Lena", not the npub) and badges it as a bot
         // (NIP-24 bot:true). kind 0 is replaceable, so this just supersedes the
