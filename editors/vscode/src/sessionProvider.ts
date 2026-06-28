@@ -309,7 +309,7 @@ function buildHistory(turns: readonly ReplayTurn[], participantId: string): unkn
  * inline image blocks; other dropped files become reference links. Best-effort:
  * a failed attachment is logged and skipped, never fatal to the turn.
  */
-async function extractAttachments(
+export async function extractAttachments(
   request: vscode.ChatRequest,
   output: vscode.OutputChannel,
 ): Promise<SessionAttachment[]> {

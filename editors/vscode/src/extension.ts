@@ -26,16 +26,27 @@ import {
 } from "./binaryResolver.ts";
 import { bridgePromptToStream } from "./participant.ts";
 import { createLanguageModelChatProvider } from "./lmProvider.ts";
-import { registerChatSessionProvider } from "./sessionProvider.ts";
+import {
+  registerChatSessionProvider,
+  extractAttachments,
+} from "./sessionProvider.ts";
 import {
   pickOpenSessionCommand,
+  promptBlocksFromRequest,
   shouldAutoOpenSession,
   SIDEBAR_OPEN_COMMAND,
   EDITOR_OPEN_COMMAND,
   type OpenOnStartup,
 } from "./sessionBridge.ts";
 
-const PARTICIPANT_ID = "phantombot.chat";
+// The participant id MUST equal the chat-session `type` (see package.json
+// contributes.chatSessions[].type). When `canDelegate: true`, VS Code registers
+// a delegate agent under that exact id and routes session requests to it via
+// `agentIdSilent`; the agent has no implementation until an extension attaches
+// one by creating a participant with the SAME id. A mismatched id (the old
+// "phantombot.chat") leaves the agent implementation-less, so every turn fails
+// with `No activated agent with id "phantombot"`. Keep these two in lockstep.
+const PARTICIPANT_ID = "phantombot";
 
 /** Command id for the "open phantombot chat" button / palette entry / keybinding. */
 const OPEN_SESSION_COMMAND = "phantombot.openSession";
@@ -96,11 +107,18 @@ export function activate(context: vscode.ExtensionContext): void {
       return { errorDetails: { message: msg } };
     }
 
+    // Fold any dragged/pasted images + files into content blocks so the
+    // agent-implementation path (initial "open with prompt", @mention) carries
+    // attachments too — the session content provider already does this for the
+    // normal in-session turns.
+    const attachments = await extractAttachments(request, output);
+    const blocks = promptBlocksFromRequest(request.prompt, attachments);
+
     try {
       const { stopReason } = await bridgePromptToStream({
         client: conn.client,
         sessionId: conn.sessionId,
-        request: { prompt: request.prompt },
+        request: { prompt: request.prompt, blocks },
         stream: {
           markdown: (v) => stream.markdown(v),
           progress: (v) => stream.progress(v),

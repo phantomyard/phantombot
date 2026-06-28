@@ -18,7 +18,7 @@
  */
 
 import type { AcpClient } from "./acpClient.ts";
-import type { AcpStopReason } from "./protocol.ts";
+import type { AcpContentBlock, AcpStopReason } from "./protocol.ts";
 
 /** The slice of `vscode.ChatResponseStream` the bridge writes to. */
 export interface ResponseStream {
@@ -32,6 +32,12 @@ export interface ResponseStream {
 export interface PromptRequest {
   /** The user's typed prompt (already stripped of the @participant mention). */
   prompt: string;
+  /**
+   * Optional pre-built content blocks (text + image + file attachments). When
+   * present these are sent verbatim — this is how dragged/pasted images and
+   * files reach the agent. When absent the bridge falls back to `prompt` text.
+   */
+  blocks?: AcpContentBlock[];
 }
 
 /** The slice of `vscode.CancellationToken` the bridge observes. */
@@ -82,7 +88,13 @@ export async function bridgePromptToStream(
   }
 
   try {
-    const stopReason = await client.prompt(sessionId, request.prompt, {
+    // Prefer pre-built blocks (carry image/file attachments); fall back to the
+    // raw prompt text when the caller didn't extract any.
+    const payload: string | AcpContentBlock[] =
+      request.blocks && request.blocks.length > 0
+        ? request.blocks
+        : request.prompt;
+    const stopReason = await client.prompt(sessionId, payload, {
       onText: (text) => stream.markdown(text),
       onToolCall: (title) => stream.progress?.(title),
     });

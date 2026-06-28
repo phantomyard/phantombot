@@ -54,12 +54,14 @@ function makeFakeClient(opts: {
   stopReason?: AcpStopReason;
   /** If set, prompt() waits for cancel() before resolving (cancellation test). */
   blockUntilCancel?: boolean;
-}): AcpClient & { cancels: string[] } {
+}): AcpClient & { cancels: string[]; sent: unknown[] } {
   const cancels: string[] = [];
+  const sent: unknown[] = [];
   let cancelled = false;
   let releaseOnCancel: (() => void) | undefined;
   const fake = {
     cancels,
+    sent,
     cancel(sessionId: string) {
       cancels.push(sessionId);
       cancelled = true;
@@ -67,12 +69,13 @@ function makeFakeClient(opts: {
     },
     async prompt(
       _sessionId: string,
-      _prompt: string,
+      _prompt: unknown,
       handlers: {
         onText?(t: string): void;
         onToolCall?(title: string, status: string): void;
       },
     ): Promise<AcpStopReason> {
+      sent.push(_prompt);
       for (const t of opts.text ?? []) handlers.onText?.(t);
       for (const tc of opts.tools ?? []) handlers.onToolCall?.(tc.title, tc.status);
       if (opts.blockUntilCancel) {
@@ -103,6 +106,35 @@ describe("bridgePromptToStream", () => {
     });
     expect(stream.md).toEqual(["Hello ", "world"]);
     expect(result.stopReason).toBe("end_turn");
+  });
+
+  test("sends pre-built blocks verbatim when present (carries attachments)", async () => {
+    const client = makeFakeClient({ text: ["ok"], stopReason: "end_turn" });
+    const stream = new FakeStream();
+    const blocks = [
+      { type: "text", text: "look" },
+      { type: "image", data: "BASE64", mimeType: "image/png" },
+    ] as never;
+    await bridgePromptToStream({
+      client,
+      sessionId: "acp_b",
+      request: { prompt: "look", blocks },
+      stream,
+    });
+    // The image block must reach the agent untouched — not be flattened to text.
+    expect(client.sent[0]).toEqual(blocks);
+  });
+
+  test("falls back to prompt text when no blocks are supplied", async () => {
+    const client = makeFakeClient({ text: ["ok"], stopReason: "end_turn" });
+    const stream = new FakeStream();
+    await bridgePromptToStream({
+      client,
+      sessionId: "acp_t",
+      request: { prompt: "just text" },
+      stream,
+    });
+    expect(client.sent[0]).toBe("just text");
   });
 
   test("maps tool_call updates to progress notes", async () => {
