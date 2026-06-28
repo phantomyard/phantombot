@@ -99,6 +99,66 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Delay (ms) before the opening typing/recording indicator is re-emitted once.
+ * Small enough to feel instant, long enough for a just-(re)connecting relay
+ * socket to come up so the second tick lands. See `emitOpeningIndicator`.
+ */
+export const OPENING_INDICATOR_REEMIT_MS = 600;
+
+/**
+ * Robust opening indicator — the fix for the flaky typing/recording dots.
+ *
+ * The first indicator tick of a turn races transport connection state. On
+ * Telegram that's a cheap idempotent HTTP `sendChatAction`, but on PhantomChat
+ * the indicator is a fire-and-forget EPHEMERAL Nostr event (kind-20001): relays
+ * do not store it, so if the relay socket isn't OPEN at the instant we publish,
+ * the tick is silently dropped. On a FAST turn — the reply lands before the 2s
+ * throttle would fire a second refresh — that single dropped tick means the
+ * user sees NO indicator at all. That's the intermittent "typing dots don't
+ * show" Andrew keeps hitting.
+ *
+ * Fix: emit the opening tick immediately AND schedule exactly ONE more a short
+ * moment later (`OPENING_INDICATOR_REEMIT_MS`), by which point the pool has had
+ * time to (re)connect — so a single cold-socket drop can no longer swallow the
+ * whole indicator. Returns a cancel handle the turn invokes on completion so
+ * the delayed pulse never fires into an already-finished turn. Idempotent and
+ * harmless on Telegram (a second chat-action is free).
+ *
+ * The timer fns are injectable so the regression test drives the schedule
+ * deterministically instead of waiting on a wall-clock delay.
+ */
+export function emitOpeningIndicator(
+  sendStatus: () => void,
+  opts?: {
+    extraPulseDelayMs?: number;
+    // Handle typed as `unknown` so the seam is agnostic to the runtime's timer
+    // handle shape (bun's `Timer` vs Node's `Timeout`); the real globals and a
+    // test's counter-based stub both satisfy it.
+    setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+    clearTimeoutFn?: (handle: unknown) => void;
+  },
+): () => void {
+  const delay = opts?.extraPulseDelayMs ?? OPENING_INDICATOR_REEMIT_MS;
+  const setT: (fn: () => void, ms: number) => unknown =
+    opts?.setTimeoutFn ?? setTimeout;
+  const clearT: (handle: unknown) => void =
+    opts?.clearTimeoutFn ?? (clearTimeout as (handle: unknown) => void);
+
+  // Pulse 1 — immediate, so the dots appear the instant the turn starts.
+  sendStatus();
+
+  // Pulse 2 — once, after the relay has had a beat to connect.
+  const handle = setT(() => sendStatus(), delay);
+
+  let cancelled = false;
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    clearT(handle);
+  };
+}
+
 export interface RunTelegramServerInput {
   config: Config;
   memory: MemoryStore;
@@ -863,9 +923,15 @@ async function processChatMessage(
     }
   };
 
-  // Initial nudge so the user sees "typing…" the moment we start
-  // working, before the first chunk lands.
-  refreshIndicator();
+  // Initial nudge so the user sees "typing…" the moment we start working,
+  // before the first chunk lands. Emitted as a robust double-pulse (immediate
+  // + one short re-emit) so a cold-relay drop of the first ephemeral tick on
+  // PhantomChat can't leave a fast turn with no indicator at all. Each pulse
+  // updates the throttle clock so the per-chunk refresh stays correctly spaced.
+  const cancelOpeningIndicator = emitOpeningIndicator(() => {
+    lastSendStatusAt = Date.now();
+    void sendStatus();
+  });
 
   // Register the AbortController so /stop can find us.
   const controller = new AbortController();
@@ -1111,6 +1177,9 @@ async function processChatMessage(
     log.error("telegram: turn threw", { error: errored });
   } finally {
     stopToolRefresh();
+    // Cancel the delayed opening-indicator pulse if it hasn't fired yet, so it
+    // never emits a tick into an already-finished turn.
+    cancelOpeningIndicator();
     // Only deregister if we're still the active turn for this chat.
     // (Defensive: a /reset or /stop could have replaced us.)
     if (activeTurns.get(msg.conversationId) === turnHandle) {

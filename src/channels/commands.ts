@@ -260,10 +260,13 @@ async function handleUpdate(
   const r = await runUpdateFlow({
     config: ctx.config,
     currentVersion: VERSION,
-    // The update-notify subsystem keys recipients by numeric Telegram chat
-    // id (it persists the id into the post-restart marker). Convert the
-    // channel-neutral string conversation id back at this boundary.
+    // Telegram-only numeric id, kept for the Telegram post-restart path. For a
+    // PhantomChat conversation `ctx.chatId` is a hex pubkey → NaN here, which is
+    // exactly why `conversation` below is the authoritative router: it carries
+    // the channel-neutral key ("telegram:42" / "phantomchat:<hex>") so the
+    // confirmation lands back where `/update` was typed, not on Telegram.
     chatId: Number(ctx.chatId),
+    conversation: ctx.conversation,
     persona: ctx.persona,
   });
   return { reply: r.reply, afterSend: r.restart };
