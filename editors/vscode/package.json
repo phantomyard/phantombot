@@ -2,7 +2,7 @@
   "name": "phantombot-vscode",
   "displayName": "phantombot",
   "description": "Chat with phantombot — your personality-first agent — in VS Code's native Chat panel via an embedded ACP client.",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "publisher": "phantomyard",
   "private": true,
   "license": "MIT",
@@ -26,7 +26,8 @@
   "activationEvents": [
     "onStartupFinished",
     "onChatParticipant:phantombot.chat",
-    "onChatSession:phantombot"
+    "onChatSession:phantombot",
+    "onCommand:phantombot.openSession"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -61,6 +62,35 @@
         "isSticky": true
       }
     ],
+    "commands": [
+      {
+        "command": "phantombot.openSession",
+        "title": "Open Phantombot Chat",
+        "category": "phantombot",
+        "icon": "$(hubot)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "phantombot.openSession"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "phantombot.openSession",
+          "when": "view == workbench.panel.chat.view.copilot",
+          "group": "navigation@-1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "phantombot.openSession",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
+      }
+    ],
     "configuration": {
       "title": "phantombot",
       "properties": {
@@ -73,6 +103,21 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Persona to bind the ACP session to (passed as `--persona`). Leave empty to use phantombot's configured default persona."
+        },
+        "phantombot.openOnStartup": {
+          "type": "string",
+          "enum": [
+            "never",
+            "ifPreviouslyOpened",
+            "always"
+          ],
+          "enumDescriptions": [
+            "Never auto-open — use the bot button, command palette, or Ctrl+Alt+P / Cmd+Alt+P.",
+            "Re-open Phantombot on startup only if it was open when you last closed VS Code (sticky).",
+            "Always open Phantombot on startup."
+          ],
+          "default": "ifPreviouslyOpened",
+          "markdownDescription": "Whether to automatically open the Phantombot chat when VS Code starts. Default `ifPreviouslyOpened` makes it _sticky_ — pick Phantombot once and it keeps coming back, leave it closed and it stays out of the way."
         }
       }
     }

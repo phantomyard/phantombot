@@ -27,8 +27,27 @@ import {
 import { bridgePromptToStream } from "./participant.ts";
 import { createLanguageModelChatProvider } from "./lmProvider.ts";
 import { registerChatSessionProvider } from "./sessionProvider.ts";
+import {
+  shouldAutoOpenSession,
+  type OpenOnStartup,
+} from "./sessionBridge.ts";
 
 const PARTICIPANT_ID = "phantombot.chat";
+
+/** Command id for the "open phantombot chat" button / palette entry / keybinding. */
+const OPEN_SESSION_COMMAND = "phantombot.openSession";
+
+/** globalState key remembering whether the phantombot session was last open. */
+const STICKY_KEY = "phantombot.sessionWasOpen";
+
+/**
+ * VS Code auto-registers these per chat-session *type* (our type is
+ * "phantombot"). Opening the sidebar one drops phantombot straight into the
+ * native chat view; the editor one is the fallback. We never hardcode the args
+ * — VS Code derives the session resource from the type for us.
+ */
+const OPEN_SIDEBAR_CMD = "workbench.action.chat.openNewSessionSidebar.phantombot";
+const OPEN_EDITOR_CMD = "workbench.action.chat.openNewSessionEditor.phantombot";
 
 /**
  * One ACP client + session per workspace folder. The session id is opaque to
@@ -130,9 +149,28 @@ export function activate(context: vscode.ExtensionContext): void {
           ?.trim() ?? "",
       participant,
       participantId: PARTICIPANT_ID,
+      // Remember that phantombot was opened so we can re-open it next launch.
+      onSessionOpened: () => {
+        void context.globalState.update(STICKY_KEY, true);
+      },
       output,
     }),
   );
+
+  // ── Quick-launch command: button + palette + keybinding ───────────────────
+  // One click / shortcut to jump straight into the phantombot chat — no fishing
+  // through the model picker or the sessions list.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_SESSION_COMMAND, () =>
+      openPhantombotSession(output),
+    ),
+  );
+
+  // ── Sticky: auto-open on startup if the user had it open before ────────────
+  // Runs at onStartupFinished (this activation event). The decision is pure and
+  // unit-tested; the side effect (executing the open command) is best-effort and
+  // never throws into activation.
+  void maybeAutoOpen(context, output);
 
   // ── First-class chat model (no @mention, native history) ─────────────────
   // Register phantombot as a selectable model in the native Chat view via the
@@ -173,6 +211,56 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   // Subscriptions (incl. the disposeAll hook) are torn down by VS Code.
+}
+
+/**
+ * Open the phantombot chat session in the native chat surface. Tries the
+ * sidebar first (where Copilot/Claude live), falls back to an editor tab, then
+ * to focusing the agent-sessions view. Best-effort: logs and gives up rather
+ * than throwing, since it's wired to a user button/keybinding and to startup.
+ */
+async function openPhantombotSession(
+  output: vscode.OutputChannel,
+): Promise<void> {
+  const tryRun = async (cmd: string): Promise<boolean> => {
+    try {
+      await vscode.commands.executeCommand(cmd);
+      return true;
+    } catch (e) {
+      output.appendLine(`[open] ${cmd} unavailable: ${(e as Error).message}`);
+      return false;
+    }
+  };
+
+  if (await tryRun(OPEN_SIDEBAR_CMD)) return;
+  if (await tryRun(OPEN_EDITOR_CMD)) return;
+  // Last resort — at least reveal the sessions list so phantombot is reachable.
+  await tryRun("workbench.view.sessions.chat.focus");
+}
+
+/**
+ * On startup, auto-open phantombot per the `phantombot.openOnStartup` setting
+ * (default: only if it was open last time — the "sticky" behaviour). Best-effort
+ * and isolated from activation failures.
+ */
+async function maybeAutoOpen(
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel,
+): Promise<void> {
+  try {
+    const setting =
+      vscode.workspace
+        .getConfiguration("phantombot")
+        .get<OpenOnStartup>("openOnStartup") ?? "ifPreviouslyOpened";
+    const wasOpen = context.globalState.get<boolean>(STICKY_KEY, false);
+    if (!shouldAutoOpenSession(setting, wasOpen)) return;
+    output.appendLine(
+      `[startup] auto-opening phantombot (openOnStartup=${setting}, wasOpen=${wasOpen}).`,
+    );
+    await openPhantombotSession(output);
+  } catch (e) {
+    output.appendLine(`[startup] auto-open skipped: ${(e as Error).message}`);
+  }
 }
 
 /** Resolve the workspace cwd, falling back to the home dir when none is open. */

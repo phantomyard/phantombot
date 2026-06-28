@@ -18,6 +18,7 @@ import {
   promptBlocksFromRequest,
   resolveSessionCandidates,
   sessionResourcePath,
+  shouldAutoOpenSession,
   type SessionAttachment,
 } from "../src/sessionBridge.ts";
 import type { AcpSessionUpdate } from "../src/protocol.ts";
@@ -146,6 +147,28 @@ describe("resolveSessionCandidates", () => {
     expect(resolveSessionCandidates([], "/home/me", "home")).toEqual([
       { cwd: "/home/me", name: "home" },
     ]);
+  });
+});
+
+describe("shouldAutoOpenSession", () => {
+  test('"always" opens regardless of prior state', () => {
+    expect(shouldAutoOpenSession("always", false)).toBe(true);
+    expect(shouldAutoOpenSession("always", true)).toBe(true);
+  });
+
+  test('"never" never opens', () => {
+    expect(shouldAutoOpenSession("never", true)).toBe(false);
+    expect(shouldAutoOpenSession("never", false)).toBe(false);
+  });
+
+  test('"ifPreviouslyOpened" tracks the remembered state', () => {
+    expect(shouldAutoOpenSession("ifPreviouslyOpened", true)).toBe(true);
+    expect(shouldAutoOpenSession("ifPreviouslyOpened", false)).toBe(false);
+  });
+
+  test("unknown setting falls back to the sticky default policy", () => {
+    expect(shouldAutoOpenSession("bogus" as never, true)).toBe(true);
+    expect(shouldAutoOpenSession("bogus" as never, false)).toBe(false);
   });
 });
 

@@ -78,6 +78,37 @@ export function resolveSessionCandidates(
   return [{ cwd: fallbackCwd, name: fallbackName }];
 }
 
+/** How the extension behaves on startup re: auto-opening the phantombot session. */
+export type OpenOnStartup = "never" | "ifPreviouslyOpened" | "always";
+
+/**
+ * Decide whether to auto-open the phantombot chat session when VS Code starts.
+ *
+ * Pure policy so it's unit-tested without a `vscode` host:
+ *  - `"always"`   → open every launch.
+ *  - `"never"`    → never auto-open (button / palette only).
+ *  - `"ifPreviouslyOpened"` (default) → open only when the user had the
+ *    phantombot session open in a previous session — the "sticky" behaviour:
+ *    pick it once and it keeps coming back, leave it closed and it stays out of
+ *    your way.
+ */
+export function shouldAutoOpenSession(
+  setting: OpenOnStartup,
+  wasPreviouslyOpened: boolean,
+): boolean {
+  switch (setting) {
+    case "always":
+      return true;
+    case "never":
+      return false;
+    case "ifPreviouslyOpened":
+      return wasPreviouslyOpened;
+    default:
+      // Unknown value (e.g. a future/typo'd setting) → safest is the default policy.
+      return wasPreviouslyOpened;
+  }
+}
+
 /** A single replayed history turn, role-tagged. */
 export interface ReplayTurn {
   role: "user" | "assistant";
