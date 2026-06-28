@@ -28,7 +28,10 @@ import { bridgePromptToStream } from "./participant.ts";
 import { createLanguageModelChatProvider } from "./lmProvider.ts";
 import { registerChatSessionProvider } from "./sessionProvider.ts";
 import {
+  pickOpenSessionCommand,
   shouldAutoOpenSession,
+  SIDEBAR_OPEN_COMMAND,
+  EDITOR_OPEN_COMMAND,
   type OpenOnStartup,
 } from "./sessionBridge.ts";
 
@@ -41,13 +44,15 @@ const OPEN_SESSION_COMMAND = "phantombot.openSession";
 const STICKY_KEY = "phantombot.sessionWasOpen";
 
 /**
- * VS Code auto-registers these per chat-session *type* (our type is
- * "phantombot"). Opening the sidebar one drops phantombot straight into the
- * native chat view; the editor one is the fallback. We never hardcode the args
- * — VS Code derives the session resource from the type for us.
+ * The per-type open commands (`…openNewSessionSidebar.phantombot`, etc.) only
+ * exist once VS Code has processed our `chatSessions` contribution — which now
+ * declares `canDelegate: true` so the commands actually register. At
+ * onStartupFinished that processing may not have happened yet, so the auto-open
+ * polls for the command to appear before giving up. See sessionBridge for the
+ * command ids and the picker.
  */
-const OPEN_SIDEBAR_CMD = "workbench.action.chat.openNewSessionSidebar.phantombot";
-const OPEN_EDITOR_CMD = "workbench.action.chat.openNewSessionEditor.phantombot";
+const OPEN_COMMAND_RETRIES = 20;
+const OPEN_COMMAND_RETRY_MS = 250;
 
 /**
  * One ACP client + session per workspace folder. The session id is opaque to
@@ -214,28 +219,57 @@ export function deactivate(): void {
 }
 
 /**
- * Open the phantombot chat session in the native chat surface. Tries the
- * sidebar first (where Copilot/Claude live), falls back to an editor tab, then
- * to focusing the agent-sessions view. Best-effort: logs and gives up rather
- * than throwing, since it's wired to a user button/keybinding and to startup.
+ * Open the phantombot chat session in the native chat surface. Resolves the best
+ * command that's actually registered (sidebar session → editor session → focus
+ * the sessions viewer) rather than firing a hardcoded id that may not exist.
+ *
+ * On a cold start the per-type session commands register slightly after our
+ * onStartupFinished activation, so when `waitForCommand` is set we briefly poll
+ * for them to appear before falling back. Best-effort throughout: logs and gives
+ * up rather than throwing, since it's wired to a button/keybinding and startup.
  */
 async function openPhantombotSession(
   output: vscode.OutputChannel,
+  opts: { waitForCommand?: boolean } = {},
 ): Promise<void> {
-  const tryRun = async (cmd: string): Promise<boolean> => {
+  const retries = opts.waitForCommand ? OPEN_COMMAND_RETRIES : 1;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const available = await vscode.commands.getCommands(true);
+    const cmd = pickOpenSessionCommand(available);
+
+    // Still waiting for the per-type commands to register? Retry before settling
+    // for the viewer fallback (which doesn't open our session specifically).
+    const isPerType = cmd === SIDEBAR_OPEN_COMMAND || cmd === EDITOR_OPEN_COMMAND;
+    if (!isPerType && opts.waitForCommand && attempt < retries - 1) {
+      await delay(OPEN_COMMAND_RETRY_MS);
+      continue;
+    }
+
+    if (!cmd) {
+      await delay(OPEN_COMMAND_RETRY_MS);
+      continue;
+    }
+
     try {
       await vscode.commands.executeCommand(cmd);
-      return true;
+      output.appendLine(`[open] opened phantombot via ${cmd}`);
+      return;
     } catch (e) {
-      output.appendLine(`[open] ${cmd} unavailable: ${(e as Error).message}`);
-      return false;
+      output.appendLine(`[open] ${cmd} failed: ${(e as Error).message}`);
+      return;
     }
-  };
+  }
 
-  if (await tryRun(OPEN_SIDEBAR_CMD)) return;
-  if (await tryRun(OPEN_EDITOR_CMD)) return;
-  // Last resort — at least reveal the sessions list so phantombot is reachable.
-  await tryRun("workbench.view.sessions.chat.focus");
+  output.appendLine(
+    "[open] no phantombot session command available — is the chatSessions " +
+      "contribution registered? (needs canDelegate + enabled proposed APIs)",
+  );
+}
+
+/** Promise-based delay (avoids pulling in a timers import). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -257,7 +291,7 @@ async function maybeAutoOpen(
     output.appendLine(
       `[startup] auto-opening phantombot (openOnStartup=${setting}, wasOpen=${wasOpen}).`,
     );
-    await openPhantombotSession(output);
+    await openPhantombotSession(output, { waitForCommand: true });
   } catch (e) {
     output.appendLine(`[startup] auto-open skipped: ${(e as Error).message}`);
   }

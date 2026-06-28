@@ -11,14 +11,18 @@ import { describe, expect, test } from "bun:test";
 
 import {
   cwdFromResourcePath,
+  EDITOR_OPEN_COMMAND,
   imageMimeFromPath,
   isImageMime,
   makeReplayCollector,
   mintSessionId,
+  pickOpenSessionCommand,
   promptBlocksFromRequest,
   resolveSessionCandidates,
   sessionResourcePath,
+  SESSIONS_VIEWER_FALLBACK,
   shouldAutoOpenSession,
+  SIDEBAR_OPEN_COMMAND,
   type SessionAttachment,
 } from "../src/sessionBridge.ts";
 import type { AcpSessionUpdate } from "../src/protocol.ts";
@@ -169,6 +173,52 @@ describe("shouldAutoOpenSession", () => {
   test("unknown setting falls back to the sticky default policy", () => {
     expect(shouldAutoOpenSession("bogus" as never, true)).toBe(true);
     expect(shouldAutoOpenSession("bogus" as never, false)).toBe(false);
+  });
+});
+
+describe("pickOpenSessionCommand", () => {
+  test("prefers the sidebar session command when present", () => {
+    expect(
+      pickOpenSessionCommand([
+        SESSIONS_VIEWER_FALLBACK,
+        EDITOR_OPEN_COMMAND,
+        SIDEBAR_OPEN_COMMAND,
+      ]),
+    ).toBe(SIDEBAR_OPEN_COMMAND);
+  });
+
+  test("falls back to the editor session command when sidebar is absent", () => {
+    expect(
+      pickOpenSessionCommand([SESSIONS_VIEWER_FALLBACK, EDITOR_OPEN_COMMAND]),
+    ).toBe(EDITOR_OPEN_COMMAND);
+  });
+
+  test("falls back to the sessions viewer when no per-type command exists", () => {
+    expect(pickOpenSessionCommand([SESSIONS_VIEWER_FALLBACK])).toBe(
+      SESSIONS_VIEWER_FALLBACK,
+    );
+  });
+
+  test("returns undefined when nothing usable is registered (early startup)", () => {
+    expect(pickOpenSessionCommand([])).toBeUndefined();
+    expect(
+      pickOpenSessionCommand(["some.other.command", "workbench.action.files.save"]),
+    ).toBeUndefined();
+  });
+
+  test("accepts a Set as well as an array", () => {
+    expect(pickOpenSessionCommand(new Set([SIDEBAR_OPEN_COMMAND]))).toBe(
+      SIDEBAR_OPEN_COMMAND,
+    );
+  });
+
+  test("the per-type ids are scoped to the phantombot session type", () => {
+    expect(SIDEBAR_OPEN_COMMAND).toBe(
+      "workbench.action.chat.openNewSessionSidebar.phantombot",
+    );
+    expect(EDITOR_OPEN_COMMAND).toBe(
+      "workbench.action.chat.openNewSessionEditor.phantombot",
+    );
   });
 });
 

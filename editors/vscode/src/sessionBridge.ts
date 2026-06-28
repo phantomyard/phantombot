@@ -109,6 +109,43 @@ export function shouldAutoOpenSession(
   }
 }
 
+/**
+ * Per-type chat-session open commands. VS Code auto-registers these for a chat
+ * session contribution ONLY when it declares `canDelegate: true` (see
+ * ChatSessionsService._enableContribution → _registerCommands). Without that
+ * flag the commands never exist and `executeCommand` throws "command not found"
+ * — which is exactly why the quick-launch button and sticky auto-open silently
+ * did nothing before. The manifest now sets `canDelegate: true`.
+ */
+export const SIDEBAR_OPEN_COMMAND = `workbench.action.chat.openNewSessionSidebar.${SESSION_TYPE}`;
+export const EDITOR_OPEN_COMMAND = `workbench.action.chat.openNewSessionEditor.${SESSION_TYPE}`;
+/**
+ * Always-present last resort: focuses the agent-sessions viewer panel. It does
+ * not open *our* session specifically, but it's a real registered command (the
+ * old `workbench.view.sessions.chat.focus` fallback never existed), so the
+ * button at least reveals the panel rather than no-opping.
+ */
+export const SESSIONS_VIEWER_FALLBACK =
+  "workbench.action.chat.focusAgentSessionsViewer";
+
+/**
+ * Pick the best available command to open/reveal the phantombot session, given
+ * the set of commands VS Code currently has registered. Pure so it's unit-tested
+ * without a host: prefer the sidebar session command, then the editor variant,
+ * then the viewer fallback. Returns `undefined` if none are present (e.g. the
+ * per-type commands haven't registered yet during early startup — the caller
+ * retries).
+ */
+export function pickOpenSessionCommand(
+  available: Iterable<string>,
+): string | undefined {
+  const set = available instanceof Set ? available : new Set(available);
+  if (set.has(SIDEBAR_OPEN_COMMAND)) return SIDEBAR_OPEN_COMMAND;
+  if (set.has(EDITOR_OPEN_COMMAND)) return EDITOR_OPEN_COMMAND;
+  if (set.has(SESSIONS_VIEWER_FALLBACK)) return SESSIONS_VIEWER_FALLBACK;
+  return undefined;
+}
+
 /** A single replayed history turn, role-tagged. */
 export interface ReplayTurn {
   role: "user" | "assistant";
