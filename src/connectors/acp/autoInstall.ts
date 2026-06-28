@@ -31,6 +31,10 @@ import { parse } from "jsonc-parser";
 import type { WriteSink } from "../../lib/io.ts";
 import { defaultZedSettingsPath, installZed } from "./installZed.ts";
 import {
+  defaultJetbrainsConfigPath,
+  installJetbrains,
+} from "./installJetbrains.ts";
+import {
   checkVscode,
   installVscode,
   type VscodeInstallResult,
@@ -101,13 +105,18 @@ export interface EditorSpec {
   install?(binaryPath: string, out?: WriteSink, err?: WriteSink): { code: number };
 }
 
-/** Best-effort read of `agent_servers.Phantombot.command` from JSONC settings. */
-function readZedCommand(settingsPath: string): string | undefined {
+/**
+ * Best-effort read of `agent_servers.Phantombot.command` from a JSONC ACP
+ * settings file. Both Zed (settings.json) and JetBrains (~/.jetbrains/acp.json)
+ * use this exact shape, so they share one reader.
+ */
+function readAgentServerCommand(settingsPath: string): string | undefined {
   try {
     const raw = readFileSync(settingsPath, "utf8");
     // Tolerant parse (comments + trailing commas). On a malformed file this
-    // returns a best-effort value or undefined; either way installZed re-parses
-    // with error collection and aborts safely, so we never risk data loss here.
+    // returns a best-effort value or undefined; either way the installer
+    // re-parses with error collection and aborts safely, so we never risk data
+    // loss here.
     const parsed = parse(raw) as
       | { agent_servers?: { Phantombot?: { command?: unknown } } }
       | undefined;
@@ -122,8 +131,22 @@ export const ZED_EDITOR: EditorSpec = {
   id: "zed",
   settingsPath: defaultZedSettingsPath,
   detectionDir: (settingsPath) => dirname(settingsPath),
-  currentCommand: readZedCommand,
+  currentCommand: readAgentServerCommand,
   install: (binaryPath, out, err) => installZed({ binaryPath, out, err }),
+};
+
+/**
+ * JetBrains AI Assistant (Rider, IntelliJ IDEA, WebStorm, PyCharm, …) speaks
+ * ACP natively from 2026.1, reading external agents from a single shared
+ * per-user file `~/.jetbrains/acp.json`. Registration is the same settings
+ * merge as Zed — no IDE plugin required — so it's a plain settings-model editor.
+ */
+export const JETBRAINS_EDITOR: EditorSpec = {
+  id: "jetbrains",
+  settingsPath: defaultJetbrainsConfigPath,
+  detectionDir: (configPath) => dirname(configPath),
+  currentCommand: readAgentServerCommand,
+  install: (binaryPath, out, err) => installJetbrains({ binaryPath, out, err }),
 };
 
 /**
@@ -177,7 +200,11 @@ export const VSCODE_EDITOR: EditorSpec = {
 };
 
 /** Editors phantombot knows how to register itself into. */
-export const KNOWN_EDITORS: EditorSpec[] = [ZED_EDITOR, VSCODE_EDITOR];
+export const KNOWN_EDITORS: EditorSpec[] = [
+  ZED_EDITOR,
+  JETBRAINS_EDITOR,
+  VSCODE_EDITOR,
+];
 
 export interface ReconcileOptions {
   /** Absolute path to the phantombot binary the editor should spawn. */
