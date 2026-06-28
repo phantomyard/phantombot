@@ -19,6 +19,7 @@ import {
   pickOpenSessionCommand,
   promptBlocksFromRequest,
   resolveSessionCandidates,
+  resolveSessionCreated,
   sessionResourcePath,
   SESSIONS_VIEWER_FALLBACK,
   shouldAutoOpenSession,
@@ -151,6 +152,43 @@ describe("resolveSessionCandidates", () => {
     expect(resolveSessionCandidates([], "/home/me", "home")).toEqual([
       { cwd: "/home/me", name: "home" },
     ]);
+  });
+});
+
+describe("resolveSessionCreated", () => {
+  const makeStore = (seed: Record<string, number> = {}) => {
+    const m = new Map<string, number>(Object.entries(seed));
+    return {
+      store: {
+        get: (k: string) => m.get(k),
+        set: (k: string, v: number) => void m.set(k, v),
+      },
+      map: m,
+    };
+  };
+
+  test("first sighting records and returns `now`", () => {
+    const { store, map } = makeStore();
+    expect(resolveSessionCreated("/proj", store, 1000)).toBe(1000);
+    expect(map.get("/proj")).toBe(1000);
+  });
+
+  test("later sightings return the stored value, not a fresh `now`", () => {
+    const { store } = makeStore({ "/proj": 1000 });
+    expect(resolveSessionCreated("/proj", store, 9999)).toBe(1000);
+  });
+
+  test("never returns the epoch — a stored 0 is treated as unset", () => {
+    const { store, map } = makeStore({ "/proj": 0 });
+    expect(resolveSessionCreated("/proj", store, 5000)).toBe(5000);
+    expect(map.get("/proj")).toBe(5000);
+  });
+
+  test("keys are independent per resource", () => {
+    const { store } = makeStore();
+    expect(resolveSessionCreated("/a", store, 100)).toBe(100);
+    expect(resolveSessionCreated("/b", store, 200)).toBe(200);
+    expect(resolveSessionCreated("/a", store, 999)).toBe(100);
   });
 });
 
