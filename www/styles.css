@@ -431,6 +431,12 @@ footer {
     margin-top: 3rem;
 }
 
+/* Wide side-by-side hero (VS Code + Zed, two PRs at once) */
+.editors-parallel-frame {
+    margin-top: 2.5rem;
+    margin-bottom: 0.5rem;
+}
+
 .editor-benefits {
     margin-top: 4rem;
 }
