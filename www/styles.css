@@ -509,3 +509,17 @@ footer {
         transform: rotate(90deg);
     }
 }
+
+/* Telegram mobile two-up */
+.iphone-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 2rem;
+}
+
+.iphone-frame--captioned {
+    margin: 2rem auto;
+    padding: 0;
+}
