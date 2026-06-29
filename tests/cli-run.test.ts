@@ -8,7 +8,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planListeners, runRun } from "../src/cli/run.ts";
+import {
+  armShutdownWatchdog,
+  planListeners,
+  runRun,
+  SHUTDOWN_GRACE_MS,
+} from "../src/cli/run.ts";
 import { savePhantomchatPersonaConfig } from "../src/channels/phantomchat/personaStore.ts";
 import { generateIdentity } from "../src/lib/nostrIdentity.ts";
 import type { Config } from "../src/config.ts";
@@ -518,5 +523,36 @@ describe("runRun — phantomchat-only (no Telegram)", () => {
     expect(code).toBe(2);
     expect(err.text).toContain("phantombot harness"); // got past the persona-missing fatal
     expect(err.text).not.toContain("no other personas exist");
+  });
+});
+
+describe("shutdown force-exit watchdog", () => {
+  // On SIGTERM we abort and let the loop drain naturally — but a relay
+  // ws.close() stuck on a half-open socket can keep the loop alive until
+  // systemd's 90s SIGKILL. The watchdog bounds that to the grace window.
+  test("grace window is bounded well under systemd's 90s SIGKILL", () => {
+    expect(SHUTDOWN_GRACE_MS).toBeGreaterThan(0);
+    expect(SHUTDOWN_GRACE_MS).toBeLessThan(90_000);
+  });
+
+  // The critical safety property: the watchdog must NOT keep the event loop
+  // alive. If it were ref'd, every clean shutdown would stall for the full
+  // grace window. hasRef() === false proves .unref() was applied.
+  test("watchdog timer is unref'd so it never delays a clean shutdown", () => {
+    const t = armShutdownWatchdog(60_000, () => {});
+    expect((t as unknown as { hasRef(): boolean }).hasRef()).toBe(false);
+    clearTimeout(t);
+  });
+
+  // And it actually fires onForce once the window elapses — this is what
+  // replaces the 90s SIGKILL with a prompt clean exit.
+  test("watchdog fires onForce after the grace window elapses", async () => {
+    let fired = 0;
+    armShutdownWatchdog(20, () => {
+      fired += 1;
+    });
+    expect(fired).toBe(0);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fired).toBe(1);
   });
 });

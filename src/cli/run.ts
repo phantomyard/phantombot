@@ -63,6 +63,29 @@ import { runDoctor } from "./doctor.ts";
 import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
 import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
+/**
+ * After SIGINT/SIGTERM we abort and let the event loop drain naturally. If a
+ * lingering handle (e.g. a relay ws.close() stuck on a half-open socket) keeps
+ * the loop alive past this window, force a clean exit rather than ride to
+ * systemd's 90s SIGKILL. .unref()'d, so clean shutdowns never wait on it.
+ */
+export const SHUTDOWN_GRACE_MS = 5000;
+
+/**
+ * Arm a one-shot watchdog that runs `onForce` if graceful teardown hasn't
+ * drained the event loop within `graceMs`. .unref()'d so a clean shutdown
+ * (the common case) exits on its own without ever waiting on this timer —
+ * it only bites when a lingering handle would otherwise wedge the process.
+ */
+export function armShutdownWatchdog(
+  graceMs: number,
+  onForce: () => void,
+): ReturnType<typeof setTimeout> {
+  const t = setTimeout(onForce, graceMs);
+  t.unref();
+  return t;
+}
+
 export interface RunInput {
   config?: Config;
   out?: WriteSink;
@@ -443,7 +466,26 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
 
   const ac = new AbortController();
-  const onSig = () => ac.abort();
+  let forcedExit = false;
+  const onSig = () => {
+    ac.abort();
+    // Graceful teardown drains the event loop naturally (run() sets
+    // process.exitCode and returns — there is no process.exit()). But a relay
+    // ws.close() on a half-open socket can leave the FD alive, keeping the loop
+    // open until systemd's 90s SIGKILL. Arm a force-exit watchdog so a wedged
+    // shutdown is bounded to the grace window instead. .unref() so a clean
+    // shutdown (the common case) never waits on this timer — it exits on its
+    // own in a few seconds. Memory is durable (SQLite/WAL) and the lock is a
+    // stale-checked pidfile, so an abrupt exit(0) here is safe.
+    if (forcedExit) return;
+    forcedExit = true;
+    armShutdownWatchdog(SHUTDOWN_GRACE_MS, () => {
+      log.warn("run: graceful shutdown exceeded grace window — forcing exit", {
+        graceMs: SHUTDOWN_GRACE_MS,
+      });
+      process.exit(0);
+    });
+  };
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
 
