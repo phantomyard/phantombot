@@ -137,6 +137,18 @@ describe("generateSystemdUnit", () => {
     expect(u).toContain("SuccessExitStatus=143");
   });
 
+  test("caps TimeoutStopSec so a hung relay socket can't stall a restart 90s", () => {
+    // Backstop to the in-process force-exit watchdog (src/cli/run.ts). If the
+    // watchdog can't fire, systemd's default 90s stop-timeout would still
+    // stall every restart for 90s on a half-open relay socket. Capping the
+    // stop wait at 15s bounds the worst case below the default.
+    const u = generateSystemdUnit({
+      binPath: "/home/kai/.local/bin/phantombot",
+      args: ["run"],
+    });
+    expect(u).toContain("TimeoutStopSec=15s");
+  });
+
   test("service PATH includes stable user harness shim locations", () => {
     const u = generateSystemdUnit({
       binPath: "/home/kai/.local/bin/phantombot",

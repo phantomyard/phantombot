@@ -114,6 +114,11 @@ RestartSec=5
 # Declaring 143 a success exit status keeps self-restart journals quiet
 # and stops a spurious Restart= cycle on top of the real one.
 SuccessExitStatus=143
+# Backstop to the in-process force-exit watchdog (see src/cli/run.ts): if the
+# watchdog itself can't fire, cap systemd's stop wait at 15s instead of the
+# 90s default so a hung relay socket can't stall a restart for a minute and a
+# half. The code-level watchdog (~5s) is the primary fix; this is the floor.
+TimeoutStopSec=15s
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
