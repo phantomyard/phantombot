@@ -91,6 +91,15 @@ export const GIFTWRAP_SINCE_WINDOW_SEC = 120;
 const FETCH_GIFTWRAPS_TIMEOUT_MS = 4000;
 
 /**
+ * Hard cap on the one-shot kind-0 profile pull (`fetchProfiles`). Kept short:
+ * resolving a sender/member profile gates a reply, so a slow or missing relay
+ * answer must fall through quickly to the default (treat as human) rather than
+ * stall the turn. The persistent relay backlog and re-fetch-on-miss make a
+ * missed profile self-healing on the next message anyway.
+ */
+const FETCH_PROFILES_TIMEOUT_MS = 3000;
+
+/**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
  * tagged to our pubkey, from roughly now. We deliberately set `since` to a
  * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
@@ -99,8 +108,25 @@ const FETCH_GIFTWRAPS_TIMEOUT_MS = 4000;
  */
 export interface NostrFilter {
   kinds: number[];
-  "#p": string[];
+  /** Recipient p-tag filter (gift-wrap subscriptions). Omitted for `authors`. */
+  "#p"?: string[];
+  /** Author filter — used by the kind-0 profile pull (`fetchProfiles`). */
+  authors?: string[];
   since?: number;
+}
+
+/**
+ * The slice of a NIP-01 kind-0 profile we read. Everything is optional — a
+ * remote profile may omit any field, and `bot` is the NIP-24 automation flag we
+ * use to recognise sibling bots (so a bot never replies to another bot).
+ */
+export interface NostrProfileMeta {
+  /** The handle/addressing token (`name`), e.g. "lena". */
+  name?: string;
+  /** A prettier label (`display_name`); falls back to `name` for addressing. */
+  display_name?: string;
+  /** NIP-24: the account is (partly) automated. PhantomChat bots publish this. */
+  bot?: boolean;
 }
 
 /**
@@ -177,6 +203,17 @@ export interface PhantomchatTransport extends ChannelTransport {
     ourPubHex: string,
     sinceSec: number,
   ): Promise<NTNostrEvent[]>;
+  /**
+   * ONE-SHOT profile pull: query the relays for the kind-0 metadata of every
+   * pubkey in `authors`, resolving with a hex→profile map once the relays signal
+   * EOSE (or a short hard timeout fires). kind-0 is replaceable, so per author we
+   * keep the event with the newest `created_at` across relays. Used to recognise
+   * which group members / DM senders are bots (NIP-24 `bot` flag) and to derive
+   * their addressing names — so a bot replies by name to humans but never to
+   * another bot. Best-effort: a missing/unreachable profile simply isn't in the
+   * returned map (caller treats absence as "human / unknown"). Never throws.
+   */
+  fetchProfiles(authors: string[]): Promise<Map<string, NostrProfileMeta>>;
   /** Publish an already-wrapped kind-1059 event to all relays. */
   publishWrap(event: NTNostrEvent): Promise<void>;
   /**
@@ -343,6 +380,59 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       sub = this.pool.subscribeMany(this.relays, filter, {
         onevent: (event) => {
           events.push(event);
+        },
+        oneose: finish,
+      });
+    });
+  }
+
+  fetchProfiles(authors: string[]): Promise<Map<string, NostrProfileMeta>> {
+    const out = new Map<string, NostrProfileMeta>();
+    // De-dup + lowercase the author list; an empty list resolves immediately.
+    const wanted = [...new Set(authors.map((a) => a.toLowerCase()))].filter(
+      (a) => a.length > 0,
+    );
+    if (wanted.length === 0) return Promise.resolve(out);
+    // Newest kind-0 wins per author (replaceable event, multiple relays).
+    const seenAt = new Map<string, number>();
+    const filter: NostrFilter = { kinds: [0], authors: wanted };
+    return new Promise<Map<string, NostrProfileMeta>>((resolve) => {
+      let settled = false;
+      let sub: { close(): void } | undefined;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          sub?.close();
+        } catch {
+          // already torn down — nothing to do.
+        }
+        resolve(out);
+      };
+      const timer = setTimeout(finish, FETCH_PROFILES_TIMEOUT_MS);
+      sub = this.pool.subscribeMany(this.relays, filter, {
+        onevent: (event) => {
+          const author = (event.pubkey ?? "").toLowerCase();
+          if (!author) return;
+          const at = event.created_at ?? 0;
+          if ((seenAt.get(author) ?? -1) >= at) return; // older — keep newest
+          let meta: NostrProfileMeta;
+          try {
+            const parsed = JSON.parse(event.content) as Record<string, unknown>;
+            meta = {
+              name: typeof parsed.name === "string" ? parsed.name : undefined,
+              display_name:
+                typeof parsed.display_name === "string"
+                  ? parsed.display_name
+                  : undefined,
+              bot: parsed.bot === true,
+            };
+          } catch {
+            return; // unparseable content — ignore this event
+          }
+          seenAt.set(author, at);
+          out.set(author, meta);
         },
         oneose: finish,
       });

@@ -639,6 +639,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             allowedHex,
             groupPersonaNames,
             siblingBotHex,
+            // Auto bot-detection + name resolution: the server fetches members'
+            // kind-0 profiles to recognise sibling bots (NIP-24 `bot` flag) and
+            // derive their addressing names, so multi-bot groups work with no
+            // group_bots config (the static lists above are now just optional
+            // seeds/overrides).
+            fetchProfiles: (authors: string[]) => transport.fetchProfiles(authors),
             tofu,
             // TOFU commit: encode the proven sender hex → npub and persist it to
             // this persona's phantomchat.json (clearing tofu). Best-effort.

@@ -533,3 +533,110 @@ describe("phantomchat transport subscription wire shape", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("phantomchat transport fetchProfiles (kind-0)", () => {
+  test("queries kind-0 by authors and resolves a parsed hex→profile map on EOSE", async () => {
+    let captured: NostrFilter | undefined;
+    const botPk = "a".repeat(64);
+    const humanPk = "b".repeat(64);
+    const fakePool: RelayPool = {
+      subscribeMany(_relays, filter, params) {
+        captured = filter;
+        // Deliver one bot profile + one human profile, then signal EOSE.
+        params.onevent({
+          kind: 0,
+          pubkey: botPk,
+          created_at: 100,
+          content: JSON.stringify({ name: "kai", display_name: "Kai", bot: true }),
+        } as NTNostrEvent);
+        params.onevent({
+          kind: 0,
+          pubkey: humanPk,
+          created_at: 100,
+          content: JSON.stringify({ name: "andrew" }),
+        } as NTNostrEvent);
+        params.oneose?.();
+        return { close() {} };
+      },
+      publish() {
+        return [];
+      },
+      close() {},
+    };
+
+    const transport = new SimplePoolPhantomchatTransport(
+      generateSecretKey(),
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const map = await transport.fetchProfiles([botPk.toUpperCase(), humanPk]);
+
+    // Filter shape: kind-0 by authors (lowercased), no #p tag.
+    expect(captured?.kinds).toEqual([0]);
+    expect(captured?.authors).toEqual([botPk, humanPk]);
+    expect(captured?.["#p"]).toBeUndefined();
+    // Parsed + keyed by lowercased hex; bot flag preserved.
+    expect(map.get(botPk)).toEqual({ name: "kai", display_name: "Kai", bot: true });
+    expect(map.get(humanPk)).toEqual({ name: "andrew", display_name: undefined, bot: false });
+  });
+
+  test("keeps the newest kind-0 per author (replaceable event)", async () => {
+    const pk = "c".repeat(64);
+    const fakePool: RelayPool = {
+      subscribeMany(_relays, _filter, params) {
+        // Older event arrives AFTER the newer one — newest created_at must win.
+        params.onevent({
+          kind: 0,
+          pubkey: pk,
+          created_at: 200,
+          content: JSON.stringify({ name: "new", bot: true }),
+        } as NTNostrEvent);
+        params.onevent({
+          kind: 0,
+          pubkey: pk,
+          created_at: 100,
+          content: JSON.stringify({ name: "old", bot: false }),
+        } as NTNostrEvent);
+        params.oneose?.();
+        return { close() {} };
+      },
+      publish() {
+        return [];
+      },
+      close() {},
+    };
+
+    const transport = new SimplePoolPhantomchatTransport(
+      generateSecretKey(),
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    const map = await transport.fetchProfiles([pk]);
+    expect(map.get(pk)?.name).toBe("new");
+    expect(map.get(pk)?.bot).toBe(true);
+  });
+
+  test("empty author list resolves to an empty map without subscribing", async () => {
+    let subscribed = false;
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        subscribed = true;
+        return { close() {} };
+      },
+      publish() {
+        return [];
+      },
+      close() {},
+    };
+    const transport = new SimplePoolPhantomchatTransport(
+      generateSecretKey(),
+      ["wss://relay.example"],
+      fakePool,
+    );
+    const map = await transport.fetchProfiles([]);
+    expect(map.size).toBe(0);
+    expect(subscribed).toBe(false);
+  });
+});

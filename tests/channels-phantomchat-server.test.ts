@@ -149,6 +149,9 @@ async function runOnce(opts: {
   streaming?: TelegramStreamingSettings;
   // How long to let listen() enqueue + the handler drain before aborting.
   waitMs?: number;
+  // Stub kind-0 resolver (lowercased hex → {name, bot}). Lets a DM test exercise
+  // the GLOBAL "never reply to a bot" rule via the sender's profile bot flag.
+  profiles?: Record<string, { name?: string; bot?: boolean }>;
 }): Promise<FakePool> {
   const botHex = getPublicKey(opts.botSk);
   const pool = new FakePool();
@@ -190,6 +193,16 @@ async function runOnce(opts: {
     allowedHex: opts.allowedHex,
     tofu: opts.tofu,
     persistTrust: opts.persistTrust,
+    fetchProfiles: opts.profiles
+      ? async (authors: string[]) => {
+          const out = new Map<string, { name?: string; bot?: boolean }>();
+          for (const a of authors) {
+            const meta = opts.profiles![a.toLowerCase()];
+            if (meta) out.set(a.toLowerCase(), meta);
+          }
+          return out;
+        }
+      : undefined,
     oneShot: true,
     signal: ac.signal,
   });
@@ -1316,8 +1329,12 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     botSk: Uint8Array;
     persona: string;
     allowedHex: string[];
-    groupPersonaNames: string[];
-    siblingBotHex: string[];
+    groupPersonaNames?: string[];
+    siblingBotHex?: string[];
+    /** Stub kind-0 resolver: lowercased hex → {name, bot}. Models what the bot
+     *  would fetch from relays, so auto bot-detection / name resolution can be
+     *  tested with no config seeds. */
+    profiles?: Record<string, { name?: string; bot?: boolean }>;
     harness: Harness;
   }): {
     pool: FakePool;
@@ -1353,6 +1370,16 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
       allowedHex: opts.allowedHex,
       groupPersonaNames: opts.groupPersonaNames,
       siblingBotHex: opts.siblingBotHex,
+      fetchProfiles: opts.profiles
+        ? async (authors: string[]) => {
+            const out = new Map<string, { name?: string; bot?: boolean }>();
+            for (const a of authors) {
+              const meta = opts.profiles![a.toLowerCase()];
+              if (meta) out.set(a.toLowerCase(), meta);
+            }
+            return out;
+          }
+        : undefined,
       oneShot: false,
       signal: ac.signal,
     });
@@ -1548,6 +1575,143 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     });
     // A message that does NOT name the bot still gets a reply (old behaviour).
     srv.feedGroup(c.andrewSk, [c.lenaHex], "what's the weather?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
+  });
+
+  // ===== auto bot-detection / name resolution from kind-0 (no config) =====
+  // These tests pass NO group_bots config — the bot must discover that Kai is a
+  // sibling bot (and his name) purely from his kind-0 profile (bot:true), so a
+  // zero-config multi-bot group behaves correctly.
+
+  test("auto: human addresses a sibling resolved from kind-0 → this bot stays quiet", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      // No groupPersonaNames / siblingBotHex — Kai is discovered via his profile.
+      profiles: {
+        [c.kaiHex.toLowerCase()]: { name: "kai", bot: true },
+        [c.andrewHex.toLowerCase()]: { name: "andrew" }, // human: no bot flag
+      },
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "hey kai, status?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    // "kai" was in the auto-derived roster, so Lena recognised the hand-off.
+    expect(harness.invocations).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
+  });
+
+  test("auto: human addresses THIS bot in a zero-config multi-bot group → it replies", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "on it" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      profiles: {
+        [c.kaiHex.toLowerCase()]: { name: "kai", bot: true },
+        [c.andrewHex.toLowerCase()]: { name: "andrew" },
+      },
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, what's up?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    expect(replyWraps(srv.pool).length).toBe(3);
+  });
+
+  test("auto: a sibling bot's message is ignored via its kind-0 bot flag (cascade kill, no config)", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      profiles: {
+        [c.kaiHex.toLowerCase()]: { name: "kai", bot: true },
+      },
+      harness,
+    });
+    // Kai (a bot, by profile) names Lena. The global bot-gate must drop it.
+    srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "good point, lena!", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
+  });
+
+  test("auto: a bot is ignored even in a 1:1 DM (global rule)", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    // Kai (a bot) DMs Lena directly. allowlisted, so auth passes — but the
+    // global bot-gate must still drop him with no reply.
+    const pool = await runOnce({
+      senderSk: c.kaiSk,
+      botSk: c.lenaSk,
+      allowedHex: [c.andrewHex, c.kaiHex],
+      harness,
+      text: "hey lena, ping",
+      profiles: { [c.kaiHex.toLowerCase()]: { name: "kai", bot: true } },
+    });
+
+    expect(harness.invocations).toBe(0);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(0);
+  });
+
+  test("auto: a human DM is still answered (bot-gate doesn't over-block)", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "hi Andrew" },
+    ]);
+    const pool = await runOnce({
+      senderSk: c.andrewSk,
+      botSk: c.lenaSk,
+      allowedHex: [c.andrewHex],
+      harness,
+      text: "hey lena",
+      profiles: { [c.andrewHex.toLowerCase()]: { name: "andrew" } }, // no bot flag
+    });
+
+    expect(harness.invocations).toBe(1);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBeGreaterThan(0);
+  });
+
+  test("auto: cold cache (no profile resolves) → lone bot answers, no false mute", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "sure" },
+    ]);
+    // Profiles map is empty: nothing resolves, so no OTHER bot is detected. The
+    // group must behave like a lone-bot group (answer everything) rather than
+    // go mute on an unaddressed message.
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      profiles: {}, // resolver present but returns nothing
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "what's the weather?", "HQ");
     await groupSleep(150);
     await srv.stop();
 

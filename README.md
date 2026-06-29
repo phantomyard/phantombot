@@ -398,9 +398,28 @@ for the app itself and the wire-protocol details.
 ### Multiple bots in one group
 
 When several persona bots share a PhantomChat group, each one would otherwise
-answer **every** message — three bots, three replies to one question. To get the
-Telegram behaviour (only the bot you addressed responds), tell each persona who
-its **sibling bots** are by adding a `group_bots` list to its `phantomchat.json`:
+answer **every** message — three bots, three replies to one question. PhantomChat
+gives you the Telegram behaviour (only the bot you addressed responds)
+**automatically, with no configuration**:
+
+- A bot replies only when its **persona name** appears in the message ("hey
+  **Lena**, …"), or when it's the bot currently holding the thread (so a no-name
+  follow-up still reaches it). Address a different bot by name and the previous
+  one falls quiet.
+- A bot **never reacts to another bot's** messages — in a group *or* a 1:1 DM —
+  so one bot's reply can't trigger another and start a back-and-forth loop. Only
+  humans drive the conversation.
+
+This works out of the box because every Phantom publishes a NIP-24 **`bot: true`**
+flag and a display name in its Nostr profile (kind-0). Each bot reads the
+profiles of the group's members, so it learns who the *other* bots are — and
+their names — straight from the protocol. Nothing to wire up; just add the bots
+to a group.
+
+**Optional override.** If you want deterministic behaviour from the very first
+message (before profiles resolve), or to force-mark a specific account as a
+sibling bot, you can still seed the roster per-persona with a `group_bots` list
+in `phantomchat.json`. It's merged with what's auto-detected:
 
 ```json
 {
@@ -413,22 +432,7 @@ its **sibling bots** are by adding a `group_bots` list to its `phantomchat.json`
 }
 ```
 
-Configure this for **every** bot in the group, each listing the *others* (a bot
-never lists itself — it knows its own name and npub). With this in place:
-
-- A bot replies only when its **persona name** appears in the message ("hey
-  **Lena**, …"), or when it's the bot currently holding the thread (so a no-name
-  follow-up still reaches it). When you address a different bot by name, the
-  previous one falls quiet — that's why every bot needs the full name roster.
-- A bot **never reacts to another bot's** messages, so one bot's reply can't
-  trigger another and start a back-and-forth loop. Only humans drive the
-  conversation.
-
-`group_bots` is per-persona and travels inside the portable persona folder. With
-no `group_bots` configured a lone bot behaves exactly as before — it answers
-every group message — so this is opt-in and changes nothing for single-bot
-groups. (The `name`/`npub` pairing mirrors Telegram's `group_persona_names`,
-plus the npub the encrypted Nostr layer needs to recognise a sibling.)
+Most setups won't need it — the auto-detection covers them.
 
 ## Editors: VS Code, Zed & JetBrains
 
