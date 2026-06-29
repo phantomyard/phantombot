@@ -246,6 +246,7 @@ Interactive setup:
 | `phantombot voice` | Configure TTS/STT providers |
 | `phantombot embedding` | Configure semantic memory |
 | `phantombot acp install zed` | Register phantombot as an ACP agent in Zed |
+| `phantombot acp install jetbrains` | Register phantombot as an ACP agent in JetBrains IDEs (Rider, IntelliJ, …) |
 | `phantombot acp install vscode` | Install the first-party VS Code extension |
 
 Runtime:
@@ -394,23 +395,26 @@ Relays come from a shared canonical list and can be edited by re-running the
 command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
 for the app itself and the wire-protocol details.
 
-## Editors: VS Code & Zed
+## Editors: VS Code, Zed & JetBrains
 
 Your Phantom runs **inside your editor** as a first-class agent over the
-[Agent Client Protocol (ACP)](https://agentclientprotocol.com) — VS Code and
-Zed both supported. It's the *same* Phantom: one persona, one memory store, one
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com) — VS Code, Zed
+and JetBrains IDEs (Rider, IntelliJ, …) all supported. It's the *same* Phantom:
+one persona, one memory store, one
 set of tools, served from your machine. Start a thread in the editor, pick it
 up later from PhantomChat or Telegram — there's only ever one soul behind all
 the surfaces.
 
 ```bash
 phantombot acp install zed       # merge the ACP registration into Zed's settings.json
+phantombot acp install jetbrains # merge the ACP registration into ~/.jetbrains/acp.json (Rider, IntelliJ, …)
 phantombot acp install vscode    # install the bundled first-party VS Code extension (.vsix)
 ```
 
-Both installers are idempotent and version-aware: Zed gets a JSONC-safe
-settings merge (your original is backed up), and VS Code installs the bundled
-extension through the `code` CLI, skipping cleanly if the editor isn't present.
+All installers are idempotent and version-aware: Zed and JetBrains get a
+JSONC-safe settings merge (your original is backed up), and VS Code installs the
+bundled extension through the `code` CLI, skipping cleanly if the editor isn't
+present.
 
 The connector sits **beside** the channel layer — it calls the turn engine
 directly with `trusted: true`. The principal is the local OS user who launched

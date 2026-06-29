@@ -1,19 +1,20 @@
 /**
  * `phantombot acp` — register phantombot as a first-class ACP (Agent Client
- * Protocol) agent inside Zed.
+ * Protocol) agent inside an ACP-capable editor (Zed, JetBrains IDEs, …).
  *
- *   phantombot acp                 run the ACP stdio server (Zed spawns this)
+ *   phantombot acp                 run the ACP stdio server (the editor spawns this)
  *   phantombot acp --persona NAME  …bound to a specific persona
- *   phantombot acp install zed     write the Zed settings.json registration
- *   phantombot acp install vscode  install the first-party VS Code extension (.vsix)
+ *   phantombot acp install zed       write the Zed settings.json registration
+ *   phantombot acp install jetbrains write the JetBrains ~/.jetbrains/acp.json registration
+ *   phantombot acp install vscode    install the first-party VS Code extension (.vsix)
  *
  * The connector sits BESIDE the channel layer: it calls runTurn directly with
- * `trusted: true`. The principal is the local OS user who launched Zed — they
- * already have full filesystem access to everything phantombot owns, so the
+ * `trusted: true`. The principal is the local OS user who launched the editor —
+ * they already have full filesystem access to everything phantombot owns, so the
  * threat judge is skipped (see connectors/acp/turnBridge.ts).
  *
- * The bare `acp` command is the long-running stdio server: Zed launches it as
- * a subprocess and talks newline-delimited JSON-RPC 2.0 over stdin/stdout.
+ * The bare `acp` command is the long-running stdio server: the editor launches it
+ * as a subprocess and talks newline-delimited JSON-RPC 2.0 over stdin/stdout.
  * stdout is the protocol channel — NEVER write logs there.
  */
 
@@ -21,6 +22,7 @@ import { defineCommand } from "citty";
 
 import { runAcpServer } from "../connectors/acp/server.ts";
 import { installZed } from "../connectors/acp/installZed.ts";
+import { installJetbrains } from "../connectors/acp/installJetbrains.ts";
 import { installVscode } from "../connectors/acp/installVscode.ts";
 
 const installZedCmd = defineCommand({
@@ -35,6 +37,20 @@ const installZedCmd = defineCommand({
     // work, but importing the ACP server pulls in modules that hold the event
     // loop open (env-reload + memory handles), so a natural exit hangs after
     // printing success. Force a clean exit once the write is done.
+    process.exit(result.code);
+  },
+});
+
+const installJetbrainsCmd = defineCommand({
+  meta: {
+    name: "jetbrains",
+    description:
+      "Register phantombot as an ACP agent for JetBrains IDEs (Rider, IntelliJ, WebStorm, …) in ~/.jetbrains/acp.json (JSON-safe merge, backs up the original).",
+  },
+  async run() {
+    const result = installJetbrains({ binaryPath: process.execPath });
+    // Same event-loop caveat as installZed: importing the ACP server keeps the
+    // loop open, so force a clean exit once the write is done.
     process.exit(result.code);
   },
 });
@@ -62,10 +78,11 @@ const installCmd = defineCommand({
   meta: {
     name: "install",
     description:
-      "Install the ACP registration into a detected editor (zed: settings merge; vscode: first-party extension).",
+      "Install the ACP registration into a detected editor (zed/jetbrains: settings merge; vscode: first-party extension).",
   },
   subCommands: {
     zed: installZedCmd,
+    jetbrains: installJetbrainsCmd,
     vscode: installVscodeCmd,
   },
 });
@@ -74,7 +91,7 @@ export default defineCommand({
   meta: {
     name: "acp",
     description:
-      "Run phantombot as an ACP agent server over stdio (Zed spawns this). Use `acp install zed` (settings merge) or `acp install vscode` (first-party extension) to register it with an editor.",
+      "Run phantombot as an ACP agent server over stdio (Zed/JetBrains spawn this). Use `acp install zed` / `acp install jetbrains` (settings merge) or `acp install vscode` (first-party extension) to register it with an editor.",
   },
   args: {
     persona: {
