@@ -1,20 +1,20 @@
 /**
  * `phantombot acp` — register phantombot as a first-class ACP (Agent Client
- * Protocol) agent inside Zed.
+ * Protocol) agent inside an ACP-capable editor (Zed, JetBrains IDEs, …).
  *
- *   phantombot acp                 run the ACP stdio server (Zed spawns this)
+ *   phantombot acp                 run the ACP stdio server (the editor spawns this)
  *   phantombot acp --persona NAME  …bound to a specific persona
  *   phantombot acp install zed       write the Zed settings.json registration
  *   phantombot acp install jetbrains write the JetBrains ~/.jetbrains/acp.json registration
  *   phantombot acp install vscode    install the first-party VS Code extension (.vsix)
  *
  * The connector sits BESIDE the channel layer: it calls runTurn directly with
- * `trusted: true`. The principal is the local OS user who launched Zed — they
- * already have full filesystem access to everything phantombot owns, so the
+ * `trusted: true`. The principal is the local OS user who launched the editor —
+ * they already have full filesystem access to everything phantombot owns, so the
  * threat judge is skipped (see connectors/acp/turnBridge.ts).
  *
- * The bare `acp` command is the long-running stdio server: Zed launches it as
- * a subprocess and talks newline-delimited JSON-RPC 2.0 over stdin/stdout.
+ * The bare `acp` command is the long-running stdio server: the editor launches it
+ * as a subprocess and talks newline-delimited JSON-RPC 2.0 over stdin/stdout.
  * stdout is the protocol channel — NEVER write logs there.
  */
 
