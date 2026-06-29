@@ -24,12 +24,19 @@
  *                                       //   allowlist is empty, the FIRST npub to
  *                                       //   DM is trusted, appended here, and the
  *                                       //   bot then locks to it (tofu cleared)
- *     "greeted": ["npub1…", …]          // optional — npubs the bot has already
+ *     "greeted": ["npub1…", …],         // optional — npubs the bot has already
  *                                       //   sent its proactive "Hello" to. On
  *                                       //   every start the bot greets any
  *                                       //   allowed npub NOT in this list, then
  *                                       //   records it here so restarts don't
  *                                       //   re-spam onboarded contacts.
+ *     "group_bots": [                   // optional — the OTHER bots that share
+ *       {"name": "kai",  "npub": "…"},  //   groups with this persona. Drives the
+ *       {"name": "lena", "npub": "…"}   //   group name-addressing roster (so a
+ *     ]                                 //   bot only replies when addressed by
+ *                                       //   name / when it holds the thread) AND
+ *                                       //   the "never reply to another bot"
+ *                                       //   cascade kill. List every sibling.
  *   }
  *
  * Allowlist semantics:
@@ -55,12 +62,32 @@ import {
 import { log } from "../../lib/logger.ts";
 import {
   decodeAllowedNpubs,
+  decodeNpubToHex,
   identityFromNsec,
   type NostrIdentity,
 } from "../../lib/nostrIdentity.ts";
 
 /** Filename of the per-persona phantomchat config inside an agent dir. */
 export const PHANTOMCHAT_FILE = "phantomchat.json";
+
+/**
+ * One SIBLING bot that shares groups with this persona. Both fields matter:
+ *   - `name`  feeds the shared name-addressing roster, so every bot in a group
+ *             knows when the human has handed the thread to a DIFFERENT bot and
+ *             can fall quiet (see decideGroupReply). The roster MUST list every
+ *             bot's name verbatim and identically across all of them.
+ *   - `npub`  is decoded to `hex` and added to the "don't react to me" set:
+ *             a bot NEVER replies to another bot's message (cascade kill —
+ *             option (a)). Only the human drives addressing.
+ */
+export interface PhantomchatGroupBot {
+  /** The sibling bot's persona name (its addressing token in groups). */
+  name: string;
+  /** The sibling bot's npub (or 64-char hex) as written in the file. */
+  npub: string;
+  /** Decoded lowercase 64-char hex pubkey — the ignore-set comparison form. */
+  hex: string;
+}
 
 /** Resolved phantomchat config for one persona. */
 export interface PhantomchatPersonaConfig {
@@ -85,6 +112,13 @@ export interface PhantomchatPersonaConfig {
    * since last time, never the ones already onboarded.
    */
   greeted: string[];
+  /**
+   * Sibling bots that share groups with this persona (name + npub + decoded
+   * hex). Drives the group name-addressing roster AND the "ignore other bots"
+   * cascade kill. Empty when the file omits `group_bots` — a lone bot in a
+   * group still works (it answers when its own name is used).
+   */
+  groupBots: PhantomchatGroupBot[];
   /** Absolute path to the phantomchat.json this came from. */
   path: string;
 }
@@ -101,11 +135,42 @@ interface PhantomchatFileShape {
   allowed_npubs?: unknown;
   tofu?: unknown;
   greeted?: unknown;
+  group_bots?: unknown;
 }
 
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string" && x.length > 0);
+}
+
+/**
+ * Parse the raw `group_bots` array into resolved {name, npub, hex} entries.
+ * Each entry must have a non-empty string `name` and an `npub` that decodes to
+ * a valid pubkey; anything malformed is skipped (a typo in one sibling must not
+ * disable the whole gate). Deduped by hex so a doubled entry can't, e.g., make
+ * a bot appear twice in the name roster.
+ */
+function parseGroupBots(v: unknown): PhantomchatGroupBot[] {
+  if (!Array.isArray(v)) return [];
+  const out: PhantomchatGroupBot[] = [];
+  const seenHex = new Set<string>();
+  for (const raw of v) {
+    if (!raw || typeof raw !== "object") continue;
+    const name = (raw as { name?: unknown }).name;
+    const npub = (raw as { npub?: unknown }).npub;
+    if (typeof name !== "string" || name.length === 0) continue;
+    if (typeof npub !== "string" || npub.length === 0) continue;
+    let hex: string;
+    try {
+      hex = decodeNpubToHex(npub).toLowerCase();
+    } catch {
+      continue; // not a valid npub/hex — skip this sibling
+    }
+    if (seenHex.has(hex)) continue;
+    seenHex.add(hex);
+    out.push({ name, npub, hex });
+  }
+  return out;
 }
 
 /**
@@ -151,6 +216,7 @@ export function loadPhantomchatPersonaConfig(
     allowedHex: decodeAllowedNpubs(allowedNpubs),
     tofu: parsed.tofu === true,
     greeted: asStringArray(parsed.greeted),
+    groupBots: parseGroupBots(parsed.group_bots),
     path,
   };
 }
@@ -168,6 +234,7 @@ export async function savePhantomchatPersonaConfig(
     allowedNpubs: string[];
     tofu?: boolean;
     greeted?: string[];
+    groupBots?: PhantomchatGroupBot[];
   },
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
@@ -181,6 +248,11 @@ export async function savePhantomchatPersonaConfig(
   if (data.tofu) body.tofu = true;
   // Only persist greeted when non-empty — keep fresh files clean.
   if (data.greeted && data.greeted.length > 0) body.greeted = data.greeted;
+  // Persist group_bots verbatim ({name, npub}) — the hex is derived on load, so
+  // it never goes to disk. Only written when non-empty to keep fresh files clean.
+  if (data.groupBots && data.groupBots.length > 0) {
+    body.group_bots = data.groupBots.map((b) => ({ name: b.name, npub: b.npub }));
+  }
   const tmp = `${path}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
@@ -218,6 +290,7 @@ export async function cacheRelaysForPersona(
     allowedNpubs: existing.allowedNpubs,
     tofu: existing.tofu,
     greeted: existing.greeted,
+    groupBots: existing.groupBots,
   });
   return true;
 }
@@ -244,6 +317,7 @@ export async function recordTrustedNpub(
     allowedNpubs,
     tofu: false,
     greeted: existing.greeted,
+    groupBots: existing.groupBots,
   });
   return allowedNpubs;
 }
@@ -273,6 +347,7 @@ export async function recordGreeted(
     allowedNpubs: existing.allowedNpubs,
     tofu: existing.tofu,
     greeted,
+    groupBots: existing.groupBots,
   });
   return greeted;
 }

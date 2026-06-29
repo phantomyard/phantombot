@@ -43,6 +43,13 @@ import {
 } from "../core/prompts.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import {
+  decideGroupReply,
+  formatGroupContext,
+  GROUP_BUFFER_MAX,
+  type GroupChatState,
+  matchPersonaNames,
+} from "../core/routing.ts";
+import {
   splitIntoSegments,
   StreamSegmenter,
 } from "../streamSegmenter.ts";
@@ -128,6 +135,22 @@ export interface RunPhantomchatServerInput {
    */
   allowedHex: string[];
   /**
+   * Shared group-addressing roster: the persona names of EVERY bot that shares
+   * groups with this one (this persona's own name is merged in automatically).
+   * In a group the bot only SPEAKS when its own name is addressed, or when it
+   * already holds the thread (sticky last-addressed). Every bot must be given
+   * the same roster so the hand-off between bots is consistent. Empty/absent →
+   * the bot still answers when its own name is used (lone-bot default).
+   */
+  groupPersonaNames?: string[];
+  /**
+   * Hex pubkeys of the OTHER bots in the group. A message whose cryptographic
+   * sender is in this set is IGNORED in group context (no reply, no state
+   * change) — bots only ever react to humans, which kills bot-to-bot reply
+   * cascades (option (a)). Has no effect on 1:1 DMs.
+   */
+  siblingBotHex?: string[];
+  /**
    * Trust-on-first-use. Only consulted when `allowedHex` is empty:
    *   - tofu true  → the FIRST sender is trusted, persisted via `persistTrust`,
    *     and the bot locks to it (every later stranger is dropped).
@@ -184,6 +207,35 @@ export async function runPhantomchatServer(
   const allowedSet = new Set(input.allowedHex.map((h) => h.toLowerCase()));
   // TOFU is armed only when we start with an empty allowlist and tofu is on.
   let tofuArmed = allowedSet.size === 0 && input.tofu === true;
+
+  // ===================== GROUP ADDRESSING GATE =====================
+  // Mirrors the Telegram engine (core/engine.ts): in a group, every bot
+  // receives every human message, but a bot must only SPEAK when addressed by
+  // name or when it currently holds the thread. The decision is computed purely
+  // from the shared human-message stream (decideGroupReply), so every bot
+  // converges with no coordination. State is per-group, in-memory.
+  const groupChats = new Map<string, GroupChatState>();
+  const selfName = input.persona;
+  // The shared roster, with our own name always present so a lone bot answers to
+  // its name with zero config. Dedup case-insensitively, preserve order.
+  const groupPersonaNames = (() => {
+    const merged = [...(input.groupPersonaNames ?? [])];
+    if (!merged.some((n) => n.toLowerCase() === selfName.toLowerCase())) {
+      merged.push(selfName);
+    }
+    return merged;
+  })();
+  // Option (a): never react to another bot. Hex set for O(1) membership.
+  const siblingBotHexSet = new Set(
+    (input.siblingBotHex ?? []).map((h) => h.toLowerCase()),
+  );
+  // The addressing gate ONLY engages when this persona knows it shares groups
+  // with OTHER bots (group_bots configured). A lone or unconfigured bot keeps
+  // the original behaviour — it answers every group message — so this change is
+  // a no-op for single-bot groups and can't make an existing deployment go mute.
+  // Name-disambiguation only matters when there's actually more than one bot.
+  const groupAddressingActive =
+    groupPersonaNames.length > 1 || siblingBotHexSet.size > 0;
 
   // ===================== CACHE WARMING =====================
   // Pre-derive symmetric keys for all allowed peers so inbound v2 DMs
@@ -262,6 +314,78 @@ export async function runPhantomchatServer(
     const senderHex = msg.senderId;
 
     if (!authorize(msg)) return;
+
+    // ===================== GROUP ADDRESSING GATE =====================
+    // Only for group messages. Decide — from the shared human message stream —
+    // whether THIS bot should reply, mirroring core/engine.ts. Runs BEFORE the
+    // (paid) voice/media pipeline so a message aimed at another bot costs no STT.
+    // The whole block is await-free, so its read-modify-write of the per-group
+    // state is atomic against other peers' interleaved turns (JS single thread).
+    let groupContext: string | undefined;
+    if (msg.groupId && groupAddressingActive) {
+      // Option (a): a sibling bot's message NEVER triggers a reply and never
+      // touches addressing state. Only humans drive the conversation, so a bot's
+      // own reply (which may name another bot) can't start a cascade.
+      if (siblingBotHexSet.has(senderHex.toLowerCase())) {
+        log.info("phantomchat: ignoring sibling bot in group", {
+          persona: input.persona,
+          group: msg.groupId,
+          sender: senderHex.slice(0, 12) + "…",
+        });
+        return;
+      }
+
+      const state =
+        groupChats.get(msg.conversationId) ?? { lastAddressed: [], buffer: [] };
+      // Route on the message text. A bare media message (e.g. a group voice
+      // note) has empty text, so it continues the current thread rather than
+      // re-addressing — same as Telegram routing on text/caption only.
+      const matchText = msg.text ?? "";
+      const matched = matchPersonaNames(matchText, groupPersonaNames);
+      const decision = decideGroupReply({
+        self: selfName,
+        matched,
+        lastAddressed: state.lastAddressed,
+      });
+      state.lastAddressed = decision.nextLastAddressed;
+
+      // What to keep in the rolling buffer for context catch-up. Text keeps its
+      // words; a media message keeps a short label so the thread reads coherently.
+      const bufText =
+        matchText.trim().length > 0
+          ? matchText.trim()
+          : msg.media
+            ? `[${msg.media.kind}]`
+            : "";
+      // No usernames on Nostr — label the buffer entry by the short sender hex.
+      const fromLabel = senderHex.slice(0, 8) + "…";
+
+      if (!decision.reply) {
+        if (bufText.length > 0) {
+          state.buffer.push({ from: fromLabel, text: bufText, delivered: false });
+        }
+        while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+        groupChats.set(msg.conversationId, state);
+        log.info("phantomchat: group message not for this bot — staying quiet", {
+          persona: input.persona,
+          group: msg.groupId,
+          matched,
+          lastAddressed: state.lastAddressed,
+        });
+        return;
+      }
+
+      // We're replying: hand the harness the messages we observed but stayed
+      // quiet through as a context preamble, then mark the buffer delivered.
+      const undelivered = state.buffer.filter((e) => !e.delivered);
+      groupContext = formatGroupContext(undelivered) || undefined;
+      for (const e of state.buffer) e.delivered = true;
+      if (bufText.length > 0) {
+        state.buffer.push({ from: fromLabel, text: bufText, delivered: true });
+      }
+      while (state.buffer.length > GROUP_BUFFER_MAX) state.buffer.shift();
+      groupChats.set(msg.conversationId, state);
+    }
 
     // ===================== DELIVERY RECEIPT =====================
     // The sender just passed the auth gate, so acknowledging receipt to them is
@@ -391,6 +515,16 @@ export async function runPhantomchatServer(
           }
         }
       }
+    }
+
+    // Group catch-up context goes at the very TOP of the turn input so the
+    // harness reads the room (messages this bot saw but stayed quiet through)
+    // before the specific message it's answering. Mirrors core/engine.ts.
+    if (groupContext) {
+      userMessage =
+        userMessage.length > 0
+          ? `${groupContext}\n\n${userMessage}`
+          : groupContext;
     }
 
     // A sender that PASSES the allowlist is a trusted principal — exactly the

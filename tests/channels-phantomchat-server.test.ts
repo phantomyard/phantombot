@@ -1293,3 +1293,265 @@ describe("phantomchat slash commands", () => {
     expect(await dmBubbles(srv.pool, senderSk)).toContain("restarting…");
   });
 });
+
+/**
+ * Group name-addressing gate (issue: multi-bot groups). When several bots share
+ * a group, only the bot addressed BY NAME (or the one currently holding the
+ * thread) replies — instead of all of them piling on. The gate reuses the
+ * channel-agnostic decideGroupReply/matchPersonaNames (core/routing.ts), the
+ * same logic Telegram uses, driven from the shared human message stream.
+ *
+ * Option (a): a bot NEVER reacts to another bot's message (cascade kill) — only
+ * humans drive addressing. The gate engages ONLY when sibling bots are
+ * configured (group_bots); a lone/unconfigured bot still answers everything, so
+ * this is a no-op for single-bot groups (proven by the HQ tests above).
+ */
+describe("phantomchat group addressing gate (multi-bot)", () => {
+  /**
+   * A long-lived group server for one bot persona, aware of its sibling bots.
+   * feedGroup() wraps a group message from `senderSk` to `otherMemberHexes` and
+   * feeds the bot the wrap it can unwrap — exactly how a relay would deliver it.
+   */
+  function makeGroupServer(opts: {
+    botSk: Uint8Array;
+    persona: string;
+    allowedHex: string[];
+    groupPersonaNames: string[];
+    siblingBotHex: string[];
+    harness: Harness;
+  }): {
+    pool: FakePool;
+    feedGroup: (
+      senderSk: Uint8Array,
+      otherMemberHexes: string[],
+      text: string,
+      groupId: string,
+    ) => void;
+    stop: () => Promise<void>;
+  } {
+    const botHex = getPublicKey(opts.botSk);
+    const pool = new FakePool();
+    const transport = new SimplePoolPhantomchatTransport(
+      opts.botSk,
+      ["wss://test.relay"],
+      pool,
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: opts.botSk,
+      publicKeyHex: botHex,
+      transport,
+    });
+    const ac = new AbortController();
+    const done = runPhantomchatServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [opts.harness],
+      agentDir,
+      persona: opts.persona,
+      channel,
+      secretKey: opts.botSk,
+      allowedHex: opts.allowedHex,
+      groupPersonaNames: opts.groupPersonaNames,
+      siblingBotHex: opts.siblingBotHex,
+      oneShot: false,
+      signal: ac.signal,
+    });
+    let n = 0;
+    const feedGroup = (
+      senderSk: Uint8Array,
+      otherMemberHexes: string[],
+      text: string,
+      groupId: string,
+    ) => {
+      const payload = JSON.stringify({
+        content: text,
+        type: "text",
+        id: `g-${++n}`,
+        timestamp: Date.now(),
+      });
+      const { wraps } = wrapGroupMessage(
+        senderSk,
+        otherMemberHexes,
+        payload,
+        groupId,
+      );
+      let forBot: NTNostrEvent | undefined;
+      for (const w of wraps) {
+        try {
+          unwrapNip17Message(w as NTNostrEvent, opts.botSk);
+          forBot = w as NTNostrEvent;
+          break;
+        } catch {
+          /* not ours */
+        }
+      }
+      if (forBot) pool.feed(forBot);
+    };
+    const stop = async () => {
+      ac.abort();
+      await done;
+    };
+    return { pool, feedGroup, stop };
+  }
+
+  const groupSleep = (ms: number): Promise<void> =>
+    new Promise((r) => setTimeout(r, ms));
+
+  // Cast for these tests: Andrew (human) + Lena (this bot) + Kai (sibling bot).
+  function cast() {
+    const andrewSk = generateSecretKey();
+    const lenaSk = generateSecretKey();
+    const kaiSk = generateSecretKey();
+    return {
+      andrewSk,
+      lenaSk,
+      kaiSk,
+      andrewHex: getPublicKey(andrewSk),
+      lenaHex: getPublicKey(lenaSk),
+      kaiHex: getPublicKey(kaiSk),
+    };
+  }
+
+  const replyWraps = (pool: FakePool) =>
+    pool.published.filter((e) => e.kind === 1059);
+
+  test("addressed by name → this bot replies", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "on it, Andrew" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "hey lena, status?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    // Group broadcast: Andrew + Kai + Lena's self-wrap = 3 wraps (no DM receipt).
+    expect(replyWraps(srv.pool).length).toBe(3);
+  });
+
+  test("another bot addressed by name → this bot stays quiet", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "hey kai, status?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
+  });
+
+  test("option (a): a sibling bot's message is ignored even if it names this bot", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      // Kai is allowlisted (so the auth gate would admit him) — the bot-ignore
+      // must drop him at the group gate regardless.
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    // Kai (a bot) sends a message that explicitly names Lena. Without option (a)
+    // this would trigger Lena and start a bot-to-bot cascade.
+    srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "good point, lena!", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
+  });
+
+  test("sticky: a no-name follow-up still reaches the bot that holds the thread", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "first" },
+      { type: "done", finalText: "second" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, do X", "HQ");
+    await groupSleep(150);
+    // No name — but Lena holds the thread, so she answers the follow-up.
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "thanks, and also Y?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(2);
+    expect(replyWraps(srv.pool).length).toBe(6); // two 3-wrap broadcasts
+  });
+
+  test("hand-off: once Andrew addresses the sibling, this bot falls quiet", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "first" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, do X", "HQ");
+    await groupSleep(150);
+    // Andrew hands the thread to Kai. Lena must go quiet (only her own first
+    // reply ran) — she needs "kai" in her roster to detect the hand-off.
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "kai, your turn", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    expect(replyWraps(srv.pool).length).toBe(3); // only the first reply
+  });
+
+  test("no sibling bots configured → lone bot still answers every group message", async () => {
+    const c = cast();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "sure" },
+    ]);
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex],
+      groupPersonaNames: [], // no roster → gate inactive (backward compat)
+      siblingBotHex: [],
+      harness,
+    });
+    // A message that does NOT name the bot still gets a reply (old behaviour).
+    srv.feedGroup(c.andrewSk, [c.lenaHex], "what's the weather?", "HQ");
+    await groupSleep(150);
+    await srv.stop();
+
+    expect(harness.invocations).toBe(1);
+    expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
+  });
+});

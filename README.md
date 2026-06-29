@@ -395,6 +395,41 @@ Relays come from a shared canonical list and can be edited by re-running the
 command. See the [PhantomChat repo](https://github.com/phantomyard/phantomchat)
 for the app itself and the wire-protocol details.
 
+### Multiple bots in one group
+
+When several persona bots share a PhantomChat group, each one would otherwise
+answer **every** message — three bots, three replies to one question. To get the
+Telegram behaviour (only the bot you addressed responds), tell each persona who
+its **sibling bots** are by adding a `group_bots` list to its `phantomchat.json`:
+
+```json
+{
+  "nsec": "nsec1…",
+  "allowed_npubs": ["npub1…"],
+  "group_bots": [
+    { "name": "kai",  "npub": "npub1kai…" },
+    { "name": "robbie", "npub": "npub1robbie…" }
+  ]
+}
+```
+
+Configure this for **every** bot in the group, each listing the *others* (a bot
+never lists itself — it knows its own name and npub). With this in place:
+
+- A bot replies only when its **persona name** appears in the message ("hey
+  **Lena**, …"), or when it's the bot currently holding the thread (so a no-name
+  follow-up still reaches it). When you address a different bot by name, the
+  previous one falls quiet — that's why every bot needs the full name roster.
+- A bot **never reacts to another bot's** messages, so one bot's reply can't
+  trigger another and start a back-and-forth loop. Only humans drive the
+  conversation.
+
+`group_bots` is per-persona and travels inside the portable persona folder. With
+no `group_bots` configured a lone bot behaves exactly as before — it answers
+every group message — so this is opt-in and changes nothing for single-bot
+groups. (The `name`/`npub` pairing mirrors Telegram's `group_persona_names`,
+plus the npub the encrypted Nostr layer needs to recognise a sibling.)
+
 ## Editors: VS Code, Zed & JetBrains
 
 Your Phantom runs **inside your editor** as a first-class agent over the

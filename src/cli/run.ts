@@ -498,7 +498,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }
 
       for (const spec of phantomchatPersonas) {
-        const { identity, allowedHex, tofu } = spec.config;
+        const { identity, allowedHex, tofu, groupBots } = spec.config;
+
+        // Group addressing (multi-bot groups). From the configured sibling bots
+        // derive: the shared NAME roster (every bot's name + our own, so a bot
+        // only replies when addressed by name / when it holds the thread) and
+        // the sibling-bot HEX set (so a bot never reacts to another bot —
+        // cascade kill, option (a)).
+        const groupPersonaNames = [
+          spec.persona,
+          ...groupBots.map((b) => b.name),
+        ];
+        const siblingBotHex = groupBots.map((b) => b.hex);
 
         // Effective relays: canonical (if fetched) else the persona's cached
         // relays. When canonical differs from the cache, write it back so a
@@ -531,6 +542,11 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         out.write(
           `  [phantomchat:${spec.persona}] npub ${identity.npub}, ${relays.length} relay(s), allowed npubs: ${allowedLabel}\n`,
         );
+        if (groupBots.length > 0) {
+          out.write(
+            `  [phantomchat:${spec.persona}] group roster: ${groupPersonaNames.join(", ")} (${groupBots.length} sibling bot(s) ignored in groups)\n`,
+          );
+        }
         // enablePing: nostr-tools sends a keepalive (ws ping, or a dummy REQ for
         // WebSocket impls without .ping()) every ~30s so an idle relay socket is
         // never closed for inactivity. This is the root fix for "the persona
@@ -621,6 +637,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             channel,
             secretKey: identity.secretKey,
             allowedHex,
+            groupPersonaNames,
+            siblingBotHex,
             tofu,
             // TOFU commit: encode the proven sender hex → npub and persist it to
             // this persona's phantomchat.json (clearing tofu). Best-effort.
