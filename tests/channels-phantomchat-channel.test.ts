@@ -23,6 +23,7 @@ import {
 } from "../src/channels/phantomchat/transport.ts";
 import {
   wrapNip17Message,
+  wrapTypingGiftWrap,
   type NTNostrEvent,
 } from "../src/lib/nostrCrypto.ts";
 
@@ -252,6 +253,34 @@ describe("phantomchat channel — NIP-17 dual-read (plain text)", () => {
     await pump;
 
     expect(got.length).toBe(0);
+  });
+
+  test("a live typing tick (dedicated kind) is dropped, never enqueued as a turn", async () => {
+    // Regression: the PWA gift-wraps typing on NOSTR_KIND_TYPING_RUMOR. A 'stop'
+    // tick is non-empty content, so before the kind guard it failed JSON.parse,
+    // fell through to the plain-text path, and the bot REPLIED to "stop". The
+    // inbound guard drops it structurally by inner kind.
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const peerSk = generateSecretKey();
+    // Both lifecycle markers a user emits while typing at the bot.
+    const startTick = wrapTypingGiftWrap(peerSk, ourPub, "", ourPub);
+    const stopTick = wrapTypingGiftWrap(peerSk, ourPub, "stop", ourPub);
+    pool.feed(startTick as unknown as NTNostrEvent);
+    pool.feed(stopTick as unknown as NTNostrEvent);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(0); // no turn from either tick
+    expect(pool.published.length).toBe(0); // and certainly no reply published
   });
 });
 

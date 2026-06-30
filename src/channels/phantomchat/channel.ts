@@ -36,6 +36,7 @@ import {
   unwrapNip17Message,
   unwrapV2,
   isV2Event,
+  NOSTR_KIND_TYPING_RUMOR,
   type NTNostrEvent,
 } from "../../lib/nostrCrypto.ts";
 import type { PhantomchatTransport } from "./transport.ts";
@@ -229,6 +230,18 @@ export function createPhantomchatChannel(
         // (4) Dedup by rumor id — the SAME logical message can arrive via more
         // than one wrap; the rumor id is stable across them.
         if (!remember(seenRumorIds, rumor.id)) return;
+
+        // (4a) Typing / voice tick — NEVER a message turn. The PWA gift-wraps
+        // typing on a dedicated inner kind (NOSTR_KIND_TYPING_RUMOR). Drop it
+        // structurally by kind: without this, a user's 'stop' tick fails
+        // JSON.parse, falls through to the plain-text path, and gets enqueued —
+        // i.e. the bot would reply to "stop". Discriminating by kind (not
+        // content) means a genuine user message that simply says "stop"
+        // (kind-14) still gets answered.
+        if (rumor.kind === NOSTR_KIND_TYPING_RUMOR) {
+          log.debug("phantomchat: dropping inbound typing tick");
+          return;
+        }
 
         // (5) Parse the JSON envelope. `type === "text"` is a chat message;
         // `presence-ping` / `presence-pong` are legacy types, silently dropped
