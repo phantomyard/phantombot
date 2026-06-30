@@ -1483,7 +1483,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
 
     expect(harness.invocations).toBe(1);
     // Group broadcast: Andrew + Kai + Lena's self-wrap = 3 wraps (no DM receipt).
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(3);
+    expect(replyWraps(srv.pool).length).toBe(3);
   });
 
   test("another bot addressed by name → this bot stays quiet", async () => {
@@ -1504,7 +1504,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(0);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
   });
 
   test("option (a): a sibling bot's message is ignored even if it names this bot", async () => {
@@ -1529,7 +1529,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(0);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
   });
 
   test("sticky: a no-name follow-up still reaches the bot that holds the thread", async () => {
@@ -1554,7 +1554,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(2);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(6); // two 3-wrap broadcasts
+    expect(replyWraps(srv.pool).length).toBe(6); // two 3-wrap broadcasts
   });
 
   test("hand-off: once Andrew addresses the sibling, this bot falls quiet", async () => {
@@ -1579,7 +1579,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(3); // only the first reply
+    expect(replyWraps(srv.pool).length).toBe(3); // only the first reply
   });
 
   test("no sibling bots configured → lone bot still answers every group message", async () => {
@@ -1601,7 +1601,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBeGreaterThan(0);
+    expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
   });
 
   // ===== auto bot-detection / name resolution from kind-0 (no config) =====
@@ -1631,7 +1631,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
 
     // "kai" was in the auto-derived roster, so Lena recognised the hand-off.
     expect(harness.invocations).toBe(0);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
   });
 
   test("auto: human addresses THIS bot in a zero-config multi-bot group → it replies", async () => {
@@ -1654,7 +1654,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(3);
+    expect(replyWraps(srv.pool).length).toBe(3);
   });
 
   test("auto: a sibling bot's message is ignored via its kind-0 bot flag (cascade kill, no config)", async () => {
@@ -1677,7 +1677,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(0);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBe(0);
+    expect(replyWraps(srv.pool).length).toBe(0);
   });
 
   test("auto: a bot is ignored even in a 1:1 DM (global rule)", async () => {
@@ -1738,7 +1738,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
 
     expect(harness.invocations).toBe(1);
-    expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBeGreaterThan(0);
+    expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
   });
 });
 

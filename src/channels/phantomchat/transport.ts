@@ -51,12 +51,9 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
 
 /**
  * Typing indicators are now gift-wrapped (kind-1059 → kind-14 rumor) for
- * privacy + collision avoidance. The relay only sees kind-1059 + an ephemeral
- * pubkey — no social graph leak, no kind collision. These constants are
- * retained as references but no longer used on the wire.
+ * privacy + collision avoidance. The relay only sees kind-1059 + an
+ * ephemeral pubkey — no social graph leak, no kind collision.
  */
-export const NOSTR_KIND_TYPING = 30001;
-export const NOSTR_KIND_TYPING_LEGACY = 20001;
 
 /**
  * Typing-event content markers. A kind-30001 event's `content` is the lifecycle
