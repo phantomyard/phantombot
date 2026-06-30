@@ -132,11 +132,26 @@ export class HttpTelegramTransport implements TelegramTransport {
       log.warn("telegram: getUpdates non-OK", { status: res.status });
       return { updates: [], nextOffset: offset };
     }
-    const body = (await res.json()) as {
+    let body: {
       ok?: boolean;
       result?: TelegramRawUpdate[];
       description?: string;
     };
+    try {
+      body = (await res.json()) as typeof body;
+    } catch (e) {
+      // A 200 with a non-JSON body (captive portal, proxy error page, an
+      // empty/truncated response) makes res.json() throw. Swallow it like
+      // the fetch failure above — log and re-poll — instead of letting it
+      // escape. The engine drives getUpdates inside a try/FINALLY (no
+      // catch), so an uncaught throw here unwinds the poll loop, rejects
+      // the run's Promise.all, and tears down EVERY sibling listener over
+      // one transient bad body.
+      log.warn("telegram: getUpdates body not JSON", {
+        error: (e as Error).message,
+      });
+      return { updates: [], nextOffset: offset };
+    }
     if (!body.ok) {
       log.warn("telegram: getUpdates not ok", { description: body.description });
       return { updates: [], nextOffset: offset };

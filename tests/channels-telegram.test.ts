@@ -3717,3 +3717,38 @@ describe("HttpTelegramTransport AbortSignal", () => {
     }
   });
 });
+
+describe("HttpTelegramTransport getUpdates non-JSON body", () => {
+  // A 200 whose body is not JSON (captive portal, proxy error page, an
+  // empty/truncated response) makes res.json() throw. getUpdates must
+  // swallow it and re-poll the SAME offset, not let the throw escape: the
+  // engine drives getUpdates in a try/finally (no catch), so an uncaught
+  // error there unwinds the poll loop and tears down every sibling listener.
+  async function expectEmptyReprobe(bodyResponse: Response): Promise<void> {
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () =>
+        bodyResponse) as unknown as typeof fetch;
+      const t = new HttpTelegramTransport("anything");
+      const r = await t.getUpdates(7, 30);
+      expect(r.updates).toEqual([]);
+      // Offset is preserved so the loop re-polls the same batch.
+      expect(r.nextOffset).toBe(7);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+    }
+  }
+
+  test("HTML body on a 200 returns empty without throwing", async () => {
+    await expectEmptyReprobe(
+      new Response("<html><body>captive portal</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+  });
+
+  test("empty body on a 200 returns empty without throwing", async () => {
+    await expectEmptyReprobe(new Response("", { status: 200 }));
+  });
+});
