@@ -664,6 +664,74 @@ export function createGiftWrap(
   return finalizeEvent(wrapTemplate, ephemeralSk) as unknown as SignedEvent;
 }
 
+// ==================== Typing Gift-Wrap ====================
+
+/**
+ * Wrap a typing indicator in a NIP-17 gift-wrap (kind-1059).
+ *
+ * Creates a kind-14 rumor with the typing content and a ['d', conversationId]
+ * tag, seals it, and gift-wraps it with an ephemeral key. The outer kind-1059
+ * event carries ['expiration', now+30] for relay-side auto-pruning.
+ *
+ * The inner kind-14 is encrypted — the relay never sees it, so there's no
+ * kind collision risk. The outer event is signed with a throwaway ephemeral
+ * key (NIP-17 parity), so the relay can't build a sender→recipient social
+ * graph from signed pubkey edges.
+ */
+export function wrapTypingGiftWrap(
+  senderSk: Uint8Array,
+  recipientPubHex: string,
+  content: string,
+  conversationId: string,
+): NTNostrEvent {
+  const rumor = createRumor(content, senderSk, [["d", conversationId]]);
+  const seal = createSeal(rumor, senderSk, recipientPubHex);
+
+  const ephemeralSk = generateSecretKey();
+  const convKey = getConversationKey(ephemeralSk, recipientPubHex);
+  const encryptedContent = nip44Encrypt(JSON.stringify(seal), convKey);
+  const now = Math.floor(Date.now() / 1000);
+  const wrapTemplate = {
+    kind: 1059,
+    created_at: now,
+    // ['t', 'typing'] marker on the outer wrap lets relays and receivers
+    // distinguish typing gift-wraps from message gift-wraps without decryption.
+    tags: [["p", recipientPubHex], ["expiration", String(now + 30)], ["t", "typing"]],
+    content: encryptedContent,
+  };
+  return finalizeEvent(wrapTemplate, ephemeralSk) as unknown as NTNostrEvent;
+}
+
+/**
+ * Wrap a group typing indicator in NIP-17 gift-wraps for multiple members.
+ *
+ * Creates a single kind-14 rumor with ['d', groupId] and ['group', groupId]
+ * tags, then wraps it separately for each member with an ephemeral key.
+ */
+export function wrapGroupTypingGiftWrap(
+  senderSk: Uint8Array,
+  memberPubkeys: string[],
+  content: string,
+  groupId: string,
+): NTNostrEvent[] {
+  const rumor = createRumor(content, senderSk, [["d", groupId], ["group", groupId]]);
+  const now = Math.floor(Date.now() / 1000);
+
+  return memberPubkeys.map((recipientPk) => {
+    const seal = createSeal(rumor, senderSk, recipientPk);
+    const ephemeralSk = generateSecretKey();
+    const convKey = getConversationKey(ephemeralSk, recipientPk);
+    const encryptedContent = nip44Encrypt(JSON.stringify(seal), convKey);
+    const wrapTemplate = {
+      kind: 1059,
+      created_at: now,
+      tags: [["p", recipientPk], ["expiration", String(now + 30)], ["t", "typing"]],
+      content: encryptedContent,
+    };
+    return finalizeEvent(wrapTemplate, ephemeralSk) as unknown as NTNostrEvent;
+  });
+}
+
 // ==================== Base64url helpers (NIP-44 compatible) ====================
 
 function base64urlEncode(bytes: Uint8Array): string {
