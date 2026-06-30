@@ -1461,7 +1461,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     };
   }
 
-  const replyWraps = (pool: FakePool, ...keys: Uint8Array[]) =>
+  const replyWraps = (pool: FakePool, ..._keys: Uint8Array[]) =>
     messageWraps(pool);
 
   test("addressed by name → this bot replies", async () => {
@@ -1741,3 +1741,4 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(replyWraps(srv.pool, c.lenaSk, c.andrewSk).length).toBeGreaterThan(0);
   });
 });
+
