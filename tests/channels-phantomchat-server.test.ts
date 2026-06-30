@@ -36,19 +36,6 @@ import {
 } from "../src/lib/nostrCrypto.ts";
 import { npubEncode } from "../src/lib/nostrIdentity.ts";
 
-/**
- * Check if a kind-1059 gift-wrap is a MESSAGE (not a typing indicator).
- * Typing gift-wraps carry a ['t', 'typing'] marker on the outer wrap.
- */
-function isMessageWrap(wrap: NTNostrEvent): boolean {
-  return !wrap.tags?.some((t: string[]) => t[0] === 't' && t[1] === 'typing');
-}
-
-/** Filter published kind-1059 events to only message wraps (exclude typing). */
-function messageWraps(pool: FakePool): NTNostrEvent[] {
-  return pool.published.filter((e) => e.kind === 1059 && isMessageWrap(e as NTNostrEvent));
-}
-
 /** A harness that always replies with a fixed final text. */
 class ScriptedHarness implements Harness {
   invocations = 0;
@@ -257,7 +244,7 @@ describe("phantomchat auth gate", () => {
     // plus the v2 REPLY (single event, no self-wrap). The pool may also carry
     // ephemeral kind-20001 typing ticks (deferred timer, timing-dependent), so
     // filter to the kind-1059 events.
-    const wraps = messageWraps(pool);
+    const wraps = pool.published.filter((e) => e.kind === 1059);
     expect(wraps.length).toBe(2);
 
     // Receipt is NIP-17 (gift-wrapped to sender); reply is v2 (AES-GCM).
@@ -319,7 +306,7 @@ describe("phantomchat auth gate", () => {
 
     expect(harness.invocations).toBe(1);
     // delivery receipt + v2 reply (single event, no self-wrap).
-    expect(messageWraps(pool).length).toBe(2);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
   });
 });
 
@@ -348,7 +335,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
     // is persisted (the run.ts callback would encode it to npub + clear tofu).
     expect(harness.invocations).toBe(1);
     // delivery receipt + v2 reply (single event, no self-wrap).
-    expect(messageWraps(pool).length).toBe(2);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
     expect(trusted).toEqual([getPublicKey(senderSk).toLowerCase()]);
   });
 
@@ -417,7 +404,7 @@ describe("phantomchat TOFU (trust-on-first-use)", () => {
     expect(harness.invocations).toBe(1);
     // delivery receipt + v2 reply (single event, no self-wrap) for the FIRST sender only;
     // the gated-out stranger gets nothing (no receipt, no reply).
-    expect(messageWraps(pool).length).toBe(2);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(2);
     expect(trusted).toEqual([getPublicKey(firstSk).toLowerCase()]);
   });
 });
@@ -661,10 +648,8 @@ describe("phantomchat group routing (HQ bug)", () => {
     expect(harness.lastRequest?.userMessage).toBe("hi Lena");
 
     // The reply is a group broadcast: one wrap per OTHER member (Andrew +
-    // member) plus Lena's self-wrap = 3 kind-1059 wraps. Filter out typing
-    // gift-wraps (also kind-1059) by checking the inner rumor content.
-    const allWraps = pool.published.filter((e) => e.kind === 1059);
-    const replyWraps = allWraps.filter((w) => isMessageWrap(w as NTNostrEvent));
+    // member) plus Lena's self-wrap = 3 kind-1059 wraps.
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
     expect(replyWraps.length).toBe(3);
 
     // Andrew (the original sender) can unwrap the reply, read the text, and see
@@ -705,26 +690,22 @@ describe("phantomchat group routing (HQ bug)", () => {
     expect(memberReply).toBeDefined();
     expect(JSON.parse(memberReply!.content).content).toBe("hey Andrew, in HQ");
 
-    // Typing indicators for a GROUP turn are now kind-1059 gift-wraps
-    // (NIP-17). Each member gets their own wrap with an ephemeral signing key.
-    // The inner kind-14 rumor carries ['d', groupId] and ['group', groupId]
-    // tags, but those are encrypted — we can only verify the outer shape.
-    const typingEvents = pool.published.filter((e) => e.kind === 1059 && e.tags?.some((t: string[]) => t[0] === 't' && t[1] === 'typing'));
+    // Typing indicators for a GROUP turn are kind-20001 events that carry the
+    // group tag (so the PWA renders the dots in HQ, not in Lena's DM), NOT a
+    // bare `['p', sender]` DM typing tick.
+    const typingEvents = pool.published.filter((e) => e.kind === 20001);
     expect(typingEvents.length).toBeGreaterThan(0);
     for (const ev of typingEvents) {
-      // Each wrap is tagged with a member's pubkey (for relay routing).
+      expect(ev.tags.find((t) => t[0] === "group")).toEqual(["group", groupId]);
+      // p-tags reach the other members (Andrew + member), never Lena herself.
       const pTags = ev.tags.filter((t) => t[0] === "p").map((t) => t[1]);
       expect(pTags).not.toContain(botHex.toLowerCase());
-      // Content is non-empty (encrypted rumor payload).
-      expect(ev.content.length).toBeGreaterThan(0);
-    }
-    // At least one wrap for Andrew and one for the member.
-    const allPTags = typingEvents.flatMap((ev) => ev.tags.filter((t) => t[0] === "p").map((t) => t[1]));
-    expect(new Set(allPTags)).toEqual(
+      expect(new Set(pTags)).toEqual(
         new Set([andrewHex.toLowerCase(), memberHex.toLowerCase()]),
       );
+    }
     // The turn ends with an explicit STOP so the dots clear at once.
-    // (STOP markers are inside encrypted rumors, so we can't check content directly.)
+    expect(typingEvents.some((e) => e.content === "stop")).toBe(true);
   });
 
   test("group voice note with STT unavailable: failure notice broadcasts to the GROUP, not a DM", async () => {
@@ -797,9 +778,7 @@ describe("phantomchat group routing (HQ bug)", () => {
 
     // The notice is a GROUP broadcast — 3 kind-1059 wraps (Andrew + member +
     // Lena's self-wrap) carrying the group tag — NOT a 1:1 DM (2 wraps, no tag).
-    // Filter out typing gift-wraps (also kind-1059) by checking inner content.
-    const allWraps2 = pool.published.filter((e) => e.kind === 1059);
-    const replyWraps = allWraps2.filter((w) => isMessageWrap(w as NTNostrEvent));
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
     expect(replyWraps.length).toBe(3);
     let andrewNotice: ReturnType<typeof unwrapNip17Message> | undefined;
     for (const w of replyWraps) {
@@ -832,7 +811,7 @@ describe("phantomchat group routing (HQ bug)", () => {
 
     // kind-1059 = delivery receipt + v2 reply = 2 events. The
     // REPLY event carries NO group tag (plain 1:1 DM behaviour unchanged).
-    const wraps = messageWraps(pool);
+    const wraps = pool.published.filter((e) => e.kind === 1059);
     expect(wraps.length).toBe(2);
     const replyWrap = wraps.find((w) =>
       w.tags.some((t) => t[0] === "v" && t[1] === "pc-v2"),
@@ -1038,9 +1017,8 @@ describe("phantomchat streaming bubbles", () => {
 
     // Two sentences → two group broadcasts. Each broadcast is one wrap per
     // OTHER member (Andrew + member) + Lena's self-wrap = 3 wraps, so two
-    // broadcasts = 6 kind-1059 reply wraps. Filter out typing gift-wraps.
-    const allWraps3 = pool.published.filter((e) => e.kind === 1059);
-    const replyWraps = allWraps3.filter((w) => isMessageWrap(w as NTNostrEvent));
+    // broadcasts = 6 kind-1059 reply wraps.
+    const replyWraps = pool.published.filter((e) => e.kind === 1059);
     expect(replyWraps.length).toBe(6);
 
     // Andrew can unwrap exactly one wrap per broadcast; the two he reads are
@@ -1245,7 +1223,7 @@ describe("phantomchat slash commands", () => {
       text: "/status",
     });
     expect(harness.invocations).toBe(0);
-    expect(messageWraps(pool).length).toBe(0);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(0);
   });
 
   test("/stop aborts an in-flight turn", async () => {
@@ -1461,8 +1439,8 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     };
   }
 
-  const replyWraps = (pool: FakePool, ..._keys: Uint8Array[]) =>
-    messageWraps(pool);
+  const replyWraps = (pool: FakePool) =>
+    pool.published.filter((e) => e.kind === 1059);
 
   test("addressed by name → this bot replies", async () => {
     const c = cast();
@@ -1697,7 +1675,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     });
 
     expect(harness.invocations).toBe(0);
-    expect(messageWraps(pool).length).toBe(0);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBe(0);
   });
 
   test("auto: a human DM is still answered (bot-gate doesn't over-block)", async () => {
@@ -1715,7 +1693,7 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     });
 
     expect(harness.invocations).toBe(1);
-    expect(messageWraps(pool).length).toBeGreaterThan(0);
+    expect(pool.published.filter((e) => e.kind === 1059).length).toBeGreaterThan(0);
   });
 
   test("auto: cold cache (no profile resolves) → lone bot answers, no false mute", async () => {
@@ -1741,4 +1719,3 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
   });
 });
-

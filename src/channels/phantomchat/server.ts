@@ -706,7 +706,7 @@ export async function runPhantomchatServer(
     };
     let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
     // Typing indicator. The PWA shows three-dots on each
-    // kind-30001 event and auto-expires it after ~6s, so we refresh
+    // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
     // every 2s for the whole turn. A plain interval (rather than per-chunk)
     // keeps the dots alive through long tool-call gaps where runTurn emits no
     // chunks at all. Best-effort: sendTyping never throws (see transport).
