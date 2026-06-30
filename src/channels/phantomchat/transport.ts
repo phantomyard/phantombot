@@ -48,17 +48,27 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
 ];
 
 /**
- * NIP-16 EPHEMERAL event kind for the typing indicator (range 20000–29999).
- * Relays do NOT store ephemeral events — they only fan them out to currently
- * connected subscribers — so a typing signal cannot be replayed on reconnect
- * and self-expires the moment nobody is listening. The PWA subscribes for this
- * kind p-tagged to itself and injects a native `updateUserTyping` (three-dots,
- * 6s auto-expiry). Must match phantomchat's `NOSTR_KIND_TYPING`.
+ * NIP-33 PARAMETERIZED REPLACEABLE event kind for the typing indicator
+ * (range 30000–39999). Relays STORE the latest event per (pubkey, kind, d-tag),
+ * so late reconnects replay instead of silently losing typing ticks. The PWA
+ * subscribes for this kind p-tagged to itself and injects a native
+ * `updateUserTyping` (three-dots, 6s auto-expiry). Must match phantomchat's
+ * `NOSTR_KIND_TYPING`.
+ *
+ * Replaces the old NIP-16 ephemeral kind-20001 which relays did NOT store —
+ * any subscription gap caused permanent silent loss.
  */
-export const NOSTR_KIND_TYPING = 20001;
+export const NOSTR_KIND_TYPING = 30001;
 
 /**
- * Typing-event content markers. A kind-20001 event's `content` is the lifecycle
+ * Legacy ephemeral typing kind (NIP-16, kind-20001). Retained as a reference;
+ * the emit side now sends kind-30001 exclusively. The PWA's receive side
+ * still accepts kind-20001 for backward compat during the migration.
+ */
+export const NOSTR_KIND_TYPING_LEGACY = 20001;
+
+/**
+ * Typing-event content markers. A kind-30001 event's `content` is the lifecycle
  * signal the PWA reads: empty string = "I'm typing now" (start/refresh);
  * `"stop"` = "I've stopped" (cancel immediately). The bot emits a STOP the
  * instant a reply is published so the PWA clears the dots at once instead of
@@ -580,11 +590,12 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    */
   async sendRecording(conversationId: string): Promise<void> {
     try {
+      const now = Math.floor(Date.now() / 1000);
       const event = finalizeEvent(
         {
           kind: NOSTR_KIND_TYPING,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["p", conversationId]],
+          created_at: now,
+          tags: [["d", conversationId], ["p", conversationId], ["expiration", String(now + 30)]],
           content: TYPING_CONTENT_RECORDING,
         },
         this.ourSecretKey,
@@ -655,15 +666,16 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * Typing indicator. Publishes a NIP-16 EPHEMERAL kind-20001 event signed by
-   * our key and p-tagged to the recipient hex. The PWA, subscribed for this
-   * kind addressed to itself, injects a native `updateUserTyping` (three-dots,
-   * 6s auto-expiry). Because ephemeral events aren't stored by relays, there's
-   * nothing to replay on reconnect — no boomerang risk.
+   * Typing indicator. Publishes a NIP-33 PARAMETERIZED REPLACEABLE kind-30001
+   * event signed by our key, p-tagged to the recipient hex, with a `d` tag
+   * (serialization key) and `expiration` tag (30s TTL). The PWA, subscribed for
+   * this kind addressed to itself, injects a native `updateUserTyping`
+   * (three-dots, 6s auto-expiry). Because kind-30001 events are stored by
+   * relays, late reconnects replay the latest typing state — no silent loss.
    *
    * Best-effort: the engine calls this on every harness chunk (throttled to
    * ~2s), so a single failed publish is harmless and must never throw into the
-   * turn loop. `content` is empty — the kind + `#p` tag carry all the meaning.
+   * turn loop. `content` is empty — the kind + tags carry all the meaning.
    *
    * NOTE: unlike `sendMessage`, this is intentionally NOT gift-wrapped. A
    * typing tick is bot→you only, fires every 2s, and self-expires; wrapping it
@@ -673,11 +685,12 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    */
   async sendTyping(conversationId: string, stop?: boolean): Promise<void> {
     try {
+      const now = Math.floor(Date.now() / 1000);
       const event = finalizeEvent(
         {
           kind: NOSTR_KIND_TYPING,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["p", conversationId]],
+          created_at: now,
+          tags: [["d", conversationId], ["p", conversationId], ["expiration", String(now + 30)]],
           content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,
         },
         this.ourSecretKey,
@@ -691,12 +704,14 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * Group typing tick. One ephemeral kind-20001 event tagged with the group id
-   * and every member's `#p` (so the PWA's `#p:[self]` subscription delivers it to
-   * each member). The `['group', groupId]` tag is what makes the PWA render the
-   * dots inside the group chat — without it a group-message reply-in-progress
-   * shows as a 1:1 DM typing indicator (the HQ mis-routing). `stop` emits the
-   * STOP marker. Best-effort; mirrors sendTyping's never-throw contract.
+   * Group typing tick. One kind-30001 parameterized replaceable event tagged
+   * with the group id, a `d` tag (group id for serialization), an `expiration`
+   * tag (30s TTL), and every member's `#p` (so the PWA's `#p:[self]`
+   * subscription delivers it to each member). The `['group', groupId]` tag is
+   * what makes the PWA render the dots inside the group chat — without it a
+   * group-message reply-in-progress shows as a 1:1 DM typing indicator (the HQ
+   * mis-routing). `stop` emits the STOP marker. Best-effort; mirrors
+   * sendTyping's never-throw contract.
    */
   async sendGroupTyping(
     groupId: string,
@@ -709,12 +724,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     ].filter((h) => h !== ourHexLower);
     if (others.length === 0) return;
     try {
+      const now = Math.floor(Date.now() / 1000);
       const event = finalizeEvent(
         {
           kind: NOSTR_KIND_TYPING,
-          created_at: Math.floor(Date.now() / 1000),
+          created_at: now,
           tags: [
+            ["d", groupId],
             ["group", groupId],
+            ["expiration", String(now + 30)],
             ...others.map((hex) => ["p", hex]),
           ],
           content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,

@@ -83,7 +83,7 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(seen).toEqual(["abc"]);
   });
 
-  test("sendTyping publishes a signed ephemeral kind-20001 p-tagged to the recipient", async () => {
+  test("sendTyping publishes a signed kind-30001 p-tagged to the recipient with d and expiration tags", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -108,17 +108,26 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    // NIP-16 ephemeral kind, signed by us, p-tagged to the recipient, no body.
-    expect(ev.kind).toBe(20001);
+    // NIP-33 parameterized replaceable kind, signed by us, p-tagged to the
+    // recipient, with d tag (serialization key) and expiration tag (30s TTL).
+    expect(ev.kind).toBe(30001);
     expect(ev.pubkey).toBe(getPublicKey(sk));
     expect(ev.content).toBe("");
-    expect(ev.tags).toEqual([["p", recipient]]);
+    expect(ev.tags).toEqual(expect.arrayContaining([
+      ["d", recipient],
+      ["p", recipient],
+    ]));
+    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
+    expect(expTag).toBeDefined();
+    const expTs = Number(expTag![1]);
+    expect(expTs).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    expect(expTs).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 31);
     // Real signature — finalizeEvent produces id + sig.
     expect(typeof ev.id).toBe("string");
     expect(typeof ev.sig).toBe("string");
   });
 
-  test("sendRecording publishes a kind-20001 with the 'recording' content marker", async () => {
+  test("sendRecording publishes a kind-30001 with the 'recording' content marker", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -145,10 +154,15 @@ describe("phantomchat transport subscription wire shape", () => {
     const ev = published[0]!;
     // Same ephemeral typing channel, but the "recording" marker tells the PWA
     // to show the native "recording voice" activity instead of typing dots.
-    expect(ev.kind).toBe(20001);
+    expect(ev.kind).toBe(30001);
     expect(ev.pubkey).toBe(getPublicKey(sk));
     expect(ev.content).toBe("recording");
-    expect(ev.tags).toEqual([["p", recipient]]);
+    expect(ev.tags).toEqual(expect.arrayContaining([
+      ["d", recipient],
+      ["p", recipient],
+    ]));
+    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
+    expect(expTag).toBeDefined();
     expect(typeof ev.sig).toBe("string");
   });
 
@@ -247,13 +261,16 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    expect(ev.kind).toBe(20001);
+    expect(ev.kind).toBe(30001);
     // STOP marker so the PWA clears the dots immediately.
     expect(ev.content).toBe("stop");
-    expect(ev.tags).toEqual([["p", recipient]]);
+    expect(ev.tags).toEqual(expect.arrayContaining([
+      ["d", recipient],
+      ["p", recipient],
+    ]));
   });
 
-  test("sendGroupTyping publishes one kind-20001 with a group tag + a p-tag per member", async () => {
+  test("sendGroupTyping publishes one kind-30001 with d, group, expiration tags + a p-tag per member", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -279,16 +296,19 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    expect(ev.kind).toBe(20001);
+    expect(ev.kind).toBe(30001);
     expect(ev.pubkey).toBe(getPublicKey(sk));
     expect(ev.content).toBe("");
-    // Group tag routes the dots to the group chat; one p-tag per member so each
-    // member's #p subscription delivers it.
-    expect(ev.tags).toEqual([
+    // d tag (serialization key = group id), group tag, expiration tag, and one
+    // p-tag per member so each member's #p subscription delivers it.
+    expect(ev.tags).toEqual(expect.arrayContaining([
+      ["d", "grp-123"],
       ["group", "grp-123"],
       ["p", memberA.toLowerCase()],
       ["p", memberB.toLowerCase()],
-    ]);
+    ]));
+    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
+    expect(expTag).toBeDefined();
     expect(typeof ev.sig).toBe("string");
   });
 
