@@ -109,8 +109,8 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(published.length).toBe(1);
     const ev = published[0]!;
     // NIP-17 gift-wrap: the relay only sees kind-1059 + ephemeral pubkey.
-    // The inner kind-14 rumor (with typing content + ['d', conversationId])
-    // is encrypted inside.
+    // The inner typing rumor (NOSTR_KIND_TYPING_RUMOR, with the lifecycle
+    // content + ['d', conversationId]) is encrypted inside.
     expect(ev.kind).toBe(1059);
     expect(ev.tags).toEqual(expect.arrayContaining([["p", recipient]]));
     // Real signature — finalizeEvent produces id + sig.
