@@ -18,38 +18,16 @@ import {
 
 import {
   GiftWrapVerificationError,
-  NOSTR_KIND_TYPING_RUMOR,
   createGiftWrap,
   createRumor,
   getConversationKey,
   nip44Encrypt,
   unwrapNip17Message,
   wrapNip17Message,
-  wrapTypingGiftWrap,
   type NTNostrEvent,
   type SignedEvent,
   type UnsignedEvent,
 } from "../src/lib/nostrCrypto.ts";
-
-describe("wrapTypingGiftWrap — dedicated inner kind", () => {
-  test("inner rumor carries NOSTR_KIND_TYPING_RUMOR (not the message kind 14)", () => {
-    const senderSk = generateSecretKey();
-    const recipientSk = generateSecretKey();
-    const recipientHex = getPublicKey(recipientSk);
-
-    const wrap = wrapTypingGiftWrap(senderSk, recipientHex, "stop", recipientHex);
-    // Outer wrap is the standard gift-wrap kind; relays see only this.
-    expect(wrap.kind).toBe(1059);
-
-    const rumor = unwrapNip17Message(wrap, recipientSk);
-    // Inner kind is the dedicated typing kind — this is what keeps a tick from
-    // ever being mistaken for a kind-14 message on the receive side.
-    expect(rumor.kind).toBe(NOSTR_KIND_TYPING_RUMOR);
-    expect(rumor.kind).not.toBe(14);
-    expect(rumor.content).toBe("stop");
-    expect(rumor.tags.some((t) => t[0] === "d")).toBe(true);
-  });
-});
 
 describe("wrapNip17Message / unwrapNip17Message round-trip", () => {
   test("recipient recovers the exact plaintext envelope; sender is rumor.pubkey", () => {

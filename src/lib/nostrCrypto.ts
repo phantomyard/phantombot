@@ -70,22 +70,6 @@ export interface SignedEvent extends UnsignedEvent {
 }
 
 /**
- * Inner rumor kind for gift-wrapped typing / voice indicators. MUST stay in
- * lockstep with the PWA's `NOSTR_KIND_TYPING_RUMOR`
- * (phantomchat src/lib/phantomchat/nostr-crypto.ts).
- *
- * Typing ticks are gift-wrapped (NIP-59 / kind-1059) for privacy like DMs, but
- * the INNER rumor must NOT reuse the message kind-14: sharing it made a tick
- * indistinguishable from a chat message except by sniffing content ('stop' /
- * 'recording' / ''), so a replayed tick could render as a "Stopped" bubble on
- * the PWA and the bot's own inbound could enqueue 'stop' as a message turn.
- * A dedicated kind makes the distinction STRUCTURAL — route/drop on rumor.kind,
- * never on content. 1414 is a regular (non-ephemeral) kind, unassigned by any
- * NIP, and only ever exists encrypted inside a kind-1059 wrap.
- */
-export const NOSTR_KIND_TYPING_RUMOR = 1414;
-
-/**
  * In-memory conversation-key cache, keyed by sender secret-key OBJECT identity
  * (a WeakMap) → recipient hex → derived NIP-44 conversation key. Keying on the
  * Uint8Array object (not its hex) keeps the private key from being materialized
@@ -612,11 +596,10 @@ export function createRumor(
   content: string,
   senderSk: Uint8Array,
   tags?: string[][],
-  kind: number = 14,
 ): UnsignedEvent {
   const pubkey = getPublicKey(senderSk);
   const event = {
-    kind,
+    kind: 14,
     created_at: Math.floor(Date.now() / 1000),
     tags: tags || [],
     content,
@@ -701,7 +684,7 @@ export function wrapTypingGiftWrap(
   content: string,
   conversationId: string,
 ): NTNostrEvent {
-  const rumor = createRumor(content, senderSk, [["d", conversationId]], NOSTR_KIND_TYPING_RUMOR);
+  const rumor = createRumor(content, senderSk, [["d", conversationId]]);
   const seal = createSeal(rumor, senderSk, recipientPubHex);
 
   const ephemeralSk = generateSecretKey();
@@ -731,7 +714,7 @@ export function wrapGroupTypingGiftWrap(
   content: string,
   groupId: string,
 ): NTNostrEvent[] {
-  const rumor = createRumor(content, senderSk, [["d", groupId], ["group", groupId]], NOSTR_KIND_TYPING_RUMOR);
+  const rumor = createRumor(content, senderSk, [["d", groupId], ["group", groupId]]);
   const now = Math.floor(Date.now() / 1000);
 
   return memberPubkeys.map((recipientPk) => {
