@@ -23,6 +23,8 @@ import {
   createSeal,
   wrapGroupMessage,
   wrapV2,
+  wrapTypingGiftWrap,
+  wrapGroupTypingGiftWrap,
   type NTNostrEvent as WrapEvent,
 } from "../../lib/nostrCrypto.ts";
 import { encryptFileBytes } from "./fileEncrypt.ts";
@@ -48,23 +50,12 @@ export const DEFAULT_PHANTOMCHAT_RELAYS: readonly string[] = [
 ];
 
 /**
- * NIP-33 PARAMETERIZED REPLACEABLE event kind for the typing indicator
- * (range 30000–39999). Relays STORE the latest event per (pubkey, kind, d-tag),
- * so late reconnects replay instead of silently losing typing ticks. The PWA
- * subscribes for this kind p-tagged to itself and injects a native
- * `updateUserTyping` (three-dots, 6s auto-expiry). Must match phantomchat's
- * `NOSTR_KIND_TYPING`.
- *
- * Replaces the old NIP-16 ephemeral kind-20001 which relays did NOT store —
- * any subscription gap caused permanent silent loss.
+ * Typing indicators are now gift-wrapped (kind-1059 → kind-14 rumor) for
+ * privacy + collision avoidance. The relay only sees kind-1059 + an ephemeral
+ * pubkey — no social graph leak, no kind collision. These constants are
+ * retained as references but no longer used on the wire.
  */
 export const NOSTR_KIND_TYPING = 30001;
-
-/**
- * Legacy ephemeral typing kind (NIP-16, kind-20001). Retained as a reference;
- * the emit side now sends kind-30001 exclusively. The PWA's receive side
- * still accepts kind-20001 for backward compat during the migration.
- */
 export const NOSTR_KIND_TYPING_LEGACY = 20001;
 
 /**
@@ -590,17 +581,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    */
   async sendRecording(conversationId: string): Promise<void> {
     try {
-      const now = Math.floor(Date.now() / 1000);
-      const event = finalizeEvent(
-        {
-          kind: NOSTR_KIND_TYPING,
-          created_at: now,
-          tags: [["d", conversationId], ["p", conversationId], ["expiration", String(now + 30)]],
-          content: TYPING_CONTENT_RECORDING,
-        },
+      const wrap = wrapTypingGiftWrap(
         this.ourSecretKey,
+        conversationId,
+        TYPING_CONTENT_RECORDING,
+        conversationId,
       );
-      await this.publishWrap(event as unknown as NTNostrEvent);
+      await this.publishWrap(wrap);
     } catch (e) {
       log.debug("phantomchat: sendRecording publish failed", {
         error: (e as Error).message,
@@ -666,36 +653,27 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * Typing indicator. Publishes a NIP-33 PARAMETERIZED REPLACEABLE kind-30001
-   * event signed by our key, p-tagged to the recipient hex, with a `d` tag
-   * (serialization key) and `expiration` tag (30s TTL). The PWA, subscribed for
-   * this kind addressed to itself, injects a native `updateUserTyping`
-   * (three-dots, 6s auto-expiry). Because kind-30001 events are stored by
-   * relays, late reconnects replay the latest typing state — no silent loss.
+   * Typing indicator. Publishes a NIP-17 gift-wrapped (kind-1059) typing tick.
+   * The inner kind-14 rumor carries the typing content and ['d', conversationId]
+   * tag; the outer kind-1059 is signed with an ephemeral key (NIP-17 parity).
+   * The relay only sees kind-1059 + an ephemeral pubkey — no social graph leak,
+   * no kind collision. Late reconnects replay via backfill (relays store
+   * kind-1059 events), and client-side 6s auto-expiry handles stale cleanup.
    *
    * Best-effort: the engine calls this on every harness chunk (throttled to
    * ~2s), so a single failed publish is harmless and must never throw into the
-   * turn loop. `content` is empty — the kind + tags carry all the meaning.
-   *
-   * NOTE: unlike `sendMessage`, this is intentionally NOT gift-wrapped. A
-   * typing tick is bot→you only, fires every 2s, and self-expires; wrapping it
-   * would double-encrypt a throwaway signal. The tradeoff (the relay learns
-   * "bot ↔ you active now") matches the posture the app already has for its
-   * plaintext kind-7 reactions / kind-5 deletes.
+   * turn loop.
    */
   async sendTyping(conversationId: string, stop?: boolean): Promise<void> {
     try {
-      const now = Math.floor(Date.now() / 1000);
-      const event = finalizeEvent(
-        {
-          kind: NOSTR_KIND_TYPING,
-          created_at: now,
-          tags: [["d", conversationId], ["p", conversationId], ["expiration", String(now + 30)]],
-          content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,
-        },
+      const content = stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START;
+      const wrap = wrapTypingGiftWrap(
         this.ourSecretKey,
+        conversationId,
+        content,
+        conversationId,
       );
-      await this.publishWrap(event as unknown as NTNostrEvent);
+      await this.publishWrap(wrap);
     } catch (e) {
       log.debug("phantomchat: sendTyping publish failed", {
         error: (e as Error).message,
@@ -704,14 +682,14 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   /**
-   * Group typing tick. One kind-30001 parameterized replaceable event tagged
-   * with the group id, a `d` tag (group id for serialization), an `expiration`
-   * tag (30s TTL), and every member's `#p` (so the PWA's `#p:[self]`
-   * subscription delivers it to each member). The `['group', groupId]` tag is
-   * what makes the PWA render the dots inside the group chat — without it a
-   * group-message reply-in-progress shows as a 1:1 DM typing indicator (the HQ
-   * mis-routing). `stop` emits the STOP marker. Best-effort; mirrors
-   * sendTyping's never-throw contract.
+   * Group typing tick. Gift-wraps (kind-1059) the typing rumor separately for
+   * each group member. The inner kind-14 rumor carries ['d', groupId] and
+   * ['group', groupId] tags; each outer kind-1059 is signed with its own
+   * ephemeral key. The `['group', groupId]` tag is what makes the PWA render
+   * the dots inside the group chat — without it a group-message reply-in-progress
+   * shows as a 1:1 DM typing indicator (the HQ mis-routing).
+   *
+   * Best-effort; mirrors sendTyping's never-throw contract.
    */
   async sendGroupTyping(
     groupId: string,
@@ -724,22 +702,16 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     ].filter((h) => h !== ourHexLower);
     if (others.length === 0) return;
     try {
-      const now = Math.floor(Date.now() / 1000);
-      const event = finalizeEvent(
-        {
-          kind: NOSTR_KIND_TYPING,
-          created_at: now,
-          tags: [
-            ["d", groupId],
-            ["group", groupId],
-            ["expiration", String(now + 30)],
-            ...others.map((hex) => ["p", hex]),
-          ],
-          content: stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START,
-        },
+      const content = stop ? TYPING_CONTENT_STOP : TYPING_CONTENT_START;
+      const wraps = wrapGroupTypingGiftWrap(
         this.ourSecretKey,
+        others,
+        content,
+        groupId,
       );
-      await this.publishWrap(event as unknown as NTNostrEvent);
+      for (const wrap of wraps) {
+        await this.publishWrap(wrap);
+      }
     } catch (e) {
       log.debug("phantomchat: sendGroupTyping publish failed", {
         error: (e as Error).message,

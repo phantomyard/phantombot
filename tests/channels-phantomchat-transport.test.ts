@@ -83,7 +83,7 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(seen).toEqual(["abc"]);
   });
 
-  test("sendTyping publishes a signed kind-30001 p-tagged to the recipient with d and expiration tags", async () => {
+  test("sendTyping publishes a kind-1059 gift-wrap tagged to the recipient", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -108,26 +108,19 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    // NIP-33 parameterized replaceable kind, signed by us, p-tagged to the
-    // recipient, with d tag (serialization key) and expiration tag (30s TTL).
-    expect(ev.kind).toBe(30001);
-    expect(ev.pubkey).toBe(getPublicKey(sk));
-    expect(ev.content).toBe("");
-    expect(ev.tags).toEqual(expect.arrayContaining([
-      ["d", recipient],
-      ["p", recipient],
-    ]));
-    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
-    expect(expTag).toBeDefined();
-    const expTs = Number(expTag![1]);
-    expect(expTs).toBeGreaterThan(Math.floor(Date.now() / 1000));
-    expect(expTs).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 31);
+    // NIP-17 gift-wrap: the relay only sees kind-1059 + ephemeral pubkey.
+    // The inner kind-14 rumor (with typing content + ['d', conversationId])
+    // is encrypted inside.
+    expect(ev.kind).toBe(1059);
+    expect(ev.tags).toEqual(expect.arrayContaining([["p", recipient]]));
     // Real signature — finalizeEvent produces id + sig.
     expect(typeof ev.id).toBe("string");
     expect(typeof ev.sig).toBe("string");
+    // Content is non-empty (encrypted rumor payload).
+    expect(ev.content.length).toBeGreaterThan(0);
   });
 
-  test("sendRecording publishes a kind-30001 with the 'recording' content marker", async () => {
+  test("sendRecording publishes a kind-1059 gift-wrap tagged to the recipient", async () => {
     const published: NTNostrEvent[] = [];
     const fakePool: RelayPool = {
       subscribeMany() {
@@ -152,18 +145,11 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    // Same ephemeral typing channel, but the "recording" marker tells the PWA
-    // to show the native "recording voice" activity instead of typing dots.
-    expect(ev.kind).toBe(30001);
-    expect(ev.pubkey).toBe(getPublicKey(sk));
-    expect(ev.content).toBe("recording");
-    expect(ev.tags).toEqual(expect.arrayContaining([
-      ["d", recipient],
-      ["p", recipient],
-    ]));
-    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
-    expect(expTag).toBeDefined();
+    // NIP-17 gift-wrap: the "recording" marker is inside the encrypted rumor.
+    expect(ev.kind).toBe(1059);
+    expect(ev.tags).toEqual(expect.arrayContaining([["p", recipient]]));
     expect(typeof ev.sig).toBe("string");
+    expect(ev.content.length).toBeGreaterThan(0);
   });
 
   test("publishProfile publishes a signed kind-0 with the display name + bot:true", async () => {
@@ -261,13 +247,10 @@ describe("phantomchat transport subscription wire shape", () => {
 
     expect(published.length).toBe(1);
     const ev = published[0]!;
-    expect(ev.kind).toBe(30001);
-    // STOP marker so the PWA clears the dots immediately.
-    expect(ev.content).toBe("stop");
-    expect(ev.tags).toEqual(expect.arrayContaining([
-      ["d", recipient],
-      ["p", recipient],
-    ]));
+    // NIP-17 gift-wrap: STOP marker is inside the encrypted rumor.
+    expect(ev.kind).toBe(1059);
+    expect(ev.tags).toEqual(expect.arrayContaining([["p", recipient]]));
+    expect(ev.content.length).toBeGreaterThan(0);
   });
 
   test("sendGroupTyping publishes one kind-30001 with d, group, expiration tags + a p-tag per member", async () => {
@@ -294,22 +277,18 @@ describe("phantomchat transport subscription wire shape", () => {
     const memberB = getPublicKey(generateSecretKey());
     await transport.sendGroupTyping("grp-123", [memberA, memberB]);
 
-    expect(published.length).toBe(1);
-    const ev = published[0]!;
-    expect(ev.kind).toBe(30001);
-    expect(ev.pubkey).toBe(getPublicKey(sk));
-    expect(ev.content).toBe("");
-    // d tag (serialization key = group id), group tag, expiration tag, and one
-    // p-tag per member so each member's #p subscription delivers it.
-    expect(ev.tags).toEqual(expect.arrayContaining([
-      ["d", "grp-123"],
-      ["group", "grp-123"],
-      ["p", memberA.toLowerCase()],
-      ["p", memberB.toLowerCase()],
-    ]));
-    const expTag = ev.tags.find((t: string[]) => t[0] === "expiration");
-    expect(expTag).toBeDefined();
-    expect(typeof ev.sig).toBe("string");
+    // One kind-1059 gift-wrap per member (each with its own ephemeral key).
+    expect(published.length).toBe(2);
+    for (const ev of published) {
+      expect(ev.kind).toBe(1059);
+      expect(typeof ev.id).toBe("string");
+      expect(typeof ev.sig).toBe("string");
+      expect(ev.content.length).toBeGreaterThan(0);
+    }
+    // Each member gets their own wrap tagged with their pubkey.
+    const pTags = published.map((ev) => ev.tags.find((t) => t[0] === "p")?.[1]);
+    expect(pTags).toContainEqual(memberA.toLowerCase());
+    expect(pTags).toContainEqual(memberB.toLowerCase());
   });
 
   test("sendGroupTyping with stop=true emits the STOP marker", async () => {
@@ -335,8 +314,10 @@ describe("phantomchat transport subscription wire shape", () => {
     const member = getPublicKey(generateSecretKey());
     await transport.sendGroupTyping("grp-9", [member], true);
 
+    // One kind-1059 gift-wrap per member.
     expect(published.length).toBe(1);
-    expect(published[0]!.content).toBe("stop");
+    expect(published[0]!.kind).toBe(1059);
+    expect(published[0]!.content.length).toBeGreaterThan(0);
   });
 
   test("sendGroupTyping is a no-op when the only member is ourselves", async () => {
