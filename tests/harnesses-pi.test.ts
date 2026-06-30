@@ -138,7 +138,7 @@ describe("parsePiEvent", () => {
     expect(c).toEqual({ type: "heartbeat" });
   });
 
-  test("emits progress for toolcall_* / tool_use_* assistantMessageEvent (not heartbeat)", () => {
+  test("emits heartbeat for anonymous toolcall_* / tool_use_* assistantMessageEvent noise", () => {
     for (const ameType of [
       // pi 0.79.x names
       "toolcall_start",
@@ -155,8 +155,35 @@ describe("parsePiEvent", () => {
           assistantMessageEvent: { type: ameType, contentIndex: 0 },
           message: {},
         }),
-      ).toEqual({ type: "progress", note: "tool" });
+      ).toEqual({ type: "heartbeat" });
     }
+  });
+
+  test("emits progress for named assistantMessageEvent tool calls", () => {
+    const c = parsePiEvent({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "toolcall_start",
+        contentIndex: 0,
+        toolName: "bash",
+        args: { command: "npm test" },
+      },
+      message: {},
+    });
+    expect(c).toEqual({ type: "progress", note: "bash: npm test" });
+  });
+
+  test("emits progress for assistantMessageEvent tool calls with useful args but no name", () => {
+    const c = parsePiEvent({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "toolcall_delta",
+        contentIndex: 0,
+        partial: { input: { file_path: "/tmp/example.txt" } },
+      },
+      message: {},
+    });
+    expect(c).toEqual({ type: "progress", note: "tool: /tmp/example.txt" });
   });
 
   test("emits heartbeat for text_start / text_end / thinking_start / thinking_end markers", () => {

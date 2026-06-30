@@ -296,10 +296,10 @@ export function renderPayload(req: HarnessRequest): string {
  * time, that's pi actually thinking — the indicator vanishing means the
  * model has gone silent (and may be wedged on a tool call).
  *
- * toolcall_* (pi ≥0.79; formerly tool_use_*) event types inside
- * assistantMessageEvent → `progress` so the channel layer flushes narration
- * into a bubble before the tool runs. thinking_delta + other event types →
- * `heartbeat`.
+ * tool_execution_start carries the useful tool name/args and is the primary
+ * progress signal. Nameless toolcall_* (pi ≥0.79; formerly tool_use_*) events
+ * inside assistantMessageEvent are only liveness noise, so they become
+ * `heartbeat` unless they carry a real tool name or useful args.
  *
  * Exported for testing.
  */
@@ -349,16 +349,17 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   }
 
   if (typeof ame.type === "string") {
-    // toolcall_* assistantMessageEvent: the model has decided to call
-    // a tool — emit `progress` so the channel layer flushes narration
-    // into a bubble before the tool runs. Previously these were mapped
-    // to heartbeats, which kept the typing indicator alive but never
-    // triggered a bubble flush (defeating the purpose of PR #74).
-    //
-    // pi 0.79.x renamed these events `tool_use_*` → `toolcall_*`. Match
-    // both prefixes so narration surfaces across pi versions.
+    // Pi also emits assistantMessageEvent toolcall_* / tool_use_* records while
+    // streaming the assistant message. In practice these can be nameless
+    // internal deltas; surfacing those as progress creates stacks of anonymous
+    // "tool" rows in ACP clients. Keep them as liveness heartbeats unless the
+    // event itself carries enough detail to title a real tool call. The
+    // top-level tool_execution_start remains the canonical useful signal.
     if (ame.type.startsWith("toolcall") || ame.type.startsWith("tool_use")) {
-      return { type: "progress", note: "tool" };
+      const note = buildAssistantToolNote(ame);
+      return note
+        ? { type: "progress", note }
+        : { type: "heartbeat" };
     }
     // thinking_delta + anything else → heartbeat.
     // We intentionally do NOT include the content in the chunk (would leak
@@ -398,4 +399,59 @@ export function piActivity(parsed: unknown, chunk: HarnessChunk): HarnessActivit
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function buildAssistantToolNote(ame: Record<string, unknown>): string | undefined {
+  const partial = isObject(ame.partial) ? ame.partial : undefined;
+  const toolName = firstString(
+    ame.toolName,
+    ame.tool_name,
+    ame.name,
+    partial?.toolName,
+    partial?.tool_name,
+    partial?.name,
+  );
+  const args =
+    ame.args ??
+    ame.input ??
+    partial?.args ??
+    partial?.input ??
+    partial?.parameters;
+
+  if (toolName) return buildToolNote(toolName, args);
+  const detail = extractUsefulArgDetail(args);
+  if (detail) return `tool: ${detail}`;
+  return undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function extractUsefulArgDetail(args: unknown): string | undefined {
+  if (!isObject(args)) return undefined;
+  for (const key of [
+    "command",
+    "cmd",
+    "file_path",
+    "filePath",
+    "path",
+    "query",
+    "pattern",
+    "prompt",
+  ]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      const joined = value
+        .filter((item): item is string => typeof item === "string")
+        .join(" ")
+        .trim();
+      if (joined) return joined;
+    }
+  }
+  return undefined;
 }
