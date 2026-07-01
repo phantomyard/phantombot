@@ -36,8 +36,56 @@
  * cmd in `setsid` and accept the spawn-time race.
  */
 
+import { dirname } from "node:path";
 import type { Subprocess, SpawnOptions } from "bun";
 import { log } from "./logger.ts";
+
+/**
+ * Ensure an absolute executable's OWN directory is on the child's PATH.
+ *
+ * Why this exists (the systemd-vs-Zed harness bug, 2026-07-01): the harness
+ * CLIs (`pi`, and any nvm/fnm/volta-installed `claude`/`gemini`/`codex`) are
+ * Node scripts whose shebang is `#!/usr/bin/env node`. The kernel honors the
+ * shebang by re-invoking `env node`, which needs `node` ON PATH. An
+ * nvm-installed `pi` lives at `~/.nvm/versions/node/<v>/bin/pi` with `node`
+ * RIGHT NEXT TO IT in the same directory — but that directory is only on PATH
+ * inside an interactive/desktop session.
+ *
+ * phantombot's `harnessSearchPath()` is smart enough to FIND `pi` on the
+ * filesystem and spawn it by absolute path, so the spawn itself succeeds. But
+ * the child inherits phantombot's PATH, and under systemd that PATH is narrow
+ * (no nvm dir) — so the shebang's `env node` fails and the process dies with
+ * exit 127. Under Zed / VS Code the extension host inherits the desktop
+ * session's PATH (nvm already on it), so `node` is found and it Just Works —
+ * which is exactly why the same bot answers from the editor but not Telegram.
+ *
+ * The fix is transport-agnostic: prepend the executable's own directory to the
+ * child PATH so `env node` resolves the interpreter sitting beside the binary,
+ * no matter how narrow the parent PATH is. This makes systemd behave like the
+ * editor without tampering with the user's shell/systemd config.
+ *
+ * Only acts when `bin` is ABSOLUTE — a bare command name (`"pi"`) is being
+ * resolved via the existing PATH, and `dirname("pi")` is `"."`, which we must
+ * never inject. Returns a FRESH object (never mutates the caller's env, which
+ * may be the shared `process.env` reference) and is a no-op when the directory
+ * is already present.
+ *
+ * Exported for testing.
+ */
+export function withCommandDirOnPath(
+  bin: string,
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  if (!bin.startsWith("/")) return env;
+  const binDir = dirname(bin);
+  const currentPath = env.PATH ?? "";
+  const entries = currentPath.split(":");
+  if (entries.includes(binDir)) return env;
+  return {
+    ...env,
+    PATH: currentPath ? `${binDir}:${currentPath}` : binDir,
+  };
+}
 
 /**
  * Spawn a subprocess as the leader of a fresh process group/session.
@@ -57,8 +105,17 @@ export function spawnInNewSession<
   if (cmd.length === 0) {
     throw new Error("spawnInNewSession: cmd cannot be empty");
   }
+  // Make the child's PATH self-sufficient for a `#!/usr/bin/env node` shebang:
+  // prepend the binary's own directory (where the matching `node` lives for an
+  // nvm/fnm/volta install) so the interpreter resolves under a narrow systemd
+  // PATH exactly as it does under a desktop/editor session. See
+  // withCommandDirOnPath for the full rationale (exit-127 bug, 2026-07-01).
+  const env = opts.env
+    ? withCommandDirOnPath(cmd[0]!, opts.env as Record<string, string | undefined>)
+    : opts.env;
   return Bun.spawn(cmd, {
     ...opts,
+    env,
     // Undocumented but stable Bun option (maps to POSIX_SPAWN_SETSID).
     // See module docstring for why this beats a `setsid` wrapper.
     detached: true,

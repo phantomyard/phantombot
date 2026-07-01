@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   killProcessGroup,
   spawnInNewSession,
+  withCommandDirOnPath,
 } from "../src/lib/processGroup.ts";
 
 function isAlive(pid: number): boolean {
@@ -190,6 +191,81 @@ describe("killProcessGroup — SIGTERM→SIGKILL escalation", () => {
     // sit out the full 5s grace.
     expect(elapsedMs).toBeLessThan(500);
     expect(isAlive(proc.pid!)).toBe(false);
+  });
+});
+
+describe("withCommandDirOnPath — shebang interpreter resolution", () => {
+  test("prepends an absolute binary's own dir to PATH", () => {
+    const out = withCommandDirOnPath("/opt/nvm/versions/node/v24/bin/pi", {
+      PATH: "/usr/bin:/bin",
+    });
+    expect(out.PATH).toBe("/opt/nvm/versions/node/v24/bin:/usr/bin:/bin");
+  });
+
+  test("is a no-op when the dir is already on PATH", () => {
+    const env = { PATH: "/opt/nvm/versions/node/v24/bin:/usr/bin" };
+    const out = withCommandDirOnPath("/opt/nvm/versions/node/v24/bin/pi", env);
+    // Same object reference back — nothing to change, no needless clone churn.
+    expect(out).toBe(env);
+    expect(out.PATH).toBe("/opt/nvm/versions/node/v24/bin:/usr/bin");
+  });
+
+  test("handles an empty/absent PATH by seeding it with the bin dir", () => {
+    expect(withCommandDirOnPath("/opt/tools/bin/pi", {}).PATH).toBe(
+      "/opt/tools/bin",
+    );
+    expect(withCommandDirOnPath("/opt/tools/bin/pi", { PATH: "" }).PATH).toBe(
+      "/opt/tools/bin",
+    );
+  });
+
+  test("leaves a bare (PATH-resolved) command name untouched", () => {
+    const env = { PATH: "/usr/bin:/bin" };
+    const out = withCommandDirOnPath("pi", env);
+    // A relative command is resolved via the existing PATH; dirname("pi")
+    // is ".", which must NEVER be injected.
+    expect(out).toBe(env);
+    expect(out.PATH).toBe("/usr/bin:/bin");
+  });
+
+  test("never mutates the caller's env object", () => {
+    const env = { PATH: "/usr/bin" };
+    const out = withCommandDirOnPath("/opt/bin/pi", env);
+    expect(out).not.toBe(env);
+    expect(env.PATH).toBe("/usr/bin"); // original untouched
+  });
+});
+
+describe("spawnInNewSession — shebang interpreter on a narrow PATH", () => {
+  test("a #!/usr/bin/env node script beside its interpreter runs with a stripped PATH", async () => {
+    // Reproduce the systemd exit-127 bug in miniature: put a Node-shebang
+    // script in the SAME dir as a `node` symlink, then spawn it with a PATH
+    // that does NOT contain that dir. Without the fix, `env node` fails
+    // (exit 127); with it, the binary's own dir is prepended and node
+    // resolves.
+    const dir = `/tmp/pg-shebang-${process.pid}-${Date.now()}`;
+    await Bun.$`mkdir -p ${dir}`.quiet();
+    // Symlink a real node interpreter next to the script (mirrors nvm layout).
+    await Bun.$`ln -sf ${process.execPath} ${dir}/node`.quiet();
+    const script = `${dir}/fakepi`;
+    await Bun.write(script, "#!/usr/bin/env node\nprocess.stdout.write('ok');\n");
+    await Bun.$`chmod +x ${script}`.quiet();
+
+    const proc = spawnInNewSession([script], {
+      // Deliberately narrow PATH — the bin dir is NOT here.
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+    const out = await new Response(proc.stdout as ReadableStream).text();
+    const code = await proc.exited;
+
+    expect(code).toBe(0); // not 127
+    expect(out).toBe("ok");
+
+    await Bun.$`rm -rf ${dir}`.quiet();
   });
 });
 
