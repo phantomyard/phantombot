@@ -591,7 +591,7 @@ const captureCmd = defineCommand({
       type: "string",
       description:
         "Tag (decision | lesson | person | commitment | norm). Repeatable for multi-tag. " +
-        "`norm` records what is ROUTINE in Andrew's world — it briefs the threat judge so it doesn't cry wolf on normal operations.",
+        "`norm` records what is ROUTINE in the owner's world — it briefs the threat judge so it doesn't cry wolf on normal operations.",
       required: true,
     },
     persona: { type: "string", description: "Persona name." },
