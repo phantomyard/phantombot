@@ -286,8 +286,17 @@ export async function runAcpServer(
         },
         {
           text: (delta) => send(agentMessageChunk(session.sessionId, delta)),
-          progress: (note) =>
-            send(toolCallUpdate(session.sessionId, `tool_${++toolSeq}`, note)),
+          progress: (note, tool) =>
+            send(
+              toolCallUpdate(
+                session.sessionId,
+                `tool_${++toolSeq}`,
+                note,
+                session.cwd,
+                "in_progress",
+                tool,
+              ),
+            ),
         },
       );
     } catch (e) {
