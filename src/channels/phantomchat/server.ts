@@ -55,6 +55,11 @@ import {
   splitIntoSegments,
   StreamSegmenter,
 } from "../streamSegmenter.ts";
+import {
+  createNarrationController,
+  resolveOutgoingSuffix,
+  segmenterOptionsFor,
+} from "../core/streaming.ts";
 import type { ServiceControl } from "../../lib/systemd.ts";
 import type { NostrProfileMeta, PhantomchatTransport } from "./transport.ts";
 import { sttSupport, synthesize, transcribe, ttsSupported } from "../../lib/audio.ts";
@@ -660,24 +665,20 @@ export async function runPhantomchatServer(
 
     const streaming =
       input.config.telegramStreaming ?? DEFAULT_TELEGRAM_STREAMING;
-    const segmenterOptions = {
-      maxSentences: streaming.bubbleMaxSentences,
-      maxChars: streaming.bubbleMaxChars,
-    };
+    const segmenterOptions = segmenterOptionsFor(streaming);
     // Streaming accumulators — mirror core/engine.ts so the PWA gets the same
     // progressive bubbles Telegram does. `streamedReply` is the running sum of
     // text chunks; `consumedReplyChars` is the prefix already delivered as a
     // final bubble OR classified as progress narration and dropped from the
-    // answer; `narrationBuffer` holds classified narration awaiting the timed
-    // flush; `finalSegmenter` is the markdown-aware live splitter.
+    // answer; the narration controller (core/streaming.ts) coalesces classified
+    // narration and flushes it on a clock; `finalSegmenter` is the
+    // markdown-aware live splitter.
     let streamedReply = "";
     let consumedReplyChars = 0;
-    let narrationBuffer = "";
     let finalSegmenter = new StreamSegmenter(segmenterOptions);
     let finalCandidateText = "";
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
-    let lastNarrationFlushAt = Date.now();
     let requestedReplyMode: ReplyModeRequest | undefined;
 
     // Reply-modality routing (mirrors core/engine.ts). Default: mirror the
@@ -767,32 +768,28 @@ export async function runPhantomchatServer(
     // Per-conversation override wins; absent, the config default decides.
     // Suppresses ONLY narration — the final reply is untouched.
     //
-    // TODO(dedup): this narration streaming loop MIRRORS
-    // src/channels/core/engine.ts (its own flushNarration + sendTextSegment).
-    // The gate below is applied in BOTH files — keep them in sync until the two
-    // loops are centralized in a future refactor.
+    // NOTE(dedup): the shared pieces of this loop (segmenter options, the
+    // narration buffer/flush controller, the streamed-suffix reconciliation)
+    // live in core/streaming.ts and are used by both this file and
+    // src/channels/core/engine.ts. The surrounding orchestration is still
+    // mirrored on purpose — the two channels diverge in transport addressing
+    // (group vs 1:1 routing) and Telegram's failure-handling; see issue #245
+    // (Tier B, not planned).
     const narrationEnabled = await resolveNarrationEnabled({
       persona: input.persona,
       conversation: conversationKey,
       configDefault: input.config.chattiness ?? DEFAULT_CHATTINESS,
     });
 
-    // Flush coalesced progress narration on a clock (like core/engine.ts), not
-    // on every tool boundary — tool boundaries classify preceding text as
-    // narration; this decides when that text becomes a bubble. Driven by both
-    // the typing interval below and the chunk boundaries in the loop.
-    const flushNarration = async (force = false): Promise<void> => {
-      if (!narrationEnabled) return;
-      if (narrationBuffer.trim().length === 0) return;
-      const now = Date.now();
-      if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {
-        return;
-      }
-      const pending = narrationBuffer;
-      narrationBuffer = "";
-      lastNarrationFlushAt = now;
-      await sendBubble(pending);
-    };
+    // Coalesce progress narration and flush it on a clock (see core/streaming.ts),
+    // not on every tool boundary. Driven by both the typing interval below and
+    // the chunk boundaries in the loop. No `suppress` here: unlike Telegram,
+    // PhantomChat voice replies are DM-only and gated elsewhere.
+    const narration = createNarrationController({
+      streaming,
+      enabled: narrationEnabled,
+      send: sendBubble,
+    });
 
     const resetFinalCandidate = (): void => {
       finalSegmenter = new StreamSegmenter(segmenterOptions);
@@ -805,7 +802,7 @@ export async function runPhantomchatServer(
     // "working on…" line buffered before the tool started.
     const typingTimer = setInterval(() => {
       sendTypingTick();
-      void flushNarration();
+      void narration.flush();
     }, 2000);
 
     // Register this turn so a /stop or /reset slash command can abort it and
@@ -892,7 +889,7 @@ export async function runPhantomchatServer(
         }
         if (chunk.type === "heartbeat") {
           // Tool completed or model is thinking — a chance to surface narration.
-          await flushNarration();
+          await narration.flush();
         }
         if (chunk.type === "progress") {
           // Surface the latest progress note on the turn handle so /status can
@@ -903,10 +900,10 @@ export async function runPhantomchatServer(
           // narration ("checking your calendar…"): buffer it for the timed
           // flush, then consume it so it is not duplicated in the final answer.
           const unsent = finalCandidateText.slice(finalCandidateSentChars);
-          if (unsent.trim().length > 0) narrationBuffer += unsent;
+          if (unsent.trim().length > 0) narration.append(unsent);
           consumedReplyChars = streamedReply.length;
           resetFinalCandidate();
-          await flushNarration();
+          await narration.flush();
         }
         if (chunk.type === "done") {
           finalReply = chunk.finalText;
@@ -958,13 +955,12 @@ export async function runPhantomchatServer(
     let outText: string;
     if (fullReply.trim().length === 0) {
       outText = "";
-    } else if (
-      consumedReplyChars > 0 &&
-      fullReply.startsWith(streamedReply.slice(0, consumedReplyChars))
-    ) {
-      outText = fullReply.slice(consumedReplyChars);
     } else {
-      outText = fullReply;
+      outText = resolveOutgoingSuffix(
+        fullReply,
+        streamedReply,
+        consumedReplyChars,
+      );
     }
 
     // Persist a model-requested reply-mode change (via meta.replyMode) for

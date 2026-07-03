@@ -63,6 +63,11 @@ import {
   StreamSegmenter,
 } from "../streamSegmenter.ts";
 import {
+  createNarrationController,
+  resolveOutgoingSuffix,
+  segmenterOptionsFor,
+} from "./streaming.ts";
+import {
   formatAttachmentUserText,
   formatReplyToContext,
   inboxDir,
@@ -881,10 +886,7 @@ async function processChatMessage(
       ? input.transport.sendRecording(msg.conversationId)
       : input.transport.sendTyping(msg.conversationId);
   const streaming = input.config.telegramStreaming ?? DEFAULT_TELEGRAM_STREAMING;
-  const segmenterOptions = {
-    maxSentences: streaming.bubbleMaxSentences,
-    maxChars: streaming.bubbleMaxChars,
-  };
+  const segmenterOptions = segmenterOptionsFor(streaming);
 
   // Indicator policy: refresh on EVERY harness chunk (text, heartbeat,
   // progress). When chunks stop, the indicator naturally expires after
@@ -915,7 +917,7 @@ async function processChatMessage(
     if (toolRefreshTimer) return; // already running
     toolRefreshTimer = setInterval(() => {
       refreshIndicator();
-      void flushNarration();
+      void narration.flush();
     }, Math.min(1000, streaming.narrationFlushMs));
   };
   const stopToolRefresh = () => {
@@ -949,8 +951,8 @@ async function processChatMessage(
   //   consumedReplyChars  — prefix length already delivered as final text OR
   //                         classified as narration and intentionally removed
   //                         from the final answer
-  //   narrationBuffer     — classified progress text waiting for the timed
-  //                         progress flush, coalesced across tool calls
+  //   narration           — coalesces classified progress text and flushes it
+  //                         on a clock (see core/streaming.ts)
   //   finalSegmenter      — markdown-aware live splitter for candidate final
   //                         answer text
   //   finalReply          — set on the `done` chunk; authoritative full text
@@ -959,7 +961,6 @@ async function processChatMessage(
   // clips after the full reply is known.
   let streamedReply = "";
   let consumedReplyChars = 0;
-  let narrationBuffer = "";
   let narrationBubblesSent = 0;
   let finalSegmenter = new StreamSegmenter(segmenterOptions);
   let finalCandidateText = "";
@@ -970,7 +971,6 @@ async function processChatMessage(
   let errored: string | undefined;
   let progressCount = 0;
   let chosenHarness: string | undefined;
-  let lastNarrationFlushAt = Date.now();
 
   const sendTextSegment = async (
     text: string,
@@ -1012,32 +1012,29 @@ async function processChatMessage(
   // the sticky semantics. Suppresses ONLY narration; the final reply and error
   // paths are untouched.
   //
-  // TODO(dedup): this narration streaming loop is MIRRORED in
-  // src/channels/phantomchat/server.ts (its own flushNarration + sendBubble).
-  // The gate below is applied in BOTH files — keep them in sync until the two
-  // loops are centralized in a future refactor.
+  // NOTE(dedup): the shared pieces of this loop (segmenter options, the
+  // narration buffer/flush controller, the streamed-suffix reconciliation) live
+  // in core/streaming.ts and are used by both this file and
+  // src/channels/phantomchat/server.ts. The surrounding orchestration is still
+  // mirrored on purpose — the two channels diverge in transport addressing and
+  // Telegram's failure-handling; see issue #245 (Tier B, not planned).
   const narrationEnabled = await resolveNarrationEnabled({
     persona: input.persona,
     conversation: conversationKey,
     configDefault: input.config.chattiness ?? DEFAULT_CHATTINESS,
   });
 
-  // Flush coalesced progress narration on a clock, not on every tool
-  // boundary. Tool boundaries classify preceding text as narration; this
-  // timer decides when, if ever, that narration becomes a progress bubble.
-  const flushNarration = async (force = false) => {
-    if (willReplyWithVoice) return;
-    if (!narrationEnabled) return;
-    if (narrationBuffer.trim().length === 0) return;
-    const now = Date.now();
-    if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {
-      return;
-    }
-    const pending = narrationBuffer;
-    narrationBuffer = "";
-    lastNarrationFlushAt = now;
-    await sendTextSegment(pending, "narration");
-  };
+  // Coalesce progress narration and flush it on a clock (see core/streaming.ts).
+  // Tool boundaries `append()` the preceding un-sent text; `flush()` decides
+  // when it becomes a bubble. `suppress` mirrors the old `if (willReplyWithVoice)
+  // return` guard: voice-out synthesizes once at the end, so interim narration
+  // would just lengthen the spoken output.
+  const narration = createNarrationController({
+    streaming,
+    enabled: narrationEnabled,
+    send: (text) => sendTextSegment(text, "narration"),
+    suppress: () => willReplyWithVoice,
+  });
 
   // Mechanical capture nudge: every CAPTURE_NUDGE_INTERVAL user turns
   // without a `memory capture`, append a reminder to the system-prompt
@@ -1149,7 +1146,7 @@ async function processChatMessage(
         // tool-refresh timer and show the indicator naturally.
         stopToolRefresh();
         refreshIndicator();
-        await flushNarration();
+        await narration.flush();
       }
       if (chunk.type === "progress") {
         progressCount++;
@@ -1169,11 +1166,11 @@ async function processChatMessage(
           finalCandidateSentChars,
         );
         if (unsentCandidate.trim().length > 0) {
-          narrationBuffer += unsentCandidate;
+          narration.append(unsentCandidate);
         }
         consumedReplyChars = streamedReply.length;
         resetFinalCandidate();
-        await flushNarration();
+        await narration.flush();
         // Start a background timer to keep the typing/recording
         // indicator visible during tool execution. Without this,
         // gemini-cli's multi-minute tool runs cause Telegram's
@@ -1310,13 +1307,12 @@ async function processChatMessage(
       narrationBubblesSent > 0 || finalBubblesSent > 0 || isGroupChat
         ? ""
         : "(no reply)";
-  } else if (
-    consumedReplyChars > 0 &&
-    fullReply.startsWith(streamedReply.slice(0, consumedReplyChars))
-  ) {
-    outText = fullReply.slice(consumedReplyChars);
   } else {
-    outText = fullReply;
+    outText = resolveOutgoingSuffix(
+      fullReply,
+      streamedReply,
+      consumedReplyChars,
+    );
   }
 
   if (requestedReplyMode === "default") {
