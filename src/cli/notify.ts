@@ -22,9 +22,10 @@
  * --voice    → synthesized via the configured TTS provider, sent via
  *              sendVoice as an OGG-Opus voice note (TELEGRAM only — Nostr DMs
  *              are text-only, so phantomchat receives the text instead).
- * --persona  → which persona's channels to notify. Selects the persona-bound
- *              Telegram bot (`channels.telegram.personas.<name>`, falling back
- *              to the default bot) AND that persona's `phantomchat.json`.
+ * --persona  → which persona's channels to notify. Broadcasts across the
+ *              persona-bound Telegram bot (`channels.telegram.personas.<name>`)
+ *              AND the default bot when both are configured, plus that persona's
+ *              `phantomchat.json`.
  *              Omitting it uses the default persona. A `tick`-fired notify has
  *              no inbound context, so this is how it lands in the right place.
  * Both message/voice flags can be combined to send text AND voice.
@@ -91,9 +92,9 @@ export interface RunNotifyInput {
   message?: string;
   voice?: string;
   /**
-   * Which persona's channels to notify. Selects the persona-bound Telegram bot
-   * (falling back to the default bot) and that persona's phantomchat.json.
-   * When omitted, the default persona is used.
+   * Which persona's channels to notify. Broadcasts across the persona-bound
+   * Telegram bot AND the default bot (when both are configured), plus that
+   * persona's phantomchat.json. When omitted, the default persona is used.
    */
   persona?: string;
   /** Inject for testing. Default: HttpTelegramTransport with the configured token. */
@@ -120,23 +121,32 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // A channel is a notify target when it has an account/identity AND at least
   // one owner. We BROADCAST to every authorized recipient of each, deduped.
 
-  // Telegram: persona-bound bot if present, else the default bot. Fan out to
-  // every allowedUserId, deduped per (bot token, chatId) so an id repeated in
-  // the allowlist is contacted once.
-  const tg: TelegramAccount | undefined =
-    config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  let tgTarget: { account: TelegramAccount; chatIds: string[] } | undefined;
-  if (tg && tg.allowedUserIds.length > 0) {
+  // Telegram: broadcast across BOTH the persona-bound bot (if this persona has
+  // one) AND the default bot (if configured) — not just one of them. A recipient
+  // is deduped per (bot token, chatId), so an id repeated within an allowlist —
+  // or a persona whose bot IS the default bot — is contacted exactly once, while
+  // the same id on two genuinely different bots (distinct tokens = distinct
+  // chats) is contacted on each.
+  const tgAccounts: TelegramAccount[] = [];
+  const personaBot = config.channels.telegramPersonas?.[persona];
+  if (personaBot) tgAccounts.push(personaBot);
+  if (config.channels.telegram) tgAccounts.push(config.channels.telegram);
+
+  const tgTargets: { account: TelegramAccount; chatIds: string[] }[] = [];
+  {
     const seen = new Set<string>();
-    const chatIds: string[] = [];
-    for (const id of tg.allowedUserIds) {
-      const chatId = String(id);
-      const key = `${tg.token}:${chatId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      chatIds.push(chatId);
+    for (const account of tgAccounts) {
+      if (account.allowedUserIds.length === 0) continue;
+      const chatIds: string[] = [];
+      for (const id of account.allowedUserIds) {
+        const chatId = String(id);
+        const key = `${account.token}:${chatId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        chatIds.push(chatId);
+      }
+      if (chatIds.length > 0) tgTargets.push({ account, chatIds });
     }
-    tgTarget = { account: tg, chatIds };
   }
 
   // Phantomchat: the persona's own phantomchat.json (identity + allowlist).
@@ -169,7 +179,7 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     });
   }
 
-  if (!tgTarget && !pcTarget) {
+  if (tgTargets.length === 0 && !pcTarget) {
     err.write(
       `no notify channel configured for persona '${persona}' — set up Telegram (\`phantombot telegram\`) and/or phantomchat (\`phantombot phantomchat\`) with at least one allowed owner first.\n`,
     );
@@ -179,13 +189,10 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // ── Telegram send (broadcast to all owners) ───────────────────────────
   let textSent = 0;
   let voiceSent = 0;
-  if (tgTarget) {
-    const transport =
-      input.transport ?? new HttpTelegramTransport(tgTarget.account.token);
-
-    // Pre-synthesize ONCE if voice was requested (not per recipient). Telegram-
-    // only — Nostr DMs carry no audio. Doing it before the text sends means a
-    // provider misconfig fails before we half-notify.
+  if (tgTargets.length > 0) {
+    // Pre-synthesize ONCE if voice was requested (not per recipient, not per
+    // account). Telegram-only — Nostr DMs carry no audio. Doing it before the
+    // text sends means a provider misconfig fails before we half-notify.
     let voiceAudio: { data: Buffer; mime: string } | undefined;
     if (input.voice) {
       const support = ttsSupport(config);
@@ -211,24 +218,30 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
       }
     }
 
-    // Fan out to every deduped recipient. Each send is independent: a failure
-    // to one owner is logged and swallowed, never aborting the others and never
-    // surfaced to the user.
-    for (const chatId of tgTarget.chatIds) {
-      try {
-        if (input.message) {
-          await transport.sendMessage(chatId, input.message);
-          textSent++;
+    // Fan out across every account (persona bot + default bot), then every
+    // deduped recipient of each. A single injected transport (tests) is reused
+    // for all accounts; in production each account gets its own transport bound
+    // to its token. Each send is independent: a failure to one owner is logged
+    // and swallowed, never aborting the others and never surfaced to the user.
+    for (const target of tgTargets) {
+      const transport =
+        input.transport ?? new HttpTelegramTransport(target.account.token);
+      for (const chatId of target.chatIds) {
+        try {
+          if (input.message) {
+            await transport.sendMessage(chatId, input.message);
+            textSent++;
+          }
+          if (voiceAudio) {
+            await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
+            voiceSent++;
+          }
+        } catch (e) {
+          log.warn("notify: telegram send failed", {
+            chatId,
+            error: (e as Error).message,
+          });
         }
-        if (voiceAudio) {
-          await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
-          voiceSent++;
-        }
-      } catch (e) {
-        log.warn("notify: telegram send failed", {
-          chatId,
-          error: (e as Error).message,
-        });
       }
     }
   }
@@ -262,7 +275,7 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   }
 
   const channels = [
-    tgTarget ? "telegram" : undefined,
+    tgTargets.length > 0 ? "telegram" : undefined,
     pcTarget ? "phantomchat" : undefined,
   ].filter(Boolean);
   out.write(

@@ -220,7 +220,7 @@ describe("runNotify text (broadcast)", () => {
 });
 
 describe("runNotify persona routing (broadcast)", () => {
-  test("--persona routes to that persona's bot + ALL its allowed ids", async () => {
+  test("--persona broadcasts to the persona bot AND the default bot (all ids of each)", async () => {
     const cfg = baseConfig();
     cfg.channels.telegramPersonas = {
       amanda: {
@@ -240,12 +240,47 @@ describe("runNotify persona routing (broadcast)", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    // The persona's bot, ALL ids ([7, 8]) — not the default ([42, 99]).
+    // #249: fan out to EVERY authorized recipient on EVERY configured account —
+    // the persona bot's ids ([7, 8]) AND the default bot's ids ([42, 99]).
+    // Persona bot first, then default.
     expect(transport.sent).toEqual([
       { chatId: "7", text: "amanda ping" },
       { chatId: "8", text: "amanda ping" },
+      { chatId: "42", text: "amanda ping" },
+      { chatId: "99", text: "amanda ping" },
     ]);
-    expect(out.text).toContain("text=2");
+    expect(out.text).toContain("text=4");
+  });
+
+  test("persona bot sharing the default token dedups per (token, chatId) across accounts", async () => {
+    const cfg = baseConfig();
+    // Same token as the default bot ([42, 99]); id 42 is shared across both.
+    cfg.channels.telegramPersonas = {
+      amanda: {
+        token: "fake-token",
+        pollTimeoutS: 30,
+        allowedUserIds: [42, 7],
+      },
+    };
+    const transport = new FakeTransport();
+    const out = new CaptureStream();
+    const code = await runNotify({
+      config: cfg,
+      transport,
+      persona: "amanda",
+      message: "ping",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    // Persona account (fake-token): 42, 7. Default account (fake-token): 42 is a
+    // (token, chatId) dup → skipped; 99 is new. Net: 42, 7, 99 — 42 exactly once.
+    expect(transport.sent).toEqual([
+      { chatId: "42", text: "ping" },
+      { chatId: "7", text: "ping" },
+      { chatId: "99", text: "ping" },
+    ]);
+    expect(out.text).toContain("text=3");
   });
 
   test("persona with no bot → falls back to the default bot's ids", async () => {
