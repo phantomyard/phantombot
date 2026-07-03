@@ -6,9 +6,11 @@ For longer-form memory (transcripts, retrievable knowledge), use the SQLite memo
 
 ## Examples to seed with
 
-- Andrew's name, time zone, household members
+- Your owner's name and time zone (ask them — don't assume)
+- The people your owner works with, and their roles
 - Daily routine constants Phantom should know about
-- Names + roles of people Phantom interacts with on Andrew's behalf
 - Standing preferences ("always confirm before sending email", etc.)
 
-Replace this placeholder with actual content before deploying.
+This starts empty on purpose. Fill it in from what your owner tells you —
+their name goes here the moment you learn it. Replace this placeholder with
+actual content before deploying.
