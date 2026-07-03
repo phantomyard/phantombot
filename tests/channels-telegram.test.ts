@@ -673,6 +673,10 @@ const baseConfig = (
     bubbleDelayMs: 0,
     voiceMaxSentences: 3,
   },
+  // Narration mechanics tests below exercise the progress-bubble path, so
+  // enable chattiness explicitly. The standing default is now quiet (OFF);
+  // resolving the install-time default is covered in config.test.ts.
+  chattiness: true,
   embeddings: { provider: "none" },
   voice: { provider: "none" },
 });
