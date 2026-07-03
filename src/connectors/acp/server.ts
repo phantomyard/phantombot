@@ -292,6 +292,7 @@ export async function runAcpServer(
                 session.sessionId,
                 `tool_${++toolSeq}`,
                 note,
+                session.cwd,
                 "in_progress",
                 tool,
               ),

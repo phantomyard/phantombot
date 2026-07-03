@@ -15,6 +15,8 @@
  * stdout, and stdout is the protocol channel — never log there. See server.ts.
  */
 
+import {isAbsolute, resolve as resolvePath} from "node:path";
+
 import type {
   ToolCallDetail,
   ToolKind,
@@ -208,6 +210,26 @@ export function agentMessageChunk(
 }
 
 /**
+ * Resolve tool-call `locations` to ABSOLUTE paths against the ACP session cwd.
+ *
+ * The ACP spec requires `ToolCallLocation.path` to be an absolute file path so
+ * the editor can open/follow it. Harness tool args, however, are usually
+ * relative to the session working dir (`src/foo.ts`), and a few are already
+ * absolute. We resolve the relative ones against `cwd` and pass absolute ones
+ * through untouched. Pure computation — `node:path` does no I/O. `cwd` is the
+ * ACP session working dir, which is always absolute (server defaults it to
+ * `process.cwd()`), so the result is always absolute regardless of input.
+ */
+export function toAbsoluteLocations(
+  locations: readonly ToolLocation[],
+  cwd: string
+): ToolLocation[] {
+  return locations.map((loc) =>
+    isAbsolute(loc.path) ? loc : {...loc, path: resolvePath(cwd, loc.path)}
+  );
+}
+
+/**
  * Build a presentational `tool_call` `session/update`.
  *
  * `detail` (issue #231) optionally carries the structured tool-call info —
@@ -216,11 +238,15 @@ export function agentMessageChunk(
  * the pre-#231 title-only behaviour) are unaffected. `content` is threaded but
  * emitted only when `detail.content` is set — currently never, pending the
  * secret-masking carry-over noted on `ToolCallDetail`.
+ *
+ * `cwd` is the ACP session working dir; `locations` are resolved against it to
+ * absolute paths before hitting the wire, as the ACP spec requires.
  */
 export function toolCallUpdate(
   sessionId: string,
   toolCallId: string,
   title: string,
+  cwd: string,
   status: ToolCallUpdate["status"] = "in_progress",
   detail?: Pick<ToolCallDetail, "kind" | "locations" | "content">,
 ): JsonRpcRequest {
@@ -233,7 +259,7 @@ export function toolCallUpdate(
   if (detail) {
     if (detail.kind) update.kind = detail.kind;
     if (detail.locations && detail.locations.length > 0) {
-      update.locations = detail.locations;
+      update.locations = toAbsoluteLocations(detail.locations, cwd);
     }
     if (detail.content) {
       update.content = [

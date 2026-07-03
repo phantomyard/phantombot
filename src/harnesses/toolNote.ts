@@ -46,7 +46,14 @@ export type ToolKind =
 
 /** A file location the editor can render as a clickable jump-to-file link. */
 export interface ToolLocation {
-  /** Absolute or workspace-relative path the editor should open. */
+  /**
+   * The path the editor should open. As extracted here it is whatever the
+   * harness tool arg contained — usually relative to the session cwd
+   * (`src/foo.ts`), occasionally already absolute. The ACP boundary
+   * (`toAbsoluteLocations` in connectors/acp/protocol.ts) resolves relative
+   * paths against the session cwd so the wire always carries an ABSOLUTE path,
+   * as the ACP `ToolCallLocation.path` spec requires.
+   */
   path: string;
   /** 1-based line to jump to, when known. Optional — file open still works. */
   line?: number;
