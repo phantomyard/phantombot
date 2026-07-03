@@ -737,8 +737,11 @@ phantombot notify --voice "Backup failed on pve-3."
 phantombot notify --message "Text" --voice "Voice"
 ```
 
-Notifications are sent to the Telegram allowlist. Phantombot refuses to notify
-if no allowed users are configured.
+Notifications **broadcast to every authorized recipient on every configured
+channel** — every Telegram allowed user id and every phantomchat allowed npub,
+deduped, each delivered independently so one blocked recipient never stops the
+rest. There is no "primary only" mode. Phantombot refuses to notify if no
+allowed users are configured.
 
 Background work should stay quiet unless something material happened or the
 user explicitly asked to be interrupted.

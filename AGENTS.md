@@ -94,7 +94,7 @@ phantombot/
 │   │   ├── install.ts uninstall.ts
 │   │   ├── update.ts         # phantombot update (consumes the GH releases feed)
 │   │   ├── env.ts            # phantombot env (manages ~/.env)
-│   │   ├── notify.ts         # phantombot notify (Telegram text/voice)
+│   │   ├── notify.ts         # phantombot notify (broadcasts text/voice to ALL authorized ids on EVERY channel, deduped, per-recipient independent delivery — #249)
 │   │   ├── task.ts           # phantombot task (CRUD over scheduled tasks)
 │   │   ├── tick.ts           # phantombot tick (called by phantombot-tick.timer every minute)
 │   │   ├── voice.ts          # phantombot voice (TUI: TTS/STT provider config)

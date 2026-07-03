@@ -124,7 +124,7 @@ describe("runNotify input validation", () => {
 });
 
 describe("runNotify text", () => {
-  test("sends --message to the FIRST allowed user only (first-owner routing)", async () => {
+  test("broadcasts --message to EVERY allowed user (fan-out)", async () => {
     const transport = new FakeTransport();
     const out = new CaptureStream();
     const code = await runNotify({
@@ -135,16 +135,67 @@ describe("runNotify text", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    // First-owner-per-channel: only id 42, NOT the whole [42, 99] list.
+    // Fan-out: BOTH ids in [42, 99], not just the first.
     expect(transport.sent).toEqual([
       { chatId: "42", text: "important thing" },
+      { chatId: "99", text: "important thing" },
     ]);
-    expect(out.text).toContain("text=1");
+    expect(out.text).toContain("text=2");
+  });
+
+  test("dedups a repeated allowed user id to a single send", async () => {
+    const cfg = baseConfig();
+    cfg.channels.telegram!.allowedUserIds = [42, 99, 42];
+    const transport = new FakeTransport();
+    const out = new CaptureStream();
+    const code = await runNotify({
+      config: cfg,
+      transport,
+      message: "once each",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(transport.sent).toEqual([
+      { chatId: "42", text: "once each" },
+      { chatId: "99", text: "once each" },
+    ]);
+    expect(out.text).toContain("text=2");
+  });
+
+  test("a mid-list recipient failure still delivers to the rest and is not surfaced", async () => {
+    const cfg = baseConfig();
+    cfg.channels.telegram!.allowedUserIds = [42, 99, 123];
+    const transport = new FakeTransport();
+    // Make the middle recipient (99) throw; 42 and 123 must still land.
+    const origSend = transport.sendMessage.bind(transport);
+    transport.sendMessage = async (chatId: string, text: string) => {
+      if (chatId === "99") throw new Error("blocked by user");
+      return origSend(chatId, text);
+    };
+    const err = new CaptureStream();
+    const out = new CaptureStream();
+    const code = await runNotify({
+      config: cfg,
+      transport,
+      message: "resilient",
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    // 42 and 123 delivered; 99 swallowed.
+    expect(transport.sent).toEqual([
+      { chatId: "42", text: "resilient" },
+      { chatId: "123", text: "resilient" },
+    ]);
+    expect(out.text).toContain("text=2");
+    // Failures live in logs only — never surfaced to the user via stderr.
+    expect(err.text).toBe("");
   });
 });
 
 describe("runNotify persona routing", () => {
-  test("--persona routes to that persona's bot + first allowed id", async () => {
+  test("--persona routes to that persona's bot + every allowed id", async () => {
     const cfg = baseConfig();
     cfg.channels.telegramPersonas = {
       amanda: {
@@ -164,12 +215,15 @@ describe("runNotify persona routing", () => {
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    // The persona's bot, first id only ([7]) — not the default ([42, 99]).
-    expect(transport.sent).toEqual([{ chatId: "7", text: "amanda ping" }]);
-    expect(out.text).toContain("text=1");
+    // The persona's bot, ALL ids ([7, 8]) — not the default ([42, 99]).
+    expect(transport.sent).toEqual([
+      { chatId: "7", text: "amanda ping" },
+      { chatId: "8", text: "amanda ping" },
+    ]);
+    expect(out.text).toContain("text=2");
   });
 
-  test("persona with no bot → falls back to the default bot's first id", async () => {
+  test("persona with no bot → falls back to the default bot's every id", async () => {
     const cfg = baseConfig();
     cfg.channels.telegramPersonas = {
       amanda: { token: "t", pollTimeoutS: 30, allowedUserIds: [7] },
@@ -184,10 +238,13 @@ describe("runNotify persona routing", () => {
       out,
       err: new CaptureStream(),
     });
-    // No bot for 'nobody' → default telegram, first id (42).
+    // No bot for 'nobody' → default telegram, every id ([42, 99]).
     expect(code).toBe(0);
-    expect(transport.sent).toEqual([{ chatId: "42", text: "hi" }]);
-    expect(out.text).toContain("text=1");
+    expect(transport.sent).toEqual([
+      { chatId: "42", text: "hi" },
+      { chatId: "99", text: "hi" },
+    ]);
+    expect(out.text).toContain("text=2");
   });
 });
 
@@ -208,7 +265,7 @@ describe("runNotify voice", () => {
     });
     expect(code).toBe(0);
     expect(err.text).toContain("voice synthesis unavailable");
-    expect(transport.sent.length).toBe(1); // text to first owner
+    expect(transport.sent.length).toBe(2); // text fanned out to both owners
     expect(transport.voiceSent.length).toBe(0);
   });
 
@@ -251,9 +308,9 @@ describe("runNotify voice", () => {
         err: new CaptureStream(),
       });
       expect(code).toBe(0);
-      expect(transport.voiceSent.length).toBe(1); // voice to first owner
+      expect(transport.voiceSent.length).toBe(2); // voice fanned out to both owners
       expect(transport.sent.length).toBe(0);
-      expect(out.text).toContain("voice=1");
+      expect(out.text).toContain("voice=2");
     } finally {
       (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
     }

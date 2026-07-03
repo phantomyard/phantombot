@@ -6,13 +6,15 @@
  * for silence as default. The harnessed agent calls `phantombot notify`
  * inside its prompt when it decides the user should hear about something.
  *
- * ROUTING: notify reaches the FIRST owner of EVERY configured channel for the
- * persona — the first Telegram allowed_user_id AND the first phantomchat
- * allowed npub. If both channels are configured, the owner gets it on BOTH, so
- * an incident is never missed because one channel is down. The "first" owner is
- * the primary; re-order the allowlist (via `phantombot telegram` /
- * `phantombot phantomchat`) to change who's primary. This is deliberately NOT a
- * broadcast to every id — exactly one recipient per channel.
+ * ROUTING: notify BROADCASTS to EVERY authorized recipient on EVERY configured
+ * channel for the persona — every Telegram allowed_user_id AND every phantomchat
+ * allowed npub. If both channels are configured, every authorized owner gets it
+ * on BOTH, so an incident is never missed because one channel is down or one
+ * recipient wasn't the "primary". Recipients are deduped (per (bot, chatId) for
+ * Telegram, per recipientHex for phantomchat) so a repeated entry gets one send,
+ * and delivery is per-recipient with independent error handling — one recipient
+ * failing (blocked bot, dead relay) never aborts delivery to the others. This is
+ * unconditional; there is no "primary only" mode and no opt-out.
  *
  * --message  → text via sendMessage (both channels)
  * --voice    → synthesized via the configured TTS provider, sent via
@@ -114,28 +116,33 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
 
   // ── Resolve the configured channels for this persona ──────────────────
   // A channel is a notify target when it has an account/identity AND at least
-  // one owner. We notify the FIRST owner of each (the primary). Not a broadcast.
+  // one owner. We BROADCAST to every authorized owner of each, deduped.
 
-  // Telegram: persona-bound bot if present, else the default bot.
+  // Telegram: persona-bound bot if present, else the default bot. Fan out to
+  // EVERY allowed user id on that bot, deduped per chatId (an id repeated in the
+  // allowlist gets one send, not many).
   const tg: TelegramAccount | undefined =
     config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  const tgTarget =
+  const tgChatIds =
     tg && tg.allowedUserIds.length > 0
-      ? { account: tg, chatId: tg.allowedUserIds[0] }
-      : undefined;
+      ? [...new Set(tg.allowedUserIds.map((id) => String(id)))]
+      : [];
+  const tgTarget =
+    tg && tgChatIds.length > 0 ? { account: tg, chatIds: tgChatIds } : undefined;
 
-  // Phantomchat: the persona's own phantomchat.json (identity + allowlist).
+  // Phantomchat: the persona's own phantomchat.json (identity + allowlist). Fan
+  // out to EVERY allowed npub, deduped per recipientHex.
   let pcTarget:
-    | { secretKey: Uint8Array; relays: string[]; recipientHex: string }
+    | { secretKey: Uint8Array; relays: string[]; recipientHexes: string[] }
     | undefined;
   try {
     const pc = loadPhantomchatPersonaConfig(personaDir(config, persona));
-    const firstHex = pc?.allowedHex[0];
-    if (pc && firstHex) {
+    const hexes = pc ? [...new Set(pc.allowedHex)] : [];
+    if (pc && hexes.length > 0) {
       pcTarget = {
         secretKey: pc.identity.secretKey,
         relays: pc.relays,
-        recipientHex: firstHex,
+        recipientHexes: hexes,
       };
     }
   } catch (e) {
@@ -152,7 +159,7 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     return 2;
   }
 
-  // ── Telegram send (first owner) ───────────────────────────────────────
+  // ── Telegram send (every authorized owner) ────────────────────────────
   let textSent = 0;
   let voiceSent = 0;
   if (tgTarget) {
@@ -187,45 +194,51 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
       }
     }
 
-    const chatId = String(tgTarget.chatId);
-    try {
-      if (input.message) {
-        await transport.sendMessage(chatId, input.message);
-        textSent++;
+    // Fan out to every authorized chatId. Per-recipient try/catch: one blocked
+    // or dead recipient is logged and swallowed, never aborting the rest.
+    for (const chatId of tgTarget.chatIds) {
+      try {
+        if (input.message) {
+          await transport.sendMessage(chatId, input.message);
+          textSent++;
+        }
+        if (voiceAudio) {
+          await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
+          voiceSent++;
+        }
+      } catch (e) {
+        log.warn("notify: telegram send failed", {
+          chatId,
+          error: (e as Error).message,
+        });
       }
-      if (voiceAudio) {
-        await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
-        voiceSent++;
-      }
-    } catch (e) {
-      log.warn("notify: telegram send failed", {
-        chatId,
-        error: (e as Error).message,
-      });
     }
   }
 
-  // ── Phantomchat send (first owner) ────────────────────────────────────
+  // ── Phantomchat send (every authorized owner) ─────────────────────────
   // Nostr DMs are text-only: send --message, or fall back to the --voice text
-  // so a voice-only notify still reaches the owner here as text.
+  // so a voice-only notify still reaches every owner here as text. Per-recipient
+  // try/catch so one dead relay/recipient never aborts delivery to the rest.
   let pcSent = 0;
   if (pcTarget) {
     const text = input.message ?? input.voice;
     if (text) {
       const send = input.phantomchatSend ?? defaultPhantomchatSend;
-      try {
-        await send({
-          secretKey: pcTarget.secretKey,
-          relays: pcTarget.relays,
-          recipientHex: pcTarget.recipientHex,
-          text,
-        });
-        pcSent++;
-      } catch (e) {
-        log.warn("notify: phantomchat send failed", {
-          recipient: pcTarget.recipientHex.slice(0, 12) + "…",
-          error: (e as Error).message,
-        });
+      for (const recipientHex of pcTarget.recipientHexes) {
+        try {
+          await send({
+            secretKey: pcTarget.secretKey,
+            relays: pcTarget.relays,
+            recipientHex,
+            text,
+          });
+          pcSent++;
+        } catch (e) {
+          log.warn("notify: phantomchat send failed", {
+            recipient: recipientHex.slice(0, 12) + "…",
+            error: (e as Error).message,
+          });
+        }
       }
     }
   }
@@ -260,7 +273,7 @@ export default defineCommand({
   meta: {
     name: "notify",
     description:
-      "Surface a message to the user on every configured channel (first Telegram owner + first phantomchat owner). The harnessed agent calls this when a scheduled task or background work needs to reach the user.",
+      "Surface a message to every authorized recipient on every configured channel (all Telegram allowed ids + all phantomchat allowed npubs, deduped). The harnessed agent calls this when a scheduled task or background work needs to reach the user.",
   },
   args: {
     message: {
@@ -275,7 +288,7 @@ export default defineCommand({
     persona: {
       type: "string",
       description:
-        "Which persona's channels to notify (its Telegram bot + phantomchat identity). Defaults to the default persona. Reaches the first owner of each configured channel.",
+        "Which persona's channels to notify (its Telegram bot + phantomchat identity). Defaults to the default persona. Reaches every authorized owner of each configured channel.",
     },
   },
   async run({ args }) {

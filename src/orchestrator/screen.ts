@@ -296,12 +296,13 @@ export function makeScreener(
   // persona context is the briefing.
   const recall = deps.recall;
 
-  // Route the escalation notify for THIS persona. runNotify reaches the first
-  // owner of every configured channel (persona-bound Telegram bot — falling back
-  // to the default bot — AND the persona's phantomchat identity), which is
-  // exactly the set principalConversations() grounds into, so the owner's
-  // approve/deny reply always has a referent regardless of which channel they
-  // answer on. (Generalises the PR #172 fix from telegram-only to multi-channel.)
+  // Route the escalation notify for THIS persona. runNotify broadcasts to every
+  // authorized owner of every configured channel (persona-bound Telegram bot —
+  // falling back to the default bot — AND the persona's phantomchat identity),
+  // which is exactly the set principalConversations() grounds into, so whichever
+  // owner replies approve/deny always has a referent regardless of who they are
+  // or which channel they answer on. (Generalises the PR #172 fix from
+  // telegram-only-first-owner to multi-channel broadcast, #249.)
   const notify =
     deps.notify ??
     ((message: string) => runNotify({ config, message, persona }));
@@ -423,36 +424,34 @@ export function makeScreener(
 
 /**
  * Resolve the principal conversation key(s) for this persona — one per
- * configured channel's PRIMARY (first) owner, matching where `notify` lands the
- * held-request alert. The principal's approve/deny reply arrives in one of these
- * conversations, so the held episode must be grounded into each.
+ * authorized owner on each configured channel, matching where `notify` lands
+ * the held-request alert. The principal's approve/deny reply can arrive in ANY
+ * of these conversations, so the held episode must be grounded into each.
  *
- *   - Telegram: persona-bound bot if configured, else the default bot; the
- *     first allowed user id → `telegram:<userId>`.
- *   - Phantomchat: the persona's first allowed npub → `phantomchat:<hex>` (the
- *     server keys conversations by the lowercase sender hex).
+ *   - Telegram: persona-bound bot if configured, else the default bot; EVERY
+ *     allowed user id → `telegram:<userId>`.
+ *   - Phantomchat: EVERY allowed npub → `phantomchat:<hex>` (the server keys
+ *     conversations by the lowercase sender hex).
  *
  * Empty when neither channel is configured / has an owner (grounding no-op).
  *
- * NOTE: Telegram uses the FIRST id only now (not every id), to mirror notify's
- * first-owner-per-channel routing — the grounding target must match the notify
- * recipient or the reply has no referent.
+ * NOTE: this fans out to EVERY owner to mirror notify's broadcast-to-all routing
+ * (#249) — the grounding targets must match the notify recipients or a reply
+ * from a non-first owner has no referent. Deduped (matching notify).
  */
 function principalConversations(config: Config, persona: string): string[] {
   const out: string[] = [];
 
   const account =
     config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  const firstId = account?.allowedUserIds[0];
-  if (firstId !== undefined) {
-    out.push(`telegram:${firstId}`);
+  for (const id of new Set(account?.allowedUserIds ?? [])) {
+    out.push(`telegram:${id}`);
   }
 
   try {
     const pc = loadPhantomchatPersonaConfig(personaDir(config, persona));
-    const firstHex = pc?.allowedHex[0];
-    if (firstHex) {
-      out.push(`phantomchat:${firstHex.toLowerCase()}`);
+    for (const hex of new Set(pc?.allowedHex ?? [])) {
+      out.push(`phantomchat:${hex.toLowerCase()}`);
     }
   } catch {
     // No phantomchat config / unresolvable persona dir — telegram-only grounding.

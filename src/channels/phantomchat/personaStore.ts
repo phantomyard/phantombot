@@ -40,8 +40,8 @@
  *   }
  *
  * Allowlist semantics:
- *   - allowed_npubs non-empty → only those npubs are answered. The FIRST entry
- *     is the incident-notification target.
+ *   - allowed_npubs non-empty → only those npubs are answered. EVERY entry is an
+ *     incident-notification target (`notify` broadcasts to all, deduped — #249).
  *   - allowed_npubs empty + tofu true → TOFU: first DMer is trusted + locked.
  *   - allowed_npubs empty + tofu false/absent → open bot (answer anyone), warned.
  */
