@@ -374,7 +374,7 @@ toggles those interim bubbles **per conversation** (the final reply and any
 errors always come through either way):
 
 - `/chattiness off` — quiet: no progress bubbles, just the final reply.
-- `/chattiness on` — show the progress bubbles (the default).
+- `/chattiness on` — show the progress bubbles.
 - `/chattiness default` — clear this chat's setting; follow the standing default.
 - `/chattiness off default` (or `on default`) — also write the standing default
   to `config.toml` so **new** chats start that way.
@@ -382,11 +382,14 @@ errors always come through either way):
 Scoped to Telegram + PhantomChat (voice and the CLI never emit these bubbles).
 The editor (Zed/VS Code) surface follows the config default only.
 
-Set the standing default directly in config — `true` (show bubbles) is the
-default, so nothing changes unless you opt out:
+**The standing default depends on whether the host is configured.** A fresh /
+not-yet-configured install (no `config.toml` on disk) starts **quiet** — new
+phantoms just send the final answer until you opt in. An install that already
+has a `config.toml` keeps bubbles **on** unless you set otherwise, so existing
+users are never flipped underneath them. Set it explicitly either way:
 
 ```toml
-# Top-level. Set false to make phantombot quiet-by-default everywhere.
+# Top-level. true = show progress bubbles everywhere; false = quiet-by-default.
 chattiness = true
 ```
 

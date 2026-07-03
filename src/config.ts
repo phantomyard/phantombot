@@ -205,11 +205,22 @@ export interface TelegramStreamingSettings {
 }
 
 /**
- * Standing default for interim progress-narration bubbles when neither a
- * per-conversation override nor a config value is set. ON so behaviour is
- * unchanged for existing users. See lib/chattiness.ts.
+ * Standing default for interim progress-narration bubbles on an *already
+ * configured* host (a `config.toml` exists but sets no `chattiness` key),
+ * and the fallback used by read sites given a partial config. ON so
+ * behaviour is unchanged for existing users. See lib/chattiness.ts.
  */
 export const DEFAULT_CHATTINESS = true;
+
+/**
+ * Standing default for a fresh / not-yet-configured install — no
+ * `config.toml` on disk. OFF (quiet) so new phantoms start calm: just the
+ * final answer, no running commentary, until an operator opts in via
+ * `chattiness = true` or `/chattiness on`. This only affects hosts with no
+ * config file; the moment one exists, DEFAULT_CHATTINESS applies instead so
+ * existing users are never flipped underneath them.
+ */
+export const DEFAULT_CHATTINESS_UNCONFIGURED = false;
 
 export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
   narrationFlushMs: 4500,
@@ -282,12 +293,15 @@ export interface Config {
    * channels (Telegram + PhantomChat). `true` = stream the running commentary
    * ("checking your calendar…"); `false` = quiet, final reply only. A
    * per-conversation `/chattiness` override wins over this default; the final
-   * reply and error paths are never affected either way. Defaults to `true` so
-   * behaviour is unchanged unless a user opts into quiet mode. Also gates the
-   * editor (ACP) surface's pre-tool narration — the config default only. See
-   * lib/chattiness.ts. Optional in the type (mirrors telegramStreaming?) so
-   * partial test fixtures need no update; loadConfig always sets it, and read
-   * sites default to `true` (DEFAULT_CHATTINESS) when absent.
+   * reply and error paths are never affected either way. When unset in config,
+   * the default depends on whether the host is configured at all: an existing
+   * install (config.toml present) stays `true` so nothing changes underneath
+   * it, while a fresh / not-yet-configured install defaults to `false` (quiet).
+   * Also gates the editor (ACP) surface's pre-tool narration — the config
+   * default only. See lib/chattiness.ts. Optional in the type (mirrors
+   * telegramStreaming?) so partial test fixtures need no update; loadConfig
+   * always sets it, and read sites default to `true` (DEFAULT_CHATTINESS) when
+   * absent.
    */
   chattiness?: boolean;
 
@@ -332,7 +346,7 @@ export async function loadConfig(): Promise<Config> {
     process.env.PHANTOMBOT_CONFIG ??
     join(xdgConfigHome(), "phantombot", "config.toml");
 
-  const toml = await tryReadToml(configPath);
+  const { data: toml, existed: configExisted } = await tryReadToml(configPath);
   const state = await loadState();
 
   const dataDir = join(xdgDataHome(), "phantombot");
@@ -476,13 +490,17 @@ export async function loadConfig(): Promise<Config> {
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
 
-    // Standing default for interim progress-narration bubbles. Defaults ON so
-    // nothing changes for existing users; a persona/host can flip it OFF here
-    // (or per-chat via /chattiness). Env override for scripted/test setups.
+    // Standing default for interim progress-narration bubbles. An explicit
+    // value always wins (env for scripted/test setups, then `chattiness` in
+    // config.toml). Absent an explicit value the default depends on whether
+    // this host is configured at all: an existing install (config.toml on
+    // disk) stays ON so nothing changes underneath it, while a fresh /
+    // not-yet-configured install starts quiet (OFF). See DEFAULT_CHATTINESS
+    // / DEFAULT_CHATTINESS_UNCONFIGURED.
     chattiness:
       asBool(process.env.PHANTOMBOT_CHATTINESS) ??
       asBool(toml.chattiness) ??
-      DEFAULT_CHATTINESS,
+      (configExisted ? DEFAULT_CHATTINESS : DEFAULT_CHATTINESS_UNCONFIGURED),
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
@@ -902,12 +920,23 @@ export function memoryIndexPath(persona: string): string {
   return join(xdgDataHome(), "phantombot", "memory-index", `${persona}.sqlite`);
 }
 
-async function tryReadToml(path: string): Promise<Record<string, unknown>> {
+/**
+ * Read + parse config.toml, reporting whether the file actually existed.
+ * `existed` is the signal that distinguishes a configured host (has a
+ * config.toml on disk) from a fresh/unconfigured install (no file yet) —
+ * which is what decides the chattiness default. A present-but-empty file
+ * still counts as `existed: true`: the operator has a config, they just
+ * didn't set this key.
+ */
+async function tryReadToml(
+  path: string,
+): Promise<{ data: Record<string, unknown>; existed: boolean }> {
   try {
     const content = await readFile(path, "utf8");
-    return parseToml(content) as Record<string, unknown>;
+    return { data: parseToml(content) as Record<string, unknown>, existed: true };
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    if ((err as NodeJS.ErrnoException).code === "ENOENT")
+      return { data: {}, existed: false };
     throw err;
   }
 }
