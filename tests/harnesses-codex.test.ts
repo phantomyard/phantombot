@@ -70,14 +70,22 @@ describe("parseCodexEvent", () => {
     expect(parseCodexEvent({
       type: "item.started",
       item: { type: "tool_call", name: "shell" },
-    })).toEqual({ type: "progress", note: "tool: shell" });
+    })).toEqual({
+      type: "progress",
+      note: "tool: shell",
+      tool: { title: "tool: shell", kind: "execute", locations: [] },
+    });
   });
 
   test("item.started tool with a command surfaces it in the title (#218)", () => {
     expect(parseCodexEvent({
       type: "item.started",
       item: { type: "tool_call", name: "shell", command: ["git", "status"] },
-    })).toEqual({ type: "progress", note: "shell: git status" });
+    })).toEqual({
+      type: "progress",
+      note: "shell: git status",
+      tool: { title: "shell: git status", kind: "execute", locations: [] },
+    });
   });
 
   test("turn.completed -> done-shaped stats carrier", () => {

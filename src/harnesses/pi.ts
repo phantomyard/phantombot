@@ -35,7 +35,7 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
-import { buildToolNote } from "./toolNote.ts";
+import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import {
   type HarnessActivity,
@@ -321,7 +321,8 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
           ? obj.tool_name
           : undefined;
     const args = obj.args ?? obj.input;
-    return { type: "progress", note: buildToolNote(toolName, args) };
+    const tool = buildToolCall(toolName, args);
+    return { type: "progress", note: tool.title, tool };
   }
 
   // tool_execution_update is fired while a tool is mid-run, carrying its
@@ -356,9 +357,9 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
     // event itself carries enough detail to title a real tool call. The
     // top-level tool_execution_start remains the canonical useful signal.
     if (ame.type.startsWith("toolcall") || ame.type.startsWith("tool_use")) {
-      const note = buildAssistantToolNote(ame);
-      return note
-        ? { type: "progress", note }
+      const tool = buildAssistantToolCall(ame);
+      return tool
+        ? { type: "progress", note: tool.title, tool }
         : { type: "heartbeat" };
     }
     // thinking_delta + anything else → heartbeat.
@@ -401,7 +402,9 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function buildAssistantToolNote(ame: Record<string, unknown>): string | undefined {
+function buildAssistantToolCall(
+  ame: Record<string, unknown>,
+): ToolCallDetail | undefined {
   const partial = isObject(ame.partial) ? ame.partial : undefined;
   const toolName = firstString(
     ame.toolName,
@@ -418,9 +421,9 @@ function buildAssistantToolNote(ame: Record<string, unknown>): string | undefine
     partial?.input ??
     partial?.parameters;
 
-  if (toolName) return buildToolNote(toolName, args);
+  if (toolName) return buildToolCall(toolName, args);
   const detail = extractUsefulArgDetail(args);
-  if (detail) return `tool: ${detail}`;
+  if (detail) return {title: `tool: ${detail}`, kind: "other", locations: []};
   return undefined;
 }
 

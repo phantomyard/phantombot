@@ -116,7 +116,11 @@ describe("parseGeminiEvent", () => {
         tool_id: "x",
         parameters: {},
       }),
-    ).toEqual({ type: "progress", note: "tool: run_shell_command" });
+    ).toEqual({
+      type: "progress",
+      note: "tool: run_shell_command",
+      tool: { title: "tool: run_shell_command", kind: "execute", locations: [] },
+    });
   });
 
   test("tool_use → progress note surfaces parameters when present (#218)", () => {
@@ -127,7 +131,15 @@ describe("parseGeminiEvent", () => {
         tool_id: "x",
         parameters: { command: "ls -la" },
       }),
-    ).toEqual({ type: "progress", note: "run_shell_command: ls -la" });
+    ).toEqual({
+      type: "progress",
+      note: "run_shell_command: ls -la",
+      tool: {
+        title: "run_shell_command: ls -la",
+        kind: "execute",
+        locations: [],
+      },
+    });
   });
 
   test("tool_use without tool_name → progress with placeholder", () => {

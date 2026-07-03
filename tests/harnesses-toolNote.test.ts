@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { buildToolNote, MAX_TOOL_NOTE_LEN } from "../src/harnesses/toolNote.ts";
+import {
+  buildToolCall,
+  buildToolNote,
+  MAX_TOOL_NOTE_LEN
+} from "../src/harnesses/toolNote.ts";
 
 describe("buildToolNote", () => {
   test("shell command → '<Name>: <command>'", () => {
@@ -96,5 +100,83 @@ describe("buildToolNote", () => {
     expect(() => buildToolNote("X", [1, 2, 3])).not.toThrow();
     // unusable input degrades to the legacy label
     expect(buildToolNote("X", "a string")).toBe("tool: X");
+  });
+});
+
+describe("buildToolCall (#231)", () => {
+  test("title is byte-identical to buildToolNote", () => {
+    const cases: [string | undefined, unknown][] = [
+      ["Bash", { command: "git status" }],
+      ["Read", { file_path: "src/foo.ts" }],
+      ["run_shell_command", { foo: 1 }],
+      [undefined, { command: "x" }],
+      ["", undefined]
+    ];
+    for (const [name, input] of cases) {
+      expect(buildToolCall(name, input).title).toBe(buildToolNote(name, input));
+    }
+  });
+
+  test("kind is keyed on the tool NAME, across per-harness spellings", () => {
+    expect(buildToolCall("Read", {}).kind).toBe("read");
+    expect(buildToolCall("read_file", {}).kind).toBe("read");
+    expect(buildToolCall("Edit", {}).kind).toBe("edit");
+    expect(buildToolCall("write_file", {}).kind).toBe("edit");
+    expect(buildToolCall("apply_patch", {}).kind).toBe("edit");
+    expect(buildToolCall("Bash", {}).kind).toBe("execute");
+    expect(buildToolCall("run_shell_command", {}).kind).toBe("execute");
+    expect(buildToolCall("Grep", {}).kind).toBe("search");
+    expect(buildToolCall("glob", {}).kind).toBe("search");
+    expect(buildToolCall("WebFetch", {}).kind).toBe("fetch");
+    expect(buildToolCall("Task", {}).kind).toBe("other");
+  });
+
+  test("kind normalises spaces/hyphens/case before lookup", () => {
+    expect(buildToolCall("Run-Shell-Command", {}).kind).toBe("execute");
+    expect(buildToolCall("READ FILE", {}).kind).toBe("read");
+  });
+
+  test("kind falls back to input field names for unknown tools", () => {
+    expect(buildToolCall("mystery", { command: "ls" }).kind).toBe("execute");
+    expect(buildToolCall("mystery", { pattern: "foo" }).kind).toBe("search");
+    expect(buildToolCall("mystery", { url: "https://x" }).kind).toBe("fetch");
+    expect(buildToolCall("mystery", { file_path: "a.ts" }).kind).toBe("read");
+    expect(buildToolCall("mystery", {}).kind).toBe("other");
+    expect(buildToolCall(undefined, undefined).kind).toBe("other");
+  });
+
+  test("locations are extracted from path fields, deduped, clickable", () => {
+    expect(buildToolCall("Read", { file_path: "src/foo.ts" }).locations).toEqual(
+      [{ path: "src/foo.ts" }]
+    );
+    expect(buildToolCall("Edit", { path: "a.ts" }).locations).toEqual([
+      { path: "a.ts" }
+    ]);
+    // Non-file tools contribute no locations.
+    expect(buildToolCall("Bash", { command: "git status" }).locations).toEqual(
+      []
+    );
+    expect(buildToolCall("Grep", { pattern: "foo" }).locations).toEqual([]);
+  });
+
+  test("locations dedupe repeated paths and skip empties", () => {
+    // file_path and path carry the same value → one location.
+    expect(
+      buildToolCall("Edit", { file_path: "dup.ts", path: "dup.ts" }).locations
+    ).toEqual([{ path: "dup.ts" }]);
+    expect(buildToolCall("Read", { file_path: "   " }).locations).toEqual([]);
+  });
+
+  test("content is left unpopulated pending redaction", () => {
+    expect(buildToolCall("Bash", { command: "git status" }).content).toBeUndefined();
+  });
+
+  test("never throws on hostile input; degrades cleanly", () => {
+    for (const bad of [null, 42, "str", [1, 2, 3]]) {
+      expect(() => buildToolCall("X", bad)).not.toThrow();
+      const call = buildToolCall("X", bad);
+      expect(call.locations).toEqual([]);
+      expect(typeof call.kind).toBe("string");
+    }
   });
 });

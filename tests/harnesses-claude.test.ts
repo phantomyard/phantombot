@@ -148,7 +148,11 @@ describe("parseStreamJson", () => {
       type: "assistant",
       message: { content: [{ type: "tool_use", name: "Bash", input: {} }] },
     });
-    expect(c).toEqual({ type: "progress", note: "tool: Bash" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool: Bash",
+      tool: { title: "tool: Bash", kind: "execute", locations: [] },
+    });
   });
 
   test("progress note surfaces the tool input when present (#218)", () => {
@@ -160,7 +164,11 @@ describe("parseStreamJson", () => {
         ],
       },
     });
-    expect(c).toEqual({ type: "progress", note: "Bash: git status" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "Bash: git status",
+      tool: { title: "Bash: git status", kind: "execute", locations: [] },
+    });
   });
 
   test("heartbeat for thinking blocks (no flush — mirrors pi.ts)", () => {
@@ -203,7 +211,11 @@ describe("parseStreamJson", () => {
         ],
       },
     });
-    expect(c).toEqual({ type: "progress", note: "tool: Read" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool: Read",
+      tool: { title: "tool: Read", kind: "read", locations: [] },
+    });
   });
 
   test("heartbeat for thinking + tool_result (no tool_use)", () => {

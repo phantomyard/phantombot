@@ -27,6 +27,7 @@
 import { homedir } from "node:os";
 
 import type { Harness, HarnessChunk } from "../../harnesses/types.ts";
+import type { ToolCallDetail } from "../../harnesses/toolNote.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn, type TurnInput } from "../../orchestrator/turn.ts";
 import type { ScreenVerdict } from "../../orchestrator/screen.ts";
@@ -70,8 +71,12 @@ export interface BridgeTurnInput {
 export interface BridgeSink {
   /** Stream an assistant text delta (→ agent_message_chunk). */
   text(delta: string): void;
-  /** A presentational progress note (→ minimal tool_call update). */
-  progress(note: string): void;
+  /**
+   * A presentational progress note (→ tool_call update). `tool` (issue #231)
+   * optionally carries the structured detail (kind + clickable locations) the
+   * ACP server threads into the update; sinks that don't need it ignore it.
+   */
+  progress(note: string, tool?: ToolCallDetail): void;
 }
 
 /**
@@ -115,7 +120,7 @@ export async function runBridgeTurn(
     if (chunk.type === "text") {
       sink.text(chunk.text);
     } else if (chunk.type === "progress") {
-      sink.progress(chunk.note);
+      sink.progress(chunk.note, chunk.tool);
     } else if (chunk.type === "error") {
       sawError = true;
       sink.text(`\n[error] ${chunk.error}`);

@@ -10,6 +10,8 @@
  * the harness's responsibility. Phantombot only sees text coming back out.
  */
 
+import type { ToolCallDetail } from "./toolNote.ts";
+
 export interface HistoryTurn {
   role: "user" | "assistant";
   text: string;
@@ -90,8 +92,15 @@ export type HarnessChunk =
    * expires, which is the truthful "frozen" signal.
    */
   | { type: "heartbeat" }
-  /** Out-of-band progress with a human-readable note (e.g. "running tool X"). */
-  | { type: "progress"; note: string }
+  /**
+   * Out-of-band progress with a human-readable note (e.g. "running tool X").
+   * `note` remains the presentational title every consumer already reads.
+   * `tool` (issue #231) optionally carries the structured tool-call detail —
+   * ACP `kind` (panel icon) + clickable `locations` — for connectors that
+   * render it (the Zed/ACP bridge). Omitted for progress that isn't a tool
+   * call (e.g. raw stderr liveness), and safely ignored by string-only sinks.
+   */
+  | { type: "progress"; note: string; tool?: ToolCallDetail }
   /** Final marker. `finalText` is the full assistant reply (sum of all `text` chunks). `meta.replyMode` may be "text", "voice", or "default"/"disable" for channel adapters that support model-selected reply modality. */
   | { type: "done"; finalText: string; meta?: Record<string, unknown> }
   /**

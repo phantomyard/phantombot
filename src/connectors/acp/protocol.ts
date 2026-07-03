@@ -15,6 +15,16 @@
  * stdout, and stdout is the protocol channel — never log there. See server.ts.
  */
 
+import type {
+  ToolCallDetail,
+  ToolKind,
+  ToolLocation
+} from "../../harnesses/toolNote.ts";
+
+// Re-export the tool-call vocabulary so ACP consumers import it from the
+// protocol module rather than reaching into the harness layer.
+export type {ToolKind, ToolLocation};
+
 // ── JSON-RPC 2.0 envelopes ─────────────────────────────────────────────
 
 /** A JSON-RPC id is a string or number (we never use null ids). */
@@ -133,12 +143,23 @@ export interface AgentMessageChunkUpdate {
   content: AcpTextBlock;
 }
 
+/** A tool-call `content` item — the panel renders it as a preview body. */
+export interface ToolCallContentBlock {
+  type: "content";
+  content: AcpContentBlock;
+}
+
 export interface ToolCallUpdate {
   sessionUpdate: "tool_call";
   toolCallId: string;
   title: string;
   status: "pending" | "in_progress" | "completed" | "failed";
-  kind?: string;
+  /** Panel icon (read/edit/execute/search/…). */
+  kind?: ToolKind;
+  /** File paths the editor renders as clickable jump-to-file links. */
+  locations?: ToolLocation[];
+  /** Optional richer preview body (issue #231; unpopulated pending redaction). */
+  content?: ToolCallContentBlock[];
 }
 
 export type AcpSessionUpdate = AgentMessageChunkUpdate | ToolCallUpdate;
@@ -186,17 +207,39 @@ export function agentMessageChunk(
   });
 }
 
-/** Build a minimal presentational `tool_call` `session/update`. */
+/**
+ * Build a presentational `tool_call` `session/update`.
+ *
+ * `detail` (issue #231) optionally carries the structured tool-call info —
+ * `kind` (panel icon) and `locations` (clickable jump-to-file paths). Each
+ * field is emitted only when present, so clients that don't consume them (and
+ * the pre-#231 title-only behaviour) are unaffected. `content` is threaded but
+ * emitted only when `detail.content` is set — currently never, pending the
+ * secret-masking carry-over noted on `ToolCallDetail`.
+ */
 export function toolCallUpdate(
   sessionId: string,
   toolCallId: string,
   title: string,
   status: ToolCallUpdate["status"] = "in_progress",
+  detail?: Pick<ToolCallDetail, "kind" | "locations" | "content">,
 ): JsonRpcRequest {
-  return sessionUpdateNotification(sessionId, {
+  const update: ToolCallUpdate = {
     sessionUpdate: "tool_call",
     toolCallId,
     title,
-    status,
-  });
+    status
+  };
+  if (detail) {
+    if (detail.kind) update.kind = detail.kind;
+    if (detail.locations && detail.locations.length > 0) {
+      update.locations = detail.locations;
+    }
+    if (detail.content) {
+      update.content = [
+        {type: "content", content: {type: "text", text: detail.content}}
+      ];
+    }
+  }
+  return sessionUpdateNotification(sessionId, update);
 }

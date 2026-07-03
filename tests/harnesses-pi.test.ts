@@ -99,7 +99,11 @@ describe("parsePiEvent", () => {
       type: "tool_execution_start",
       toolName: "bash",
     });
-    expect(c).toEqual({ type: "progress", note: "tool: bash" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool: bash",
+      tool: { title: "tool: bash", kind: "execute", locations: [] },
+    });
   });
 
   test("tool_execution_start surfaces args in the note when present (#218)", () => {
@@ -108,7 +112,11 @@ describe("parsePiEvent", () => {
       toolName: "bash",
       args: { command: "npm test" },
     });
-    expect(c).toEqual({ type: "progress", note: "bash: npm test" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "bash: npm test",
+      tool: { title: "bash: npm test", kind: "execute", locations: [] },
+    });
   });
 
   test("emits progress for tool_execution_start (legacy 0.67.x tool_name field)", () => {
@@ -116,12 +124,20 @@ describe("parsePiEvent", () => {
       type: "tool_execution_start",
       tool_name: "run_shell_command",
     });
-    expect(c).toEqual({ type: "progress", note: "tool: run_shell_command" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool: run_shell_command",
+      tool: { title: "tool: run_shell_command", kind: "execute", locations: [] },
+    });
   });
 
   test("emits progress for tool_execution_start without a tool name", () => {
     const c = parsePiEvent({ type: "tool_execution_start" });
-    expect(c).toEqual({ type: "progress", note: "tool" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool",
+      tool: { title: "tool", kind: "other", locations: [] },
+    });
   });
 
   test("emits a payload-less heartbeat for tool_execution_update (coder liveness)", () => {
@@ -170,7 +186,11 @@ describe("parsePiEvent", () => {
       },
       message: {},
     });
-    expect(c).toEqual({ type: "progress", note: "bash: npm test" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "bash: npm test",
+      tool: { title: "bash: npm test", kind: "execute", locations: [] },
+    });
   });
 
   test("emits progress for assistantMessageEvent tool calls with useful args but no name", () => {
@@ -183,7 +203,11 @@ describe("parsePiEvent", () => {
       },
       message: {},
     });
-    expect(c).toEqual({ type: "progress", note: "tool: /tmp/example.txt" });
+    expect(c).toEqual({
+      type: "progress",
+      note: "tool: /tmp/example.txt",
+      tool: { title: "tool: /tmp/example.txt", kind: "other", locations: [] },
+    });
   });
 
   test("emits heartbeat for text_start / text_end / thinking_start / thinking_end markers", () => {
