@@ -6,13 +6,17 @@
  * for silence as default. The harnessed agent calls `phantombot notify`
  * inside its prompt when it decides the user should hear about something.
  *
- * ROUTING: notify reaches the FIRST owner of EVERY configured channel for the
- * persona — the first Telegram allowed_user_id AND the first phantomchat
- * allowed npub. If both channels are configured, the owner gets it on BOTH, so
- * an incident is never missed because one channel is down. The "first" owner is
- * the primary; re-order the allowlist (via `phantombot telegram` /
- * `phantombot phantomchat`) to change who's primary. This is deliberately NOT a
- * broadcast to every id — exactly one recipient per channel.
+ * ROUTING: notify BROADCASTS to EVERY authorized recipient on EVERY configured
+ * channel for the persona — all Telegram allowed_user_ids AND all phantomchat
+ * allowed npubs. Everyone authorized to talk to the persona hears about a
+ * material event, not just a single designated primary. If both channels are
+ * configured, each recipient gets it on the channel(s) they're authorized on,
+ * so an incident is never missed because one channel is down. Recipients are
+ * deduped (per (bot, chatId) for Telegram, per recipientHex for phantomchat) so
+ * an id authorized twice is contacted once. Sends are per-recipient with
+ * independent error handling: one recipient failing (blocked bot, dead relay)
+ * is logged and swallowed — it never aborts delivery to the others and is never
+ * surfaced to users.
  *
  * --message  → text via sendMessage (both channels)
  * --voice    → synthesized via the configured TTS provider, sent via
@@ -114,29 +118,49 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
 
   // ── Resolve the configured channels for this persona ──────────────────
   // A channel is a notify target when it has an account/identity AND at least
-  // one owner. We notify the FIRST owner of each (the primary). Not a broadcast.
+  // one owner. We BROADCAST to every authorized recipient of each, deduped.
 
-  // Telegram: persona-bound bot if present, else the default bot.
+  // Telegram: persona-bound bot if present, else the default bot. Fan out to
+  // every allowedUserId, deduped per (bot token, chatId) so an id repeated in
+  // the allowlist is contacted once.
   const tg: TelegramAccount | undefined =
     config.channels.telegramPersonas?.[persona] ?? config.channels.telegram;
-  const tgTarget =
-    tg && tg.allowedUserIds.length > 0
-      ? { account: tg, chatId: tg.allowedUserIds[0] }
-      : undefined;
+  let tgTarget: { account: TelegramAccount; chatIds: string[] } | undefined;
+  if (tg && tg.allowedUserIds.length > 0) {
+    const seen = new Set<string>();
+    const chatIds: string[] = [];
+    for (const id of tg.allowedUserIds) {
+      const chatId = String(id);
+      const key = `${tg.token}:${chatId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chatIds.push(chatId);
+    }
+    tgTarget = { account: tg, chatIds };
+  }
 
   // Phantomchat: the persona's own phantomchat.json (identity + allowlist).
+  // Fan out to every allowedHex, deduped per recipientHex.
   let pcTarget:
-    | { secretKey: Uint8Array; relays: string[]; recipientHex: string }
+    | { secretKey: Uint8Array; relays: string[]; recipientHexes: string[] }
     | undefined;
   try {
     const pc = loadPhantomchatPersonaConfig(personaDir(config, persona));
-    const firstHex = pc?.allowedHex[0];
-    if (pc && firstHex) {
-      pcTarget = {
-        secretKey: pc.identity.secretKey,
-        relays: pc.relays,
-        recipientHex: firstHex,
-      };
+    if (pc && pc.allowedHex.length > 0) {
+      const seen = new Set<string>();
+      const recipientHexes: string[] = [];
+      for (const hex of pc.allowedHex) {
+        if (seen.has(hex)) continue;
+        seen.add(hex);
+        recipientHexes.push(hex);
+      }
+      if (recipientHexes.length > 0) {
+        pcTarget = {
+          secretKey: pc.identity.secretKey,
+          relays: pc.relays,
+          recipientHexes,
+        };
+      }
     }
   } catch (e) {
     log.warn("notify: failed to load phantomchat config", {
@@ -152,16 +176,16 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     return 2;
   }
 
-  // ── Telegram send (first owner) ───────────────────────────────────────
+  // ── Telegram send (broadcast to all owners) ───────────────────────────
   let textSent = 0;
   let voiceSent = 0;
   if (tgTarget) {
     const transport =
       input.transport ?? new HttpTelegramTransport(tgTarget.account.token);
 
-    // Pre-synthesize once if voice was requested. Telegram-only — Nostr DMs
-    // carry no audio. Doing it before the text send means a provider misconfig
-    // fails before we half-notify.
+    // Pre-synthesize ONCE if voice was requested (not per recipient). Telegram-
+    // only — Nostr DMs carry no audio. Doing it before the text sends means a
+    // provider misconfig fails before we half-notify.
     let voiceAudio: { data: Buffer; mime: string } | undefined;
     if (input.voice) {
       const support = ttsSupport(config);
@@ -187,45 +211,52 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
       }
     }
 
-    const chatId = String(tgTarget.chatId);
-    try {
-      if (input.message) {
-        await transport.sendMessage(chatId, input.message);
-        textSent++;
+    // Fan out to every deduped recipient. Each send is independent: a failure
+    // to one owner is logged and swallowed, never aborting the others and never
+    // surfaced to the user.
+    for (const chatId of tgTarget.chatIds) {
+      try {
+        if (input.message) {
+          await transport.sendMessage(chatId, input.message);
+          textSent++;
+        }
+        if (voiceAudio) {
+          await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
+          voiceSent++;
+        }
+      } catch (e) {
+        log.warn("notify: telegram send failed", {
+          chatId,
+          error: (e as Error).message,
+        });
       }
-      if (voiceAudio) {
-        await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
-        voiceSent++;
-      }
-    } catch (e) {
-      log.warn("notify: telegram send failed", {
-        chatId,
-        error: (e as Error).message,
-      });
     }
   }
 
-  // ── Phantomchat send (first owner) ────────────────────────────────────
+  // ── Phantomchat send (broadcast to all owners) ────────────────────────
   // Nostr DMs are text-only: send --message, or fall back to the --voice text
-  // so a voice-only notify still reaches the owner here as text.
+  // so a voice-only notify still reaches owners here as text. Each recipient is
+  // an independent send — a failure is logged and swallowed.
   let pcSent = 0;
   if (pcTarget) {
     const text = input.message ?? input.voice;
     if (text) {
       const send = input.phantomchatSend ?? defaultPhantomchatSend;
-      try {
-        await send({
-          secretKey: pcTarget.secretKey,
-          relays: pcTarget.relays,
-          recipientHex: pcTarget.recipientHex,
-          text,
-        });
-        pcSent++;
-      } catch (e) {
-        log.warn("notify: phantomchat send failed", {
-          recipient: pcTarget.recipientHex.slice(0, 12) + "…",
-          error: (e as Error).message,
-        });
+      for (const recipientHex of pcTarget.recipientHexes) {
+        try {
+          await send({
+            secretKey: pcTarget.secretKey,
+            relays: pcTarget.relays,
+            recipientHex,
+            text,
+          });
+          pcSent++;
+        } catch (e) {
+          log.warn("notify: phantomchat send failed", {
+            recipient: recipientHex.slice(0, 12) + "…",
+            error: (e as Error).message,
+          });
+        }
       }
     }
   }
@@ -238,9 +269,11 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     `notify: persona=${persona} channels=[${channels.join(", ")}] telegram(text=${textSent} voice=${voiceSent}) phantomchat(text=${pcSent})\n`,
   );
   // At least one channel was configured (we'd have returned 2 otherwise). Exit 0
-  // when something actually went out; exit 1 when nothing could be delivered —
-  // e.g. a voice-only notify whose synthesis failed with no text fallback, or
-  // every configured channel's send erroring.
+  // when something actually went out to any recipient; exit 1 when nothing could
+  // be delivered — e.g. a voice-only notify whose synthesis failed with no text
+  // fallback, or every recipient on every channel erroring. Partial fan-out
+  // failures (some recipients ok, some not) are NOT an error — they exit 0, same
+  // "did anything land at all" semantics as before the broadcast change.
   return textSent + voiceSent + pcSent > 0 ? 0 : 1;
 }
 
@@ -260,7 +293,7 @@ export default defineCommand({
   meta: {
     name: "notify",
     description:
-      "Surface a message to the user on every configured channel (first Telegram owner + first phantomchat owner). The harnessed agent calls this when a scheduled task or background work needs to reach the user.",
+      "Surface a message to every authorized recipient on every configured channel (all Telegram owners + all phantomchat owners). The harnessed agent calls this when a scheduled task or background work needs to reach the user.",
   },
   args: {
     message: {
@@ -275,7 +308,7 @@ export default defineCommand({
     persona: {
       type: "string",
       description:
-        "Which persona's channels to notify (its Telegram bot + phantomchat identity). Defaults to the default persona. Reaches the first owner of each configured channel.",
+        "Which persona's channels to notify (its Telegram bot + phantomchat identity). Defaults to the default persona. Broadcasts to every authorized owner of each configured channel.",
     },
   },
   async run({ args }) {

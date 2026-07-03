@@ -739,8 +739,14 @@ phantombot notify --voice "Backup failed on pve-3."
 phantombot notify --message "Text" --voice "Voice"
 ```
 
-Notifications are sent to the Telegram allowlist. Phantombot refuses to notify
-if no allowed users are configured.
+Notifications broadcast to **every** authorized recipient on **every**
+configured channel for the persona — all Telegram allowed users and all
+phantomchat allowed npubs (deduped, so an id authorized twice is contacted
+once). Everyone authorized to talk to the persona hears about a material event,
+not just a single primary. Each recipient is an independent send: one failing
+(blocked bot, dead relay) is logged and skipped, never aborting delivery to the
+others. Phantombot refuses to notify if no allowed recipients are configured on
+any channel.
 
 Background work should stay quiet unless something material happened or the
 user explicitly asked to be interrupted.
