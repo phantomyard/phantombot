@@ -32,6 +32,11 @@ import {
   applyCoderSwapRequest,
   normalizeCoderSwapRequest,
 } from "../lib/coderSwap.ts";
+import {
+  applyChattinessRequest,
+  normalizeChattinessRequest,
+} from "../lib/chattiness.ts";
+import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { DEFAULT_HISTORY_LIMIT } from "../orchestrator/turn.ts";
 import { VERSION } from "../version.ts";
@@ -138,6 +143,10 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
     command: "coder",
     description: "Force the coding brain on for this chat (off | default to revert)",
   },
+  {
+    command: "chattiness",
+    description: "Show/hide progress bubbles here (on | off | <on|off> default)",
+  },
   { command: "help", description: "Show this command list" },
 ];
 
@@ -221,6 +230,8 @@ export async function handleSlashCommand(
     case "/coder":
       // Bare `/coder` forces on; `/coder off|default` is also accepted.
       return await handleCoderSwap(arg || "on", ctx);
+    case "/chattiness":
+      return await handleChattiness(arg, ctx);
     case "/start":
     case "/help":
       return { reply: HELP };
@@ -347,6 +358,103 @@ async function handleCoderSwap(
       : request === "off"
         ? "coding brain: forced OFF for this chat — no auto-swap, stays on the primary"
         : "coding brain: reset to auto — the scorer decides each turn";
+  return { reply };
+}
+
+/**
+ * /chattiness [on|off|default] — per-conversation toggle for the interim
+ * "progress narration" bubbles ("checking your calendar…") that stream while a
+ * turn runs. Scoped to Telegram + PhantomChat; the final reply and error paths
+ * are never affected.
+ *
+ *   on              → show interim bubbles in this chat
+ *   off             → quiet: no interim bubbles, just the final reply
+ *   default         → clear this chat's override; defer to the config default
+ *   <on|off> default → ALSO write `chattiness` in config.toml as the standing
+ *                       default (and clear this chat's override so it follows it)
+ *
+ * Persistent (no idle expiry). The per-conversation override wins over the
+ * config default; absent an override, `config.chattiness` decides.
+ */
+async function handleChattiness(
+  arg: string,
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  const usage =
+    "usage: /chattiness on|off|default\n" +
+    "  on              — show progress bubbles in this chat\n" +
+    "  off             — quiet: just the final reply, no interim bubbles\n" +
+    "  default         — clear this chat's setting; use the standing default\n" +
+    "  <on|off> default — also make on/off the standing default everywhere";
+
+  const tokens = arg.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  // Bare `/chattiness` → show the options rather than silently clearing.
+  if (tokens.length === 0) return { reply: usage };
+  const setDefault = tokens.length > 1 && tokens[tokens.length - 1] === "default";
+  // With the trailing "default" modifier, the leading token is the value to
+  // persist globally; without it, the whole (single) token is the request.
+  const head = setDefault ? tokens[0]! : (tokens[0] ?? "");
+  const request = normalizeChattinessRequest(head);
+
+  // `<on|off> default` must resolve to a concrete on/off to write to config.
+  if (setDefault && request !== "on" && request !== "off") {
+    return { reply: usage };
+  }
+  if (!setDefault && !request) {
+    return { reply: usage };
+  }
+
+  // Writing the standing default: flip config.toml, then clear this chat's
+  // per-conversation override so it follows the new default (consistent with
+  // what the user just asked for right here).
+  if (setDefault) {
+    const enable = request === "on";
+    if (!ctx.config) {
+      return {
+        reply:
+          "can't set the default: channel didn't pass config to the dispatcher",
+      };
+    }
+    await updateConfigToml(ctx.config.configPath, (c) => {
+      setIn(c, ["chattiness"], enable);
+    });
+    await applyChattinessRequest({
+      persona: ctx.persona,
+      conversation: ctx.conversation,
+      request: "default",
+    });
+    log.info("commands: /chattiness set default", {
+      chatId: ctx.chatId,
+      persona: ctx.persona,
+      conversation: ctx.conversation,
+      enable,
+    });
+    return {
+      reply: enable
+        ? "chattiness default: ON everywhere — new chats show progress bubbles (this chat follows the default now)"
+        : "chattiness default: OFF everywhere — new chats stay quiet (this chat follows the default now)",
+    };
+  }
+
+  // Per-conversation sticky toggle (or clear).
+  await applyChattinessRequest({
+    persona: ctx.persona,
+    conversation: ctx.conversation,
+    request: request!,
+  });
+  log.info("commands: /chattiness", {
+    chatId: ctx.chatId,
+    persona: ctx.persona,
+    conversation: ctx.conversation,
+    request,
+  });
+
+  const reply =
+    request === "on"
+      ? "chattiness: ON for this chat — you'll see progress bubbles while I work"
+      : request === "off"
+        ? "chattiness: OFF for this chat — I'll work quietly and just send the final reply"
+        : "chattiness: reset to the standing default for this chat";
   return { reply };
 }
 

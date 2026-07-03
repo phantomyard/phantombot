@@ -85,7 +85,7 @@ phantombot/
 │   │   ├── telegram.ts       # backward-compat barrel re-export (preserves the old public surface)
 │   │   ├── telegramFormat.ts # markdown → Telegram HTML
 │   │   ├── streamSegmenter.ts # splits a streaming reply into Telegram-sized segments (fence/table/list-aware)
-│   │   └── commands.ts       # slash-command handling (/stop, /update, …)
+│   │   └── commands.ts       # slash-command handling (/stop, /update, /coder, /chattiness, …)
 │   ├── cli/                  # one file per Citty subcommand
 │   │   ├── index.ts          # dispatcher; subcommand registration list lives here
 │   │   ├── run.ts            # the long-running listener
@@ -115,6 +115,7 @@ phantombot/
 │   │   └── codex.ts          # Bun.spawn `codex …` (OpenAI Codex CLI harness)
 │   └── lib/
 │       ├── logger.ts io.ts configWriter.ts envFile.ts format.ts
+│       ├── coderSwap.ts chattiness.ts  # per-conversation overrides: coding-brain swap + progress-bubble on/off (JSON state under xdgStateHome)
 │       ├── threatJudge.ts    # tool-less untrusted-input judge (see "Security perimeter")
 │       ├── redact.ts         # secret redaction for log lines + task_runs audit table
 │       ├── platform.ts       # cross-platform service-manager router (systemd ↔ launchd)
@@ -263,6 +264,8 @@ Every merged PR auto-releases `v1.0.<PR_NUMBER>`. The workflow at `.github/workf
 11. **Reply modality is mirror-input by default, with a per-message text override available.** `processChatMessage` in `src/channels/core/engine.ts` picks the wire format (sendMessage vs sendVoice) via `replyModalityOverride()` from `src/lib/audio.ts`: when the user's message (post-STT, so voice transcripts count) contains an explicit directive like *"reply in text"*, *"no voice"*, or *"send a voice note"*, that wins; otherwise modality mirrors input. The override is parsed by a small, deliberately conservative regex set — anchored on reply-verbs and unmistakable shorthand, no bare-noun matches ("text message to John" must not trigger). Voice is still capped by `ttsSupported(config)`: an override asking for voice when no TTS provider is configured degrades to text gracefully, same as the original no-TTS fallback. If you extend the regex set, add cases to `replyModalityOverride` in `tests/lib-audio.test.ts` AND to the three end-to-end scenarios in `tests/channels-telegram.test.ts` (voice-in→text, text-in→voice, text-in→voice-without-TTS).
 
 12. **`GITHUB_TOKEN` for `phantombot update` isn't always safe to send.** GitHub App installation tokens are scoped to a single org's repos; using one against the public `phantomyard/phantombot` releases endpoint returns 401 even though the endpoint is anonymously reachable. `findLatestRelease` in `src/lib/githubReleases.ts` therefore retries once *without* the auth header on 401/403 before failing, and the final error mentions org-scoping explicitly. If you add another auth'd GitHub API call (e.g. for changelog fetch, asset metadata, etc.), reuse the `buildHeaders(withAuth)` helper and replicate the unauth-retry path — otherwise users with org-scoped tokens hit a dead end on what should be a public read. See issue #115 / PR #120.
+
+13. **The narration/streaming loop is DUPLICATED across the two chat channels — gate both.** `src/channels/core/engine.ts` (Telegram) and `src/channels/phantomchat/server.ts` (PhantomChat) each carry their own near-identical `flushNarration` + segment-send state machine; PhantomChat *mirrors* engine.ts rather than calling into it. Any change to how interim progress bubbles are emitted (the `/chattiness` gate is the current example — a `resolveNarrationEnabled()` check at the top of both `flushNarration`s) must be applied in **both** files or half of it silently doesn't work. Both sites carry a `TODO(dedup)` breadcrumb. Scope is Telegram + PhantomChat only — the editor (ACP) surface is deliberately left untouched. Per-conversation overrides live in `src/lib/chattiness.ts` (JSON under `xdgStateHome`, mirroring `coderSwap.ts`). See issue #243.
 
 ## Process for updating this file
 

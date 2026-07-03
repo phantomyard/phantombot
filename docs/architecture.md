@@ -75,6 +75,21 @@ phantombot ask "what's on my calendar?"
   → exit 0 / 1 / 2
 ```
 
+### Progress narration in the chat channels
+
+`progress` chunks (and the model text streamed *before* a tool call) become
+interim "progress bubbles" — the running "checking your calendar…" commentary.
+This is emitted by a per-channel streaming state machine, and that machine is
+**duplicated**: `src/channels/core/engine.ts` (Telegram) and
+`src/channels/phantomchat/server.ts` (PhantomChat) each carry their own
+`flushNarration`. Whether those bubbles appear is gated **per conversation** by
+`/chattiness` (`src/lib/chattiness.ts`): a per-conversation override wins, else
+the `chattiness` config default decides. The gate lives in **both**
+`flushNarration`s — the final reply and error paths are never gated. Scope is
+Telegram + PhantomChat only; the editor (ACP) surface is deliberately left
+untouched. Any change here touches both channel files (see the `TODO(dedup)`
+breadcrumbs) — a future refactor should centralize the loop.
+
 ## Memory subsystem
 
 Memory is two layers — see the README `## Memory` section for the operator-facing

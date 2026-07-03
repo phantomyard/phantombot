@@ -338,6 +338,8 @@ overwrites stale BotFather commands. The supported commands are:
 | `/harness` | List or switch the active harness |
 | `/update` | Install the latest phantombot release |
 | `/restart` | Restart the phantombot service |
+| `/coder` | Force the coding brain on for this chat (`off` / `default` to revert) |
+| `/chattiness` | Show or hide progress bubbles in this chat (`on` / `off` / `<on\|off> default`) |
 | `/help` | Show the command list |
 
 Unknown slash commands fall through to the harness so personas can define
@@ -345,7 +347,7 @@ their own conventions.
 
 ### Reply Pacing
 
-Telegram replies are shaped for phone chats:
+Telegram and PhantomChat replies are shaped for phone chats:
 
 - Progress narration is coalesced instead of sent once per tool call.
 - Final replies are split into readable bubbles.
@@ -361,6 +363,31 @@ bubble_max_sentences = 4
 bubble_max_chars = 700
 bubble_delay_ms = 800
 voice_max_sentences = 3
+```
+
+### Chattiness (quiet mode)
+
+While a phantom works, it streams interim **progress bubbles** — the running
+"checking your calendar…" commentary that fills the silence before a tool call.
+Some people like the play-by-play; others just want the answer. `/chattiness`
+toggles those interim bubbles **per conversation** (the final reply and any
+errors always come through either way):
+
+- `/chattiness off` — quiet: no progress bubbles, just the final reply.
+- `/chattiness on` — show the progress bubbles (the default).
+- `/chattiness default` — clear this chat's setting; follow the standing default.
+- `/chattiness off default` (or `on default`) — also write the standing default
+  to `config.toml` so **new** chats start that way.
+
+Scoped to Telegram + PhantomChat (voice and the CLI never emit these bubbles).
+The editor (Zed/VS Code) surface follows the config default only.
+
+Set the standing default directly in config — `true` (show bubbles) is the
+default, so nothing changes unless you opt out:
+
+```toml
+# Top-level. Set false to make phantombot quiet-by-default everywhere.
+chattiness = true
 ```
 
 ## PhantomChat

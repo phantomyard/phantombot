@@ -204,6 +204,13 @@ export interface TelegramStreamingSettings {
   voiceMaxSentences: number;
 }
 
+/**
+ * Standing default for interim progress-narration bubbles when neither a
+ * per-conversation override nor a config value is set. ON so behaviour is
+ * unchanged for existing users. See lib/chattiness.ts.
+ */
+export const DEFAULT_CHATTINESS = true;
+
 export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
   narrationFlushMs: 4500,
   bubbleMaxSentences: 4,
@@ -269,6 +276,20 @@ export interface Config {
   };
 
   telegramStreaming?: TelegramStreamingSettings;
+
+  /**
+   * Standing default for interim "progress narration" bubbles in the chat
+   * channels (Telegram + PhantomChat). `true` = stream the running commentary
+   * ("checking your calendar…"); `false` = quiet, final reply only. A
+   * per-conversation `/chattiness` override wins over this default; the final
+   * reply and error paths are never affected either way. Defaults to `true` so
+   * behaviour is unchanged unless a user opts into quiet mode. Also gates the
+   * editor (ACP) surface's pre-tool narration — the config default only. See
+   * lib/chattiness.ts. Optional in the type (mirrors telegramStreaming?) so
+   * partial test fixtures need no update; loadConfig always sets it, and read
+   * sites default to `true` (DEFAULT_CHATTINESS) when absent.
+   */
+  chattiness?: boolean;
 
   embeddings: {
     /** "gemini" | "none". "none" = FTS5-only search. */
@@ -454,6 +475,14 @@ export async function loadConfig(): Promise<Config> {
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
+
+    // Standing default for interim progress-narration bubbles. Defaults ON so
+    // nothing changes for existing users; a persona/host can flip it OFF here
+    // (or per-chat via /chattiness). Env override for scripted/test setups.
+    chattiness:
+      asBool(process.env.PHANTOMBOT_CHATTINESS) ??
+      asBool(toml.chattiness) ??
+      DEFAULT_CHATTINESS,
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 

@@ -23,10 +23,11 @@
  */
 
 import type { Config } from "../../config.ts";
-import { DEFAULT_TELEGRAM_STREAMING } from "../../config.ts";
+import { DEFAULT_CHATTINESS, DEFAULT_TELEGRAM_STREAMING } from "../../config.ts";
 import type { Harness } from "../../harnesses/types.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
+import { resolveNarrationEnabled } from "../../lib/chattiness.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
@@ -762,11 +763,26 @@ export async function runPhantomchatServer(
       }
     };
 
+    // /chattiness gate: does this conversation want interim progress bubbles?
+    // Per-conversation override wins; absent, the config default decides.
+    // Suppresses ONLY narration — the final reply is untouched.
+    //
+    // TODO(dedup): this narration streaming loop MIRRORS
+    // src/channels/core/engine.ts (its own flushNarration + sendTextSegment).
+    // The gate below is applied in BOTH files — keep them in sync until the two
+    // loops are centralized in a future refactor.
+    const narrationEnabled = await resolveNarrationEnabled({
+      persona: input.persona,
+      conversation: conversationKey,
+      configDefault: input.config.chattiness ?? DEFAULT_CHATTINESS,
+    });
+
     // Flush coalesced progress narration on a clock (like core/engine.ts), not
     // on every tool boundary — tool boundaries classify preceding text as
     // narration; this decides when that text becomes a bubble. Driven by both
     // the typing interval below and the chunk boundaries in the loop.
     const flushNarration = async (force = false): Promise<void> => {
+      if (!narrationEnabled) return;
       if (narrationBuffer.trim().length === 0) return;
       const now = Date.now();
       if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {

@@ -20,6 +20,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import {
+  DEFAULT_CHATTINESS,
   DEFAULT_TELEGRAM_STREAMING,
   type Config,
 } from "../../config.ts";
@@ -43,6 +44,7 @@ import {
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
+import { resolveNarrationEnabled } from "../../lib/chattiness.ts";
 import type { ServiceControl } from "../../lib/systemd.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
@@ -1004,11 +1006,28 @@ async function processChatMessage(
     finalCandidateSentChars = 0;
   };
 
+  // /chattiness gate: does this conversation want interim progress bubbles?
+  // Per-conversation override wins; absent, the config default decides. Resolved
+  // once per turn — a mid-turn toggle takes effect on the next message, matching
+  // the sticky semantics. Suppresses ONLY narration; the final reply and error
+  // paths are untouched.
+  //
+  // TODO(dedup): this narration streaming loop is MIRRORED in
+  // src/channels/phantomchat/server.ts (its own flushNarration + sendBubble).
+  // The gate below is applied in BOTH files — keep them in sync until the two
+  // loops are centralized in a future refactor.
+  const narrationEnabled = await resolveNarrationEnabled({
+    persona: input.persona,
+    conversation: conversationKey,
+    configDefault: input.config.chattiness ?? DEFAULT_CHATTINESS,
+  });
+
   // Flush coalesced progress narration on a clock, not on every tool
   // boundary. Tool boundaries classify preceding text as narration; this
   // timer decides when, if ever, that narration becomes a progress bubble.
   const flushNarration = async (force = false) => {
     if (willReplyWithVoice) return;
+    if (!narrationEnabled) return;
     if (narrationBuffer.trim().length === 0) return;
     const now = Date.now();
     if (!force && now - lastNarrationFlushAt < streaming.narrationFlushMs) {

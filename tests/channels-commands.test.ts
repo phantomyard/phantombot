@@ -18,6 +18,11 @@ import {
 } from "../src/channels/commands.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
+import { getChattinessOverride } from "../src/lib/chattiness.ts";
+import { getIn, readConfigToml } from "../src/lib/configWriter.ts";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 class StubHarness implements Harness {
   constructor(
@@ -478,6 +483,80 @@ describe("/restart", () => {
     const r = await handleSlashCommand("/restart", ctx());
     expect(r).not.toBeNull();
     expect(typeof r!.afterSend).toBe("function");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /chattiness
+// ---------------------------------------------------------------------------
+
+describe("/chattiness", () => {
+  const SAVED = process.env.PHANTOMBOT_CHATTINESS_STATE;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "phantombot-cmd-chattiness-"));
+    process.env.PHANTOMBOT_CHATTINESS_STATE = join(dir, "state.json");
+  });
+  afterEach(async () => {
+    if (SAVED === undefined) delete process.env.PHANTOMBOT_CHATTINESS_STATE;
+    else process.env.PHANTOMBOT_CHATTINESS_STATE = SAVED;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("bare /chattiness with no arg shows usage", async () => {
+    const r = await handleSlashCommand("/chattiness", ctx());
+    expect(r).not.toBeNull();
+    expect(r!.reply).toContain("usage:");
+  });
+
+  test("/chattiness off sets a per-conversation override", async () => {
+    const r = await handleSlashCommand("/chattiness off", ctx());
+    expect(r!.reply).toContain("OFF for this chat");
+    expect(await getChattinessOverride({ persona: "phantom", conversation: "telegram:42" })).toBe("off");
+  });
+
+  test("/chattiness on sets a per-conversation override", async () => {
+    const r = await handleSlashCommand("/chattiness on", ctx());
+    expect(r!.reply).toContain("ON for this chat");
+    expect(await getChattinessOverride({ persona: "phantom", conversation: "telegram:42" })).toBe("on");
+  });
+
+  test("/chattiness default clears the override", async () => {
+    await handleSlashCommand("/chattiness off", ctx());
+    const r = await handleSlashCommand("/chattiness default", ctx());
+    expect(r!.reply).toContain("standing default");
+    expect(await getChattinessOverride({ persona: "phantom", conversation: "telegram:42" })).toBeUndefined();
+  });
+
+  test("/chattiness off default writes config.toml and clears the override", async () => {
+    const configPath = join(dir, "config.toml");
+    const config = { configPath } as unknown as import("../src/config.ts").Config;
+    // Seed an override so we can prove `default` clears it while writing config.
+    await handleSlashCommand("/chattiness on", ctx({ config }));
+    const r = await handleSlashCommand("/chattiness off default", ctx({ config }));
+    expect(r!.reply).toContain("OFF everywhere");
+    // Config file got the standing default.
+    const toml = await readConfigToml(configPath);
+    expect(getIn(toml, ["chattiness"])).toBe(false);
+    // And this chat's override was cleared so it follows the new default.
+    expect(await getChattinessOverride({ persona: "phantom", conversation: "telegram:42" })).toBeUndefined();
+  });
+
+  test("/chattiness on default writes true to config.toml", async () => {
+    const configPath = join(dir, "config.toml");
+    const config = { configPath } as unknown as import("../src/config.ts").Config;
+    const r = await handleSlashCommand("/chattiness on default", ctx({ config }));
+    expect(r!.reply).toContain("ON everywhere");
+    const toml = await readConfigToml(configPath);
+    expect(getIn(toml, ["chattiness"])).toBe(true);
+  });
+
+  test("/chattiness <garbage> default is rejected with usage", async () => {
+    const configPath = join(dir, "config.toml");
+    const config = { configPath } as unknown as import("../src/config.ts").Config;
+    const r = await handleSlashCommand("/chattiness maybe default", ctx({ config }));
+    expect(r!.reply).toContain("usage:");
   });
 });
 
