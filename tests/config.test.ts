@@ -140,18 +140,18 @@ describe("loadConfig — chattiness default", () => {
     expect(c.chattiness).toBe(false);
   });
 
-  test("config.toml exists but omits chattiness → stays ON (existing users unchanged)", async () => {
-    // Any config content is enough to mark the host as 'configured'; the
-    // key itself is absent, so we keep the historical ON default.
+  test("config.toml exists but omits chattiness → quiet (OFF)", async () => {
+    // The key is absent, so the standing quiet default applies even though
+    // the host otherwise has a config.
     await writeConfig(`default_persona = "robbie"\n`);
     const c = await loadConfig();
-    expect(c.chattiness).toBe(true);
+    expect(c.chattiness).toBe(false);
   });
 
-  test("empty config.toml still counts as configured → stays ON", async () => {
+  test("empty config.toml → quiet (OFF)", async () => {
     await writeConfig("");
     const c = await loadConfig();
-    expect(c.chattiness).toBe(true);
+    expect(c.chattiness).toBe(false);
   });
 
   test("explicit chattiness = false in config.toml is honored", async () => {

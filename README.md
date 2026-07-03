@@ -382,14 +382,13 @@ errors always come through either way):
 Scoped to Telegram + PhantomChat (voice and the CLI never emit these bubbles).
 The editor (Zed/VS Code) surface follows the config default only.
 
-**The standing default depends on whether the host is configured.** A fresh /
-not-yet-configured install (no `config.toml` on disk) starts **quiet** — new
-phantoms just send the final answer until you opt in. An install that already
-has a `config.toml` keeps bubbles **on** unless you set otherwise, so existing
-users are never flipped underneath them. Set it explicitly either way:
+**The standing default is quiet.** Unless you explicitly set `chattiness`, a
+phantom starts **quiet** and just sends the final answer — this holds whether
+there's no `config.toml`, an empty one, or a `config.toml` that simply omits
+the key. Opt in to the running commentary by setting it:
 
 ```toml
-# Top-level. true = show progress bubbles everywhere; false = quiet-by-default.
+# Top-level. true = show progress bubbles everywhere; false (or unset) = quiet.
 chattiness = true
 ```
 

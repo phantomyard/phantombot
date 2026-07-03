@@ -125,6 +125,10 @@ const baseConfig = (): Config => ({
     gemini: { bin: "gemini", model: "" },
   },
   channels: {},
+  // Streaming tests below exercise the progress-bubble path, so enable
+  // chattiness explicitly. The standing default is now quiet (OFF); the
+  // install-time default resolution is covered in config.test.ts.
+  chattiness: true,
   embeddings: { provider: "none" },
   // Retrieval disabled so the test doesn't need an embeddings index.
   retrieval: undefined,
