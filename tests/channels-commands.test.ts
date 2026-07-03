@@ -18,7 +18,10 @@ import {
 } from "../src/channels/commands.ts";
 import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
-import { getChattinessOverride } from "../src/lib/chattiness.ts";
+import {
+  getChattinessOverride,
+  resolveNarrationEnabled,
+} from "../src/lib/chattiness.ts";
 import { getIn, readConfigToml } from "../src/lib/configWriter.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -550,6 +553,37 @@ describe("/chattiness", () => {
     expect(r!.reply).toContain("ON everywhere");
     const toml = await readConfigToml(configPath);
     expect(getIn(toml, ["chattiness"])).toBe(true);
+  });
+
+  test("/chattiness off default updates the live config so override-less chats resolve to the new default immediately", async () => {
+    const configPath = join(dir, "config.toml");
+    // Start with the default ON, matching a fresh install.
+    const config = { configPath, chattiness: true } as unknown as import(
+      "../src/config.ts"
+    ).Config;
+    // Before the change, an override-less chat follows the ON default.
+    expect(
+      await resolveNarrationEnabled({
+        persona: "phantom",
+        conversation: "telegram:99",
+        configDefault: config.chattiness!,
+      }),
+    ).toBe(true);
+
+    const r = await handleSlashCommand("/chattiness off default", ctx({ config }));
+    expect(r!.reply).toContain("OFF everywhere");
+
+    // The live Config object was mutated in place — not just the file on disk.
+    expect(config.chattiness).toBe(false);
+    // So a *different*, override-less chat resolving against the same config
+    // object now goes quiet without any restart/reload.
+    expect(
+      await resolveNarrationEnabled({
+        persona: "phantom",
+        conversation: "telegram:99",
+        configDefault: config.chattiness!,
+      }),
+    ).toBe(false);
   });
 
   test("/chattiness <garbage> default is rejected with usage", async () => {

@@ -418,6 +418,12 @@ async function handleChattiness(
     await updateConfigToml(ctx.config.configPath, (c) => {
       setIn(c, ["chattiness"], enable);
     });
+    // Keep the live Config in sync with what we just wrote to disk. Without
+    // this, the running process keeps resolving against the old default until
+    // a restart/reload — and since we also clear this chat's override below,
+    // this chat (and every override-less chat) would silently keep the old
+    // behavior despite the reply saying the default changed.
+    ctx.config.chattiness = enable;
     await applyChattinessRequest({
       persona: ctx.persona,
       conversation: ctx.conversation,
