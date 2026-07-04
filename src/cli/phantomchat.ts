@@ -43,8 +43,8 @@ import {
   identityFromNsec,
 } from "../lib/nostrIdentity.ts";
 import {
+  createPersonaIdentityIfAbsent,
   readPersonaIdentityNsec,
-  writePersonaIdentity,
 } from "../lib/personaIdentity.ts";
 import { fetchCanonicalRelays } from "../channels/phantomchat/relaysSource.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
@@ -150,16 +150,20 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
       );
     } else {
       const identity = generate();
-      nsec = identity.nsec;
-      npub = identity.npub;
       // The nsec is the persona's SHARED identity (used by the vault too), so it
       // lives in <persona-dir>/identity.json (mode 0600), not phantomchat.json.
-      await writePersonaIdentity(agentDir, nsec);
+      // Atomic create-if-absent: if the vault minted one between the read above
+      // and here, we adopt its identity rather than overwriting it — and display
+      // whatever is durably on disk so the npub we show is the real one.
+      const persistedNsec = await createPersonaIdentityIfAbsent(agentDir, identity.nsec);
+      const persisted = identityFromNsec(persistedNsec);
+      nsec = persisted.nsec;
+      npub = persisted.npub;
       p.note(
         `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
           `saved to <persona-dir>/identity.json (mode 0600). Back it up — losing\n` +
           `it means a new identity (and re-adding the new npub in the app).\n\n` +
-          `  nsec (one-time display): ${identity.nsec}\n\n` +
+          `  nsec (one-time display): ${nsec}\n\n` +
           `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
           `  ${npub}`,
         "New identity created",

@@ -67,9 +67,8 @@ import {
   type NostrIdentity,
 } from "../../lib/nostrIdentity.ts";
 import {
-  personaIdentityPath,
+  createPersonaIdentityIfAbsent,
   readPersonaIdentityNsec,
-  writePersonaIdentity,
 } from "../../lib/personaIdentity.ts";
 
 /** Filename of the per-persona phantomchat config inside an agent dir. */
@@ -263,12 +262,14 @@ export async function savePhantomchatPersonaConfig(
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
   await mkdir(dirname(path), { recursive: true });
-  // Ensure the root secret lives in identity.json before we drop it from this
-  // file. Create-if-absent: a legacy persona's nsec (read out of the old
-  // phantomchat.json) is promoted here exactly once; an identity.json that
-  // already exists (the common case) is left untouched so we never clobber it.
-  if (data.nsec && !existsSync(personaIdentityPath(agentDir))) {
-    await writePersonaIdentity(agentDir, data.nsec);
+  // Ensure the root secret is durably in identity.json before we drop it from
+  // this channel file. Atomic create-if-absent (no existsSync check-then-write):
+  // a legacy persona's nsec is promoted exactly once; an identity.json that
+  // already exists — including one the vault just minted concurrently — is never
+  // overwritten, so we can't clobber the canonical identity and orphan its
+  // encrypted rows.
+  if (data.nsec) {
+    await createPersonaIdentityIfAbsent(agentDir, data.nsec);
   }
   const body: PhantomchatFileShape = {
     relays: data.relays,

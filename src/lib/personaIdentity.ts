@@ -21,7 +21,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { link, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { generateSecretKey } from "nostr-tools/pure";
@@ -62,61 +62,33 @@ function readNsecFromJson(path: string): string | undefined {
   return undefined;
 }
 
-/**
- * Atomically write `<personaDir>/identity.json` at mode 0600 (the nsec is a
- * secret). Tempfile + rename avoids the world-readable window a
- * write-then-chmod would leave — same guarantee as savePhantomchatPersonaConfig.
- * Public so setup flows (e.g. `phantombot phantomchat`) that mint an identity
- * with their own generator can persist it to the shared file.
- */
-export async function writePersonaIdentity(
-  personaDir: string,
-  nsec: string,
-): Promise<void> {
-  return writeIdentityFile(personaDir, nsec);
-}
-
-async function writeIdentityFile(personaDir: string, nsec: string): Promise<void> {
-  const path = personaIdentityPath(personaDir);
-  await mkdir(dirname(path), { recursive: true });
-  const body: IdentityFileShape = { nsec };
-  // Per-process-unique tmp name so two concurrent writers don't collide on a
-  // shared `.tmp` and corrupt each other's partial write before the swap.
-  const tmp = uniqueTmpPath(path);
-  try {
-    await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    await rename(tmp, path);
-  } catch (e) {
-    try {
-      await unlink(tmp);
-    } catch {
-      /* best-effort cleanup */
-    }
-    throw e;
-  }
-}
-
 /** A collision-resistant tempfile path alongside `path`. */
 function uniqueTmpPath(path: string): string {
   return `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 }
 
 /**
- * Create identity.json holding `nsec` ONLY IF it doesn't already exist, closing
- * the check-then-act race in getOrCreatePersonaIdentity: two processes that both
- * see "no identity.json" and mint fresh keys must NOT end up with divergent
- * nsecs (whichever's write landed last would orphan everything the other had
- * already encrypted under its key — undecryptable forever).
+ * Create identity.json holding `nsec` ONLY IF it doesn't already exist, returning
+ * the nsec that is DURABLY PERSISTED on disk (ours if we won, the incumbent's if
+ * we lost). Atomic create-if-absent: safe to call concurrently, and safe to call
+ * when the file may already exist — an existing identity.json is NEVER overwritten.
+ * This is the single race-safe primitive for minting the shared identity; callers
+ * must not do check-then-write (existsSync + unconditional rename) themselves.
  *
  * Mechanism: write a per-process-unique tempfile (mode 0600), then hard-LINK it
  * into place. `link()` is atomic and fails with EEXIST if the target already
  * exists, so exactly one racer wins; every loser reads the winner's nsec back
- * and adopts it. Returns the nsec actually persisted on disk.
+ * and adopts it. This closes the check-then-act race where two processes that
+ * both saw "no identity.json" mint divergent nsecs — whichever wrote last would
+ * orphan everything the other had already encrypted under its key.
+ *
+ * Fails CLOSED: if identity.json already exists but its nsec can't be read back
+ * (malformed / truncated file), this THROWS rather than returning the caller's
+ * in-process `nsec` — because that value never reached disk, and handing it back
+ * would let the vault encrypt rows under a key the next process can't reproduce
+ * (silent, permanent data loss). A thrown error surfaces the corrupt file instead.
  */
-async function createIdentityFileExclusive(
+export async function createPersonaIdentityIfAbsent(
   personaDir: string,
   nsec: string,
 ): Promise<string> {
@@ -134,11 +106,15 @@ async function createIdentityFileExclusive(
       return nsec; // we won the race
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-        // Lost the race — adopt the winner's identity, discard ours.
+        // Lost the race — adopt the winner's durably-stored identity.
         const winner = readNsecFromJson(path);
         if (winner) return winner;
-        // Present-but-unreadable is pathological; fall back to our own value.
-        return nsec;
+        // Present-but-unreadable identity.json: fail closed rather than hand back
+        // an nsec that isn't on disk (see the doc comment above).
+        throw new Error(
+          `identity.json exists at ${path} but its nsec is unreadable; refusing ` +
+            `to return a transient identity that would orphan encrypted vault data`,
+        );
       }
       throw e;
     }
@@ -187,7 +163,7 @@ export async function getOrCreatePersonaIdentity(
   //    the race-safe path keeps the invariant "first write wins, losers adopt").
   const legacy = readNsecFromJson(join(personaDir, LEGACY_PHANTOMCHAT_FILE));
   if (legacy) {
-    const persisted = await createIdentityFileExclusive(personaDir, legacy);
+    const persisted = await createPersonaIdentityIfAbsent(personaDir, legacy);
     return identityFromNsec(persisted);
   }
 
@@ -196,6 +172,6 @@ export async function getOrCreatePersonaIdentity(
   //    adopt theirs rather than clobbering (which would orphan their vault).
   const secretKey = generateSecretKey();
   const nsec = nsecEncode(secretKey);
-  const persisted = await createIdentityFileExclusive(personaDir, nsec);
+  const persisted = await createPersonaIdentityIfAbsent(personaDir, nsec);
   return identityFromNsec(persisted);
 }

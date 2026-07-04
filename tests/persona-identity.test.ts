@@ -17,10 +17,10 @@ import { join } from "node:path";
 
 import { generateIdentity } from "../src/lib/nostrIdentity.ts";
 import {
+  createPersonaIdentityIfAbsent,
   getOrCreatePersonaIdentity,
   personaIdentityPath,
   readPersonaIdentityNsec,
-  writePersonaIdentity,
 } from "../src/lib/personaIdentity.ts";
 
 let workdir: string;
@@ -73,7 +73,7 @@ describe("getOrCreatePersonaIdentity", () => {
     await mkdir(dir, { recursive: true });
     const shared = generateIdentity();
     const legacy = generateIdentity();
-    await writePersonaIdentity(dir, shared.nsec);
+    await createPersonaIdentityIfAbsent(dir, shared.nsec);
     await writeFile(
       join(dir, "phantomchat.json"),
       JSON.stringify({ nsec: legacy.nsec }),
@@ -95,19 +95,44 @@ describe("getOrCreatePersonaIdentity", () => {
   });
 });
 
-describe("readPersonaIdentityNsec / writePersonaIdentity", () => {
+describe("createPersonaIdentityIfAbsent", () => {
   test("read returns undefined before write, the value after", async () => {
     const dir = join(workdir, "p");
     expect(readPersonaIdentityNsec(dir)).toBeUndefined();
     const id = generateIdentity();
-    await writePersonaIdentity(dir, id.nsec);
+    await createPersonaIdentityIfAbsent(dir, id.nsec);
     expect(readPersonaIdentityNsec(dir)).toBe(id.nsec);
   });
 
-  test("writePersonaIdentity persists at mode 0600", async () => {
+  test("persists at mode 0600", async () => {
     const dir = join(workdir, "p");
-    await writePersonaIdentity(dir, generateIdentity().nsec);
+    await createPersonaIdentityIfAbsent(dir, generateIdentity().nsec);
     const st = await stat(personaIdentityPath(dir));
     expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  test("never overwrites an existing identity — returns the incumbent nsec", async () => {
+    const dir = join(workdir, "p");
+    const first = generateIdentity();
+    const second = generateIdentity();
+    const got1 = await createPersonaIdentityIfAbsent(dir, first.nsec);
+    // A second caller (e.g. the phantomchat channel writing after the vault
+    // already minted the identity) must NOT clobber the file.
+    const got2 = await createPersonaIdentityIfAbsent(dir, second.nsec);
+    expect(got1).toBe(first.nsec);
+    expect(got2).toBe(first.nsec); // adopted the incumbent, not `second`
+    expect(readPersonaIdentityNsec(dir)).toBe(first.nsec);
+  });
+
+  test("fails closed when identity.json exists but is unreadable", async () => {
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    // A present-but-malformed identity.json: readNsecFromJson can't recover an
+    // nsec, so the create-if-absent primitive must THROW rather than hand back a
+    // transient in-process key that would orphan encrypted vault data.
+    await writeFile(personaIdentityPath(dir), "{ this is not json");
+    await expect(
+      createPersonaIdentityIfAbsent(dir, generateIdentity().nsec),
+    ).rejects.toThrow(/unreadable/);
   });
 });
