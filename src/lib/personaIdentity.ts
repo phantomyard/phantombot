@@ -21,7 +21,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { generateSecretKey } from "nostr-tools/pure";
@@ -80,7 +80,9 @@ async function writeIdentityFile(personaDir: string, nsec: string): Promise<void
   const path = personaIdentityPath(personaDir);
   await mkdir(dirname(path), { recursive: true });
   const body: IdentityFileShape = { nsec };
-  const tmp = `${path}.tmp`;
+  // Per-process-unique tmp name so two concurrent writers don't collide on a
+  // shared `.tmp` and corrupt each other's partial write before the swap.
+  const tmp = uniqueTmpPath(path);
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
       encoding: "utf8",
@@ -94,6 +96,58 @@ async function writeIdentityFile(personaDir: string, nsec: string): Promise<void
       /* best-effort cleanup */
     }
     throw e;
+  }
+}
+
+/** A collision-resistant tempfile path alongside `path`. */
+function uniqueTmpPath(path: string): string {
+  return `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+}
+
+/**
+ * Create identity.json holding `nsec` ONLY IF it doesn't already exist, closing
+ * the check-then-act race in getOrCreatePersonaIdentity: two processes that both
+ * see "no identity.json" and mint fresh keys must NOT end up with divergent
+ * nsecs (whichever's write landed last would orphan everything the other had
+ * already encrypted under its key — undecryptable forever).
+ *
+ * Mechanism: write a per-process-unique tempfile (mode 0600), then hard-LINK it
+ * into place. `link()` is atomic and fails with EEXIST if the target already
+ * exists, so exactly one racer wins; every loser reads the winner's nsec back
+ * and adopts it. Returns the nsec actually persisted on disk.
+ */
+async function createIdentityFileExclusive(
+  personaDir: string,
+  nsec: string,
+): Promise<string> {
+  const path = personaIdentityPath(personaDir);
+  await mkdir(dirname(path), { recursive: true });
+  const body: IdentityFileShape = { nsec };
+  const tmp = uniqueTmpPath(path);
+  try {
+    await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    try {
+      await link(tmp, path);
+      return nsec; // we won the race
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        // Lost the race — adopt the winner's identity, discard ours.
+        const winner = readNsecFromJson(path);
+        if (winner) return winner;
+        // Present-but-unreadable is pathological; fall back to our own value.
+        return nsec;
+      }
+      throw e;
+    }
+  } finally {
+    try {
+      await unlink(tmp);
+    } catch {
+      /* best-effort cleanup of the tmp hard-link source */
+    }
   }
 }
 
@@ -128,15 +182,20 @@ export async function getOrCreatePersonaIdentity(
   }
 
   // 2. Legacy migration: hoist the nsec out of phantomchat.json if present.
+  //    Exclusive-create so a concurrent racer can't end up migrating to a
+  //    different value (both would read the same legacy nsec here anyway, but
+  //    the race-safe path keeps the invariant "first write wins, losers adopt").
   const legacy = readNsecFromJson(join(personaDir, LEGACY_PHANTOMCHAT_FILE));
   if (legacy) {
-    await writeIdentityFile(personaDir, legacy);
-    return identityFromNsec(legacy);
+    const persisted = await createIdentityFileExclusive(personaDir, legacy);
+    return identityFromNsec(persisted);
   }
 
-  // 3. Generate a fresh identity in-process and persist it.
+  // 3. Generate a fresh identity in-process and persist it race-safely: if
+  //    another process generated one between our read above and this write, we
+  //    adopt theirs rather than clobbering (which would orphan their vault).
   const secretKey = generateSecretKey();
   const nsec = nsecEncode(secretKey);
-  await writeIdentityFile(personaDir, nsec);
-  return identityFromNsec(nsec);
+  const persisted = await createIdentityFileExclusive(personaDir, nsec);
+  return identityFromNsec(persisted);
 }

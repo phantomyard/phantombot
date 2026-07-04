@@ -40,6 +40,7 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
+import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -143,6 +144,8 @@ export class GeminiHarness implements Harness {
     // (`phantombot env set FOO bar`) are visible here without a daemon
     // restart. See envBootstrap.ts for the sticky-vs-reloadable rules.
     await reloadEnvFiles();
+    // Reconcile this persona's encrypted vault into the env (see claude.ts).
+    await reloadVaultForPersona(req.persona);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,

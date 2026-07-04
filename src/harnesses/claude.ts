@@ -51,6 +51,7 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
+import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -97,6 +98,11 @@ export class ClaudeHarness implements Harness {
     // visible in this turn's env without needing a daemon restart.
     // Shell-exported keys remain sticky — see envBootstrap.ts header.
     await reloadEnvFiles();
+    // Then reconcile THIS persona's encrypted vault into the env (the canonical
+    // credential store; the .env files above are only the legacy transitional
+    // path). This makes a `vault set` from the previous turn visible now and
+    // ensures the subprocess sees only this persona's secrets.
+    await reloadVaultForPersona(req.persona);
 
     // OAuth-on-host: don't leak any ANTHROPIC_* / CLAUDE_CODE_* auth or
     // routing var into the subprocess env (reloadEnvFiles just re-sourced

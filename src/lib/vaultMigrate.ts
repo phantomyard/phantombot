@@ -43,12 +43,17 @@ export function legacyUserEnvPath(): string {
   return process.env.PHANTOMBOT_USER_ENV_FILE ?? join(homedir(), ".env");
 }
 
-/** Every persona name that has a directory under personasDir. */
+/**
+ * Every persona name that has a directory under personasDir. Hidden dirs
+ * (leading dot — `.git`, `.DS_Store` dirs, editor scratch) are skipped so the
+ * central fan-out doesn't spray an identity.json + a vault full of secrets into
+ * non-persona junk. Real persona folders are never dot-prefixed.
+ */
 function listPersonaNames(config: Config): string[] {
   if (!existsSync(config.personasDir)) return [];
   try {
     return readdirSync(config.personasDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name);
   } catch {
     return [];
@@ -110,7 +115,18 @@ async function migrateUserEnv(
   }
   const entries = Object.entries(vars);
   const keys = entries.map(([k]) => k);
-  const vault = await openPersonaVault(personaDir(config, defaultPersona));
+  let vault: Vault;
+  try {
+    vault = await openPersonaVault(personaDir(config, defaultPersona));
+  } catch (e) {
+    // Can't open the persona's vault (identity mint failed, disk error) —
+    // leave the plaintext in place for a later retry. Never throw (best-effort).
+    log.warn("vault-migrate: could not open vault for ~/.env — leaving it in place", {
+      persona: defaultPersona,
+      error: (e as Error).message,
+    });
+    return { removed: false, keys: [] };
+  }
   let ok: boolean;
   try {
     ok = writeAndVerify(vault, entries);
@@ -175,7 +191,20 @@ async function migrateCentralEnv(
   let allOk = true;
   for (const persona of personas) {
     const skip = localKeys.get(persona) ?? new Set<string>();
-    const vault = await openPersonaVault(personaDir(config, persona));
+    let vault: Vault;
+    try {
+      vault = await openPersonaVault(personaDir(config, persona));
+    } catch (e) {
+      // One persona's vault won't open — don't delete the plaintext (some
+      // persona would be left without the central secrets), but keep going so
+      // the others still get migrated. Never throw (best-effort).
+      allOk = false;
+      log.warn("vault-migrate: could not open vault for central fan-out", {
+        persona,
+        error: (e as Error).message,
+      });
+      continue;
+    }
     try {
       const ok = writeAndVerify(vault, entries, skip);
       if (!ok) allOk = false;
@@ -229,9 +258,13 @@ export async function migratePlaintextToVault(config: Config): Promise<void> {
   const userResult = await migrateUserEnv(config, defaultPersona);
 
   // Record which keys the default persona already got locally, so the central
-  // fan-out lets those win (skips them for that persona only).
+  // fan-out lets those win (skips them for that persona only). ONLY when the
+  // ~/.env migration actually SUCCEEDED (removed === true, i.e. every key wrote
+  // and read back): if it failed and we skipped these keys, the default persona
+  // could end up with the value from NEITHER source. On failure we let the
+  // central value populate it, and a later ~/.env retry re-asserts local-wins.
   const localKeys = new Map<string, Set<string>>();
-  if (userResult.keys.length > 0) {
+  if (userResult.removed && userResult.keys.length > 0) {
     localKeys.set(defaultPersona, new Set(userResult.keys));
   }
 

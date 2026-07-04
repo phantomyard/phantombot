@@ -40,8 +40,12 @@ import {
 import {
   decodeNpubToHex,
   generateIdentity,
+  identityFromNsec,
 } from "../lib/nostrIdentity.ts";
-import { writePersonaIdentity } from "../lib/personaIdentity.ts";
+import {
+  readPersonaIdentityNsec,
+  writePersonaIdentity,
+} from "../lib/personaIdentity.ts";
 import { fetchCanonicalRelays } from "../channels/phantomchat/relaysSource.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import type { WriteSink } from "../lib/io.ts";
@@ -129,21 +133,38 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
       "Existing identity",
     );
   } else {
-    const identity = generate();
-    nsec = identity.nsec;
-    npub = identity.npub;
-    // The nsec is the persona's SHARED identity (used by the vault too), so it
-    // lives in <persona-dir>/identity.json (mode 0600), not phantomchat.json.
-    await writePersonaIdentity(agentDir, nsec);
-    p.note(
-      `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
-        `saved to <persona-dir>/identity.json (mode 0600). Back it up — losing\n` +
-        `it means a new identity (and re-adding the new npub in the app).\n\n` +
-        `  nsec (one-time display): ${identity.nsec}\n\n` +
-        `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
-        `  ${npub}`,
-      "New identity created",
-    );
+    // No phantomchat.json yet — but identity.json may already exist (e.g. the
+    // vault minted it first). ADOPT an existing identity rather than generating
+    // a fresh nsec, which would orphan everything the vault already encrypted
+    // under the old key. Only mint when there is genuinely no identity yet.
+    const adopted = readPersonaIdentityNsec(agentDir);
+    if (adopted) {
+      const identity = identityFromNsec(adopted);
+      nsec = identity.nsec;
+      npub = identity.npub;
+      p.note(
+        `Persona '${persona}' already has a Nostr identity (identity.json). Reusing it.\n\n` +
+          `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
+          `  ${npub}`,
+        "Existing identity",
+      );
+    } else {
+      const identity = generate();
+      nsec = identity.nsec;
+      npub = identity.npub;
+      // The nsec is the persona's SHARED identity (used by the vault too), so it
+      // lives in <persona-dir>/identity.json (mode 0600), not phantomchat.json.
+      await writePersonaIdentity(agentDir, nsec);
+      p.note(
+        `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
+          `saved to <persona-dir>/identity.json (mode 0600). Back it up — losing\n` +
+          `it means a new identity (and re-adding the new npub in the app).\n\n` +
+          `  nsec (one-time display): ${identity.nsec}\n\n` +
+          `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
+          `  ${npub}`,
+        "New identity created",
+      );
+    }
   }
 
   // 2. Relays are NOT prompted any more — they come from the canonical

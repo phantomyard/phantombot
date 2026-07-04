@@ -66,7 +66,11 @@ import {
   identityFromNsec,
   type NostrIdentity,
 } from "../../lib/nostrIdentity.ts";
-import { readPersonaIdentityNsec } from "../../lib/personaIdentity.ts";
+import {
+  personaIdentityPath,
+  readPersonaIdentityNsec,
+  writePersonaIdentity,
+} from "../../lib/personaIdentity.ts";
 
 /** Filename of the per-persona phantomchat config inside an agent dir. */
 export const PHANTOMCHAT_FILE = "phantomchat.json";
@@ -234,9 +238,17 @@ export function loadPhantomchatPersonaConfig(
 }
 
 /**
- * Atomically write a persona's phantomchat.json at mode 0600 (the nsec is a
- * secret). Creates the agent dir if needed. Tempfile + rename avoids the
- * world-readable window a write-then-chmod would leave.
+ * Atomically write a persona's phantomchat.json at mode 0600. Creates the agent
+ * dir if needed. Tempfile + rename avoids the world-readable window a
+ * write-then-chmod would leave.
+ *
+ * The persona's root secret (nsec) is NO LONGER written here — it lives solely
+ * in the shared `identity.json` (lib/personaIdentity.ts), which both this
+ * channel and the encrypted vault derive from. `data.nsec` is still accepted so
+ * callers (and legacy files whose nsec we just read back) can seed identity.json
+ * on the first save that follows a migration; it is persisted there
+ * (create-if-absent, never clobbering an existing identity) and then kept OUT of
+ * phantomchat.json, which now carries channel settings only.
  */
 export async function savePhantomchatPersonaConfig(
   agentDir: string,
@@ -251,8 +263,14 @@ export async function savePhantomchatPersonaConfig(
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
   await mkdir(dirname(path), { recursive: true });
+  // Ensure the root secret lives in identity.json before we drop it from this
+  // file. Create-if-absent: a legacy persona's nsec (read out of the old
+  // phantomchat.json) is promoted here exactly once; an identity.json that
+  // already exists (the common case) is left untouched so we never clobber it.
+  if (data.nsec && !existsSync(personaIdentityPath(agentDir))) {
+    await writePersonaIdentity(agentDir, data.nsec);
+  }
   const body: PhantomchatFileShape = {
-    nsec: data.nsec,
     relays: data.relays,
     allowed_npubs: data.allowedNpubs,
   };

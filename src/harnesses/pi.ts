@@ -37,6 +37,7 @@ import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/pi
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
+import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -188,6 +189,9 @@ export class PiHarness implements Harness {
     // restart — and so the Pi API key below is read fresh. See envBootstrap.ts
     // for the sticky-vs-reloadable rules.
     await reloadEnvFiles();
+    // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
+    // key is read below — the key is a vault secret post-migration. See claude.ts.
+    await reloadVaultForPersona(req.persona);
 
     // Per-turn Pi auth: thread the API key onto `--api-key` exactly the way the
     // model is threaded onto `--model`. We do NOT persist it into Pi's own auth

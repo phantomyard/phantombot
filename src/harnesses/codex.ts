@@ -16,6 +16,7 @@ import { access, constants } from "node:fs/promises";
 import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
+import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
   type HarnessActivity,
   runHarnessProcess,
@@ -52,6 +53,8 @@ export class CodexHarness implements Harness {
     });
 
     await reloadEnvFiles();
+    // Reconcile this persona's encrypted vault into the env (see claude.ts).
+    await reloadVaultForPersona(req.persona);
 
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
