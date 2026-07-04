@@ -31,6 +31,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 import { loadConfig, personaDir as resolvePersonaDir, type Config } from "../config.ts";
+import { log } from "./logger.ts";
 import { getOrCreatePersonaIdentity } from "./personaIdentity.ts";
 
 /** Filename of the per-persona encrypted secrets DB inside a persona dir. */
@@ -217,13 +218,21 @@ export async function openPersonaVault(personaDir: string): Promise<Vault> {
 
 /**
  * Read EVERY secret out of a persona's vault into a decrypted Map, then close
- * the vault. Best-effort: returns `null` if the vault can't be opened (fresh
- * install, corruption) so callers can distinguish "no vault" from "empty vault".
- * Never logs secret values.
+ * the vault. Best-effort: returns `null` if the vault can't be OPENED (fresh
+ * install, missing identity, DB-level corruption) so callers can distinguish
+ * "no vault" from "empty vault". Never logs secret values.
+ *
+ * Decryption is PER-ROW resilient: a single undecryptable row (corrupt nonce/
+ * ciphertext/tag, or a value written under a different key) is skipped and its
+ * name collected in `badKeys` — it must NOT abort the read and blank every
+ * OTHER secret for the turn. This is fail-*partial*, not fail-open: we never
+ * invent or substitute a value, so a row we can't decrypt (already unusable) is
+ * simply dropped, with no security regression. The caller decides how to
+ * surface `badKeys`.
  */
 async function readAllVaultValues(
   personaDirPath: string,
-): Promise<Map<string, string> | null> {
+): Promise<{ values: Map<string, string>; badKeys: string[] } | null> {
   let vault: Vault;
   try {
     vault = await openPersonaVault(personaDirPath);
@@ -231,15 +240,48 @@ async function readAllVaultValues(
     return null;
   }
   const values = new Map<string, string>();
+  const badKeys: string[] = [];
   try {
     for (const name of vault.list()) {
-      const value = vault.get(name);
-      if (value !== undefined) values.set(name, value);
+      try {
+        const value = vault.get(name);
+        if (value !== undefined) values.set(name, value);
+      } catch {
+        // One poisoned row shouldn't cost the persona its other secrets.
+        // Record the name (never the value) and keep loading the good rows.
+        badKeys.push(name);
+      }
     }
   } finally {
     vault.close();
   }
-  return values;
+  return { values, badKeys };
+}
+
+/**
+ * Key-set signatures we've already warned about. An undecryptable vault row is
+ * surfaced ONCE per process start, deduped by the exact set of bad keys, so
+ * corruption stays visible without spamming a warning on every per-turn reload.
+ */
+const _warnedBadKeySets = new Set<string>();
+
+/** For tests: reset the warn-once-per-process dedupe of undecryptable keys. */
+export function _resetVaultWarningsForTesting(): void {
+  _warnedBadKeySets.clear();
+}
+
+/** Warn once per process start about undecryptable vault rows. Never logs values. */
+function warnBadVaultKeys(badKeys: string[]): void {
+  if (badKeys.length === 0) return;
+  const sorted = [...badKeys].sort();
+  const signature = sorted.join(" ");
+  if (_warnedBadKeySets.has(signature)) return;
+  _warnedBadKeySets.add(signature);
+  log.warn(
+    `vault: ${sorted.length} undecryptable key${sorted.length === 1 ? "" : "s"} ` +
+      `(${sorted.join(", ")}) — skipped; other secrets loaded normally`,
+    { count: sorted.length, keys: sorted },
+  );
 }
 
 /**
@@ -285,15 +327,18 @@ export async function loadVaultIntoEnv(
   personaDirPath: string,
   env: NodeJS.ProcessEnv = process.env,
   tracked: Set<string> = _vaultTracked,
-): Promise<{ updated: string[]; removed: string[] }> {
+): Promise<{ updated: string[]; removed: string[]; badKeys: string[] }> {
   const updated: string[] = [];
   const removed: string[] = [];
-  const values = await readAllVaultValues(personaDirPath);
+  const result = await readAllVaultValues(personaDirPath);
 
-  if (values === null) {
+  if (result === null) {
+    // A null (unopenable) vault is a distinct failure mode from per-row
+    // corruption: there are no decryptable-or-not rows to report, so badKeys
+    // is empty. This is what lets a caller tell "no vault" from "1 bad row".
     if (personaDirPath === _vaultLoadedPersonaDir) {
       // Same persona, transient open failure — keep what we already injected.
-      return { updated, removed };
+      return { updated, removed, badKeys: [] };
     }
     // Different/first persona we can't read: fail closed, strip prior keys.
     for (const k of [...tracked]) {
@@ -302,8 +347,15 @@ export async function loadVaultIntoEnv(
       removed.push(k);
     }
     _vaultLoadedPersonaDir = undefined;
-    return { updated, removed };
+    return { updated, removed, badKeys: [] };
   }
+
+  const { values, badKeys } = result;
+
+  // Corruption becomes visible instead of silent: surface undecryptable rows
+  // once per process start. The good rows below still load — a bad SENTRY_DSN
+  // no longer costs the persona its GITHUB_TOKEN.
+  warnBadVaultKeys(badKeys);
 
   // Phase 1: reconcile previously vault-injected keys against this persona.
   for (const k of [...tracked]) {
@@ -329,7 +381,7 @@ export async function loadVaultIntoEnv(
   }
 
   _vaultLoadedPersonaDir = personaDirPath;
-  return { updated, removed };
+  return { updated, removed, badKeys };
 }
 
 /**
@@ -360,12 +412,12 @@ export function _resetConfigCacheForTesting(): void {
 export async function reloadVaultForPersona(
   persona: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<{ updated: string[]; removed: string[] }> {
+): Promise<{ updated: string[]; removed: string[]; badKeys: string[] }> {
   try {
     const config = await cachedConfig();
     const name = persona || process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
     return await loadVaultIntoEnv(resolvePersonaDir(config, name), env);
   } catch {
-    return { updated: [], removed: [] };
+    return { updated: [], removed: [], badKeys: [] };
   }
 }

@@ -21,8 +21,11 @@ import { join } from "node:path";
 
 import { generateSecretKey } from "nostr-tools/pure";
 
+import { Database } from "bun:sqlite";
+
 import {
   _resetVaultTrackingForTesting,
+  _resetVaultWarningsForTesting,
   deriveVaultKey,
   loadVaultIntoEnv,
   openPersonaVault,
@@ -35,6 +38,7 @@ let workdir: string;
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-vault-"));
   _resetVaultTrackingForTesting();
+  _resetVaultWarningsForTesting();
 });
 
 afterEach(async () => {
@@ -290,5 +294,58 @@ describe("loadVaultIntoEnv reconcile", () => {
 
     expect(env.TOKEN).toBeUndefined(); // stripped — no leak into the failed turn
     expect(r.removed).toContain("TOKEN");
+  });
+});
+
+describe("per-row resilience — one bad row never blanks the vault", () => {
+  /** Corrupt a single row's ciphertext in place so GCM auth rejects it. */
+  function corruptRow(dir: string, name: string): void {
+    const db = new Database(vaultPath(dir));
+    db.prepare("UPDATE secrets SET ciphertext = ? WHERE name = ?").run(
+      Buffer.from(crypto.getRandomValues(new Uint8Array(48))),
+      name,
+    );
+    db.close();
+  }
+
+  test("a corrupt row is skipped; every other secret still loads", async () => {
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("GITHUB_TOKEN", "good-1");
+    v.set("SENTRY_DSN", "poisoned");
+    v.set("OPENAI_API_KEY", "good-2");
+    v.close();
+
+    corruptRow(dir, "SENTRY_DSN");
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    await loadVaultIntoEnv(dir, env, tracked);
+
+    // The good secrets are untouched by the one poisoned neighbour.
+    expect(env.GITHUB_TOKEN).toBe("good-1");
+    expect(env.OPENAI_API_KEY).toBe("good-2");
+    // The bad row is skipped, not injected.
+    expect(env.SENTRY_DSN).toBeUndefined();
+  });
+
+  test("the undecryptable key is reported (name only), not silently swallowed", async () => {
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("GITHUB_TOKEN", "good");
+    v.set("SENTRY_DSN", "poisoned");
+    v.close();
+
+    corruptRow(dir, "SENTRY_DSN");
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    const r = await loadVaultIntoEnv(dir, env, tracked);
+
+    // "1 bad row" is distinguishable from "empty vault": the name surfaces.
+    expect(r.badKeys).toEqual(["SENTRY_DSN"]);
+    expect(r.updated).toContain("GITHUB_TOKEN");
+    // A vault with a bad row is NOT the same as a null (unopenable) vault.
+    expect(env.GITHUB_TOKEN).toBe("good");
   });
 });
