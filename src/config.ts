@@ -207,12 +207,13 @@ export interface TelegramStreamingSettings {
 /**
  * Standing default for interim progress-narration bubbles whenever no
  * `chattiness` key is set — regardless of whether a `config.toml` exists.
- * OFF (quiet) so every unconfigured phantom starts calm: just the final
- * answer, no running commentary, until an operator opts in via
- * `chattiness = true` or `/chattiness on`. Also the fallback used by read
- * sites given a partial config. See lib/chattiness.ts.
+ * ON so every phantom narrates by default: the running commentary keeps the
+ * agent anchored across long tool-heavy runs (empirically it holds the thread
+ * better and produces more reliable work on large tasks), and an operator can
+ * always quiet it via `chattiness = false` or `/chattiness off`. Also the
+ * fallback used by read sites given a partial config. See lib/chattiness.ts.
  */
-export const DEFAULT_CHATTINESS = false;
+export const DEFAULT_CHATTINESS = true;
 
 export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
   narrationFlushMs: 4500,
@@ -287,12 +288,12 @@ export interface Config {
    * per-conversation `/chattiness` override wins over this default; the final
    * reply and error paths are never affected either way. When unset in config
    * — no `chattiness` key, an empty file, or no `config.toml` at all — the
-   * default is `false` (quiet), so any not-yet-configured phantom starts calm
-   * and only narrates once an operator opts in. Also gates the editor (ACP)
+   * default is `true` (narrate), so every phantom keeps the agent anchored on
+   * long runs until an operator opts out. Also gates the editor (ACP)
    * surface's pre-tool narration — the config default only. See
    * lib/chattiness.ts. Optional in the type (mirrors telegramStreaming?) so
    * partial test fixtures need no update; loadConfig always sets it, and read
-   * sites default to `false` (DEFAULT_CHATTINESS) when absent.
+   * sites default to `true` (DEFAULT_CHATTINESS) when absent.
    */
   chattiness?: boolean;
 
@@ -483,10 +484,9 @@ export async function loadConfig(): Promise<Config> {
 
     // Standing default for interim progress-narration bubbles. An explicit
     // value always wins (env for scripted/test setups, then `chattiness` in
-    // config.toml). Absent any explicit value the phantom starts quiet (OFF)
-    // — this holds whether or not a config.toml exists, so an existing
-    // install with no `chattiness` key or an empty file is quiet too. See
-    // DEFAULT_CHATTINESS.
+    // config.toml). Absent any explicit value the phantom narrates (ON) — this
+    // holds whether or not a config.toml exists, so an existing install with no
+    // `chattiness` key or an empty file narrates too. See DEFAULT_CHATTINESS.
     chattiness:
       asBool(process.env.PHANTOMBOT_CHATTINESS) ??
       asBool(toml.chattiness) ??
