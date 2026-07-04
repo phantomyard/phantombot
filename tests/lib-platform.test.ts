@@ -17,14 +17,15 @@ import {
 } from "../src/lib/platform.ts";
 
 describe("currentPlatform", () => {
-  test("returns linux/darwin/unsupported only", () => {
+  test("returns linux/darwin/windows/unsupported only", () => {
     const p = currentPlatform();
-    expect(["linux", "darwin", "unsupported"]).toContain(p);
+    expect(["linux", "darwin", "windows", "unsupported"]).toContain(p);
   });
 
-  test("matches process.platform when it's one of the supported pair", () => {
+  test("matches process.platform for each supported platform", () => {
     if (process.platform === "linux") expect(currentPlatform()).toBe("linux");
     if (process.platform === "darwin") expect(currentPlatform()).toBe("darwin");
+    if (process.platform === "win32") expect(currentPlatform()).toBe("windows");
   });
 });
 

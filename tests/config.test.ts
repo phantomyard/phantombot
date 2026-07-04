@@ -428,7 +428,9 @@ describe("personaDir", () => {
   test("joins personasDir + name", async () => {
     process.env.PHANTOMBOT_PERSONAS_DIR = "/tmp/personas";
     const c = await loadConfig();
-    expect(personaDir(c, "robbie")).toBe("/tmp/personas/robbie");
+    // Build the expectation with the host path.join so the separator is right
+    // on Windows (backslash) as well as POSIX.
+    expect(personaDir(c, "robbie")).toBe(join("/tmp/personas", "robbie"));
   });
 });
 

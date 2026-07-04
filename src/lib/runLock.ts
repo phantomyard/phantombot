@@ -26,8 +26,11 @@
  * stranger inherited its PID" and reclaim the stale lock in the latter case.
  *
  * The token is best-effort and Linux-specific (/proc). On platforms where we
- * can't read it (macOS dev boxes), we degrade to the old PID-only liveness
- * check — no worse than before, and those aren't the always-on production host.
+ * can't read it (macOS and Windows), we degrade to the old PID-only liveness
+ * check — no worse than before. The only cost of the degraded path is that a
+ * crash-then-PID-recycle can make a stale lock look live until the lock file is
+ * removed; on Windows that file lives in per-user %TEMP% and is trivially
+ * cleared, matching the long-accepted macOS behaviour.
  */
 
 import {
@@ -39,6 +42,7 @@ import {
   writeSync,
   closeSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface LockHandle {
@@ -58,6 +62,12 @@ export interface LockConflict {
 export function defaultLockPath(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
   if (xdg) return join(xdg, "phantombot.run.lock");
+  // Windows has no XDG_RUNTIME_DIR and no uid. `os.tmpdir()` resolves to the
+  // per-user %TEMP% (…\AppData\Local\Temp), which is already user-scoped, so a
+  // single filename there won't collide across accounts the way /tmp would.
+  if (process.platform === "win32") {
+    return join(tmpdir(), "phantombot.run.lock");
+  }
   const uid = process.getuid?.() ?? 0;
   return join("/tmp", `phantombot-${uid}.run.lock`);
 }

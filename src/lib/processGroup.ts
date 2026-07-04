@@ -36,7 +36,8 @@
  * cmd in `setsid` and accept the spawn-time race.
  */
 
-import { dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+import { delimiter, dirname, isAbsolute } from "node:path";
 import type { Subprocess, SpawnOptions } from "bun";
 import { log } from "./logger.ts";
 
@@ -76,14 +77,18 @@ export function withCommandDirOnPath(
   bin: string,
   env: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
-  if (!bin.startsWith("/")) return env;
+  // Only act on an ABSOLUTE path — a bare command name is resolved via the
+  // existing PATH and `dirname("pi")` is "." which we must never inject.
+  // `isAbsolute` + the platform `delimiter` (":" on POSIX, ";" on Windows)
+  // keep this correct on both without changing POSIX behaviour.
+  if (!isAbsolute(bin)) return env;
   const binDir = dirname(bin);
   const currentPath = env.PATH ?? "";
-  const entries = currentPath.split(":");
+  const entries = currentPath.split(delimiter);
   if (entries.includes(binDir)) return env;
   return {
     ...env,
-    PATH: currentPath ? `${binDir}:${currentPath}` : binDir,
+    PATH: currentPath ? `${binDir}${delimiter}${currentPath}` : binDir,
   };
 }
 
@@ -116,9 +121,16 @@ export function spawnInNewSession<
   return Bun.spawn(cmd, {
     ...opts,
     env,
-    // Undocumented but stable Bun option (maps to POSIX_SPAWN_SETSID).
-    // See module docstring for why this beats a `setsid` wrapper.
-    detached: true,
+    // POSIX only: `detached` (undocumented but stable Bun option, maps to
+    // POSIX_SPAWN_SETSID) puts the child in its own session so pid==pgid and a
+    // single negative-pid signal reaches the whole descendant group. See the
+    // module docstring for why this beats a `setsid` wrapper.
+    //
+    // Windows has no POSIX process groups — we bring the tree down with
+    // `taskkill /T` by PID instead — and detaching there can prevent Bun from
+    // observing the child's exit, leaving `proc.exited` permanently unresolved
+    // (killProcessGroup would then hang). So we only detach on POSIX.
+    detached: process.platform !== "win32",
   } as typeof opts) as Subprocess<Stdin, Stdout, Stderr>;
 }
 
@@ -174,12 +186,14 @@ export async function killProcessGroup(
  * Returns true if the signal was delivered (or the kernel accepted it),
  * false if the group is already gone (ESRCH).
  *
- * Wraps `process.kill` with negative pid — the POSIX convention for
- * "this entire process group". Anything other than ESRCH is logged
- * and treated as a delivered signal (best-effort; the caller still
- * waits on proc.exited).
+ * On POSIX this wraps `process.kill` with a negative pid — the convention for
+ * "this entire process group". Windows has no process groups or signals in the
+ * POSIX sense, so there we shell out to `taskkill /T` (walk and terminate the
+ * child tree by PID). Anything other than "already gone" is logged and treated
+ * as a delivered signal (best-effort; the caller still waits on proc.exited).
  */
 function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
+  if (process.platform === "win32") return windowsKillTree(pid);
   try {
     process.kill(-pid, signal);
     return true;
@@ -190,6 +204,51 @@ function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
       pid,
       signal,
       code,
+      error: (e as Error).message,
+    });
+    return true;
+  }
+}
+
+/**
+ * Windows equivalent of a process-group kill: `taskkill /PID <pid> /T /F` walks
+ * the descendant tree and force-terminates it.
+ *
+ * Why always force (`/F`), ignoring the SIGTERM/SIGKILL distinction: a Windows
+ * console process tree (cmd + its children) does not honour the graceful
+ * WM_CLOSE that `taskkill` without `/F` sends, and — critically — `taskkill /T`
+ * WITHOUT `/F` returns exit 128 against a still-alive console tree, which is
+ * indistinguishable from "no such process". Treating that as "already gone"
+ * made killProcessGroup skip escalation and await a never-resolving exit. With
+ * `/F`, exit 128 reliably means the PID genuinely doesn't exist, so we can map
+ * it to the POSIX ESRCH branch. The grace window still applies: the caller
+ * races proc.exited against it, and a forced kill resolves proc.exited well
+ * inside a normal grace, so the escalation path simply never needs to fire.
+ *
+ * Returns false when the process is already gone (exit 128, mirroring the POSIX
+ * ESRCH branch) or when `taskkill` itself is missing (ENOENT) — in both cases no
+ * signal was delivered, so the caller must not treat the tree as reaped.
+ */
+function windowsKillTree(pid: number): boolean {
+  try {
+    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch (e) {
+    // taskkill exits 128 ("process not found") when the tree is already gone.
+    const status = (e as { status?: number }).status;
+    if (status === 128) return false;
+    // taskkill missing from PATH: nothing was killed, so report failure rather
+    // than a misleading "signal delivered".
+    const code = (e as { code?: string }).code;
+    if (code === "ENOENT") {
+      log.warn("processGroup: taskkill not found on PATH", { pid });
+      return false;
+    }
+    log.warn("processGroup: taskkill failed", {
+      pid,
+      status,
       error: (e as Error).message,
     });
     return true;

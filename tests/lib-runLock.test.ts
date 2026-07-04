@@ -121,19 +121,26 @@ describe("defaultLockPath", () => {
     const saved = process.env.XDG_RUNTIME_DIR;
     process.env.XDG_RUNTIME_DIR = "/run/user/1003";
     try {
-      expect(defaultLockPath()).toBe("/run/user/1003/phantombot.run.lock");
+      // Build the expectation with the host's path.join so the separator is
+      // correct on Windows too (XDG_RUNTIME_DIR still wins if it's set there).
+      expect(defaultLockPath()).toBe(join("/run/user/1003", "phantombot.run.lock"));
     } finally {
       if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
       else process.env.XDG_RUNTIME_DIR = saved;
     }
   });
 
-  test("falls back to /tmp/phantombot-<uid>.run.lock when XDG_RUNTIME_DIR is unset", () => {
+  test("falls back to a per-user temp path when XDG_RUNTIME_DIR is unset", () => {
     const saved = process.env.XDG_RUNTIME_DIR;
     delete process.env.XDG_RUNTIME_DIR;
     try {
-      const uid = process.getuid?.() ?? 0;
-      expect(defaultLockPath()).toBe(`/tmp/phantombot-${uid}.run.lock`);
+      if (process.platform === "win32") {
+        // Windows has no uid and no /tmp — the lock lives in per-user %TEMP%.
+        expect(defaultLockPath()).toBe(join(tmpdir(), "phantombot.run.lock"));
+      } else {
+        const uid = process.getuid?.() ?? 0;
+        expect(defaultLockPath()).toBe(`/tmp/phantombot-${uid}.run.lock`);
+      }
     } finally {
       if (saved !== undefined) process.env.XDG_RUNTIME_DIR = saved;
     }
