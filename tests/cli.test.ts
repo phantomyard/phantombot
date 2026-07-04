@@ -41,6 +41,7 @@ describe("phantombot CLI dispatcher", () => {
       "tick",
       "uninstall",
       "update",
+      "vault",
       "voice",
     ]);
   });

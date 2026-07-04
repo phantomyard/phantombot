@@ -66,6 +66,7 @@ import {
   identityFromNsec,
   type NostrIdentity,
 } from "../../lib/nostrIdentity.ts";
+import { readPersonaIdentityNsec } from "../../lib/personaIdentity.ts";
 
 /** Filename of the per-persona phantomchat config inside an agent dir. */
 export const PHANTOMCHAT_FILE = "phantomchat.json";
@@ -193,14 +194,25 @@ export function loadPhantomchatPersonaConfig(
     });
     return undefined;
   }
-  if (!parsed || typeof parsed.nsec !== "string" || parsed.nsec.trim() === "") {
+  // The nsec now lives in the shared `identity.json` (lib/personaIdentity.ts).
+  // Prefer it; fall back to a legacy nsec still inside phantomchat.json so
+  // pre-migration persona folders keep working. The channel is enabled as long
+  // as EITHER source yields a usable nsec — phantomchat.json still carries the
+  // channel config (relays / allowlist / group bots).
+  const sharedNsec = readPersonaIdentityNsec(agentDir);
+  const nsec =
+    sharedNsec ??
+    (typeof parsed.nsec === "string" && parsed.nsec.trim() !== ""
+      ? parsed.nsec.trim()
+      : undefined);
+  if (!nsec) {
     return undefined;
   }
   let identity: NostrIdentity;
   try {
-    identity = identityFromNsec(parsed.nsec);
+    identity = identityFromNsec(nsec);
   } catch (e) {
-    log.warn(`phantomchat: invalid nsec in ${path} — skipping`, {
+    log.warn(`phantomchat: invalid nsec for ${agentDir} — skipping`, {
       error: (e as Error).message,
     });
     return undefined;
