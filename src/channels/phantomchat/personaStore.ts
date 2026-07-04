@@ -66,6 +66,10 @@ import {
   identityFromNsec,
   type NostrIdentity,
 } from "../../lib/nostrIdentity.ts";
+import {
+  createPersonaIdentityIfAbsent,
+  readPersonaIdentityNsec,
+} from "../../lib/personaIdentity.ts";
 
 /** Filename of the per-persona phantomchat config inside an agent dir. */
 export const PHANTOMCHAT_FILE = "phantomchat.json";
@@ -193,14 +197,25 @@ export function loadPhantomchatPersonaConfig(
     });
     return undefined;
   }
-  if (!parsed || typeof parsed.nsec !== "string" || parsed.nsec.trim() === "") {
+  // The nsec now lives in the shared `identity.json` (lib/personaIdentity.ts).
+  // Prefer it; fall back to a legacy nsec still inside phantomchat.json so
+  // pre-migration persona folders keep working. The channel is enabled as long
+  // as EITHER source yields a usable nsec — phantomchat.json still carries the
+  // channel config (relays / allowlist / group bots).
+  const sharedNsec = readPersonaIdentityNsec(agentDir);
+  const nsec =
+    sharedNsec ??
+    (typeof parsed.nsec === "string" && parsed.nsec.trim() !== ""
+      ? parsed.nsec.trim()
+      : undefined);
+  if (!nsec) {
     return undefined;
   }
   let identity: NostrIdentity;
   try {
-    identity = identityFromNsec(parsed.nsec);
+    identity = identityFromNsec(nsec);
   } catch (e) {
-    log.warn(`phantomchat: invalid nsec in ${path} — skipping`, {
+    log.warn(`phantomchat: invalid nsec for ${agentDir} — skipping`, {
       error: (e as Error).message,
     });
     return undefined;
@@ -222,9 +237,17 @@ export function loadPhantomchatPersonaConfig(
 }
 
 /**
- * Atomically write a persona's phantomchat.json at mode 0600 (the nsec is a
- * secret). Creates the agent dir if needed. Tempfile + rename avoids the
- * world-readable window a write-then-chmod would leave.
+ * Atomically write a persona's phantomchat.json at mode 0600. Creates the agent
+ * dir if needed. Tempfile + rename avoids the world-readable window a
+ * write-then-chmod would leave.
+ *
+ * The persona's root secret (nsec) is NO LONGER written here — it lives solely
+ * in the shared `identity.json` (lib/personaIdentity.ts), which both this
+ * channel and the encrypted vault derive from. `data.nsec` is still accepted so
+ * callers (and legacy files whose nsec we just read back) can seed identity.json
+ * on the first save that follows a migration; it is persisted there
+ * (create-if-absent, never clobbering an existing identity) and then kept OUT of
+ * phantomchat.json, which now carries channel settings only.
  */
 export async function savePhantomchatPersonaConfig(
   agentDir: string,
@@ -239,8 +262,16 @@ export async function savePhantomchatPersonaConfig(
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
   await mkdir(dirname(path), { recursive: true });
+  // Ensure the root secret is durably in identity.json before we drop it from
+  // this channel file. Atomic create-if-absent (no existsSync check-then-write):
+  // a legacy persona's nsec is promoted exactly once; an identity.json that
+  // already exists — including one the vault just minted concurrently — is never
+  // overwritten, so we can't clobber the canonical identity and orphan its
+  // encrypted rows.
+  if (data.nsec) {
+    await createPersonaIdentityIfAbsent(agentDir, data.nsec);
+  }
   const body: PhantomchatFileShape = {
-    nsec: data.nsec,
     relays: data.relays,
     allowed_npubs: data.allowedNpubs,
   };

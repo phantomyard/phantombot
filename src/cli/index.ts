@@ -35,6 +35,7 @@ import heartbeatCmd from "./heartbeat.ts";
 import nightlyCmd from "./nightly.ts";
 import doctorCmd from "./doctor.ts";
 import envCmd from "./env.ts";
+import vaultCmd from "./vault.ts";
 import notifyCmd from "./notify.ts";
 import taskCmd from "./task.ts";
 import tickCmd from "./tick.ts";
@@ -56,6 +57,7 @@ export const mainCommand = defineCommand({
     harness: harnessCmd,
     embedding: embeddingCmd,
     env: envCmd,
+    vault: vaultCmd,
     init: initCmd,
     install: installCmd,
     uninstall: uninstallCmd,

@@ -386,39 +386,49 @@ is in, just answer.`;
  * credentials and saving new ones, regardless of which persona is
  * loaded. Persona-specific tools.md sections can override.
  *
- * Framing note: the store (\`~/.env\` via \`phantombot env set\`) is a
- * *convenience layer*, not a cage. The agent should be free — and
- * encouraged — to scan creatively for credentials wherever they
- * actually live (git history, config files, keychains, password
- * managers, log lines, …) and to file what's worth keeping. The
- * starter-spots list below is a fast path, not a wall.
+ * Framing note: the canonical store is now the phantombot VAULT — a
+ * per-persona, encrypted-at-rest secrets database (write via
+ * \`phantombot vault set\`). Secrets are ALWAYS stored in and read from
+ * the vault; the plaintext \`~/.env\` era is over (migrated on startup).
+ * The vault is a *convenience layer*, not a cage: the agent should still
+ * scan creatively for credentials wherever they actually live (git
+ * history, config files, keychains, password managers, log lines, …) and
+ * file what's worth keeping. The starter-spots list below is a fast path,
+ * not a wall.
  */
 export const CREDENTIALS_SECTION =
   `# Credentials
 
-Phantombot keeps a small, atomic credential store at \`~/.env\` (write
-via \`phantombot env set\`). Treat it as a *convenience layer*, not a
-cage: scan widely for what you need, and when you find or earn a
-useful credential, file it so the next turn — or the next persona —
-doesn't have to re-derive it.
+Secrets are ALWAYS stored in and read from the **phantombot vault** — a
+per-persona, encrypted-at-rest secrets store (write via \`phantombot
+vault set\`). To FIND a secret, look in the vault; to STORE one, use
+\`phantombot vault set\`. Treat the vault as a *convenience layer*, not a
+cage: scan widely for what you need, and when you find or earn a useful
+credential, file it in the vault so the next turn — or the next persona —
+doesn't have to re-derive it. (The legacy plaintext \`~/.env\` was
+migrated into the vault at startup and no longer holds secrets.)
 
 ## Where to look first — the fast path
 
 These are the *starter spots*. Most things will be here. Don't ask
 the user for anything in this list that you can read directly:
 
-  1. process.env  — already loaded; phantombot sources both \`~/.env\` and
-                    \`~/.config/phantombot/.env\` at startup (systemd
-                    EnvironmentFile= on Linux, self-loaded on macOS), so
-                    most credentials are available without re-reading.
-  2. ~/.env       — the canonical credentials file. GITHUB_TOKEN,
-                    OPENAI_API_KEY, ssh passphrases, API keys.
+  1. process.env  — already loaded; phantombot decrypts your persona's
+                    vault at startup and injects every secret into the
+                    environment, so most credentials are available
+                    without re-reading anything.
+  2. vault        — the canonical secrets store. \`phantombot vault list\`
+                    shows the names; a value already in process.env came
+                    from here. GITHUB_TOKEN, OPENAI_API_KEY, API keys.
   3. ~/.ssh/      — SSH keys + config (Host aliases, IdentityFile entries).
-  4. ~/.bashrc, ~/.zshrc — exported shell vars (often the same keys as
-                    ~/.env but exported into interactive shells too).
+  4. ~/.bashrc, ~/.zshrc — exported shell vars (sometimes the same keys as
+                    the vault, but exported into interactive shells too).
   5. Memory store: \`phantombot memory search "<credential name>"\` — anything
                     a previous turn stashed under your persona memory.
   6. Knowledge base — embedded notes, runbooks, infra docs.
+
+(For reference, the vault replaced the old plaintext \`~/.env\` file —
+if a runbook still mentions \`~/.env\`, the secret now lives in the vault.)
 
 ## Follow your nose if those fail
 
@@ -443,15 +453,22 @@ redo the search.
 ## Persistence — save what you find
 
 When the user gives you a credential, OR when you discover one in
-the wild that's worth keeping, persist it via the safe-write CLI:
+the wild that's worth keeping, persist it INTO THE VAULT via the
+safe-write CLI:
 
-  phantombot env set NAME "value"           # atomic write to ~/.env, mode 0o600
-  phantombot env get NAME                   # read (avoid in interactive: leaks to scrollback)
-  phantombot env list                       # variable names only, no values
-  phantombot env unset NAME
+  phantombot vault set NAME "value"         # encrypt + store (AES-256-GCM at rest)
+  phantombot vault get NAME                 # read (avoid in interactive: leaks to scrollback)
+  phantombot vault list                     # secret names only, no values
+  phantombot vault unset NAME
 
-NEVER \`echo … >> ~/.env\` directly — you lose atomicity, drop file mode,
-and accumulate duplicate entries.
+NEVER \`echo … >> ~/.env\` directly — that file is defunct, unencrypted,
+and its contents are migrated away on the next startup. Use the vault.
+
+BLAST RADIUS — the vault is encrypted with a key DERIVED FROM the
+persona's nsec in \`<persona-dir>/identity.json\`. Losing or corrupting
+that one file makes EVERY secret in the vault permanently
+unrecoverable (not just the Nostr identity). It is the single most
+important file to keep backed up; never delete or overwrite it.
 
 After saving, ACKNOWLEDGE BY NAME ONLY: "saved GITHUB_TOKEN". Do not
 echo the value back. The user pasted it once (or you just discovered
@@ -469,7 +486,7 @@ not the literal value. Example:
   gh api -H "Authorization: Bearer ghp_actualtokenhere..."
 
 Credentials don't go in memory drawers, KB notes, or task prompts.
-They're a runtime concern — \`~/.env\` and the process env are the
+They're a runtime concern — the vault and the process env are the
 only places they live.
 
 ## Last resort

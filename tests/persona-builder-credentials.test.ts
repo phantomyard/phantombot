@@ -6,12 +6,12 @@
  * credentials and how to persist new ones, regardless of which persona
  * is loaded.
  *
- * Framing: the section presents `~/.env` (write via `phantombot env set`)
- * as a *convenience layer*, not a cage. The agent must be free to scan
- * creatively for credentials wherever they live, and to file what's
- * worth keeping. These tests pin both halves: starter spots are
- * documented (fast path), AND the section explicitly licenses
- * follow-your-nose discovery with concrete examples.
+ * Framing: the section presents the phantombot VAULT (write via
+ * `phantombot vault set`) as the canonical store — a *convenience layer*,
+ * not a cage. The agent must be free to scan creatively for credentials
+ * wherever they live, and to file what's worth keeping. These tests pin
+ * both halves: starter spots are documented (fast path), AND the section
+ * explicitly licenses follow-your-nose discovery with concrete examples.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -42,7 +42,7 @@ describe("buildSystemPrompt — credentials section", () => {
 
   test("frames the store as a convenience layer, not a cage", () => {
     // The literal phrase is load-bearing. It's how the agent learns
-    // that `phantombot env` is a place to *file* credentials, not a
+    // that the vault is a place to *file* credentials, not a
     // wall around them. If you change the wording, update both here
     // and the persona docs at the same time.
     expect(CREDENTIALS_SECTION).toMatch(/convenience layer/i);
@@ -50,9 +50,18 @@ describe("buildSystemPrompt — credentials section", () => {
     expect(CREDENTIALS_SECTION).toMatch(/not a\s+cage/i);
   });
 
-  test("documents the starter-spots fast path with ~/.env, ssh, shell, memory, KB", () => {
+  test("names the vault as the canonical, always-used secrets store", () => {
+    // The whole point of #253: the vault is where secrets ALWAYS live.
+    expect(CREDENTIALS_SECTION).toMatch(/phantombot vault/i);
+    expect(CREDENTIALS_SECTION).toMatch(/always/i);
+    expect(CREDENTIALS_SECTION).toMatch(/encrypted/i);
+  });
+
+  test("documents the starter-spots fast path with vault, ssh, shell, memory, KB", () => {
     expect(CREDENTIALS_SECTION).toContain("process.env");
-    expect(CREDENTIALS_SECTION).toContain("~/.env");
+    // The canonical store is the vault now; ~/.env only survives as a
+    // pointer note explaining where secrets moved.
+    expect(CREDENTIALS_SECTION).toMatch(/vault/i);
     expect(CREDENTIALS_SECTION).toContain("~/.ssh/");
     expect(CREDENTIALS_SECTION).toContain("~/.bashrc");
     expect(CREDENTIALS_SECTION).toContain("phantombot memory search");
@@ -81,11 +90,11 @@ describe("buildSystemPrompt — credentials section", () => {
     expect(CREDENTIALS_SECTION).toMatch(/save it/i);
   });
 
-  test("documents the env-set/get/list/unset CLI as the safe-write path", () => {
-    expect(CREDENTIALS_SECTION).toContain("phantombot env set");
-    expect(CREDENTIALS_SECTION).toContain("phantombot env get");
-    expect(CREDENTIALS_SECTION).toContain("phantombot env list");
-    expect(CREDENTIALS_SECTION).toContain("phantombot env unset");
+  test("documents the vault set/get/list/unset CLI as the safe-write path", () => {
+    expect(CREDENTIALS_SECTION).toContain("phantombot vault set");
+    expect(CREDENTIALS_SECTION).toContain("phantombot vault get");
+    expect(CREDENTIALS_SECTION).toContain("phantombot vault list");
+    expect(CREDENTIALS_SECTION).toContain("phantombot vault unset");
   });
 
   test("explicitly forbids `echo … >> ~/.env`", () => {

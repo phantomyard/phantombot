@@ -20,6 +20,8 @@ import {
   savePhantomchatPersonaConfig,
 } from "../src/channels/phantomchat/personaStore.ts";
 import { decodeNpubToHex, generateIdentity } from "../src/lib/nostrIdentity.ts";
+import { readPersonaIdentityNsec } from "../src/lib/personaIdentity.ts";
+import { readFile } from "node:fs/promises";
 
 let workdir: string;
 
@@ -53,6 +55,52 @@ describe("save/load round-trip", () => {
     expect(loaded!.allowedNpubs).toEqual([allowed]);
     // allowedHex is the decoded lowercase-hex form used by the auth gate.
     expect(loaded!.allowedHex).toEqual([decodeNpubToHex(allowed)]);
+  });
+
+  test("nsec is stored in identity.json, NOT phantomchat.json (Kai #253)", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+
+    // The root secret lives in identity.json ...
+    expect(readPersonaIdentityNsec(agentDir)).toBe(id.nsec);
+    // ... and is NOT duplicated into the channel-config file.
+    const pcRaw = JSON.parse(
+      await readFile(phantomchatConfigPath(agentDir), "utf8"),
+    ) as Record<string, unknown>;
+    expect(pcRaw.nsec).toBeUndefined();
+    expect(pcRaw.relays).toEqual(["wss://a.example"]);
+    // The channel still loads fine, sourcing the nsec from identity.json.
+    expect(loadPhantomchatPersonaConfig(agentDir)!.identity.npub).toBe(id.npub);
+  });
+
+  test("a legacy phantomchat.json nsec is promoted to identity.json on next save", async () => {
+    const legacy = generateIdentity();
+    const agentDir = join(workdir, "legacy");
+    await mkdir(agentDir, { recursive: true });
+    // Simulate a pre-migration file with the nsec inline.
+    await writeFile(
+      phantomchatConfigPath(agentDir),
+      JSON.stringify({ nsec: legacy.nsec, relays: [], allowed_npubs: [] }),
+    );
+    // It still loads (legacy fallback read).
+    expect(loadPhantomchatPersonaConfig(agentDir)!.identity.npub).toBe(legacy.npub);
+
+    // A subsequent save (e.g. recordGreeted/cacheRelays) promotes it and drops
+    // the inline nsec, without losing the identity.
+    await recordTrustedNpub(agentDir, generateIdentity().npub);
+    expect(readPersonaIdentityNsec(agentDir)).toBe(legacy.nsec);
+    const pcRaw = JSON.parse(
+      await readFile(phantomchatConfigPath(agentDir), "utf8"),
+    ) as Record<string, unknown>;
+    expect(pcRaw.nsec).toBeUndefined();
+    expect(loadPhantomchatPersonaConfig(agentDir)!.identity.npub).toBe(legacy.npub);
   });
 
   test("tofu round-trips: persisted only when enabled, defaults false", async () => {
