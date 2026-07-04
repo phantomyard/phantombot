@@ -161,8 +161,10 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
       npub = persisted.npub;
       p.note(
         `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
-          `saved to <persona-dir>/identity.json (mode 0600). Back it up — losing\n` +
-          `it means a new identity (and re-adding the new npub in the app).\n\n` +
+          `saved to <persona-dir>/identity.json (mode 0600). Back it up — this\n` +
+          `nsec now also derives the persona's VAULT encryption key, so losing it\n` +
+          `means a new identity (re-add the new npub in the app) AND every secret\n` +
+          `stored in the vault becomes permanently unrecoverable.\n\n` +
           `  nsec (one-time display): ${nsec}\n\n` +
           `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
           `  ${npub}`,

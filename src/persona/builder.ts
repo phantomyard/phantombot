@@ -464,6 +464,12 @@ safe-write CLI:
 NEVER \`echo … >> ~/.env\` directly — that file is defunct, unencrypted,
 and its contents are migrated away on the next startup. Use the vault.
 
+BLAST RADIUS — the vault is encrypted with a key DERIVED FROM the
+persona's nsec in \`<persona-dir>/identity.json\`. Losing or corrupting
+that one file makes EVERY secret in the vault permanently
+unrecoverable (not just the Nostr identity). It is the single most
+important file to keep backed up; never delete or overwrite it.
+
 After saving, ACKNOWLEDGE BY NAME ONLY: "saved GITHUB_TOKEN". Do not
 echo the value back. The user pasted it once (or you just discovered
 it); further reflection in the conversation is leakage that ends up

@@ -4,9 +4,10 @@
  * ciphertext read back first.
  *
  * Covers:
- *   - ~/.env → the DEFAULT persona's vault, decryptable, plaintext deleted,
+ *   - ~/.env → FANNED OUT into every persona's vault (default AND non-default),
+ *     decryptable, plaintext deleted,
  *   - central .env → FANNED OUT into every persona's vault,
- *   - COLLISION: a persona-local ~/.env value WINS over the central one,
+ *   - COLLISION: a ~/.env value WINS over the central one, in every persona,
  *   - IDEMPOTENCY: a re-run with the files already gone is a clean no-op,
  *   - hidden/non-persona dirs are NOT sprayed with an identity + secrets.
  */
@@ -75,6 +76,31 @@ describe("migratePlaintextToVault", () => {
     expect(await readVault("robbie", "GITHUB_TOKEN")).toBe("ghp_local");
     expect(await readVault("robbie", "API_KEY")).toBe("abc123");
     expect(existsSync(userEnv)).toBe(false); // plaintext removed after read-back
+  });
+
+  test("~/.env fans out into NON-default personas too (Lena/Kai keep their creds)", async () => {
+    // Pre-create non-default persona dirs so the fan-out reaches them.
+    await mkdir(join(personasDir, "lena"), { recursive: true });
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await saveEnvFile(userEnv, { GITHUB_TOKEN: "ghp_shared" });
+
+    await migratePlaintextToVault(cfg());
+
+    // Every persona — not just the default — must have the ~/.env secret.
+    expect(await readVault("robbie", "GITHUB_TOKEN")).toBe("ghp_shared");
+    expect(await readVault("lena", "GITHUB_TOKEN")).toBe("ghp_shared");
+    expect(await readVault("kai", "GITHUB_TOKEN")).toBe("ghp_shared");
+    expect(existsSync(userEnv)).toBe(false); // deleted only after all read back
+  });
+
+  test("collision: ~/.env value wins over central in a NON-default persona", async () => {
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await saveEnvFile(userEnv, { SHARED: "local-wins" });
+    await saveEnvFile(centralEnv, { SHARED: "central-value" });
+
+    await migratePlaintextToVault(cfg());
+
+    expect(await readVault("kai", "SHARED")).toBe("local-wins");
   });
 
   test("central .env fans out into EVERY persona's vault", async () => {

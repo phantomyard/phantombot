@@ -2,17 +2,21 @@
  * One-time (idempotent) migration of the legacy PLAINTEXT credential files
  * into the per-persona encrypted vaults.
  *
- * Two source files, two policies:
+ * Two source files, both FANNED OUT to every persona:
  *
- *   1. `~/.env` (legacy per-account secrets) → migrated into the DEFAULT/active
- *      persona's vault ONLY. These were always the single-box operator's own
- *      credentials, so they belong to the one active persona.
+ *   1. `~/.env` (legacy per-account secrets) → FANNED OUT into EVERY persona's
+ *      vault. In the old world these were loaded globally (systemd
+ *      `EnvironmentFile=` / `preloadEnvFiles`), so every persona could read
+ *      them; on a single-operator multi-persona box (the dogfood plan: Lena +
+ *      Kai) they must stay available to all personas, not just the default one,
+ *      or the non-default personas silently lose `GITHUB_TOKEN` etc. once the
+ *      plaintext file is deleted.
  *
  *   2. `~/.config/phantombot/.env` (central phantombot-managed secrets, e.g.
  *      TTS keys) → FANNED OUT into EVERY persona's vault, since any persona's
- *      turn might need them. On a per-key COLLISION (a persona already received
- *      that key from `~/.env`), the persona-local value from `~/.env` WINS — so
- *      we skip overwriting it during the central fan-out.
+ *      turn might need them. On a per-key COLLISION (a key that also came from
+ *      `~/.env`), the `~/.env` value WINS in every persona — so we skip
+ *      overwriting it during the central fan-out.
  *
  * Safety (per source file):
  *   - VALIDATION GATE: after every encrypted write we read the value back
@@ -94,13 +98,15 @@ function writeAndVerify(
 }
 
 /**
- * Migrate `~/.env` into the default/active persona's vault. Returns true if the
- * plaintext file was (or already is) fully migrated and removed. Best-effort —
- * never throws to the caller.
+ * Migrate `~/.env` by FANNING IT OUT into EVERY persona's vault (mirroring the
+ * old global `EnvironmentFile=` behaviour, so non-default personas keep their
+ * credentials). Read-back is verified in every persona written to; the plaintext
+ * file is deleted only if ALL personas passed. Returns `removed: true` (with the
+ * migrated keys) only on full success. Best-effort — never throws to the caller.
  */
 async function migrateUserEnv(
   config: Config,
-  defaultPersona: string,
+  personas: string[],
 ): Promise<{ removed: boolean; keys: string[] }> {
   const path = legacyUserEnvPath();
   if (!existsSync(path)) return { removed: false, keys: [] };
@@ -115,29 +121,40 @@ async function migrateUserEnv(
   }
   const entries = Object.entries(vars);
   const keys = entries.map(([k]) => k);
-  let vault: Vault;
-  try {
-    vault = await openPersonaVault(personaDir(config, defaultPersona));
-  } catch (e) {
-    // Can't open the persona's vault (identity mint failed, disk error) —
-    // leave the plaintext in place for a later retry. Never throw (best-effort).
-    log.warn("vault-migrate: could not open vault for ~/.env — leaving it in place", {
-      persona: defaultPersona,
-      error: (e as Error).message,
-    });
-    return { removed: false, keys: [] };
+  if (personas.length === 0) {
+    // No personas to fan out to — leave the file for a later run.
+    return { removed: false, keys };
   }
-  let ok: boolean;
-  try {
-    ok = writeAndVerify(vault, entries);
-  } finally {
-    vault.close();
+
+  let allOk = true;
+  for (const persona of personas) {
+    let vault: Vault;
+    try {
+      vault = await openPersonaVault(personaDir(config, persona));
+    } catch (e) {
+      // One persona's vault won't open (identity mint failed, disk error) —
+      // don't delete the plaintext (that persona would be left without the
+      // secrets), but keep going so the others still migrate. Never throw.
+      allOk = false;
+      log.warn("vault-migrate: could not open vault for ~/.env fan-out — leaving it in place", {
+        persona,
+        error: (e as Error).message,
+      });
+      continue;
+    }
+    try {
+      const ok = writeAndVerify(vault, entries);
+      if (!ok) allOk = false;
+    } finally {
+      vault.close();
+    }
   }
-  if (ok) {
+
+  if (allOk) {
     try {
       await unlink(path);
-      log.info("vault-migrate: migrated ~/.env into vault, removed plaintext", {
-        persona: defaultPersona,
+      log.info("vault-migrate: fanned ~/.env into all persona vaults, removed plaintext", {
+        personaCount: personas.length,
         keyCount: keys.length,
       });
       return { removed: true, keys };
@@ -148,7 +165,7 @@ async function migrateUserEnv(
     }
   } else {
     log.warn(
-      "vault-migrate: ~/.env read-back failed — leaving plaintext file in place",
+      "vault-migrate: ~/.env read-back failed in at least one persona — leaving plaintext file in place",
     );
   }
   return { removed: false, keys };
@@ -254,18 +271,19 @@ export async function migratePlaintextToVault(config: Config): Promise<void> {
   personaSet.add(defaultPersona);
   const personas = [...personaSet];
 
-  // 1. ~/.env → default persona.
-  const userResult = await migrateUserEnv(config, defaultPersona);
+  // 1. ~/.env → fanned out to EVERY persona.
+  const userResult = await migrateUserEnv(config, personas);
 
-  // Record which keys the default persona already got locally, so the central
-  // fan-out lets those win (skips them for that persona only). ONLY when the
-  // ~/.env migration actually SUCCEEDED (removed === true, i.e. every key wrote
-  // and read back): if it failed and we skipped these keys, the default persona
-  // could end up with the value from NEITHER source. On failure we let the
-  // central value populate it, and a later ~/.env retry re-asserts local-wins.
+  // Record which keys came from `~/.env` so the central fan-out lets those win
+  // (skips them) in EVERY persona. ONLY when the ~/.env migration actually
+  // SUCCEEDED (removed === true, i.e. every key wrote and read back in every
+  // persona): if it failed and we skipped these keys, a persona could end up
+  // with the value from NEITHER source. On failure we let the central value
+  // populate it, and a later ~/.env retry re-asserts local-wins.
   const localKeys = new Map<string, Set<string>>();
   if (userResult.removed && userResult.keys.length > 0) {
-    localKeys.set(defaultPersona, new Set(userResult.keys));
+    const won = new Set(userResult.keys);
+    for (const persona of personas) localKeys.set(persona, won);
   }
 
   // 2. central .env → every persona (local wins on collision).
