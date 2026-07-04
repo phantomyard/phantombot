@@ -13,11 +13,21 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { delimiter, dirname } from "node:path";
 import {
   killProcessGroup,
   spawnInNewSession,
   withCommandDirOnPath,
 } from "../src/lib/processGroup.ts";
+
+// The spawn/kill tests below drive real POSIX subprocesses (`sleep`, `sh -c`,
+// `#!/usr/bin/env node` shebangs) and the negative-pid group signal — none of
+// which exist on Windows, where the equivalent path is taskkill /T (covered by
+// its own Windows-only test at the bottom). Skip the POSIX-model suites on
+// Windows rather than assert against a process model that isn't there.
+const isWin = process.platform === "win32";
+const describePosix = isWin ? describe.skip : describe;
+const describeWin = isWin ? describe : describe.skip;
 
 function isAlive(pid: number): boolean {
   try {
@@ -86,7 +96,7 @@ afterEach(() => {
   trackedPids.length = 0;
 });
 
-describe("spawnInNewSession", () => {
+describePosix("spawnInNewSession", () => {
   test("starts the binary with the same pid==pgid (the kill-the-group precondition)", async () => {
     // We can't observe pgid directly without /proc, but we CAN verify
     // that the process started and is reachable via its own pid.
@@ -106,7 +116,7 @@ describe("spawnInNewSession", () => {
   });
 });
 
-describe("killProcessGroup — orphan grandchild fix", () => {
+describePosix("killProcessGroup — orphan grandchild fix", () => {
   test("SIGTERM to the group reaps both parent AND grandchild", async () => {
     // Shell spawns a backgrounded sleep, prints its pid, then waits.
     // Without process-group kill, killing the shell would leave the
@@ -139,7 +149,7 @@ describe("killProcessGroup — orphan grandchild fix", () => {
   });
 });
 
-describe("killProcessGroup — SIGTERM→SIGKILL escalation", () => {
+describePosix("killProcessGroup — SIGTERM→SIGKILL escalation", () => {
   test("escalates to SIGKILL when SIGTERM is trapped/ignored", async () => {
     // Use a Bun process that registers a no-op SIGTERM handler so the
     // signal is delivered but the process keeps running. Only SIGKILL
@@ -194,20 +204,26 @@ describe("killProcessGroup — SIGTERM→SIGKILL escalation", () => {
   });
 });
 
+// These are pure string tests with no subprocess, so they run on every
+// platform. We build expected PATHs from the host's `path.delimiter`
+// (":" on POSIX, ";" on Windows) and `path.dirname` — the same primitives
+// withCommandDirOnPath uses — so the assertions hold on both without
+// hardcoding a POSIX separator.
 describe("withCommandDirOnPath — shebang interpreter resolution", () => {
   test("prepends an absolute binary's own dir to PATH", () => {
-    const out = withCommandDirOnPath("/opt/nvm/versions/node/v24/bin/pi", {
-      PATH: "/usr/bin:/bin",
-    });
-    expect(out.PATH).toBe("/opt/nvm/versions/node/v24/bin:/usr/bin:/bin");
+    const bin = "/opt/nvm/versions/node/v24/bin/pi";
+    const before = ["/usr/bin", "/bin"].join(delimiter);
+    const out = withCommandDirOnPath(bin, { PATH: before });
+    expect(out.PATH).toBe([dirname(bin), before].join(delimiter));
   });
 
   test("is a no-op when the dir is already on PATH", () => {
-    const env = { PATH: "/opt/nvm/versions/node/v24/bin:/usr/bin" };
-    const out = withCommandDirOnPath("/opt/nvm/versions/node/v24/bin/pi", env);
+    const bin = "/opt/nvm/versions/node/v24/bin/pi";
+    const env = { PATH: [dirname(bin), "/usr/bin"].join(delimiter) };
+    const out = withCommandDirOnPath(bin, env);
     // Same object reference back — nothing to change, no needless clone churn.
     expect(out).toBe(env);
-    expect(out.PATH).toBe("/opt/nvm/versions/node/v24/bin:/usr/bin");
+    expect(out.PATH).toBe([dirname(bin), "/usr/bin"].join(delimiter));
   });
 
   test("handles an empty/absent PATH by seeding it with the bin dir", () => {
@@ -236,7 +252,33 @@ describe("withCommandDirOnPath — shebang interpreter resolution", () => {
   });
 });
 
-describe("spawnInNewSession — shebang interpreter on a narrow PATH", () => {
+describeWin("killProcessGroup — Windows taskkill tree", () => {
+  test("force-terminates a spawned console process tree via taskkill /T /F", async () => {
+    // Windows analog of the orphan-grandchild test: `cmd /c ping -n 60` spawns
+    // a child ping and blocks for ~60s. killProcessGroup must bring the whole
+    // tree down with `taskkill /T /F` and resolve. Regression guard for the
+    // exit-128 bug: `taskkill /T` WITHOUT /F returns 128 on a live console
+    // tree, which we previously misread as "already gone" and then hung on
+    // proc.exited. This must complete promptly, not sit out the grace window.
+    const proc = spawnInNewSession(
+      ["cmd", "/c", "ping -n 60 127.0.0.1 >NUL"],
+      { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+    expect(isAlive(proc.pid!)).toBe(true);
+
+    const start = Date.now();
+    await killProcessGroup(proc, 2000);
+    const elapsedMs = Date.now() - start;
+
+    // A forced kill resolves proc.exited well inside the grace window, so this
+    // returns fast rather than waiting out the full 2s.
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(isAlive(proc.pid!)).toBe(false);
+  }, 15000);
+});
+
+describePosix("spawnInNewSession — shebang interpreter on a narrow PATH", () => {
   test("a #!/usr/bin/env node script beside its interpreter runs with a stripped PATH", async () => {
     // Reproduce the systemd exit-127 bug in miniature: put a Node-shebang
     // script in the SAME dir as a `node` symlink, then spawn it with a PATH
@@ -269,7 +311,7 @@ describe("spawnInNewSession — shebang interpreter on a narrow PATH", () => {
   });
 });
 
-describe("killProcessGroup — already-dead handling", () => {
+describePosix("killProcessGroup — already-dead handling", () => {
   test("safe to call after the process has already exited", async () => {
     const proc = spawnInNewSession(["true"], {
       stdin: "ignore",

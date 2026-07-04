@@ -27,20 +27,26 @@
 import { runMain } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
+import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
 import { preloadEnvFiles } from "./lib/envBootstrap.ts";
 import { log } from "./lib/logger.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
 
-try {
-  const config = await loadConfig();
-  await migratePlaintextToVault(config);
-  const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
-  await loadVaultIntoEnv(personaDir(config, activePersona));
-} catch (e) {
-  // Never let credential bootstrap wedge the CLI — log and carry on. The
-  // subcommand may still work (e.g. `phantombot persona` on a fresh box).
-  log.warn("startup: vault bootstrap failed", { error: (e as Error).message });
+// Skip the credential bootstrap entirely for read-only invocations
+// (--help/--version/bare) so they never mutate disk or provision a persona —
+// important for CI, which uses them as smoke tests. See cliInvocation.ts.
+if (!isReadOnlyInvocation(process.argv)) {
+  try {
+    const config = await loadConfig();
+    await migratePlaintextToVault(config);
+    const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
+    await loadVaultIntoEnv(personaDir(config, activePersona));
+  } catch (e) {
+    // Never let credential bootstrap wedge the CLI — log and carry on. The
+    // subcommand may still work (e.g. `phantombot persona` on a fresh box).
+    log.warn("startup: vault bootstrap failed", { error: (e as Error).message });
+  }
+  await preloadEnvFiles();
 }
-await preloadEnvFiles();
 runMain(mainCommand);

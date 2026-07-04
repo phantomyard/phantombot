@@ -33,11 +33,12 @@ import {
 
 export type { ServiceControl };
 
-export type Platform = "linux" | "darwin" | "unsupported";
+export type Platform = "linux" | "darwin" | "windows" | "unsupported";
 
 export function currentPlatform(): Platform {
   if (process.platform === "linux") return "linux";
   if (process.platform === "darwin") return "darwin";
+  if (process.platform === "win32") return "windows";
   return "unsupported";
 }
 

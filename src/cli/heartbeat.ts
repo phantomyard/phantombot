@@ -7,9 +7,9 @@
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -25,13 +25,11 @@ import {
 import { recordHeartbeatFired } from "../lib/timerHealth.ts";
 import { VERSION } from "../version.ts";
 
+// Delegates to the shared, platform-aware resolver in config.ts so the
+// path is correct on Windows (%LOCALAPPDATA%) as well as XDG systems,
+// rather than re-deriving `~/.local/share` with a POSIX literal.
 function indexPath(persona: string): string {
-  return join(
-    process.env.XDG_DATA_HOME || join(process.env.HOME ?? "", ".local/share"),
-    "phantombot",
-    "memory-index",
-    `${persona}.sqlite`,
-  );
+  return memoryIndexPath(persona);
 }
 
 export interface RunHeartbeatCliInput {
