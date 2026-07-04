@@ -382,14 +382,16 @@ errors always come through either way):
 Scoped to Telegram + PhantomChat (voice and the CLI never emit these bubbles).
 The editor (Zed/VS Code) surface follows the config default only.
 
-**The standing default is quiet.** Unless you explicitly set `chattiness`, a
-phantom starts **quiet** and just sends the final answer — this holds whether
-there's no `config.toml`, an empty one, or a `config.toml` that simply omits
-the key. Opt in to the running commentary by setting it:
+**The standing default is on.** Unless you explicitly set `chattiness`, a
+phantom **narrates** — it streams the running commentary as it works. This is
+deliberate: the play-by-play keeps the agent anchored across long, tool-heavy
+runs and empirically produces more reliable work on large tasks. The default
+holds whether there's no `config.toml`, an empty one, or a `config.toml` that
+simply omits the key. Opt out of the commentary by setting it:
 
 ```toml
-# Top-level. true = show progress bubbles everywhere; false (or unset) = quiet.
-chattiness = true
+# Top-level. true (or unset) = show progress bubbles everywhere; false = quiet.
+chattiness = false
 ```
 
 ## PhantomChat

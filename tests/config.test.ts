@@ -115,9 +115,9 @@ describe("loadConfig — defaults (no file)", () => {
       model: "",
     });
     expect(c.telegramStreaming).toEqual(DEFAULT_TELEGRAM_STREAMING);
-    // Fresh / not-yet-configured install (no config.toml on disk) starts
-    // QUIET — the standing default for new phantoms.
-    expect(c.chattiness).toBe(false);
+    // Fresh / not-yet-configured install (no config.toml on disk) NARRATES —
+    // the standing default that keeps the agent anchored on long runs.
+    expect(c.chattiness).toBe(true);
   });
 
   test("XDG paths resolve to ~/.config and ~/.local/share by default", async () => {
@@ -135,23 +135,22 @@ describe("loadConfig — chattiness default", () => {
     await writeFile(join(cfgDir, "config.toml"), body, "utf8");
   }
 
-  test("no config file at all → quiet (OFF) for fresh installs", async () => {
+  test("no config file at all → narrate (ON) for fresh installs", async () => {
     const c = await loadConfig();
-    expect(c.chattiness).toBe(false);
+    expect(c.chattiness).toBe(true);
   });
 
-  test("config.toml exists but omits chattiness → quiet (OFF)", async () => {
-    // The key is absent, so the standing quiet default applies even though
-    // the host otherwise has a config.
+  test("config.toml exists but omits chattiness → narrate (ON)", async () => {
+    // The key is absent, so the standing narrate default applies.
     await writeConfig(`default_persona = "robbie"\n`);
     const c = await loadConfig();
-    expect(c.chattiness).toBe(false);
+    expect(c.chattiness).toBe(true);
   });
 
-  test("empty config.toml → quiet (OFF)", async () => {
+  test("empty config.toml → narrate (ON)", async () => {
     await writeConfig("");
     const c = await loadConfig();
-    expect(c.chattiness).toBe(false);
+    expect(c.chattiness).toBe(true);
   });
 
   test("explicit chattiness = false in config.toml is honored", async () => {
@@ -166,11 +165,11 @@ describe("loadConfig — chattiness default", () => {
     expect(c.chattiness).toBe(true);
   });
 
-  test("PHANTOMBOT_CHATTINESS env wins over the fresh-install default", async () => {
-    // No config file → would be OFF, but the env override forces ON.
-    process.env.PHANTOMBOT_CHATTINESS = "on";
+  test("PHANTOMBOT_CHATTINESS env wins over the standing default", async () => {
+    // No config file → would be ON, but the env override forces OFF.
+    process.env.PHANTOMBOT_CHATTINESS = "off";
     const c = await loadConfig();
-    expect(c.chattiness).toBe(true);
+    expect(c.chattiness).toBe(false);
   });
 
   test("PHANTOMBOT_CHATTINESS env wins over config.toml", async () => {
