@@ -14,10 +14,11 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { rmrf } from "./fixtures/rmrf.ts";
 import type { Config } from "../src/config.ts";
 import { personaDir } from "../src/config.ts";
 import { saveEnvFile } from "../src/lib/envFile.ts";
@@ -64,7 +65,9 @@ afterEach(async () => {
   else process.env.PHANTOMBOT_USER_ENV_FILE = savedUserEnvVar;
   if (savedCentralEnvVar === undefined) delete process.env.PHANTOMBOT_ENV_FILE;
   else process.env.PHANTOMBOT_ENV_FILE = savedCentralEnvVar;
-  await rm(workdir, { recursive: true, force: true });
+  // rmrf retries on Windows EBUSY (bun:sqlite handles linger briefly after
+  // close()). No-op-fast on POSIX. See fixtures/rmrf.
+  await rmrf(workdir);
 });
 
 describe("migratePlaintextToVault", () => {

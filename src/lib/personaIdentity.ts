@@ -3,8 +3,10 @@
  * long-lived secret key (`nsec`), used by BOTH the phantomchat channel and
  * the encrypted secrets vault (lib/vault.ts).
  *
- * Storage: `<personaDir>/identity.json` (mode 0600), shape:
+ * Storage: `<personaDir>/identity.json`, shape:
  *   { "nsec": "nsec1…" }
+ * Locked to the owner alone: mode 0600 on POSIX, an explicit owner-only ACL on
+ * Windows (where mode bits are ignored) — see lib/filePermissions.ts.
  *
  * Historically the nsec lived only inside `<personaDir>/phantomchat.json`
  * (see channels/phantomchat/personaStore.ts) — coupling the persona's crypto
@@ -26,6 +28,7 @@ import { dirname, join } from "node:path";
 
 import { generateSecretKey } from "nostr-tools/pure";
 
+import { restrictFileToCurrentUser } from "./filePermissions.ts";
 import {
   identityFromNsec,
   nsecEncode,
@@ -75,11 +78,13 @@ function uniqueTmpPath(path: string): string {
  * This is the single race-safe primitive for minting the shared identity; callers
  * must not do check-then-write (existsSync + unconditional rename) themselves.
  *
- * Mechanism: write a per-process-unique tempfile (mode 0600), then hard-LINK it
- * into place. `link()` is atomic and fails with EEXIST if the target already
- * exists, so exactly one racer wins; every loser reads the winner's nsec back
- * and adopts it. This closes the check-then-act race where two processes that
- * both saw "no identity.json" mint divergent nsecs — whichever wrote last would
+ * Mechanism: write a per-process-unique tempfile (mode 0600), lock it to the
+ * current user (owner-only ACL on Windows; the mode already suffices on POSIX),
+ * then hard-LINK it into place. `link()` is atomic and fails with EEXIST if the
+ * target already exists, so exactly one racer wins; every loser reads the
+ * winner's nsec back and adopts it. This closes the check-then-act race where
+ * two processes that both saw "no identity.json" mint divergent nsecs —
+ * whichever wrote last would
  * orphan everything the other had already encrypted under its key.
  *
  * Fails CLOSED: if identity.json already exists but its nsec can't be read back
@@ -101,6 +106,15 @@ export async function createPersonaIdentityIfAbsent(
       encoding: "utf8",
       mode: 0o600,
     });
+    // Lock the file down to the current user BEFORE linking it into place, so
+    // the canonical identity.json is restrictive from birth (never briefly
+    // readable by other principals). On POSIX the mode 0o600 above already does
+    // this and this is a no-op; on Windows the mode bits are ignored, so we
+    // apply an explicit owner-only ACL to the tmp file — the hard link below
+    // shares the same security descriptor, so identity.json inherits it. Fails
+    // CLOSED: a lockdown error throws here, before link(), so no world-readable
+    // identity.json is ever created (the finally block cleans up the tmp).
+    restrictFileToCurrentUser(tmp);
     try {
       await link(tmp, path);
       return nsec; // we won the race

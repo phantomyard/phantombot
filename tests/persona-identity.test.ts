@@ -23,6 +23,36 @@ import {
   readPersonaIdentityNsec,
 } from "../src/lib/personaIdentity.ts";
 
+const isWindows = process.platform === "win32";
+
+/** Dump a file's ACL via icacls (Windows only). */
+function aclDump(path: string): string {
+  const res = Bun.spawnSync(["icacls", path]);
+  return new TextDecoder().decode(res.stdout);
+}
+
+/**
+ * Assert `path` is locked to the current user alone:
+ *   - POSIX: mode is exactly 0600.
+ *   - Windows: the DACL grants the current user and NO one else — no inherited
+ *     ACEs and none of the broad principals a parent dir would otherwise leak.
+ */
+async function expectOwnerOnly(path: string): Promise<void> {
+  if (!isWindows) {
+    const st = await stat(path);
+    expect(st.mode & 0o777).toBe(0o600);
+    return;
+  }
+  const out = aclDump(path);
+  const user = process.env.USERNAME ?? "";
+  expect(user).not.toBe("");
+  expect(out).toContain(user); // the owner has an ACE
+  expect(out).not.toMatch(/\(I\)/); // no inherited ACEs (inheritance removed)
+  expect(out).not.toMatch(/BUILTIN\\Users/i);
+  expect(out).not.toMatch(/\bEveryone\b/i);
+  expect(out).not.toMatch(/Authenticated Users/i);
+}
+
 let workdir: string;
 
 beforeEach(async () => {
@@ -34,7 +64,7 @@ afterEach(async () => {
 });
 
 describe("getOrCreatePersonaIdentity", () => {
-  test("generates, persists identity.json at mode 0600, returns a valid identity", async () => {
+  test("generates, persists identity.json locked to the owner, returns a valid identity", async () => {
     const dir = join(workdir, "p");
     const identity = await getOrCreatePersonaIdentity(dir);
 
@@ -42,8 +72,7 @@ describe("getOrCreatePersonaIdentity", () => {
     expect(identity.npub).toMatch(/^npub1/);
     expect(identity.secretKey.length).toBe(32);
 
-    const st = await stat(personaIdentityPath(dir));
-    expect(st.mode & 0o777).toBe(0o600);
+    await expectOwnerOnly(personaIdentityPath(dir));
     expect(readPersonaIdentityNsec(dir)).toBe(identity.nsec);
   });
 
@@ -104,11 +133,10 @@ describe("createPersonaIdentityIfAbsent", () => {
     expect(readPersonaIdentityNsec(dir)).toBe(id.nsec);
   });
 
-  test("persists at mode 0600", async () => {
+  test("persists locked to the owner alone (mode 0600 / owner-only ACL)", async () => {
     const dir = join(workdir, "p");
     await createPersonaIdentityIfAbsent(dir, generateIdentity().nsec);
-    const st = await stat(personaIdentityPath(dir));
-    expect(st.mode & 0o777).toBe(0o600);
+    await expectOwnerOnly(personaIdentityPath(dir));
   });
 
   test("never overwrites an existing identity — returns the incumbent nsec", async () => {

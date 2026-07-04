@@ -15,13 +15,15 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { generateSecretKey } from "nostr-tools/pure";
 
 import { Database } from "bun:sqlite";
+
+import { rmrf } from "./fixtures/rmrf.ts";
 
 import {
   _resetVaultTrackingForTesting,
@@ -42,7 +44,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(workdir, { recursive: true, force: true });
+  // rmrf retries on Windows EBUSY: a bun:sqlite handle can linger a few ms after
+  // close(), racing the recursive delete. No-op-fast on POSIX. See fixtures/rmrf.
+  await rmrf(workdir);
 });
 
 describe("vault crypto round-trip", () => {
