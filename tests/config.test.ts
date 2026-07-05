@@ -6,9 +6,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmrf } from "./fixtures/rmrf.ts";
 import {
   DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
@@ -89,7 +90,7 @@ afterEach(async () => {
     if (SAVED_ENV[k] === undefined) delete process.env[k];
     else process.env[k] = SAVED_ENV[k];
   }
-  await rm(workdir, { recursive: true, force: true });
+  await rmrf(workdir);
 });
 
 describe("loadConfig — defaults (no file)", () => {

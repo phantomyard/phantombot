@@ -11,9 +11,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmrf } from "./fixtures/rmrf.ts";
 
 import { generateIdentity } from "../src/lib/nostrIdentity.ts";
 import {
@@ -60,7 +61,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(workdir, { recursive: true, force: true });
+  await rmrf(workdir);
 });
 
 describe("getOrCreatePersonaIdentity", () => {

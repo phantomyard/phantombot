@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmrf } from "./fixtures/rmrf.ts";
 import { runHeartbeatCli } from "../src/cli/heartbeat.ts";
 import type { Config } from "../src/config.ts";
 import { heartbeatMarkerPath } from "../src/lib/timerHealth.ts";
@@ -52,7 +53,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(workdir, { recursive: true, force: true });
+  await rmrf(workdir);
 });
 
 describe("runHeartbeatCli", () => {
