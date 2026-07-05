@@ -43,7 +43,7 @@ $ProgressPreference = 'SilentlyContinue'  # keep Invoke-WebRequest quiet + fast
 $Repo = 'phantomyard/phantombot'
 
 function Fail([string]$msg) {
-    Write-Error "phantombot: $msg"
+    [Console]::Error.WriteLine("phantombot: $msg")
     exit 1
 }
 
