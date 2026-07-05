@@ -390,9 +390,14 @@ describe("runHeartbeat update check hook", () => {
       lastNotifiedPath: join(workdir, "last-notified"),
     });
     // The heartbeat itself succeeded — promotions/staleness/index work
-    // happened. The update-check result records the failure but doesn't
-    // bubble it up.
-    expect(r.updateCheck?.status).toBe("release_check_failed");
+    // happened. The update-check result records the outcome but never bubbles
+    // it up. On Linux/macOS a published release target exists, so the failing
+    // fetch surfaces as release_check_failed. On Windows there is no release
+    // target yet, so the check no-targets *before* it ever calls fetch — a
+    // different status, but the same invariant: the heartbeat did not fail.
+    const expectedStatus =
+      process.platform === "win32" ? "no_target" : "release_check_failed";
+    expect(r.updateCheck?.status).toBe(expectedStatus);
     expect(r.ranAt).toBeDefined();
   });
 });

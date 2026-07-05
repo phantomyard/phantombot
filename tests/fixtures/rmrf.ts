@@ -16,8 +16,13 @@ import { rm } from "node:fs/promises";
  */
 export async function rmrf(
   path: string,
-  attempts = 20,
-  delayMs = 50,
+  // Generous headroom: a suite that fans a migration into several personas
+  // leaves multiple bun:sqlite Database objects awaiting finalization, and a
+  // single gc()+retry occasionally isn't enough to release every handle. The
+  // fast path (POSIX, or a dir with no lingering handle) still returns on the
+  // first attempt, so the ceiling only costs time in the rare busy case.
+  attempts = 50,
+  delayMs = 100,
 ): Promise<void> {
   const gc = (globalThis as { Bun?: { gc?: (sync: boolean) => void } }).Bun?.gc;
   for (let i = 0; ; i++) {
