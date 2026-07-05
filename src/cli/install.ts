@@ -2,8 +2,9 @@
  * `phantombot install` — write the host-appropriate service-manager
  * units for `phantombot run` and start them.
  *
- *   - Linux  → systemd --user units in ~/.config/systemd/user/
- *   - macOS  → launchd plists in ~/Library/LaunchAgents/
+ *   - Linux   → systemd --user units in ~/.config/systemd/user/
+ *   - macOS   → launchd plists in ~/Library/LaunchAgents/
+ *   - Windows → Task Scheduler logon tasks under \Phantombot\
  *
  * Requires the compiled binary (process.execPath ends in 'phantombot' or
  * the user passes --bin). Running from `bun src/index.ts` won't work
@@ -34,6 +35,11 @@ import {
   type SystemctlRunner,
   type UserSystemdEnv,
 } from "../lib/systemd.ts";
+import {
+  BunSchtasksRunner,
+  installPhantombotTasks,
+  type SchtasksRunner,
+} from "../lib/taskScheduler.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 
@@ -65,13 +71,19 @@ export interface RunInstallInput {
   systemctl?: SystemctlRunner;
   /** Override launchctl runner for testing. */
   launchctl?: LaunchctlRunner;
+  /** Override schtasks runner for testing (Windows). */
+  schtasks?: SchtasksRunner;
+  /** Override the current-user SID for testing (Windows). */
+  sid?: string;
+  /** Directory for transient Task Scheduler XML import files (Windows tests). */
+  xmlDir?: string;
   /** Override systemd-env detection for testing. */
   ensureSystemdEnv?: () => UserSystemdEnv;
   /**
    * Override the platform check for testing. Defaults to currentPlatform()
    * which reads process.platform.
    */
-  platform?: "linux" | "darwin" | "unsupported";
+  platform?: "linux" | "darwin" | "windows" | "unsupported";
   /** Override gui domain (e.g. "gui/501") on darwin. Defaults to gui/<current uid>. */
   domain?: string;
 }
@@ -81,7 +93,14 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
 
   const binPath = input.binPath ?? process.execPath;
-  if (basename(binPath) !== "phantombot") {
+  // The compiled binary is `phantombot` on POSIX and `phantombot.exe` on
+  // Windows — accept either. Running from `bun src/index.ts` (basename `bun`)
+  // is rejected because the resulting unit would point at the bun runtime.
+  // Split on both separators so the check is correct regardless of which
+  // platform's path we're handed (matters for cross-platform unit tests).
+  const rawName = binPath.split(/[/\\]/).pop() ?? binPath;
+  const binName = rawName.replace(/\.exe$/i, "");
+  if (binName !== "phantombot") {
     err.write(
       `phantombot install needs the compiled binary, not '${basename(binPath)}'. ` +
         `Build it with \`bun run build\`, then run install via \`./dist/phantombot install\`.\n`,
@@ -95,9 +114,11 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
       return runInstallLinux(input, binPath, out, err);
     case "darwin":
       return runInstallDarwin(input, binPath, out, err);
+    case "windows":
+      return runInstallWindows(input, binPath, out, err);
     default:
       err.write(
-        `phantombot install supports linux and darwin only; this host reports platform=${process.platform}\n`,
+        `phantombot install supports linux, darwin and windows only; this host reports platform=${process.platform}\n`,
       );
       return 2;
   }
@@ -186,11 +207,40 @@ async function runInstallDarwin(
   return 0;
 }
 
+async function runInstallWindows(
+  input: RunInstallInput,
+  binPath: string,
+  out: WriteSink,
+  err: WriteSink,
+): Promise<number> {
+  const schtasks = input.schtasks ?? new BunSchtasksRunner();
+
+  const result = await installPhantombotTasks({
+    binPath,
+    sid: input.sid,
+    xmlDir: input.xmlDir,
+    schtasks,
+    out,
+    err,
+  });
+  if (!result.installed) return 1;
+
+  out.write(
+    `\nThese tasks run only while you are logged in (the macOS model). For\n` +
+      `true headless-without-login, install a real service — see the README\n` +
+      `(WinSW is the recommended route).\n` +
+      `\nview logs:    ${logsCommand()}\n` +
+      `restart:      ${restartCommand()}\n` +
+      `uninstall:    phantombot uninstall\n`,
+  );
+  return 0;
+}
+
 export default defineCommand({
   meta: {
     name: "install",
     description:
-      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS) and start it.",
+      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler logon task on Windows) and start it.",
   },
   async run() {
     const code = await runInstall();

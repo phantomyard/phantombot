@@ -15,6 +15,10 @@ import type {
   LaunchctlRunner,
 } from "../src/lib/launchd.ts";
 import type {
+  SchtasksResult,
+  SchtasksRunner,
+} from "../src/lib/taskScheduler.ts";
+import type {
   SystemctlResult,
   SystemctlRunner,
   UserSystemdEnv,
@@ -33,6 +37,15 @@ class FakeLaunchctl implements LaunchctlRunner {
   async run(args: readonly string[]): Promise<LaunchctlResult> {
     this.calls.push([...args]);
     return { exitCode: 0, stdout: "", stderr: "" };
+  }
+}
+
+class FakeSchtasks implements SchtasksRunner {
+  calls: string[][] = [];
+  responses: SchtasksResult[] = [];
+  async run(args: readonly string[]): Promise<SchtasksResult> {
+    this.calls.push([...args]);
+    return this.responses.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
   }
 }
 
@@ -262,6 +275,103 @@ describe("runInstall (darwin/launchd)", () => {
     expect(code).toBe(2);
     expect(err.text).toContain("compiled binary");
     expect(lc.calls).toEqual([]);
+  });
+});
+
+describe("runInstall (windows/schtasks)", () => {
+  const WIN_BIN =
+    "C:\\Users\\andrew\\AppData\\Local\\phantombot\\bin\\phantombot.exe";
+
+  test("accepts the .exe binary and imports all four tasks", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const st = new FakeSchtasks();
+    const code = await runInstall({
+      binPath: WIN_BIN,
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err,
+      platform: "windows",
+    });
+    expect(code).toBe(0);
+    // Four /Create imports, one per task.
+    const creates = st.calls.filter((c) => c[0] === "/Create");
+    expect(creates.length).toBe(4);
+    expect(out.text).toContain("registered");
+    // The logged-in-only caveat is surfaced to the user.
+    expect(out.text).toContain("logged in");
+  });
+
+  test("doesn't fall through to systemctl or launchctl on windows", async () => {
+    const sys = new FakeSystemctl();
+    const lc = new FakeLaunchctl();
+    const st = new FakeSchtasks();
+    const code = await runInstall({
+      binPath: WIN_BIN,
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      systemctl: sys,
+      launchctl: lc,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      platform: "windows",
+    });
+    expect(code).toBe(0);
+    expect(sys.calls).toEqual([]);
+    expect(lc.calls).toEqual([]);
+  });
+
+  test("propagates a schtasks import failure as a non-zero exit", async () => {
+    const err = new CaptureStream();
+    const st = new FakeSchtasks();
+    st.responses = [{ exitCode: 1, stdout: "", stderr: "Access is denied" }];
+    const code = await runInstall({
+      binPath: WIN_BIN,
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err,
+      platform: "windows",
+    });
+    expect(code).toBe(1);
+    expect(err.text).toContain("schtasks /Create");
+  });
+
+  test("rejects a non-phantombot binary on windows too", async () => {
+    const err = new CaptureStream();
+    const st = new FakeSchtasks();
+    const code = await runInstall({
+      binPath: "C:\\Program Files\\bun\\bun.exe",
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err,
+      platform: "windows",
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("compiled binary");
+    expect(st.calls).toEqual([]);
+  });
+});
+
+describe("runUninstall (windows/schtasks)", () => {
+  test("deletes all four tasks and reports complete", async () => {
+    const out = new CaptureStream();
+    const st = new FakeSchtasks();
+    const code = await runUninstall({
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+    });
+    expect(code).toBe(0);
+    const deletes = st.calls.filter((c) => c[0] === "/Delete");
+    expect(deletes.length).toBe(4);
+    expect(out.text).toContain("uninstall complete");
   });
 });
 

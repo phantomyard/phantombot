@@ -1,10 +1,11 @@
 /**
  * Cross-platform service-manager router.
  *
- * Phantombot ships on Linux (systemd --user) and macOS (launchd, per-user
- * LaunchAgents). The two backends have different unit-file shapes,
- * different control verbs, and different log destinations — this module
- * is the single place where CLI code decides which one to talk to.
+ * Phantombot ships on Linux (systemd --user), macOS (launchd, per-user
+ * LaunchAgents) and Windows (Task Scheduler, per-user logon-triggered
+ * tasks). The backends have different unit-file shapes, different control
+ * verbs, and different log destinations — this module is the single place
+ * where CLI code decides which one to talk to.
  *
  * Public surface:
  *
@@ -30,6 +31,7 @@ import {
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
+import { defaultTaskSchedulerServiceControl } from "./taskScheduler.ts";
 
 export type { ServiceControl };
 
@@ -57,6 +59,8 @@ export function defaultServiceControl(): ServiceControl {
       return defaultSystemdServiceControl();
     case "darwin":
       return defaultLaunchdServiceControl();
+    case "windows":
+      return defaultTaskSchedulerServiceControl();
     default:
       return noopServiceControl();
   }
@@ -84,6 +88,8 @@ export function restartCommand(): string {
   switch (currentPlatform()) {
     case "darwin":
       return `launchctl kickstart -k gui/$(id -u)/dev.phantombot.phantombot`;
+    case "windows":
+      return `schtasks /End /TN "\\Phantombot\\phantombot" & schtasks /Run /TN "\\Phantombot\\phantombot"`;
     case "linux":
     default:
       return "systemctl --user restart phantombot";
@@ -95,6 +101,8 @@ export function statusCommand(): string {
   switch (currentPlatform()) {
     case "darwin":
       return `launchctl print gui/$(id -u)/dev.phantombot.phantombot`;
+    case "windows":
+      return `schtasks /Query /TN "\\Phantombot\\phantombot" /V /FO LIST`;
     case "linux":
     default:
       return "systemctl --user status phantombot";
@@ -106,6 +114,8 @@ export function logsCommand(): string {
   switch (currentPlatform()) {
     case "darwin":
       return `tail -f ~/Library/Logs/phantombot/dev.phantombot.phantombot.{out,err}.log`;
+    case "windows":
+      return `powershell -Command "Get-Content -Wait -Tail 50 \\"$env:LOCALAPPDATA\\phantombot\\logs\\phantombot.out.log\\""`;
     case "linux":
     default:
       return "journalctl --user -u phantombot -f";

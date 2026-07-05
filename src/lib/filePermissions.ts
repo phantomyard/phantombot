@@ -31,7 +31,7 @@
  * "No mapping between account names and security IDs". The SID always maps and
  * is immune to renamed accounts and localized principal names.
  */
-function currentUserSid(): string {
+export function currentUserSid(): string {
   const res = Bun.spawnSync(["whoami", "/user", "/fo", "csv", "/nh"]);
   const out = new TextDecoder().decode(res.stdout).trim();
   // Output shape: "DOMAIN\user","S-1-5-21-…"
