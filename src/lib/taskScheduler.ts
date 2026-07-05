@@ -146,7 +146,7 @@ async function writeLauncherVbs(): Promise<void> {
  * Build the wscript.exe argument string for a task's <Exec>. Each value is a
  * single quoted token so paths with spaces survive Windows' CommandLineToArgvW
  * parsing (which the launcher reads back as WScript.Arguments 0..3):
- *   "<launcher.vbs>" "<binPath>" "<args joined>" "<outLog>" "<errLog>"
+ *   //B "<launcher.vbs>" "<binPath>" "<args joined>" "<outLog>" "<errLog>"
  * The binary path stays a visible task argument so drift detection still works.
  */
 export function buildLauncherArguments(
@@ -157,6 +157,10 @@ export function buildLauncherArguments(
 ): string {
   const q = (s: string) => `"${s}"`;
   return [
+    // Batch mode: suppress any runtime script-error GUI dialog (wscript's
+    // default), which would itself be a visible popup - the exact thing this
+    // launcher exists to avoid.
+    "//B",
     q(launcherVbsPath()),
     q(binPath),
     q(args.join(" ")),
