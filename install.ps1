@@ -129,7 +129,17 @@ try {
     Invoke-WebRequest -Uri $binaryUrl -OutFile $tmpBin -Headers $headers -UseBasicParsing
 
     Write-Host 'phantombot: verifying SHA256'
-    $sumsText = (Invoke-WebRequest -Uri $sumsUrl -Headers $headers -UseBasicParsing).Content
+    # GitHub serves release assets as application/octet-stream, so
+    # Invoke-WebRequest returns .Content as a byte[] (NOT a string) for
+    # SHA256SUMS. Decode explicitly; a naive string parse silently matches
+    # nothing and every install fails with "no entry". Tolerate the string
+    # case too, in case a runtime/proxy hands back decoded text.
+    $sumsRaw = (Invoke-WebRequest -Uri $sumsUrl -Headers $headers -UseBasicParsing).Content
+    if ($sumsRaw -is [byte[]]) {
+        $sumsText = [Text.Encoding]::UTF8.GetString($sumsRaw)
+    } else {
+        $sumsText = [string]$sumsRaw
+    }
 
     # SHA256SUMS lines are "<hex>  <asset>" (two spaces, text mode) or
     # "<hex> *<asset>" (binary mode). Match our asset, tolerate either.
