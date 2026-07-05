@@ -217,6 +217,23 @@ describe("loadVaultIntoEnv reconcile", () => {
     expect(tracked.has("BAR")).toBe(true);
   });
 
+  test("open-existing-only: a never-provisioned persona dir is NOT created on load", async () => {
+    // Regression: the startup bootstrap loads the default persona's vault to
+    // populate env. That load must never conjure the persona on disk - otherwise
+    // `persona new test` on a fresh box also silently creates a stray `phantom`.
+    const dir = join(workdir, "never-provisioned");
+    expect(existsSync(dir)).toBe(false);
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    const { updated, removed } = await loadVaultIntoEnv(dir, env, tracked);
+
+    // No dir, no identity.json, no vault.sqlite materialized.
+    expect(existsSync(dir)).toBe(false);
+    expect(updated).toEqual([]);
+    expect(removed).toEqual([]);
+  });
+
   test("existing env value is sticky — vault never overwrites it", async () => {
     const dir = join(workdir, "p");
     const v = await openPersonaVault(dir);

@@ -1,6 +1,6 @@
 import { access, constants, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import type { Config } from "../config.ts";
 import { log } from "./logger.ts";
 import { saveHarnessBins } from "../state.ts";
@@ -43,32 +43,69 @@ export function expandSystemdPath(path: string, home = homedir()): string {
     .join(":");
 }
 
-export async function whichBinary(
-  bin: string,
-  pathEnv = process.env.PATH ?? "",
-): Promise<string | undefined> {
-  if (bin.startsWith("/")) {
-    return (await executableFile(bin)) ? bin : undefined;
-  }
-  for (const dir of pathEnv.split(":")) {
-    if (!dir) continue;
-    const candidate = join(dir, bin);
-    if (await executableFile(candidate)) {
-      return candidate;
-    }
+const isWindows = process.platform === "win32";
+
+/**
+ * Extensions to try when resolving a bare command name against a directory.
+ *
+ * POSIX executables have no extension, so the only candidate is the name as
+ * given (""). On Windows the shipped harness CLIs are `claude.cmd`, `pi.cmd`,
+ * `gemini.cmd`, `codex.exe` etc., and which suffixes count as "runnable" is
+ * defined by PATHEXT. We try "" first so an already-qualified name (bin =
+ * "claude.cmd", or an absolute path) resolves directly, then every PATHEXT
+ * suffix for the bare-name case.
+ */
+export function executableExtensions(
+  platform: NodeJS.Platform = process.platform,
+  pathext: string | undefined = process.env.PATHEXT,
+): string[] {
+  if (platform !== "win32") return [""];
+  const raw = pathext ?? ".COM;.EXE;.BAT;.CMD";
+  const exts = raw
+    .split(";")
+    .map((e) => e.trim())
+    .filter((e) => e.length > 0);
+  return ["", ...exts];
+}
+
+/**
+ * Resolve a base path to a runnable file, trying platform executable
+ * extensions. Returns the matched path (with extension, if one was appended).
+ */
+async function resolveExecutable(basePath: string): Promise<string | undefined> {
+  for (const ext of executableExtensions()) {
+    const candidate = basePath + ext;
+    if (await executableFile(candidate)) return candidate;
   }
   return undefined;
 }
 
-async function executable(path: string): Promise<boolean> {
-  return executableFile(path);
+export async function whichBinary(
+  bin: string,
+  pathEnv = process.env.PATH ?? "",
+): Promise<string | undefined> {
+  if (isAbsolute(bin)) {
+    return await resolveExecutable(bin);
+  }
+  for (const dir of pathEnv.split(delimiter)) {
+    if (!dir) continue;
+    const found = await resolveExecutable(join(dir, bin));
+    if (found) return found;
+  }
+  return undefined;
 }
 
 async function executableFile(path: string): Promise<boolean> {
   try {
     const info = await stat(path);
     if (!info.isFile()) return false;
-    await access(path, constants.X_OK);
+    // The Unix execute bit isn't modeled on Windows: access(X_OK) there can
+    // spuriously fail (or pass) and would wrongly reject a real `.cmd`/`.exe`.
+    // A regular file with a PATHEXT-recognised extension is runnable, so on
+    // win32 the isFile() check above is the gate.
+    if (!isWindows) {
+      await access(path, constants.X_OK);
+    }
     return true;
   } catch {
     return false;
@@ -88,7 +125,7 @@ async function existingChildDirs(parent: string): Promise<string[]> {
 
 export async function harnessSearchPath(home = homedir()): Promise<string[]> {
   const dirs = new Set<string>();
-  for (const dir of (process.env.PATH ?? "").split(":")) {
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (dir) dirs.add(dir);
   }
 
@@ -103,6 +140,14 @@ export async function harnessSearchPath(home = homedir()): Promise<string[]> {
     join(home, ".local", "share", "pi-node", "current", "bin"),
   ];
   for (const dir of staticDirs) dirs.add(dir);
+
+  if (isWindows) {
+    // Windows global-install locations the POSIX home subdirs don't cover:
+    // npm global shims land in %APPDATA%\npm, and bun's global bin in
+    // %USERPROFILE%\.bun\bin (already added above) - add the npm one here.
+    const appData = process.env.APPDATA;
+    if (appData) dirs.add(join(appData, "npm"));
+  }
 
   for (const nodeDir of await existingChildDirs(join(home, ".nvm", "versions", "node"))) {
     dirs.add(join(nodeDir, "bin"));
@@ -125,18 +170,17 @@ export async function resolveHarnessBinary(
   bin: string,
   pathEnv = process.env.PATH ?? "",
 ): Promise<ResolvedHarnessBinary> {
-  if (bin.startsWith("/")) {
-    return (await executable(bin))
-      ? { path: bin, source: "configured" }
-      : {};
+  if (isAbsolute(bin)) {
+    const resolved = await resolveExecutable(bin);
+    return resolved ? { path: resolved, source: "configured" } : {};
   }
 
   const fromPath = await whichBinary(bin, pathEnv);
   if (fromPath) return { path: fromPath, source: "path" };
 
   for (const dir of await harnessSearchPath()) {
-    const candidate = join(dir, bin);
-    if (await executable(candidate)) {
+    const candidate = await resolveExecutable(join(dir, bin));
+    if (candidate) {
       return { path: candidate, source: "search" };
     }
   }
@@ -155,7 +199,7 @@ export async function checkConfiguredHarnesses(
     const bin = harnessBin(config, id);
     if (!bin) continue;
     let resolved = await resolveHarnessBinary(bin, pathEnv);
-    if (!resolved.path && bin.startsWith("/")) {
+    if (!resolved.path && isAbsolute(bin)) {
       const fallbackBin = defaultHarnessBin(id);
       if (fallbackBin) {
         resolved = await resolveHarnessBinary(fallbackBin, pathEnv);

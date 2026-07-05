@@ -24,7 +24,7 @@
 
 import { Database } from "bun:sqlite";
 import { createCipheriv, createDecipheriv } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { hkdf } from "@noble/hashes/hkdf.js";
@@ -233,6 +233,16 @@ export async function openPersonaVault(personaDir: string): Promise<Vault> {
 async function readAllVaultValues(
   personaDirPath: string,
 ): Promise<{ values: Map<string, string>; badKeys: string[] } | null> {
+  // Open-existing-only: this is a pure READ path (env loading), so it must never
+  // provision a persona as a side effect. openPersonaVault -> getOrCreatePersonaIdentity
+  // + openVaultWithSecret both mkdir/create on demand, so calling them for a
+  // never-provisioned persona (e.g. the built-in "phantom" default during the
+  // startup bootstrap) would conjure a stray persona dir + identity.json + vault
+  // the user never asked for. Guard on the persona dir already existing; if it
+  // doesn't, treat it as "no vault" (null) exactly like an unopenable one.
+  if (!existsSync(personaDirPath)) {
+    return null;
+  }
   let vault: Vault;
   try {
     vault = await openPersonaVault(personaDirPath);
