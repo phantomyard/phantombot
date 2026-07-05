@@ -47,3 +47,61 @@ jobs:
           bun-version: 1.x
       - run: bun install --frozen-lockfile
       - run: bun test
+
+  # Windows gate for the Windows port. Runs in PARALLEL with the Linux jobs,
+  # on the same `pull_request` trigger — no path filter. The port shares ~95%
+  # of its code with Linux and its Windows-specific behaviour lives in shared
+  # modules (config paths, processGroup, runLock, vault ACL, taskScheduler),
+  # so a regression can arrive from a file that looks Windows-neutral. A
+  # paths filter would therefore give false confidence; the honest gate is
+  # "run on every PR push."
+  #
+  # Scope is by TEST SELECTION, not trigger: Linux (`test` above) stays the
+  # full-suite gate; Windows runs a curated subset of the suites that
+  # actually exercise the win32 branches. Many other suites bake in POSIX
+  # `sh`/`/tmp`/`:` assumptions and are out of scope for the port.
+  test-windows:
+    runs-on: windows-latest
+    concurrency:
+      group: ci-test-windows-${{ github.head_ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+      # Cache Bun's global install cache so Windows runs don't re-download the
+      # dependency graph every push (Windows installs are the slow ones). Miss
+      # is harmless — bun install just repopulates it.
+      - name: Cache bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-windows-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-windows-
+      - run: bun install --frozen-lockfile
+      # Typecheck on Windows too — cheap, and catches platform-conditional
+      # type errors the Linux typecheck can't see.
+      - run: bun tsc --noEmit
+      # Curated Windows-relevant subset. Keep this list in sync when a new
+      # suite starts exercising win32-specific code. `--coverage` prints a
+      # per-file table in the run logs — the visible coverage baseline for the
+      # win32 code paths. Kept as reporting (not a hard threshold) on purpose:
+      # a floor over a partial suite is brittle and would fail on unrelated
+      # changes. Promote to a bunfig coverageThreshold once numbers prove
+      # stable across several runs.
+      - name: Run Windows-relevant test suites
+        run: >
+          bun test --coverage
+          tests/windows-port.test.ts
+          tests/lib-processGroup.test.ts
+          tests/lib-runLock.test.ts
+          tests/lib-platform.test.ts
+          tests/config.test.ts
+          tests/persona-identity.test.ts
+          tests/vault.test.ts
+          tests/vault-migrate.test.ts
+          tests/lib-taskScheduler.test.ts
+          tests/cli-install.test.ts
+          tests/cli-heartbeat.test.ts
+          tests/lib-heartbeat.test.ts
