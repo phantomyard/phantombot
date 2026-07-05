@@ -442,9 +442,10 @@ describe("/update", () => {
     // dispatcher doesn't accept seams. Instead, swap process.platform
     // briefly so the flow exits early at the platform check — far before
     // any network call. (Bun preserves the property descriptor; restore
-    // in finally.)
+    // in finally.) Use freebsd: win32 is a supported release target now,
+    // so it would proceed to a real network fetch instead of short-circuiting.
     const origPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "win32" });
+    Object.defineProperty(process, "platform", { value: "freebsd" });
     try {
       const r = await handleSlashCommand(
         "/update",
@@ -452,7 +453,7 @@ describe("/update", () => {
       );
       expect(r).not.toBeNull();
       expect(r!.reply).toContain("can't self-update");
-      expect(r!.reply).toContain("platform=win32");
+      expect(r!.reply).toContain("platform=freebsd");
       // No restart callback when the flow short-circuits at the platform
       // check (nothing was installed, nothing to restart).
       expect(r!.afterSend).toBeUndefined();

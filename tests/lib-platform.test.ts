@@ -13,7 +13,9 @@ import {
   defaultServiceControl,
   logsCommand,
   restartCommand,
+  selfRestart,
   statusCommand,
+  type ServiceControl,
 } from "../src/lib/platform.ts";
 
 describe("currentPlatform", () => {
@@ -67,5 +69,54 @@ describe("defaultServiceControl", () => {
     // We don't care what it returns; we care that it doesn't blow up
     // when no service-manager bus is available (e.g. CI containers).
     await expect(svc.isActive()).resolves.toBeDefined();
+  });
+});
+
+describe("selfRestart", () => {
+  function trackingSvc(result: { ok: boolean; stderr?: string } = { ok: true }) {
+    const calls: number[] = [];
+    const svc: ServiceControl = {
+      async isActive() {
+        return true;
+      },
+      async restart() {
+        calls.push(1);
+        return result;
+      },
+      async rerenderUnitIfStale() {
+        return { rerendered: false };
+      },
+    };
+    return { svc, calls };
+  }
+
+  test("POSIX: delegates to the supervisor's restart()", async () => {
+    const { svc, calls } = trackingSvc({ ok: true });
+    const r = await selfRestart({ serviceControl: svc, procPlatform: "linux" });
+    expect(r.ok).toBe(true);
+    expect(calls.length).toBe(1);
+  });
+
+  test("POSIX: surfaces a failed supervisor restart", async () => {
+    const { svc } = trackingSvc({ ok: false, stderr: "boom" });
+    const r = await selfRestart({ serviceControl: svc, procPlatform: "darwin" });
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toBe("boom");
+  });
+
+  test("Windows: triggers a clean exit and never calls schtasks restart()", async () => {
+    const { svc, calls } = trackingSvc({ ok: true });
+    let shutdowns = 0;
+    const r = await selfRestart({
+      serviceControl: svc,
+      procPlatform: "win32",
+      triggerShutdown: () => {
+        shutdowns++;
+      },
+    });
+    expect(r.ok).toBe(true);
+    // The keep-alive relaunches us; we must NOT End/Run our own task tree.
+    expect(calls.length).toBe(0);
+    expect(shutdowns).toBe(1);
   });
 });

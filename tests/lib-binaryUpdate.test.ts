@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   applyUpdate,
   checkWritable,
+  cleanupStaleUpdateArtifacts,
   downloadAndVerify,
   parseSha256SumsLine,
 } from "../src/lib/binaryUpdate.ts";
@@ -217,5 +218,102 @@ describe("checkWritable", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).toContain("doesn't exist");
+  });
+});
+
+describe("applyUpdate on Windows (rename-aside swap)", () => {
+  test("moves the running binary to .old and installs the new one", async () => {
+    const target = join(workdir, "phantombot.exe");
+    const tmp = join(workdir, "phantombot.exe.update.tmp");
+    await writeFile(target, "OLD", { mode: 0o755 });
+    await writeFile(tmp, "NEW", { mode: 0o755 });
+
+    const r = await applyUpdate({
+      tempPath: tmp,
+      targetPath: target,
+      procPlatform: "win32",
+    });
+    expect(r.ok).toBe(true);
+    // New binary is in place…
+    expect(await readFile(target, "utf8")).toBe("NEW");
+    // …and the previous one is preserved as .old (Windows can't delete a
+    // running .exe; startup cleanup removes it after the process exits).
+    expect(await readFile(`${target}.old`, "utf8")).toBe("OLD");
+    // The temp file was consumed by the rename.
+    expect(existsSync(tmp)).toBe(false);
+  });
+
+  test("does not use the POSIX .bak path on win32", async () => {
+    const target = join(workdir, "phantombot.exe");
+    const tmp = join(workdir, "phantombot.exe.update.tmp");
+    await writeFile(target, "OLD", { mode: 0o755 });
+    await writeFile(tmp, "NEW", { mode: 0o755 });
+    await applyUpdate({ tempPath: tmp, targetPath: target, procPlatform: "win32" });
+    expect(existsSync(`${target}.bak`)).toBe(false);
+  });
+
+  test("falls back to a timestamped .old when a stale .old is present", async () => {
+    const target = join(workdir, "phantombot.exe");
+    const tmp = join(workdir, "phantombot.exe.update.tmp");
+    await writeFile(target, "OLD", { mode: 0o755 });
+    await writeFile(tmp, "NEW", { mode: 0o755 });
+    // A stale .old from a prior update (in reality it would be removable;
+    // here we just confirm the swap still succeeds and the new binary lands).
+    await writeFile(`${target}.old`, "STALE", { mode: 0o755 });
+
+    const r = await applyUpdate({
+      tempPath: tmp,
+      targetPath: target,
+      procPlatform: "win32",
+    });
+    expect(r.ok).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("NEW");
+  });
+
+  test("errors (does not touch target) when temp file is missing", async () => {
+    const target = join(workdir, "phantombot.exe");
+    await writeFile(target, "OLD", { mode: 0o755 });
+    const r = await applyUpdate({
+      tempPath: join(workdir, "phantombot.exe.update.tmp"),
+      targetPath: target,
+      procPlatform: "win32",
+    });
+    expect(r.ok).toBe(false);
+    // The live binary is untouched — no half-applied swap.
+    expect(await readFile(target, "utf8")).toBe("OLD");
+    expect(existsSync(`${target}.old`)).toBe(false);
+  });
+});
+
+describe("cleanupStaleUpdateArtifacts", () => {
+  test("removes .old and timestamped .old next to the binary (win32)", async () => {
+    const target = join(workdir, "phantombot.exe");
+    await writeFile(target, "LIVE", { mode: 0o755 });
+    await writeFile(`${target}.old`, "x");
+    await writeFile(`${target}.1720000000000.old`, "x");
+    // Unrelated files must survive.
+    await writeFile(join(workdir, "phantombot.exe.update.tmp"), "x");
+    await writeFile(join(workdir, "notes.old"), "x");
+
+    const removed = await cleanupStaleUpdateArtifacts(target, "win32");
+    expect(removed.sort()).toEqual(
+      ["phantombot.exe.1720000000000.old", "phantombot.exe.old"].sort(),
+    );
+    expect(existsSync(`${target}.old`)).toBe(false);
+    expect(existsSync(`${target}.1720000000000.old`)).toBe(false);
+    // The live binary and unrelated files are left alone.
+    expect(existsSync(target)).toBe(true);
+    expect(existsSync(join(workdir, "phantombot.exe.update.tmp"))).toBe(true);
+    expect(existsSync(join(workdir, "notes.old"))).toBe(true);
+  });
+
+  test("is a no-op on POSIX platforms", async () => {
+    const target = join(workdir, "phantombot");
+    await writeFile(target, "LIVE", { mode: 0o755 });
+    await writeFile(`${target}.old`, "x");
+    const removed = await cleanupStaleUpdateArtifacts(target, "linux");
+    expect(removed).toEqual([]);
+    // Nothing deleted on POSIX (rename-over leaves no .old to clean).
+    expect(existsSync(`${target}.old`)).toBe(true);
   });
 });

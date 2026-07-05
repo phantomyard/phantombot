@@ -345,6 +345,78 @@ describe("runUpdate on darwin-arm64", () => {
   });
 });
 
+describe("runUpdate on windows-x64", () => {
+  // On Windows the asset name carries a `.exe` suffix and the swap renames
+  // the running binary aside to `.exe.old` (rename-over is forbidden for a
+  // live .exe). Verify the right asset is fetched, `phantombot.exe` is
+  // accepted as a valid binary, and the rename-aside swap lands correctly.
+  const WIN_ASSET = "phantombot-v1.0.99-windows-x64.exe";
+  const WIN_BYTES = Buffer.from("WINDOWS_BINARY_VERIFIED");
+  const WIN_SHA = createHash("sha256").update(WIN_BYTES).digest("hex");
+
+  function windowsFetch(): typeof fetch {
+    const releaseBody = {
+      tag_name: "v1.0.99",
+      body: "test release",
+      assets: [
+        {
+          name: WIN_ASSET,
+          browser_download_url: "https://example/" + WIN_ASSET,
+          size: WIN_BYTES.byteLength,
+        },
+        {
+          name: "phantombot-v1.0.99-linux-x64",
+          browser_download_url: "https://example/linux-x64",
+          size: WIN_BYTES.byteLength,
+        },
+        {
+          name: "SHA256SUMS",
+          browser_download_url: "https://example/SHA256SUMS",
+          size: 256,
+        },
+      ],
+    };
+    return (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (isGitHubApiUrl(u)) {
+        return new Response(JSON.stringify(releaseBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("SHA256SUMS")) {
+        return new Response(`${WIN_SHA}  ${WIN_ASSET}\n`, { status: 200 });
+      }
+      return new Response(WIN_BYTES, { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  test("accepts phantombot.exe, picks the .exe asset, renames the old binary aside", async () => {
+    const winBin = join(workdir, "phantombot.exe");
+    await writeFile(winBin, "OLD_BINARY", { mode: 0o755 });
+    const out = new CaptureStream();
+    const code = await runUpdate({
+      binPath: winBin,
+      procPlatform: "win32",
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: windowsFetch(),
+      out,
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("phantombot-v1.0.99-windows-x64.exe");
+    // New binary in place; previous one preserved as .old for startup cleanup.
+    expect((await readFile(winBin)).equals(WIN_BYTES)).toBe(true);
+    expect(await readFile(`${winBin}.old`, "utf8")).toBe("OLD_BINARY");
+    // No POSIX .bak left behind.
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(`${winBin}.bak`)).toBe(false);
+  });
+});
+
 describe("runUpdate happy path with --force --restart", () => {
   test("downloads, verifies, swaps, restarts — the full cron contract", async () => {
     const out = new CaptureStream();

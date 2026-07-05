@@ -415,13 +415,67 @@ describe("runUpdateFlow", () => {
       },
       pendingPath,
       lastNotifiedPath: lastNotifiedPathLocal,
-      procPlatform: "win32",
+      // freebsd is genuinely unreleased (win32 IS supported since the
+      // Windows self-update work — see the win32 case below).
+      procPlatform: "freebsd",
       procArch: "x64",
     });
     expect(r.reply).toContain("can't self-update");
-    expect(r.reply).toContain("platform=win32");
+    expect(r.reply).toContain("platform=freebsd");
     expect(r.restart).toBeUndefined();
     expect(runUpdateCalled).toBe(false);
+  });
+
+  test("win32 → supported: swaps and returns a restart() callback", async () => {
+    const { svc } = fakeSvc();
+    let runUpdateCalledWith: unknown;
+    // The release must carry the `.exe` asset for a windows target, so
+    // findLatestRelease (which runUpdateFlow calls before the swap) resolves.
+    const winReleaseBody = {
+      tag_name: "v1.0.99",
+      published_at: "2026-05-01T00:00:00Z",
+      body: "test release",
+      assets: [
+        {
+          name: "phantombot-v1.0.99-windows-x64.exe",
+          browser_download_url:
+            "https://example/phantombot-v1.0.99-windows-x64.exe",
+          size: 123,
+        },
+        {
+          name: "SHA256SUMS",
+          browser_download_url: "https://example/SHA256SUMS",
+          size: 256,
+        },
+      ],
+    };
+    const r = await runUpdateFlow({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      chatId: 42,
+      fetchImpl: fakeReleaseFetch({ releaseBody: winReleaseBody }),
+      serviceControl: svc,
+      runUpdateImpl: async (opts) => {
+        runUpdateCalledWith = opts;
+        return 0;
+      },
+      pendingPath,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "win32",
+      procArch: "x64",
+    });
+    // Windows is a real release target now — the flow proceeds to a swap.
+    expect(r.reply).toContain("installed");
+    expect(r.restart).toBeDefined();
+    // runUpdate saw win32 so it takes the rename-aside swap path.
+    expect((runUpdateCalledWith as { procPlatform: string }).procPlatform).toBe(
+      "win32",
+    );
+    // NB: we deliberately don't invoke r.restart() here. On win32 selfRestart's
+    // default shutdown trigger is process.emit("SIGTERM"), which would signal
+    // the test runner. The "Windows exits cleanly, never calls schtasks
+    // restart()" behaviour is asserted in lib-platform.test.ts with an injected
+    // trigger.
   });
 });
 
@@ -628,7 +682,8 @@ describe("checkAndNotifyOnce", () => {
       fetchImpl: fakeReleaseFetch(),
       transport: new FakeTransport(),
       lastNotifiedPath: lastNotifiedPathLocal,
-      procPlatform: "win32",
+      // freebsd has no release target (win32 is supported now).
+      procPlatform: "freebsd",
       procArch: "x64",
     });
     expect(r.status).toBe("no_target");

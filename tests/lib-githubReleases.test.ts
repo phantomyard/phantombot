@@ -6,7 +6,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   detectSupportedArch,
+  detectSupportedTarget,
   findLatestRelease,
+  releaseAssetName,
 } from "../src/lib/githubReleases.ts";
 
 const SAVED_ENV = {
@@ -99,6 +101,44 @@ describe("detectSupportedArch", () => {
   });
 });
 
+describe("detectSupportedTarget", () => {
+  test("linux x64/arm64", () => {
+    expect(detectSupportedTarget("linux", "x64")).toBe("linux-x64");
+    expect(detectSupportedTarget("linux", "arm64")).toBe("linux-arm64");
+  });
+  test("darwin arm64 only (no intel mac build)", () => {
+    expect(detectSupportedTarget("darwin", "arm64")).toBe("darwin-arm64");
+    expect(detectSupportedTarget("darwin", "x64")).toBeUndefined();
+  });
+  test("windows x64/arm64", () => {
+    expect(detectSupportedTarget("win32", "x64")).toBe("windows-x64");
+    expect(detectSupportedTarget("win32", "arm64")).toBe("windows-arm64");
+  });
+  test("unsupported platform/arch → undefined", () => {
+    expect(detectSupportedTarget("freebsd", "x64")).toBeUndefined();
+    expect(detectSupportedTarget("win32", "ia32")).toBeUndefined();
+  });
+});
+
+describe("releaseAssetName", () => {
+  test("POSIX targets are extensionless", () => {
+    expect(releaseAssetName("v1.2.3", "linux-x64")).toBe(
+      "phantombot-v1.2.3-linux-x64",
+    );
+    expect(releaseAssetName("v1.2.3", "darwin-arm64")).toBe(
+      "phantombot-v1.2.3-darwin-arm64",
+    );
+  });
+  test("windows targets carry the .exe suffix", () => {
+    expect(releaseAssetName("v1.2.3", "windows-x64")).toBe(
+      "phantombot-v1.2.3-windows-x64.exe",
+    );
+    expect(releaseAssetName("v1.2.3", "windows-arm64")).toBe(
+      "phantombot-v1.2.3-windows-arm64.exe",
+    );
+  });
+});
+
 describe("findLatestRelease", () => {
   test("picks the x64 binary + SHA256SUMS, strips leading v from version", async () => {
     const r = await findLatestRelease({
@@ -125,6 +165,31 @@ describe("findLatestRelease", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.release.binary.name).toBe("phantombot-v1.0.43-linux-arm64");
+  });
+
+  test("resolves the .exe asset for a windows target", async () => {
+    const withWindows = {
+      ...SAMPLE_RELEASE,
+      assets: [
+        ...SAMPLE_RELEASE.assets,
+        {
+          name: "phantombot-v1.0.43-windows-x64.exe",
+          browser_download_url:
+            "https://example/phantombot-v1.0.43-windows-x64.exe",
+          size: 90_000_000,
+        },
+      ],
+    };
+    const r = await findLatestRelease({
+      target: "windows-x64",
+      fetchImpl: fakeFetch(200, withWindows),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.binary.name).toBe("phantombot-v1.0.43-windows-x64.exe");
+    expect(r.release.binary.url).toBe(
+      "https://example/phantombot-v1.0.43-windows-x64.exe",
+    );
   });
 
   test("errors when the right-arch asset is absent", async () => {
