@@ -3,8 +3,9 @@
  * service-manager units. Best-effort; missing units / inactive services
  * are not errors.
  *
- *   - Linux  → systemctl --user stop/disable + remove unit files
- *   - macOS  → launchctl bootout + remove plists
+ *   - Linux   → systemctl --user stop/disable + remove unit files
+ *   - macOS   → launchctl bootout + remove plists
+ *   - Windows → schtasks /Delete of the \Phantombot\ tasks
  */
 
 import { defineCommand } from "citty";
@@ -29,6 +30,11 @@ import {
   type SystemctlRunner,
   type UserSystemdEnv,
 } from "../lib/systemd.ts";
+import {
+  BunSchtasksRunner,
+  type SchtasksRunner,
+  uninstallPhantombotTasks,
+} from "../lib/taskScheduler.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 export interface RunUninstallInput {
@@ -39,10 +45,11 @@ export interface RunUninstallInput {
   tickPlistPath?: string;
   systemctl?: SystemctlRunner;
   launchctl?: LaunchctlRunner;
+  schtasks?: SchtasksRunner;
   out?: WriteSink;
   err?: WriteSink;
   ensureSystemdEnv?: () => UserSystemdEnv;
-  platform?: "linux" | "darwin" | "unsupported";
+  platform?: "linux" | "darwin" | "windows" | "unsupported";
   domain?: string;
 }
 
@@ -58,9 +65,11 @@ export async function runUninstall(
       return runUninstallLinux(input, out, err);
     case "darwin":
       return runUninstallDarwin(input, out, err);
+    case "windows":
+      return runUninstallWindows(input, out, err);
     default:
       err.write(
-        `phantombot uninstall supports linux and darwin only; this host reports platform=${process.platform}\n`,
+        `phantombot uninstall supports linux, darwin and windows only; this host reports platform=${process.platform}\n`,
       );
       return 2;
   }
@@ -120,11 +129,22 @@ async function runUninstallDarwin(
   return 0;
 }
 
+async function runUninstallWindows(
+  input: RunUninstallInput,
+  out: WriteSink,
+  err: WriteSink,
+): Promise<number> {
+  const schtasks = input.schtasks ?? new BunSchtasksRunner();
+  await uninstallPhantombotTasks({ schtasks, out, err });
+  out.write("uninstall complete\n");
+  return 0;
+}
+
 export default defineCommand({
   meta: {
     name: "uninstall",
     description:
-      "Stop, disable, and remove the phantombot service-manager units (systemd --user on Linux, launchd LaunchAgent on macOS).",
+      "Stop, disable, and remove the phantombot service-manager units (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler tasks on Windows).",
   },
   async run() {
     const code = await runUninstall();

@@ -44,6 +44,14 @@ describe("hint commands shape per platform", () => {
     expect(statusCommand()).toContain("launchctl print");
     expect(logsCommand()).toContain("Library/Logs/phantombot");
   });
+
+  test("on windows: schtasks strings", () => {
+    if (process.platform !== "win32") return;
+    expect(restartCommand()).toContain("schtasks /Run /TN");
+    expect(restartCommand()).toContain("\\Phantombot\\phantombot");
+    expect(statusCommand()).toContain("schtasks /Query /TN");
+    expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
+  });
 });
 
 describe("defaultServiceControl", () => {

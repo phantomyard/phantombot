@@ -22,6 +22,10 @@ import {
   ensureSystemdUnitsCurrent,
   ensureUserSystemdEnv,
 } from "../lib/systemd.ts";
+import {
+  BunSchtasksRunner,
+  ensureTasksCurrent,
+} from "../lib/taskScheduler.ts";
 import { recordHeartbeatFired } from "../lib/timerHealth.ts";
 import { VERSION } from "../version.ts";
 
@@ -104,21 +108,21 @@ export async function runHeartbeatCli(
     });
   }
 
-  // Self-heal systemd units on the heartbeat's regular cadence. This
-  // is the long-uptime cure for the broken-symlink class of bug — a
-  // box that never restarts still gets a re-check every 30 minutes,
-  // and any drift is fixed in-place without operator action. Wrapped
-  // in try/catch so a transient systemctl failure doesn't break the
-  // primary heartbeat work.
+  // Self-heal the service-manager units on the heartbeat's regular cadence.
+  // This is the long-uptime cure for the drifted-unit class of bug (a broken
+  // symlink on Linux, a moved binary on Windows) — a box that never restarts
+  // still gets a re-check every 30 minutes, and any drift is fixed in-place
+  // without operator action. Wrapped in try/catch so a transient failure
+  // doesn't break the primary heartbeat work.
   if (input.healSystemd !== false) {
     try {
       if (input.healSystemd) {
         await input.healSystemd();
       } else {
-        await defaultHealSystemd();
+        await defaultHealService();
       }
     } catch (e) {
-      log.warn("heartbeat: systemd self-heal threw unexpectedly", {
+      log.warn("heartbeat: service self-heal threw unexpectedly", {
         error: (e as Error).message,
       });
     }
@@ -143,13 +147,27 @@ export async function runHeartbeatCli(
 }
 
 /**
- * Production self-heal: idempotently ensure all phantombot systemd
- * units are present and timers are armed. Silent on healthy boxes,
- * logs a notice on repair. Skips on macOS and on Linux hosts where
- * the user-systemd bus isn't reachable (e.g. SSH without lingering).
+ * Production self-heal, dispatched to the host's service-manager backend.
+ * Silent on healthy boxes; logs a notice only on repair. A no-op on any
+ * platform without a backend.
+ */
+async function defaultHealService(): Promise<void> {
+  switch (currentPlatform()) {
+    case "linux":
+      return defaultHealSystemd();
+    case "windows":
+      return defaultHealTaskScheduler();
+    default:
+      return; // macOS (launchd self-heals via KeepAlive) and unsupported hosts
+  }
+}
+
+/**
+ * Idempotently ensure all phantombot systemd units are present and timers are
+ * armed. Skips on Linux hosts where the user-systemd bus isn't reachable (e.g.
+ * SSH without lingering).
  */
 async function defaultHealSystemd(): Promise<void> {
-  if (currentPlatform() !== "linux") return;
   const binPath = process.execPath;
   if (basename(binPath) !== "phantombot") return;
   const sysEnv = ensureUserSystemdEnv();
@@ -161,6 +179,24 @@ async function defaultHealSystemd(): Promise<void> {
       rewrote: r.rewrote,
       repairedTimers: r.repairedTimers,
     });
+  }
+}
+
+/**
+ * Windows analogue of `defaultHealSystemd`: re-register any of the four
+ * scheduled tasks that drifted from the current binary path (the moved- or
+ * updated-binary case). Only fires when we ARE the compiled binary
+ * (`phantombot.exe`), so a dev `bun src/index.ts` run never rewrites tasks.
+ */
+async function defaultHealTaskScheduler(): Promise<void> {
+  const binPath = process.execPath;
+  if (!basename(binPath).startsWith("phantombot")) return;
+  const r = await ensureTasksCurrent({
+    binPath,
+    schtasks: new BunSchtasksRunner(),
+  });
+  if (r.rewrote.length > 0) {
+    log.info("heartbeat: healed scheduled tasks", { rewrote: r.rewrote });
   }
 }
 
