@@ -32,6 +32,7 @@ import {
   fetchCanonicalRelays,
   sameRelays,
 } from "../channels/phantomchat/relaysSource.ts";
+import { cleanupStaleUpdateArtifacts } from "../lib/binaryUpdate.ts";
 import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
   type Config,
@@ -303,6 +304,25 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         "stop the other instance first, or remove the lock if it's stale.\n",
     );
     return 1;
+  }
+
+  // Windows self-update leaves the previous binary renamed aside as
+  // `${exe}.old` (a running .exe can't be deleted, so the swap moves it out of
+  // the way). It's unlocked once the old process has exited, so this freshly-
+  // relaunched process sweeps it up. No-op on POSIX and best-effort — a
+  // still-locked artifact is retried on the next boot. Gated to the real
+  // compiled binary so `bun src/index.ts`/tests never touch the dev box.
+  if (basename(process.execPath).toLowerCase().startsWith("phantombot")) {
+    try {
+      const removed = await cleanupStaleUpdateArtifacts(process.execPath);
+      if (removed.length > 0) {
+        log.info("run: removed stale self-update artifacts", { removed });
+      }
+    } catch (e) {
+      log.warn("run: self-update artifact cleanup threw", {
+        error: (e as Error).message,
+      });
+    }
   }
 
   const memory = await openMemoryStore(config.memoryDbPath);

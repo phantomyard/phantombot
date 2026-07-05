@@ -46,6 +46,7 @@ import {
 import { log } from "./logger.ts";
 import {
   defaultServiceControl,
+  selfRestart,
   type ServiceControl,
 } from "./platform.ts";
 
@@ -321,7 +322,7 @@ export async function runUpdateFlow(
     return {
       reply:
         `can't self-update on this host: phantombot only ships binaries ` +
-        `for linux-x64, linux-arm64, and darwin-arm64 ` +
+        `for linux-x64, linux-arm64, darwin-arm64, windows-x64, and windows-arm64 ` +
         `(this machine reports platform=${procPlatform} arch=${procArch})`,
     };
   }
@@ -398,7 +399,11 @@ export async function runUpdateFlow(
   //    the flow used (matters for tests that inject a stub).
   const svc = input.serviceControl ?? defaultServiceControl();
   const restart = async (): Promise<void> => {
-    const r = await svc.restart();
+    // In-process restart: POSIX delegates to the supervisor; Windows exits
+    // cleanly and lets the keep-alive task relaunch from the swapped binary
+    // (see selfRestart — calling schtasks End/Run from our own task tree
+    // would race the relaunch).
+    const r = await selfRestart({ serviceControl: svc, procPlatform });
     if (!r.ok) {
       log.error("updateNotify: restart failed after binary swap", {
         stderr: r.stderr,

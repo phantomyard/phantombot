@@ -19,11 +19,28 @@ export type SupportedArch = "x64" | "arm64";
 
 /**
  * The full release-target tuple — phantombot ships one binary per
- * (platform, arch) pair, named `phantombot-${tag}-${target}`. Currently
- * built: linux-x64, linux-arm64, darwin-arm64. No darwin-x64 because no
- * deploy target uses Intel Mac.
+ * (platform, arch) pair, named `phantombot-${tag}-${target}` (Windows adds a
+ * `.exe` suffix — see releaseAssetName). Currently built: linux-x64,
+ * linux-arm64, darwin-arm64, windows-x64, windows-arm64. No darwin-x64
+ * because no deploy target uses Intel Mac.
  */
-export type SupportedTarget = "linux-x64" | "linux-arm64" | "darwin-arm64";
+export type SupportedTarget =
+  | "linux-x64"
+  | "linux-arm64"
+  | "darwin-arm64"
+  | "windows-x64"
+  | "windows-arm64";
+
+/**
+ * The release asset filename for a (tag, target). Windows binaries carry a
+ * `.exe` suffix (that's how the release workflow uploads them); every other
+ * platform is extensionless. Kept as a single helper so the updater's
+ * "what asset am I looking for" logic and any future callers agree.
+ */
+export function releaseAssetName(tag: string, target: SupportedTarget): string {
+  const base = `phantombot-${tag}-${target}`;
+  return target.startsWith("windows-") ? `${base}.exe` : base;
+}
 
 export interface ReleaseAsset {
   name: string;
@@ -140,7 +157,7 @@ export async function findLatestRelease(opts: {
 
   const tag = body.tag_name;
   const version = tag.startsWith("v") ? tag.slice(1) : tag;
-  const wantedBinaryName = `phantombot-${tag}-${opts.target}`;
+  const wantedBinaryName = releaseAssetName(tag, opts.target);
   const binary = body.assets.find((a) => a.name === wantedBinaryName);
   const checksums = body.assets.find((a) => a.name === "SHA256SUMS");
 
@@ -199,11 +216,12 @@ export function detectSupportedArch(
 /**
  * Map (process.platform, process.arch) to one of the release-target
  * tuples we actually ship. Returns undefined for combinations the
- * release workflow doesn't build (e.g. darwin-x64, linux-ia32, win32-*),
- * so `phantombot update` can refuse with a clear message instead of
+ * release workflow doesn't build (e.g. darwin-x64, linux-ia32), so
+ * `phantombot update` can refuse with a clear message instead of
  * 404-ing on a missing asset.
  *
- * Built targets: linux-x64, linux-arm64, darwin-arm64.
+ * Built targets: linux-x64, linux-arm64, darwin-arm64, windows-x64,
+ * windows-arm64.
  */
 export function detectSupportedTarget(
   procPlatform: string = process.platform,
@@ -213,6 +231,7 @@ export function detectSupportedTarget(
   if (!arch) return undefined;
   if (procPlatform === "linux") return `linux-${arch}` as SupportedTarget;
   if (procPlatform === "darwin" && arch === "arm64") return "darwin-arm64";
+  if (procPlatform === "win32") return `windows-${arch}` as SupportedTarget;
   return undefined;
 }
 
