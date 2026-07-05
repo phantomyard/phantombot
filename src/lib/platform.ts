@@ -31,7 +31,10 @@ import {
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
-import { defaultTaskSchedulerServiceControl } from "./taskScheduler.ts";
+import {
+  defaultTaskSchedulerServiceControl,
+  taskLogPaths,
+} from "./taskScheduler.ts";
 
 export type { ServiceControl };
 
@@ -164,8 +167,13 @@ export function logsCommand(): string {
   switch (currentPlatform()) {
     case "darwin":
       return `tail -f ~/Library/Logs/phantombot/dev.phantombot.phantombot.{out,err}.log`;
-    case "windows":
-      return `powershell -Command "Get-Content -Wait -Tail 50 \\"$env:USERPROFILE\\.local\\share\\phantombot\\logs\\phantombot.out.log\\""`;
+    case "windows": {
+      // Derive the log path from the same resolver the scheduler writes to
+      // (taskLogPaths -> xdgDataHome), so an XDG_DATA_HOME override points the
+      // hint at the real file instead of the default .local\share location.
+      const { out } = taskLogPaths("phantombot");
+      return `powershell -Command "Get-Content -Wait -Tail 50 \\"${out}\\""`;
+    }
     case "linux":
     default:
       return "journalctl --user -u phantombot -f";

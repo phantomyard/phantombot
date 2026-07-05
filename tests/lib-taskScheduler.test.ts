@@ -22,6 +22,7 @@ import {
   installPhantombotTasks,
   type SchtasksResult,
   type SchtasksRunner,
+  taskLogPaths,
   uninstallPhantombotTasks,
   HEARTBEAT_TASK,
   NIGHTLY_TASK,
@@ -60,6 +61,27 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rmrf(workdir);
+});
+
+describe("taskLogPaths", () => {
+  test("honours XDG_DATA_HOME so the log hint matches where tasks write", () => {
+    const prev = process.env.XDG_DATA_HOME;
+    try {
+      process.env.XDG_DATA_HOME = join("/tmp", "xdg-data-override");
+      const { out, err } = taskLogPaths("phantombot");
+      // Both the scheduler action and platform.ts logsCommand() resolve
+      // through this function, so an override must flow into both.
+      expect(out).toBe(
+        join("/tmp", "xdg-data-override", "phantombot", "logs", "phantombot.out.log"),
+      );
+      expect(err).toBe(
+        join("/tmp", "xdg-data-override", "phantombot", "logs", "phantombot.err.log"),
+      );
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+    }
+  });
 });
 
 describe("buildCmdArguments", () => {
