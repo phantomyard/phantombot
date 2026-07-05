@@ -3,9 +3,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { rmrf } from "./fixtures/rmrf.ts";
 import {
   checkStaleness,
   extractRecentSection,
@@ -25,7 +26,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(workdir, { recursive: true, force: true });
+  await rmrf(workdir);
 });
 
 async function file(rel: string, content: string) {
