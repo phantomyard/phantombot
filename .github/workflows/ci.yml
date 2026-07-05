@@ -105,3 +105,7 @@ jobs:
           tests/cli-install.test.ts
           tests/cli-heartbeat.test.ts
           tests/lib-heartbeat.test.ts
+          tests/lib-binaryUpdate.test.ts
+          tests/lib-githubReleases.test.ts
+          tests/cli-update.test.ts
+          tests/lib-updateNotify.test.ts

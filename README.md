@@ -197,23 +197,30 @@ sudo loginctl enable-linger "$USER"
 
 ## Windows (preview)
 
-Phantombot runs on Windows (x64). The port shares ~95% of its code with the
-Linux and macOS builds; the platform-specific pieces (data paths, process
-tree-kill, run-lock, credential-store ACL, and the background service) have
-native Windows implementations. There is no prebuilt Windows release yet, so
-you build the binary from source.
+Phantombot runs on Windows (x64 and arm64). The port shares ~95% of its code
+with the Linux and macOS builds; the platform-specific pieces (data paths,
+process tree-kill, run-lock, credential-store ACL, the background service, and
+self-update) have native Windows implementations.
 
-**Build the binary** (needs [Bun](https://bun.sh) on the Windows machine):
+Every release publishes prebuilt, unsigned Windows binaries -
+`phantombot-<tag>-windows-x64.exe` and `phantombot-<tag>-windows-arm64.exe` -
+alongside the SHA256SUMS file. Download the one for your architecture, verify
+its checksum, and drop it somewhere stable on your PATH:
+
+```powershell
+# Unblock the downloaded file (SmartScreen marks internet downloads):
+Unblock-File .\phantombot-<tag>-windows-x64.exe
+mkdir "$env:LOCALAPPDATA\Programs\phantombot"
+copy .\phantombot-<tag>-windows-x64.exe "$env:LOCALAPPDATA\Programs\phantombot\phantombot.exe"
+```
+
+**Or build from source** (needs [Bun](https://bun.sh) on the Windows machine):
 
 ```powershell
 git clone https://github.com/phantomyard/phantombot.git
 cd phantombot
 bun install
 bun run build:win        # produces dist\phantombot.exe
-
-# Put it somewhere stable and on your PATH, e.g.:
-mkdir "$env:LOCALAPPDATA\Programs\phantombot"
-copy dist\phantombot.exe "$env:LOCALAPPDATA\Programs\phantombot\phantombot.exe"
 ```
 
 Then configure it exactly as on Linux (`phantombot persona`, `harness`,
@@ -247,6 +254,16 @@ kiosk, a server, or a machine that reboots unattended), wrap `phantombot run`
 in a service supervisor such as [WinSW](https://github.com/winsw/winsw) or NSSM
 and run it under a dedicated service account. That path is not yet scripted by
 `phantombot install`; it is the documented escape hatch for now.
+
+**Self-update.** `phantombot update` and the `/update` chat command work on
+Windows. Because Windows locks a running `.exe` against overwrite, the updater
+renames the live binary aside to `phantombot.exe.old` (allowed while it runs),
+drops the verified new binary into place, then exits cleanly - the one-minute
+keep-alive trigger relaunches the agent on the new binary within ≈60 seconds
+(no console windows, no manual restart). The relaunched process deletes the
+leftover `.old` on startup once it is unlocked. In-place self-update needs the
+service installed (`phantombot install`) so the keep-alive is present to bring
+the agent back up.
 
 **Logs.** Service stdout/stderr are redirected to
 `%LOCALAPPDATA%\phantombot\logs\*.out.log` / `*.err.log`. These currently grow
