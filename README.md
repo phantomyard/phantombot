@@ -204,8 +204,23 @@ self-update) have native Windows implementations.
 
 Every release publishes prebuilt, unsigned Windows binaries -
 `phantombot-<tag>-windows-x64.exe` and `phantombot-<tag>-windows-arm64.exe` -
-alongside the SHA256SUMS file. Download the one for your architecture, verify
-its checksum, and drop it somewhere stable on your PATH:
+alongside the SHA256SUMS file.
+
+**Install (preview) - PowerShell one-liner:**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.ps1 | iex
+```
+
+This detects your architecture (x64/arm64), downloads the matching binary,
+verifies its SHA256, runs `Unblock-File` so SmartScreen does not flag it,
+installs to `%LOCALAPPDATA%\Programs\phantombot\phantombot.exe` (per-user, no
+admin), adds that dir to your PATH, and launches `phantombot init`. It is the
+Windows parallel to the Linux/macOS `install.sh`. Marked **(preview)** while the
+Windows port settles.
+
+**Or install manually** - download the `.exe` for your architecture, verify its
+checksum, and drop it into the same per-user location:
 
 ```powershell
 # Unblock the downloaded file (SmartScreen marks internet downloads):
