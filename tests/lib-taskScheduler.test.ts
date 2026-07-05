@@ -72,10 +72,11 @@ describe("buildLauncherArguments", () => {
       "C:\\logs\\phantombot.out.log",
       "C:\\logs\\phantombot.err.log",
     );
-    // Each value is its own quoted token so a spaced path survives arg parsing,
-    // and the binary path stays visible (drift detection reads it back).
+    // //B (batch mode) suppresses any runtime script-error dialog. Each value
+    // is its own quoted token so a spaced path survives arg parsing, and the
+    // binary path stays visible (drift detection reads it back).
     expect(args).toBe(
-      `"${launcherVbsPath()}" "${BIN}" "run" "C:\\logs\\phantombot.out.log" "C:\\logs\\phantombot.err.log"`,
+      `//B "${launcherVbsPath()}" "${BIN}" "run" "C:\\logs\\phantombot.out.log" "C:\\logs\\phantombot.err.log"`,
     );
   });
 });
@@ -127,6 +128,8 @@ describe("generatePhantombotTaskXml", () => {
     // the task never pops a visible window; cmd.exe is no longer the Command.
     expect(xml).toContain("<Command>wscript.exe</Command>");
     expect(xml).not.toContain("<Command>cmd.exe</Command>");
+    // wscript runs in batch mode so a script error never pops its own dialog.
+    expect(xml).toContain("//B");
     // The launcher path and the binary path are both quoted args…
     expect(xml).toContain(`"${launcherVbsPath()}"`);
     expect(xml).toContain(`"${BIN}"`);
