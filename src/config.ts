@@ -322,30 +322,23 @@ export interface Config {
 }
 
 /**
- * Windows local-application-data root (`%LOCALAPPDATA%`, e.g.
- * `C:\Users\<you>\AppData\Local`). On the Windows port we deliberately
- * collapse config, data AND state under this single non-roaming root:
- * every caller appends `"phantombot"`, so all three resolve to
- * `%LOCALAPPDATA%\phantombot`. One predictable home, nothing roams
- * across machines (which `%APPDATA%` would).
+ * XDG base-directory resolution, identical on every platform. Windows uses
+ * the same home-relative layout as Linux/macOS so a persona's on-disk tree is
+ * portable across machines: `~/.config/phantombot`, `~/.local/share/phantombot`
+ * and `~/.local/state/phantombot` (on Windows `~` is the `%USERPROFILE%` root,
+ * e.g. `C:\Users\<you>\.local\share\phantombot`). The `XDG_*` env vars still
+ * take precedence everywhere, so an explicit override remains the escape hatch.
  */
-function windowsLocalAppData(): string {
-  return process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-}
-
 export function xdgConfigHome(): string {
   if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
-  if (process.platform === "win32") return windowsLocalAppData();
   return join(homedir(), ".config");
 }
 export function xdgDataHome(): string {
   if (process.env.XDG_DATA_HOME) return process.env.XDG_DATA_HOME;
-  if (process.platform === "win32") return windowsLocalAppData();
   return join(homedir(), ".local", "share");
 }
 export function xdgStateHome(): string {
   if (process.env.XDG_STATE_HOME) return process.env.XDG_STATE_HOME;
-  if (process.platform === "win32") return windowsLocalAppData();
   return join(homedir(), ".local", "state");
 }
 

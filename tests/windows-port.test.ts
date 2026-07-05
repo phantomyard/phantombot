@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { xdgConfigHome, xdgDataHome, xdgStateHome } from "../src/config.ts";
@@ -63,13 +63,15 @@ describe("xdg* path resolvers on Windows", () => {
     LOCALAPPDATA: "C:\\Users\\megan\\AppData\\Local",
   };
 
-  test("config, data AND state all collapse under %LOCALAPPDATA% (single root)", () => {
+  test("config, data AND state use the same home-relative layout as Linux", () => {
     withEnv(XDG, () => {
       withPlatform("win32", () => {
-        const root = "C:\\Users\\megan\\AppData\\Local";
-        expect(xdgConfigHome()).toBe(root);
-        expect(xdgDataHome()).toBe(root);
-        expect(xdgStateHome()).toBe(root);
+        // Windows now mirrors POSIX: ~/.config, ~/.local/share, ~/.local/state
+        // (on a real Windows box `~` is %USERPROFILE%). %LOCALAPPDATA% is
+        // intentionally ignored so the persona tree is portable across OSes.
+        expect(xdgConfigHome()).toBe(join(homedir(), ".config"));
+        expect(xdgDataHome()).toBe(join(homedir(), ".local", "share"));
+        expect(xdgStateHome()).toBe(join(homedir(), ".local", "state"));
       });
     });
   });

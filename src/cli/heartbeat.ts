@@ -29,9 +29,9 @@ import {
 import { recordHeartbeatFired } from "../lib/timerHealth.ts";
 import { VERSION } from "../version.ts";
 
-// Delegates to the shared, platform-aware resolver in config.ts so the
-// path is correct on Windows (%LOCALAPPDATA%) as well as XDG systems,
-// rather than re-deriving `~/.local/share` with a POSIX literal.
+// Delegates to the shared resolver in config.ts so the memory-index path
+// stays consistent everywhere (~/.local/share/phantombot on every platform,
+// or the XDG_DATA_HOME override) rather than re-deriving it with a literal.
 function indexPath(persona: string): string {
   return memoryIndexPath(persona);
 }

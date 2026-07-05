@@ -40,7 +40,7 @@
  * Logging (WinSW-inspired, minus the SCM): Task Scheduler does not capture a
  * process's stdout/stderr, so the action is run through `cmd /c` with the
  * streams redirected (append) to per-task .out.log / .err.log under
- * %LOCALAPPDATA%\phantombot\logs — the same out/err split launchd writes to
+ * ~/.local/share/phantombot/logs - the same out/err split launchd writes to
  * ~/Library/Logs. Log ROTATION is not yet handled here (documented limitation;
  * WinSW is the upgrade path for rotation + richer supervision).
  */

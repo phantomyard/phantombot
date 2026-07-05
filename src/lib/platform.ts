@@ -165,7 +165,7 @@ export function logsCommand(): string {
     case "darwin":
       return `tail -f ~/Library/Logs/phantombot/dev.phantombot.phantombot.{out,err}.log`;
     case "windows":
-      return `powershell -Command "Get-Content -Wait -Tail 50 \\"$env:LOCALAPPDATA\\phantombot\\logs\\phantombot.out.log\\""`;
+      return `powershell -Command "Get-Content -Wait -Tail 50 \\"$env:USERPROFILE\\.local\\share\\phantombot\\logs\\phantombot.out.log\\""`;
     case "linux":
     default:
       return "journalctl --user -u phantombot -f";

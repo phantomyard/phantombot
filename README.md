@@ -241,11 +241,14 @@ bun run build:win        # produces dist\phantombot.exe
 Then configure it exactly as on Linux (`phantombot persona`, `harness`,
 `telegram`, …).
 
-**Data location.** Everything lives under a single root,
-`%LOCALAPPDATA%\phantombot` (config, personas, memory database, logs, and the
-run-lock). Nothing roams between machines. The crown-jewel `identity.json` is
-created with an owner-only ACL (`icacls`, inheritance stripped) so other
-accounts on the box cannot read it.
+**Data location.** Windows uses the same home-relative XDG layout as Linux and
+macOS, so a persona's on-disk tree is identical across all three: config in
+`%USERPROFILE%\.config\phantombot`, data (personas, memory database, logs) in
+`%USERPROFILE%\.local\share\phantombot`, and state (timer/lock bookkeeping) in
+`%USERPROFILE%\.local\state\phantombot`. Setting `XDG_DATA_HOME` (or the
+`XDG_CONFIG_HOME` / `XDG_STATE_HOME` overrides) relocates them, exactly as on
+Linux. The crown-jewel `identity.json` is created with an owner-only ACL
+(`icacls`, inheritance stripped) so other accounts on the box cannot read it.
 
 **Install as a background service.**
 
@@ -281,9 +284,9 @@ service installed (`phantombot install`) so the keep-alive is present to bring
 the agent back up.
 
 **Logs.** Service stdout/stderr are redirected to
-`%LOCALAPPDATA%\phantombot\logs\*.out.log` / `*.err.log`. These currently grow
-unbounded (no built-in rotation yet) — prune them periodically if the box runs
-for a long time.
+`%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. These
+currently grow unbounded (no built-in rotation yet) - prune them periodically
+if the box runs for a long time.
 
 Status: the Windows port is exercised by a dedicated `windows-latest` CI job on
 every pull request. Treat it as a **preview** — solid enough to run, but newer
