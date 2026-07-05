@@ -63,6 +63,7 @@ Supported harnesses:
 - [Why Phantombot Exists](#why-phantombot-exists)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Windows (preview)](#windows-preview)
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
 - [Telegram](#telegram)
@@ -193,6 +194,68 @@ running after logout:
 ```bash
 sudo loginctl enable-linger "$USER"
 ```
+
+## Windows (preview)
+
+Phantombot runs on Windows (x64). The port shares ~95% of its code with the
+Linux and macOS builds; the platform-specific pieces (data paths, process
+tree-kill, run-lock, credential-store ACL, and the background service) have
+native Windows implementations. There is no prebuilt Windows release yet, so
+you build the binary from source.
+
+**Build the binary** (needs [Bun](https://bun.sh) on the Windows machine):
+
+```powershell
+git clone https://github.com/phantomyard/phantombot.git
+cd phantombot
+bun install
+bun run build:win        # produces dist\phantombot.exe
+
+# Put it somewhere stable and on your PATH, e.g.:
+mkdir "$env:LOCALAPPDATA\Programs\phantombot"
+copy dist\phantombot.exe "$env:LOCALAPPDATA\Programs\phantombot\phantombot.exe"
+```
+
+Then configure it exactly as on Linux (`phantombot persona`, `harness`,
+`telegram`, …).
+
+**Data location.** Everything lives under a single root,
+`%LOCALAPPDATA%\phantombot` (config, personas, memory database, logs, and the
+run-lock). Nothing roams between machines. The crown-jewel `identity.json` is
+created with an owner-only ACL (`icacls`, inheritance stripped) so other
+accounts on the box cannot read it.
+
+**Install as a background service.**
+
+```powershell
+phantombot install      # registers per-user Task Scheduler tasks under \Phantombot\
+phantombot uninstall    # removes them
+```
+
+`install` registers four logon-triggered scheduled tasks (`run`, `heartbeat`,
+`nightly`, `tick`). They run as **you**, using an interactive-token principal —
+**no admin rights and no stored password required**.
+
+**Important — the agent runs only while you are logged in.** This mirrors the
+macOS (launchd `Aqua`) model, not the Linux `enable-linger` model. When you log
+out, Windows tears down your session and the tasks stop; they start again at
+your next logon. A LogonTrigger plus a one-minute keep-alive re-launches the
+agent if it crashes while you are logged in.
+
+For a **true headless service** that runs without an interactive login (a
+kiosk, a server, or a machine that reboots unattended), wrap `phantombot run`
+in a service supervisor such as [WinSW](https://github.com/winsw/winsw) or NSSM
+and run it under a dedicated service account. That path is not yet scripted by
+`phantombot install`; it is the documented escape hatch for now.
+
+**Logs.** Service stdout/stderr are redirected to
+`%LOCALAPPDATA%\phantombot\logs\*.out.log` / `*.err.log`. These currently grow
+unbounded (no built-in rotation yet) — prune them periodically if the box runs
+for a long time.
+
+Status: the Windows port is exercised by a dedicated `windows-latest` CI job on
+every pull request. Treat it as a **preview** — solid enough to run, but newer
+than the Linux/macOS paths.
 
 ## Configuration
 
