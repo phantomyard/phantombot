@@ -13,13 +13,15 @@ import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 
 import {
-  buildCmdArguments,
+  buildLauncherArguments,
   ensureTasksCurrent,
   generateHeartbeatTaskXml,
   generateNightlyTaskXml,
   generatePhantombotTaskXml,
   generateTickTaskXml,
   installPhantombotTasks,
+  launcherVbsPath,
+  LAUNCHER_VBS,
   type SchtasksResult,
   type SchtasksRunner,
   uninstallPhantombotTasks,
@@ -62,18 +64,34 @@ afterEach(async () => {
   await rmrf(workdir);
 });
 
-describe("buildCmdArguments", () => {
-  test("wraps the binary + redirects both streams, doubling the outer quotes", () => {
-    const args = buildCmdArguments(
+describe("buildLauncherArguments", () => {
+  test("passes launcher, binary, subcommand and both logs as quoted tokens", () => {
+    const args = buildLauncherArguments(
       BIN,
       ["run"],
       "C:\\logs\\phantombot.out.log",
       "C:\\logs\\phantombot.err.log",
     );
-    // cmd's rule: the whole payload after /c is wrapped in one more quote pair.
+    // Each value is its own quoted token so a spaced path survives arg parsing,
+    // and the binary path stays visible (drift detection reads it back).
     expect(args).toBe(
-      `/c ""${BIN}" run 1>>"C:\\logs\\phantombot.out.log" 2>>"C:\\logs\\phantombot.err.log""`,
+      `"${launcherVbsPath()}" "${BIN}" "run" "C:\\logs\\phantombot.out.log" "C:\\logs\\phantombot.err.log"`,
     );
+  });
+});
+
+describe("LAUNCHER_VBS", () => {
+  test("runs the child hidden and waits, rebuilding the cmd redirection", () => {
+    // windowStyle 0 (hidden) + waitOnReturn True - no console flash, but Task
+    // Scheduler still sees the always-on task as Running for IgnoreNew.
+    expect(LAUNCHER_VBS).toContain("sh.Run cmd, 0, True");
+    // Rebuilds `cmd /c ""<exe>" <args> 1>>"<out>" 2>>"<err>""` from the tokens.
+    expect(LAUNCHER_VBS).toContain('"cmd /c "');
+    expect(LAUNCHER_VBS).toContain('" 1>>"');
+    expect(LAUNCHER_VBS).toContain('" 2>>"');
+    // ASCII-only (byte-identical as ANSI or UTF-8) and CRLF-terminated.
+    expect(Buffer.byteLength(LAUNCHER_VBS, "utf8")).toBe(LAUNCHER_VBS.length);
+    expect(LAUNCHER_VBS).toContain("\r\n");
   });
 });
 
@@ -104,15 +122,20 @@ describe("generatePhantombotTaskXml", () => {
     expect(xml).toContain("<RestartOnFailure>");
   });
 
-  test("action routes through cmd.exe so stdout/stderr are logged", () => {
-    expect(xml).toContain("<Command>cmd.exe</Command>");
+  test("action runs the hidden launcher via wscript.exe (no console flash)", () => {
+    // wscript.exe (no console) runs the launcher, which spawns cmd hidden, so
+    // the task never pops a visible window; cmd.exe is no longer the Command.
+    expect(xml).toContain("<Command>wscript.exe</Command>");
+    expect(xml).not.toContain("<Command>cmd.exe</Command>");
+    // The launcher path and the binary path are both quoted args…
+    expect(xml).toContain(`"${launcherVbsPath()}"`);
+    expect(xml).toContain(`"${BIN}"`);
+    // …and the per-task log paths are handed to the launcher.
     expect(xml).toContain("phantombot.out.log");
     expect(xml).toContain("phantombot.err.log");
-    // The `>` of the redirection must be XML-escaped inside <Arguments>.
-    expect(xml).toContain("1&gt;&gt;");
-    expect(xml).toContain("2&gt;&gt;");
-    // ...and the raw unescaped operator must NOT appear.
+    // The redirection operators now live in the .vbs, never in the task XML.
     expect(xml).not.toContain("1>>");
+    expect(xml).not.toContain("1&gt;&gt;");
   });
 });
 
@@ -172,6 +195,20 @@ describe("installPhantombotTasks", () => {
       `/Create /TN ${TICK_TASK} /XML ${join(workdir, "phantombot-task-tick.xml")} /F`,
     ]);
     expect(out.text).toContain("registered");
+  });
+
+  test("writes the shared hidden launcher so wscript.exe has a script to run", async () => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    await installPhantombotTasks({
+      binPath: BIN,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: new FakeSchtasks(),
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(launcherVbsPath())).toBe(true);
+    expect(readFileSync(launcherVbsPath(), "utf8")).toBe(LAUNCHER_VBS);
   });
 
   test("transient XML import files are cleaned up after import", async () => {
@@ -254,6 +291,26 @@ describe("uninstallPhantombotTasks", () => {
       `/Delete /TN ${PHANTOMBOT_TASK} /F`,
     ]);
     expect(out.text).toContain("removed scheduled task");
+  });
+
+  test("removes the shared launcher script when the tasks are torn down", async () => {
+    const { existsSync } = await import("node:fs");
+    // Put the launcher in place first (install writes it), then uninstall.
+    await installPhantombotTasks({
+      binPath: BIN,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: new FakeSchtasks(),
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(launcherVbsPath())).toBe(true);
+    await uninstallPhantombotTasks({
+      schtasks: new FakeSchtasks(),
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(launcherVbsPath())).toBe(false);
   });
 
   test("a missing task (non-zero delete) is logged, not fatal", async () => {
