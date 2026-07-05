@@ -25,7 +25,7 @@ import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
 import { MemoryIndex } from "../lib/memoryIndex.ts";
-import { defaultServiceControl } from "../lib/platform.ts";
+import { defaultServiceControl, selfRestart } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
 import {
@@ -286,20 +286,18 @@ async function handleUpdate(
 /**
  * /restart — restart the phantombot service.
  *
- * Sends "restarting…" to the user, then triggers a service restart via
- * the platform-appropriate backend (systemctl --user on Linux, launchctl
- * on macOS). The restart is fired via `afterSend` so the channel layer
- * sends the heads-up message FIRST, then SIGTERMs us.
- *
- * On unsupported platforms (Windows, BSD) where there's no service
- * manager backend, we tell the user restart isn't supported rather than
- * failing cryptically.
+ * Sends "restarting…" to the user, then triggers an IN-PROCESS restart via
+ * `selfRestart`: on Linux/macOS the supervisor bounces us (systemctl --user /
+ * launchctl); on Windows we exit cleanly and the always-on task's keep-alive
+ * trigger relaunches us (calling schtasks End/Run from our own task tree would
+ * race the relaunch — see selfRestart). The restart is fired via `afterSend`
+ * so the channel layer sends the heads-up message FIRST, then we go down.
  */
 function handleRestart(ctx: SlashCommandContext): SlashCommandResult {
   const svc = ctx.serviceControl ?? defaultServiceControl();
 
   const afterSend = async (): Promise<void> => {
-    const r = await svc.restart();
+    const r = await selfRestart({ serviceControl: svc });
     if (!r.ok) {
       log.error("commands: /restart failed", {
         chatId: ctx.chatId,

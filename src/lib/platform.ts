@@ -66,6 +66,56 @@ export function defaultServiceControl(): ServiceControl {
   }
 }
 
+export interface SelfRestartOpts {
+  /** The host's ServiceControl (POSIX path delegates to its restart()). */
+  serviceControl: ServiceControl;
+  /** Defaults to process.platform. Tests override. */
+  procPlatform?: string;
+  /**
+   * Test seam for the Windows graceful-exit trigger. Production emits
+   * SIGTERM so `phantombot run`'s existing shutdown handler drains cleanly.
+   */
+  triggerShutdown?: () => void;
+}
+
+/**
+ * Restart THE CURRENT phantombot process so it comes back running the
+ * freshly-swapped binary. This is the IN-PROCESS restart used by the
+ * `/update` and `/restart` slash-commands, where the caller is the running
+ * service itself — distinct from `defaultServiceControl().restart()`, which
+ * an EXTERNAL `phantombot update --restart` uses to bounce the service from a
+ * separate terminal.
+ *
+ * POSIX (linux/darwin): delegate to the supervisor's restart verb
+ * (`systemctl --user restart` / `launchctl kickstart`). Those SIGTERM us and
+ * the supervisor relaunches — safe to call from within the unit.
+ *
+ * Windows: we must NOT call `schtasks /End` + `/Run` from inside the task's
+ * own process tree — `/End` tears down that tree (including the child
+ * `schtasks.exe` we just spawned to issue `/Run`), so the relaunch can be
+ * dropped. Instead we exit cleanly (emit SIGTERM → the run loop's handler
+ * drains and returns), and the always-on task's 1-minute keep-alive
+ * TimeTrigger relaunches from the swapped binary within ≤60s. The relaunched
+ * process deletes the stale `.old` on startup. No console window, no watcher.
+ */
+export async function selfRestart(
+  opts: SelfRestartOpts,
+): Promise<{ ok: boolean; stderr?: string }> {
+  const platform = opts.procPlatform ?? process.platform;
+  if (platform === "win32") {
+    const trigger =
+      opts.triggerShutdown ??
+      (() => {
+        // Emit through the normal shutdown path so memory (SQLite/WAL) and the
+        // run-lock are released cleanly, exactly like a POSIX SIGTERM restart.
+        process.emit("SIGTERM" as NodeJS.Signals);
+      });
+    trigger();
+    return { ok: true };
+  }
+  return opts.serviceControl.restart();
+}
+
 function noopServiceControl(): ServiceControl {
   return {
     async isActive() {

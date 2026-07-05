@@ -94,7 +94,8 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
 
   if (!target) {
     err.write(
-      `phantombot is only released for linux-x64, linux-arm64, and darwin-arm64; ` +
+      `phantombot is only released for linux-x64, linux-arm64, darwin-arm64, ` +
+        `windows-x64, and windows-arm64; ` +
         `this machine reports platform=${procPlatform} arch=${procArch}\n`,
     );
     return 1;
@@ -111,7 +112,10 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     binPath = rawBinPath;
   }
 
-  if (basename(binPath) !== "phantombot") {
+  // Accept both the POSIX `phantombot` and the Windows `phantombot.exe`.
+  const binBase = basename(binPath).toLowerCase();
+  const binStem = binBase.endsWith(".exe") ? binBase.slice(0, -4) : binBase;
+  if (binStem !== "phantombot") {
     err.write(
       `not a phantombot binary at ${binPath} (basename=${basename(binPath)}). ` +
         `Are you running from source via 'bun src/index.ts'? ` +
@@ -179,8 +183,8 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   }
   out.write(`verified ${formatBytes(dl.bytes)} (sha256 ok).\n`);
 
-  // 7. Atomic swap.
-  const swap = await applyUpdate({ tempPath, targetPath: binPath });
+  // 7. Atomic swap (rename-over on POSIX; rename-aside on Windows).
+  const swap = await applyUpdate({ tempPath, targetPath: binPath, procPlatform });
   if (!swap.ok) {
     err.write(`install failed: ${swap.error}\n`);
     return 1;

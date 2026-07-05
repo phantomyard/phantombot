@@ -1,10 +1,22 @@
 /**
  * Download + SHA256-verify + atomically swap a phantombot binary.
  *
- * The actual filesystem swap relies on Linux semantics: rename(2) over
- * the currently-executing binary is safe. The kernel keeps the running
- * process backed by the original inode; the new file gets a fresh inode
- * at the same path. The next exec() of that path picks up the new file.
+ * The swap is platform-split because the OSes disagree on what you can do
+ * to a running executable:
+ *
+ *   - POSIX (linux/darwin): rename(2) OVER the currently-executing binary
+ *     is safe. The kernel keeps the running process backed by the original
+ *     inode; the new file gets a fresh inode at the same path, and the next
+ *     exec() of that path picks up the new file.
+ *
+ *   - Windows: the OS locks a running .exe against overwrite AND delete, so
+ *     rename-over is impossible. But it does NOT block RENAMING the running
+ *     image. So we rename the live `phantombot.exe` aside to
+ *     `phantombot.exe.old` (a directory-entry change, allowed while it runs),
+ *     then rename the verified new binary into the now-free path. The `.old`
+ *     stays locked until this process exits, so it can't be deleted here —
+ *     the freshly-relaunched process removes it on startup via
+ *     cleanupStaleUpdateArtifacts.
  *
  * SHA256 verification is mandatory — we refuse to swap if the downloaded
  * bytes don't match SHA256SUMS. A poisoned mirror or in-flight tamper
@@ -16,11 +28,13 @@ import { existsSync } from "node:fs";
 import {
   chmod,
   copyFile,
+  readdir,
   rename,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 
 export interface DownloadAndVerifyOpts {
   /** URL of the binary asset (browser_download_url from the release). */
@@ -146,6 +160,12 @@ export interface ApplyUpdateOpts {
   tempPath: string;
   /** Path of the binary to replace (usually process.execPath). */
   targetPath: string;
+  /**
+   * Defaults to process.platform. On "win32" the swap renames the running
+   * .exe aside instead of renaming over it (which Windows forbids). Tests
+   * override to exercise the Windows path from a POSIX box.
+   */
+  procPlatform?: string;
 }
 
 export type ApplyResult =
@@ -184,6 +204,10 @@ export type ApplyResult =
 export async function applyUpdate(opts: ApplyUpdateOpts): Promise<ApplyResult> {
   if (!existsSync(opts.tempPath)) {
     return { ok: false, error: `temp file missing: ${opts.tempPath}` };
+  }
+  const procPlatform = opts.procPlatform ?? process.platform;
+  if (procPlatform === "win32") {
+    return applyUpdateWindows(opts.tempPath, opts.targetPath);
   }
   const backupPath = `${opts.targetPath}.bak`;
   try {
@@ -229,6 +253,101 @@ export async function applyUpdate(opts: ApplyUpdateOpts): Promise<ApplyResult> {
     /* best-effort cleanup; the next update will retry */
   }
   return { ok: true };
+}
+
+/**
+ * Windows binary swap. Windows locks a running .exe against overwrite/delete
+ * but permits RENAME, so:
+ *   1. Free up `${target}.old` (rm any stale one; if it's still locked by a
+ *      not-fully-exited prior process, fall back to a timestamped name so we
+ *      never fail on a lingering artifact).
+ *   2. rename(target → old)   — moves the live binary aside (allowed while it
+ *      runs; a directory-entry change, not a copy). Same volume by
+ *      construction (old sits next to target).
+ *   3. rename(temp → target)  — drops the verified new binary into the freed
+ *      path. On failure we rename `old` back so the path always has a valid
+ *      binary (rollback).
+ *
+ * We deliberately do NOT delete `old` here: it's still the running process's
+ * on-disk image and stays locked until this process exits. The relaunched
+ * (new) process removes it on startup — see cleanupStaleUpdateArtifacts.
+ */
+async function applyUpdateWindows(
+  tempPath: string,
+  targetPath: string,
+): Promise<ApplyResult> {
+  let oldPath = `${targetPath}.old`;
+  if (existsSync(oldPath)) {
+    await rm(oldPath, { force: true }).catch(() => {});
+    // Still there → it's locked by a prior process that hasn't fully exited.
+    // Use a unique name so this update isn't blocked; cleanup globs *.old.
+    if (existsSync(oldPath)) oldPath = `${targetPath}.${Date.now()}.old`;
+  }
+
+  try {
+    await rename(targetPath, oldPath);
+  } catch (e) {
+    return {
+      ok: false,
+      error: `failed to move running binary aside (${targetPath} → ${oldPath}): ${(e as Error).message}`,
+    };
+  }
+
+  try {
+    await rename(tempPath, targetPath);
+  } catch (e) {
+    // Roll back so the canonical path always holds a working binary.
+    try {
+      await rename(oldPath, targetPath);
+    } catch {
+      /* if restore fails too, `${target}.old` is the intact binary to
+         rename back by hand */
+    }
+    return {
+      ok: false,
+      error: `failed to install new binary (${tempPath} → ${targetPath}): ${(e as Error).message} (rolled back)`,
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Remove stale `${binary}.old` artifacts left behind by a Windows self-update.
+ * The Windows swap renames the previous binary aside because a running .exe
+ * can't be deleted; once the old process has exited the file is unlocked, so
+ * the freshly-relaunched process calls this at startup to tidy up. Matches
+ * both `${name}.old` and the timestamped `${name}.<n>.old` fallback.
+ *
+ * No-op on non-Windows (POSIX rename-over leaves nothing to clean). Returns
+ * the basenames actually removed. Never throws — a still-locked or
+ * unreadable dir is swallowed and retried on the next boot.
+ */
+export async function cleanupStaleUpdateArtifacts(
+  targetPath: string,
+  procPlatform: string = process.platform,
+): Promise<string[]> {
+  if (procPlatform !== "win32") return [];
+  const dir = dirname(targetPath);
+  const base = basename(targetPath);
+  const prefix = `${base}.`;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of entries) {
+    if (!name.startsWith(prefix) || !name.endsWith(".old")) continue;
+    try {
+      await rm(`${dir}/${name}`, { force: true });
+      removed.push(name);
+    } catch {
+      /* still locked (old process not fully gone) — leave for next boot */
+    }
+  }
+  return removed;
 }
 
 /**
