@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  executableExtensions,
   expandSystemdPath,
   whichBinary,
   checkConfiguredHarnesses,
@@ -22,6 +23,37 @@ describe("expandSystemdPath", () => {
     const home = "/home/test";
     const path = "%h/bin:%h/.local/bin";
     expect(expandSystemdPath(path, home)).toBe("/home/test/bin:/home/test/.local/bin");
+  });
+});
+
+describe("executableExtensions", () => {
+  test("POSIX resolves the bare name only", () => {
+    expect(executableExtensions("linux")).toEqual([""]);
+    expect(executableExtensions("darwin")).toEqual([""]);
+  });
+
+  test("Windows tries the bare name first, then each PATHEXT suffix", () => {
+    expect(executableExtensions("win32", ".COM;.EXE;.BAT;.CMD")).toEqual([
+      "",
+      ".COM",
+      ".EXE",
+      ".BAT",
+      ".CMD",
+    ]);
+  });
+
+  test("Windows falls back to a sane PATHEXT default when unset", () => {
+    // Without this, a bare `claude` never matches the shipped `claude.cmd`.
+    expect(executableExtensions("win32", undefined)).toContain(".CMD");
+    expect(executableExtensions("win32", undefined)).toContain(".EXE");
+  });
+
+  test("Windows tolerates whitespace and blank PATHEXT entries", () => {
+    expect(executableExtensions("win32", " .EXE ; ; .CMD ")).toEqual([
+      "",
+      ".EXE",
+      ".CMD",
+    ]);
   });
 });
 
@@ -48,6 +80,21 @@ describe("whichBinary", () => {
   test("resolves bare names from pathEnv", async () => {
     const pathEnv = "/bin:/usr/bin";
     expect(await whichBinary("sh", pathEnv)).toBe("/bin/sh");
+  });
+
+  // Windows-only: runs on the test-windows CI runner. Proves the bare harness
+  // name `claude` resolves to the shipped `claude.cmd` via PATHEXT, and that the
+  // PATH is split on `;` (not `:`, which would shred `C:\...` entries).
+  const winTest = process.platform === "win32" ? test : test.skip;
+  winTest("resolves a bare name to its .cmd via PATHEXT across a ';'-joined PATH", async () => {
+    const dirA = await mkdtemp(join(tmpdir(), "phantombot-win-a-"));
+    const dirB = await mkdtemp(join(tmpdir(), "phantombot-win-b-"));
+    const cmd = join(dirB, "claude.cmd");
+    await writeFile(cmd, "@echo off\r\nexit /b 0\r\n", "utf8");
+
+    // dirA first (no match), dirB second - a ';'-joined, drive-letter PATH.
+    const pathEnv = `${dirA};${dirB}`;
+    expect(await whichBinary("claude", pathEnv)).toBe(cmd);
   });
 });
 
