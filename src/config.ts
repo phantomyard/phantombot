@@ -323,9 +323,10 @@ export interface Config {
   /**
    * Relay-free P2P transport (phantombot#258): a local ws bridge for the
    * same-machine PhantomChat PWA plus werift WebRTC + Nostr-signalled channels
-   * to peer nodes. DISABLED BY DEFAULT — an unconfigured or existing install
-   * runs exactly as before (no bridge port opened, no capability advertised, no
-   * signaling subscription). See P2PSettings and buildP2PConfig.
+   * to peer nodes. ENABLED BY DEFAULT — a fresh install opens the loopback
+   * bridge, advertises P2P capability and subscribes to signaling so the
+   * same-machine PWA lights up P2P with no config. Set `enabled = false`
+   * (or PHANTOMBOT_P2P_ENABLED=0) to opt out. See P2PSettings and buildP2PConfig.
    *
    * Optional on the type (so partial test configs need not spell it out), but
    * `loadConfig` always populates it; consumers treat absence as `DEFAULT_P2P`.
@@ -335,7 +336,7 @@ export interface Config {
 
 /** Settings for the relay-free P2P transport node (phantombot#258). */
 export interface P2PSettings {
-  /** Master switch. Default false — the whole subsystem is dormant when off. */
+  /** Master switch. Default true — set false to keep the subsystem dormant. */
   enabled: boolean;
   /**
    * Loopback port for the PWA ws bridge. MUST match the PWA's
@@ -362,7 +363,7 @@ export interface P2PSettings {
 }
 
 export const DEFAULT_P2P: P2PSettings = {
-  enabled: false,
+  enabled: true,
   port: 47100,
   // Google's public STUN — reflexive-only, no relaying, no infra of ours.
   stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],

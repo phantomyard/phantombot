@@ -710,10 +710,10 @@ flush_after_hours = 6
 });
 
 describe("loadConfig — p2p (phantombot#258)", () => {
-  test("defaults to disabled on port 47100 with public STUN", async () => {
+  test("defaults to enabled on port 47100 with public STUN", async () => {
     const c = await loadConfig();
     expect(c.p2p).toEqual({
-      enabled: false,
+      enabled: true,
       port: 47100,
       stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
       allowedOrigins: ["https://chat.phantomyard.ai"],
