@@ -58,6 +58,11 @@ import {
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
+import {
+  argvNeedsTempFiles,
+  createHarnessTempDir,
+  type HarnessTempDir,
+} from "../lib/harnessArgvFiles.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -71,7 +76,13 @@ export interface ClaudeHarnessConfig {
 export class ClaudeHarness implements Harness {
   readonly id = "claude";
 
-  constructor(private readonly config: ClaudeHarnessConfig) {}
+  constructor(
+    private readonly config: ClaudeHarnessConfig,
+    // Injectable so the Windows argv-length branch below is testable on a
+    // POSIX CI runner. Prod callers pass only the config and get the real
+    // platform.
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
 
   async available(): Promise<boolean> {
     try {
@@ -87,10 +98,27 @@ export class ClaudeHarness implements Harness {
   }
 
   async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
-    const args = this.buildArgs(req.systemPrompt, req.toolsMode);
+    // Windows argv-length workaround. Claude's conversation payload already
+    // travels on stdin, but the persona/memory system prompt still rides on
+    // argv via `--system-prompt <text>` - and megan's BOOT.md alone can blow
+    // Windows' ~8,191-char command-line limit, so the child fails to spawn
+    // with "The command line is too long." Spill the system prompt to a temp
+    // file and pass `--system-prompt-file <file>` instead. POSIX keeps the
+    // inline `--system-prompt <text>` path unchanged. See harnessArgvFiles.
+    const useTempFiles = argvNeedsTempFiles(this.platform);
+    let temp: HarnessTempDir | undefined;
+    let systemPromptFile: string | undefined;
+    if (useTempFiles) {
+      temp = await createHarnessTempDir();
+      systemPromptFile = await temp.file("system-prompt.md", req.systemPrompt);
+    }
+    try {
+
+    const args = this.buildArgs(req.systemPrompt, req.toolsMode, systemPromptFile);
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
+      tempFiles: useTempFiles,
     });
 
     // Re-source ~/.env / ~/.config/phantombot/.env so secrets the agent
@@ -137,11 +165,21 @@ export class ClaudeHarness implements Harness {
         model: this.config.model,
       }),
     });
+
+    } finally {
+      // Remove the temp system-prompt file once the child has exited (or the
+      // consumer stopped iterating early). No-op on POSIX.
+      await temp?.cleanup();
+    }
   }
 
   private buildArgs(
     systemPrompt: string,
     toolsMode?: "none",
+    // When set (Windows), the persona system prompt is passed by FILE
+    // (`--system-prompt-file`) instead of inline (`--system-prompt <text>`)
+    // to stay under the command-line length limit.
+    systemPromptFile?: string,
   ): string[] {
     const args = [
       "--print",
@@ -189,7 +227,13 @@ export class ClaudeHarness implements Harness {
     // running `claude` directly on this host (e.g. for emergency repairs) is
     // unaffected. See PHANTOMBOT_INJECTED_CLAUDE_SETTINGS for the policy.
     args.push("--settings", JSON.stringify(PHANTOMBOT_INJECTED_CLAUDE_SETTINGS));
-    args.push("--system-prompt", systemPrompt);
+    if (systemPromptFile) {
+      // Windows: read the persona system prompt from a file to keep it off the
+      // length-limited command line. Verified against Claude Code.
+      args.push("--system-prompt-file", systemPromptFile);
+    } else {
+      args.push("--system-prompt", systemPrompt);
+    }
     return args;
   }
 }

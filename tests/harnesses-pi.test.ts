@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   PiHarness,
@@ -418,6 +419,69 @@ describe("PiHarness.invoke (subprocess)", () => {
       recoverable: true,
       error: expect.stringContaining("timed out"),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Windows argv-length workaround. On Windows the whole command line is capped
+// at ~8,191 chars; pi carries both the system prompt (a flag) and the full
+// payload (the positional) on argv, so a real persona turn fails to spawn.
+// The harness spills both to temp files and passes `--system-prompt <file>`
+// plus an `@<file>` positional. The platform is injected so this runs on the
+// Linux CI runner. FAKE_PI 'argv' mode echoes argv so we can inspect it.
+// ---------------------------------------------------------------------------
+
+describe("PiHarness.invoke Windows argv-length workaround", () => {
+  const argvOf = (chunks: HarnessChunk[]): string =>
+    chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+
+  test("win32: system prompt + payload go to temp files, not raw argv", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "win32");
+    const chunks = await collect(
+      harness.invoke(
+        newRequest({ systemPrompt: "SECRET-PERSONA-PROMPT", userMessage: "SECRET-USER-MSG" }),
+      ),
+    );
+    const argv = argvOf(chunks);
+
+    // The raw system prompt and payload text must NOT appear on the command
+    // line - they live in the temp files instead.
+    expect(argv).not.toContain("SECRET-PERSONA-PROMPT");
+    expect(argv).not.toContain("SECRET-USER-MSG");
+    // The system prompt is passed as a file path, the payload as an @file.
+    expect(argv).toContain("system-prompt.md");
+    expect(argv).toMatch(/@\S*payload\.md/);
+  });
+
+  test("win32: temp dir is cleaned up after the run", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "win32");
+    const chunks = await collect(harness.invoke(newRequest()));
+    const argv = argvOf(chunks);
+    const match = argv.match(/@(\S*payload\.md)/);
+    const payloadFile = match?.[1];
+    expect(payloadFile).toBeTruthy();
+    // The temp payload file referenced on argv is gone once invoke() completed.
+    expect(existsSync(payloadFile!)).toBe(false);
+  });
+
+  test("POSIX: system prompt + payload stay inline on argv", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    // Force the POSIX branch so this holds on the Windows CI runner too.
+    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "linux");
+    const chunks = await collect(
+      harness.invoke(
+        newRequest({ systemPrompt: "INLINE-PERSONA", userMessage: "INLINE-MSG" }),
+      ),
+    );
+    const argv = argvOf(chunks);
+    expect(argv).toContain("INLINE-PERSONA");
+    expect(argv).toContain("INLINE-MSG");
+    expect(argv).not.toContain("payload.md");
   });
 });
 

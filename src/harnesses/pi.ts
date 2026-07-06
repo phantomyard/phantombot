@@ -44,6 +44,11 @@ import {
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
+import {
+  argvNeedsTempFiles,
+  createHarnessTempDir,
+  type HarnessTempDir,
+} from "../lib/harnessArgvFiles.ts";
 
 export interface PiHarnessConfig {
   /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
@@ -69,7 +74,13 @@ export interface PiHarnessConfig {
 export class PiHarness implements Harness {
   readonly id = "pi";
 
-  constructor(private readonly config: PiHarnessConfig) {}
+  constructor(
+    private readonly config: PiHarnessConfig,
+    // Injectable so the Windows argv-length branch below is testable on a
+    // POSIX CI runner. Prod callers pass only the config and get the real
+    // platform.
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
 
   get maxPayloadBytes(): number {
     return this.config.maxPayloadBytes;
@@ -100,10 +111,29 @@ export class PiHarness implements Harness {
       return;
     }
 
+    // Windows argv-length workaround. On Windows the whole command line is
+    // capped at ~8,191 chars, and pi carries BOTH the system prompt (a flag
+    // value) AND the full rendered payload (the positional) on argv - a real
+    // persona turn is tens of KB, so the child fails to spawn with "The
+    // command line is too long." and the bot replies with nothing. Spill both
+    // to temp files: pi reads `--system-prompt <file>` as the system prompt
+    // and includes an `@<file>` positional's contents in the message. POSIX
+    // (ARG_MAX ~2 MB) keeps the raw argv path unchanged. See harnessArgvFiles.
+    const useTempFiles = argvNeedsTempFiles(this.platform);
+    let temp: HarnessTempDir | undefined;
+    let systemPromptArg = req.systemPrompt;
+    let payloadArg = payload;
+    if (useTempFiles) {
+      temp = await createHarnessTempDir();
+      systemPromptArg = await temp.file("system-prompt.md", req.systemPrompt);
+      payloadArg = `@${await temp.file("payload.md", payload)}`;
+    }
+    try {
+
     const args = [
       "--print",
       "--mode", "json",
-      "--system-prompt", req.systemPrompt,
+      "--system-prompt", systemPromptArg,
       // Pre-prompting trim:
       //   --offline   Disables Pi's STARTUP network operations (telemetry,
       //               update checks) only — NOT the model API call. The
@@ -207,10 +237,13 @@ export class PiHarness implements Harness {
     }
 
     // Payload is the LAST positional arg (pi reads it from argv, not stdin).
-    args.push(payload);
+    // On Windows this is `@<tempfile>` so pi loads the payload from disk
+    // instead of the length-limited command line; on POSIX it's the raw text.
+    args.push(payloadArg);
     log.debug("pi.invoke spawning", {
       bin: this.config.bin,
       payloadBytes: totalBytes,
+      tempFiles: useTempFiles,
     });
 
     // Relay THIS harness's provider + api-key into the child env so the bundled
@@ -249,6 +282,12 @@ export class PiHarness implements Harness {
       activity: piActivity,
       buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
     });
+
+    } finally {
+      // Remove the temp payload/system-prompt files once the child has exited
+      // (or the consumer stopped iterating early). No-op on POSIX.
+      await temp?.cleanup();
+    }
   }
 }
 

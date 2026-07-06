@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   ClaudeHarness,
@@ -432,6 +433,69 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).toContain("--disable-slash-commands");
     // Per-machine dynamic sections dropped.
     expect(texts).toContain("--exclude-dynamic-system-prompt-sections");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Windows argv-length workaround. Claude's conversation payload already goes
+// via stdin, but the persona system prompt still rides on argv via
+// `--system-prompt <text>` - and a large BOOT.md can exceed Windows' ~8,191
+// char command-line limit. On Windows the harness spills the system prompt to
+// a temp file and passes `--system-prompt-file <file>` instead. Platform is
+// injected so this runs on the Linux CI runner.
+// ---------------------------------------------------------------------------
+
+describe("ClaudeHarness Windows argv-length workaround", () => {
+  const argvOf = (chunks: HarnessChunk[]): string =>
+    chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+
+  test("win32: system prompt goes to a file, not raw argv", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "win32",
+    );
+    const chunks = await collect(
+      h.invoke(newRequest({ systemPrompt: "SECRET-CLAUDE-PERSONA" })),
+    );
+    const argv = argvOf(chunks);
+    // File flag present with a temp path; inline flag + raw text absent.
+    expect(argv).toContain("--system-prompt-file");
+    expect(argv).toContain("system-prompt.md");
+    expect(argv).not.toContain("SECRET-CLAUDE-PERSONA");
+  });
+
+  test("win32: temp system-prompt file is cleaned up after the run", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "win32",
+    );
+    const chunks = await collect(h.invoke(newRequest()));
+    const argv = argvOf(chunks);
+    const match = argv.match(/(\S*system-prompt\.md)/);
+    const systemPromptFile = match?.[1];
+    expect(systemPromptFile).toBeTruthy();
+    expect(existsSync(systemPromptFile!)).toBe(false);
+  });
+
+  test("POSIX: system prompt stays inline via --system-prompt", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    // Force the POSIX branch so this holds on the Windows CI runner too.
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "linux",
+    );
+    const chunks = await collect(
+      h.invoke(newRequest({ systemPrompt: "INLINE-CLAUDE-PERSONA" })),
+    );
+    const argv = argvOf(chunks);
+    expect(argv).toContain("--system-prompt");
+    expect(argv).toContain("INLINE-CLAUDE-PERSONA");
+    expect(argv).not.toContain("--system-prompt-file");
   });
 });
 
