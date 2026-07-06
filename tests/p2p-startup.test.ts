@@ -78,7 +78,6 @@ describe("startP2PNode — port-conflict containment", () => {
       out,
       err,
       persona: "lena",
-      port: takenPort,
     });
 
     // Contained: no task to push, relay-fallback warning emitted, advert skipped.
@@ -96,25 +95,73 @@ describe("startP2PNode — port-conflict containment", () => {
     let advertised = false;
     const ac = new AbortController();
 
+    let advertisedPort = -1;
     const task = startP2PNode({
       node,
-      advertise: () => {
+      advertise: (boundPort) => {
         advertised = true;
+        advertisedPort = boundPort;
       },
       signal: ac.signal,
       out,
       err,
       persona: "lena",
-      port: 0,
     });
 
     expect(task).not.toBeNull();
     expect(advertised).toBe(true);
+    // Ephemeral bind → a real OS-assigned port was advertised, not 0.
+    expect(advertisedPort).toBeGreaterThan(0);
     expect(out.text).toContain("[p2p:lena]");
     expect(err.text).toBe("");
 
     // The keep-alive task must resolve cleanly once we abort (no hang, no throw).
     ac.abort();
     await task;
+  });
+});
+
+describe("ephemeral ports — many personas, one machine, zero collisions", () => {
+  test("two nodes on port 0 both start and bind DISTINCT ports", () => {
+    // The exact "5 phantoms on the same PC" scenario, minimised to two: with the
+    // old fixed 47100 the second would throw a port conflict; with ephemeral
+    // binding each gets its own free port and both come up.
+    const a = makeNode(0);
+    const b = makeNode(0);
+    try {
+      a.start();
+      b.start();
+      expect(a.boundPort).toBeGreaterThan(0);
+      expect(b.boundPort).toBeGreaterThan(0);
+      expect(a.boundPort).not.toBe(b.boundPort);
+    } finally {
+      a.stop();
+      b.stop();
+    }
+  });
+
+  test("startP2PNode advertises each node's REAL bound port, not the request", () => {
+    const n = makeNode(0);
+    const ac = new AbortController();
+    let advertisedPort = -1;
+    const task = startP2PNode({
+      node: n,
+      advertise: (boundPort) => {
+        advertisedPort = boundPort;
+      },
+      signal: ac.signal,
+      out: new Capture(),
+      err: new Capture(),
+      persona: "kai",
+    });
+    try {
+      expect(task).not.toBeNull();
+      // What was advertised is exactly what the bridge actually bound.
+      expect(advertisedPort).toBe(n.boundPort);
+      expect(advertisedPort).toBeGreaterThan(0);
+    } finally {
+      ac.abort();
+      n.stop();
+    }
   });
 });

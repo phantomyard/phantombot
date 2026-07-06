@@ -710,11 +710,11 @@ flush_after_hours = 6
 });
 
 describe("loadConfig — p2p (phantombot#258)", () => {
-  test("defaults to disabled on port 47100 with public STUN", async () => {
+  test("defaults to enabled on an OS-ephemeral port (0) with public STUN", async () => {
     const c = await loadConfig();
     expect(c.p2p).toEqual({
-      enabled: false,
-      port: 47100,
+      enabled: true,
+      port: 0,
       stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
       allowedOrigins: ["https://chat.phantomyard.ai"],
     });
@@ -751,9 +751,15 @@ describe("loadConfig — p2p (phantombot#258)", () => {
     expect(envWins.p2p!.port).toBe(51000);
   });
 
-  test("port is clamped to the unprivileged range", async () => {
+  test("a non-zero port is clamped to the unprivileged range", async () => {
     process.env.PHANTOMBOT_P2P_PORT = "80";
     const c = await loadConfig();
     expect(c.p2p!.port).toBe(1024);
+  });
+
+  test("port 0 is preserved as the OS-ephemeral sentinel (not clamped up)", async () => {
+    process.env.PHANTOMBOT_P2P_PORT = "0";
+    const c = await loadConfig();
+    expect(c.p2p!.port).toBe(0);
   });
 });

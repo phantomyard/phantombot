@@ -9,11 +9,7 @@
 import { log } from "../lib/logger.ts";
 import type { P2PSettings } from "../config.ts";
 import type { RelayPool } from "../channels/phantomchat/transport.ts";
-import {
-  buildCapabilityEvent,
-  nodeCapabilities,
-  publishCapability,
-} from "./capability.ts";
+import { buildCapabilityEvent, publishCapability } from "./capability.ts";
 import { LocalBridge } from "./localBridge.ts";
 import { P2PNode } from "./node.ts";
 import { NostrSignaling } from "./signaling.ts";
@@ -54,11 +50,14 @@ export function buildP2PNode(deps: BuildP2PNodeDeps): P2PNode {
 
 /**
  * Publish this node's capability advertisement once. Best-effort and detached
- * from startup — a relay hiccup must never delay the node coming up, and the
- * advert is inert until a PWA companion reads it.
+ * from startup — a relay hiccup must never delay the node coming up.
+ *
+ * `boundPort` is the node's ACTUAL bound loopback port (`node.boundPort`), read
+ * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real port,
+ * self-encrypted, rather than the configured request.
  */
-export function advertiseP2PCapability(deps: BuildP2PNodeDeps): void {
-  const event = buildCapabilityEvent(deps.secretKey, nodeCapabilities(deps.settings.port));
+export function advertiseP2PCapability(deps: BuildP2PNodeDeps, boundPort: number): void {
+  const event = buildCapabilityEvent(deps.secretKey, deps.publicKeyHex, boundPort);
   void publishCapability(deps.pool, deps.relays, event).catch((err) => {
     log.debug(`[p2p] capability advertise failed: ${String(err)}`);
   });
@@ -87,13 +86,15 @@ export async function keepP2PNodeAlive(node: P2PNode, signal: AbortSignal): Prom
 
 export interface StartP2PNodeInput {
   node: P2PNode;
-  /** Publish the capability advert — only after a successful start. */
-  advertise: () => void;
+  /**
+   * Publish the capability advert — only after a successful start. Receives the
+   * node's actual bound loopback port (OS-ephemeral, known post-start).
+   */
+  advertise: (boundPort: number) => void;
   signal: AbortSignal;
   out: { write: (s: string) => void };
   err: { write: (s: string) => void };
   persona: string;
-  port: number;
 }
 
 /**
@@ -108,13 +109,13 @@ export interface StartP2PNodeInput {
  */
 export function startP2PNode(input: StartP2PNodeInput): Promise<void> | null {
   try {
-    input.node.start(); // synchronous; throws if the loopback port is in use
+    input.node.start(); // synchronous; throws if a fixed loopback port is in use
   } catch (e) {
     log.warn(`p2p[${input.persona}]: node failed to start`, {
       error: (e as Error).message,
     });
     input.err.write(
-      `warning: p2p node failed to start (port ${input.port} in use?) — chat still works over relays\n`,
+      `warning: p2p node failed to start — chat still works over relays\n`,
     );
     try {
       input.node.stop();
@@ -123,9 +124,10 @@ export function startP2PNode(input: StartP2PNodeInput): Promise<void> | null {
     }
     return null;
   }
-  input.advertise();
+  const boundPort = input.node.boundPort;
+  input.advertise(boundPort);
   input.out.write(
-    `  [p2p:${input.persona}] node on ws://127.0.0.1:${input.port}\n`,
+    `  [p2p:${input.persona}] node on ws://127.0.0.1:${boundPort}\n`,
   );
   return keepP2PNodeAlive(input.node, input.signal);
 }

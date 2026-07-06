@@ -55,6 +55,7 @@ class BusSignaling implements Signaling {
 /** A bridge that captures broadcasts and can inject a PWA send. */
 class CapturingBridge implements BridgePort {
   broadcasts: string[] = [];
+  boundPort = 50000;
   outbound!: (frame: ParsedEventFrame, raw: string) => void;
   start(): void {}
   stop(): void {}

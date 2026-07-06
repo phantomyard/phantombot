@@ -48,6 +48,12 @@ export interface BridgePort {
   broadcast(frame: string): number;
   /** How many local PWA sockets are attached. */
   clientCount(): number;
+  /**
+   * The loopback port the bridge is ACTUALLY listening on. With OS-ephemeral
+   * binding (`port: 0`) this is only meaningful after `start()`; that's fine
+   * because the node advertises it post-start.
+   */
+  readonly boundPort: number;
 }
 
 export interface P2PNodeDeps {
@@ -106,6 +112,15 @@ export class P2PNode {
     this.signaling.start();
     this.started = true;
     log.info(`[p2p] node started (self ${this.ourPubHex.slice(0, 8)})`);
+  }
+
+  /**
+   * The loopback port the bridge actually bound. Meaningful only after
+   * `start()` (with an OS-ephemeral request the kernel assigns it on listen).
+   * This is the value advertised so the PWA can find its local node.
+   */
+  get boundPort(): number {
+    return this.bridge.boundPort;
   }
 
   /** Stop everything and drop all peer connections. Idempotent. */
