@@ -335,11 +335,15 @@ export interface Config {
 
 /** Settings for the relay-free P2P transport node (phantombot#258). */
 export interface P2PSettings {
-  /** Master switch. Default false — the whole subsystem is dormant when off. */
+  /** Master switch. Default true — P2P is on by default (phantombot#267). */
   enabled: boolean;
   /**
-   * Loopback port for the PWA ws bridge. MUST match the PWA's
-   * DEFAULT_LOCAL_NODE_PORT (47100). Bound to 127.0.0.1 only.
+   * Loopback port for the PWA ws bridge. Bound to 127.0.0.1 only. Default `0`
+   * means OS-EPHEMERAL: the kernel assigns a free port at listen time, so any
+   * number of personas can each host a node on one machine with zero port
+   * collisions. The real bound port is discovered at runtime and published
+   * (self-encrypted) in the capability advert; the PWA reads it from there
+   * rather than assuming a fixed value. Set a specific port only for debugging.
    */
   port: number;
   /**
@@ -362,8 +366,8 @@ export interface P2PSettings {
 }
 
 export const DEFAULT_P2P: P2PSettings = {
-  enabled: false,
-  port: 47100,
+  enabled: true,
+  port: 0,
   // Google's public STUN — reflexive-only, no relaying, no infra of ours.
   stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
   // The production PhantomChat PWA. Localhost origins (dev) and no-Origin
@@ -576,13 +580,14 @@ function buildP2PConfig(tomlP2p: Record<string, unknown>): P2PSettings {
     asBool(tomlP2p.enabled) ??
     DEFAULT_P2P.enabled;
 
-  const port = clampInt(
+  // Port `0` is the sentinel for "OS-ephemeral" (default) and is preserved as-is;
+  // any other value is clamped to the unprivileged range. So an install can pin a
+  // fixed debug port, but the zero-collision default just works for N personas.
+  const rawPort =
     asInt(process.env.PHANTOMBOT_P2P_PORT) ??
-      asInt(tomlP2p.port) ??
-      DEFAULT_P2P.port,
-    1024,
-    65_535,
-  );
+    asInt(tomlP2p.port) ??
+    DEFAULT_P2P.port;
+  const port = rawPort === 0 ? 0 : clampInt(rawPort, 1024, 65_535);
 
   // Env is a comma-separated list (like PHANTOMBOT_TELEGRAM_ALLOWED_USERS);
   // TOML is a native array. An explicit empty env value ("") means "no STUN".

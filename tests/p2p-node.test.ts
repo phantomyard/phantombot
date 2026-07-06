@@ -41,6 +41,7 @@ class FakeBridge implements BridgePort {
   broadcasts: string[] = [];
   clients = 1;
   started = false;
+  boundPort = 50000;
   outbound!: (frame: ParsedEventFrame, raw: string) => void;
   start(): void {
     this.started = true;

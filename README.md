@@ -621,14 +621,20 @@ an encrypted WebRTC data channel with no relay in the hot path.
 
 ```
   PWA (browser)                                    PWA (browser)
-     │  ws://localhost:47100                          │  ws://localhost:47100
+     │  ws://localhost:<discovered>                   │  ws://localhost:<discovered>
      ▼                                                ▼
   [phantombot node] ◀── werift WebRTC data channel ──▶ [phantombot node]
      ╲                    (direct, encrypted)                    ╱
       ╲···· Nostr relays: WebRTC handshake (signaling) only ····╱
 ```
 
-- The node exposes **`ws://localhost:47100`** for the same-machine PWA (loopback
+- **No hardcoded port — the PWA discovers it.** Each node binds an **OS-ephemeral
+  loopback port** (`port = 0`), so any number of personas can host a node on one
+  machine with **zero port collisions**. The node publishes its real bound port in
+  its capability advert, but **self-encrypted** (NIP-44, to its own key) — so your
+  IP and port never hit a relay in the clear. The PWA reads its *own* npub's
+  self-advert, decrypts the port, and dials `ws://localhost:<that port>`.
+- The node exposes that loopback bridge for the same-machine PWA (loopback
   is a secure context, so an HTTPS PWA may open it — no TLS-cert wall). The bridge
   **gates WebSocket upgrades on the browser `Origin`**: loopback binding keeps the
   port off the LAN, but any website you visit could otherwise reach it (WebSocket
@@ -650,17 +656,18 @@ an encrypted WebRTC data channel with no relay in the hot path.
 - If no direct route can be established, everything **falls back to the existing
   relay path**, so nothing ever breaks.
 
-**Off by default — zero regression.** The whole subsystem is dormant unless you
-turn it on. An unconfigured or existing install opens no port, advertises no
-capability, and behaves byte-for-byte as before. The node also relays only the
-opaque gift-wrap between peers — it never holds a key for your message contents.
+**On by default — but still zero-cost when unused.** The subsystem runs, but it
+only ever *adds* a fast path: if no direct route exists, everything falls back to
+the relay, and the node relays only the opaque gift-wrap between peers — it never
+holds a key for your message contents. The advert is inert until a peer's PWA
+reads it.
 
-**Enable it** in `~/.config/phantombot/config.toml`, then restart the service:
+**Tuning** (all optional) in `~/.config/phantombot/config.toml`:
 
 ```toml
 [p2p]
-enabled = true          # default false
-port = 47100            # loopback ws bridge; must match the PWA (default 47100)
+enabled = true          # default true
+port = 0                # 0 = OS-ephemeral (default); pin a number only for debugging
 stun_servers = [        # public reflexive-only STUN (no infra of ours)
   "stun:stun.l.google.com:19302",
   "stun:stun1.l.google.com:19302",
@@ -670,20 +677,18 @@ allowed_origins = [     # browser origins allowed to open the loopback bridge
 ]
 ```
 
-Env overrides (highest precedence): `PHANTOMBOT_P2P_ENABLED=1`,
-`PHANTOMBOT_P2P_PORT=47100`, `PHANTOMBOT_P2P_STUN="stun:a:3478,stun:b:3478"`,
+Env overrides (highest precedence): `PHANTOMBOT_P2P_ENABLED=0` to disable,
+`PHANTOMBOT_P2P_PORT=0`, `PHANTOMBOT_P2P_STUN="stun:a:3478,stun:b:3478"`,
 `PHANTOMBOT_P2P_ALLOWED_ORIGINS="https://chat.phantomyard.ai"`.
 
 Check it with `phantombot p2p status` — it prints the resolved config and probes
 the loopback port to tell you whether a node is actually listening on this
 machine.
 
-> **Preview scope.** This ships the phantombot node half. The PWA already sends
-> over `ws://localhost` when a peer advertises P2P capability, but the PWA-side
-> *ingestion* of a node's capability advertisement lands in a companion
-> phantomchat change — so until that ships, the node runs and advertises but the
-> PWA ladder stays on the relay path. A single node binds the loopback port, so
-> on a multi-persona host only the first PhantomChat persona hosts it.
+> **Note.** Every persona on a host runs its own node on its own ephemeral port
+> and advertises it under its own npub — so multi-persona machines "just work."
+> The companion phantomchat change reads a node's self-advert to discover the
+> local port and a contact's advert to light up the ladder.
 
 ## Editors: VS Code, Zed & JetBrains
 
