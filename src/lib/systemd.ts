@@ -325,6 +325,22 @@ export const SELF_RESTART_ARGS: readonly string[] = [
 export interface ServiceControl {
   /** True iff `systemctl --user is-active phantombot.service` returns "active". */
   isActive(): Promise<boolean>;
+  /**
+   * Start the phantombot service (idempotent — starting an already-running
+   * service is a no-op success). On backends with a keep-alive relaunch
+   * (launchd KeepAlive, Windows TimeTrigger), this also re-arms the
+   * keep-alive that `stop()` disabled. Returns ok=false on failure.
+   */
+  start(): Promise<{ ok: boolean; stderr?: string }>;
+  /**
+   * Stop the phantombot service and keep it down. On backends whose
+   * supervisor would otherwise relaunch the process (launchd KeepAlive,
+   * Windows 1-minute TimeTrigger), this disables that relaunch so the
+   * service stays stopped until the next `start()`. Idempotent — stopping
+   * an already-stopped service is a no-op success. Returns ok=false on
+   * failure.
+   */
+  stop(): Promise<{ ok: boolean; stderr?: string }>;
   /** Restart the phantombot service. Returns ok=false on failure. */
   restart(): Promise<{ ok: boolean; stderr?: string }>;
   /**
@@ -424,6 +440,36 @@ export function defaultSystemdServiceControl(): ServiceControl {
         PHANTOMBOT_UNIT_NAME,
       ]);
       return r.exitCode === 0 && r.stdout.trim() === "active";
+    },
+    async start() {
+      const sysEnv = ensureUserSystemdEnv();
+      if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
+      // `systemctl --user start` is idempotent — it's a no-op success when the
+      // unit is already active. Our main unit is Restart=on-failure (not
+      // always), so nothing else re-arms; start is the only way back up.
+      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
+        "--user",
+        "start",
+        PHANTOMBOT_UNIT_NAME,
+      ]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+    },
+    async stop() {
+      const sysEnv = ensureUserSystemdEnv();
+      if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
+      // Because the main unit is Restart=on-failure, a clean `stop` (SIGTERM →
+      // exit 0) leaves it stopped — no keep-alive to disable, unlike launchd
+      // and Windows. `stop` on an already-stopped unit exits 0.
+      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
+        "--user",
+        "stop",
+        PHANTOMBOT_UNIT_NAME,
+      ]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
     },
     async restart() {
       const sysEnv = ensureUserSystemdEnv();

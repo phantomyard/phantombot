@@ -186,6 +186,11 @@ phantombot embedding   # recommended semantic memory setup
 
 phantombot run         # foreground listener
 phantombot install     # install systemd --user units
+
+phantombot start       # start the installed background service
+phantombot stop        # stop it (and keep it stopped)
+phantombot restart     # bounce it
+phantombot logs        # tail its logs (Ctrl-C to stop; --no-follow to dump)
 ```
 
 For a headless Linux service account, enable linger so the user service keeps
@@ -292,6 +297,41 @@ Status: the Windows port is exercised by a dedicated `windows-latest` CI job on
 every pull request. Treat it as a **preview** — solid enough to run, but newer
 than the Linux/macOS paths.
 
+## Service lifecycle (`start` / `stop` / `restart` / `logs`)
+
+Once the background service is installed (`phantombot install`), four
+OS-agnostic verbs control it. They resolve to the right service manager for the
+host automatically — you type the same command everywhere:
+
+```bash
+phantombot start      # start the installed service
+phantombot stop       # stop it and keep it down
+phantombot restart    # bounce it
+phantombot logs       # tail its logs (Ctrl-C to stop)
+phantombot logs --no-follow --lines 200   # dump the last 200 lines and exit
+```
+
+| Verb | Linux (systemd) | macOS (launchd) | Windows (Task Scheduler) |
+|---|---|---|---|
+| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `/Change /ENABLE` + `/Run` |
+| `stop` | `systemctl --user stop` | `bootout` | `/Change /DISABLE` + `/End` |
+| `restart` | `systemctl --user restart` | `kickstart -k` | `/End` + `/Run` |
+| `logs` | `journalctl --user -u phantombot` | `tail` the out/err log files | `Get-Content -Wait` the out log |
+
+**Why `stop` does more than kill the process.** On macOS the agent is a
+KeepAlive LaunchAgent and on Windows it has a one-minute keep-alive trigger — a
+plain kill would be relaunched within seconds. So `stop` *disables* the
+keep-alive (launchd `bootout` / schtasks `/DISABLE`) so the service actually
+stays down, and `start` re-arms it. On Linux the main unit is
+`Restart=on-failure`, so a clean `stop` already stays stopped with nothing extra
+to do.
+
+`start`/`stop`/`restart` exit `0` on success and `1` on failure, printing a
+copy-pasteable manual command if the backend refuses — so they're safe to script
+in health checks or deploy hooks. These are the *external* controls (run from a
+terminal); the in-chat `/restart` and `/update` commands still bounce the running
+service from inside itself.
+
 ## Configuration
 
 Phantombot resolves configuration in this order:
@@ -354,6 +394,10 @@ Runtime:
 | `phantombot run` | Foreground Telegram listener |
 | `phantombot install` | Install systemd user service and timers |
 | `phantombot uninstall` | Remove systemd user service and timers |
+| `phantombot start` | Start the installed background service (systemd/launchd/Task Scheduler) |
+| `phantombot stop` | Stop the background service and keep it down until `start` |
+| `phantombot restart` | Restart the background service |
+| `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Task Scheduler log) |
 | `phantombot ask "<prompt>"` | One-shot prompt through the persona and harness chain |
 | `phantombot update [--check] [--force] [--restart]` | Check, install, or restart after updates |
 

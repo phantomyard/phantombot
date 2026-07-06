@@ -3498,6 +3498,12 @@ describe("runTelegramServer slash commands", () => {
       async isActive() {
         return true;
       },
+      async start() {
+        return { ok: true };
+      },
+      async stop() {
+        return { ok: true };
+      },
       async restart() {
         restartCalled = true;
         restartOrder.push("restart");

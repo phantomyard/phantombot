@@ -29,6 +29,10 @@ import installCmd from "./install.ts";
 import uninstallCmd from "./uninstall.ts";
 import initCmd from "./init.ts";
 import runCmd from "./run.ts";
+import startCmd from "./start.ts";
+import stopCmd from "./stop.ts";
+import restartCmd from "./restart.ts";
+import logsCmd from "./logs.ts";
 import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
 import heartbeatCmd from "./heartbeat.ts";
@@ -62,6 +66,10 @@ export const mainCommand = defineCommand({
     install: installCmd,
     uninstall: uninstallCmd,
     run: runCmd,
+    start: startCmd,
+    stop: stopCmd,
+    restart: restartCmd,
+    logs: logsCmd,
     ask: askCmd,
     acp: acpCmd,
     memory: memoryCmd,

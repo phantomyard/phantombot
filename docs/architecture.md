@@ -46,6 +46,10 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/harnesses/pi.ts` | `Bun.spawn pi --print --mode json …`. Argv payload (Pi ignores stdin). Declares `maxPayloadBytes`. | `pi` CLI |
 | `src/lib/logger.ts` | Structured logs to stdout. | stdout |
 | `src/lib/io.ts` | Shared `WriteSink` interface. | — |
+| `src/lib/platform.ts` | Cross-platform service-manager router. Picks the backend (systemd/launchd/Task Scheduler) and exposes one `ServiceControl` (`isActive`/`start`/`stop`/`restart`/`rerenderUnitIfStale`), plus hint strings and `logsSpec()` for tailing. | `systemd.ts`, `launchd.ts`, `taskScheduler.ts` |
+| `src/lib/{systemd,launchd,taskScheduler}.ts` | Per-OS backends: unit/plist/task templates + a `ServiceControl` impl. Each encapsulates its own keep-alive quirk (systemd `Restart=on-failure`; launchd `KeepAlive`; Windows 1-min `TimeTrigger`), so `stop`/`start` behave consistently across OSes. | `systemctl`/`launchctl`/`schtasks` |
+| `src/lib/serviceLifecycle.ts` | `runLifecycleAction` — the shared driver behind `phantombot start/stop/restart`. OS-agnostic: only ever calls `ServiceControl`, never a supervisor directly. | `platform.ts` |
+| `src/cli/{start,stop,restart,logs}.ts` | Thin CLI wrappers over `serviceLifecycle`/`logsSpec` for the service-lifecycle verbs. | `lib/serviceLifecycle`, `lib/platform` |
 
 ## End-to-end flow
 

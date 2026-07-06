@@ -590,6 +590,8 @@ export async function ensureTasksCurrent(
 
 export interface TaskSchedulerServiceControl {
   isActive(): Promise<boolean>;
+  start(): Promise<{ ok: boolean; stderr?: string }>;
+  stop(): Promise<{ ok: boolean; stderr?: string }>;
   restart(): Promise<{ ok: boolean; stderr?: string }>;
   rerenderUnitIfStale(): Promise<{ rerendered: boolean; backupPath?: string }>;
 }
@@ -608,9 +610,35 @@ export function defaultTaskSchedulerServiceControl(): TaskSchedulerServiceContro
       const r = await runner.run(["/Query", "/TN", PHANTOMBOT_TASK]);
       return r.exitCode === 0;
     },
+    async start() {
+      // The main task carries a 1-minute keep-alive TimeTrigger, which `stop()`
+      // disables. Re-enable it first so the supervisor keeps the process up,
+      // then kick off a run immediately rather than waiting up to 60s for the
+      // next trigger. /Change /ENABLE on an already-enabled task is harmless.
+      await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
+      const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+    },
+    async stop() {
+      // /End alone isn't enough: the 1-minute keep-alive TimeTrigger would
+      // relaunch within 60s. Disable the task first so the trigger can't fire,
+      // then end the running instance. /Disable on an already-disabled task is
+      // harmless; /End on a stopped task is harmless.
+      const r = await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/DISABLE"]);
+      await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+    },
     async restart() {
       // End any running instance, then start a fresh one — the schtasks
-      // analogue of `systemctl restart`. /End on a stopped task is harmless.
+      // analogue of `systemctl restart`. Re-enable first in case a prior
+      // `stop()` disabled the keep-alive trigger; a restart should always
+      // leave the service running AND supervised. /End on a stopped task is
+      // harmless.
+      await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
       await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
       const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
       return r.exitCode === 0
