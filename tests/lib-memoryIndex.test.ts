@@ -95,6 +95,18 @@ describe("walkMarkdown", () => {
       "kb/concepts/Foo.md",
     ].sort());
   });
+
+  test("records nested paths posix-style, never with backslashes", async () => {
+    await note("kb/concepts/Foo.md", "foo");
+    const paths = walkMarkdown(personaDir).map((f) => f.path);
+    // Portability invariant: the index keys files the same way on every OS,
+    // so a persona's memory can move between Linux and Windows without the
+    // first walk missing every row (which deletes and re-embeds, or wipes,
+    // the index). On the Windows CI runner this catches relative() emitting
+    // backslash separators.
+    expect(paths).toContain("kb/concepts/Foo.md");
+    for (const p of paths) expect(p).not.toContain("\\");
+  });
 });
 
 describe("MemoryIndex.refreshStale", () => {

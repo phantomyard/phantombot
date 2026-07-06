@@ -1054,7 +1054,18 @@ function walk(
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
     const st = statSync(full);
     out.push({
-      path: relative(dir.startsWith(root) ? dirname(root) : root, full),
+      // Store paths posix-style (forward slashes) on every OS. relative()
+      // emits the platform separator, so Windows would record backslash
+      // paths. That makes the index non-portable: move a persona's memory
+      // between Linux and Windows and the first walk finds zero matching
+      // rows, so every note is deleted and re-embedded (or, if the source
+      // files are missing, the whole index is wiped). Normalising here keys
+      // the index the same way everywhere. Downstream reads use join(), and
+      // resolveMdLink/buildNameIndex already normalise, so this is safe.
+      path: relative(dir.startsWith(root) ? dirname(root) : root, full).replace(
+        /\\/g,
+        "/",
+      ),
       scope,
       mtimeMs: Math.floor(st.mtimeMs),
       size: st.size,
