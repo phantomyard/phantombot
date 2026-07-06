@@ -91,15 +91,20 @@ export class P2PNode {
     this.bridge = deps.createBridge((frame, raw) => this.onOutbound(frame, raw));
   }
 
-  /** Start the bridge + signaling. Idempotent. */
+  /**
+   * Start the bridge + signaling. Idempotent. `bridge.start()` throws
+   * synchronously on a port conflict — we only mark the node `started` AFTER
+   * both come up, so a failed start leaves the node re-startable and makes
+   * `stop()` a safe no-op (the caller in `startP2PNode` handles the throw).
+   */
   start(): void {
     if (this.started) return;
-    this.started = true;
     this.signaling.onMessage((senderHex, msg) => {
       void this.onSignal(senderHex, msg);
     });
-    this.bridge.start();
+    this.bridge.start(); // may throw (port in use) — started stays false
     this.signaling.start();
+    this.started = true;
     log.info(`[p2p] node started (self ${this.ourPubHex.slice(0, 8)})`);
   }
 

@@ -349,6 +349,16 @@ export interface P2PSettings {
    * only (localhost + LAN work; remote NAT traversal won't).
    */
   stunServers: string[];
+  /**
+   * Browser origins allowed to open the loopback ws bridge. Binding to 127.0.0.1
+   * keeps the port off the LAN, but ANY website the user visits can still reach
+   * `ws://127.0.0.1:<port>` from the browser (WebSocket handshakes are not
+   * CORS-preflighted). We gate on the `Origin` header: requests with NO Origin
+   * (CLI probes / non-browser tooling) and localhost origins (the dev PWA) are
+   * always allowed; a browser Origin is otherwise accepted only if it is in this
+   * list. Defaults to the production PhantomChat origin.
+   */
+  allowedOrigins: string[];
 }
 
 export const DEFAULT_P2P: P2PSettings = {
@@ -356,6 +366,9 @@ export const DEFAULT_P2P: P2PSettings = {
   port: 47100,
   // Google's public STUN — reflexive-only, no relaying, no infra of ours.
   stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+  // The production PhantomChat PWA. Localhost origins (dev) and no-Origin
+  // clients (CLI) are allowed unconditionally on top of this list.
+  allowedOrigins: ["https://chat.phantomyard.ai"],
 };
 
 /**
@@ -582,7 +595,19 @@ function buildP2PConfig(tomlP2p: Record<string, unknown>): P2PSettings {
           .filter((s) => s.length > 0)
       : (asStringArray(tomlP2p.stun_servers) ?? DEFAULT_P2P.stunServers);
 
-  return { enabled, port, stunServers };
+  // Same env-list convention as STUN: comma-separated env overrides the TOML
+  // array; an explicit empty env value ("") means "no extra browser origins"
+  // (localhost + no-Origin clients are still allowed by the bridge itself).
+  const originsFromEnv = process.env.PHANTOMBOT_P2P_ALLOWED_ORIGINS;
+  const allowedOrigins =
+    originsFromEnv !== undefined
+      ? originsFromEnv
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : (asStringArray(tomlP2p.allowed_origins) ?? DEFAULT_P2P.allowedOrigins);
+
+  return { enabled, port, stunServers, allowedOrigins };
 }
 
 function buildTelegramStreamingConfig(

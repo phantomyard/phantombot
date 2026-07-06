@@ -32,6 +32,50 @@ export interface LocalBridgeOptions {
   host?: string;
   /** An outgoing PWA frame was received and parsed. */
   onOutbound: (frame: ParsedEventFrame, raw: string) => void;
+  /**
+   * Browser origins allowed to upgrade. A no-`Origin` client (CLI/tooling) and
+   * localhost origins (the dev PWA) are always allowed; any other browser
+   * `Origin` must appear here or the upgrade is refused with 403.
+   */
+  allowedOrigins?: string[];
+}
+
+/**
+ * Decide whether a WebSocket upgrade may proceed, based on its `Origin` header.
+ *
+ * The bridge binds to loopback, but a browser will still send WebSocket
+ * handshakes to `ws://127.0.0.1:<port>` from ANY site the user is visiting, and
+ * WebSocket is exempt from CORS preflight — so without this gate an arbitrary
+ * page could subscribe to every wrap broadcast and inject `EVENT` frames for the
+ * node to forward. The policy:
+ *
+ *   - No `Origin` header  → allow. Non-browser clients (CLI probes, the werift
+ *     test harness, curl) don't send one; browsers always do.
+ *   - `localhost` / `127.0.0.1` / `[::1]` origin (any scheme/port) → allow. This
+ *     is the user's own dev PhantomChat, not a remote site.
+ *   - Origin in `allowedOrigins` (exact match) → allow (e.g. prod PhantomChat).
+ *   - Anything else → deny.
+ */
+export function isOriginAllowed(
+  origin: string | null | undefined,
+  allowedOrigins: readonly string[],
+): boolean {
+  // No Origin header at all: not a browser cross-site request.
+  if (origin === null || origin === undefined || origin === "") return true;
+  // Some non-browser agents send the literal "null" origin; treat as non-browser.
+  if (origin === "null") return true;
+
+  let host: string;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    // Unparseable Origin → treat as hostile, refuse.
+    return false;
+  }
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") {
+    return true;
+  }
+  return allowedOrigins.includes(origin);
 }
 
 /** Per-socket data. Empty today; a hook for future auth/handshake state. */
@@ -41,6 +85,7 @@ export class LocalBridge {
   private readonly port: number;
   private readonly host: string;
   private readonly onOutbound: (frame: ParsedEventFrame, raw: string) => void;
+  private readonly allowedOrigins: readonly string[];
   private server: Server<SocketData> | null = null;
   private readonly clients = new Set<ServerWebSocket<SocketData>>();
 
@@ -48,6 +93,7 @@ export class LocalBridge {
     this.port = opts.port;
     this.host = opts.host ?? "127.0.0.1";
     this.onOutbound = opts.onOutbound;
+    this.allowedOrigins = opts.allowedOrigins ?? [];
   }
 
   /** The port the bridge is actually listening on (useful when port was 0). */
@@ -71,6 +117,13 @@ export class LocalBridge {
       port: this.port,
       hostname: this.host,
       fetch(req, server) {
+        // Refuse cross-site browser upgrades BEFORE upgrading — a visited page
+        // must not be able to attach to the local node (see isOriginAllowed).
+        const origin = req.headers.get("origin");
+        if (!isOriginAllowed(origin, self.allowedOrigins)) {
+          log.warn(`[p2p] bridge refused upgrade from origin ${origin}`);
+          return new Response("phantombot p2p bridge: origin not allowed", { status: 403 });
+        }
         // Only accept WebSocket upgrades; everything else is a 426.
         if (server.upgrade(req, { data: {} })) return undefined;
         return new Response("phantombot p2p bridge: websocket only", { status: 426 });

@@ -72,6 +72,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_P2P_ENABLED",
   "PHANTOMBOT_P2P_PORT",
   "PHANTOMBOT_P2P_STUN",
+  "PHANTOMBOT_P2P_ALLOWED_ORIGINS",
 ];
 
 let workdir: string;
@@ -715,18 +716,21 @@ describe("loadConfig — p2p (phantombot#258)", () => {
       enabled: false,
       port: 47100,
       stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+      allowedOrigins: ["https://chat.phantomyard.ai"],
     });
   });
 
-  test("env overrides enabled, port and STUN", async () => {
+  test("env overrides enabled, port, STUN and allowed origins", async () => {
     process.env.PHANTOMBOT_P2P_ENABLED = "1";
     process.env.PHANTOMBOT_P2P_PORT = "48000";
     process.env.PHANTOMBOT_P2P_STUN = "stun:a.example:3478,stun:b.example:3478";
+    process.env.PHANTOMBOT_P2P_ALLOWED_ORIGINS = "https://one.example, https://two.example";
     const c = await loadConfig();
     expect(c.p2p).toEqual({
       enabled: true,
       port: 48000,
       stunServers: ["stun:a.example:3478", "stun:b.example:3478"],
+      allowedOrigins: ["https://one.example", "https://two.example"],
     });
   });
 

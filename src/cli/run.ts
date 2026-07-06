@@ -44,7 +44,7 @@ import {
 import {
   advertiseP2PCapability,
   buildP2PNode,
-  runP2PNode,
+  startP2PNode,
 } from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import {
@@ -785,35 +785,29 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         // the WebRTC handshake. Started for the first phantomchat persona only
         // (single loopback port). Inert unless config.p2p.enabled.
         if (p2pSettings.enabled && !p2pNodeStarted) {
-          p2pNodeStarted = true;
-          try {
-            const p2pNode = buildP2PNode({
-              secretKey: identity.secretKey,
-              publicKeyHex: identity.publicKeyHex,
-              relays,
-              pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
-              settings: p2pSettings,
-            });
-            advertiseP2PCapability({
-              secretKey: identity.secretKey,
-              publicKeyHex: identity.publicKeyHex,
-              relays,
-              pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
-              settings: p2pSettings,
-            });
-            out.write(
-              `  [p2p:${spec.persona}] node on ws://127.0.0.1:${p2pSettings.port}, ` +
-                `${p2pSettings.stunServers.length} STUN server(s)\n`,
-            );
-            tasks.push(runP2PNode(p2pNode, ac.signal));
-          } catch (e) {
-            p2pNodeStarted = false;
-            log.warn(`p2p[${spec.persona}]: node failed to start`, {
-              error: (e as Error).message,
-            });
-            err.write(
-              `warning: p2p node failed to start (port ${p2pSettings.port} in use?) — chat still works over relays\n`,
-            );
+          const p2pDeps = {
+            secretKey: identity.secretKey,
+            publicKeyHex: identity.publicKeyHex,
+            relays,
+            pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
+            settings: p2pSettings,
+          };
+          const p2pNode = buildP2PNode(p2pDeps);
+          // Start SYNCHRONOUSLY and contain any port-conflict throw inside the
+          // helper, so a failed P2P bring-up degrades to relays instead of
+          // rejecting a pushed task and aborting the whole `run` process.
+          const p2pTask = startP2PNode({
+            node: p2pNode,
+            advertise: () => advertiseP2PCapability(p2pDeps),
+            signal: ac.signal,
+            out,
+            err,
+            persona: spec.persona,
+            port: p2pSettings.port,
+          });
+          if (p2pTask) {
+            p2pNodeStarted = true;
+            tasks.push(p2pTask);
           }
         } else if (p2pSettings.enabled && p2pNodeStarted) {
           out.write(

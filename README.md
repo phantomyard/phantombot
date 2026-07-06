@@ -629,7 +629,13 @@ an encrypted WebRTC data channel with no relay in the hot path.
 ```
 
 - The node exposes **`ws://localhost:47100`** for the same-machine PWA (loopback
-  is a secure context, so an HTTPS PWA may open it — no TLS-cert wall).
+  is a secure context, so an HTTPS PWA may open it — no TLS-cert wall). The bridge
+  **gates WebSocket upgrades on the browser `Origin`**: loopback binding keeps the
+  port off the LAN, but any website you visit could otherwise reach it (WebSocket
+  isn't CORS-preflighted). No-`Origin` clients (CLI/tooling) and localhost origins
+  (the dev PWA) are always allowed; other browser origins must be in
+  `allowed_origins` (defaults to the production PhantomChat origin) or the upgrade
+  is refused with **403**.
 - Two nodes negotiate a **werift** (pure-TypeScript WebRTC) data channel. werift
   is used instead of Hyperswarm/`node-datachannel` because it's the only stack
   that survives `bun build --compile` into the shipped single binary — no native
@@ -657,10 +663,14 @@ stun_servers = [        # public reflexive-only STUN (no infra of ours)
   "stun:stun.l.google.com:19302",
   "stun:stun1.l.google.com:19302",
 ]
+allowed_origins = [     # browser origins allowed to open the loopback bridge
+  "https://chat.phantomyard.ai",   # (localhost + no-Origin clients always allowed)
+]
 ```
 
 Env overrides (highest precedence): `PHANTOMBOT_P2P_ENABLED=1`,
-`PHANTOMBOT_P2P_PORT=47100`, `PHANTOMBOT_P2P_STUN="stun:a:3478,stun:b:3478"`.
+`PHANTOMBOT_P2P_PORT=47100`, `PHANTOMBOT_P2P_STUN="stun:a:3478,stun:b:3478"`,
+`PHANTOMBOT_P2P_ALLOWED_ORIGINS="https://chat.phantomyard.ai"`.
 
 Check it with `phantombot p2p status` — it prints the resolved config and probes
 the loopback port to tell you whether a node is actually listening on this
