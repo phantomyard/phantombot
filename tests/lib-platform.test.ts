@@ -12,9 +12,12 @@ import {
   currentPlatform,
   defaultServiceControl,
   logsCommand,
+  logsSpec,
   restartCommand,
   selfRestart,
+  startCommand,
   statusCommand,
+  stopCommand,
   type ServiceControl,
 } from "../src/lib/platform.ts";
 
@@ -56,10 +59,69 @@ describe("hint commands shape per platform", () => {
   });
 });
 
+describe("start/stop hint commands per platform", () => {
+  test("on linux: systemctl start/stop", () => {
+    if (process.platform !== "linux") return;
+    expect(startCommand()).toBe("systemctl --user start phantombot");
+    expect(stopCommand()).toBe("systemctl --user stop phantombot");
+  });
+
+  test("on darwin: launchctl bootstrap/bootout", () => {
+    if (process.platform !== "darwin") return;
+    expect(startCommand()).toContain("launchctl bootstrap");
+    expect(startCommand()).toContain("dev.phantombot.phantombot");
+    expect(stopCommand()).toContain("launchctl bootout");
+  });
+
+  test("on windows: schtasks enable+run / disable+end", () => {
+    if (process.platform !== "win32") return;
+    expect(startCommand()).toContain("/ENABLE");
+    expect(startCommand()).toContain("schtasks /Run /TN");
+    expect(stopCommand()).toContain("/DISABLE");
+    expect(stopCommand()).toContain("schtasks /End /TN");
+  });
+});
+
+describe("logsSpec", () => {
+  test("follow default is true, lines default 50", () => {
+    const spec = logsSpec();
+    if (process.platform === "linux") {
+      expect(spec).toEqual({
+        cmd: "journalctl",
+        args: ["--user", "-u", "phantombot", "-n", "50", "-f"],
+      });
+    } else if (process.platform === "darwin") {
+      expect(spec?.cmd).toBe("tail");
+      expect(spec?.args).toContain("-f");
+      expect(spec?.args).toContain("-n");
+    } else if (process.platform === "win32") {
+      expect(spec?.cmd).toBe("powershell");
+      expect(spec?.args.join(" ")).toContain("-Wait");
+      expect(spec?.args.join(" ")).toContain("-Tail 50");
+    }
+  });
+
+  test("--no-follow drops the follow flag", () => {
+    const spec = logsSpec({ follow: false, lines: 10 });
+    if (process.platform === "linux") {
+      expect(spec?.args).not.toContain("-f");
+      expect(spec?.args).toEqual(["--user", "-u", "phantombot", "-n", "10"]);
+    } else if (process.platform === "darwin") {
+      expect(spec?.args).not.toContain("-f");
+      expect(spec?.args).toContain("10");
+    } else if (process.platform === "win32") {
+      expect(spec?.args.join(" ")).not.toContain("-Wait");
+      expect(spec?.args.join(" ")).toContain("-Tail 10");
+    }
+  });
+});
+
 describe("defaultServiceControl", () => {
   test("returns an object with the ServiceControl interface", () => {
     const svc = defaultServiceControl();
     expect(typeof svc.isActive).toBe("function");
+    expect(typeof svc.start).toBe("function");
+    expect(typeof svc.stop).toBe("function");
     expect(typeof svc.restart).toBe("function");
     expect(typeof svc.rerenderUnitIfStale).toBe("function");
   });
@@ -78,6 +140,12 @@ describe("selfRestart", () => {
     const svc: ServiceControl = {
       async isActive() {
         return true;
+      },
+      async start() {
+        return { ok: true };
+      },
+      async stop() {
+        return { ok: true };
       },
       async restart() {
         calls.push(1);

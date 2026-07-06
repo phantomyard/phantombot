@@ -155,6 +155,14 @@ function fakeSvc(opts: { restartOk?: boolean } = {}): {
         calls.push("isActive");
         return true;
       },
+      async start() {
+        calls.push("start");
+        return { ok: true };
+      },
+      async stop() {
+        calls.push("stop");
+        return { ok: true };
+      },
       async restart() {
         calls.push("restart");
         return opts.restartOk === false

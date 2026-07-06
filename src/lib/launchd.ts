@@ -48,6 +48,17 @@ export function defaultPlistPath(): string {
   return join(launchAgentsDir(), `${PHANTOMBOT_PLIST_LABEL}.plist`);
 }
 
+/**
+ * Absolute paths of the main agent's stdout/stderr logs on macOS
+ * (~/Library/Logs/phantombot/<label>.{out,err}.log). Mirrors the paths
+ * baked into the plist's StandardOutPath/StandardErrorPath, so `phantombot
+ * logs` tails the same files launchd writes.
+ */
+export function launchdLogPaths(): { out: string; err: string } {
+  const base = join(logsDir(), PHANTOMBOT_PLIST_LABEL);
+  return { out: `${base}.out.log`, err: `${base}.err.log` };
+}
+
 export function heartbeatPlistPath(): string {
   return join(launchAgentsDir(), `${HEARTBEAT_PLIST_LABEL}.plist`);
 }
@@ -409,6 +420,8 @@ export async function uninstallPhantombotPlists(
 
 export interface LaunchdServiceControl {
   isActive(): Promise<boolean>;
+  start(): Promise<{ ok: boolean; stderr?: string }>;
+  stop(): Promise<{ ok: boolean; stderr?: string }>;
   restart(): Promise<{ ok: boolean; stderr?: string }>;
   rerenderUnitIfStale(): Promise<{ rerendered: boolean; backupPath?: string }>;
 }
@@ -473,6 +486,57 @@ export function defaultLaunchdServiceControl(): LaunchdServiceControl {
         `${domain}/${PHANTOMBOT_PLIST_LABEL}`,
       ]);
       return r.exitCode === 0;
+    },
+    async start() {
+      let domain: string;
+      try {
+        domain = guiDomain();
+      } catch (e) {
+        return { ok: false, stderr: (e as Error).message };
+      }
+      const target = `${domain}/${PHANTOMBOT_PLIST_LABEL}`;
+      // Our main agent is KeepAlive=true, so `stop()` fully unloads it with
+      // `bootout` (a mere SIGTERM would be relaunched). `start` is therefore
+      // the inverse: if the agent is already loaded, `kickstart` (re)starts it;
+      // if it was booted out, `bootstrap` reloads it from the plist. Splitting
+      // on load state sidesteps bootstrap's EBUSY-when-already-loaded error.
+      const loaded = await runner.run(["print", target]);
+      if (loaded.exitCode === 0) {
+        const r = await runner.run(["kickstart", target]);
+        return r.exitCode === 0
+          ? { ok: true }
+          : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      const plistPath = defaultPlistPath();
+      if (!existsSync(plistPath)) {
+        return {
+          ok: false,
+          stderr: `no LaunchAgent installed at ${plistPath} — run 'phantombot install' first`,
+        };
+      }
+      const r = await runner.run(["bootstrap", domain, plistPath]);
+      return r.exitCode === 0
+        ? { ok: true }
+        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+    },
+    async stop() {
+      let domain: string;
+      try {
+        domain = guiDomain();
+      } catch (e) {
+        return { ok: false, stderr: (e as Error).message };
+      }
+      const target = `${domain}/${PHANTOMBOT_PLIST_LABEL}`;
+      // KeepAlive=true means a plain `kill` would be relaunched immediately.
+      // `bootout` unloads the agent from the domain so it stays stopped until
+      // the next `start()`.
+      const r = await runner.run(["bootout", target]);
+      if (r.exitCode === 0) return { ok: true };
+      // bootout on a not-loaded agent exits non-zero; treat "already gone" as
+      // success rather than surfacing a spurious error.
+      const stillLoaded = await runner.run(["print", target]);
+      if (stillLoaded.exitCode !== 0) return { ok: true };
+      return { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
     },
     async restart() {
       let domain: string;

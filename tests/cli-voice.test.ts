@@ -138,6 +138,8 @@ WantedBy=default.target
     let unitContentAtRestart: string | undefined;
     const svc: ServiceControl = {
       isActive: async () => true,
+      start: async () => ({ ok: true }),
+      stop: async () => ({ ok: true }),
       restart: async () => {
         callOrder.push("restart");
         unitContentAtRestart = await readFile(unitPath, "utf8");
@@ -184,6 +186,8 @@ WantedBy=default.target
     };
     const svc: ServiceControl = {
       isActive: async () => true,
+      start: async () => ({ ok: true }),
+      stop: async () => ({ ok: true }),
       restart: async () => {
         callOrder.push("restart");
         return { ok: true };

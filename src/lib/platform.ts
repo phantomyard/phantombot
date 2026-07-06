@@ -26,7 +26,10 @@
  * has a single import path.
  */
 
-import { defaultLaunchdServiceControl } from "./launchd.ts";
+import {
+  defaultLaunchdServiceControl,
+  launchdLogPaths,
+} from "./launchd.ts";
 import {
   defaultSystemdServiceControl,
   type ServiceControl,
@@ -120,15 +123,22 @@ export async function selfRestart(
 }
 
 function noopServiceControl(): ServiceControl {
+  const unsupported = () => ({
+    ok: false,
+    stderr: `phantombot has no service-manager backend on ${process.platform}`,
+  });
   return {
     async isActive() {
       return false;
     },
+    async start() {
+      return unsupported();
+    },
+    async stop() {
+      return unsupported();
+    },
     async restart() {
-      return {
-        ok: false,
-        stderr: `phantombot has no service-manager backend on ${process.platform}`,
-      };
+      return unsupported();
     },
     async rerenderUnitIfStale() {
       return { rerendered: false };
@@ -146,6 +156,32 @@ export function restartCommand(): string {
     case "linux":
     default:
       return "systemctl --user restart phantombot";
+  }
+}
+
+/** Copy-pasteable command string the user can run to start phantombot. */
+export function startCommand(): string {
+  switch (currentPlatform()) {
+    case "darwin":
+      return `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.phantombot.phantombot.plist`;
+    case "windows":
+      return `schtasks /Change /TN "\\Phantombot\\phantombot" /ENABLE & schtasks /Run /TN "\\Phantombot\\phantombot"`;
+    case "linux":
+    default:
+      return "systemctl --user start phantombot";
+  }
+}
+
+/** Copy-pasteable command string the user can run to stop phantombot. */
+export function stopCommand(): string {
+  switch (currentPlatform()) {
+    case "darwin":
+      return `launchctl bootout gui/$(id -u)/dev.phantombot.phantombot`;
+    case "windows":
+      return `schtasks /Change /TN "\\Phantombot\\phantombot" /DISABLE & schtasks /End /TN "\\Phantombot\\phantombot"`;
+    case "linux":
+    default:
+      return "systemctl --user stop phantombot";
   }
 }
 
@@ -177,5 +213,61 @@ export function logsCommand(): string {
     case "linux":
     default:
       return "journalctl --user -u phantombot -f";
+  }
+}
+
+/** Options for {@link logsSpec}. */
+export interface LogsSpecOpts {
+  /** Stream new lines as they arrive (tail -f / -Wait). Default true. */
+  follow?: boolean;
+  /** How many trailing lines to show before following. Default 50. */
+  lines?: number;
+}
+
+/**
+ * Argv for a child process that tails phantombot's service logs, resolved for
+ * the host platform. `phantombot logs` spawns this with inherited stdio.
+ *
+ *   - linux:   journalctl --user -u phantombot [-n N] [-f]  (one merged stream)
+ *   - darwin:  tail [-n N] [-f] <out.log> <err.log>         (two files)
+ *   - windows: powershell Get-Content -Tail N [-Wait] <out.log>
+ *
+ * Returns null on unsupported platforms so the caller can print a hint
+ * instead of spawning garbage.
+ */
+export function logsSpec(
+  opts: LogsSpecOpts = {},
+): { cmd: string; args: string[] } | null {
+  const follow = opts.follow ?? true;
+  const lines = opts.lines ?? 50;
+  switch (currentPlatform()) {
+    case "linux": {
+      const args = ["--user", "-u", "phantombot", "-n", String(lines)];
+      if (follow) args.push("-f");
+      return { cmd: "journalctl", args };
+    }
+    case "darwin": {
+      const { out, err } = launchdLogPaths();
+      const args: string[] = [];
+      if (follow) args.push("-f");
+      args.push("-n", String(lines), out, err);
+      return { cmd: "tail", args };
+    }
+    case "windows": {
+      // Get-Content -Wait follows a single file; we tail stdout (the err log
+      // is surfaced by the copy-pasteable logsCommand() hint if needed).
+      const { out } = taskLogPaths("phantombot");
+      const wait = follow ? "-Wait " : "";
+      return {
+        cmd: "powershell",
+        args: [
+          "-NoProfile",
+          "-Command",
+          `Get-Content ${wait}-Tail ${lines} "${out}"`,
+        ],
+      };
+    }
+    default:
+      return null;
   }
 }

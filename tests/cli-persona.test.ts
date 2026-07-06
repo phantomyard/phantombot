@@ -37,6 +37,8 @@ class CaptureStream {
 const svcInactive: ServiceControl = {
   isActive: async () => false,
   restart: async () => ({ ok: true }),
+  start: async () => ({ ok: true }),
+  stop: async () => ({ ok: true }),
   rerenderUnitIfStale: async () => ({ rerendered: false }),
 };
 
