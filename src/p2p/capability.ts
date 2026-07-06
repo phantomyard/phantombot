@@ -9,36 +9,32 @@
  *
  * A node publishes an addressable app-data event (NIP-78 kind 30078, `d` tag
  * `phantomchat-p2p`) under the persona's pubkey. It is replaceable, so
- * re-publishing on each start supersedes the previous one.
+ * re-publishing on each start supersedes the previous one, and its content is
+ * PLAINTEXT on purpose:
  *
- * TWO-PART CONTENT — public booleans + a self-encrypted reachability blob:
+ *   { "localWs": true, "localWsPort": 33297, "webrtc": true, "dht": false }
  *
- *   {
- *     "localWs": true, "webrtc": true, "dht": false,   // PUBLIC — any contact reads
- *     "enc": "<NIP-44 self-encrypted { localWsPort, lanIps }>"  // OWNER-ONLY
- *   }
- *
- * The capability BOOLEANS must stay public: a contact has to read whether we can
- * accept a direct transport BEFORE any encrypted channel exists, and they don't
- * hold our key. But the concrete REACHABILITY — which loopback port our bridge
- * bound (now OS-ephemeral, not a fixed 47100) and our LAN IPs — is nobody's
- * business but our own. Only the persona's own PWA, holding the same nsec, can
- * decrypt the `enc` blob (NIP-44 conversation key from our key to our own
- * pubkey). So the port/IP never touch a relay in the clear, while the gate still
- * works. The PWA discovers its LOCAL node's port by reading its OWN self-advert.
+ * WHY PLAINTEXT (and why the earlier self-encrypted-port design was wrong).
+ * Nothing here is a secret:
+ *   - The capability BOOLEANS must be public — a contact has to read whether we
+ *     can accept a direct transport BEFORE any encrypted channel exists, and
+ *     they don't hold our key.
+ *   - `localWsPort` is an OS-ephemeral loopback port bound to 127.0.0.1. It is
+ *     reachable ONLY from this machine; a remote party who learns "33297" still
+ *     cannot dial our localhost. So it is not sensitive — and encrypting it broke
+ *     the actual use case: the PWA is a DIFFERENT identity than the node, so it
+ *     could never decrypt a self-keyed blob to learn the port. Plaintext, any
+ *     same-machine PWA reads the port and dials `ws://localhost:PORT`.
+ *   - LAN IPs are gone entirely: a browser PWA cannot dial a bare LAN IP over
+ *     `ws://` (mixed-content + no TLS), and the node↔node WebRTC path discovers
+ *     LAN host candidates live via ICE at connection time. A frozen LAN IP in an
+ *     advert was a stale duplicate nobody consumed. Deleted.
  */
-
-import { networkInterfaces } from "node:os";
 
 import { finalizeEvent } from "nostr-tools/pure";
 
 import { log } from "../lib/logger.ts";
-import {
-  getConversationKey,
-  nip44Decrypt,
-  nip44Encrypt,
-  type NTNostrEvent,
-} from "../lib/nostrCrypto.ts";
+import type { NTNostrEvent } from "../lib/nostrCrypto.ts";
 import type { RelayPool } from "../channels/phantomchat/transport.ts";
 
 /** NIP-78 addressable app-data kind used for the capability advertisement. */
@@ -48,139 +44,79 @@ export const CAPABILITY_KIND = 30078;
 export const CAPABILITY_D_TAG = "phantomchat-p2p";
 
 /**
- * The PUBLIC capability booleans — plaintext, readable by any contact. Mirrors
- * the boolean half of the PWA's `PeerCapabilities` shape.
+ * What a node advertises — PLAINTEXT. Mirrors the PWA's `PeerCapabilities` shape
+ * verbatim (phantomchat `transport/capability.ts`) so ingestion is a direct
+ * assignment.
  */
 export interface NodeCapabilities {
   /** The node can accept a same-machine `ws://localhost` bridge connection. */
   localWs: boolean;
+  /**
+   * The OS-ephemeral loopback TCP port the ws bridge is ACTUALLY listening on
+   * (not a fixed 47100). A same-machine PWA reads this to dial `ws://localhost`.
+   */
+  localWsPort: number;
   /** The node can hold a WebRTC data channel (LAN host candidates or remote). */
   webrtc: boolean;
   /**
    * The node runs a raw-UDP DHT. Always false: this build uses werift WebRTC +
-   * Nostr signaling, not Hyperswarm (which panics under Bun).
+   * Nostr signaling, not Hyperswarm (which panics under Bun). Kept in the shape
+   * so the field is explicit rather than absent.
    */
   dht: boolean;
 }
 
 /**
- * OWNER-PRIVATE reachability — carried self-encrypted in the `enc` field, so
- * only the persona's own nsec can read it. Never leaves a relay in the clear.
+ * Build the capability descriptor a running node advertises.
+ *
+ * @param boundPort the ACTUAL bound loopback port (e.g. `bridge.boundPort`).
  */
-export interface NodeReachability {
-  /**
-   * The loopback TCP port the ws bridge is ACTUALLY listening on. With
-   * OS-ephemeral binding (`port: 0`) this is the real bound port, discovered at
-   * runtime — the PWA reads it here rather than assuming a fixed 47100.
-   */
-  localWsPort: number;
-  /**
-   * Non-internal IPv4 LAN addresses of this host. Informational: a browser PWA
-   * cannot dial a bare LAN IP over `ws://` (mixed-content + no TLS), so the LAN
-   * hop is served by ICE host candidates on the node↔node WebRTC path, not by
-   * the browser. Advertised so a peer knows "everything about" us for future use.
-   */
-  lanIps: string[];
-}
-
-/** Build the PUBLIC capability booleans a running node advertises. */
-export function nodeCapabilities(): NodeCapabilities {
-  return { localWs: true, webrtc: true, dht: false };
-}
-
-/**
- * Enumerate this host's non-internal IPv4 addresses (its LAN IPs). Never throws;
- * returns `[]` if enumeration fails. `family` is compared against both the
- * string `"IPv4"` (Node/Bun) and the numeric `4` some runtimes report.
- */
-export function localLanIps(): string[] {
-  try {
-    const out: string[] = [];
-    for (const addrs of Object.values(networkInterfaces())) {
-      if (!addrs) continue;
-      for (const a of addrs) {
-        const isV4 = a.family === "IPv4" || (a.family as unknown) === 4;
-        if (isV4 && !a.internal && a.address) out.push(a.address);
-      }
-    }
-    return out;
-  } catch {
-    return [];
-  }
+export function nodeCapabilities(boundPort: number): NodeCapabilities {
+  return { localWs: true, localWsPort: boundPort, webrtc: true, dht: false };
 }
 
 /**
  * Build (and sign) the replaceable capability event for this node.
  *
- * @param ourSk       persona secret key (signs the event + derives the self key)
- * @param ourPubHex   persona pubkey (hex) — the self-encryption recipient
- * @param boundPort   the ACTUAL bound loopback port (e.g. `bridge.boundPort`)
- * @param reachability override the reachability blob (LAN IPs default to
- *                      `localLanIps()`); primarily a test seam.
+ * @param ourSk     persona secret key (signs the event)
+ * @param boundPort the ACTUAL bound loopback port (e.g. `bridge.boundPort`)
  */
 export function buildCapabilityEvent(
   ourSk: Uint8Array,
-  ourPubHex: string,
   boundPort: number,
-  reachability?: Partial<NodeReachability>,
 ): NTNostrEvent {
-  const reach: NodeReachability = {
-    localWsPort: boundPort,
-    lanIps: reachability?.lanIps ?? localLanIps(),
-    ...reachability,
-  };
-  const selfKey = getConversationKey(ourSk, ourPubHex);
-  const enc = nip44Encrypt(JSON.stringify(reach), selfKey);
-  const content = JSON.stringify({ ...nodeCapabilities(), enc });
   const template = {
     kind: CAPABILITY_KIND,
     created_at: Math.floor(Date.now() / 1000),
     tags: [["d", CAPABILITY_D_TAG]],
-    content,
+    content: JSON.stringify(nodeCapabilities(boundPort)),
   };
   return finalizeEvent(template, ourSk) as unknown as NTNostrEvent;
 }
 
 /**
- * Parse a capability event back to its public caps (and, when `ourSk` is given
- * and this is our OWN advert, the decrypted reachability). Returns `null` when
- * the event is not a well-formed capability advertisement. Never throws.
- *
- * `reachability` is only populated for a SELF advert — decryption uses the self
- * conversation key `(ourSk → event.pubkey)`, which succeeds only when
- * `event.pubkey` is our own pubkey. A contact's advert yields `caps` with no
- * `reachability`, which is correct: a contact's port/IP are none of our business.
+ * Parse a capability event back to `{ authorHex, caps }`, or `null` when it is
+ * not a well-formed capability advertisement. This is the reference the PWA
+ * companion mirrors on ingest. Never throws.
  */
 export function parseCapabilityEvent(
   event: NTNostrEvent,
-  ourSk?: Uint8Array,
-): { authorHex: string; caps: NodeCapabilities; reachability?: NodeReachability } | null {
+): { authorHex: string; caps: NodeCapabilities } | null {
   try {
     if (event.kind !== CAPABILITY_KIND) return null;
     const hasDTag = event.tags.some((t) => t[0] === "d" && t[1] === CAPABILITY_D_TAG);
     if (!hasDTag) return null;
-    const parsed = JSON.parse(event.content) as Record<string, unknown>;
+    const parsed = JSON.parse(event.content) as Partial<NodeCapabilities>;
     if (typeof parsed !== "object" || parsed === null) return null;
-    const caps: NodeCapabilities = {
-      localWs: Boolean(parsed.localWs),
-      webrtc: Boolean(parsed.webrtc),
-      dht: Boolean(parsed.dht),
+    return {
+      authorHex: event.pubkey,
+      caps: {
+        localWs: Boolean(parsed.localWs),
+        localWsPort: typeof parsed.localWsPort === "number" ? parsed.localWsPort : 0,
+        webrtc: Boolean(parsed.webrtc),
+        dht: Boolean(parsed.dht),
+      },
     };
-    let reachability: NodeReachability | undefined;
-    if (ourSk && typeof parsed.enc === "string") {
-      try {
-        const selfKey = getConversationKey(ourSk, event.pubkey);
-        const reach = JSON.parse(nip44Decrypt(parsed.enc, selfKey)) as Partial<NodeReachability>;
-        reachability = {
-          localWsPort: typeof reach.localWsPort === "number" ? reach.localWsPort : 0,
-          lanIps: Array.isArray(reach.lanIps) ? reach.lanIps.filter((x) => typeof x === "string") : [],
-        };
-      } catch {
-        // Not our advert (can't derive the matching key) or corrupt blob — the
-        // public caps are still valid; just no reachability.
-      }
-    }
-    return { authorHex: event.pubkey, caps, reachability };
   } catch {
     return null;
   }

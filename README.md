@@ -631,9 +631,13 @@ an encrypted WebRTC data channel with no relay in the hot path.
 - **No hardcoded port — the PWA discovers it.** Each node binds an **OS-ephemeral
   loopback port** (`port = 0`), so any number of personas can host a node on one
   machine with **zero port collisions**. The node publishes its real bound port in
-  its capability advert, but **self-encrypted** (NIP-44, to its own key) — so your
-  IP and port never hit a relay in the clear. The PWA reads its *own* npub's
-  self-advert, decrypts the port, and dials `ws://localhost:<that port>`.
+  its capability advert, in **plaintext** — a loopback port bound to `127.0.0.1` is
+  reachable only from this machine, so it's not a secret, and any same-machine PWA
+  (a *different* Nostr identity than the node) reads the port and dials
+  `ws://localhost:<that port>`. (An earlier design self-encrypted the port to the
+  node's own key; that was wrong — the PWA is a different identity and could never
+  decrypt it. LAN IPs aren't advertised at all: ICE discovers LAN host candidates
+  live on the node↔node WebRTC path.)
 - The node exposes that loopback bridge for the same-machine PWA (loopback
   is a secure context, so an HTTPS PWA may open it — no TLS-cert wall). The bridge
   **gates WebSocket upgrades on the browser `Origin`**: loopback binding keeps the

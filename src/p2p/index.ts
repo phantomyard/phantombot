@@ -53,11 +53,11 @@ export function buildP2PNode(deps: BuildP2PNodeDeps): P2PNode {
  * from startup — a relay hiccup must never delay the node coming up.
  *
  * `boundPort` is the node's ACTUAL bound loopback port (`node.boundPort`), read
- * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real port,
- * self-encrypted, rather than the configured request.
+ * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real bound
+ * port (plaintext) rather than the configured request.
  */
 export function advertiseP2PCapability(deps: BuildP2PNodeDeps, boundPort: number): void {
-  const event = buildCapabilityEvent(deps.secretKey, deps.publicKeyHex, boundPort);
+  const event = buildCapabilityEvent(deps.secretKey, boundPort);
   void publishCapability(deps.pool, deps.relays, event).catch((err) => {
     log.debug(`[p2p] capability advertise failed: ${String(err)}`);
   });

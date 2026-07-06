@@ -56,7 +56,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/p2p/peerConnection.ts` | One werift `RTCPeerConnection` + data channel per peer. Readiness is gated on the **data channel** `open` event, not transport `connected` (the channel opens later; flushing early drops the first frame). | `werift` |
 | `src/p2p/localBridge.ts` | `ws://localhost:<ephemeral>` server (Bun native, loopback-only) for the same-machine PWA; `boundPort` reads back the OS-assigned port. Frames in → route; peer frames → broadcast to PWA. | Bun ws |
 | `src/p2p/node.ts` | Orchestrator. Routes frames by recipient pubkey, dials peers on demand, deterministic initiator (smaller pubkey) + `hello` nudge to avoid offer glare, per-peer outbox buffered until the channel opens. All seams injected for testing. | `peerConnection`, `signaling`, `localBridge` |
-| `src/p2p/capability.ts` | Capability advertisement (NIP-78 kind 30078): public capability booleans + a **self-encrypted** reachability blob (bound port + LAN IPs, NIP-44 to own key) so only the owner's PWA learns the local port. | `nostrCrypto`, `RelayPool` |
+| `src/p2p/capability.ts` | Capability advertisement (NIP-78 kind 30078): **plaintext** capability booleans + the actual bound loopback port. The port is a `127.0.0.1`-only ephemeral port (not a secret), so any same-machine PWA reads it and dials `ws://localhost`. | `RelayPool` |
 | `src/p2p/index.ts` | Daemon glue: `buildP2PNode` (from a persona's identity/relays/pool) + `runP2PNode` (start, wait for abort, stop), pushed onto `run`'s task list. | all of `src/p2p/*` |
 | `src/cli/p2p.ts` | `phantombot p2p status` — read-only view of the config + a loopback probe. | `config` |
 
