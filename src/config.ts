@@ -319,7 +319,44 @@ export interface Config {
   retrieval?: RetrievalSettings;
 
   voice: import("./lib/voice.ts").VoiceConfig;
+
+  /**
+   * Relay-free P2P transport (phantombot#258): a local ws bridge for the
+   * same-machine PhantomChat PWA plus werift WebRTC + Nostr-signalled channels
+   * to peer nodes. DISABLED BY DEFAULT — an unconfigured or existing install
+   * runs exactly as before (no bridge port opened, no capability advertised, no
+   * signaling subscription). See P2PSettings and buildP2PConfig.
+   *
+   * Optional on the type (so partial test configs need not spell it out), but
+   * `loadConfig` always populates it; consumers treat absence as `DEFAULT_P2P`.
+   */
+  p2p?: P2PSettings;
 }
+
+/** Settings for the relay-free P2P transport node (phantombot#258). */
+export interface P2PSettings {
+  /** Master switch. Default false — the whole subsystem is dormant when off. */
+  enabled: boolean;
+  /**
+   * Loopback port for the PWA ws bridge. MUST match the PWA's
+   * DEFAULT_LOCAL_NODE_PORT (47100). Bound to 127.0.0.1 only.
+   */
+  port: number;
+  /**
+   * Public STUN servers for NAT traversal. STUN only reflects your public
+   * IP:port back — it never relays media — so using public STUN keeps the
+   * "no infrastructure of ours" constraint intact. Empty = host candidates
+   * only (localhost + LAN work; remote NAT traversal won't).
+   */
+  stunServers: string[];
+}
+
+export const DEFAULT_P2P: P2PSettings = {
+  enabled: false,
+  port: 47100,
+  // Google's public STUN — reflexive-only, no relaying, no infra of ours.
+  stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+};
 
 /**
  * XDG base-directory resolution, identical on every platform. Windows uses
@@ -361,6 +398,7 @@ export async function loadConfig(): Promise<Config> {
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
+  const tomlP2p = (toml.p2p ?? {}) as Record<string, unknown>;
   const tomlEmbeddings = (toml.embeddings ?? {}) as Record<string, unknown>;
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
   const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
@@ -508,7 +546,43 @@ export async function loadConfig(): Promise<Config> {
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
 
     voice: buildVoiceConfig(tomlVoice),
+
+    p2p: buildP2PConfig(tomlP2p),
   };
+}
+
+/**
+ * Resolve the relay-free P2P transport settings. Env wins over TOML wins over
+ * defaults, same precedence as everything else. DISABLED by default so an
+ * unconfigured install is byte-for-byte unchanged. The port is clamped to the
+ * unprivileged range; STUN servers fall back to the public reflexive-only set.
+ */
+function buildP2PConfig(tomlP2p: Record<string, unknown>): P2PSettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_P2P_ENABLED) ??
+    asBool(tomlP2p.enabled) ??
+    DEFAULT_P2P.enabled;
+
+  const port = clampInt(
+    asInt(process.env.PHANTOMBOT_P2P_PORT) ??
+      asInt(tomlP2p.port) ??
+      DEFAULT_P2P.port,
+    1024,
+    65_535,
+  );
+
+  // Env is a comma-separated list (like PHANTOMBOT_TELEGRAM_ALLOWED_USERS);
+  // TOML is a native array. An explicit empty env value ("") means "no STUN".
+  const stunFromEnv = process.env.PHANTOMBOT_P2P_STUN;
+  const stunServers =
+    stunFromEnv !== undefined
+      ? stunFromEnv
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : (asStringArray(tomlP2p.stun_servers) ?? DEFAULT_P2P.stunServers);
+
+  return { enabled, port, stunServers };
 }
 
 function buildTelegramStreamingConfig(

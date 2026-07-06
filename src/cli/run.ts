@@ -36,10 +36,16 @@ import { cleanupStaleUpdateArtifacts } from "../lib/binaryUpdate.ts";
 import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
   type Config,
+  DEFAULT_P2P,
   loadConfig,
   personaDir,
   type TelegramAccount,
 } from "../config.ts";
+import {
+  advertiseP2PCapability,
+  buildP2PNode,
+  runP2PNode,
+} from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import {
   resolveHarnessBinsForConfig,
@@ -559,6 +565,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         );
       }
 
+      // The relay-free P2P node (phantombot#258) binds a single loopback port
+      // (config.p2p.port), so exactly ONE persona hosts it — the first
+      // phantomchat persona. Disabled by default; see config.p2p.
+      const p2pSettings = config.p2p ?? DEFAULT_P2P;
+      let p2pNodeStarted = false;
+
       for (const spec of phantomchatPersonas) {
         const { identity, allowedHex, tofu, groupBots } = spec.config;
 
@@ -765,6 +777,48 @@ export async function runRun(input: RunInput = {}): Promise<number> {
               error: (e as Error).message,
             });
           });
+        }
+
+        // Relay-free P2P transport node. Rides THIS persona's identity, relays
+        // and relay pool: a loopback ws bridge for the same-machine PhantomChat
+        // PWA plus werift WebRTC channels to peer nodes, with Nostr carrying only
+        // the WebRTC handshake. Started for the first phantomchat persona only
+        // (single loopback port). Inert unless config.p2p.enabled.
+        if (p2pSettings.enabled && !p2pNodeStarted) {
+          p2pNodeStarted = true;
+          try {
+            const p2pNode = buildP2PNode({
+              secretKey: identity.secretKey,
+              publicKeyHex: identity.publicKeyHex,
+              relays,
+              pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
+              settings: p2pSettings,
+            });
+            advertiseP2PCapability({
+              secretKey: identity.secretKey,
+              publicKeyHex: identity.publicKeyHex,
+              relays,
+              pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
+              settings: p2pSettings,
+            });
+            out.write(
+              `  [p2p:${spec.persona}] node on ws://127.0.0.1:${p2pSettings.port}, ` +
+                `${p2pSettings.stunServers.length} STUN server(s)\n`,
+            );
+            tasks.push(runP2PNode(p2pNode, ac.signal));
+          } catch (e) {
+            p2pNodeStarted = false;
+            log.warn(`p2p[${spec.persona}]: node failed to start`, {
+              error: (e as Error).message,
+            });
+            err.write(
+              `warning: p2p node failed to start (port ${p2pSettings.port} in use?) — chat still works over relays\n`,
+            );
+          }
+        } else if (p2pSettings.enabled && p2pNodeStarted) {
+          out.write(
+            `  [p2p:${spec.persona}] skipped — a P2P node is already bound to port ${p2pSettings.port}\n`,
+          );
         }
       }
     }

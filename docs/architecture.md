@@ -50,6 +50,15 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/lib/{systemd,launchd,taskScheduler}.ts` | Per-OS backends: unit/plist/task templates + a `ServiceControl` impl. Each encapsulates its own keep-alive quirk (systemd `Restart=on-failure`; launchd `KeepAlive`; Windows 1-min `TimeTrigger`), so `stop`/`start` behave consistently across OSes. | `systemctl`/`launchctl`/`schtasks` |
 | `src/lib/serviceLifecycle.ts` | `runLifecycleAction` — the shared driver behind `phantombot start/stop/restart`. OS-agnostic: only ever calls `ServiceControl`, never a supervisor directly. | `platform.ts` |
 | `src/cli/{start,stop,restart,logs}.ts` | Thin CLI wrappers over `serviceLifecycle`/`logsSpec` for the service-lifecycle verbs. | `lib/serviceLifecycle`, `lib/platform` |
+| `src/p2p/` | Relay-free P2P transport (issue #258). The node is a dumb, encrypted-wrap relay: it forwards opaque gift-wraps node-to-node and never decrypts them. Off by default (`config.p2p.enabled`). | `werift`, `nostrCrypto`, `RelayPool`, Bun ws |
+| `src/p2p/frame.ts` | Wire-frame contract with the PWA: parse/build `["EVENT", <gift-wrap>]` relay frames, read the recipient off the wrap p-tag. Pure. | — |
+| `src/p2p/signaling.ts` | WebRTC handshake (SDP/ICE) over Nostr — NIP-44-encrypted on a dedicated ephemeral kind (21050), separate from the chat 1059 plane. Rides the `RelayPool` seam. | `nostrCrypto`, `RelayPool` |
+| `src/p2p/peerConnection.ts` | One werift `RTCPeerConnection` + data channel per peer. Readiness is gated on the **data channel** `open` event, not transport `connected` (the channel opens later; flushing early drops the first frame). | `werift` |
+| `src/p2p/localBridge.ts` | `ws://localhost:47100` server (Bun native, loopback-only) for the same-machine PWA. Frames in → route; peer frames → broadcast to PWA. | Bun ws |
+| `src/p2p/node.ts` | Orchestrator. Routes frames by recipient pubkey, dials peers on demand, deterministic initiator (smaller pubkey) + `hello` nudge to avoid offer glare, per-peer outbox buffered until the channel opens. All seams injected for testing. | `peerConnection`, `signaling`, `localBridge` |
+| `src/p2p/capability.ts` | Capability advertisement (NIP-78 kind 30078) so a peer's PWA can light up its transport ladder. The PWA-side ingestion is a companion phantomchat change. | `RelayPool` |
+| `src/p2p/index.ts` | Daemon glue: `buildP2PNode` (from a persona's identity/relays/pool) + `runP2PNode` (start, wait for abort, stop), pushed onto `run`'s task list. | all of `src/p2p/*` |
+| `src/cli/p2p.ts` | `phantombot p2p status` — read-only view of the config + a loopback probe. | `config` |
 
 ## End-to-end flow
 

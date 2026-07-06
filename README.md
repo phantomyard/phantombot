@@ -400,6 +400,7 @@ Runtime:
 | `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Task Scheduler log) |
 | `phantombot ask "<prompt>"` | One-shot prompt through the persona and harness chain |
 | `phantombot update [--check] [--force] [--restart]` | Check, install, or restart after updates |
+| `phantombot p2p status` | Show relay-free P2P transport config and whether a local node is listening |
 
 Agent-facing tools:
 
@@ -606,6 +607,71 @@ in `phantomchat.json`. It's merged with what's auto-detected:
 ```
 
 Most setups won't need it — the auto-detection covers them.
+
+## Relay-free P2P transport (preview)
+
+Normally every PhantomChat message round-trips through a public Nostr relay. That
+relay is both a latency floor (even two peers on the same desk pay a relay hop)
+and a dependency you don't control. The P2P transport (issue #258) demotes relays
+from "carry every message" to **signaling + fallback only**: your phantombot
+becomes your personal P2P node, and messages travel **directly node-to-node** over
+an encrypted WebRTC data channel with no relay in the hot path.
+
+**How it fits together**
+
+```
+  PWA (browser)                                    PWA (browser)
+     │  ws://localhost:47100                          │  ws://localhost:47100
+     ▼                                                ▼
+  [phantombot node] ◀── werift WebRTC data channel ──▶ [phantombot node]
+     ╲                    (direct, encrypted)                    ╱
+      ╲···· Nostr relays: WebRTC handshake (signaling) only ····╱
+```
+
+- The node exposes **`ws://localhost:47100`** for the same-machine PWA (loopback
+  is a secure context, so an HTTPS PWA may open it — no TLS-cert wall).
+- Two nodes negotiate a **werift** (pure-TypeScript WebRTC) data channel. werift
+  is used instead of Hyperswarm/`node-datachannel` because it's the only stack
+  that survives `bun build --compile` into the shipped single binary — no native
+  addon, no sidecar.
+- **Nostr carries only the WebRTC handshake** (SDP offer/answer + ICE candidates),
+  encrypted with NIP-44 on a dedicated ephemeral event kind — never your message
+  contents, which stay end-to-end sealed. Public **STUN** handles NAT traversal
+  (STUN only reflects your IP back, it never relays — so there's still no
+  infrastructure of ours in the path).
+- If no direct route can be established, everything **falls back to the existing
+  relay path**, so nothing ever breaks.
+
+**Off by default — zero regression.** The whole subsystem is dormant unless you
+turn it on. An unconfigured or existing install opens no port, advertises no
+capability, and behaves byte-for-byte as before. The node also relays only the
+opaque gift-wrap between peers — it never holds a key for your message contents.
+
+**Enable it** in `~/.config/phantombot/config.toml`, then restart the service:
+
+```toml
+[p2p]
+enabled = true          # default false
+port = 47100            # loopback ws bridge; must match the PWA (default 47100)
+stun_servers = [        # public reflexive-only STUN (no infra of ours)
+  "stun:stun.l.google.com:19302",
+  "stun:stun1.l.google.com:19302",
+]
+```
+
+Env overrides (highest precedence): `PHANTOMBOT_P2P_ENABLED=1`,
+`PHANTOMBOT_P2P_PORT=47100`, `PHANTOMBOT_P2P_STUN="stun:a:3478,stun:b:3478"`.
+
+Check it with `phantombot p2p status` — it prints the resolved config and probes
+the loopback port to tell you whether a node is actually listening on this
+machine.
+
+> **Preview scope.** This ships the phantombot node half. The PWA already sends
+> over `ws://localhost` when a peer advertises P2P capability, but the PWA-side
+> *ingestion* of a node's capability advertisement lands in a companion
+> phantomchat change — so until that ships, the node runs and advertises but the
+> PWA ladder stays on the relay path. A single node binds the loopback port, so
+> on a multi-persona host only the first PhantomChat persona hosts it.
 
 ## Editors: VS Code, Zed & JetBrains
 

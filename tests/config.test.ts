@@ -69,6 +69,9 @@ const ENV_KEYS = [
   "PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS",
   "PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES",
   "PHANTOMBOT_CHATTINESS",
+  "PHANTOMBOT_P2P_ENABLED",
+  "PHANTOMBOT_P2P_PORT",
+  "PHANTOMBOT_P2P_STUN",
 ];
 
 let workdir: string;
@@ -702,5 +705,51 @@ flush_after_hours = 6
     expect(memoryIndexPath("phantom")).toBe(
       join(workdir, "data", "phantombot", "memory-index", "phantom.sqlite"),
     );
+  });
+});
+
+describe("loadConfig — p2p (phantombot#258)", () => {
+  test("defaults to disabled on port 47100 with public STUN", async () => {
+    const c = await loadConfig();
+    expect(c.p2p).toEqual({
+      enabled: false,
+      port: 47100,
+      stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+    });
+  });
+
+  test("env overrides enabled, port and STUN", async () => {
+    process.env.PHANTOMBOT_P2P_ENABLED = "1";
+    process.env.PHANTOMBOT_P2P_PORT = "48000";
+    process.env.PHANTOMBOT_P2P_STUN = "stun:a.example:3478,stun:b.example:3478";
+    const c = await loadConfig();
+    expect(c.p2p).toEqual({
+      enabled: true,
+      port: 48000,
+      stunServers: ["stun:a.example:3478", "stun:b.example:3478"],
+    });
+  });
+
+  test("TOML sets p2p, env still wins", async () => {
+    const configDir = join(workdir, "config", "phantombot");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "config.toml"),
+      ['[p2p]', 'enabled = true', 'port = 50000', 'stun_servers = ["stun:toml.example:3478"]'].join("\n"),
+    );
+    const fromToml = await loadConfig();
+    expect(fromToml.p2p!.enabled).toBe(true);
+    expect(fromToml.p2p!.port).toBe(50000);
+    expect(fromToml.p2p!.stunServers).toEqual(["stun:toml.example:3478"]);
+
+    process.env.PHANTOMBOT_P2P_PORT = "51000";
+    const envWins = await loadConfig();
+    expect(envWins.p2p!.port).toBe(51000);
+  });
+
+  test("port is clamped to the unprivileged range", async () => {
+    process.env.PHANTOMBOT_P2P_PORT = "80";
+    const c = await loadConfig();
+    expect(c.p2p!.port).toBe(1024);
   });
 });

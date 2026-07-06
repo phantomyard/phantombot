@@ -46,6 +46,7 @@ import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
 import voiceCmd from "./voice.ts";
 import replyModeCmd from "./replyMode.ts";
+import p2pCmd from "./p2p.ts";
 
 export const mainCommand = defineCommand({
   meta: {
@@ -82,5 +83,6 @@ export const mainCommand = defineCommand({
     update: updateCmd,
     voice: voiceCmd,
     "reply-mode": replyModeCmd,
+    p2p: p2pCmd,
   },
 });
