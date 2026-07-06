@@ -632,10 +632,12 @@ an encrypted WebRTC data channel with no relay in the hot path.
   is a secure context, so an HTTPS PWA may open it — no TLS-cert wall). The bridge
   **gates WebSocket upgrades on the browser `Origin`**: loopback binding keeps the
   port off the LAN, but any website you visit could otherwise reach it (WebSocket
-  isn't CORS-preflighted). No-`Origin` clients (CLI/tooling) and localhost origins
-  (the dev PWA) are always allowed; other browser origins must be in
-  `allowed_origins` (defaults to the production PhantomChat origin) or the upgrade
-  is refused with **403**.
+  isn't CORS-preflighted). Clients that send no `Origin` header (CLI/tooling) and
+  localhost origins (the dev PWA) are always allowed; other browser origins must
+  be in `allowed_origins` (defaults to the production PhantomChat origin) or the
+  upgrade is refused with **403**. A literal `Origin: null` — what a browser emits
+  from an *opaque* origin (sandboxed iframe, `data:`/`file:` page, some redirects)
+  — is treated as untrusted and refused too, so it can't be used to slip the gate.
 - Two nodes negotiate a **werift** (pure-TypeScript WebRTC) data channel. werift
   is used instead of Hyperswarm/`node-datachannel` because it's the only stack
   that survives `bun build --compile` into the shipped single binary — no native

@@ -51,6 +51,9 @@ export interface LocalBridgeOptions {
  *
  *   - No `Origin` header  → allow. Non-browser clients (CLI probes, the werift
  *     test harness, curl) don't send one; browsers always do.
+ *   - Literal `Origin: null` → DENY. This is what a browser emits for an *opaque*
+ *     origin (sandboxed iframe, `data:`/`file:` page, some cross-origin
+ *     redirects); a hostile page can provoke it, so opaque origins are untrusted.
  *   - `localhost` / `127.0.0.1` / `[::1]` origin (any scheme/port) → allow. This
  *     is the user's own dev PhantomChat, not a remote site.
  *   - Origin in `allowedOrigins` (exact match) → allow (e.g. prod PhantomChat).
@@ -60,10 +63,14 @@ export function isOriginAllowed(
   origin: string | null | undefined,
   allowedOrigins: readonly string[],
 ): boolean {
-  // No Origin header at all: not a browser cross-site request.
+  // Genuinely absent Origin header: not a browser cross-site request. (Bun's
+  // req.headers.get("origin") returns real null when the header is absent, which
+  // is distinct from a browser sending the literal string "null".)
   if (origin === null || origin === undefined || origin === "") return true;
-  // Some non-browser agents send the literal "null" origin; treat as non-browser.
-  if (origin === "null") return true;
+  // A literal "null" Origin is a browser *opaque* origin (sandboxed iframe,
+  // data:/file: page, some cross-origin redirects). NOT a non-browser tell — a
+  // hostile page can provoke it to slip the gate, so refuse it as untrusted.
+  if (origin === "null") return false;
 
   let host: string;
   try {

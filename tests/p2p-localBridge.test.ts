@@ -100,11 +100,17 @@ describe("LocalBridge loopback", () => {
 describe("isOriginAllowed (pure)", () => {
   const allow = ["https://chat.phantomyard.ai"];
 
-  test("no / empty / null Origin is allowed (CLI + non-browser tooling)", () => {
+  test("a genuinely absent Origin is allowed (CLI + non-browser tooling)", () => {
     expect(isOriginAllowed(null, allow)).toBe(true);
     expect(isOriginAllowed(undefined, allow)).toBe(true);
     expect(isOriginAllowed("", allow)).toBe(true);
-    expect(isOriginAllowed("null", allow)).toBe(true);
+  });
+
+  test('a literal "null" Origin (browser opaque origin) is refused', () => {
+    // Sandboxed iframes, data:/file: pages, and some cross-origin redirects make
+    // a browser send `Origin: null`. A hostile page can provoke it, so it must
+    // NOT be treated as trusted non-browser tooling.
+    expect(isOriginAllowed("null", allow)).toBe(false);
   });
 
   test("localhost origins are always allowed (the dev PWA)", () => {
@@ -140,6 +146,19 @@ describe("LocalBridge origin gate (live)", () => {
     bridge.start();
     const res = await fetch(`http://127.0.0.1:${bridge.boundPort}/`, {
       headers: { Origin: "https://example.com" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('a literal "null" Origin is refused with 403', async () => {
+    bridge = new LocalBridge({
+      port: 0,
+      onOutbound: () => {},
+      allowedOrigins: ["https://chat.phantomyard.ai"],
+    });
+    bridge.start();
+    const res = await fetch(`http://127.0.0.1:${bridge.boundPort}/`, {
+      headers: { Origin: "null" },
     });
     expect(res.status).toBe(403);
   });
