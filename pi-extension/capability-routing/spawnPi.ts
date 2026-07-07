@@ -141,7 +141,38 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
   if (!isGenericRuntime) {
     return { command: process.execPath, args };
   }
-  return { command: "pi", args };
+  // Bare "pi" fallback. On Windows, node's spawn(shell:false) does NOT apply
+  // PATHEXT, so a bare "pi" never resolves to the real `pi.cmd`/`pi.exe` shim
+  // and dies with ENOENT (uv_spawn 'pi') — this is exactly the memory/nightly
+  // failure on the Windows port. Resolve the concrete file ourselves so the
+  // spawn stays shell:false (no arg-quoting hazard). No-op on POSIX.
+  return { command: resolveCommandOnPath("pi"), args };
+}
+
+/**
+ * Resolve a bare command name to a concrete executable path on Windows using
+ * PATH × PATHEXT (the lookup cmd.exe does but node's spawn(shell:false) does
+ * not). Returns the input unchanged on POSIX, when already a path, or when
+ * nothing matches (so the caller still gets a sensible ENOENT to surface).
+ */
+function resolveCommandOnPath(cmd: string): string {
+  if (process.platform !== "win32") return cmd;
+  if (path.isAbsolute(cmd) || cmd.includes(path.sep) || cmd.includes("/")) return cmd;
+  const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((e) => e.trim())
+    .filter(Boolean);
+  const dirs = (process.env.PATH ?? process.env.Path ?? "").split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    // An explicit extension already present? Probe it verbatim first.
+    if (fs.existsSync(path.join(dir, cmd))) return path.join(dir, cmd);
+    for (const ext of exts) {
+      const candidate = path.join(dir, cmd + ext);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return cmd;
 }
 
 function emptyUsage(): DelegateUsage {
@@ -296,6 +327,9 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
         cwd: opts.cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        // Suppress the console window Windows opens for the delegate pi child.
+        // No-op on POSIX.
+        windowsHide: true,
       });
 
       // ── Tool-boundary timeouts ────────────────────────────────────────────

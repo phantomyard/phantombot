@@ -289,6 +289,9 @@ async function runCommandTask(
       cwd: opts.cwd,
       env: opts.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // With shell:true Windows spawns cmd.exe, which pops a visible console
+      // window per command task. Suppress it (issue #271); no-op on POSIX.
+      windowsHide: true,
     });
     let output = "";
     const append = (chunk: Buffer) => {
@@ -333,11 +336,31 @@ function buildCommandEnv(secretNames: string[]): NodeJS.ProcessEnv {
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
   ];
+  // Windows-only additions (issue #270): without USERPROFILE the spawned
+  // process's os.homedir() — and therefore every home-relative config/state
+  // path phantombot reads (voice config.toml, personas, .env) — resolves to a
+  // DIFFERENT location than the one the wizard wrote to, so voice/memory look
+  // "not configured". APPDATA/LOCALAPPDATA back the same home-relative stores;
+  // SystemRoot + ComSpec are required for cmd.exe (shell:true) and most Windows
+  // binaries to launch at all; PATHEXT lets bare command names resolve their
+  // .cmd/.exe form. All are harmless no-ops when absent (POSIX).
+  if (process.platform === "win32") {
+    allowlist.push(
+      "USERPROFILE",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "SystemRoot",
+      "SystemDrive",
+      "ComSpec",
+      "PATHEXT",
+      "Path",
+    );
+  }
   const env: NodeJS.ProcessEnv = {};
   for (const name of allowlist) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
-  if (env.PATH === undefined) {
+  if (env.PATH === undefined && process.platform !== "win32") {
     env.PATH = "/usr/local/bin:/usr/bin:/bin";
   }
   for (const name of secretNames) {

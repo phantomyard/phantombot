@@ -131,6 +131,12 @@ export function spawnInNewSession<
     // observing the child's exit, leaving `proc.exited` permanently unresolved
     // (killProcessGroup would then hang). So we only detach on POSIX.
     detached: process.platform !== "win32",
+    // Windows only (issue #271): suppress the console window Windows opens for
+    // every child of a GUI/service process. Without it, each harness turn (and
+    // each tool subprocess it spawns) flashes a cmd/console window on the
+    // desktop. No-op on POSIX. Covers all four harnesses (claude/gemini/codex/pi)
+    // in one place since they all spawn through here.
+    windowsHide: true,
   } as typeof opts) as Subprocess<Stdin, Stdout, Stderr>;
 }
 
@@ -233,6 +239,9 @@ function windowsKillTree(pid: number): boolean {
   try {
     execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
       stdio: "ignore",
+      // Suppress the taskkill console window that would otherwise flash on every
+      // process-group teardown (issue #271).
+      windowsHide: true,
     });
     return true;
   } catch (e) {

@@ -41,9 +41,24 @@ export interface ResolveResult {
   source: "setting" | "path" | "install-location";
 }
 
-/** The bare executable name for the platform. */
+/** The canonical executable name for the platform (used in diagnostics). */
 export function binaryName(platform: Platform): string {
   return platform === "win32" ? "phantombot.exe" : "phantombot";
+}
+
+/**
+ * All executable-name variants to probe, in priority order.
+ *
+ * On Windows phantombot may be installed as a native `phantombot.exe` (compiled
+ * release) OR as an npm/shim `phantombot.cmd`/`phantombot.bat` (e.g. a global
+ * npm install). The old resolver only looked for `.exe`, so a perfectly good
+ * `.cmd` install surfaced as "binary not found". We probe `.exe` first (the
+ * released artifact), then the shims. POSIX has a single extensionless name.
+ */
+export function binaryNames(platform: Platform): string[] {
+  return platform === "win32"
+    ? ["phantombot.exe", "phantombot.cmd", "phantombot.bat"]
+    : ["phantombot"];
 }
 
 /**
@@ -72,25 +87,36 @@ export function installLocationCandidates(
   platform: Platform,
   env: Record<string, string | undefined>,
 ): string[] {
-  const name = binaryName(platform);
+  const names = binaryNames(platform);
   if (platform === "win32") {
     // Implemented, UNTESTED on a real Windows host (no Windows box here).
-    const candidates: string[] = [];
+    // For each install dir we probe every name variant (.exe/.cmd/.bat).
+    const dirs: string[][] = [];
     const localAppData = env.LOCALAPPDATA;
     if (localAppData) {
-      candidates.push(joinFor(platform, localAppData, "phantombot", "bin", name));
-      candidates.push(joinFor(platform, localAppData, "Programs", "phantombot", name));
+      dirs.push([localAppData, "phantombot", "bin"]);
+      dirs.push([localAppData, "Programs", "phantombot"]);
     }
     const userProfile = env.USERPROFILE;
     if (userProfile) {
-      candidates.push(joinFor(platform, userProfile, ".local", "bin", name));
-      candidates.push(joinFor(platform, userProfile, "bin", name));
+      dirs.push([userProfile, ".local", "bin"]);
+      dirs.push([userProfile, "bin"]);
     }
-    candidates.push(joinFor(platform, "C:\\", "Program Files", "phantombot", name));
+    // npm global shims (phantombot.cmd) land here.
+    const appData = env.APPDATA;
+    if (appData) dirs.push([appData, "npm"]);
+    dirs.push(["C:\\", "Program Files", "phantombot"]);
+    const candidates: string[] = [];
+    for (const dir of dirs) {
+      for (const name of names) {
+        candidates.push(joinFor(platform, ...dir, name));
+      }
+    }
     return candidates;
   }
 
   // linux + darwin share the POSIX layout.
+  const name = names[0]!;
   const home = env.HOME;
   const candidates: string[] = [];
   if (home) {
@@ -114,12 +140,14 @@ export function findOnPath(
 ): string | undefined {
   const rawPath = env.PATH ?? env.Path ?? "";
   if (!rawPath) return undefined;
-  const name = binaryName(platform);
+  const names = binaryNames(platform);
   const sep = pathSeparator(platform);
   for (const dir of rawPath.split(sep)) {
     if (!dir) continue;
-    const candidate = joinFor(platform, dir, name);
-    if (exists(candidate)) return candidate;
+    for (const name of names) {
+      const candidate = joinFor(platform, dir, name);
+      if (exists(candidate)) return candidate;
+    }
   }
   return undefined;
 }

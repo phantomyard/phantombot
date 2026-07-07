@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   binaryName,
+  binaryNames,
   findOnPath,
   installLocationCandidates,
   notFoundMessage,
@@ -121,6 +122,50 @@ describe("resolvePhantombotBinary — win32 (implemented, untested on real host)
     });
     expect(r?.source).toBe("install-location");
     expect(r?.path.endsWith("phantombot.exe")).toBe(true);
+  });
+
+  test("finds a .cmd shim on PATH when there is no .exe", () => {
+    // An npm-global install ships phantombot.cmd, not phantombot.exe. The old
+    // resolver only probed .exe and reported 'not found'.
+    const found = findOnPath(
+      "win32",
+      { PATH: "C:\\Users\\dev\\AppData\\Roaming\\npm" },
+      (p) => p === "C:\\Users\\dev\\AppData\\Roaming\\npm\\phantombot.cmd",
+    );
+    expect(found).toBe("C:\\Users\\dev\\AppData\\Roaming\\npm\\phantombot.cmd");
+  });
+
+  test("probes .exe before the .cmd/.bat shims", () => {
+    expect(binaryNames("win32")).toEqual([
+      "phantombot.exe",
+      "phantombot.cmd",
+      "phantombot.bat",
+    ]);
+    expect(binaryNames("linux")).toEqual(["phantombot"]);
+  });
+
+  test("install-location candidates include the npm global shim dir", () => {
+    const candidates = installLocationCandidates("win32", {
+      APPDATA: "C:\\Users\\dev\\AppData\\Roaming",
+    });
+    expect(
+      candidates.some(
+        (c) => c.includes("Roaming\\npm") && c.endsWith("phantombot.cmd"),
+      ),
+    ).toBe(true);
+  });
+
+  test("resolves a .cmd install end-to-end when no .exe exists", () => {
+    const r = resolvePhantombotBinary({
+      platform: "win32",
+      env: {
+        PATH: "C:\\nowhere",
+        APPDATA: "C:\\Users\\dev\\AppData\\Roaming",
+      },
+      exists: (p) => p === "C:\\Users\\dev\\AppData\\Roaming\\npm\\phantombot.cmd",
+    });
+    expect(r?.source).toBe("install-location");
+    expect(r?.path.endsWith("phantombot.cmd")).toBe(true);
   });
 });
 

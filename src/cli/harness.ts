@@ -61,10 +61,28 @@ export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
 /**
  * The official Pi installer invocation — user-space, no sudo. Returned as an
  * argv array (not a shell string) so callers spawn it explicitly; it is pure
- * and unit-tested so the wizard's shell-out stays a thin wrapper. The installer
- * itself (pi.dev/install.sh) runs Pi's own onboarding into the user prefix.
+ * and unit-tested so the wizard's shell-out stays a thin wrapper.
+ *
+ * Platform-aware (issue #269): POSIX runs Pi's shell installer
+ * (pi.dev/install.sh) via `sh`, but on Windows there is no `sh` and that path
+ * either fails outright or, if Git Bash is present, installs a POSIX layout the
+ * Windows runtime can't launch. Windows instead runs Pi's PowerShell installer
+ * (pi.dev/install.ps1) through `powershell`. The `platform` arg defaults to the
+ * host but is injectable so both branches stay unit-tested on a single OS.
  */
-export function piInstallCommand(): string[] {
+export function piInstallCommand(
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform === "win32") {
+    return [
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "irm https://pi.dev/install.ps1 | iex",
+    ];
+  }
   return ["sh", "-c", "curl -fsSL https://pi.dev/install.sh | sh"];
 }
 

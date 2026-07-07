@@ -339,9 +339,22 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
   const args = ["acp"];
   if (options.persona) args.push("--persona", options.persona);
 
+  // On Windows a `.cmd`/`.bat` shim (e.g. an npm-global phantombot) cannot be
+  // spawned directly — Node throws EINVAL unless it goes through a shell. A
+  // native `phantombot.exe` runs fine with shell:false. Detect the shim by
+  // extension and only opt into the shell for it. (Args here are a fixed verb
+  // plus a simple persona id, so shell quoting is not a concern.)
+  const isWindows = process.platform === "win32";
+  const isShim = isWindows && /\.(cmd|bat)$/i.test(bin);
+
   const child = spawn(bin, args, {
     cwd: options.cwd,
     stdio: ["pipe", "pipe", "pipe"],
+    // Run `.cmd`/`.bat` shims via cmd.exe (required); native `.exe` stays direct.
+    shell: isShim,
+    // Suppress the console window Windows opens for the ACP subprocess and any
+    // tool subprocess it spawns. No-op on POSIX.
+    windowsHide: true,
     // Inherit env so phantombot finds its config/secrets exactly as on a TTY —
     // but under a STRICT SNAP (Ubuntu App Center VS Code) `$HOME` is redirected
     // into the snap sandbox, whose persona/config store is empty, so plain

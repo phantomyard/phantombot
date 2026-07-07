@@ -14,11 +14,27 @@ describe("Pi-default wizard wiring", () => {
     expect(SUPPORTED_HARNESSES[0]).toBe("pi");
   });
 
-  test("piInstallCommand is the official user-space installer", () => {
-    expect(piInstallCommand()).toEqual([
+  test("piInstallCommand is the official user-space installer (POSIX)", () => {
+    expect(piInstallCommand("linux")).toEqual([
       "sh",
       "-c",
       "curl -fsSL https://pi.dev/install.sh | sh",
+    ]);
+    expect(piInstallCommand("darwin")).toEqual([
+      "sh",
+      "-c",
+      "curl -fsSL https://pi.dev/install.sh | sh",
+    ]);
+  });
+
+  test("piInstallCommand uses the PowerShell installer on Windows (#269)", () => {
+    expect(piInstallCommand("win32")).toEqual([
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "irm https://pi.dev/install.ps1 | iex",
     ]);
   });
 });
