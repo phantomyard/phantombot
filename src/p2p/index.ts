@@ -10,6 +10,7 @@ import { log } from "../lib/logger.ts";
 import type { P2PSettings } from "../config.ts";
 import type { RelayPool } from "../channels/phantomchat/transport.ts";
 import { buildCapabilityEvent, publishCapability } from "./capability.ts";
+import { installIceErrorGuard } from "./iceErrorGuard.ts";
 import { LocalBridge } from "./localBridge.ts";
 import { P2PNode } from "./node.ts";
 import { NostrSignaling } from "./signaling.ts";
@@ -108,6 +109,10 @@ export interface StartP2PNodeInput {
  * is caught here, never inside a pushed Promise.
  */
 export function startP2PNode(input: StartP2PNodeInput): Promise<void> | null {
+  // werift's ICE UDP sockets throw benign uncaught ECONNREFUSED/EHOSTUNREACH on
+  // dead candidate probes, which would crash-loop the daemon mid-handshake.
+  // Install the scoped guard before any peer connection can open a socket.
+  installIceErrorGuard();
   try {
     input.node.start(); // synchronous; throws if a fixed loopback port is in use
   } catch (e) {
