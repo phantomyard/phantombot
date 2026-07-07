@@ -131,6 +131,22 @@ export class PeerConnection {
     this.channel = ch;
     ch.onMessage.subscribe((msg) => {
       const text = typeof msg === "string" ? msg : Buffer.from(msg).toString("utf8");
+      // Mesh keepalive control frames. The PWA's mesh-manager sends `PING` every
+      // 30s and tears the channel down if no `PONG` returns within 90s. These are
+      // NOT gift-wrap frames — answer `PING` on this same channel and never
+      // surface a control frame to the bridge (broadcasting it would both leak a
+      // bogus "message" to local PWAs AND leave the ping unanswered → the peer
+      // kills a perfectly healthy channel on the 90s clock). Swallow stray `PONG`
+      // too (we don't send `PING`, but a duplicate must not be parsed as a frame).
+      if (text === "PING") {
+        try {
+          ch.send("PONG");
+        } catch (err) {
+          log.debug(`[p2p] PONG reply failed for ${this.short()}: ${String(err)}`);
+        }
+        return;
+      }
+      if (text === "PONG") return;
       try {
         this.onFrame(text);
       } catch (err) {

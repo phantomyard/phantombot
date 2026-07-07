@@ -86,6 +86,13 @@ export class P2PNode {
   private readonly outbox = new Map<string, string[]>();
   /** Peers we've already kicked into negotiating (offer sent / nudge sent). */
   private readonly negotiating = new Set<string>();
+  /**
+   * The SDP of the last offer we accepted per peer. An inbound offer starts a
+   * NEW WebRTC session, so a peer that already exists must be rebuilt (its old
+   * transport belongs to a dead session). We dedup by SDP so a relay re-delivery
+   * of the SAME offer doesn't tear down a connection we just built from it.
+   */
+  private readonly lastOfferSdp = new Map<string, string>();
   private started = false;
 
   constructor(deps: P2PNodeDeps) {
@@ -184,6 +191,28 @@ export class P2PNode {
         this.kickstart(senderHex, peer);
       }
       return;
+    }
+    if (msg.t === "offer") {
+      const prevSdp = this.lastOfferSdp.get(senderHex);
+      if (prevSdp === msg.sdp) {
+        // Exact-duplicate offer (relay re-delivery) — don't churn the connection
+        // we already built from it.
+        log.info(`[p2p] duplicate offer from ${senderHex.slice(0, 8)} — ignoring`);
+        return;
+      }
+      // A DIFFERENT offer after a previous one = the peer restarted its WebRTC
+      // session with brand-new ICE/DTLS credentials. Any peer we still hold
+      // belongs to the dead session; feeding this offer into it can't revive the
+      // transport — it stalls. Rebuild on a clean connection. (On the FIRST offer
+      // — prevSdp undefined — we do NOT rebuild: an existing peer here was just
+      // created to buffer early-arriving candidates, and tearing it down would
+      // drop those candidates. Feed the offer straight into it instead.)
+      const isNewSession = prevSdp !== undefined;
+      this.lastOfferSdp.set(senderHex, msg.sdp);
+      if (isNewSession && this.peers.has(senderHex)) {
+        log.info(`[p2p] new offer from ${senderHex.slice(0, 8)} — rebuilding peer`);
+        this.dropPeer(senderHex);
+      }
     }
     const peer = this.getOrCreatePeer(senderHex);
     // Receiving an offer/answer/candidate means we're actively negotiating, so
