@@ -93,14 +93,19 @@ export function phantombotAgentServerBlock(binaryPath: string): {
 /**
  * Resolve the default Zed settings.json path.
  *
- * Zed reads its user settings from `~/.config/zed/settings.json` on EVERY
- * platform — including macOS (that's the file `⌘,` opens). The earlier
+ * On macOS/Linux Zed reads its user settings from `~/.config/zed/settings.json`
+ * (that's the file `⌘,` opens, even on macOS). The earlier
  * `~/Library/Application Support/Zed/settings.json` branch was wrong: the
  * registration landed in a file Zed never reads, so the agent silently never
- * appeared in Zed's External Agents list on Macs. We honour XDG_CONFIG_HOME
- * when set, falling back to ~/.config otherwise.
+ * appeared in Zed's External Agents list on Macs. On WINDOWS, Zed instead reads
+ * `%APPDATA%\Zed\settings.json`, so `~/.config` there hits the same silent-miss
+ * failure. We branch on win32 and honour XDG_CONFIG_HOME on the POSIX side.
  */
 export function defaultZedSettingsPath(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+    return join(appData, "Zed", "settings.json");
+  }
   const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(xdg, "zed", "settings.json");
 }

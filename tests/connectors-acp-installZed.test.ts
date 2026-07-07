@@ -48,20 +48,47 @@ describe("defaultZedSettingsPath", () => {
     else process.env.XDG_CONFIG_HOME = saved;
   });
 
-  test("resolves under ~/.config/zed on every platform (incl. macOS)", () => {
+  test("resolves under ~/.config/zed on macOS/Linux", () => {
+    if (process.platform === "win32") return; // POSIX-only assertion
     delete process.env.XDG_CONFIG_HOME;
     const p = defaultZedSettingsPath();
     // The macOS bug was returning Library/Application Support — Zed never reads
-    // that. It must be the .config/zed path everywhere.
+    // that. It must be the .config/zed path on POSIX.
     expect(p.endsWith(join(".config", "zed", "settings.json"))).toBe(true);
     expect(p).not.toContain("Application Support");
   });
 
-  test("honours XDG_CONFIG_HOME", () => {
+  test("honours XDG_CONFIG_HOME on POSIX", () => {
+    if (process.platform === "win32") return;
     process.env.XDG_CONFIG_HOME = "/tmp/xdg-test";
     expect(defaultZedSettingsPath()).toBe(
       join("/tmp/xdg-test", "zed", "settings.json"),
     );
+  });
+
+  test("resolves under %APPDATA%\\Zed on Windows (never ~/.config)", () => {
+    // Zed on Windows reads %APPDATA%\Zed\settings.json; ~/.config would be a
+    // file Zed never reads (silent-miss). Stub process.platform + APPDATA so the
+    // win32 branch is exercised even when the suite runs on Linux/macOS.
+    const realPlatform = process.platform;
+    const savedAppData = process.env.APPDATA;
+    try {
+      Object.defineProperty(process, "platform", {
+        value: "win32",
+        configurable: true,
+      });
+      process.env.APPDATA = "C:\\Users\\test\\AppData\\Roaming";
+      const p = defaultZedSettingsPath();
+      expect(p).toBe(join("C:\\Users\\test\\AppData\\Roaming", "Zed", "settings.json"));
+      expect(p).not.toContain(".config");
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: realPlatform,
+        configurable: true,
+      });
+      if (savedAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = savedAppData;
+    }
   });
 });
 
