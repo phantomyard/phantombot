@@ -4,6 +4,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import type { Config } from "../config.ts";
 import { log } from "./logger.ts";
 import { saveHarnessBins } from "../state.ts";
+import { recordHarnessBinDirs } from "./processGroup.ts";
 import type { WriteSink } from "./io.ts";
 
 export type KnownHarnessId = "claude" | "pi" | "gemini" | "codex";
@@ -263,6 +264,11 @@ export async function resolveHarnessBinsForConfig(
     ? await opts.check(config)
     : await checkConfiguredHarnesses(config);
   const resolved = resolvedHarnessBins(checks);
+  // Make the resolved harness dirs available on every harness child's PATH so
+  // the agent's Bash tool can invoke pi/claude/gemini/codex by bare name even
+  // under a narrow launcher PATH (Windows machine-PATH-only Scheduled Task).
+  // Retires the by-hand machine-PATH band-aid. See processGroup.harnessBinDirs.
+  recordHarnessBinDirs(Object.values(resolved));
   let next = config;
   if (Object.keys(resolved).length > 0) {
     if (opts.persist !== false) await saveHarnessBins(resolved);

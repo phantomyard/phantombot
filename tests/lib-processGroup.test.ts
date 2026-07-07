@@ -12,13 +12,16 @@
  * ability to clean up after wedged subprocesses.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { delimiter, dirname } from "node:path";
 import {
   killProcessGroup,
   spawnInNewSession,
   withCommandDirOnPath,
   withPhantombotBinDirOnPath,
+  withHarnessBinDirsOnPath,
+  recordHarnessBinDirs,
+  clearHarnessBinDirs,
 } from "../src/lib/processGroup.ts";
 
 // The spawn/kill tests below drive real POSIX subprocesses (`sleep`, `sh -c`,
@@ -329,6 +332,62 @@ describe("withPhantombotBinDirOnPath — CLI self-call resolution", () => {
       expect(out).not.toBe(env);
       expect(env.PATH).toBe("/usr/bin");
     });
+  });
+});
+
+// Cross-platform pure-string tests: absolute leading-slash paths, host
+// delimiter/dirname. The registry is process-wide, so every case clears it.
+describe("withHarnessBinDirsOnPath — sibling harness resolution", () => {
+  // Registry is process-wide and other suites (resolveHarnessBinsForConfig)
+  // may have populated it — clear before AND after each case for isolation.
+  beforeEach(() => clearHarnessBinDirs());
+  afterEach(() => clearHarnessBinDirs());
+
+  test("no-op when nothing recorded (same reference)", () => {
+    const env = { PATH: "/usr/bin" };
+    expect(withHarnessBinDirsOnPath(env)).toBe(env);
+  });
+
+  test("prepends recorded harness dirs, de-duplicating", () => {
+    recordHarnessBinDirs([
+      "/home/u/.bun/bin/pi",
+      "/home/u/.bun/bin/claude", // same dir as pi → one entry
+      "/opt/gemini/bin/gemini",
+    ]);
+    const out = withHarnessBinDirsOnPath({ PATH: "/usr/bin" });
+    const parts = (out.PATH ?? "").split(delimiter);
+    expect(parts).toContain("/home/u/.bun/bin");
+    expect(parts).toContain("/opt/gemini/bin");
+    expect(parts).toContain("/usr/bin");
+    // .bun/bin appears exactly once despite two bins living there
+    expect(parts.filter((p) => p === "/home/u/.bun/bin")).toHaveLength(1);
+  });
+
+  test("skips dirs already on PATH (the current harness's own dir)", () => {
+    recordHarnessBinDirs(["/home/u/.bun/bin/pi"]);
+    const env = { PATH: ["/home/u/.bun/bin", "/usr/bin"].join(delimiter) };
+    const out = withHarnessBinDirsOnPath(env);
+    expect(out).toBe(env); // already present → untouched, same reference
+  });
+
+  test("ignores bare/relative bins (no meaningful dir)", () => {
+    recordHarnessBinDirs(["pi", "codex", "./local/pi"]);
+    const env = { PATH: "/usr/bin" };
+    expect(withHarnessBinDirsOnPath(env)).toBe(env);
+  });
+
+  test("seeds an empty/absent PATH with the recorded dir", () => {
+    recordHarnessBinDirs(["/opt/pi/bin/pi"]);
+    expect(withHarnessBinDirsOnPath({}).PATH).toBe("/opt/pi/bin");
+    expect(withHarnessBinDirsOnPath({ PATH: "" }).PATH).toBe("/opt/pi/bin");
+  });
+
+  test("never mutates the caller's env object", () => {
+    recordHarnessBinDirs(["/opt/pi/bin/pi"]);
+    const env = { PATH: "/usr/bin" };
+    const out = withHarnessBinDirsOnPath(env);
+    expect(out).not.toBe(env);
+    expect(env.PATH).toBe("/usr/bin");
   });
 });
 

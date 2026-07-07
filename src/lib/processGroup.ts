@@ -142,6 +142,71 @@ export function withPhantombotBinDirOnPath(
 }
 
 /**
+ * Process-wide set of directories that hold RESOLVED harness binaries
+ * (`pi`, `claude`, `gemini`, `codex`), recorded by `resolveHarnessBinsForConfig`
+ * at each entry point (run / nightly / tick / ask / acp) the moment it resolves
+ * every configured harness to an absolute path.
+ *
+ * Why this exists (the Windows "pi/claude not on the agent's PATH" gap,
+ * 2026-07-07): `withCommandDirOnPath` only puts the CURRENTLY-spawning harness's
+ * own dir on the child PATH — enough for that harness's shebang, but not enough
+ * for the agent's Bash tool to invoke a *sibling* harness by bare name
+ * (`pi ...`, `claude ...`, a delegate, a user smoke-test). phantombot resolves
+ * each harness to an absolute path and spawns it directly, so it never needed
+ * the harness dirs on PATH itself — but the shells it spawns do, and on Windows
+ * the Scheduled-Task daemon inherits only the machine PATH (the pi-node / npm
+ * dirs live on the user PATH). That's the band-aid we had to add to the machine
+ * PATH by hand; recording the dirs here makes it travel with the code.
+ *
+ * Populated once per process (bins are resolved at startup); a Set de-dupes and
+ * keeps the common current-harness dir from piling up. Only absolute bins
+ * contribute a dir — a bare, unresolved name has no meaningful directory.
+ */
+const harnessBinDirs = new Set<string>();
+
+/**
+ * Record the directories of resolved harness binaries so `spawnInNewSession`
+ * can prepend them to every harness child's PATH. Called by
+ * `resolveHarnessBinsForConfig` with the absolute bins it just resolved.
+ * Bare/relative names are ignored (no meaningful dir).
+ */
+export function recordHarnessBinDirs(bins: Iterable<string>): void {
+  for (const bin of bins) {
+    if (bin && isAbsolute(bin)) harnessBinDirs.add(dirname(bin));
+  }
+}
+
+/** Test-only: reset the recorded harness dirs between cases. */
+export function clearHarnessBinDirs(): void {
+  harnessBinDirs.clear();
+}
+
+/**
+ * Prepend every recorded harness bin dir (see `harnessBinDirs`) to the child's
+ * PATH so the agent's Bash tool can invoke `pi`/`claude`/`gemini`/`codex` by
+ * bare name regardless of how narrow the launcher's PATH was. Dirs already on
+ * PATH (e.g. the current harness's own dir, added by `withCommandDirOnPath`) are
+ * skipped, so nothing is duplicated. Returns a FRESH object; never mutates the
+ * caller's env. No-op when nothing was recorded or all dirs are already present.
+ *
+ * Exported for testing.
+ */
+export function withHarnessBinDirsOnPath(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  if (harnessBinDirs.size === 0) return env;
+  const currentPath = env.PATH ?? "";
+  const present = new Set(currentPath.split(delimiter));
+  const missing = [...harnessBinDirs].filter((dir) => !present.has(dir));
+  if (missing.length === 0) return env;
+  const prefix = missing.join(delimiter);
+  return {
+    ...env,
+    PATH: currentPath ? `${prefix}${delimiter}${currentPath}` : prefix,
+  };
+}
+
+/**
  * Spawn a subprocess as the leader of a fresh process group/session.
  *
  * Identical to `Bun.spawn` except the resulting process's `pid` doubles
@@ -171,11 +236,16 @@ export function spawnInNewSession<
   //     agent's Bash tool can call back into the `phantombot` CLI even when the
   //     daemon was launched with a narrow PATH (Windows Scheduled Task /
   //     machine-PATH-only, "phantombot: command not found", 2026-07-07).
+  //  3. withHarnessBinDirsOnPath — the dirs of every RESOLVED harness binary
+  //     (pi/claude/gemini/codex), so the agent's Bash tool can invoke a sibling
+  //     harness by bare name too, retiring the machine-PATH band-aid (same day).
   const env = opts.env
-    ? withPhantombotBinDirOnPath(
-        withCommandDirOnPath(
-          cmd[0]!,
-          opts.env as Record<string, string | undefined>,
+    ? withHarnessBinDirsOnPath(
+        withPhantombotBinDirOnPath(
+          withCommandDirOnPath(
+            cmd[0]!,
+            opts.env as Record<string, string | undefined>,
+          ),
         ),
       )
     : opts.env;
