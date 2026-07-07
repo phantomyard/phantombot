@@ -210,6 +210,57 @@ describe("P2PNode routing", () => {
     expect(peerFor(peerHex)!.handled).toEqual([{ t: "offer", sdp: "x" }]);
   });
 
+  test("a re-offer (new session) rebuilds the peer on a clean connection", () => {
+    const us = "f".repeat(64);
+    const peerHex = "a".repeat(64);
+    const { signaling, peers, peerFor } = makeNode(us);
+
+    // First session: offer establishes a peer.
+    signaling.emit(peerHex, { t: "offer", sdp: "session-1" });
+    const first = peerFor(peerHex)!;
+    first.transition("connected");
+    expect(peers.filter((p) => p.peerHex === peerHex)).toHaveLength(1);
+
+    // The peer reconnects with a brand-new offer while the old (zombie) peer is
+    // still "connected" — werift never fired a failure. Must rebuild, not feed
+    // the new-session offer into the dead transport.
+    signaling.emit(peerHex, { t: "offer", sdp: "session-2" });
+    expect(first.closed).toBe(true);
+    const both = peers.filter((p) => p.peerHex === peerHex);
+    expect(both).toHaveLength(2);
+    expect(both[1]!.handled).toEqual([{ t: "offer", sdp: "session-2" }]);
+  });
+
+  test("a duplicate offer (same SDP) is ignored, not rebuilt", () => {
+    const us = "f".repeat(64);
+    const peerHex = "a".repeat(64);
+    const { signaling, peers, peerFor } = makeNode(us);
+
+    signaling.emit(peerHex, { t: "offer", sdp: "same" });
+    const first = peerFor(peerHex)!;
+    signaling.emit(peerHex, { t: "offer", sdp: "same" });
+    // No teardown, no second peer, offer handled exactly once.
+    expect(first.closed).toBe(false);
+    expect(peers.filter((p) => p.peerHex === peerHex)).toHaveLength(1);
+    expect(first.handled).toEqual([{ t: "offer", sdp: "same" }]);
+  });
+
+  test("a candidate arriving before the first offer is not torn down by that offer", () => {
+    const us = "f".repeat(64);
+    const peerHex = "a".repeat(64);
+    const { signaling, peers, peerFor } = makeNode(us);
+
+    // Relay reordering: candidate lands first, creating a buffering peer.
+    signaling.emit(peerHex, { t: "candidate", candidate: "cand", sdpMid: null, sdpMLineIndex: null });
+    const peer = peerFor(peerHex)!;
+    // The FIRST offer must feed this same peer (preserving buffered candidates),
+    // NOT rebuild it.
+    signaling.emit(peerHex, { t: "offer", sdp: "session-1" });
+    expect(peer.closed).toBe(false);
+    expect(peers.filter((p) => p.peerHex === peerHex)).toHaveLength(1);
+    expect(peer.handled.map((m) => m.t)).toEqual(["candidate", "offer"]);
+  });
+
   test("inbound peer frame is broadcast to the local PWA", () => {
     const us = "a".repeat(64);
     const peerHex = "f".repeat(64);

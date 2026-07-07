@@ -10,6 +10,7 @@ import { log } from "../lib/logger.ts";
 import type { P2PSettings } from "../config.ts";
 import type { RelayPool } from "../channels/phantomchat/transport.ts";
 import { buildCapabilityEvent, publishCapability } from "./capability.ts";
+import { installIceErrorGuard } from "./iceErrorGuard.ts";
 import { LocalBridge } from "./localBridge.ts";
 import { P2PNode } from "./node.ts";
 import { NostrSignaling } from "./signaling.ts";
@@ -53,11 +54,11 @@ export function buildP2PNode(deps: BuildP2PNodeDeps): P2PNode {
  * from startup — a relay hiccup must never delay the node coming up.
  *
  * `boundPort` is the node's ACTUAL bound loopback port (`node.boundPort`), read
- * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real port,
- * self-encrypted, rather than the configured request.
+ * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real bound
+ * port (plaintext) rather than the configured request.
  */
 export function advertiseP2PCapability(deps: BuildP2PNodeDeps, boundPort: number): void {
-  const event = buildCapabilityEvent(deps.secretKey, deps.publicKeyHex, boundPort);
+  const event = buildCapabilityEvent(deps.secretKey, boundPort);
   void publishCapability(deps.pool, deps.relays, event).catch((err) => {
     log.debug(`[p2p] capability advertise failed: ${String(err)}`);
   });
@@ -108,6 +109,10 @@ export interface StartP2PNodeInput {
  * is caught here, never inside a pushed Promise.
  */
 export function startP2PNode(input: StartP2PNodeInput): Promise<void> | null {
+  // werift's ICE UDP sockets throw benign uncaught ECONNREFUSED/EHOSTUNREACH on
+  // dead candidate probes, which would crash-loop the daemon mid-handshake.
+  // Install the scoped guard before any peer connection can open a socket.
+  installIceErrorGuard();
   try {
     input.node.start(); // synchronous; throws if a fixed loopback port is in use
   } catch (e) {

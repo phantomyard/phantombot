@@ -91,6 +91,44 @@ describe("werift PeerConnection round-trip", () => {
     20_000,
   );
 
+  test(
+    "PING/PONG keepalive control frames are never surfaced as messages",
+    async () => {
+      const bFrames: string[] = [];
+      const aFrames: string[] = [];
+      const { a, b } = connectPair(
+        (f) => aFrames.push(f),
+        (f) => bFrames.push(f),
+      );
+
+      await a.start();
+      const deadline = Date.now() + 12_000;
+      while (!a.isReady() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(a.isReady()).toBe(true);
+
+      // The PWA's mesh keepalive: PING must be intercepted + answered, never
+      // handed to the bridge as a bogus "message". PONG likewise swallowed.
+      a.send("PING");
+      a.send("PONG");
+      // A real gift-wrap frame after the control frames must still arrive.
+      a.send(JSON.stringify(["EVENT", { real: true }]));
+
+      const start = Date.now();
+      while (bFrames.length === 0 && Date.now() - start < 5_000) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      // Exactly the real frame reached B — no PING, no PONG.
+      expect(bFrames).toEqual([JSON.stringify(["EVENT", { real: true }])]);
+      expect(aFrames).toEqual([]); // B's PONG reply was swallowed on A too
+
+      a.close();
+      b.close();
+    },
+    20_000,
+  );
+
   test("send returns false before the channel is open", () => {
     const pc = new PeerConnection({
       peerHex: "z",

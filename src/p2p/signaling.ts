@@ -186,6 +186,9 @@ export class NostrSignaling implements Signaling {
     this.sub = this.pool.subscribeMany(this.relays, filter, {
       onevent: (event) => this.ingest(event),
     });
+    log.info(
+      `[p2p] signaling subscribed (kind ${NOSTR_KIND_P2P_SIGNAL}, self ${this.ourPubHex.slice(0, 8)}, ${this.relays.length} relays)`,
+    );
   }
 
   stop(): void {
