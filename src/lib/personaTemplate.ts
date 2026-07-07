@@ -218,7 +218,7 @@ export function generateIdentityStub(name: string): string {
 -->
 
 You are ${name}, _<one line: what you are and what you do — e.g. "a personal
-assistant who manages Andrew's admin, finances, and home">_.
+assistant who manages your principal's admin, finances, and home">_.
 
 ## Role
 
