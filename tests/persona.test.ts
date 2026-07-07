@@ -51,20 +51,28 @@ describe("loadPersona — identity file naming", () => {
     expect(p.identitySource).toBe("IDENTITY.md");
   });
 
-  test("BOOT.md wins over SOUL.md when both exist", async () => {
+  test("BOOT.md + SOUL.md are combined (facts first, then soul)", async () => {
     await write("BOOT.md", "from BOOT");
     await write("SOUL.md", "from SOUL");
     const p = await loadPersona(agentDir);
-    expect(p.boot).toBe("from BOOT");
-    expect(p.identitySource).toBe("BOOT.md");
+    expect(p.boot).toBe("from BOOT\n\nfrom SOUL");
+    expect(p.identitySource).toBe("BOOT.md+SOUL.md");
   });
 
-  test("SOUL.md wins over IDENTITY.md when BOOT.md is absent", async () => {
+  test("IDENTITY.md + SOUL.md are combined (facts first, then soul)", async () => {
     await write("SOUL.md", "from SOUL");
     await write("IDENTITY.md", "from IDENTITY");
     const p = await loadPersona(agentDir);
-    expect(p.boot).toBe("from SOUL");
-    expect(p.identitySource).toBe("SOUL.md");
+    expect(p.boot).toBe("from IDENTITY\n\nfrom SOUL");
+    expect(p.identitySource).toBe("IDENTITY.md+SOUL.md");
+  });
+
+  test("BOOT.md is the facts file, taking precedence over IDENTITY.md", async () => {
+    await write("BOOT.md", "from BOOT");
+    await write("IDENTITY.md", "from IDENTITY");
+    const p = await loadPersona(agentDir);
+    expect(p.boot).toBe("from BOOT");
+    expect(p.identitySource).toBe("BOOT.md");
   });
 
   test("throws PersonaNotFoundError when no identity file exists", async () => {

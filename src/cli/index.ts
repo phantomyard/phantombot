@@ -21,6 +21,7 @@ import { defineCommand } from "citty";
 import { VERSION } from "../version.ts";
 import askCmd from "./ask.ts";
 import acpCmd from "./acp.ts";
+import backfillIdentityCmd from "./backfill-identity.ts";
 import personaCmd from "./persona.ts";
 import telegramCmd from "./telegram.ts";
 import phantomchatCmd from "./phantomchat.ts";
@@ -57,6 +58,7 @@ export const mainCommand = defineCommand({
   },
   subCommands: {
     persona: personaCmd,
+    "backfill-identity": backfillIdentityCmd,
     telegram: telegramCmd,
     phantomchat: phantomchatCmd,
     harness: harnessCmd,

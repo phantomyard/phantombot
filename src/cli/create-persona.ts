@@ -2,8 +2,9 @@
  * Persona creation flow — used by `phantombot persona` (the consolidated
  * subcommand) when the user picks "Create a new persona" from its menu.
  *
- * Asks a handful of questions, generates BOOT.md (and a placeholder
- * MEMORY.md), and optionally sets the new persona as default.
+ * Asks a handful of questions, generates SOUL.md (shared behaviour anchor)
+ * + IDENTITY.md (per-phantom facts) and a placeholder MEMORY.md, and
+ * optionally sets the new persona as default.
  *
  * Side effects live in `applyPersona`; the prompt flow is in
  * `runCreatePersona`. Tests cover applyPersona with synthetic inputs;
@@ -21,8 +22,9 @@ import * as p from "@clack/prompts";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import {
-  generateBootMd,
+  generateIdentityMd,
   generateMemoryMdPlaceholder,
+  generateSoulMd,
   type PersonaTemplateInput,
   type PersonaTone,
 } from "../lib/personaTemplate.ts";
@@ -86,7 +88,11 @@ export async function applyPersona(
     archived = await archivePersona(config.personasDir, inputs.name);
   }
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "BOOT.md"), generateBootMd(inputs), "utf8");
+  // Split identity: SOUL.md is the shared, character-free behaviour anchor;
+  // IDENTITY.md is the per-phantom "who you are" from the wizard answers.
+  // The loader concatenates them at runtime.
+  await writeFile(join(dir, "SOUL.md"), generateSoulMd(), "utf8");
+  await writeFile(join(dir, "IDENTITY.md"), generateIdentityMd(inputs), "utf8");
   await writeFile(
     join(dir, "MEMORY.md"),
     generateMemoryMdPlaceholder(inputs.name),

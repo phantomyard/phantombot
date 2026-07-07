@@ -1,13 +1,29 @@
 /**
  * Read persona files from an agent directory.
  *
- * Phantombot accepts both naming conventions in use across the OpenClaw
- * ecosystem so personas can move freely between systems:
+ * Phantombot accepts the naming conventions in use across the OpenClaw
+ * ecosystem so personas can move freely between systems.
  *
- *   identity (required) — first match wins:
- *     BOOT.md     (Robbie convention; original phantombot placeholders use this)
- *     SOUL.md     (modern OpenClaw)
- *     IDENTITY.md (modern OpenClaw)
+ * The identity content the harness sees is composed of up to two parts,
+ * concatenated in this order when both are present:
+ *
+ *   SOUL.md      — the shared, character-free behaviour anchor ("how you
+ *                  operate": conciseness, persistence, trust, voice). Every
+ *                  modern persona gets one.
+ *   facts        — the per-phantom "who you are", first match wins:
+ *                    BOOT.md     (Robbie / original-phantombot convention:
+ *                                 a single combined identity+behaviour file)
+ *                    IDENTITY.md (modern split convention)
+ *
+ * Backward compatibility:
+ *   - A persona with only BOOT.md loads exactly as before (BOOT.md is the
+ *     facts file; no SOUL.md to prepend).
+ *   - A persona with only SOUL.md (e.g. Robbie today) loads SOUL.md as its
+ *     whole identity.
+ *   - A persona with SOUL.md + IDENTITY.md (or SOUL.md + BOOT.md) gets BOTH,
+ *     concatenated — this is the split the onboarding + backfill produce.
+ *   - At least one of SOUL.md / BOOT.md / IDENTITY.md must exist, else
+ *     PersonaNotFoundError.
  *
  *   persistent memory (optional):
  *     MEMORY.md
@@ -24,12 +40,20 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const IDENTITY_FILES = ["BOOT.md", "SOUL.md", "IDENTITY.md"] as const;
+const SOUL_FILE = "SOUL.md" as const;
+/** Per-phantom "who you are" file — first match wins. */
+const FACTS_FILES = ["BOOT.md", "IDENTITY.md"] as const;
+/** All files that can supply identity content (for the not-found message). */
+const IDENTITY_FILES = [SOUL_FILE, ...FACTS_FILES] as const;
 const MEMORY_FILES = ["MEMORY.md"] as const;
 const TOOLS_FILES = ["tools.md", "AGENTS.md"] as const;
 
 export interface PersonaFiles {
-  /** Identity content (from BOOT.md / SOUL.md / IDENTITY.md). */
+  /**
+   * Identity content shown to the harness. Concatenation of the per-phantom
+   * facts file (BOOT.md / IDENTITY.md) followed by SOUL.md, whichever are
+   * present.
+   */
   boot: string;
   /** Always-in-context notes (from MEMORY.md). */
   memory?: string;
@@ -54,15 +78,27 @@ export class PersonaNotFoundError extends Error {
 }
 
 export async function loadPersona(agentDir: string): Promise<PersonaFiles> {
-  const identity = await tryReadFirst(agentDir, IDENTITY_FILES);
-  if (!identity) throw new PersonaNotFoundError(agentDir);
+  // Per-phantom "who you are" (BOOT.md legacy-combined, or IDENTITY.md).
+  const facts = await tryReadFirst(agentDir, FACTS_FILES);
+  // Shared "how you operate" anchor.
+  const soul = await tryReadFirst(agentDir, [SOUL_FILE]);
+
+  if (!facts && !soul) throw new PersonaNotFoundError(agentDir);
+
+  // Facts first (who), then soul (how). Either may be absent.
+  const parts = [facts?.content, soul?.content].filter(
+    (c): c is string => typeof c === "string",
+  );
+  const sources = [facts?.source, soul?.source].filter(
+    (s): s is string => typeof s === "string",
+  );
 
   const memory = await tryReadFirst(agentDir, MEMORY_FILES);
   const tools = await tryReadFirst(agentDir, TOOLS_FILES);
 
   return {
-    boot: identity.content,
-    identitySource: identity.source,
+    boot: parts.join("\n\n"),
+    identitySource: sources.join("+"),
     memory: memory?.content,
     memorySource: memory?.source,
     tools: tools?.content,

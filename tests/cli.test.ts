@@ -22,6 +22,7 @@ describe("phantombot CLI dispatcher", () => {
     expect(names).toEqual([
       "acp",
       "ask",
+      "backfill-identity",
       "doctor",
       "embedding",
       "env",

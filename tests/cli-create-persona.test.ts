@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +46,7 @@ afterEach(async () => {
 });
 
 describe("applyPersona", () => {
-  test("writes BOOT.md and MEMORY.md to the personas dir", async () => {
+  test("writes SOUL.md, IDENTITY.md and MEMORY.md to the personas dir", async () => {
     const r = await applyPersona(config, {
       name: "robbie",
       identity: "a curious assistant",
@@ -56,12 +57,20 @@ describe("applyPersona", () => {
       setDefault: false,
     });
     expect(r.dir).toBe(join(config.personasDir, "robbie"));
-    const boot = await readFile(join(r.dir, "BOOT.md"), "utf8");
+    const soul = await readFile(join(r.dir, "SOUL.md"), "utf8");
+    const identity = await readFile(join(r.dir, "IDENTITY.md"), "utf8");
     const mem = await readFile(join(r.dir, "MEMORY.md"), "utf8");
-    expect(boot).toContain("# robbie");
-    expect(boot).toContain("a curious assistant");
-    expect(boot).toContain("Tone: **blunt**");
-    expect(boot).toContain("- Coding");
+    // SOUL is the shared, character-free behaviour anchor.
+    expect(soul).toContain("# Soul");
+    expect(soul).toContain("be compact");
+    expect(soul).not.toContain("robbie");
+    // IDENTITY carries the per-phantom facts from the wizard answers.
+    expect(identity).toContain("# robbie");
+    expect(identity).toContain("a curious assistant");
+    expect(identity).toContain("Tone: **blunt**");
+    expect(identity).toContain("- Coding");
+    // No legacy combined BOOT.md is written for new personas.
+    expect(existsSync(join(r.dir, "BOOT.md"))).toBe(false);
     expect(mem).toContain("robbie — persistent memory");
   });
 
