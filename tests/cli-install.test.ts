@@ -190,10 +190,11 @@ describe("runInstall (linux/systemd)", () => {
       "--user enable phantombot-tick.timer",
       "--user start phantombot-tick.timer",
     ]);
-    // The hint text uses the host's restartCommand/logsCommand, so it'll
-    // be journalctl on linux CI; match loosely.
-    expect(out.text).toContain("view logs:");
-    expect(out.text).toContain("restart:");
+    // The trailing manage block advertises the clean subcommands (identical
+    // on every OS), not the raw systemctl/schtasks incantations.
+    expect(out.text).toContain("manage phantombot:");
+    expect(out.text).toContain("phantombot restart");
+    expect(out.text).toContain("phantombot logs");
     // No auto-set message when env was already set.
     expect(out.text).not.toContain("auto-detected");
   });

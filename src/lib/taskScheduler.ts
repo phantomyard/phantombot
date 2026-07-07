@@ -368,6 +368,108 @@ export class BunSchtasksRunner implements SchtasksRunner {
   }
 }
 
+/** A running Windows process, as reported by the process lister. */
+export interface RunningProcess {
+  pid: number;
+  commandLine: string;
+}
+
+/**
+ * Enumerate + terminate Windows processes. Abstracted behind an interface so
+ * `stop()`/`restart()` are unit-testable with a fake — the real backend shells
+ * out to PowerShell (CIM) and taskkill.
+ */
+export interface ProcessManager {
+  /** All running processes whose image name equals `image` (e.g. phantombot.exe). */
+  listByImage(image: string): Promise<RunningProcess[]>;
+  /** Force-terminate a single process by PID (best-effort; never throws). */
+  kill(pid: number): Promise<void>;
+}
+
+/**
+ * Is this command line the always-on daemon (`phantombot run`)?
+ *
+ * `schtasks /End` is unreliable at killing phantombot's detached daemon — the
+ * scheduler loses track of the real PID, so `/End` no-ops and the process
+ * survives a "stop"/"restart". To finish the job we enumerate phantombot.exe
+ * processes and kill the daemon directly — but we must NEVER kill the CLI
+ * invoker that's running `stop`/`restart` (itself a phantombot.exe). The daemon
+ * is uniquely identified by its first argument being exactly `run`; the CLI
+ * invoker's first arg is `stop`/`restart`, so it's naturally excluded (belt +
+ * braces: callers also skip their own PID).
+ */
+export function isDaemonCommandLine(commandLine: string): boolean {
+  // Strip a leading quoted ("...") or bare (\S+) executable token, then take
+  // the first remaining whitespace-separated argument.
+  const m = commandLine.match(/^\s*(?:"[^"]*"|\S+)\s+(.*)$/);
+  const firstArg = (m?.[1] ?? "").trim().split(/\s+/)[0] ?? "";
+  return firstArg.toLowerCase() === "run";
+}
+
+export class BunProcessManager implements ProcessManager {
+  async listByImage(image: string): Promise<RunningProcess[]> {
+    // CIM gives us the full CommandLine (tasklist does not), which we need to
+    // tell the daemon (`... run`) apart from the CLI invoker (`... restart`).
+    const script =
+      `Get-CimInstance Win32_Process -Filter "Name='${image}'" | ` +
+      `Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`;
+    try {
+      const proc = Bun.spawn(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
+      );
+      const stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      const trimmed = stdout.trim();
+      if (!trimmed) return [];
+      const parsed = JSON.parse(trimmed);
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return rows
+        .map((r) => ({
+          pid: Number(r?.ProcessId),
+          commandLine: String(r?.CommandLine ?? ""),
+        }))
+        .filter((r) => Number.isFinite(r.pid) && r.pid > 0);
+    } catch {
+      // PowerShell missing / JSON malformed → treat as "nothing to kill".
+      return [];
+    }
+  }
+
+  async kill(pid: number): Promise<void> {
+    try {
+      const proc = Bun.spawn(["taskkill", "/F", "/PID", String(pid)], {
+        env: { ...process.env },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      await proc.exited;
+    } catch {
+      // Best-effort: a race where the PID already exited is fine.
+    }
+  }
+}
+
+/**
+ * Kill every stray `phantombot run` daemon reported by the process manager,
+ * skipping the current process (the CLI invoker running stop/restart). This is
+ * the reliable teardown `schtasks /End` fails to guarantee.
+ */
+export async function killDaemonProcesses(
+  pm: ProcessManager,
+  selfPid: number,
+): Promise<number> {
+  const procs = await pm.listByImage("phantombot.exe");
+  let killed = 0;
+  for (const p of procs) {
+    if (p.pid === selfPid) continue;
+    if (!isDaemonCommandLine(p.commandLine)) continue;
+    await pm.kill(p.pid);
+    killed++;
+  }
+  return killed;
+}
+
 /**
  * Write a Task Scheduler XML file. schtasks /Create /XML is picky about
  * encoding: the most broadly-compatible form is UTF-16LE with a BOM matching
@@ -601,8 +703,11 @@ export interface TaskSchedulerServiceControl {
  * isActive=false on any error so callers can treat "task unknown" the same as
  * "not running".
  */
-export function defaultTaskSchedulerServiceControl(): TaskSchedulerServiceControl {
-  const runner = new BunSchtasksRunner();
+export function defaultTaskSchedulerServiceControl(
+  runner: SchtasksRunner = new BunSchtasksRunner(),
+  processManager: ProcessManager = new BunProcessManager(),
+  selfPid: number = process.pid,
+): TaskSchedulerServiceControl {
   return {
     async isActive() {
       // `schtasks /Query /TN <name>` exits 0 when the task is registered —
@@ -622,24 +727,30 @@ export function defaultTaskSchedulerServiceControl(): TaskSchedulerServiceContro
         : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
     },
     async stop() {
-      // /End alone isn't enough: the 1-minute keep-alive TimeTrigger would
-      // relaunch within 60s. Disable the task first so the trigger can't fire,
-      // then end the running instance. /Disable on an already-disabled task is
-      // harmless; /End on a stopped task is harmless.
+      // /End alone isn't enough on two counts: the 1-minute keep-alive
+      // TimeTrigger would relaunch within 60s, AND /End often fails to kill
+      // phantombot's detached daemon at all (the scheduler loses its PID). So:
+      // disable the trigger, /End the task, then kill any surviving `phantombot
+      // run` daemon directly. /Disable on an already-disabled task is harmless;
+      // /End on a stopped task is harmless.
       const r = await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/DISABLE"]);
       await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
+      await killDaemonProcesses(processManager, selfPid);
       return r.exitCode === 0
         ? { ok: true }
         : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
     },
     async restart() {
-      // End any running instance, then start a fresh one — the schtasks
-      // analogue of `systemctl restart`. Re-enable first in case a prior
-      // `stop()` disabled the keep-alive trigger; a restart should always
-      // leave the service running AND supervised. /End on a stopped task is
-      // harmless.
+      // Kill any running instance, then start a fresh one — the schtasks
+      // analogue of `systemctl restart`. Re-enable the keep-alive trigger FIRST
+      // (before killing): if this CLI is itself a descendant of the daemon we're
+      // about to kill, the /Run below never executes — but the re-enabled
+      // 1-minute trigger relaunches the swapped binary within 60s regardless.
+      // /End is best-effort; killDaemonProcesses guarantees the old process is
+      // actually gone so /Run doesn't bounce off the single-instance lock.
       await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
       await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
+      await killDaemonProcesses(processManager, selfPid);
       const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
       return r.exitCode === 0
         ? { ok: true }

@@ -14,14 +14,19 @@ import { rmrf } from "./fixtures/rmrf.ts";
 
 import {
   buildLauncherArguments,
+  defaultTaskSchedulerServiceControl,
   ensureTasksCurrent,
   generateHeartbeatTaskXml,
   generateNightlyTaskXml,
   generatePhantombotTaskXml,
   generateTickTaskXml,
   installPhantombotTasks,
+  isDaemonCommandLine,
+  killDaemonProcesses,
   launcherVbsPath,
   LAUNCHER_VBS,
+  type ProcessManager,
+  type RunningProcess,
   type SchtasksResult,
   type SchtasksRunner,
   taskLogPaths,
@@ -459,5 +464,86 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     });
     expect(r.rewrote).toEqual([]);
     expect(st.created()).toEqual([]);
+  });
+});
+
+describe("isDaemonCommandLine", () => {
+  test("matches the always-on daemon (`... run`)", () => {
+    expect(isDaemonCommandLine(`"${BIN}" run`)).toBe(true);
+    expect(isDaemonCommandLine(`${BIN} run`)).toBe(true);
+    // Case-insensitive, tolerant of trailing redirection text.
+    expect(isDaemonCommandLine(`"${BIN}" RUN 1>>log 2>>err`)).toBe(true);
+  });
+
+  test("does NOT match the CLI invoker (stop/restart/other)", () => {
+    expect(isDaemonCommandLine(`"${BIN}" restart`)).toBe(false);
+    expect(isDaemonCommandLine(`"${BIN}" stop`)).toBe(false);
+    expect(isDaemonCommandLine(`"${BIN}" runner`)).toBe(false); // not a bare `run`
+    expect(isDaemonCommandLine(`"${BIN}"`)).toBe(false); // no args
+    expect(isDaemonCommandLine("")).toBe(false);
+  });
+});
+
+/** A ProcessManager fake: canned process list + records killed PIDs. */
+class FakeProcessManager implements ProcessManager {
+  killed: number[] = [];
+  constructor(private procs: RunningProcess[]) {}
+  async listByImage(): Promise<RunningProcess[]> {
+    return this.procs;
+  }
+  async kill(pid: number): Promise<void> {
+    this.killed.push(pid);
+  }
+}
+
+describe("killDaemonProcesses", () => {
+  test("kills daemon PIDs, skips self and non-daemon processes", async () => {
+    const pm = new FakeProcessManager([
+      { pid: 100, commandLine: `"${BIN}" run` }, // daemon → kill
+      { pid: 200, commandLine: `"${BIN}" restart` }, // CLI invoker → skip
+      { pid: 300, commandLine: `"${BIN}" run` }, // second daemon → kill
+      { pid: 999, commandLine: `"${BIN}" run` }, // self → skip even though daemon
+    ]);
+    const killed = await killDaemonProcesses(pm, 999);
+    expect(pm.killed).toEqual([100, 300]);
+    expect(killed).toBe(2);
+  });
+
+  test("no daemons → nothing killed", async () => {
+    const pm = new FakeProcessManager([
+      { pid: 1, commandLine: `"${BIN}" restart` },
+    ]);
+    expect(await killDaemonProcesses(pm, 999)).toBe(0);
+    expect(pm.killed).toEqual([]);
+  });
+});
+
+describe("service control stop/restart kill the stray daemon", () => {
+  test("stop(): disable + end + kill daemon (not the CLI invoker)", async () => {
+    const st = new FakeSchtasks();
+    const pm = new FakeProcessManager([
+      { pid: 100, commandLine: `"${BIN}" run` },
+      { pid: 555, commandLine: `"${BIN}" stop` }, // this CLI
+    ]);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555);
+    const r = await svc.stop();
+    expect(r.ok).toBe(true);
+    const verbs = st.calls.map((c) => c[0]);
+    expect(verbs).toContain("/Change"); // /DISABLE
+    expect(verbs).toContain("/End");
+    expect(pm.killed).toEqual([100]); // daemon killed, CLI (555) spared
+  });
+
+  test("restart(): enable + end + kill daemon + run", async () => {
+    const st = new FakeSchtasks();
+    const pm = new FakeProcessManager([
+      { pid: 100, commandLine: `"${BIN}" run` },
+    ]);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555);
+    const r = await svc.restart();
+    expect(r.ok).toBe(true);
+    const verbs = st.calls.map((c) => c[0]);
+    expect(verbs).toEqual(["/Change", "/End", "/Run"]);
+    expect(pm.killed).toEqual([100]);
   });
 });

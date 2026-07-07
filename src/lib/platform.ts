@@ -256,15 +256,20 @@ export function logsSpec(
     case "windows": {
       // Get-Content -Wait follows a single file; we tail stdout (the err log
       // is surfaced by the copy-pasteable logsCommand() hint if needed).
+      // Guard on Test-Path first: Get-Content throws a red "Cannot find path"
+      // error if the log doesn't exist yet (e.g. the daemon has never written),
+      // which reads as a crash. Print a friendly line and exit 0 instead.
+      // -LiteralPath so spaces/brackets in the path aren't treated as globs.
       const { out } = taskLogPaths("phantombot");
       const wait = follow ? "-Wait " : "";
+      const ps =
+        `$p='${out.replace(/'/g, "''")}'; ` +
+        `if (-not (Test-Path -LiteralPath $p)) { ` +
+        `Write-Host "no phantombot logs yet at $p"; return }; ` +
+        `Get-Content -LiteralPath $p ${wait}-Tail ${lines}`;
       return {
         cmd: "powershell",
-        args: [
-          "-NoProfile",
-          "-Command",
-          `Get-Content ${wait}-Tail ${lines} "${out}"`,
-        ],
+        args: ["-NoProfile", "-NonInteractive", "-Command", ps],
       };
     }
     default:

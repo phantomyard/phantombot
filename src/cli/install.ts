@@ -25,7 +25,7 @@ import {
   nightlyPlistPath as launchdNightlyPath,
   tickPlistPath as launchdTickPath,
 } from "../lib/launchd.ts";
-import { currentPlatform, logsCommand, restartCommand } from "../lib/platform.ts";
+import { currentPlatform } from "../lib/platform.ts";
 import {
   BunSystemctlRunner,
   buildSystemctlEnv,
@@ -42,6 +42,22 @@ import {
 } from "../lib/taskScheduler.ts";
 import type { WriteSink } from "../lib/io.ts";
 
+/**
+ * Trailing "here's how to manage it" block shown after a successful install,
+ * identical on every OS. Advertises the clean `phantombot <verb>` subcommands
+ * rather than the raw systemctl/launchctl/schtasks incantations — the CLI wraps
+ * those per-platform, so the user never has to see or type them.
+ */
+export function manageHints(): string {
+  return (
+    `\nmanage phantombot:\n` +
+    `  phantombot start      start the service\n` +
+    `  phantombot stop       stop the service\n` +
+    `  phantombot restart    restart the service\n` +
+    `  phantombot logs       tail the service logs\n` +
+    `  phantombot uninstall  remove the service\n`
+  );
+}
 
 export interface RunInstallInput {
   binPath?: string;
@@ -162,11 +178,7 @@ async function runInstallLinux(
   });
   if (!result.installed) return 1;
 
-  out.write(
-    `\nview logs:    ${logsCommand()}\n` +
-      `restart:      ${restartCommand()}\n` +
-      `uninstall:    phantombot uninstall\n`,
-  );
+  out.write(manageHints());
   return 0;
 }
 
@@ -199,11 +211,7 @@ async function runInstallDarwin(
   });
   if (!result.installed) return 1;
 
-  out.write(
-    `\nview logs:    ${logsCommand()}\n` +
-      `restart:      ${restartCommand()}\n` +
-      `uninstall:    phantombot uninstall\n`,
-  );
+  out.write(manageHints());
   return 0;
 }
 
@@ -229,9 +237,7 @@ async function runInstallWindows(
     `\nThese tasks run only while you are logged in (the macOS model). For\n` +
       `true headless-without-login, install a real service — see the README\n` +
       `(WinSW is the recommended route).\n` +
-      `\nview logs:    ${logsCommand()}\n` +
-      `restart:      ${restartCommand()}\n` +
-      `uninstall:    phantombot uninstall\n`,
+      manageHints(),
   );
   return 0;
 }
