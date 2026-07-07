@@ -18,6 +18,7 @@ import {
   killProcessGroup,
   spawnInNewSession,
   withCommandDirOnPath,
+  withPhantombotBinDirOnPath,
 } from "../src/lib/processGroup.ts";
 
 // The spawn/kill tests below drive real POSIX subprocesses (`sleep`, `sh -c`,
@@ -249,6 +250,85 @@ describe("withCommandDirOnPath — shebang interpreter resolution", () => {
     const out = withCommandDirOnPath("/opt/bin/pi", env);
     expect(out).not.toBe(env);
     expect(env.PATH).toBe("/usr/bin"); // original untouched
+  });
+});
+
+// Pure string tests, cross-platform: a leading-slash path is absolute on both
+// POSIX and Windows, and we build expected PATHs from the host `delimiter`/
+// `dirname`, so these hold without hardcoding a separator. process.execPath is
+// a writable property; we override it per-test and restore in a finally.
+describe("withPhantombotBinDirOnPath — CLI self-call resolution", () => {
+  function withExecPath<T>(exe: string, fn: () => T): T {
+    const orig = process.execPath;
+    try {
+      Object.defineProperty(process, "execPath", {
+        value: exe,
+        configurable: true,
+      });
+      return fn();
+    } finally {
+      Object.defineProperty(process, "execPath", {
+        value: orig,
+        configurable: true,
+      });
+    }
+  }
+
+  test("prepends phantombot's own install dir when running as the binary", () => {
+    withExecPath("/opt/programs/phantombot/phantombot", () => {
+      const before = ["/usr/bin", "/bin"].join(delimiter);
+      const out = withPhantombotBinDirOnPath({ PATH: before });
+      expect(out.PATH).toBe(
+        ["/opt/programs/phantombot", before].join(delimiter),
+      );
+    });
+  });
+
+  test("matches the Windows .exe name (case-insensitive)", () => {
+    withExecPath("/opt/programs/phantombot/Phantombot.exe", () => {
+      const out = withPhantombotBinDirOnPath({ PATH: "/usr/bin" });
+      expect(out.PATH).toBe(
+        ["/opt/programs/phantombot", "/usr/bin"].join(delimiter),
+      );
+    });
+  });
+
+  test("no-ops under a source run (execPath is bun/node, not phantombot)", () => {
+    withExecPath("/usr/local/bin/bun", () => {
+      const env = { PATH: "/usr/bin" };
+      const out = withPhantombotBinDirOnPath(env);
+      expect(out).toBe(env); // same reference — untouched
+    });
+  });
+
+  test("is a no-op when the install dir is already on PATH", () => {
+    withExecPath("/opt/programs/phantombot/phantombot", () => {
+      const env = {
+        PATH: ["/opt/programs/phantombot", "/usr/bin"].join(delimiter),
+      };
+      const out = withPhantombotBinDirOnPath(env);
+      expect(out).toBe(env);
+    });
+  });
+
+  test("seeds an empty/absent PATH with the install dir", () => {
+    withExecPath("/opt/programs/phantombot/phantombot", () => {
+      expect(withPhantombotBinDirOnPath({}).PATH).toBe(
+        "/opt/programs/phantombot",
+      );
+      expect(withPhantombotBinDirOnPath({ PATH: "" }).PATH).toBe(
+        "/opt/programs/phantombot",
+      );
+    });
+  });
+
+  test("never mutates the caller's env object", () => {
+    withExecPath("/opt/programs/phantombot/phantombot", () => {
+      const env = { PATH: "/usr/bin" };
+      const out = withPhantombotBinDirOnPath(env);
+      expect(out).not.toBe(env);
+      expect(env.PATH).toBe("/usr/bin");
+    });
   });
 });
 
