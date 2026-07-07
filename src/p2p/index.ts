@@ -51,14 +51,11 @@ export function buildP2PNode(deps: BuildP2PNodeDeps): P2PNode {
 
 /**
  * Publish this node's capability advertisement once. Best-effort and detached
- * from startup — a relay hiccup must never delay the node coming up.
- *
- * `boundPort` is the node's ACTUAL bound loopback port (`node.boundPort`), read
- * AFTER `start()` so an OS-ephemeral bind (`port: 0`) advertises the real bound
- * port (plaintext) rather than the configured request.
+ * from startup — a relay hiccup must never delay the node coming up. Post-#61
+ * the advert is a single `{ webrtc: true }` boolean (no loopback port).
  */
-export function advertiseP2PCapability(deps: BuildP2PNodeDeps, boundPort: number): void {
-  const event = buildCapabilityEvent(deps.secretKey, boundPort);
+export function advertiseP2PCapability(deps: BuildP2PNodeDeps): void {
+  const event = buildCapabilityEvent(deps.secretKey);
   void publishCapability(deps.pool, deps.relays, event).catch((err) => {
     log.debug(`[p2p] capability advertise failed: ${String(err)}`);
   });
@@ -87,11 +84,8 @@ export async function keepP2PNodeAlive(node: P2PNode, signal: AbortSignal): Prom
 
 export interface StartP2PNodeInput {
   node: P2PNode;
-  /**
-   * Publish the capability advert — only after a successful start. Receives the
-   * node's actual bound loopback port (OS-ephemeral, known post-start).
-   */
-  advertise: (boundPort: number) => void;
+  /** Publish the capability advert — only after a successful start. */
+  advertise: () => void;
   signal: AbortSignal;
   out: { write: (s: string) => void };
   err: { write: (s: string) => void };
@@ -129,8 +123,8 @@ export function startP2PNode(input: StartP2PNodeInput): Promise<void> | null {
     }
     return null;
   }
+  input.advertise();
   const boundPort = input.node.boundPort;
-  input.advertise(boundPort);
   input.out.write(
     `  [p2p:${input.persona}] node on ws://127.0.0.1:${boundPort}\n`,
   );

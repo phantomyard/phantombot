@@ -95,12 +95,10 @@ describe("startP2PNode — port-conflict containment", () => {
     let advertised = false;
     const ac = new AbortController();
 
-    let advertisedPort = -1;
     const task = startP2PNode({
       node,
-      advertise: (boundPort) => {
+      advertise: () => {
         advertised = true;
-        advertisedPort = boundPort;
       },
       signal: ac.signal,
       out,
@@ -110,8 +108,8 @@ describe("startP2PNode — port-conflict containment", () => {
 
     expect(task).not.toBeNull();
     expect(advertised).toBe(true);
-    // Ephemeral bind → a real OS-assigned port was advertised, not 0.
-    expect(advertisedPort).toBeGreaterThan(0);
+    // The bridge still binds a real OS-assigned ephemeral port (no port conflict).
+    expect(node.boundPort).toBeGreaterThan(0);
     expect(out.text).toContain("[p2p:lena]");
     expect(err.text).toBe("");
 
@@ -140,14 +138,14 @@ describe("ephemeral ports — many personas, one machine, zero collisions", () =
     }
   });
 
-  test("startP2PNode advertises each node's REAL bound port, not the request", () => {
+  test("startP2PNode advertises after a successful start (webrtc-only advert)", () => {
     const n = makeNode(0);
     const ac = new AbortController();
-    let advertisedPort = -1;
+    let advertised = false;
     const task = startP2PNode({
       node: n,
-      advertise: (boundPort) => {
-        advertisedPort = boundPort;
+      advertise: () => {
+        advertised = true;
       },
       signal: ac.signal,
       out: new Capture(),
@@ -156,9 +154,9 @@ describe("ephemeral ports — many personas, one machine, zero collisions", () =
     });
     try {
       expect(task).not.toBeNull();
-      // What was advertised is exactly what the bridge actually bound.
-      expect(advertisedPort).toBe(n.boundPort);
-      expect(advertisedPort).toBeGreaterThan(0);
+      // Advert fires post-start; the bridge still bound a real ephemeral port.
+      expect(advertised).toBe(true);
+      expect(n.boundPort).toBeGreaterThan(0);
     } finally {
       ac.abort();
       n.stop();

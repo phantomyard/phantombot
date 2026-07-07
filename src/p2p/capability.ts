@@ -12,23 +12,24 @@
  * re-publishing on each start supersedes the previous one, and its content is
  * PLAINTEXT on purpose:
  *
- *   { "localWs": true, "localWsPort": 33297, "webrtc": true, "dht": false }
+ *   { "webrtc": true }
  *
- * WHY PLAINTEXT (and why the earlier self-encrypted-port design was wrong).
- * Nothing here is a secret:
- *   - The capability BOOLEANS must be public — a contact has to read whether we
- *     can accept a direct transport BEFORE any encrypted channel exists, and
- *     they don't hold our key.
- *   - `localWsPort` is an OS-ephemeral loopback port bound to 127.0.0.1. It is
- *     reachable ONLY from this machine; a remote party who learns "33297" still
- *     cannot dial our localhost. So it is not sensitive — and encrypting it broke
- *     the actual use case: the PWA is a DIFFERENT identity than the node, so it
- *     could never decrypt a self-keyed blob to learn the port. Plaintext, any
- *     same-machine PWA reads the port and dials `ws://localhost:PORT`.
- *   - LAN IPs are gone entirely: a browser PWA cannot dial a bare LAN IP over
- *     `ws://` (mixed-content + no TLS), and the node↔node WebRTC path discovers
- *     LAN host candidates live via ICE at connection time. A frozen LAN IP in an
- *     advert was a stale duplicate nobody consumed. Deleted.
+ * SCOPE (issue #61 rewrite). There is exactly ONE direct transport: WebRTC
+ * (NAT-traversed via ICE, signaled over Nostr). The former `localWs` /
+ * `localWsPort` (same-machine `ws://localhost`) and `dht` (Hyperswarm) fields
+ * were removed from the advert:
+ *   - The localhost tier only helped when a PWA and this node shared one machine
+ *     — a vanishingly rare case for real conversations — and all the port
+ *     plumbing it needed (ephemeral bind + advertise + dial) bought a sub-ms win
+ *     only there.
+ *   - `dht` was always false (this build is werift WebRTC + Nostr signaling, not
+ *     Hyperswarm), and the browser never had a DHT tier to consume it.
+ *   - LAN IPs never belonged here either: a browser PWA cannot dial a bare LAN IP
+ *     over `ws://`; the node↔node WebRTC path discovers LAN host candidates live
+ *     via ICE at connection time.
+ * WHY PLAINTEXT: the `webrtc` boolean must be public — a contact reads whether we
+ * accept a direct transport BEFORE any encrypted channel exists, and they don't
+ * hold our key. Nothing here is a secret.
  */
 
 import { finalizeEvent } from "nostr-tools/pure";
@@ -46,50 +47,33 @@ export const CAPABILITY_D_TAG = "phantomchat-p2p";
 /**
  * What a node advertises — PLAINTEXT. Mirrors the PWA's `PeerCapabilities` shape
  * verbatim (phantomchat `transport/capability.ts`) so ingestion is a direct
- * assignment.
+ * assignment. Post-#61 this is a single `webrtc` boolean.
  */
 export interface NodeCapabilities {
-  /** The node can accept a same-machine `ws://localhost` bridge connection. */
-  localWs: boolean;
-  /**
-   * The OS-ephemeral loopback TCP port the ws bridge is ACTUALLY listening on
-   * (not a fixed 47100). A same-machine PWA reads this to dial `ws://localhost`.
-   */
-  localWsPort: number;
-  /** The node can hold a WebRTC data channel (LAN host candidates or remote). */
+  /** The node can hold a WebRTC data channel (LAN host candidates, STUN, TURN). */
   webrtc: boolean;
-  /**
-   * The node runs a raw-UDP DHT. Always false: this build uses werift WebRTC +
-   * Nostr signaling, not Hyperswarm (which panics under Bun). Kept in the shape
-   * so the field is explicit rather than absent.
-   */
-  dht: boolean;
 }
 
 /**
- * Build the capability descriptor a running node advertises.
- *
- * @param boundPort the ACTUAL bound loopback port (e.g. `bridge.boundPort`).
+ * Build the capability descriptor a running node advertises. A phantombot node
+ * that has the P2P subsystem enabled can hold a WebRTC data channel, so it
+ * advertises `webrtc: true`.
  */
-export function nodeCapabilities(boundPort: number): NodeCapabilities {
-  return { localWs: true, localWsPort: boundPort, webrtc: true, dht: false };
+export function nodeCapabilities(): NodeCapabilities {
+  return { webrtc: true };
 }
 
 /**
  * Build (and sign) the replaceable capability event for this node.
  *
- * @param ourSk     persona secret key (signs the event)
- * @param boundPort the ACTUAL bound loopback port (e.g. `bridge.boundPort`)
+ * @param ourSk persona secret key (signs the event)
  */
-export function buildCapabilityEvent(
-  ourSk: Uint8Array,
-  boundPort: number,
-): NTNostrEvent {
+export function buildCapabilityEvent(ourSk: Uint8Array): NTNostrEvent {
   const template = {
     kind: CAPABILITY_KIND,
     created_at: Math.floor(Date.now() / 1000),
     tags: [["d", CAPABILITY_D_TAG]],
-    content: JSON.stringify(nodeCapabilities(boundPort)),
+    content: JSON.stringify(nodeCapabilities()),
   };
   return finalizeEvent(template, ourSk) as unknown as NTNostrEvent;
 }
@@ -108,13 +92,12 @@ export function parseCapabilityEvent(
     if (!hasDTag) return null;
     const parsed = JSON.parse(event.content) as Partial<NodeCapabilities>;
     if (typeof parsed !== "object" || parsed === null) return null;
+    // Read only `webrtc`. Legacy adverts may still carry localWs/localWsPort/dht
+    // from the retired tiers; they are ignored.
     return {
       authorHex: event.pubkey,
       caps: {
-        localWs: Boolean(parsed.localWs),
-        localWsPort: typeof parsed.localWsPort === "number" ? parsed.localWsPort : 0,
         webrtc: Boolean(parsed.webrtc),
-        dht: Boolean(parsed.dht),
       },
     };
   } catch {

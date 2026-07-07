@@ -796,10 +796,10 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           // Start SYNCHRONOUSLY and contain any startup throw inside the helper,
           // so a failed P2P bring-up degrades to relays instead of rejecting a
           // pushed task and aborting the whole `run` process. `advertise` fires
-          // post-start with the node's actual bound port.
+          // post-start (a single `{ webrtc: true }` capability advert).
           const p2pTask = startP2PNode({
             node: p2pNode,
-            advertise: (boundPort) => advertiseP2PCapability(p2pDeps, boundPort),
+            advertise: () => advertiseP2PCapability(p2pDeps),
             signal: ac.signal,
             out,
             err,
