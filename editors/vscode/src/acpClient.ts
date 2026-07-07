@@ -329,6 +329,38 @@ export class AcpClient {
  * Default transport: spawn `phantombot acp [--persona NAME]` and wire its
  * stdio into the line-delimited contract. Buffers partial stdout lines.
  */
+/**
+ * Build the discrete `(command, args)` pair for spawning `phantombot acp`.
+ *
+ * Pure and platform-parameterized so the Windows shim path is unit-testable
+ * off-Windows. On Windows, a `.cmd`/`.bat` shim (e.g. an npm-global phantombot)
+ * cannot be spawned directly — Node throws EINVAL unless it goes through
+ * cmd.exe. A native `phantombot.exe` runs fine directly.
+ *
+ * SECURITY: never route this through `shell:true`. `persona` comes from VS Code
+ * workspace settings (attacker-controllable via a malicious .code-workspace),
+ * and `shell:true` would hand it to cmd.exe for metacharacter interpretation —
+ * `--persona "x & calc.exe"` would run calc.exe. Instead we spawn cmd.exe
+ * explicitly (with `shell:false` at the call site) and pass `/d /s /c <bin>
+ * ...args` as discrete argv elements. Node then applies its normal argv
+ * double-quoting, so cmd treats `&`/`|`/`>` inside the quoted args literally
+ * rather than as separators. (Ref: reviewer Kai/Lena on PR #277.)
+ */
+export function buildAcpSpawnCommand(
+  bin: string,
+  persona: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+  const args = ["acp"];
+  if (persona) args.push("--persona", persona);
+
+  const isShim = platform === "win32" && /\.(cmd|bat)$/i.test(bin);
+  if (isShim) {
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", bin, ...args] };
+  }
+  return { command: bin, args };
+}
+
 export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
   const bin = options.binaryPath;
   if (!bin) {
@@ -336,22 +368,16 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
       "spawnAcpTransport: binaryPath is required (resolve the phantombot binary first)",
     );
   }
-  const args = ["acp"];
-  if (options.persona) args.push("--persona", options.persona);
 
-  // On Windows a `.cmd`/`.bat` shim (e.g. an npm-global phantombot) cannot be
-  // spawned directly — Node throws EINVAL unless it goes through a shell. A
-  // native `phantombot.exe` runs fine with shell:false. Detect the shim by
-  // extension and only opt into the shell for it. (Args here are a fixed verb
-  // plus a simple persona id, so shell quoting is not a concern.)
-  const isWindows = process.platform === "win32";
-  const isShim = isWindows && /\.(cmd|bat)$/i.test(bin);
+  const { command, args } = buildAcpSpawnCommand(bin, options.persona);
 
-  const child = spawn(bin, args, {
+  const child = spawn(command, args, {
     cwd: options.cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    // Run `.cmd`/`.bat` shims via cmd.exe (required); native `.exe` stays direct.
-    shell: isShim,
+    // Never use a shell: shim resolution is handled by cmd.exe above with
+    // discrete argv, which keeps attacker-controlled args from being parsed as
+    // shell syntax.
+    shell: false,
     // Suppress the console window Windows opens for the ACP subprocess and any
     // tool subprocess it spawns. No-op on POSIX.
     windowsHide: true,

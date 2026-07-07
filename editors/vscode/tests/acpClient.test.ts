@@ -11,7 +11,11 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { AcpClient, type AcpTransport } from "../src/acpClient.ts";
+import {
+  AcpClient,
+  buildAcpSpawnCommand,
+  type AcpTransport,
+} from "../src/acpClient.ts";
 import { resetIdCounter } from "../src/protocol.ts";
 
 /**
@@ -306,5 +310,80 @@ describe("AcpClient — error + lifecycle handling", () => {
     client.dispose();
     expect(t.closed).toBe(true);
     await expect(p).rejects.toThrow();
+  });
+});
+
+describe("buildAcpSpawnCommand — Windows shim safety", () => {
+  test("native .exe on Windows spawns directly, no shell wrapper", () => {
+    const { command, args } = buildAcpSpawnCommand(
+      "C:\\Program Files\\phantombot\\phantombot.exe",
+      undefined,
+      "win32",
+    );
+    expect(command).toBe("C:\\Program Files\\phantombot\\phantombot.exe");
+    expect(args).toEqual(["acp"]);
+  });
+
+  test("non-Windows platform never routes through cmd.exe", () => {
+    const { command, args } = buildAcpSpawnCommand(
+      "/usr/local/bin/phantombot",
+      "megan",
+      "linux",
+    );
+    expect(command).toBe("/usr/local/bin/phantombot");
+    expect(args).toEqual(["acp", "--persona", "megan"]);
+  });
+
+  test(".cmd shim on Windows goes through cmd.exe /d /s /c with discrete argv", () => {
+    const { command, args } = buildAcpSpawnCommand(
+      "C:\\npm\\phantombot.cmd",
+      "megan",
+      "win32",
+    );
+    expect(command).toBe("cmd.exe");
+    expect(args).toEqual([
+      "/d",
+      "/s",
+      "/c",
+      "C:\\npm\\phantombot.cmd",
+      "acp",
+      "--persona",
+      "megan",
+    ]);
+  });
+
+  test(".bat shim on Windows is treated the same as .cmd", () => {
+    const { command } = buildAcpSpawnCommand(
+      "C:\\npm\\phantombot.bat",
+      undefined,
+      "win32",
+    );
+    expect(command).toBe("cmd.exe");
+  });
+
+  test("SECURITY: an injection payload in persona stays a single argv element", () => {
+    // A malicious .code-workspace could set persona to a cmd-injection string.
+    // It must remain one discrete argv token — NOT be split on the `&`, so cmd
+    // (with Node's argv quoting) treats it literally and cannot run calc.exe.
+    const evil = 'lena" & calc.exe & echo "';
+    const { command, args } = buildAcpSpawnCommand(
+      "C:\\npm\\phantombot.cmd",
+      evil,
+      "win32",
+    );
+    expect(command).toBe("cmd.exe");
+    // The payload is exactly one element, untouched — no shell:true parsing.
+    expect(args).toEqual([
+      "/d",
+      "/s",
+      "/c",
+      "C:\\npm\\phantombot.cmd",
+      "acp",
+      "--persona",
+      evil,
+    ]);
+    expect(args.filter((a) => a === evil)).toHaveLength(1);
+    // And nothing was split into a standalone "calc.exe" token.
+    expect(args).not.toContain("calc.exe");
   });
 });
