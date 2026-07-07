@@ -176,6 +176,7 @@ export class P2PNode {
 
   /** An inbound signal from a peer. */
   private async onSignal(senderHex: string, msg: SignalMessage): Promise<void> {
+    log.info(`[p2p] signal in: ${msg.t} from ${senderHex.slice(0, 8)}`);
     if (msg.t === "hello") {
       // We were nudged to initiate. Only act if we are in fact the initiator.
       if (this.amInitiator(senderHex)) {
@@ -197,6 +198,7 @@ export class P2PNode {
   }
 
   private onPeerState(peerHex: string, state: PeerState): void {
+    log.info(`[p2p] peer ${peerHex.slice(0, 8)} → ${state}`);
     if (state === "connected") {
       this.flushOutbox(peerHex);
     } else if (state === "failed" || state === "closed") {
@@ -232,8 +234,10 @@ export class P2PNode {
     if (this.negotiating.has(peerHex)) return;
     this.negotiating.add(peerHex);
     if (this.amInitiator(peerHex)) {
+      log.info(`[p2p] kickstart ${peerHex.slice(0, 8)}: sending offer (initiator)`);
       void peer.start();
     } else {
+      log.info(`[p2p] kickstart ${peerHex.slice(0, 8)}: sending hello (responder)`);
       void this.signaling.send(peerHex, { t: "hello" });
     }
   }
