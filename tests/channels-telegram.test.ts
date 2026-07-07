@@ -543,6 +543,34 @@ describe("extensionFromMime", () => {
   });
 });
 
+describe("inboxDir path sanitization", () => {
+  test("numeric Telegram chat ids are unchanged (byte-identical path)", () => {
+    expect(inboxDir("1001").endsWith(join("inbox", "1001"))).toBe(true);
+  });
+
+  test("ACP colon-bearing conversation keys are rewritten so Windows mkdir works", () => {
+    // Windows forbids ':' in file names → raw acp:<hash> threw ENOTDIR.
+    const dir = inboxDir("acp:0a6da22affbe");
+    expect(dir.endsWith(join("inbox", "acp_0a6da22affbe"))).toBe(true);
+    expect(dir).not.toContain(":acp");
+    // No reserved char survives in the final segment.
+    const seg = dir.slice(dir.lastIndexOf("inbox") + "inbox".length + 1);
+    expect(/[<>:"/\\|?*]/.test(seg)).toBe(false);
+  });
+
+  test("all Windows-reserved characters map to underscore", () => {
+    const dir = inboxDir('a<b>c:d"e|f?g*h');
+    const seg = dir.slice(dir.lastIndexOf("inbox") + "inbox".length + 1);
+    expect(seg).toBe("a_b_c_d_e_f_g_h");
+  });
+
+  test("spaces and ordinary characters are preserved", () => {
+    const dir = inboxDir("hex npub-1");
+    const seg = dir.slice(dir.lastIndexOf("inbox") + "inbox".length + 1);
+    expect(seg).toBe("hex npub-1");
+  });
+});
+
 describe("extractAttachment", () => {
   test("synthesizes filename when document has none", () => {
     const att = extractAttachment({

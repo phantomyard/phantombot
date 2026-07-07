@@ -27,13 +27,30 @@ import type { ChannelMessage } from "../core/types.ts";
 export const TELEGRAM_BOT_DOWNLOAD_CAP_BYTES = 20 * 1024 * 1024;
 
 /**
+ * Sanitize a conversation id for use as a single on-disk path segment.
+ *
+ * Windows forbids `< > : " / \ | ? *` (and control chars) in file names —
+ * `:` is the drive/alternate-data-stream separator, so a raw `acp:<hash>`
+ * conversation key makes `mkdir` throw `ENOTDIR`. We map every reserved char
+ * to `_`. This is a no-op for Telegram's numeric chat ids and phantomchat's
+ * hex/npub ids (none contain reserved chars), so existing on-disk paths are
+ * unchanged; only ACP's colon-bearing keys are rewritten.
+ */
+function sanitizePathSegment(id: string): string {
+  // eslint-disable-next-line no-control-regex
+  return id.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
+}
+
+/**
  * Per-chat inbox where Telegram attachments are saved. Takes the
  * channel-neutral STRING conversation id (the engine's `msg.conversationId`);
  * Telegram's numeric chat id was already stringified at ingest, so the on-disk
- * path is byte-identical to the previous `String(chatId)` form.
+ * path is byte-identical to the previous `String(chatId)` form. Ids containing
+ * Windows-reserved characters (e.g. ACP's `acp:<hash>`) are sanitized so the
+ * path is creatable on every platform.
  */
 export function inboxDir(conversationId: string): string {
-  return join(xdgDataHome(), "phantombot", "inbox", conversationId);
+  return join(xdgDataHome(), "phantombot", "inbox", sanitizePathSegment(conversationId));
 }
 
 /**
