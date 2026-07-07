@@ -19,6 +19,7 @@ import { PassThrough } from "node:stream";
 
 import { runAcpServer } from "../src/connectors/acp/server.ts";
 import { conversationForCwd } from "../src/connectors/acp/session.ts";
+import { sanitizePathSegment } from "../src/channels/telegram/parse.ts";
 import type { Config } from "../src/config.ts";
 import type {
   Harness,
@@ -377,7 +378,7 @@ describe("ACP server — session/prompt", () => {
       const m = req.userMessage.match(/\[attached: (.*\.png)\]/);
       expect(m).not.toBeNull();
       const savedPath = m![1]!;
-      expect(savedPath).toContain(join("phantombot", "inbox", conversation));
+      expect(savedPath).toContain(join("phantombot", "inbox", sanitizePathSegment(conversation)));
       const { readFile } = await import("node:fs/promises");
       expect((await readFile(savedPath)).toString()).toBe("hello-image-bytes");
 

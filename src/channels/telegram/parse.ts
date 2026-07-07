@@ -36,7 +36,7 @@ export const TELEGRAM_BOT_DOWNLOAD_CAP_BYTES = 20 * 1024 * 1024;
  * hex/npub ids (none contain reserved chars), so existing on-disk paths are
  * unchanged; only ACP's colon-bearing keys are rewritten.
  */
-function sanitizePathSegment(id: string): string {
+export function sanitizePathSegment(id: string): string {
   // eslint-disable-next-line no-control-regex
   return id.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
 }
