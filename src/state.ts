@@ -9,9 +9,10 @@
  * Resolution priority for any value that lives in both: env > state > toml > default.
  */
 
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { xdgDataHome } from "./config.ts";
+import { writeFileAtomic } from "./lib/io.ts";
 
 export interface State {
   default_persona?: string;
@@ -100,8 +101,9 @@ export async function saveState(state: State): Promise<string> {
   const path = statePath();
   const prev = await loadStateForAudit();
   await auditPersonaChange(prev, state);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2) + "\n", "utf8");
+  // Atomic write: a torn state.json bricks every command that must parse it
+  // on startup (loadState throws), so never expose a half-written file.
+  await writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
   return path;
 }
 

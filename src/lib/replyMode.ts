@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { xdgStateHome } from "../config.ts";
+import { writeFileAtomic } from "./io.ts";
 
 export type ReplyMode = "text" | "voice";
 export type ReplyModeRequest = ReplyMode | "default";
@@ -53,8 +54,9 @@ async function load(path = replyModeStatePath()): Promise<StoredOverrides> {
 }
 
 async function save(state: StoredOverrides, path = replyModeStatePath()): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2) + "\n", "utf8");
+  // Atomic write: a torn overrides file makes load() throw and drops every
+  // inbound message until it's deleted. Never expose a half-written file.
+  await writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
 }
 
 function active(
