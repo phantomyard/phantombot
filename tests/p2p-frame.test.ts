@@ -12,7 +12,6 @@ import {
   looksLikeEvent,
   parseEventFrame,
   recipientOfWrap,
-  DEFAULT_LOCAL_NODE_PORT,
   GIFTWRAP_KIND,
 } from "../src/p2p/frame.ts";
 import type { NTNostrEvent } from "../src/lib/nostrCrypto.ts";
@@ -31,10 +30,6 @@ function wrap(overrides: Partial<NTNostrEvent> = {}): NTNostrEvent {
 }
 
 describe("p2p frame contract", () => {
-  test("default local port stays 47100 (must match the PWA)", () => {
-    expect(DEFAULT_LOCAL_NODE_PORT).toBe(47100);
-  });
-
   test("build then parse round-trips a gift-wrap", () => {
     const w = wrap();
     const frame = buildEventFrame(w);

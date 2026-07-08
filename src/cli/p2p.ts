@@ -1,54 +1,15 @@
 /**
- * `phantombot p2p` — inspect the relay-free P2P transport (phantombot#258).
+ * `phantombot p2p` — inspect the P2P WebRTC transport (phantombot#258, #61).
  *
  * The node itself runs inside `phantombot run`; this command is a read-only
- * window on it. `p2p status` prints the resolved config and probes the loopback
- * bridge port to report whether a node is actually listening on this machine.
+ * window on it. `p2p status` prints the resolved config. There is no loopback
+ * bridge to probe (retired in #61) — live peer/connection state surfaces in the
+ * `phantombot run` logs (`[p2p] peer …`).
  */
 
 import { defineCommand } from "citty";
 
 import { DEFAULT_P2P, loadConfig } from "../config.ts";
-
-/** Probe whether something is accepting ws connections on the loopback port. */
-async function bridgeListening(port: number, timeoutMs = 500): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (v: boolean) => {
-      if (settled) return;
-      settled = true;
-      resolve(v);
-    };
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(`ws://127.0.0.1:${port}`);
-    } catch {
-      done(false);
-      return;
-    }
-    const timer = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      done(false);
-    }, timeoutMs);
-    ws.addEventListener("open", () => {
-      clearTimeout(timer);
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      done(true);
-    });
-    ws.addEventListener("error", () => {
-      clearTimeout(timer);
-      done(false);
-    });
-  });
-}
 
 const statusCmd = defineCommand({
   meta: {
@@ -59,9 +20,8 @@ const statusCmd = defineCommand({
     const config = await loadConfig();
     const p2p = config.p2p ?? DEFAULT_P2P;
 
-    console.log("P2P transport (phantombot#258)");
+    console.log("P2P WebRTC transport (phantombot#258, #61)");
     console.log(`  enabled:  ${p2p.enabled ? "yes" : "no (relay-only)"}`);
-    console.log(`  port:     ${p2p.port} (ws://127.0.0.1:${p2p.port}, loopback only)`);
     console.log(
       `  STUN:     ${p2p.stunServers.length ? p2p.stunServers.join(", ") : "none (host candidates only)"}`,
     );
@@ -75,14 +35,11 @@ const statusCmd = defineCommand({
       return;
     }
 
-    const listening = await bridgeListening(p2p.port);
-    console.log(`\n  bridge:   ${listening ? "listening ✓" : "not listening ✗"}`);
-    if (!listening) {
-      console.log(
-        "  A node is not currently bound to the port. Is `phantombot run` " +
-          "(or the service) up on this machine?",
-      );
-    }
+    console.log(
+      "\n  Peers connect on demand over WebRTC (STUN-traversed) with a Nostr " +
+        "relay fallback. Live peer state appears in the `phantombot run` logs " +
+        "(`[p2p] peer …`).",
+    );
     process.exitCode = 0;
   },
 });

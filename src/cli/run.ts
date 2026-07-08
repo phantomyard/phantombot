@@ -44,6 +44,7 @@ import {
 import {
   advertiseP2PCapability,
   buildP2PNode,
+  ChannelBridge,
   startP2PNode,
 } from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
@@ -640,10 +641,20 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             typeof SimplePoolPhantomchatTransport
           >[2],
         );
+        // The in-process P2P bridge (created only when P2P is enabled). It wires
+        // the WebRTC node's inbound frames into the channel's ingest and tees
+        // outbound replies to the node — replacing the retired ws LocalBridge, so
+        // a headless persona actually terminates a conversation over WebRTC
+        // instead of advertising a capability it can't honour (issue #61).
+        const p2pBridge = p2pSettings.enabled ? new ChannelBridge() : undefined;
+        if (p2pBridge) {
+          transport.setPublishObserver((event) => p2pBridge.routeOutbound(event));
+        }
         const channel = createPhantomchatChannel({
           secretKey: identity.secretKey,
           publicKeyHex: identity.publicKeyHex,
           transport,
+          inboundSink: p2pBridge,
         });
         // Post-restart confirmation for a `/update` that was issued FROM
         // PhantomChat. The Telegram notify above deliberately deferred any
@@ -780,17 +791,19 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         }
 
         // Relay-free P2P transport node. Rides THIS persona's identity, relays
-        // and relay pool: a loopback ws bridge for the same-machine PhantomChat
-        // PWA plus werift WebRTC channels to peer nodes, with Nostr carrying only
-        // the WebRTC handshake. Every persona hosts its own node on an ephemeral
-        // port and advertises it under its own npub. Inert unless config.p2p.enabled.
-        if (p2pSettings.enabled) {
+        // and relay pool: werift WebRTC channels to peer nodes (NAT-traversed via
+        // STUN), with Nostr carrying only the WebRTC handshake and acting as the
+        // delivery fallback. Inbound frames terminate in THIS persona's channel
+        // (via p2pBridge), replies tee back out over WebRTC. Inert unless
+        // config.p2p.enabled (issue #61).
+        if (p2pSettings.enabled && p2pBridge) {
           const p2pDeps = {
             secretKey: identity.secretKey,
             publicKeyHex: identity.publicKeyHex,
             relays,
             pool: pool as unknown as Parameters<typeof buildP2PNode>[0]["pool"],
             settings: p2pSettings,
+            bridge: p2pBridge,
           };
           const p2pNode = buildP2PNode(p2pDeps);
           // Start SYNCHRONOUSLY and contain any startup throw inside the helper,

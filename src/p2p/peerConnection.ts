@@ -46,6 +46,15 @@ export interface PeerConnectionOptions {
 /** Data-channel label. Both sides must agree; the responder reads it off the offer. */
 const DATA_CHANNEL_LABEL = "phantomchat-bridge";
 
+/**
+ * Heartbeat cadence, kept in lockstep with the PWA's mesh-manager (#61 R2). We
+ * send `PING` every 30s and declare the peer dead if no traffic (`PONG` or any
+ * frame) has arrived for 90s — three missed intervals. The PWA answers our
+ * `PING` with `PONG` and vice-versa, so liveness is symmetric on both ends.
+ */
+const PING_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 90_000;
+
 export class PeerConnection {
   readonly peerHex: string;
   private readonly initiator: boolean;
@@ -60,6 +69,10 @@ export class PeerConnection {
   /** ICE candidates that arrived before the remote description — flushed after. */
   private pendingCandidates: CandidateSignal[] = [];
   private closed = false;
+  /** Heartbeat timer; runs only while the data channel is open. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp (ms) of the last inbound liveness proof (PONG or any frame). */
+  private lastInboundMs = 0;
 
   constructor(opts: PeerConnectionOptions) {
     this.peerHex = opts.peerHex;
@@ -121,6 +134,19 @@ export class PeerConnection {
       }
     });
 
+    // ICE-death detection (#274). werift's `connectionState` can stay `connected`
+    // after the underlying ICE path silently dies — the zombie-peer bug where the
+    // PWA badge lies green while nothing gets through. The ICE transport state
+    // DOES flip, so treat its `failed`/`disconnected` as terminal too and let the
+    // orchestrator drop + re-dial. The heartbeat below is the belt to this
+    // braces: it catches a peer that vanishes without any state event at all.
+    this.pc.iceConnectionStateChange.subscribe((s) => {
+      if (s === "failed" || s === "disconnected") {
+        log.info(`[p2p] peer ${this.short()} ICE ${s} — connection dead`);
+        this.setState("failed");
+      }
+    });
+
     // The responder receives the channel the initiator created.
     this.pc.onDataChannel.subscribe((ch) => {
       this.bindChannel(ch);
@@ -131,13 +157,15 @@ export class PeerConnection {
     this.channel = ch;
     ch.onMessage.subscribe((msg) => {
       const text = typeof msg === "string" ? msg : Buffer.from(msg).toString("utf8");
-      // Mesh keepalive control frames. The PWA's mesh-manager sends `PING` every
-      // 30s and tears the channel down if no `PONG` returns within 90s. These are
-      // NOT gift-wrap frames — answer `PING` on this same channel and never
-      // surface a control frame to the bridge (broadcasting it would both leak a
-      // bogus "message" to local PWAs AND leave the ping unanswered → the peer
-      // kills a perfectly healthy channel on the 90s clock). Swallow stray `PONG`
-      // too (we don't send `PING`, but a duplicate must not be parsed as a frame).
+      // ANY inbound traffic proves the channel is live — reset the death clock.
+      this.lastInboundMs = Date.now();
+      // Mesh keepalive control frames. Both ends send `PING` every 30s and tear
+      // the channel down if no `PONG` returns within 90s (#61 R2). These are NOT
+      // gift-wrap frames — answer a peer's `PING` with `PONG` on this same
+      // channel and never surface a control frame to the bridge (broadcasting it
+      // would both leak a bogus "message" AND leave the ping unanswered → the
+      // peer kills a healthy channel on the 90s clock). A `PONG` is a liveness
+      // proof only (already recorded above); it must not be parsed as a frame.
       if (text === "PING") {
         try {
           ch.send("PONG");
@@ -154,9 +182,60 @@ export class PeerConnection {
       }
     });
     ch.stateChanged.subscribe((s) => {
-      if (s === "open") this.setState("connected");
+      if (s === "open") this.onChannelOpen();
+      // A data channel that closes under a live peer is a dead connection, not a
+      // clean shutdown (that path goes through `close()` which already set
+      // `closed`). Fail so the orchestrator drops + re-dials (#274).
+      else if (s === "closed" && !this.closed) this.setState("failed");
     });
-    if (ch.readyState === "open") this.setState("connected");
+    if (ch.readyState === "open") this.onChannelOpen();
+  }
+
+  /**
+   * The data channel opened — promote to `connected` and arm the heartbeat.
+   * Seeds the death clock so the first 90s window starts now, not at epoch.
+   */
+  private onChannelOpen(): void {
+    this.lastInboundMs = Date.now();
+    this.setState("connected");
+    this.startHeartbeat();
+  }
+
+  /** Arm the 30s liveness heartbeat (idempotent). */
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer || this.closed) return;
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
+  }
+
+  /** Stop the heartbeat. Idempotent. */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * One heartbeat tick: if nothing has arrived from the peer for `PONG_TIMEOUT_MS`
+   * the connection is dead (ICE may never have fired an event) — fail it so the
+   * orchestrator drops + re-dials. Otherwise send a `PING`; the peer answers
+   * `PONG`, which resets the clock on the next tick.
+   */
+  private heartbeat(): void {
+    if (this.closed) return;
+    if (Date.now() - this.lastInboundMs > PONG_TIMEOUT_MS) {
+      log.info(`[p2p] peer ${this.short()} pong timeout — connection dead`);
+      this.stopHeartbeat();
+      this.setState("failed");
+      return;
+    }
+    if (this.channel?.readyState === "open") {
+      try {
+        this.channel.send("PING");
+      } catch (err) {
+        log.debug(`[p2p] PING send failed for ${this.short()}: ${String(err)}`);
+      }
+    }
   }
 
   /**
@@ -251,6 +330,7 @@ export class PeerConnection {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopHeartbeat();
     this.setState("closed");
     try {
       void this.pc.close();

@@ -1,28 +1,30 @@
 /**
- * Daemon startup containment (phantomchat#258, Kai review on #266).
+ * Daemon startup containment (phantomchat#258, Kai review on #266; #61 rewrite).
  *
- * `node.start()` throws SYNCHRONOUSLY when the loopback port is already taken.
- * If that throw escaped into a pushed task it would reject `Promise.all(tasks)`
- * and abort the whole `phantombot run` process — killing PhantomChat over a P2P
- * port conflict. `startP2PNode` must contain it: log, warn, tear down, return
- * `null`, and never reject. These tests drive that with a REAL LocalBridge
- * occupying the port (the exact failure Kai reproduced).
+ * `node.start()` runs synchronously and can throw during signaling bring-up. If
+ * that throw escaped into a pushed task it would reject `Promise.all(tasks)` and
+ * abort the whole `phantombot run` process — killing PhantomChat over a P2P
+ * hiccup. `startP2PNode` must contain it: log, warn, tear down, return `null`,
+ * and never reject. (The old ws loopback bridge — and its port-conflict throw —
+ * was retired in #61; the in-process `ChannelBridge` opens no socket, so
+ * containment is now proven against a throwing signaling layer instead.)
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { startP2PNode } from "../src/p2p/index.ts";
+import { ChannelBridge, startP2PNode } from "../src/p2p/index.ts";
 import { P2PNode } from "../src/p2p/node.ts";
-import { LocalBridge } from "../src/p2p/localBridge.ts";
 import type { SignalHandler, SignalMessage, Signaling } from "../src/p2p/signaling.ts";
 
 class FakeSignaling implements Signaling {
   started = false;
+  constructor(private readonly throwOnStart = false) {}
   send(_to: string, _msg: SignalMessage): Promise<void> {
     return Promise.resolve();
   }
   onMessage(_h: SignalHandler): void {}
   start(): void {
+    if (this.throwOnStart) throw new Error("signaling boom");
     this.started = true;
   }
   stop(): void {
@@ -39,32 +41,28 @@ class Capture {
 
 const SELF = "a".repeat(64);
 
-let blocker: LocalBridge | null = null;
 let node: P2PNode | null = null;
 afterEach(() => {
   node?.stop();
   node = null;
-  blocker?.stop();
-  blocker = null;
 });
 
-function makeNode(port: number): P2PNode {
+function makeNode(throwOnStart = false): P2PNode {
   return new P2PNode({
     ourPubHex: SELF,
     iceServers: [],
-    signaling: new FakeSignaling(),
-    createBridge: (onOutbound) => new LocalBridge({ port, onOutbound }),
+    signaling: new FakeSignaling(throwOnStart),
+    createBridge: (onOutbound) => {
+      const bridge = new ChannelBridge();
+      bridge.setRouter(onOutbound);
+      return bridge;
+    },
   });
 }
 
-describe("startP2PNode — port-conflict containment", () => {
-  test("a taken loopback port degrades to a warning, not a rejected task", async () => {
-    // Occupy the port first — this is Kai's two-bridges-on-one-port repro.
-    blocker = new LocalBridge({ port: 0, onOutbound: () => {} });
-    blocker.start();
-    const takenPort = blocker.boundPort;
-
-    node = makeNode(takenPort);
+describe("startP2PNode — startup-throw containment", () => {
+  test("a throwing bring-up degrades to a warning, not a rejected task", () => {
+    node = makeNode(true);
     const out = new Capture();
     const err = new Capture();
     let advertised = false;
@@ -84,12 +82,12 @@ describe("startP2PNode — port-conflict containment", () => {
     expect(task).toBeNull();
     expect(err.text).toContain("chat still works over relays");
     expect(advertised).toBe(false);
-    // The node was left re-startable (start never completed), not wedged.
+    // The node was torn down, not wedged.
     expect(node.stats().peers).toEqual([]);
   });
 
-  test("a free port starts, advertises, and the task resolves on abort", async () => {
-    node = makeNode(0);
+  test("a clean start advertises and the task resolves on abort", async () => {
+    node = makeNode(false);
     const out = new Capture();
     const err = new Capture();
     let advertised = false;
@@ -108,58 +106,12 @@ describe("startP2PNode — port-conflict containment", () => {
 
     expect(task).not.toBeNull();
     expect(advertised).toBe(true);
-    // The bridge still binds a real OS-assigned ephemeral port (no port conflict).
-    expect(node.boundPort).toBeGreaterThan(0);
     expect(out.text).toContain("[p2p:lena]");
+    expect(out.text).toContain("WebRTC");
     expect(err.text).toBe("");
 
     // The keep-alive task must resolve cleanly once we abort (no hang, no throw).
     ac.abort();
     await task;
-  });
-});
-
-describe("ephemeral ports — many personas, one machine, zero collisions", () => {
-  test("two nodes on port 0 both start and bind DISTINCT ports", () => {
-    // The exact "5 phantoms on the same PC" scenario, minimised to two: with the
-    // old fixed 47100 the second would throw a port conflict; with ephemeral
-    // binding each gets its own free port and both come up.
-    const a = makeNode(0);
-    const b = makeNode(0);
-    try {
-      a.start();
-      b.start();
-      expect(a.boundPort).toBeGreaterThan(0);
-      expect(b.boundPort).toBeGreaterThan(0);
-      expect(a.boundPort).not.toBe(b.boundPort);
-    } finally {
-      a.stop();
-      b.stop();
-    }
-  });
-
-  test("startP2PNode advertises after a successful start (webrtc-only advert)", () => {
-    const n = makeNode(0);
-    const ac = new AbortController();
-    let advertised = false;
-    const task = startP2PNode({
-      node: n,
-      advertise: () => {
-        advertised = true;
-      },
-      signal: ac.signal,
-      out: new Capture(),
-      err: new Capture(),
-      persona: "kai",
-    });
-    try {
-      expect(task).not.toBeNull();
-      // Advert fires post-start; the bridge still bound a real ephemeral port.
-      expect(advertised).toBe(true);
-      expect(n.boundPort).toBeGreaterThan(0);
-    } finally {
-      ac.abort();
-      n.stop();
-    }
   });
 });

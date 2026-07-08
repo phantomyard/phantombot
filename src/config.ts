@@ -321,11 +321,12 @@ export interface Config {
   voice: import("./lib/voice.ts").VoiceConfig;
 
   /**
-   * Relay-free P2P transport (phantombot#258): a local ws bridge for the
-   * same-machine PhantomChat PWA plus werift WebRTC + Nostr-signalled channels
-   * to peer nodes. DISABLED BY DEFAULT — an unconfigured or existing install
-   * runs exactly as before (no bridge port opened, no capability advertised, no
-   * signaling subscription). See P2PSettings and buildP2PConfig.
+   * P2P transport (phantombot#258, rewritten in #61): werift WebRTC channels to
+   * peer nodes, NAT-traversed via public STUN, with Nostr carrying only the
+   * signaling handshake and acting as the delivery fallback. On by default;
+   * inbound frames terminate in the persona's phantomchat channel and replies
+   * tee back over WebRTC. No ws/localhost bridge (retired in #61). See
+   * P2PSettings and buildP2PConfig.
    *
    * Optional on the type (so partial test configs need not spell it out), but
    * `loadConfig` always populates it; consumers treat absence as `DEFAULT_P2P`.
@@ -333,46 +334,23 @@ export interface Config {
   p2p?: P2PSettings;
 }
 
-/** Settings for the relay-free P2P transport node (phantombot#258). */
+/** Settings for the P2P WebRTC transport node (phantombot#258, #61). */
 export interface P2PSettings {
   /** Master switch. Default true — P2P is on by default (phantombot#267). */
   enabled: boolean;
   /**
-   * Loopback port for the PWA ws bridge. Bound to 127.0.0.1 only. Default `0`
-   * means OS-EPHEMERAL: the kernel assigns a free port at listen time, so any
-   * number of personas can each host a node on one machine with zero port
-   * collisions. The real bound port is discovered at runtime and published
-   * (self-encrypted) in the capability advert; the PWA reads it from there
-   * rather than assuming a fixed value. Set a specific port only for debugging.
-   */
-  port: number;
-  /**
    * Public STUN servers for NAT traversal. STUN only reflects your public
    * IP:port back — it never relays media — so using public STUN keeps the
    * "no infrastructure of ours" constraint intact. Empty = host candidates
-   * only (localhost + LAN work; remote NAT traversal won't).
+   * only (LAN works; remote NAT traversal won't).
    */
   stunServers: string[];
-  /**
-   * Browser origins allowed to open the loopback ws bridge. Binding to 127.0.0.1
-   * keeps the port off the LAN, but ANY website the user visits can still reach
-   * `ws://127.0.0.1:<port>` from the browser (WebSocket handshakes are not
-   * CORS-preflighted). We gate on the `Origin` header: requests with NO Origin
-   * (CLI probes / non-browser tooling) and localhost origins (the dev PWA) are
-   * always allowed; a browser Origin is otherwise accepted only if it is in this
-   * list. Defaults to the production PhantomChat origin.
-   */
-  allowedOrigins: string[];
 }
 
 export const DEFAULT_P2P: P2PSettings = {
   enabled: true,
-  port: 0,
   // Google's public STUN — reflexive-only, no relaying, no infra of ours.
   stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-  // The production PhantomChat PWA. Localhost origins (dev) and no-Origin
-  // clients (CLI) are allowed unconditionally on top of this list.
-  allowedOrigins: ["https://chat.phantomyard.ai"],
 };
 
 /**
@@ -580,15 +558,6 @@ function buildP2PConfig(tomlP2p: Record<string, unknown>): P2PSettings {
     asBool(tomlP2p.enabled) ??
     DEFAULT_P2P.enabled;
 
-  // Port `0` is the sentinel for "OS-ephemeral" (default) and is preserved as-is;
-  // any other value is clamped to the unprivileged range. So an install can pin a
-  // fixed debug port, but the zero-collision default just works for N personas.
-  const rawPort =
-    asInt(process.env.PHANTOMBOT_P2P_PORT) ??
-    asInt(tomlP2p.port) ??
-    DEFAULT_P2P.port;
-  const port = rawPort === 0 ? 0 : clampInt(rawPort, 1024, 65_535);
-
   // Env is a comma-separated list (like PHANTOMBOT_TELEGRAM_ALLOWED_USERS);
   // TOML is a native array. An explicit empty env value ("") means "no STUN".
   const stunFromEnv = process.env.PHANTOMBOT_P2P_STUN;
@@ -600,19 +569,7 @@ function buildP2PConfig(tomlP2p: Record<string, unknown>): P2PSettings {
           .filter((s) => s.length > 0)
       : (asStringArray(tomlP2p.stun_servers) ?? DEFAULT_P2P.stunServers);
 
-  // Same env-list convention as STUN: comma-separated env overrides the TOML
-  // array; an explicit empty env value ("") means "no extra browser origins"
-  // (localhost + no-Origin clients are still allowed by the bridge itself).
-  const originsFromEnv = process.env.PHANTOMBOT_P2P_ALLOWED_ORIGINS;
-  const allowedOrigins =
-    originsFromEnv !== undefined
-      ? originsFromEnv
-          .split(",")
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0)
-      : (asStringArray(tomlP2p.allowed_origins) ?? DEFAULT_P2P.allowedOrigins);
-
-  return { enabled, port, stunServers, allowedOrigins };
+  return { enabled, stunServers };
 }
 
 function buildTelegramStreamingConfig(

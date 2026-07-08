@@ -19,14 +19,6 @@
 
 import type { NTNostrEvent } from "../lib/nostrCrypto.ts";
 
-/**
- * The loopback port the local node exposes for the PWA ws bridge. MUST stay in
- * sync with `DEFAULT_LOCAL_NODE_PORT` in the phantomchat PWA
- * (`src/lib/phantomchat/transport/local-ws-transport.ts`). Changing one without
- * the other silently breaks the Tier-1 localhost path.
- */
-export const DEFAULT_LOCAL_NODE_PORT = 47100;
-
 /** The relay-wire kind carried over the bridge: a NIP-59 gift-wrap. */
 export const GIFTWRAP_KIND = 1059;
 

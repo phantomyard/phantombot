@@ -297,6 +297,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   readonly relays: string[];
   /** Our 64-char hex pubkey — the `from` field of every reply envelope. */
   private readonly ourPubHex: string;
+  /**
+   * Optional tee for every published gift-wrap, wired to the P2P bridge so a
+   * reply also goes out over WebRTC (see channelBridge.routeOutbound). Fires for
+   * BOTH the recipient wrap and the multi-device self-wrap; the node drops the
+   * self-wrap (recipient === us). Null when P2P is disabled.
+   */
+  private publishObserver: ((event: NTNostrEvent) => void) | null = null;
 
   constructor(
     private readonly ourSecretKey: Uint8Array,
@@ -305,6 +312,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   ) {
     this.relays = [...relays];
     this.ourPubHex = getPublicKey(ourSecretKey);
+  }
+
+  /**
+   * Register (or clear) a tee invoked with every wrap passed to `publishWrap`,
+   * fired BEFORE the relay round-trip so P2P delivery isn't gated on relay
+   * latency. Best-effort: a throwing observer must never break a publish.
+   */
+  setPublishObserver(observer: ((event: NTNostrEvent) => void) | null): void {
+    this.publishObserver = observer;
   }
 
   subscribeGiftWraps(
@@ -440,6 +456,18 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   async publishWrap(event: NTNostrEvent): Promise<void> {
+    // Tee to the P2P bridge FIRST (fire-and-forget) so a reply races out over
+    // WebRTC in parallel with the relay publish, not after it. Guarded so a
+    // bridge fault can never break relay delivery — the relay is the floor.
+    if (this.publishObserver) {
+      try {
+        this.publishObserver(event);
+      } catch (err) {
+        log.debug("phantomchat: publish observer threw", {
+          error: (err as Error).message,
+        });
+      }
+    }
     // SimplePool.publish returns one promise per relay; a publish that fails on
     // some relays but lands on others is still a success from our side. We wait
     // on all of them (allSettled) so a single dead relay can't reject the send,

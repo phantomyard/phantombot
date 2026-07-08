@@ -709,28 +709,22 @@ flush_after_hours = 6
   });
 });
 
-describe("loadConfig — p2p (phantombot#258)", () => {
-  test("defaults to enabled on an OS-ephemeral port (0) with public STUN", async () => {
+describe("loadConfig — p2p (phantombot#258, #61)", () => {
+  test("defaults to enabled with public STUN (no ws/localhost port)", async () => {
     const c = await loadConfig();
     expect(c.p2p).toEqual({
       enabled: true,
-      port: 0,
       stunServers: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-      allowedOrigins: ["https://chat.phantomyard.ai"],
     });
   });
 
-  test("env overrides enabled, port, STUN and allowed origins", async () => {
+  test("env overrides enabled and STUN", async () => {
     process.env.PHANTOMBOT_P2P_ENABLED = "1";
-    process.env.PHANTOMBOT_P2P_PORT = "48000";
     process.env.PHANTOMBOT_P2P_STUN = "stun:a.example:3478,stun:b.example:3478";
-    process.env.PHANTOMBOT_P2P_ALLOWED_ORIGINS = "https://one.example, https://two.example";
     const c = await loadConfig();
     expect(c.p2p).toEqual({
       enabled: true,
-      port: 48000,
       stunServers: ["stun:a.example:3478", "stun:b.example:3478"],
-      allowedOrigins: ["https://one.example", "https://two.example"],
     });
   });
 
@@ -739,27 +733,20 @@ describe("loadConfig — p2p (phantombot#258)", () => {
     await mkdir(configDir, { recursive: true });
     await writeFile(
       join(configDir, "config.toml"),
-      ['[p2p]', 'enabled = true', 'port = 50000', 'stun_servers = ["stun:toml.example:3478"]'].join("\n"),
+      ['[p2p]', 'enabled = true', 'stun_servers = ["stun:toml.example:3478"]'].join("\n"),
     );
     const fromToml = await loadConfig();
     expect(fromToml.p2p!.enabled).toBe(true);
-    expect(fromToml.p2p!.port).toBe(50000);
     expect(fromToml.p2p!.stunServers).toEqual(["stun:toml.example:3478"]);
 
-    process.env.PHANTOMBOT_P2P_PORT = "51000";
+    process.env.PHANTOMBOT_P2P_ENABLED = "0";
     const envWins = await loadConfig();
-    expect(envWins.p2p!.port).toBe(51000);
+    expect(envWins.p2p!.enabled).toBe(false);
   });
 
-  test("a non-zero port is clamped to the unprivileged range", async () => {
-    process.env.PHANTOMBOT_P2P_PORT = "80";
+  test("an explicit empty STUN env means no STUN servers", async () => {
+    process.env.PHANTOMBOT_P2P_STUN = "";
     const c = await loadConfig();
-    expect(c.p2p!.port).toBe(1024);
-  });
-
-  test("port 0 is preserved as the OS-ephemeral sentinel (not clamped up)", async () => {
-    process.env.PHANTOMBOT_P2P_PORT = "0";
-    const c = await loadConfig();
-    expect(c.p2p!.port).toBe(0);
+    expect(c.p2p!.stunServers).toEqual([]);
   });
 });

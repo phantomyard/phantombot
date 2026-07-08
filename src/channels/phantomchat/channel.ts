@@ -111,6 +111,20 @@ export interface PhantomchatEnvelope {
   timestamp: number;
 }
 
+/**
+ * A secondary inbound source for gift-wraps that arrive over a NON-relay
+ * transport (the P2P WebRTC data channel). `listen()` registers its `onWrap`
+ * here while running and clears it on abort, so a directly-received wrap flows
+ * through the EXACT same ingest (unwrap → verify → dedup → live-gate → turn) as
+ * a relay-delivered one. The relay stays the delivery floor; this is a faster,
+ * redundant path. Implemented by `p2p/channelBridge.ts`; absent (and inert) when
+ * P2P is disabled. Kept as a local interface so the channel takes no dependency
+ * on the p2p layer.
+ */
+export interface InboundWrapSink {
+  setSink(handler: ((event: NTNostrEvent) => void) | null): void;
+}
+
 export interface PhantomchatChannelInput {
   /** Our secret key — used to unwrap inbound gift-wraps. */
   secretKey: Uint8Array;
@@ -118,6 +132,12 @@ export interface PhantomchatChannelInput {
   publicKeyHex: string;
   /** The relay-pool transport (subscribe + publish). */
   transport: PhantomchatTransport;
+  /**
+   * Optional non-relay inbound source (P2P WebRTC). When present, `listen()`
+   * registers its `onWrap` so directly-received gift-wraps are ingested through
+   * the same path as relay ones. Omit to run relay-only (the default).
+   */
+  inboundSink?: InboundWrapSink;
   /**
    * Self-heal watchdog poll interval (ms). Defaults to
    * `SUBSCRIPTION_HEAL_CHECK_MS`; overridable so tests can drive the watchdog
@@ -413,6 +433,14 @@ export function createPhantomchatChannel(
 
       let sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
 
+      // P2P INBOUND. Register `onWrap` as the sink for gift-wraps that arrive
+      // over the WebRTC data channel (when P2P is wired). A direct wrap then runs
+      // the SAME ingest as a relay one — dedup by wrap/rumor id means a message
+      // that lands over BOTH transports still runs exactly one turn, and the
+      // live-gate applies uniformly. Cleared in `finally` so a stopped listener
+      // never receives a frame. No-op when `inboundSink` is absent (relay-only).
+      input.inboundSink?.setSink(onWrap);
+
       // SELF-HEAL WATCHDOG. `enablePing` (set on the pool) keeps idle sockets
       // warm so they aren't dropped for inactivity — that alone fixes the common
       // "ignores the first DM after idle" case. But a HARD drop (relay restart,
@@ -523,6 +551,7 @@ export function createPhantomchatChannel(
         clearInterval(healTimer);
         clearInterval(pollTimer);
         if (signal) signal.removeEventListener("abort", onAbort);
+        input.inboundSink?.setSink(null);
         sub.close();
       }
     },
