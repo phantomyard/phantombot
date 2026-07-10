@@ -25,14 +25,24 @@
  * start-time, so we can tell "the original phantombot is alive" from "a
  * stranger inherited its PID" and reclaim the stale lock in the latter case.
  *
- * The token is best-effort and Linux-specific (/proc). On platforms where we
- * can't read it (macOS and Windows), we degrade to the old PID-only liveness
- * check — no worse than before. The only cost of the degraded path is that a
- * crash-then-PID-recycle can make a stale lock look live until the lock file is
- * removed; on Windows that file lives in per-user %TEMP% and is trivially
- * cleared, matching the long-accepted macOS behaviour.
+ * The token is best-effort and platform-specific: /proc on Linux, CIM
+ * (Win32_Process.CreationDate) on Windows. On platforms where we can't read it
+ * (macOS), we degrade to the old PID-only liveness check — no worse than
+ * before. The only cost of the degraded path is that a crash-then-PID-recycle
+ * can make a stale lock look live until the lock file is removed.
+ *
+ * ── Why Windows needs this MORE than Linux (2026-07-10) ──
+ * The daemon is force-killed (`taskkill /F`) on every stop/restart/self-update,
+ * so `release()` never runs and the lock FILE always survives its holder. The
+ * next daemon start therefore ALWAYS lands on the stale-lock path and leans
+ * entirely on the liveness check. With bare PID liveness, a recycled PID makes
+ * a dead holder look alive and phantombot refuses to start — permanently, until
+ * someone deletes %TEMP%\phantombot.run.lock by hand. That's a wedged bot with
+ * no error anyone would think to look for, which is why the degraded path is
+ * no longer acceptable here.
  */
 
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -209,14 +219,57 @@ function bootId(): string | undefined {
 }
 
 /**
+ * Windows instance token: the process's creation time, which the kernel stamps
+ * per process instance. A recycled PID belongs to a process created later, so
+ * its CreationDate differs and the token changes — exactly the property we need.
+ *
+ * Costs one PowerShell spawn (~300ms). That's tolerable because this runs at
+ * most twice per `phantombot run` startup (once to write our own token, once to
+ * check the previous holder's) and never on a hot path. Bounded by `timeout` so
+ * a wedged PowerShell can't hang daemon startup; on any failure we return
+ * undefined and fall back to bare PID liveness.
+ *
+ * Exported for testing.
+ */
+export function _windowsInstanceToken(pid: number): string | undefined {
+  // The PID is read back out of the lock file; never interpolate it into the
+  // CIM filter without proving it's a plain positive integer.
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    const out = execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}")` +
+          `.CreationDate.ToUniversalTime().ToString('o')`,
+      ],
+      {
+        encoding: "utf8",
+        timeout: 5_000,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    return out ? `win:${out}` : undefined;
+  } catch {
+    // PowerShell missing, timed out, or the PID vanished mid-query.
+    return undefined;
+  }
+}
+
+/**
  * A token that uniquely identifies a running process instance: boot id +
  * the process start-time (field 22 of /proc/<pid>/stat, in clock ticks since
  * boot). Recycled PIDs get a different start-time, so the token changes.
  *
- * Returns undefined when /proc isn't available (e.g. macOS) — callers treat
- * that as "fall back to bare PID liveness".
+ * On Windows we use the CIM creation-time token instead. Returns undefined when
+ * neither is available (e.g. macOS) — callers treat that as "fall back to bare
+ * PID liveness".
  */
 function processInstanceToken(pid: number): string | undefined {
+  if (process.platform === "win32") return _windowsInstanceToken(pid);
   const boot = bootId();
   if (boot === undefined) return undefined;
   try {

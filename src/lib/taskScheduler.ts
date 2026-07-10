@@ -64,6 +64,7 @@ import { basename, join } from "node:path";
 import { xdgDataHome } from "../config.ts";
 import { currentUserSid } from "./filePermissions.ts";
 import type { WriteSink } from "./io.ts";
+import { log } from "./logger.ts";
 
 export const TASK_FOLDER = "\\Phantombot";
 export const PHANTOMBOT_TASK = "\\Phantombot\\phantombot";
@@ -372,6 +373,12 @@ export class BunSchtasksRunner implements SchtasksRunner {
 export interface RunningProcess {
   pid: number;
   commandLine: string;
+  /** Image name, e.g. "phantombot.exe". Empty when the lister can't see it. */
+  name?: string;
+  /** Parent PID as reported by the OS. May point at a long-dead process. */
+  parentPid?: number;
+  /** Process creation time (ms since epoch), used to reject recycled parents. */
+  createdMs?: number;
 }
 
 /**
@@ -380,8 +387,12 @@ export interface RunningProcess {
  * out to PowerShell (CIM) and taskkill.
  */
 export interface ProcessManager {
-  /** All running processes whose image name equals `image` (e.g. phantombot.exe). */
-  listByImage(image: string): Promise<RunningProcess[]>;
+  /**
+   * EVERY running process, with parentage. We can't filter to phantombot.exe:
+   * the orphans we must reap are the daemon's harness children (claude.exe,
+   * node.exe, cmd.exe, …), which carry unrelated image names.
+   */
+  listAll(): Promise<RunningProcess[]>;
   /** Force-terminate a single process by PID (best-effort; never throws). */
   kill(pid: number): Promise<void>;
 }
@@ -406,17 +417,138 @@ export function isDaemonCommandLine(commandLine: string): boolean {
   return firstArg.toLowerCase() === "run";
 }
 
+/**
+ * Every descendant of `rootPid`, breadth-first (nearest children first).
+ *
+ * ── Why the creation-time guard ──
+ * Windows never reparents orphans, so a dead process's PID can be recycled
+ * while its children still name it as `parentPid`. Worse, a BRAND NEW,
+ * unrelated process can be handed the recycled PID and inherit a pile of
+ * bogus "children". Walking parentage naively would then kill innocent
+ * processes.
+ *
+ * A genuine child is always created AFTER its parent. So we only follow an
+ * edge when the child's creation time is >= the parent's. When either
+ * timestamp is missing we follow the edge anyway — degrading to the previous
+ * (unguarded) behaviour rather than silently under-reaping.
+ *
+ * Exported for testing.
+ */
+export function descendantsOf(
+  procs: readonly RunningProcess[],
+  rootPid: number,
+): number[] {
+  const byParent = new Map<number, RunningProcess[]>();
+  for (const p of procs) {
+    if (p.parentPid === undefined) continue;
+    const siblings = byParent.get(p.parentPid);
+    if (siblings) siblings.push(p);
+    else byParent.set(p.parentPid, [p]);
+  }
+  const createdOf = new Map<number, number | undefined>(
+    procs.map((p) => [p.pid, p.createdMs]),
+  );
+
+  const out: number[] = [];
+  const seen = new Set<number>([rootPid]); // also guards parentage cycles
+  let frontier = [rootPid];
+  while (frontier.length > 0) {
+    const next: number[] = [];
+    for (const parent of frontier) {
+      const parentCreated = createdOf.get(parent);
+      for (const child of byParent.get(parent) ?? []) {
+        if (seen.has(child.pid)) continue;
+        // Reject a recycled-PID parent: a real child can't predate its parent.
+        if (
+          parentCreated !== undefined &&
+          child.createdMs !== undefined &&
+          child.createdMs < parentCreated
+        ) {
+          continue;
+        }
+        seen.add(child.pid);
+        out.push(child.pid);
+        next.push(child.pid);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/** Does this process look like the phantombot binary? */
+function isPhantombotImage(p: RunningProcess): boolean {
+  return (p.name ?? "").toLowerCase() === "phantombot.exe";
+}
+
+/**
+ * The exact PIDs `stop()`/`restart()` must terminate, in kill order.
+ *
+ * For each stray `phantombot run` daemon we take the daemon PLUS its whole
+ * descendant tree — the harness processes (claude.exe and its children) that
+ * `taskkill /F /PID` leaves behind as orphans, because it terminates one
+ * process and Windows has no process groups to sweep the rest.
+ *
+ * ── Why not just `taskkill /T` ──
+ * `/T` would be simpler, but it kills the tree from the root DOWN — and the
+ * CLI invoker running `restart` is frequently a DESCENDANT of the daemon
+ * (the agent's own Bash tool shells out to `phantombot restart`). `/T` would
+ * therefore kill the very process that still has to call `schtasks /Run`,
+ * turning an instant restart into a silent 60-second wait for the keep-alive
+ * trigger. So we enumerate the tree ourselves and subtract our own subtree.
+ *
+ * Order is root-first: the daemon dies before its children, so it can't spawn
+ * a fresh harness while we're partway through reaping the old one.
+ *
+ * Exported for testing.
+ */
+export function daemonKillOrder(
+  procs: readonly RunningProcess[],
+  selfPid: number,
+): number[] {
+  // Never kill ourselves, nor anything we spawned (e.g. the powershell we
+  // just used to enumerate). Our ANCESTORS are fair game — the daemon above
+  // us must still die; Windows simply leaves us with a dangling parent PID.
+  const protectedPids = new Set<number>([
+    selfPid,
+    ...descendantsOf(procs, selfPid),
+  ]);
+
+  const order: number[] = [];
+  const queued = new Set<number>();
+  for (const p of procs) {
+    if (p.pid === selfPid) continue;
+    if (!isPhantombotImage(p)) continue;
+    if (!isDaemonCommandLine(p.commandLine)) continue;
+    if (protectedPids.has(p.pid)) continue;
+    for (const pid of [p.pid, ...descendantsOf(procs, p.pid)]) {
+      if (protectedPids.has(pid) || queued.has(pid)) continue;
+      queued.add(pid);
+      order.push(pid);
+    }
+  }
+  return order;
+}
+
 export class BunProcessManager implements ProcessManager {
-  async listByImage(image: string): Promise<RunningProcess[]> {
+  async listAll(): Promise<RunningProcess[]> {
     // CIM gives us the full CommandLine (tasklist does not), which we need to
-    // tell the daemon (`... run`) apart from the CLI invoker (`... restart`).
+    // tell the daemon (`... run`) apart from the CLI invoker (`... restart`),
+    // plus ParentProcessId/CreationDate for safe tree-walking. CreationDate is
+    // projected to a round-trip ISO string: piping a raw CIM DateTime through
+    // ConvertTo-Json yields a shape that varies by PowerShell version.
     const script =
-      `Get-CimInstance Win32_Process -Filter "Name='${image}'" | ` +
-      `Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`;
+      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine," +
+      "@{N='Created';E={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress";
     try {
       const proc = Bun.spawn(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
+        {
+          env: { ...process.env },
+          stdout: "pipe",
+          stderr: "pipe",
+          windowsHide: true,
+        },
       );
       const stdout = await new Response(proc.stdout).text();
       await proc.exited;
@@ -425,10 +557,17 @@ export class BunProcessManager implements ProcessManager {
       const parsed = JSON.parse(trimmed);
       const rows = Array.isArray(parsed) ? parsed : [parsed];
       return rows
-        .map((r) => ({
-          pid: Number(r?.ProcessId),
-          commandLine: String(r?.CommandLine ?? ""),
-        }))
+        .map((r) => {
+          const created = Date.parse(String(r?.Created ?? ""));
+          const parent = Number(r?.ParentProcessId);
+          return {
+            pid: Number(r?.ProcessId),
+            commandLine: String(r?.CommandLine ?? ""),
+            name: String(r?.Name ?? ""),
+            parentPid: Number.isFinite(parent) ? parent : undefined,
+            createdMs: Number.isNaN(created) ? undefined : created,
+          };
+        })
         .filter((r) => Number.isFinite(r.pid) && r.pid > 0);
     } catch {
       // PowerShell missing / JSON malformed → treat as "nothing to kill".
@@ -438,10 +577,14 @@ export class BunProcessManager implements ProcessManager {
 
   async kill(pid: number): Promise<void> {
     try {
+      // No `/T`: `daemonKillOrder` already enumerated the tree, minus our own
+      // subtree. `/T` here could sweep up the CLI invoker running `restart`.
       const proc = Bun.spawn(["taskkill", "/F", "/PID", String(pid)], {
         env: { ...process.env },
         stdout: "ignore",
         stderr: "ignore",
+        // Without this every reaped PID flashes a console window on the desktop.
+        windowsHide: true,
       });
       await proc.exited;
     } catch {
@@ -450,24 +593,74 @@ export class BunProcessManager implements ProcessManager {
   }
 }
 
+/** Injectable clock/sleep so the wait loop is testable without real delays. */
+export interface WaitDeps {
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  intervalMs: number;
+}
+
+const defaultWaitDeps: WaitDeps = {
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  timeoutMs: 10_000,
+  intervalMs: 100,
+};
+
 /**
- * Kill every stray `phantombot run` daemon reported by the process manager,
- * skipping the current process (the CLI invoker running stop/restart). This is
- * the reliable teardown `schtasks /End` fails to guarantee.
+ * Block until none of `pids` are running, or the timeout expires.
+ *
+ * `taskkill /F` returns as soon as the OS *accepts* the termination request,
+ * not when the process is actually gone. `restart()` used to fire
+ * `schtasks /Run` immediately afterwards, so the new daemon could start while
+ * the old one still held the single-instance run-lock — the new process saw a
+ * live holder, refused to start, and the restart silently no-opped. Waiting
+ * for the PIDs to actually disappear closes that race.
+ *
+ * Returns true if everything exited, false on timeout (caller proceeds anyway —
+ * a stuck PID shouldn't wedge `stop()` forever).
+ */
+export async function waitForProcessesGone(
+  pm: ProcessManager,
+  pids: readonly number[],
+  deps: WaitDeps = defaultWaitDeps,
+): Promise<boolean> {
+  if (pids.length === 0) return true;
+  const target = new Set(pids);
+  const deadline = Date.now() + deps.timeoutMs;
+  for (;;) {
+    const alive = (await pm.listAll()).filter((p) => target.has(p.pid));
+    if (alive.length === 0) return true;
+    if (Date.now() >= deadline) {
+      log.warn("taskScheduler: processes still alive after kill timeout", {
+        pids: alive.map((p) => p.pid),
+      });
+      return false;
+    }
+    await deps.sleep(deps.intervalMs);
+  }
+}
+
+/**
+ * Kill every stray `phantombot run` daemon AND its orphaned descendants,
+ * skipping the current process (the CLI invoker running stop/restart) and
+ * anything it spawned. This is the reliable teardown `schtasks /End` fails to
+ * guarantee. Blocks until the killed PIDs are actually gone, so a following
+ * `schtasks /Run` can't race the old process's run-lock.
+ *
+ * Returns the number of processes killed.
  */
 export async function killDaemonProcesses(
   pm: ProcessManager,
   selfPid: number,
+  waitDeps: WaitDeps = defaultWaitDeps,
 ): Promise<number> {
-  const procs = await pm.listByImage("phantombot.exe");
-  let killed = 0;
-  for (const p of procs) {
-    if (p.pid === selfPid) continue;
-    if (!isDaemonCommandLine(p.commandLine)) continue;
-    await pm.kill(p.pid);
-    killed++;
+  const procs = await pm.listAll();
+  const victims = daemonKillOrder(procs, selfPid);
+  for (const pid of victims) {
+    await pm.kill(pid);
   }
-  return killed;
+  await waitForProcessesGone(pm, victims, waitDeps);
+  return victims.length;
 }
 
 /**

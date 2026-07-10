@@ -12,6 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  _windowsInstanceToken,
   acquireRunLock,
   defaultLockPath,
   isLockHandle,
@@ -144,5 +145,21 @@ describe("defaultLockPath", () => {
     } finally {
       if (saved !== undefined) process.env.XDG_RUNTIME_DIR = saved;
     }
+  });
+});
+
+describe("_windowsInstanceToken", () => {
+  // The PID is read back out of an on-disk lock file and interpolated into a
+  // PowerShell CIM filter, so it must be proven to be a plain positive integer
+  // before it ever reaches a command line.
+  test("rejects non-integer, negative, and zero PIDs before spawning", () => {
+    for (const bad of [NaN, 0, -1, 1.5, Infinity]) {
+      expect(_windowsInstanceToken(bad)).toBeUndefined();
+    }
+  });
+
+  test("degrades to undefined when PowerShell is unavailable", () => {
+    if (process.platform === "win32") return; // real PowerShell would answer
+    expect(_windowsInstanceToken(process.pid)).toBeUndefined();
   });
 });
