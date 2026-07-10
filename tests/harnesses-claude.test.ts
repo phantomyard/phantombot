@@ -16,6 +16,7 @@ import {
   ClaudeHarness,
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
+  isRateLimitSentinel,
   parseStreamJson,
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
@@ -108,6 +109,67 @@ describe("filterAuthEnv", () => {
       MAYBE: undefined,
     });
     expect(out).toEqual({ DEFINED: "yes" });
+  });
+});
+
+describe("isRateLimitSentinel", () => {
+  test("matches claude's session-limit notice", () => {
+    expect(
+      isRateLimitSentinel(
+        "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+      ),
+    ).toBe(true);
+  });
+
+  test("matches usage-limit and generic phrasings", () => {
+    expect(isRateLimitSentinel("You've reached your usage limit")).toBe(true);
+    expect(isRateLimitSentinel("Claude usage limit reached")).toBe(true);
+    expect(isRateLimitSentinel("You've hit your weekly limit, resets Monday")).toBe(true);
+  });
+
+  test("does NOT match a normal reply that merely mentions limits", () => {
+    expect(
+      isRateLimitSentinel("Sure — the API has a rate limit of 50 requests per minute."),
+    ).toBe(false);
+    expect(isRateLimitSentinel("Here's how to raise your account limit in settings.")).toBe(false);
+  });
+
+  test("does NOT match a long essay even if it contains the phrase", () => {
+    const essay =
+      "When you hit your session limit the client shows a notice. " +
+      "x".repeat(400);
+    expect(isRateLimitSentinel(essay)).toBe(false);
+  });
+
+  test("ignores empty / whitespace", () => {
+    expect(isRateLimitSentinel("")).toBe(false);
+    expect(isRateLimitSentinel("   ")).toBe(false);
+  });
+});
+
+describe("parseStreamJson rate-limit sentinel", () => {
+  test("converts the session-limit text block to a recoverable error, not text", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "text",
+            text: "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+          },
+        ],
+      },
+    });
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+    expect((c as { error: string }).error).toContain("session/usage limit");
+  });
+
+  test("a normal reply is still surfaced as text", () => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "the rate limit is 50/min" }] },
+    });
+    expect(c).toEqual({ type: "text", text: "the rate limit is 50/min" });
   });
 });
 

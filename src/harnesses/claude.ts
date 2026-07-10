@@ -388,6 +388,37 @@ export function renderStdinPayload(req: HarnessRequest): string {
  *
  * Exported for testing.
  */
+/**
+ * True when an assistant text block is claude's session/usage-limit notice
+ * rather than a real reply. Matches the CLI's cap messages —
+ *   "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)"
+ *   "You've reached your usage limit"
+ *   "Claude usage limit reached"
+ * — while staying narrow enough not to trip on a normal reply that happens to
+ * discuss limits. Two guards keep false positives down:
+ *   1. The text must be SHORT (< 320 chars). The real notice is a one-liner;
+ *      a genuine essay about rate limits is long and won't match.
+ *   2. The phrase must pair a "hit/reached ... limit" verb with a
+ *      session/usage/quota noun, the CLI's actual wording.
+ * The failure mode if we ever over-match is benign anyway: we fall through to
+ * the next harness, which just answers the turn.
+ *
+ * Exported for testing.
+ */
+const RATE_LIMIT_RE =
+  // (a) a cap-noun directly qualifying "limit" — "session limit", "usage limit"
+  //     (deliberately NOT "rate limit": "the API has a rate limit of 50/min" is
+  //     a legitimate reply, not a cap notice);
+  // (b) "limit reached/exceeded" in either order — "usage limit reached";
+  // (c) a "hit/reached ... limit" clause — the CLI's "You've hit your ... limit".
+  /\b(?:session|usage|quota|weekly|daily|5-hour)\s+limit\b|\blimit\s+(?:reached|exceeded)\b|\b(?:hit|reached)\b[^.]{0,30}\blimit\b/i;
+
+export function isRateLimitSentinel(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0 || t.length > 320) return false;
+  return RATE_LIMIT_RE.test(t);
+}
+
 export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
@@ -423,7 +454,25 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
       }
     }
   }
-  if (text) return { type: "text", text };
+  if (text) {
+    // Rate-limit sentinel filter. When the account's 5-hour session (or weekly)
+    // cap is spent, the claude CLI emits its "You've hit your session limit ·
+    // resets 1:40pm" notice as an ordinary assistant TEXT block, THEN exits
+    // non-zero. Left alone, that text streams live to the user (Telegram, Zed,
+    // every channel) before the orchestrator falls through to the next harness
+    // — exactly the drama we don't want. Detect it here and convert it to a
+    // RECOVERABLE error instead, so fall-through fires before a single byte of
+    // the notice reaches the screen. The fallback harness answers; the user
+    // never sees that claude was capped.
+    if (isRateLimitSentinel(text)) {
+      return {
+        type: "error",
+        error: `claude session/usage limit reached: ${text.trim().slice(0, 160)}`,
+        recoverable: true,
+      };
+    }
+    return { type: "text", text };
+  }
   if (toolName) {
     const tool = buildToolCall(toolName, toolInput);
     return { type: "progress", note: tool.title, tool };

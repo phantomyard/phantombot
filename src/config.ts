@@ -33,6 +33,20 @@ import { loadState } from "./state.ts";
  * gated by a module-scoped flag so loadConfig can be called multiple
  * times in tests without spamming.
  */
+/**
+ * One-shot deprecation warning for the retired pi `max_payload_bytes` /
+ * `PHANTOMBOT_PI_MAX_PAYLOAD` knob. Module-scoped flag so repeated loadConfig
+ * calls (tests, reloads) don't spam.
+ */
+let piMaxPayloadWarnLogged = false;
+function warnPiMaxPayloadDeprecated(): void {
+  if (piMaxPayloadWarnLogged) return;
+  piMaxPayloadWarnLogged = true;
+  log.warn(
+    "config: pi max_payload_bytes / PHANTOMBOT_PI_MAX_PAYLOAD is deprecated and ignored — pi now streams its payload via temp files with no size ceiling, so the fallback never refuses a turn for size. Remove the setting; it has no effect.",
+  );
+}
+
 let legacyWarnLogged = false;
 function legacyTurnTimeoutMs(
   toml: Record<string, unknown>,
@@ -251,7 +265,13 @@ export interface Config {
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
       bin: string;
-      maxPayloadBytes: number;
+      /**
+       * @deprecated Retired and IGNORED. Pi now always streams its payload via
+       * temp files, so there is no argv-length ceiling and the fallback never
+       * refuses a turn for size. Kept as an optional field only so a stale
+       * config object still type-checks; nothing reads it. See warnPiMaxPayloadDeprecated.
+       */
+      maxPayloadBytes?: number;
       /**
        * Capability routing (distinct from the failover `chain`). When set, the
        * bundled Pi extension delegates vision/coding subtasks to specialist
@@ -389,6 +409,18 @@ export async function loadConfig(): Promise<Config> {
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
   const tomlPi = (tomlHarnesses.pi ?? {}) as Record<string, unknown>;
+  // DEPRECATED & IGNORED: pi's payload now always travels via temp files, so
+  // there is no argv-length ceiling and no reason to cap payload size — pi is
+  // the transparent last-resort fallback and must never refuse a turn for
+  // size. Honor neither the env override nor the TOML key; just warn once so a
+  // hand-tweaked `max_payload_bytes = 4000` on an old box becomes harmless
+  // instead of silently starving the fallback. No user need ever touch this.
+  if (
+    process.env.PHANTOMBOT_PI_MAX_PAYLOAD !== undefined ||
+    tomlPi.max_payload_bytes !== undefined
+  ) {
+    warnPiMaxPayloadDeprecated();
+  }
   const tomlGeminiHarness = (tomlHarnesses.gemini ?? {}) as Record<string, unknown>;
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
@@ -484,10 +516,6 @@ export async function loadConfig(): Promise<Config> {
           asString(tomlPi.bin) ??
           state.harness_bins?.pi ??
           "pi",
-        maxPayloadBytes:
-          asInt(process.env.PHANTOMBOT_PI_MAX_PAYLOAD) ??
-          asInt(tomlPi.max_payload_bytes) ??
-          1_500_000,
         routing: buildPiRoutingConfig(tomlPi),
       },
 

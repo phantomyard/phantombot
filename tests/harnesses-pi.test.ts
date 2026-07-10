@@ -332,11 +332,7 @@ afterEach(() => {
   reloadSpy?.mockRestore();
 });
 
-const mkHarness = (overrides: Partial<{ maxPayloadBytes: number }> = {}) =>
-  new PiHarness({
-    bin: FAKE_PI,
-    maxPayloadBytes: overrides.maxPayloadBytes ?? 1_500_000,
-  });
+const mkHarness = () => new PiHarness({ bin: FAKE_PI });
 
 describe("PiHarness.invoke (subprocess)", () => {
   test("normal exit: text chunks (thinking ignored) + done with finalText", async () => {
@@ -423,24 +419,26 @@ describe("PiHarness.invoke (subprocess)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Windows argv-length workaround. On Windows the whole command line is capped
-// at ~8,191 chars; pi carries both the system prompt (a flag) and the full
-// payload (the positional) on argv, so a real persona turn fails to spawn.
-// The harness spills both to temp files and passes `--system-prompt <file>`
-// plus an `@<file>` positional. The platform is injected so this runs on the
-// Linux CI runner. FAKE_PI 'argv' mode echoes argv so we can inspect it.
+// Payload always via temp files (every platform). Pi carries both the system
+// prompt (a flag) and the full payload (the positional) on argv, so a real
+// persona turn would fail to spawn on Windows (~8,191-char command line) and
+// could hit Linux ARG_MAX on a huge turn. As the LAST harness in the chain, pi
+// must swallow whatever context the primary was chewing when it failed — so it
+// spills both to temp files and passes `--system-prompt <file>` plus an
+// `@<file>` positional, on every platform, with no size ceiling. FAKE_PI
+// 'argv' mode echoes argv so we can inspect it.
 // ---------------------------------------------------------------------------
 
-describe("PiHarness.invoke Windows argv-length workaround", () => {
+describe("PiHarness.invoke payload-via-temp-files", () => {
   const argvOf = (chunks: HarnessChunk[]): string =>
     chunks
       .filter((c) => c.type === "text")
       .map((c) => (c as { text: string }).text)
       .join("");
 
-  test("win32: system prompt + payload go to temp files, not raw argv", async () => {
+  test("system prompt + payload go to temp files, not raw argv", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "win32");
+    const harness = new PiHarness({ bin: FAKE_PI });
     const chunks = await collect(
       harness.invoke(
         newRequest({ systemPrompt: "SECRET-PERSONA-PROMPT", userMessage: "SECRET-USER-MSG" }),
@@ -457,9 +455,9 @@ describe("PiHarness.invoke Windows argv-length workaround", () => {
     expect(argv).toMatch(/@\S*payload\.md/);
   });
 
-  test("win32: temp dir is cleaned up after the run", async () => {
+  test("temp dir is cleaned up after the run", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "win32");
+    const harness = new PiHarness({ bin: FAKE_PI });
     const chunks = await collect(harness.invoke(newRequest()));
     const argv = argvOf(chunks);
     const match = argv.match(/@(\S*payload\.md)/);
@@ -469,19 +467,20 @@ describe("PiHarness.invoke Windows argv-length workaround", () => {
     expect(existsSync(payloadFile!)).toBe(false);
   });
 
-  test("POSIX: system prompt + payload stay inline on argv", async () => {
+  test("a large payload still spills to files and is answered (no size ceiling)", async () => {
     process.env.FAKE_PI_MODE = "argv";
-    // Force the POSIX branch so this holds on the Windows CI runner too.
-    const harness = new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000 }, "linux");
+    const harness = new PiHarness({ bin: FAKE_PI });
+    // ~200 KB — far past any old maxPayloadBytes cap and past a raw Windows
+    // command line. Must still spill to a file and produce a reply, never a
+    // recoverable "exceeds" error.
+    const huge = "x".repeat(200_000);
     const chunks = await collect(
-      harness.invoke(
-        newRequest({ systemPrompt: "INLINE-PERSONA", userMessage: "INLINE-MSG" }),
-      ),
+      harness.invoke(newRequest({ userMessage: huge })),
     );
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
     const argv = argvOf(chunks);
-    expect(argv).toContain("INLINE-PERSONA");
-    expect(argv).toContain("INLINE-MSG");
-    expect(argv).not.toContain("payload.md");
+    expect(argv).toMatch(/@\S*payload\.md/);
+    expect(argv).not.toContain(huge);
   });
 });
 
@@ -497,7 +496,7 @@ describe("PiHarness routing (subprocess)", () => {
     primaryModel?: string;
     imageModel?: string;
     codingModel?: string;
-  }) => new PiHarness({ bin: FAKE_PI, maxPayloadBytes: 1_500_000, routing });
+  }) => new PiHarness({ bin: FAKE_PI, routing });
 
   test("routing.primaryModel pins the orchestrator via --model", async () => {
     process.env.FAKE_PI_MODE = "argv";
@@ -676,28 +675,12 @@ describe("PiHarness routing (subprocess)", () => {
   });
 });
 
-describe("PiHarness ARG_MAX precheck", () => {
-  test("emits a recoverable error and does NOT spawn when payload exceeds budget", async () => {
-    // Make the budget tiny so the test request blows it.
-    const chunks = await collect(
-      mkHarness({ maxPayloadBytes: 5 }).invoke(
-        newRequest({
-          systemPrompt: "long system prompt that is more than 5 bytes",
-          userMessage: "hello",
-        }),
-      ),
-    );
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0]).toMatchObject({
-      type: "error",
-      recoverable: true,
-      error: expect.stringContaining("exceeds maxPayloadBytes"),
-    });
-  });
-
-  test("declares maxPayloadBytes on the Harness instance", () => {
-    const h = mkHarness({ maxPayloadBytes: 1_000 });
-    expect(h.maxPayloadBytes).toBe(1_000);
+describe("PiHarness has no payload ceiling", () => {
+  test("does not declare maxPayloadBytes (fallback never refuses a turn for size)", () => {
+    // The orchestrator's generic precheck skips a harness only when it declares
+    // maxPayloadBytes. Pi must NOT declare it — as the last-resort fallback it
+    // spills any payload to temp files and always answers.
+    expect((mkHarness() as { maxPayloadBytes?: number }).maxPayloadBytes).toBeUndefined();
   });
 });
 
@@ -707,11 +690,6 @@ describe("PiHarness.available", () => {
   });
 
   test("returns false for a non-existent absolute path", async () => {
-    expect(
-      await new PiHarness({
-        bin: "/no/such/pi",
-        maxPayloadBytes: 1_000,
-      }).available(),
-    ).toBe(false);
+    expect(await new PiHarness({ bin: "/no/such/pi" }).available()).toBe(false);
   });
 });
