@@ -18,6 +18,7 @@ import {
   ENABLE_PROPOSED_API_KEY,
   ensureProposedApi,
   planProposedApi,
+  vscodeDataFolderName,
   type ArgvDeps,
 } from "../src/connectors/acp/vscodeArgv.ts";
 
@@ -53,13 +54,72 @@ const STOCK = `// This configuration file allows you to pass permanent command l
 	"crash-reporter-id": "71e7281d-a073-4285-8a37-7581b7168042"
 }`;
 
+/** Path segments, split on either separator, so `.vscode` can be matched EXACTLY. */
+function segments(p: string): string[] {
+  return p.split(/[\\/]/);
+}
+
 describe("defaultVscodeArgvPath", () => {
   test("is <home>/.vscode/argv.json — no APPDATA/XDG branch", () => {
     // Unlike settings.json, VS Code derives argv.json from os.homedir() on
     // every platform. Getting this wrong = writing a file VS Code never reads.
+    // Verified on the real Windows box: C:\Users\<user>\.vscode\argv.json,
+    // carrying VS Code's own header comments and crash-reporter-id.
     const p = defaultVscodeArgvPath();
     expect(p.endsWith("argv.json")).toBe(true);
-    expect(p.includes(".vscode")).toBe(true);
+    // Exact segment, not `includes(".vscode")` — that substring also matches
+    // `.vscode-insiders`, so the loose form would pass for the wrong folder.
+    expect(segments(p)).toContain(".vscode");
+  });
+});
+
+describe("vscodeDataFolderName", () => {
+  // Kai's review asked for Windows coverage. The value of these cases is that
+  // they run on LINUX CI: a node:path.basename() implementation passes on
+  // Windows and fails here — that asymmetry is how the phantombot.exe gate
+  // shipped in the first place.
+  test("stable resolves to .vscode on every platform and path shape", () => {
+    for (const cli of [
+      undefined,
+      "code",
+      "code.cmd",
+      "/usr/bin/code",
+      "/snap/bin/code",
+      "C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd",
+      "C:\\Program Files (x86)\\Microsoft VS Code\\bin\\CODE.CMD",
+      "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+    ]) {
+      expect(vscodeDataFolderName(cli)).toBe(".vscode");
+    }
+  });
+
+  test("a Windows CLI path is split on backslashes, not swallowed whole", () => {
+    // The whole point: node:path.basename does NOT split `\` under POSIX.
+    expect(
+      vscodeDataFolderName(
+        "C:\\Program Files\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd",
+      ),
+    ).toBe(".vscode-insiders");
+  });
+
+  test("distributions get their own data folder, never stable's", () => {
+    expect(vscodeDataFolderName("code-insiders")).toBe(".vscode-insiders");
+    expect(vscodeDataFolderName("/usr/bin/code-insiders")).toBe(".vscode-insiders");
+    expect(vscodeDataFolderName("codium")).toBe(".vscode-oss");
+    expect(vscodeDataFolderName("/usr/bin/vscodium")).toBe(".vscode-oss");
+  });
+
+  test("an unknown CLI falls back to stable rather than inventing a folder", () => {
+    expect(vscodeDataFolderName("cursor")).toBe(".vscode");
+    expect(vscodeDataFolderName("/opt/weird/editor.exe")).toBe(".vscode");
+  });
+
+  test("defaultVscodeArgvPath follows the derived folder", () => {
+    expect(segments(defaultVscodeArgvPath("code-insiders"))).toContain(
+      ".vscode-insiders",
+    );
+    expect(segments(defaultVscodeArgvPath("code-insiders"))).not.toContain(".vscode");
+    expect(segments(defaultVscodeArgvPath("codium"))).toContain(".vscode-oss");
   });
 });
 

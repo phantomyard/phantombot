@@ -82,15 +82,65 @@ export interface ArgvDeps {
 }
 
 /**
- * Resolve the per-user VS Code `argv.json`.
+ * Basename of a CLI path, split on BOTH separators and stripped of a Windows
+ * launcher extension.
  *
- * It lives at `<home>/.vscode/argv.json` on EVERY platform — VS Code derives it
- * from `os.homedir()` + its `dataFolderName`, so unlike settings.json there is
- * no `%APPDATA%` branch on Windows and no XDG lookup on Linux. (VS Code
- * Insiders uses `.vscode-insiders`; we target stable only.)
+ * `node:path`'s `basename` is platform-bound: on POSIX it does not treat `\` as
+ * a separator, so `basename("C:\\...\\bin\\code.cmd")` returns the WHOLE
+ * string. Deriving the data folder with it would therefore work on Windows and
+ * silently misbehave under a Linux CI run of the Windows test — the exact class
+ * of bug that let the `phantombot.exe` gate ship. Split on both, always.
  */
-export function defaultVscodeArgvPath(): string {
-  return join(homedir(), ".vscode", "argv.json");
+function cliBasename(cliPath: string): string {
+  const tail = cliPath.split(/[\\/]/).pop() ?? cliPath;
+  return tail.replace(/\.(cmd|exe|bat)$/i, "").toLowerCase();
+}
+
+/**
+ * VS Code's per-user data folder, derived from the resolved CLI.
+ *
+ * Each distribution stamps its own `dataFolderName` into product.json, and
+ * argv.json lives inside it. Hardcoding `.vscode` writes STABLE's runtime args
+ * no matter which distribution we actually installed the extension into.
+ *
+ * Today `resolveCodeCli()` only ever resolves stable (`code` / `code.cmd`), so
+ * every branch below except the first is unreachable in production. It exists
+ * so the two can't silently disagree the moment someone adds Insiders to the
+ * resolver — which is exactly how the extension would end up installed in one
+ * editor and allow-listed in another.
+ *
+ * Unknown names fall back to stable rather than inventing a folder: writing
+ * stable's argv.json is a visible no-op, creating a phantom data folder for an
+ * editor that doesn't exist is litter.
+ */
+export function vscodeDataFolderName(codeCommand?: string): string {
+  if (!codeCommand) return ".vscode";
+  switch (cliBasename(codeCommand)) {
+    case "code-insiders":
+      return ".vscode-insiders";
+    // VSCodium and OSS builds ship dataFolderName `.vscode-oss`.
+    case "codium":
+    case "vscodium":
+      return ".vscode-oss";
+    default:
+      return ".vscode";
+  }
+}
+
+/**
+ * Resolve the per-user VS Code `argv.json` for the distribution behind
+ * `codeCommand` (omit it for stable).
+ *
+ * It lives at `<home>/<dataFolder>/argv.json` on EVERY platform — VS Code
+ * derives it from `os.homedir()` + its `dataFolderName`, so unlike
+ * settings.json there is no `%APPDATA%` branch on Windows and no XDG lookup on
+ * Linux. Verified directly on the Windows box: `C:\Users\<user>\.vscode\argv.json`,
+ * carrying VS Code's own generated header comments and `crash-reporter-id`.
+ *
+ * argv.json holds GLOBAL runtime arguments, so it is not per-profile either.
+ */
+export function defaultVscodeArgvPath(codeCommand?: string): string {
+  return join(homedir(), vscodeDataFolderName(codeCommand), "argv.json");
 }
 
 /** What a reconcile WOULD do to `existing`, computed purely. */
@@ -162,6 +212,12 @@ const NEW_FILE_HEADER =
 export interface ProposedApiOptions {
   deps?: ArgvDeps;
   extensionId?: string;
+  /**
+   * The `code` CLI the extension was actually installed with, as resolved by
+   * `resolveCodeCli()`. Selects the matching data folder so we allow-list the
+   * extension in the same distribution we installed it into. Omit for stable.
+   */
+  codeCommand?: string;
 }
 
 /**
@@ -171,7 +227,7 @@ export interface ProposedApiOptions {
 export function checkProposedApi(
   options: ProposedApiOptions = {},
 ): ProposedApiResult {
-  const deps = options.deps ?? defaultArgvDeps();
+  const deps = options.deps ?? defaultArgvDeps(options.codeCommand);
   const extensionId = options.extensionId ?? VSCODE_EXTENSION_ID;
   try {
     const plan = planProposedApi(deps.read(deps.argvPath), extensionId);
@@ -203,7 +259,7 @@ export function checkProposedApi(
 export function ensureProposedApi(
   options: ProposedApiOptions = {},
 ): ProposedApiResult {
-  const deps = options.deps ?? defaultArgvDeps();
+  const deps = options.deps ?? defaultArgvDeps(options.codeCommand);
   const extensionId = options.extensionId ?? VSCODE_EXTENSION_ID;
   try {
     const existing = deps.read(deps.argvPath);
@@ -238,10 +294,10 @@ export function ensureProposedApi(
   }
 }
 
-/** Production deps: real fs, real home. */
-export function defaultArgvDeps(): ArgvDeps {
+/** Production deps: real fs, real home, the resolved distribution's argv.json. */
+export function defaultArgvDeps(codeCommand?: string): ArgvDeps {
   return {
-    argvPath: defaultVscodeArgvPath(),
+    argvPath: defaultVscodeArgvPath(codeCommand),
     read: (p) => {
       try {
         return readFileSync(p, "utf8");

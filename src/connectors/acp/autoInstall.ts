@@ -42,6 +42,7 @@ import {
 import {
   checkProposedApi,
   ensureProposedApi,
+  type ProposedApiOptions,
   type ProposedApiResult,
   type ProposedApiStatus,
 } from "./vscodeArgv.ts";
@@ -230,8 +231,8 @@ export function vscodeResultToConnector(
 export interface VscodeReconcileHooks {
   install(): VscodeInstallResult;
   check(): VscodeInstallResult;
-  ensureArgv(): ProposedApiResult;
-  checkArgv(): ProposedApiResult;
+  ensureArgv(options?: ProposedApiOptions): ProposedApiResult;
+  checkArgv(options?: ProposedApiOptions): ProposedApiResult;
 }
 
 /**
@@ -245,6 +246,10 @@ export interface VscodeReconcileHooks {
  * failed (`error`), we don't go creating a `~/.vscode/argv.json` for an editor
  * the user may not even have — that's the same "never provision what wasn't
  * asked for" rule the settings-model editors enforce via `detectionDir`.
+ *
+ * The CLI the extension step actually resolved is threaded into the argv step,
+ * so we allow-list the extension in the SAME distribution we installed it into
+ * rather than in whatever `.vscode` happens to sit in `$HOME`.
  */
 export function reconcileVscode(
   repair: boolean,
@@ -255,11 +260,15 @@ export function reconcileVscode(
   const ensureArgv = hooks.ensureArgv ?? ensureProposedApi;
   const checkArgv = hooks.checkArgv ?? checkProposedApi;
 
-  const connector = vscodeResultToConnector(repair ? install() : check(), repair);
+  const result = repair ? install() : check();
+  const connector = vscodeResultToConnector(result, repair);
   if (connector.action === "not-detected" || connector.action === "error") {
     return connector;
   }
-  const argv = repair ? ensureArgv() : checkArgv();
+  const argvOptions: ProposedApiOptions = result.codeCommand
+    ? { codeCommand: result.codeCommand }
+    : {};
+  const argv = repair ? ensureArgv(argvOptions) : checkArgv(argvOptions);
   connector.proposedApi = argv.status;
   if (argv.error) connector.proposedApiError = argv.error;
   return connector;

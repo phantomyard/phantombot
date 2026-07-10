@@ -256,4 +256,49 @@ describe("reconcileVscode — proposed-api allow-list gating", () => {
     expect(r.proposedApi).toBe("current");
     expect(editorConnectorBroken(r)).toBe(false);
   });
+
+  // The extension is installed via the RESOLVED cli, so the allow-list must
+  // land in that same distribution's data folder. If the cli never reaches the
+  // argv step we'd install into Insiders and allow-list stable — silently
+  // degraded, which is precisely the failure this file exists to prevent.
+  test("the resolved code CLI is threaded into the repair-mode argv step", () => {
+    let seen: string | undefined | "unset" = "unset";
+    const r = reconcileVscode(true, {
+      install: () =>
+        vscodeResult({
+          action: "installed",
+          codeCommand: "C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd",
+        }),
+      ensureArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "enabled", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBe("C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd");
+    expect(r.proposedApi).toBe("enabled");
+  });
+
+  test("the resolved code CLI is threaded into the report-only argv step", () => {
+    let seen: string | undefined | "unset" = "unset";
+    reconcileVscode(false, {
+      check: () => vscodeResult({ action: "current", codeCommand: "code-insiders" }),
+      checkArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "current", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBe("code-insiders");
+  });
+
+  test("no resolved CLI ⇒ no override, so the default (stable) argv.json applies", () => {
+    let seen: string | undefined | "unset" = "unset";
+    reconcileVscode(true, {
+      install: () => vscodeResult({ action: "installed" }), // no codeCommand
+      ensureArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "enabled", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBeUndefined();
+  });
 });
