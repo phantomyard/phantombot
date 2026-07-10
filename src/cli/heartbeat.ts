@@ -7,9 +7,9 @@
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
 
 import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
+import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -169,7 +169,7 @@ async function defaultHealService(): Promise<void> {
  */
 async function defaultHealSystemd(): Promise<void> {
   const binPath = process.execPath;
-  if (basename(binPath) !== "phantombot") return;
+  if (!isPhantombotBinary(binPath)) return;
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return;
   const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
@@ -190,7 +190,7 @@ async function defaultHealSystemd(): Promise<void> {
  */
 async function defaultHealTaskScheduler(): Promise<void> {
   const binPath = process.execPath;
-  if (!basename(binPath).startsWith("phantombot")) return;
+  if (!isPhantombotBinary(binPath)) return;
   const r = await ensureTasksCurrent({
     binPath,
     schtasks: new BunSchtasksRunner(),

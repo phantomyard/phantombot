@@ -111,7 +111,8 @@ describe("loadConfig — defaults (no file)", () => {
     });
     expect(c.harnesses.pi).toEqual({
       bin: "pi",
-      maxPayloadBytes: 1_500_000,
+      // maxPayloadBytes is retired — the builder no longer sets it (pi streams
+      // its payload via temp files with no size ceiling).
       // No routing configured by default → field is undefined (optional).
       routing: undefined,
     });
@@ -223,7 +224,9 @@ model = "gpt-5.3-codex"
     expect(c.harnesses.claude.model).toBe("sonnet");
     expect(c.harnesses.claude.fallbackModel).toBe("");
     expect(c.harnesses.pi.bin).toBe("/opt/pi/pi");
-    expect(c.harnesses.pi.maxPayloadBytes).toBe(500_000);
+    // max_payload_bytes is deprecated & ignored — the loader never reads it
+    // into the config (pi streams its payload via temp files, no size ceiling).
+    expect(c.harnesses.pi.maxPayloadBytes).toBeUndefined();
     expect(c.harnesses.codex).toBeDefined();
     expect(c.harnesses.codex!.bin).toBe("/opt/codex/codex");
     expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");

@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { isPhantombotBinary } from "./binaryIdentity.ts";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
@@ -410,7 +411,7 @@ async function defaultRerenderUnitIfStale(): Promise<{
   backupPath?: string;
 }> {
   const binPath = process.execPath;
-  if (basename(binPath) !== "phantombot") return { rerendered: false };
+  if (!isPhantombotBinary(binPath)) return { rerendered: false };
   const unitPath = defaultUnitPath();
   if (!existsSync(unitPath)) return { rerendered: false };
   const sysEnv = ensureUserSystemdEnv();

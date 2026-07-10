@@ -132,6 +132,39 @@ describe("runWithFallback — maxPayloadBytes precheck", () => {
   });
 });
 
+describe("runWithFallback — silent rate-limit failover", () => {
+  test("claude rate-limit (recoverable error, no text) → pi answers, nothing leaks", async () => {
+    // Mirrors the real chain: claude stamps `error:"rate_limit"` on the
+    // assistant envelope, and parseStreamJson converts that to a recoverable
+    // error BEFORE any text is yielded — so at the orchestrator level claude
+    // produces only a recoverable error. Pi must answer, and the user must see
+    // ONLY pi's text + done — no error chunk, no rate-limit notice.
+    const claude = new FakeHarness("claude", [
+      { type: "error", error: "claude api error: rate_limit", recoverable: true },
+    ]);
+    const pi = new FakeHarness("pi", [
+      { type: "text", text: "answered by pi" },
+      { type: "done", finalText: "answered by pi" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([claude, pi], newRequest(), {
+        cooldown: new CooldownStore(),
+      }),
+    );
+    expect(claude.invocations).toBe(1);
+    expect(pi.invocations).toBe(1);
+    // No error chunk reaches the user, and no rate-limit text does either.
+    expect(chunks.some((c) => c.type === "error")).toBe(false);
+    expect(
+      chunks.some(
+        (c) => c.type === "text" && /session limit/i.test((c as { text: string }).text),
+      ),
+    ).toBe(false);
+    expect(chunks.map((c) => c.type)).toEqual(["text", "done"]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "answered by pi" });
+  });
+});
+
 describe("runWithFallback — empty done falls through", () => {
   test("non-last harness emitting done with empty finalText falls through", async () => {
     // Repro of the gemini "(no reply)" bug: gemini exits 0 (e.g.

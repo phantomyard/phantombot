@@ -8,7 +8,6 @@
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
 
 import {
   HttpTelegramTransport,
@@ -55,6 +54,7 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
+import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
   acquireRunLock,
@@ -319,7 +319,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // relaunched process sweeps it up. No-op on POSIX and best-effort — a
   // still-locked artifact is retried on the next boot. Gated to the real
   // compiled binary so `bun src/index.ts`/tests never touch the dev box.
-  if (basename(process.execPath).toLowerCase().startsWith("phantombot")) {
+  if (isPhantombotBinary()) {
     try {
       const removed = await cleanupStaleUpdateArtifacts(process.execPath);
       if (removed.length > 0) {
@@ -439,7 +439,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Gated to the real `phantombot` binary (same gate doctor uses for its
   // filesystem-touching checks) so `bun test`/dev never stamp the dev box's
   // real ~/.pi.
-  if (basename(process.execPath) === "phantombot") {
+  if (isPhantombotBinary()) {
     ensureRoutingExtension(config.harnesses?.pi?.routing).then(
       (r) => {
         if (r.action !== "unchanged") {
@@ -465,7 +465,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // self-update. `doctor` re-reconciles on demand. Gated to the real
   // `phantombot` binary (same gate as the pi extension) so `bun run`/dev never
   // writes to the dev box's real ~/.config/zed.
-  if (basename(process.execPath) === "phantombot") {
+  if (isPhantombotBinary()) {
     try {
       for (const r of reconcileEditorConnectors({
         binaryPath: process.execPath,
@@ -480,6 +480,21 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           log.warn("run: editor connector registration failed", {
             editor: r.editor,
             error: r.error,
+          });
+        }
+        // VS Code's proposed-api allow-list is a SEPARATE outcome from the
+        // extension install — an extension can be `current` and still be
+        // running degraded. Log it on its own axis so a silent fallback to the
+        // `@phantombot` participant is visible in the daemon log.
+        if (r.proposedApi === "enabled") {
+          log.info("run: enabled VS Code proposed APIs", {
+            editor: r.editor,
+            note: "restart VS Code to activate",
+          });
+        } else if (r.proposedApi === "error") {
+          log.warn("run: could not enable VS Code proposed APIs", {
+            editor: r.editor,
+            error: r.proposedApiError,
           });
         }
       }

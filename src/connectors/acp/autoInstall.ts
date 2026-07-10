@@ -39,6 +39,13 @@ import {
   installVscode,
   type VscodeInstallResult,
 } from "./installVscode.ts";
+import {
+  checkProposedApi,
+  ensureProposedApi,
+  type ProposedApiOptions,
+  type ProposedApiResult,
+  type ProposedApiStatus,
+} from "./vscodeArgv.ts";
 
 /** A sink that drops everything — keeps reconcile silent on stdout/stderr. */
 const SILENT: WriteSink = { write: () => true };
@@ -62,6 +69,17 @@ export interface EditorConnectorResult {
   action: EditorConnectorAction;
   settingsPath: string;
   error?: string;
+  /**
+   * VS Code only. Whether our side-loaded extension is allow-listed for the
+   * proposed chat APIs it declares, via `~/.vscode/argv.json`. Orthogonal to
+   * `action`: the extension can be installed and current (`action: "current"`)
+   * while still lacking the allow-list entry, in which case it silently
+   * degrades to the `@phantombot` participant instead of a native chat session.
+   * Undefined for editors where the concept doesn't apply.
+   */
+  proposedApi?: ProposedApiStatus;
+  /** Detail for a `proposedApi: "error"`. */
+  proposedApiError?: string;
 }
 
 /**
@@ -193,10 +211,72 @@ export function vscodeResultToConnector(
   }
 }
 
+/**
+ * Installing the .vsix is only HALF of a working VS Code integration: the
+ * extension declares proposed chat APIs that stable VS Code withholds unless
+ * the extension id is allow-listed in `~/.vscode/argv.json`. Reconcile both, in
+ * that order.
+ *
+ * The argv.json step is gated on the extension step having found VS Code. When
+ * `code` isn't on the box (`not-detected`) or the install itself failed
+ * (`error`), we don't go creating a `~/.vscode/argv.json` for an editor the
+ * user doesn't have — that's the same "never provision what wasn't asked for"
+ * rule the settings-model editors enforce with their `detectionDir` probe.
+ */
+/**
+ * The impure halves of a VS Code reconcile, injectable so the GATING logic
+ * below is unit-testable without a real `code` CLI and — critically — without
+ * writing the dev box's real `~/.vscode/argv.json`.
+ */
+export interface VscodeReconcileHooks {
+  install(): VscodeInstallResult;
+  check(): VscodeInstallResult;
+  ensureArgv(options?: ProposedApiOptions): ProposedApiResult;
+  checkArgv(options?: ProposedApiOptions): ProposedApiResult;
+}
+
+/**
+ * Installing the .vsix is only HALF of a working VS Code integration: the
+ * extension declares proposed chat APIs that stable VS Code withholds unless
+ * the extension id is allow-listed in `~/.vscode/argv.json`. Reconcile both, in
+ * that order.
+ *
+ * The argv.json step is GATED on the extension step having actually found VS
+ * Code. When `code` isn't on the box (`not-detected`) or the install itself
+ * failed (`error`), we don't go creating a `~/.vscode/argv.json` for an editor
+ * the user may not even have — that's the same "never provision what wasn't
+ * asked for" rule the settings-model editors enforce via `detectionDir`.
+ *
+ * The CLI the extension step actually resolved is threaded into the argv step,
+ * so we allow-list the extension in the SAME distribution we installed it into
+ * rather than in whatever `.vscode` happens to sit in `$HOME`.
+ */
+export function reconcileVscode(
+  repair: boolean,
+  hooks: Partial<VscodeReconcileHooks> = {},
+): EditorConnectorResult {
+  const install = hooks.install ?? installVscode;
+  const check = hooks.check ?? checkVscode;
+  const ensureArgv = hooks.ensureArgv ?? ensureProposedApi;
+  const checkArgv = hooks.checkArgv ?? checkProposedApi;
+
+  const result = repair ? install() : check();
+  const connector = vscodeResultToConnector(result, repair);
+  if (connector.action === "not-detected" || connector.action === "error") {
+    return connector;
+  }
+  const argvOptions: ProposedApiOptions = result.codeCommand
+    ? { codeCommand: result.codeCommand }
+    : {};
+  const argv = repair ? ensureArgv(argvOptions) : checkArgv(argvOptions);
+  connector.proposedApi = argv.status;
+  if (argv.error) connector.proposedApiError = argv.error;
+  return connector;
+}
+
 export const VSCODE_EDITOR: EditorSpec = {
   id: "vscode",
-  reconcile: ({ repair }) =>
-    vscodeResultToConnector(repair ? installVscode() : checkVscode(), repair),
+  reconcile: ({ repair }) => reconcileVscode(repair),
 };
 
 /** Editors phantombot knows how to register itself into. */
@@ -318,7 +398,18 @@ export function reconcileEditorConnectors(
   return results;
 }
 
-/** True if a result represents a state an operator should be warned about. */
+/**
+ * True if a result represents a state an operator should be warned about.
+ *
+ * A missing proposed-api allow-list counts: the extension is installed but runs
+ * degraded, which is precisely the failure mode nobody notices. `enabled` does
+ * NOT count — we just fixed it (though VS Code needs a restart to see it).
+ */
 export function editorConnectorBroken(r: EditorConnectorResult): boolean {
-  return r.action === "error" || r.action === "stale";
+  return (
+    r.action === "error" ||
+    r.action === "stale" ||
+    r.proposedApi === "error" ||
+    r.proposedApi === "stale"
+  );
 }

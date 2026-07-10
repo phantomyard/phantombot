@@ -16,6 +16,7 @@ import {
   ClaudeHarness,
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
+  apiErrorStatus,
   parseStreamJson,
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
@@ -108,6 +109,101 @@ describe("filterAuthEnv", () => {
       MAYBE: undefined,
     });
     expect(out).toEqual({ DEFINED: "yes" });
+  });
+});
+
+describe("apiErrorStatus", () => {
+  test("reads the status the CLI stamps on the envelope", () => {
+    expect(apiErrorStatus({ type: "assistant", error: "rate_limit" })).toBe("rate_limit");
+    expect(apiErrorStatus({ type: "assistant", error: "overloaded" })).toBe("overloaded");
+  });
+
+  test("max_output_tokens is NOT an error — it is a real, truncated reply", () => {
+    expect(apiErrorStatus({ error: "max_output_tokens" })).toBeUndefined();
+  });
+
+  test("an unknown future status still counts as an error (fails safe)", () => {
+    expect(apiErrorStatus({ error: "some_new_status" })).toBe("some_new_status");
+  });
+
+  test("absent / empty / non-string error means no error", () => {
+    expect(apiErrorStatus({})).toBeUndefined();
+    expect(apiErrorStatus({ error: "" })).toBeUndefined();
+    expect(apiErrorStatus({ error: "   " })).toBeUndefined();
+    expect(apiErrorStatus({ error: 42 })).toBeUndefined();
+    expect(apiErrorStatus({ error: null })).toBeUndefined();
+  });
+});
+
+describe("parseStreamJson api-error gate", () => {
+  // Fixture shape captured from claude CLI v2.1.206 on the wire (forced
+  // model_not_found). The session-cap message has the same shape with
+  // error:"rate_limit".
+  const errorEnvelope = (status: string, text: string) => ({
+    type: "assistant",
+    message: {
+      model: "<synthetic>",
+      content: [{ type: "text", text }],
+    },
+    error: status,
+    request_id: "req_test",
+  });
+
+  test("a rate-limited session yields a recoverable error, never text", () => {
+    const c = parseStreamJson(
+      errorEnvelope(
+        "rate_limit",
+        "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+      ),
+    );
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+    expect((c as { error: string }).error).toContain("rate_limit");
+    // The CLI's prose must never be surfaced.
+    expect((c as { error: string }).error).not.toContain("session limit");
+  });
+
+  test.each([
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "billing_error",
+    "overloaded",
+    "invalid_request",
+    "model_not_found",
+    "server_error",
+    "unknown",
+  ])("%s also falls through recoverably", (status) => {
+    const c = parseStreamJson(errorEnvelope(status, "There's an issue with..."));
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+  });
+
+  test("max_output_tokens is surfaced as real (truncated) assistant text", () => {
+    const c = parseStreamJson(errorEnvelope("max_output_tokens", "a long partial answer"));
+    expect(c).toEqual({ type: "text", text: "a long partial answer" });
+  });
+
+  // ── Regression: the old regex-based sentinel ate these as "rate limits".
+  // A reply is only an error when the ENVELOPE says so, never because of its
+  // prose. Each of these matched RATE_LIMIT_RE and was silently discarded.
+  test.each([
+    "You have reached the limit for this proof.",
+    "The limit reached as n approaches infinity is zero.",
+    "Your query hit the row limit of 1000.",
+    "You have hit the limit of my patience.",
+    "Sure — the API has a rate limit of 50 requests per minute.",
+    "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+  ])("a normal reply is surfaced verbatim, whatever it says: %s", (text) => {
+    const c = parseStreamJson({
+      type: "assistant",
+      message: { content: [{ type: "text", text }] },
+    });
+    expect(c).toEqual({ type: "text", text });
+  });
+
+  test("the gate ignores non-assistant envelopes", () => {
+    // control_response carries a free-text `error`, not an API status enum.
+    expect(
+      parseStreamJson({ type: "control_response", error: "boom", message: {} }),
+    ).toBeUndefined();
   });
 });
 

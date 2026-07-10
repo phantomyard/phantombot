@@ -1,10 +1,16 @@
 /**
  * Pi harness (https://pi.dev — Pi Coding Agent from Earendil Works).
  *
- * Spawns `pi --print --mode json` with the system prompt as a flag and the
- * full rendered payload (history + new message) as the LAST positional
- * argument. Pi ignores stdin in --print mode, so the payload travels via
- * argv — bounded by Linux ARG_MAX.
+ * Spawns `pi --print --mode json` with the system prompt and the full rendered
+ * payload (history + new message) ALWAYS spilled to temp files: the system
+ * prompt via `--system-prompt <file>` and the payload via an `@<file>`
+ * positional. Pi ignores stdin in --print mode, so the payload would otherwise
+ * travel on argv — and as the LAST harness in the chain, pi is the transparent
+ * fallback that must swallow WHATEVER context the primary was chewing when it
+ * failed (a rate-limited claude turn is tens of KB). Routing that through temp
+ * files removes every argv-length ceiling (Linux ARG_MAX, Windows' ~8,191-char
+ * command line) so there is no payload size at which pi is skipped or errors.
+ * There is deliberately NO maxPayloadBytes: the fallback never refuses a turn.
  *
  * Stream-json events translated to phantombot HarnessChunks:
  *   message_update with text_delta  → { type: "text", text }
@@ -25,10 +31,6 @@
  * defaults to google, so an OpenRouter key with no `--provider openrouter` is
  * sent to the wrong endpoint and fails. The wizard scopes all routed models to
  * one provider, so a single `--provider` is correct even after a coding swap.
- *
- * ARG_MAX guard: declares maxPayloadBytes so the orchestrator's fallback
- * skips Pi for oversized turns. Internal precheck mirrors that so a
- * direct invoke() with a too-large payload still fails recoverably.
  */
 
 import { access, constants } from "node:fs/promises";
@@ -44,17 +46,11 @@ import {
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
-import {
-  argvNeedsTempFiles,
-  createHarnessTempDir,
-  type HarnessTempDir,
-} from "../lib/harnessArgvFiles.ts";
+import { createHarnessTempDir } from "../lib/harnessArgvFiles.ts";
 
 export interface PiHarnessConfig {
   /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
   bin: string;
-  /** Maximum payload size in bytes (system prompt + rendered conversation). */
-  maxPayloadBytes: number;
   /**
    * Resolved capability routing (env-over-TOML, from config.ts). When present
    * it does ONE runtime thing in this harness:
@@ -74,17 +70,7 @@ export interface PiHarnessConfig {
 export class PiHarness implements Harness {
   readonly id = "pi";
 
-  constructor(
-    private readonly config: PiHarnessConfig,
-    // Injectable so the Windows argv-length branch below is testable on a
-    // POSIX CI runner. Prod callers pass only the config and get the real
-    // platform.
-    private readonly platform: NodeJS.Platform = process.platform,
-  ) {}
-
-  get maxPayloadBytes(): number {
-    return this.config.maxPayloadBytes;
-  }
+  constructor(private readonly config: PiHarnessConfig) {}
 
   async available(): Promise<boolean> {
     try {
@@ -102,32 +88,21 @@ export class PiHarness implements Harness {
     const totalBytes =
       Buffer.byteLength(req.systemPrompt, "utf8") +
       Buffer.byteLength(payload, "utf8");
-    if (totalBytes > this.config.maxPayloadBytes) {
-      yield {
-        type: "error",
-        error: `pi payload ${totalBytes} bytes exceeds maxPayloadBytes ${this.config.maxPayloadBytes}`,
-        recoverable: true,
-      };
-      return;
-    }
 
-    // Windows argv-length workaround. On Windows the whole command line is
-    // capped at ~8,191 chars, and pi carries BOTH the system prompt (a flag
-    // value) AND the full rendered payload (the positional) on argv - a real
-    // persona turn is tens of KB, so the child fails to spawn with "The
-    // command line is too long." and the bot replies with nothing. Spill both
-    // to temp files: pi reads `--system-prompt <file>` as the system prompt
-    // and includes an `@<file>` positional's contents in the message. POSIX
-    // (ARG_MAX ~2 MB) keeps the raw argv path unchanged. See harnessArgvFiles.
-    const useTempFiles = argvNeedsTempFiles(this.platform);
-    let temp: HarnessTempDir | undefined;
-    let systemPromptArg = req.systemPrompt;
-    let payloadArg = payload;
-    if (useTempFiles) {
-      temp = await createHarnessTempDir();
-      systemPromptArg = await temp.file("system-prompt.md", req.systemPrompt);
-      payloadArg = `@${await temp.file("payload.md", payload)}`;
-    }
+    // Payload is ALWAYS spilled to temp files, on every platform. Pi carries
+    // BOTH the system prompt (a flag value) AND the full rendered payload (the
+    // positional) — and as the LAST harness in the chain it must swallow the
+    // SAME context the primary was chewing when it failed (a rate-limited
+    // claude turn is tens of KB). Passing that on argv fails to spawn on
+    // Windows (~8,191-char command line) and could theoretically hit Linux
+    // ARG_MAX on a huge turn; routing through files removes the ceiling
+    // entirely so the fallback never refuses a turn for size. Pi reads
+    // `--system-prompt <file>` as the system prompt and includes an `@<file>`
+    // positional's contents in the message (verified against pi 0.80.3). See
+    // harnessArgvFiles.
+    const temp = await createHarnessTempDir();
+    const systemPromptArg = await temp.file("system-prompt.md", req.systemPrompt);
+    const payloadArg = `@${await temp.file("payload.md", payload)}`;
     try {
 
     const args = [
@@ -237,13 +212,13 @@ export class PiHarness implements Harness {
     }
 
     // Payload is the LAST positional arg (pi reads it from argv, not stdin).
-    // On Windows this is `@<tempfile>` so pi loads the payload from disk
-    // instead of the length-limited command line; on POSIX it's the raw text.
+    // This is always `@<tempfile>` so pi loads the payload from disk instead
+    // of the length-limited command line.
     args.push(payloadArg);
     log.debug("pi.invoke spawning", {
       bin: this.config.bin,
       payloadBytes: totalBytes,
-      tempFiles: useTempFiles,
+      tempFiles: true,
     });
 
     // Relay THIS harness's provider + api-key into the child env so the bundled
@@ -285,8 +260,8 @@ export class PiHarness implements Harness {
 
     } finally {
       // Remove the temp payload/system-prompt files once the child has exited
-      // (or the consumer stopped iterating early). No-op on POSIX.
-      await temp?.cleanup();
+      // (or the consumer stopped iterating early).
+      await temp.cleanup();
     }
   }
 }
