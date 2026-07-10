@@ -28,7 +28,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
+import { isPhantombotBinary } from "./binaryIdentity.ts";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_PLIST_LABEL = "dev.phantombot.phantombot";
@@ -558,7 +559,7 @@ export function defaultLaunchdServiceControl(): LaunchdServiceControl {
     },
     async rerenderUnitIfStale() {
       const binPath = process.execPath;
-      if (basename(binPath) !== "phantombot") return { rerendered: false };
+      if (!isPhantombotBinary(binPath)) return { rerendered: false };
       const plistPath = defaultPlistPath();
       if (!existsSync(plistPath)) return { rerendered: false };
       let domain: string;

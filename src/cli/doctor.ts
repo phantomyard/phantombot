@@ -45,6 +45,7 @@ import {
   removeRoutingExtension,
   routingExtensionStatus,
 } from "../lib/piExtensionProvision.ts";
+import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import {
   editorConnectorBroken,
@@ -455,7 +456,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     // explicitly skipped by a test
   } else if (input.checkPiExtension) {
     piExtensionReport = await input.checkPiExtension();
-  } else if (basename(process.execPath) === "phantombot") {
+  } else if (isPhantombotBinary()) {
     const piRouting = config.harnesses?.pi?.routing;
     const status = await routingExtensionStatus(piRouting);
     let repaired = false;
@@ -493,7 +494,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     // explicitly skipped by a test
   } else if (input.checkEditorConnectors) {
     editorConnectors = input.checkEditorConnectors(repair);
-  } else if (basename(process.execPath) === "phantombot") {
+  } else if (isPhantombotBinary()) {
     editorConnectors = reconcileEditorConnectors({
       binaryPath: process.execPath,
       repair,
@@ -798,6 +799,26 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
           );
           break;
       }
+      // Second line for VS Code's proposed-api allow-list. Silent when already
+      // `current` (or undefined, i.e. an editor without the concept), so a
+      // healthy box shows exactly one line per editor as before.
+      switch (e.proposedApi) {
+        case "enabled":
+          out.write(
+            "    proposed-api: allow-listed in ~/.vscode/argv.json — restart VS Code to activate\n",
+          );
+          break;
+        case "stale":
+          out.write(
+            "    proposed-api: NOT allow-listed in ~/.vscode/argv.json — extension falls back to the `@phantombot` participant instead of a native chat session; run `phantombot doctor` (without --no-repair) to fix\n",
+          );
+          break;
+        case "error":
+          out.write(
+            `    proposed-api: could not be allow-listed${e.proposedApiError ? ` — ${e.proposedApiError}` : ""}\n`,
+          );
+          break;
+      }
     }
   }
 
@@ -807,7 +828,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
 async function computeHarnessReport(
   config: Config,
 ): Promise<DoctorReport["harnesses"] | undefined> {
-  if (basename(process.execPath) !== "phantombot") return undefined;
+  if (!isPhantombotBinary()) return undefined;
   const path =
     currentPlatform() === "linux"
       ? expandSystemdPath(PHANTOMBOT_SERVICE_PATH)
@@ -836,7 +857,7 @@ async function defaultCheckSystemd(
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return undefined;
   const binPath = process.execPath;
-  if (basename(binPath) !== "phantombot") return undefined;
+  if (!isPhantombotBinary(binPath)) return undefined;
   const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
   const expectedFiles: Array<{ path: string; name: string }> = [
     { path: defaultUnitPath(), name: basename(defaultUnitPath()) },
@@ -905,7 +926,7 @@ async function defaultCheckSystemd(
  * dev contexts and tests don't need to clean up marker files.
  */
 function computeTimersReport(): DoctorReport["timers"] | undefined {
-  if (basename(process.execPath) !== "phantombot") return undefined;
+  if (!isPhantombotBinary()) return undefined;
   const now = new Date();
   const heartbeat = loadHeartbeatLastFired(now);
   const tickFired = loadTickLastFired(now);
