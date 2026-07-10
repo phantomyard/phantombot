@@ -166,6 +166,61 @@ export function emitOpeningIndicator(
   };
 }
 
+/**
+ * Background indicator keepalive — keeps the typing/recording dots visible
+ * across the silent gaps where a harness legitimately emits NO chunks for a
+ * while and Telegram's chat-action would otherwise expire after ~5s, making
+ * the bot look frozen. Two such gaps:
+ *
+ *   1. Turn start → first chunk. A model that reasons WITHOUT streaming its
+ *      thinking deltas (pi routed to an OpenRouter-served model, or a failover
+ *      from a rate-limited claude down to pi) produces nothing at all until
+ *      its first token — a multi-minute silent think that reads as "hung".
+ *   2. During tool execution — gemini-cli emits zero events while a tool runs
+ *      (potentially minutes).
+ *
+ * A single reusable interval: `start()` arms it (idempotent — a second call
+ * while running is a no-op), `stop()` disarms it. The caller arms it at turn
+ * start and on each `progress`, and disarms it on the next
+ * `text`/`heartbeat`/`done`/`error`/`finally` so a genuinely silent stream
+ * (no gap in progress) still lets the indicator expire as the truthful
+ * "frozen / no signal" cue.
+ *
+ * The timer fns are injectable so the regression test drives the schedule
+ * deterministically instead of waiting on a wall-clock interval.
+ */
+export function createIndicatorKeepalive(
+  tick: () => void,
+  intervalMs: number,
+  opts?: {
+    // `unknown` handle: agnostic to the runtime's timer shape (bun `Timer` vs
+    // Node `Timeout`); the real globals and a test's counter stub both satisfy it.
+    setIntervalFn?: (fn: () => void, ms: number) => unknown;
+    clearIntervalFn?: (handle: unknown) => void;
+  },
+): { start: () => void; stop: () => void; isRunning: () => boolean } {
+  const setI: (fn: () => void, ms: number) => unknown =
+    opts?.setIntervalFn ?? setInterval;
+  const clearI: (handle: unknown) => void =
+    opts?.clearIntervalFn ?? (clearInterval as (handle: unknown) => void);
+
+  let handle: unknown;
+  return {
+    start() {
+      if (handle !== undefined) return; // already running
+      handle = setI(() => tick(), intervalMs);
+    },
+    stop() {
+      if (handle === undefined) return;
+      clearI(handle);
+      handle = undefined;
+    },
+    isRunning() {
+      return handle !== undefined;
+    },
+  };
+}
+
 export interface RunTelegramServerInput {
   config: Config;
   memory: MemoryStore;
@@ -906,26 +961,23 @@ async function processChatMessage(
     void sendStatus();
   };
 
-  // Background typing/recording indicator refresh during tool execution.
-  // gemini-cli emits zero events while a tool runs (potentially minutes),
-  // causing Telegram's chat-action indicator to expire after ~5s. This
-  // interval timer keeps it visible during the gap. Started on the first
-  // `progress` event, stopped on the next `text` / `heartbeat` / `done`
-  // / `error` / `finally`.
-  let toolRefreshTimer: ReturnType<typeof setInterval> | undefined;
-  const startToolRefresh = () => {
-    if (toolRefreshTimer) return; // already running
-    toolRefreshTimer = setInterval(() => {
+  // Background typing/recording indicator keepalive. Covers the silent gaps
+  // where a harness emits NO chunks and Telegram's chat-action would expire
+  // after ~5s: (1) turn start → first chunk (a model reasoning without
+  // streaming deltas — pi on an OpenRouter model, or the claude→pi rate-limit
+  // failover — sends nothing until its first token), and (2) tool execution
+  // (gemini-cli emits zero events while a tool runs). Armed at turn start and
+  // on each `progress`; disarmed on the next `text`/`heartbeat`/`done`/
+  // `error`/`finally`. See `createIndicatorKeepalive` for the semantics.
+  const indicatorKeepalive = createIndicatorKeepalive(
+    () => {
       refreshIndicator();
       void narration.flush();
-    }, Math.min(1000, streaming.narrationFlushMs));
-  };
-  const stopToolRefresh = () => {
-    if (toolRefreshTimer) {
-      clearInterval(toolRefreshTimer);
-      toolRefreshTimer = undefined;
-    }
-  };
+    },
+    Math.min(1000, streaming.narrationFlushMs),
+  );
+  const startIndicatorKeepalive = () => indicatorKeepalive.start();
+  const stopIndicatorKeepalive = () => indicatorKeepalive.stop();
 
   // Initial nudge so the user sees "typing…" the moment we start working,
   // before the first chunk lands. Emitted as a robust double-pulse (immediate
@@ -1051,6 +1103,12 @@ async function processChatMessage(
   }
 
   try {
+    // Arm the indicator keepalive for the initial silent gap. A harness that
+    // reasons without streaming thinking deltas (pi on an OpenRouter model, or
+    // the claude→pi rate-limit failover) emits nothing until its first chunk;
+    // without this the dots vanish after ~5s and the turn looks frozen. The
+    // first chunk (text/heartbeat/progress) disarms or re-arms it below.
+    startIndicatorKeepalive();
     for await (const chunk of runTurn({
       persona: input.persona,
       conversation: conversationKey,
@@ -1126,7 +1184,7 @@ async function processChatMessage(
     })) {
       if (chunk.type === "text") {
         streamedReply += chunk.text;
-        stopToolRefresh();
+        stopIndicatorKeepalive();
         refreshIndicator();
         if (!willReplyWithVoice) {
           finalCandidateText += chunk.text;
@@ -1142,9 +1200,10 @@ async function processChatMessage(
         }
       }
       if (chunk.type === "heartbeat") {
-        // Tool completed (or model is thinking) — stop the background
-        // tool-refresh timer and show the indicator naturally.
-        stopToolRefresh();
+        // A heartbeat means the harness IS emitting signal (a streamed
+        // thinking delta, or a tool completing) — stop the background
+        // keepalive and let the per-chunk refresh drive the indicator.
+        stopIndicatorKeepalive();
         refreshIndicator();
         await narration.flush();
       }
@@ -1171,12 +1230,11 @@ async function processChatMessage(
         consumedReplyChars = streamedReply.length;
         resetFinalCandidate();
         await narration.flush();
-        // Start a background timer to keep the typing/recording
-        // indicator visible during tool execution. Without this,
-        // gemini-cli's multi-minute tool runs cause Telegram's
-        // indicator to expire after ~5s, making it look like the
-        // bot has frozen. Stopped on the next text/heartbeat/done/error.
-        startToolRefresh();
+        // Re-arm the background keepalive for the tool run. Without this,
+        // gemini-cli's multi-minute tool runs cause Telegram's indicator
+        // to expire after ~5s, making it look like the bot has frozen.
+        // Stopped on the next text/heartbeat/done/error.
+        startIndicatorKeepalive();
       }
       if (chunk.type === "done") {
         finalReply = chunk.finalText;
@@ -1192,7 +1250,7 @@ async function processChatMessage(
     errored = (e as Error).message;
     log.error("telegram: turn threw", { error: errored });
   } finally {
-    stopToolRefresh();
+    stopIndicatorKeepalive();
     // Cancel the delayed opening-indicator pulse if it hasn't fired yet, so it
     // never emits a tick into an already-finished turn.
     cancelOpeningIndicator();

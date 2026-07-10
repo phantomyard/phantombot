@@ -19,6 +19,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  createIndicatorKeepalive,
   emitOpeningIndicator,
   OPENING_INDICATOR_REEMIT_MS,
 } from "../src/channels/core/engine.ts";
@@ -118,5 +119,112 @@ describe("emitOpeningIndicator — robust opening typing indicator", () => {
     cancel();
     cancel();
     expect(timers.cleared.length).toBe(1);
+  });
+});
+
+/** Deterministic interval harness: captures the interval callback so the test
+ *  drives "another interval elapsed" instead of waiting on the wall clock. */
+function fakeIntervals() {
+  const active = new Map<number, () => void>();
+  let nextId = 1;
+  return {
+    active,
+    setIntervalFn: (fn: () => void, _ms: number): unknown => {
+      const id = nextId++;
+      active.set(id, fn);
+      return id;
+    },
+    clearIntervalFn: (handle: unknown): void => {
+      active.delete(handle as number);
+    },
+    /** Fire every still-active interval once. */
+    tickAll(): void {
+      for (const fn of active.values()) fn();
+    },
+  };
+}
+
+describe("createIndicatorKeepalive — silent-gap typing keepalive", () => {
+  test("does not tick until start() is called", () => {
+    let ticks = 0;
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => ticks++, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    expect(keepalive.isRunning()).toBe(false);
+    iv.tickAll(); // nothing armed
+    expect(ticks).toBe(0);
+  });
+
+  test("start() arms an interval that fires the tick (covers the silent think)", () => {
+    let ticks = 0;
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => ticks++, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    keepalive.start();
+    expect(keepalive.isRunning()).toBe(true);
+    iv.tickAll();
+    iv.tickAll();
+    // A model that streams no deltas still gets the dots refreshed each interval.
+    expect(ticks).toBe(2);
+  });
+
+  test("start() is idempotent — a second call while running arms only one interval", () => {
+    let ticks = 0;
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => ticks++, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    keepalive.start();
+    keepalive.start(); // re-arm (e.g. first chunk is `progress`) — no-op
+    expect(iv.active.size).toBe(1);
+    iv.tickAll();
+    expect(ticks).toBe(1); // one interval, one tick — not doubled
+  });
+
+  test("stop() disarms — the first real chunk kills the keepalive", () => {
+    let ticks = 0;
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => ticks++, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    keepalive.start();
+    keepalive.stop(); // first `text`/`heartbeat` arrived
+    expect(keepalive.isRunning()).toBe(false);
+    iv.tickAll();
+    expect(ticks).toBe(0); // no dots refreshed after the stream started
+  });
+
+  test("can be re-armed after stop (turn start → tool gap → tool gap)", () => {
+    let ticks = 0;
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => ticks++, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    keepalive.start(); // turn start
+    keepalive.stop(); // first chunk
+    keepalive.start(); // `progress` — tool running
+    expect(keepalive.isRunning()).toBe(true);
+    iv.tickAll();
+    expect(ticks).toBe(1);
+  });
+
+  test("stop() is idempotent — safe to call when already stopped", () => {
+    const iv = fakeIntervals();
+    const keepalive = createIndicatorKeepalive(() => {}, 1000, {
+      setIntervalFn: iv.setIntervalFn,
+      clearIntervalFn: iv.clearIntervalFn,
+    });
+    keepalive.stop(); // never started
+    keepalive.start();
+    keepalive.stop();
+    keepalive.stop(); // finally after an already-stopped stream
+    expect(iv.active.size).toBe(0);
   });
 });
