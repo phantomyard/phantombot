@@ -16,7 +16,7 @@ import {
   ClaudeHarness,
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
-  isRateLimitSentinel,
+  apiErrorStatus,
   parseStreamJson,
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
@@ -112,64 +112,98 @@ describe("filterAuthEnv", () => {
   });
 });
 
-describe("isRateLimitSentinel", () => {
-  test("matches claude's session-limit notice", () => {
-    expect(
-      isRateLimitSentinel(
-        "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
-      ),
-    ).toBe(true);
+describe("apiErrorStatus", () => {
+  test("reads the status the CLI stamps on the envelope", () => {
+    expect(apiErrorStatus({ type: "assistant", error: "rate_limit" })).toBe("rate_limit");
+    expect(apiErrorStatus({ type: "assistant", error: "overloaded" })).toBe("overloaded");
   });
 
-  test("matches usage-limit and generic phrasings", () => {
-    expect(isRateLimitSentinel("You've reached your usage limit")).toBe(true);
-    expect(isRateLimitSentinel("Claude usage limit reached")).toBe(true);
-    expect(isRateLimitSentinel("You've hit your weekly limit, resets Monday")).toBe(true);
+  test("max_output_tokens is NOT an error — it is a real, truncated reply", () => {
+    expect(apiErrorStatus({ error: "max_output_tokens" })).toBeUndefined();
   });
 
-  test("does NOT match a normal reply that merely mentions limits", () => {
-    expect(
-      isRateLimitSentinel("Sure — the API has a rate limit of 50 requests per minute."),
-    ).toBe(false);
-    expect(isRateLimitSentinel("Here's how to raise your account limit in settings.")).toBe(false);
+  test("an unknown future status still counts as an error (fails safe)", () => {
+    expect(apiErrorStatus({ error: "some_new_status" })).toBe("some_new_status");
   });
 
-  test("does NOT match a long essay even if it contains the phrase", () => {
-    const essay =
-      "When you hit your session limit the client shows a notice. " +
-      "x".repeat(400);
-    expect(isRateLimitSentinel(essay)).toBe(false);
-  });
-
-  test("ignores empty / whitespace", () => {
-    expect(isRateLimitSentinel("")).toBe(false);
-    expect(isRateLimitSentinel("   ")).toBe(false);
+  test("absent / empty / non-string error means no error", () => {
+    expect(apiErrorStatus({})).toBeUndefined();
+    expect(apiErrorStatus({ error: "" })).toBeUndefined();
+    expect(apiErrorStatus({ error: "   " })).toBeUndefined();
+    expect(apiErrorStatus({ error: 42 })).toBeUndefined();
+    expect(apiErrorStatus({ error: null })).toBeUndefined();
   });
 });
 
-describe("parseStreamJson rate-limit sentinel", () => {
-  test("converts the session-limit text block to a recoverable error, not text", () => {
-    const c = parseStreamJson({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "text",
-            text: "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
-          },
-        ],
-      },
-    });
-    expect(c).toMatchObject({ type: "error", recoverable: true });
-    expect((c as { error: string }).error).toContain("session/usage limit");
+describe("parseStreamJson api-error gate", () => {
+  // Fixture shape captured from claude CLI v2.1.206 on the wire (forced
+  // model_not_found). The session-cap message has the same shape with
+  // error:"rate_limit".
+  const errorEnvelope = (status: string, text: string) => ({
+    type: "assistant",
+    message: {
+      model: "<synthetic>",
+      content: [{ type: "text", text }],
+    },
+    error: status,
+    request_id: "req_test",
   });
 
-  test("a normal reply is still surfaced as text", () => {
+  test("a rate-limited session yields a recoverable error, never text", () => {
+    const c = parseStreamJson(
+      errorEnvelope(
+        "rate_limit",
+        "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+      ),
+    );
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+    expect((c as { error: string }).error).toContain("rate_limit");
+    // The CLI's prose must never be surfaced.
+    expect((c as { error: string }).error).not.toContain("session limit");
+  });
+
+  test.each([
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "billing_error",
+    "overloaded",
+    "invalid_request",
+    "model_not_found",
+    "server_error",
+    "unknown",
+  ])("%s also falls through recoverably", (status) => {
+    const c = parseStreamJson(errorEnvelope(status, "There's an issue with..."));
+    expect(c).toMatchObject({ type: "error", recoverable: true });
+  });
+
+  test("max_output_tokens is surfaced as real (truncated) assistant text", () => {
+    const c = parseStreamJson(errorEnvelope("max_output_tokens", "a long partial answer"));
+    expect(c).toEqual({ type: "text", text: "a long partial answer" });
+  });
+
+  // ── Regression: the old regex-based sentinel ate these as "rate limits".
+  // A reply is only an error when the ENVELOPE says so, never because of its
+  // prose. Each of these matched RATE_LIMIT_RE and was silently discarded.
+  test.each([
+    "You have reached the limit for this proof.",
+    "The limit reached as n approaches infinity is zero.",
+    "Your query hit the row limit of 1000.",
+    "You have hit the limit of my patience.",
+    "Sure — the API has a rate limit of 50 requests per minute.",
+    "You've hit your session limit · resets 1:40pm (Europe/Amsterdam)",
+  ])("a normal reply is surfaced verbatim, whatever it says: %s", (text) => {
     const c = parseStreamJson({
       type: "assistant",
-      message: { content: [{ type: "text", text: "the rate limit is 50/min" }] },
+      message: { content: [{ type: "text", text }] },
     });
-    expect(c).toEqual({ type: "text", text: "the rate limit is 50/min" });
+    expect(c).toEqual({ type: "text", text });
+  });
+
+  test("the gate ignores non-assistant envelopes", () => {
+    // control_response carries a free-text `error`, not an API status enum.
+    expect(
+      parseStreamJson({ type: "control_response", error: "boom", message: {} }),
+    ).toBeUndefined();
   });
 });
 
