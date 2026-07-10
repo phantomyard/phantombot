@@ -382,6 +382,21 @@ export interface RunningProcess {
 }
 
 /**
+ * Process enumeration failed, so the set of running processes is UNKNOWN.
+ *
+ * Distinct from "no processes matched". Conflating the two is dangerous: a
+ * transient PowerShell/CIM failure would otherwise read as "every victim has
+ * exited", letting `restart()` fire `schtasks /Run` while the old daemon still
+ * holds the run-lock — the exact race this module exists to close.
+ */
+export class ProcessEnumerationError extends Error {
+  constructor(cause: string) {
+    super(`failed to enumerate running processes: ${cause}`);
+    this.name = "ProcessEnumerationError";
+  }
+}
+
+/**
  * Enumerate + terminate Windows processes. Abstracted behind an interface so
  * `stop()`/`restart()` are unit-testable with a fake — the real backend shells
  * out to PowerShell (CIM) and taskkill.
@@ -391,6 +406,9 @@ export interface ProcessManager {
    * EVERY running process, with parentage. We can't filter to phantombot.exe:
    * the orphans we must reap are the daemon's harness children (claude.exe,
    * node.exe, cmd.exe, …), which carry unrelated image names.
+   *
+   * MUST throw {@link ProcessEnumerationError} rather than return `[]` when the
+   * query fails. An empty array is a positive claim that nothing is running.
    */
   listAll(): Promise<RunningProcess[]>;
   /** Force-terminate a single process by PID (best-effort; never throws). */
@@ -540,6 +558,8 @@ export class BunProcessManager implements ProcessManager {
     const script =
       "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine," +
       "@{N='Created';E={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress";
+    let stdout: string;
+    let exitCode: number;
     try {
       const proc = Bun.spawn(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -550,29 +570,43 @@ export class BunProcessManager implements ProcessManager {
           windowsHide: true,
         },
       );
-      const stdout = await new Response(proc.stdout).text();
-      await proc.exited;
-      const trimmed = stdout.trim();
-      if (!trimmed) return [];
-      const parsed = JSON.parse(trimmed);
-      const rows = Array.isArray(parsed) ? parsed : [parsed];
-      return rows
-        .map((r) => {
-          const created = Date.parse(String(r?.Created ?? ""));
-          const parent = Number(r?.ParentProcessId);
-          return {
-            pid: Number(r?.ProcessId),
-            commandLine: String(r?.CommandLine ?? ""),
-            name: String(r?.Name ?? ""),
-            parentPid: Number.isFinite(parent) ? parent : undefined,
-            createdMs: Number.isNaN(created) ? undefined : created,
-          };
-        })
-        .filter((r) => Number.isFinite(r.pid) && r.pid > 0);
-    } catch {
-      // PowerShell missing / JSON malformed → treat as "nothing to kill".
-      return [];
+      stdout = await new Response(proc.stdout).text();
+      exitCode = await proc.exited;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ProcessEnumerationError(`could not spawn powershell: ${msg}`);
     }
+    if (exitCode !== 0) {
+      throw new ProcessEnumerationError(`powershell exited ${exitCode}`);
+    }
+    const trimmed = stdout.trim();
+    // Win32_Process always contains at least the powershell process running
+    // this very query, so empty output can only mean the query failed — never
+    // that no processes exist.
+    if (!trimmed) {
+      throw new ProcessEnumerationError("powershell produced no output");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ProcessEnumerationError(`malformed JSON: ${msg}`);
+    }
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .map((r) => {
+        const created = Date.parse(String(r?.Created ?? ""));
+        const parent = Number(r?.ParentProcessId);
+        return {
+          pid: Number(r?.ProcessId),
+          commandLine: String(r?.CommandLine ?? ""),
+          name: String(r?.Name ?? ""),
+          parentPid: Number.isFinite(parent) ? parent : undefined,
+          createdMs: Number.isNaN(created) ? undefined : created,
+        };
+      })
+      .filter((r) => Number.isFinite(r.pid) && r.pid > 0);
   }
 
   async kill(pid: number): Promise<void> {
@@ -607,6 +641,14 @@ const defaultWaitDeps: WaitDeps = {
 };
 
 /**
+ * Outcome of {@link waitForProcessesGone}. `gone: true` is a positive proof of
+ * exit — never a fallback for "we couldn't tell".
+ */
+export type WaitOutcome =
+  | { gone: true }
+  | { gone: false; reason: "timeout" | "enumeration-failed"; detail: string };
+
+/**
  * Block until none of `pids` are running, or the timeout expires.
  *
  * `taskkill /F` returns as soon as the OS *accepts* the termination request,
@@ -616,28 +658,64 @@ const defaultWaitDeps: WaitDeps = {
  * live holder, refused to start, and the restart silently no-opped. Waiting
  * for the PIDs to actually disappear closes that race.
  *
- * Returns true if everything exited, false on timeout (caller proceeds anyway —
- * a stuck PID shouldn't wedge `stop()` forever).
+ * Fails closed: if enumeration itself fails we do NOT know whether the victims
+ * exited, so we keep polling (a transient PowerShell hiccup recovers on the
+ * next tick) and, if it never recovers, report `enumeration-failed` rather than
+ * claiming success.
  */
 export async function waitForProcessesGone(
   pm: ProcessManager,
   pids: readonly number[],
   deps: WaitDeps = defaultWaitDeps,
-): Promise<boolean> {
-  if (pids.length === 0) return true;
+): Promise<WaitOutcome> {
+  if (pids.length === 0) return { gone: true };
   const target = new Set(pids);
   const deadline = Date.now() + deps.timeoutMs;
   for (;;) {
-    const alive = (await pm.listAll()).filter((p) => target.has(p.pid));
-    if (alive.length === 0) return true;
+    let alive: number[] | undefined;
+    let enumError: string | undefined;
+    try {
+      alive = (await pm.listAll())
+        .filter((p) => target.has(p.pid))
+        .map((p) => p.pid);
+    } catch (e) {
+      // UNKNOWN, not "gone". Keep waiting; maybe the next poll succeeds.
+      enumError = e instanceof Error ? e.message : String(e);
+    }
+    if (alive && alive.length === 0) return { gone: true };
     if (Date.now() >= deadline) {
+      if (enumError !== undefined) {
+        log.warn("taskScheduler: cannot confirm processes exited", {
+          pids: [...target],
+          error: enumError,
+        });
+        return { gone: false, reason: "enumeration-failed", detail: enumError };
+      }
       log.warn("taskScheduler: processes still alive after kill timeout", {
-        pids: alive.map((p) => p.pid),
+        pids: alive,
       });
-      return false;
+      return {
+        gone: false,
+        reason: "timeout",
+        detail: `still alive after ${deps.timeoutMs}ms: ${(alive ?? []).join(", ")}`,
+      };
     }
     await deps.sleep(deps.intervalMs);
   }
+}
+
+/** Result of {@link killDaemonProcesses}. */
+export interface KillResult {
+  /** How many PIDs we issued a kill for. */
+  killed: number;
+  /**
+   * True only when we positively observed every victim exit (or found none to
+   * kill). False means the daemon MAY still be running — callers must not start
+   * a replacement.
+   */
+  confirmed: boolean;
+  /** Why we couldn't confirm, when `confirmed` is false. */
+  detail?: string;
 }
 
 /**
@@ -647,20 +725,34 @@ export async function waitForProcessesGone(
  * guarantee. Blocks until the killed PIDs are actually gone, so a following
  * `schtasks /Run` can't race the old process's run-lock.
  *
- * Returns the number of processes killed.
+ * Never throws: an enumeration failure is reported as `confirmed: false` so the
+ * caller can fail closed rather than start a second daemon on top of the first.
  */
 export async function killDaemonProcesses(
   pm: ProcessManager,
   selfPid: number,
   waitDeps: WaitDeps = defaultWaitDeps,
-): Promise<number> {
-  const procs = await pm.listAll();
+): Promise<KillResult> {
+  let procs: RunningProcess[];
+  try {
+    procs = await pm.listAll();
+  } catch (e) {
+    // We don't know whether a daemon is running, so we can't claim we stopped
+    // it. Report unconfirmed and let the caller decide.
+    const detail = e instanceof Error ? e.message : String(e);
+    log.warn("taskScheduler: cannot enumerate processes; skipping kill", {
+      error: detail,
+    });
+    return { killed: 0, confirmed: false, detail };
+  }
   const victims = daemonKillOrder(procs, selfPid);
   for (const pid of victims) {
     await pm.kill(pid);
   }
-  await waitForProcessesGone(pm, victims, waitDeps);
-  return victims.length;
+  const outcome = await waitForProcessesGone(pm, victims, waitDeps);
+  return outcome.gone
+    ? { killed: victims.length, confirmed: true }
+    : { killed: victims.length, confirmed: false, detail: outcome.detail };
 }
 
 /**
@@ -900,6 +992,8 @@ export function defaultTaskSchedulerServiceControl(
   runner: SchtasksRunner = new BunSchtasksRunner(),
   processManager: ProcessManager = new BunProcessManager(),
   selfPid: number = process.pid,
+  // Injectable so stop()/restart() are testable without real 10s waits.
+  waitDeps: WaitDeps = defaultWaitDeps,
 ): TaskSchedulerServiceControl {
   return {
     async isActive() {
@@ -928,10 +1022,19 @@ export function defaultTaskSchedulerServiceControl(
       // /End on a stopped task is harmless.
       const r = await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/DISABLE"]);
       await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
-      await killDaemonProcesses(processManager, selfPid);
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      const kill = await killDaemonProcesses(processManager, selfPid, waitDeps);
+      if (r.exitCode !== 0) {
+        return { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      // An unconfirmed kill is a failed stop, not a successful one — say so
+      // rather than letting a surviving daemon look like a clean shutdown.
+      if (!kill.confirmed) {
+        return {
+          ok: false,
+          stderr: `could not confirm the daemon stopped: ${kill.detail ?? "unknown"}`,
+        };
+      }
+      return { ok: true };
     },
     async restart() {
       // Kill any running instance, then start a fresh one — the schtasks
@@ -943,7 +1046,23 @@ export function defaultTaskSchedulerServiceControl(
       // actually gone so /Run doesn't bounce off the single-instance lock.
       await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
       await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
-      await killDaemonProcesses(processManager, selfPid);
+      const kill = await killDaemonProcesses(processManager, selfPid, waitDeps);
+      // Fail closed. If we can't prove the old daemon is gone, `/Run` would
+      // bounce off its still-held run-lock and silently no-op — leaving the old
+      // binary running while we report success. Skipping `/Run` costs at most
+      // 60s: the keep-alive trigger re-enabled above relaunches the task once
+      // the old process really has exited.
+      if (!kill.confirmed) {
+        log.warn("taskScheduler: skipping /Run — old daemon not confirmed gone", {
+          detail: kill.detail,
+        });
+        return {
+          ok: false,
+          stderr:
+            `could not confirm the old daemon exited (${kill.detail ?? "unknown"}); ` +
+            `skipped /Run — the keep-alive trigger will relaunch within 60s`,
+        };
+      }
       const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
       return r.exitCode === 0
         ? { ok: true }

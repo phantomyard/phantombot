@@ -27,6 +27,7 @@ import {
   killDaemonProcesses,
   launcherVbsPath,
   LAUNCHER_VBS,
+  ProcessEnumerationError,
   type ProcessManager,
   type RunningProcess,
   type WaitDeps,
@@ -523,12 +524,20 @@ function child(
 class FakeProcessManager implements ProcessManager {
   killed: number[] = [];
   listCalls = 0;
+  /** Number of leading listAll() calls that throw, simulating a CIM hiccup. */
+  failListsFor = 0;
+  /** When true, every listAll() throws. */
+  alwaysFailList = false;
   constructor(
     private procs: RunningProcess[],
     private unkillable: number[] = [],
   ) {}
   async listAll(): Promise<RunningProcess[]> {
     this.listCalls++;
+    if (this.alwaysFailList || this.failListsFor > 0) {
+      this.failListsFor--;
+      throw new ProcessEnumerationError("powershell produced no output");
+    }
     return this.procs;
   }
   async kill(pid: number): Promise<void> {
@@ -629,22 +638,46 @@ describe("daemonKillOrder", () => {
 });
 
 describe("waitForProcessesGone", () => {
-  test("returns true once the PIDs disappear", async () => {
+  test("reports gone once the PIDs disappear", async () => {
     const pm = new FakeProcessManager([pb(100, "run")]);
     await pm.kill(100);
-    expect(await waitForProcessesGone(pm, [100], fastWait)).toBe(true);
+    expect(await waitForProcessesGone(pm, [100], fastWait)).toEqual({
+      gone: true,
+    });
   });
 
-  test("returns false when a PID never exits (bounded, does not hang)", async () => {
+  test("times out when a PID never exits (bounded, does not hang)", async () => {
     const pm = new FakeProcessManager([pb(100, "run")], [100]);
     await pm.kill(100);
-    expect(await waitForProcessesGone(pm, [100], fastWait)).toBe(false);
+    const out = await waitForProcessesGone(pm, [100], fastWait);
+    expect(out.gone).toBe(false);
+    expect(out).toMatchObject({ reason: "timeout" });
   });
 
   test("empty pid list short-circuits without listing", async () => {
     const pm = new FakeProcessManager([]);
-    expect(await waitForProcessesGone(pm, [], fastWait)).toBe(true);
+    expect(await waitForProcessesGone(pm, [], fastWait)).toEqual({ gone: true });
     expect(pm.listCalls).toBe(0);
+  });
+
+  // The regression Kai flagged: enumeration failure used to surface as [],
+  // which read as "every victim exited" and green-lit `schtasks /Run`.
+  test("a persistent enumeration failure never reports gone", async () => {
+    const pm = new FakeProcessManager([pb(100, "run")], [100]);
+    pm.alwaysFailList = true;
+    const out = await waitForProcessesGone(pm, [100], fastWait);
+    expect(out.gone).toBe(false);
+    expect(out).toMatchObject({ reason: "enumeration-failed" });
+  });
+
+  test("a transient enumeration failure recovers and still confirms exit", async () => {
+    const pm = new FakeProcessManager([pb(100, "run")]);
+    await pm.kill(100); // actually gone…
+    pm.failListsFor = 2; // …but the first two polls can't see that
+    expect(await waitForProcessesGone(pm, [100], fastWait)).toEqual({
+      gone: true,
+    });
+    expect(pm.listCalls).toBeGreaterThan(2);
   });
 });
 
@@ -655,17 +688,35 @@ describe("killDaemonProcesses", () => {
       child(200, "claude.exe", 100),
       pb(999, "restart"),
     ]);
-    const killed = await killDaemonProcesses(pm, 999, fastWait);
+    const r = await killDaemonProcesses(pm, 999, fastWait);
     expect(pm.killed).toEqual([100, 200]);
-    expect(killed).toBe(2);
+    expect(r).toEqual({ killed: 2, confirmed: true });
     // Proves we polled for exit rather than returning straight after taskkill.
     expect(pm.listCalls).toBeGreaterThan(1);
   });
 
-  test("no daemons → nothing killed", async () => {
+  test("no daemons → nothing killed, still confirmed", async () => {
     const pm = new FakeProcessManager([pb(1, "restart")]);
-    expect(await killDaemonProcesses(pm, 999, fastWait)).toBe(0);
+    expect(await killDaemonProcesses(pm, 999, fastWait)).toEqual({
+      killed: 0,
+      confirmed: true,
+    });
     expect(pm.killed).toEqual([]);
+  });
+
+  test("enumeration failure → kills nothing and reports unconfirmed", async () => {
+    const pm = new FakeProcessManager([pb(100, "run")]);
+    pm.alwaysFailList = true;
+    const r = await killDaemonProcesses(pm, 999, fastWait);
+    expect(r.confirmed).toBe(false);
+    expect(r.killed).toBe(0);
+    expect(pm.killed).toEqual([]); // never blind-kill on an unknown process set
+  });
+
+  test("victim survives taskkill → reports unconfirmed", async () => {
+    const pm = new FakeProcessManager([pb(100, "run")], [100]);
+    const r = await killDaemonProcesses(pm, 999, fastWait);
+    expect(r).toMatchObject({ killed: 1, confirmed: false });
   });
 });
 
@@ -673,7 +724,7 @@ describe("service control stop/restart kill the stray daemon", () => {
   test("stop(): disable + end + kill daemon (not the CLI invoker)", async () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run"), pb(555, "stop")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
     const r = await svc.stop();
     expect(r.ok).toBe(true);
     const verbs = st.calls.map((c) => c[0]);
@@ -685,7 +736,7 @@ describe("service control stop/restart kill the stray daemon", () => {
   test("restart(): enable + end + kill daemon + run", async () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
     const r = await svc.restart();
     expect(r.ok).toBe(true);
     const verbs = st.calls.map((c) => c[0]);
@@ -698,11 +749,47 @@ describe("service control stop/restart kill the stray daemon", () => {
     // still held the single-instance lock, so the new daemon refused to start.
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
     await svc.restart();
     const runIdx = st.calls.findIndex((c) => c[0] === "/Run");
     expect(runIdx).toBeGreaterThanOrEqual(0);
     // By the time /Run was issued, PID 100 no longer appears in listAll().
     expect((await pm.listAll()).map((p) => p.pid)).not.toContain(100);
+  });
+
+  test("restart(): enumeration failure must NOT fire /Run", async () => {
+    // Fail closed. A transient CIM failure once read as "everything exited",
+    // so /Run raced the still-held run-lock and silently no-opped while we
+    // reported success. The keep-alive trigger is the recovery path instead.
+    const st = new FakeSchtasks();
+    const pm = new FakeProcessManager([pb(100, "run")]);
+    pm.alwaysFailList = true;
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const r = await svc.restart();
+    expect(r.ok).toBe(false);
+    expect(st.calls.map((c) => c[0])).not.toContain("/Run");
+    // The keep-alive trigger must still have been re-enabled, or nothing
+    // would ever relaunch the daemon.
+    expect(st.calls.map((c) => c[0])).toContain("/Change");
+    expect(r.stderr ?? "").toContain("keep-alive");
+  });
+
+  test("restart(): an unkillable daemon must NOT fire /Run", async () => {
+    const st = new FakeSchtasks();
+    const pm = new FakeProcessManager([pb(100, "run")], [100]);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const r = await svc.restart();
+    expect(r.ok).toBe(false);
+    expect(st.calls.map((c) => c[0])).not.toContain("/Run");
+  });
+
+  test("stop(): enumeration failure reports failure, not a clean stop", async () => {
+    const st = new FakeSchtasks();
+    const pm = new FakeProcessManager([pb(100, "run")]);
+    pm.alwaysFailList = true;
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const r = await svc.stop();
+    expect(r.ok).toBe(false);
+    expect(r.stderr ?? "").toContain("could not confirm");
   });
 });
