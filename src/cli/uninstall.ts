@@ -10,6 +10,7 @@
 
 import { defineCommand } from "citty";
 
+import { uninstallCompletions } from "../lib/completionInstall.ts";
 import {
   BunLaunchctlRunner,
   defaultPlistPath,
@@ -148,6 +149,13 @@ export default defineCommand({
   },
   async run() {
     const code = await runUninstall();
+    // Remove the shell tab-completion that `install` set up. Best-effort;
+    // leftover stubs are harmless, so a failure never fails the uninstall.
+    try {
+      await uninstallCompletions();
+    } catch {
+      // ignore
+    }
     process.exitCode = code;
   },
 });

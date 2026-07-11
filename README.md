@@ -424,6 +424,18 @@ Maintenance:
 | `phantombot nightly [--resume]` | Run or resume memory distillation |
 | `phantombot doctor [--no-repair]` | Check memory health and optionally repair |
 
+## Shell completion
+
+`phantombot install` sets up `<TAB>` completion for `bash`, `zsh`, and `fish`
+automatically — no extra command, no separate opt-in. `phantombot update`
+refreshes it, and `phantombot uninstall` removes it. Open a new shell after
+installing to pick it up.
+
+Completion is dynamic: a small stub in your shell calls back into the binary on
+every `<TAB>`, so it always matches the available subcommands and flags —
+`phantombot p<TAB>` → `persona`, `phantomchat`, `p2p`; `phantombot p2p <TAB>` →
+`status`; `phantombot logs --<TAB>` → `--follow`, `--no-follow`, `--lines`.
+
 ## Telegram
 
 Phantombot runs one or more Telegram long-poll listeners. Each listener needs a

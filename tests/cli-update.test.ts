@@ -337,6 +337,7 @@ describe("runUpdate on darwin-arm64", () => {
       err: new CaptureStream(),
       force: true,
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     expect(code).toBe(0);
     expect(out.text).toContain("phantombot-v1.0.99-darwin-arm64");
@@ -405,6 +406,7 @@ describe("runUpdate on windows-x64", () => {
       err: new CaptureStream(),
       force: true,
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     expect(code).toBe(0);
     expect(out.text).toContain("phantombot-v1.0.99-windows-x64.exe");
@@ -432,6 +434,7 @@ describe("runUpdate happy path with --force --restart", () => {
       force: true,
       restart: true,
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     expect(code).toBe(0);
     // New binary swapped in.
@@ -463,6 +466,7 @@ describe("runUpdate happy path with --force --restart", () => {
       force: true,
       // restart NOT set
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     expect(code).toBe(0);
     expect(calls).not.toContain("restart");
@@ -485,6 +489,7 @@ describe("runUpdate happy path with --force --restart", () => {
       force: true,
       restart: true,
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     // Exit 0 — the install succeeded; restart is best-effort.
     expect(code).toBe(0);
@@ -518,6 +523,7 @@ describe("runUpdate post-swap systemd heal", () => {
       out,
       err: new CaptureStream(),
       force: true,
+      refreshCompletions: false,
       healSystemdUnits: async (bin) => {
         called.push(bin);
         return { rewrote: [], backups: [], repairedTimers: [] };
@@ -541,6 +547,7 @@ describe("runUpdate post-swap systemd heal", () => {
       out,
       err: new CaptureStream(),
       force: true,
+      refreshCompletions: false,
       healSystemdUnits: async () => ({
         rewrote: ["phantombot-tick.timer", "phantombot.service"],
         backups: [],
@@ -566,6 +573,7 @@ describe("runUpdate post-swap systemd heal", () => {
       out,
       err,
       force: true,
+      refreshCompletions: false,
       healSystemdUnits: async () => {
         throw new Error("dbus is missing");
       },
@@ -629,6 +637,7 @@ describe("runUpdate post-swap systemd heal", () => {
       out: new CaptureStream(),
       err: new CaptureStream(),
       force: true,
+      refreshCompletions: false,
       healSystemdUnits: async () => {
         healCalled = true;
         return null;
@@ -674,6 +683,7 @@ describe("runUpdate confirm injection", () => {
       confirmInstall: async () => true,
       confirmRestart: async () => false,
       healSystemdUnits: false,
+      refreshCompletions: false,
     });
     expect(code).toBe(0);
     expect(calls).not.toContain("restart");

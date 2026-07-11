@@ -28,10 +28,22 @@ import { runMain } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
+import { runComplete } from "./lib/completion.ts";
 import { preloadEnvFiles } from "./lib/envBootstrap.ts";
 import { log } from "./lib/logger.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
+
+// Hidden dynamic-completion backend. The shell stubs emitted by
+// `phantombot completion <shell>` call `phantombot _complete -- <words…>` on
+// every <TAB>. Handle it here, before the credential bootstrap, so a tab press
+// is as cheap and side-effect-free as --help and never touches the vault. It is
+// intentionally not a Citty subcommand, so it stays out of --help output.
+if (process.argv[2] === "_complete") {
+  const candidates = await runComplete(mainCommand, process.argv.slice(3));
+  if (candidates.length > 0) process.stdout.write(candidates.join("\n") + "\n");
+  process.exit(0);
+}
 
 // Skip the credential bootstrap entirely for read-only invocations
 // (--help/--version/bare) so they never mutate disk or provision a persona —
