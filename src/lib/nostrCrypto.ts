@@ -468,7 +468,15 @@ export async function wrapV2(
   replyTo?: { eventId: string; relayUrl?: string },
 ): Promise<{ event: NTNostrEvent; rumorId: string }> {
   const senderPubHex = getPublicKey(senderSk);
-  const tags: string[][] = [["p", recipientPubHex], ["v", "pc-v2"]];
+  // ONE Date.now() for BOTH created_at and the ms tag — see MS_TAG. Two calls
+  // can straddle a second boundary and desync the sub-second slot from the
+  // second it belongs to.
+  const nowMs = Date.now();
+  const tags: string[][] = [
+    ["p", recipientPubHex],
+    ["v", "pc-v2"],
+    buildMsTag(nowMs),
+  ];
   if (replyTo) {
     tags.push(["e", replyTo.eventId, replyTo.relayUrl || "", "reply"]);
   }
@@ -476,7 +484,7 @@ export async function wrapV2(
   // Rumor (kind 14, unsigned) — same structure as NIP-17 rumor
   const rumor = {
     kind: 14,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: Math.floor(nowMs / 1000),
     tags,
     content,
     pubkey: senderPubHex,
@@ -588,6 +596,46 @@ export function isV2Event(event: NTNostrEvent): boolean {
 // ==================== Low-level pipeline ====================
 
 /**
+ * Sub-second ordering tag: `['ms', '0'-'999']` on the kind-14 rumor.
+ *
+ * Message order in the PWA is decided by a `mid` = `created_at * 1e6 + slot`.
+ * `created_at` only has WHOLE-SECOND resolution, so two messages sent in the
+ * same second tie — and the legacy tiebreak was a HASH of the event id, which
+ * is stable across devices but NOT chronological. Same-second pairs therefore
+ * rendered in coin-flip order. This tag carries the real millisecond so the
+ * tiebreak is both deterministic and chronological.
+ *
+ * MUST stay byte-identical to phantomchat's `MS_TAG` (src/lib/phantomchat/
+ * nostr-crypto.ts) — both repos hash the rumor, so a divergent tag set forks
+ * the rumor id and breaks the shared protocol vector. Additive and ignorable:
+ * stock Nostr clients drop unknown tags, so this stays interop-safe. Messages
+ * without the tag fall back to the legacy hash tiebreak.
+ *
+ * INVARIANT: the ms value MUST come from the SAME `Date.now()` call that
+ * produced the rumor's `created_at`. A second `Date.now()` can straddle a
+ * second boundary and place the message a full second out of order.
+ */
+export const MS_TAG = "ms";
+
+/** Build the ['ms', '0'-'999'] rumor tag from a millisecond epoch instant. */
+export function buildMsTag(nowMs: number): string[] {
+  return [MS_TAG, String(((nowMs % 1000) + 1000) % 1000)];
+}
+
+/**
+ * Read the sub-second slot (0-999) from a rumor's tags. Returns undefined for
+ * legacy messages that predate the tag, or for a malformed value — callers then
+ * fall back to the legacy hash tiebreak so old history keeps its existing order.
+ */
+export function getMsSlotFromTags(tags?: string[][]): number | undefined {
+  const tag = tags?.find((t) => t?.[0] === MS_TAG);
+  if (!tag) return undefined;
+  const ms = Number(tag[1]);
+  if (!Number.isInteger(ms) || ms < 0 || ms > 999) return undefined;
+  return ms;
+}
+
+/**
  * Create an unsigned rumor event (NIP-17 kind 14). The rumor is NOT signed —
  * it has an `id` (its canonical hash) but no `sig`. The id is what receiver
  * and sender converge on after unwrap.
@@ -598,10 +646,16 @@ export function createRumor(
   tags?: string[][],
 ): UnsignedEvent {
   const pubkey = getPublicKey(senderSk);
+  // ONE Date.now() for BOTH created_at and the ms tag — see MS_TAG.
+  const nowMs = Date.now();
+  const baseTags = tags || [];
   const event = {
     kind: 14,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: tags || [],
+    created_at: Math.floor(nowMs / 1000),
+    // Don't double-stamp if a caller already supplied an ms tag.
+    tags: baseTags.some((t) => t?.[0] === MS_TAG)
+      ? baseTags
+      : [...baseTags, buildMsTag(nowMs)],
     content,
     pubkey,
   };

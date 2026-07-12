@@ -21,6 +21,7 @@ import {
   createGiftWrap,
   createRumor,
   getConversationKey,
+  getMsSlotFromTags,
   nip44Encrypt,
   unwrapNip17Message,
   wrapNip17Message,
@@ -437,10 +438,17 @@ describe("PhantomChat Protocol v2 — cross-repo shared test vector", () => {
   // Deterministic inner half — these bytes MUST match across repos
   const EXPECTED_SYMMETRIC_KEY =
     "20be5fd3f2476eed59a6eeac45331d88e8f5a2204591f3604d57c87b1eada7fc";
+  // Re-pinned when the ['ms', …] sub-second ordering tag was added to the
+  // kind-14 rumor (see MS_TAG in src/lib/nostrCrypto.ts). The tag is part of
+  // the hashed tag set, so it changes the rumor id — phantomchat's copy of this
+  // vector MUST be re-pinned to the same value in the same change.
   const EXPECTED_RUMOR_ID =
-    "1012a22578e51593cad513f022acd569452a8a22a3560e9af260049edcdc4435";
+    "3ded8957dfc336570634322ed9e8ace9b12cf89c9533560a4d139864f98d8c0c";
   const PLAINTEXT = "test vector plaintext";
   const FIXED_CREATED_AT = 1700000000;
+  // Date.now() is pinned to FIXED_CREATED_AT * 1000 → an exact second boundary,
+  // so the sub-second slot is 0.
+  const EXPECTED_MS_SLOT = "0";
 
   test("symmetric key derivation matches cross-repo vector", async () => {
     clearSymmetricKeyCache();
@@ -456,11 +464,45 @@ describe("PhantomChat Protocol v2 — cross-repo shared test vector", () => {
     const rumor = {
       kind: 14,
       created_at: FIXED_CREATED_AT,
-      tags: [["p", recipientPk], ["v", "pc-v2"]],
+      tags: [
+        ["p", recipientPk],
+        ["v", "pc-v2"],
+        ["ms", EXPECTED_MS_SLOT],
+      ],
       content: PLAINTEXT,
       pubkey: senderPk,
     };
     expect(getEventHash(rumor as never)).toBe(EXPECTED_RUMOR_ID);
+  });
+
+  test("wrapV2 stamps the ms ordering tag on the rumor", async () => {
+    clearSymmetricKeyCache();
+    const realDateNow = Date.now;
+    // 250ms past the second boundary — the slot must carry the real remainder,
+    // and created_at must still floor to the same whole second.
+    Date.now = () => FIXED_CREATED_AT * 1000 + 250;
+    try {
+      const { event } = await wrapV2(senderSk, recipientPk, PLAINTEXT);
+      const rumor = await unwrapV2(event, recipientSk);
+      expect(rumor.created_at).toBe(FIXED_CREATED_AT);
+      expect(getMsSlotFromTags(rumor.tags)).toBe(250);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("getMsSlotFromTags falls back to undefined for legacy/malformed tags", () => {
+    // Legacy rumor (predates the tag) → undefined → caller uses hash tiebreak
+    expect(getMsSlotFromTags([["p", recipientPk], ["v", "pc-v2"]])).toBeUndefined();
+    expect(getMsSlotFromTags(undefined)).toBeUndefined();
+    // Malformed values must never produce a bogus slot
+    expect(getMsSlotFromTags([["ms", "1000"]])).toBeUndefined();
+    expect(getMsSlotFromTags([["ms", "-1"]])).toBeUndefined();
+    expect(getMsSlotFromTags([["ms", "abc"]])).toBeUndefined();
+    expect(getMsSlotFromTags([["ms", "12.5"]])).toBeUndefined();
+    // Valid boundaries
+    expect(getMsSlotFromTags([["ms", "0"]])).toBe(0);
+    expect(getMsSlotFromTags([["ms", "999"]])).toBe(999);
   });
 
   test("full wrap/unwrap roundtrip with fixed keys produces correct rumor", async () => {
