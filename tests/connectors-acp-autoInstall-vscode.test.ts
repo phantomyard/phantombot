@@ -14,12 +14,16 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  editorConnectorBroken,
   reconcileEditorConnectors,
+  reconcileVscode,
   vscodeResultToConnector,
   VSCODE_EDITOR,
   type EditorSpec,
+  type VscodeReconcileHooks,
 } from "../src/connectors/acp/autoInstall.ts";
 import type { VscodeInstallResult } from "../src/connectors/acp/installVscode.ts";
+import type { ProposedApiResult } from "../src/connectors/acp/vscodeArgv.ts";
 
 const BIN = "/home/dev/.local/bin/phantombot";
 
@@ -139,5 +143,162 @@ describe("VSCODE_EDITOR is registered and reconcile-driven", () => {
   test("is exported with a reconcile hook (self-driven shape)", () => {
     expect(VSCODE_EDITOR.id).toBe("vscode");
     expect(typeof VSCODE_EDITOR.reconcile).toBe("function");
+  });
+});
+
+/**
+ * The proposed-api allow-list is the SECOND half of a working VS Code
+ * integration, and it has its own failure mode: the extension installs fine,
+ * reports `current`, and silently runs degraded on the `@phantombot` participant
+ * because `~/.vscode/argv.json` never listed it. These tests pin the gating —
+ * especially the negative one, that we do NOT create `~/.vscode/argv.json` for
+ * a machine with no VS Code on it.
+ */
+describe("reconcileVscode — proposed-api allow-list gating", () => {
+  function hooks(
+    over: Partial<VscodeReconcileHooks> & { calls?: string[] } = {},
+  ) {
+    const calls: string[] = over.calls ?? [];
+    return {
+      calls,
+      hooks: {
+        install: over.install ?? (() => {
+          calls.push("install");
+          return vscodeResult({ action: "installed" });
+        }),
+        check: over.check ?? (() => {
+          calls.push("check");
+          return vscodeResult({ action: "current" });
+        }),
+        ensureArgv: over.ensureArgv ?? ((): ProposedApiResult => {
+          calls.push("ensureArgv");
+          return { status: "enabled", argvPath: "/fake/argv.json" };
+        }),
+        checkArgv: over.checkArgv ?? ((): ProposedApiResult => {
+          calls.push("checkArgv");
+          return { status: "stale", argvPath: "/fake/argv.json" };
+        }),
+      } satisfies VscodeReconcileHooks,
+    };
+  }
+
+  test("VS Code absent ⇒ argv.json is NEVER read or written", () => {
+    const { calls, hooks: h } = hooks({
+      install: () => vscodeResult({ action: "not-detected" }),
+    });
+    const r = reconcileVscode(true, h);
+    expect(r.action).toBe("not-detected");
+    expect(r.proposedApi).toBeUndefined();
+    expect(calls).toEqual([]); // no ensureArgv, no checkArgv
+  });
+
+  test("a failed extension install ⇒ argv.json is left alone", () => {
+    const { calls, hooks: h } = hooks({
+      install: () => vscodeResult({ code: 1, action: "error", message: "boom" }),
+    });
+    const r = reconcileVscode(true, h);
+    expect(r.action).toBe("error");
+    expect(r.proposedApi).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  test("repair mode writes the allow-list after installing", () => {
+    const { calls, hooks: h } = hooks();
+    const r = reconcileVscode(true, h);
+    expect(r.action).toBe("registered");
+    expect(r.proposedApi).toBe("enabled");
+    expect(calls).toEqual(["install", "ensureArgv"]);
+  });
+
+  test("report-only mode checks but never writes the allow-list", () => {
+    const { calls, hooks: h } = hooks();
+    const r = reconcileVscode(false, h);
+    expect(r.proposedApi).toBe("stale");
+    expect(calls).toEqual(["check", "checkArgv"]);
+  });
+
+  test("an installed-but-not-allow-listed extension reads as BROKEN", () => {
+    // The whole point: action is `current` (extension is fine) yet the box is
+    // running degraded. Doctor must not print a green tick here.
+    const { hooks: h } = hooks();
+    const r = reconcileVscode(false, h);
+    expect(r.action).toBe("current");
+    expect(editorConnectorBroken(r)).toBe(true);
+  });
+
+  test("a freshly-enabled allow-list does NOT read as broken", () => {
+    const { hooks: h } = hooks();
+    const r = reconcileVscode(true, h);
+    expect(r.proposedApi).toBe("enabled");
+    expect(editorConnectorBroken(r)).toBe(false);
+  });
+
+  test("an argv.json error surfaces as broken, with its detail", () => {
+    const { hooks: h } = hooks({
+      ensureArgv: () => ({
+        status: "error",
+        argvPath: "/fake/argv.json",
+        error: "not parseable as JSONC",
+      }),
+    });
+    const r = reconcileVscode(true, h);
+    expect(r.proposedApi).toBe("error");
+    expect(r.proposedApiError).toContain("not parseable");
+    expect(editorConnectorBroken(r)).toBe(true);
+  });
+
+  test("an allow-listed, current extension is healthy and quiet", () => {
+    const { hooks: h } = hooks({
+      checkArgv: () => ({ status: "current", argvPath: "/fake/argv.json" }),
+    });
+    const r = reconcileVscode(false, h);
+    expect(r.action).toBe("current");
+    expect(r.proposedApi).toBe("current");
+    expect(editorConnectorBroken(r)).toBe(false);
+  });
+
+  // The extension is installed via the RESOLVED cli, so the allow-list must
+  // land in that same distribution's data folder. If the cli never reaches the
+  // argv step we'd install into Insiders and allow-list stable — silently
+  // degraded, which is precisely the failure this file exists to prevent.
+  test("the resolved code CLI is threaded into the repair-mode argv step", () => {
+    let seen: string | undefined | "unset" = "unset";
+    const r = reconcileVscode(true, {
+      install: () =>
+        vscodeResult({
+          action: "installed",
+          codeCommand: "C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd",
+        }),
+      ensureArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "enabled", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBe("C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd");
+    expect(r.proposedApi).toBe("enabled");
+  });
+
+  test("the resolved code CLI is threaded into the report-only argv step", () => {
+    let seen: string | undefined | "unset" = "unset";
+    reconcileVscode(false, {
+      check: () => vscodeResult({ action: "current", codeCommand: "code-insiders" }),
+      checkArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "current", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBe("code-insiders");
+  });
+
+  test("no resolved CLI ⇒ no override, so the default (stable) argv.json applies", () => {
+    let seen: string | undefined | "unset" = "unset";
+    reconcileVscode(true, {
+      install: () => vscodeResult({ action: "installed" }), // no codeCommand
+      ensureArgv: (o): ProposedApiResult => {
+        seen = o?.codeCommand;
+        return { status: "enabled", argvPath: "/fake/argv.json" };
+      },
+    });
+    expect(seen).toBeUndefined();
   });
 });

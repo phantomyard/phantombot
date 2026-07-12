@@ -59,9 +59,10 @@
 
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { xdgDataHome } from "../config.ts";
+import { isPhantombotBinary } from "./binaryIdentity.ts";
 import { currentUserSid } from "./filePermissions.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
@@ -1076,7 +1077,7 @@ export function defaultTaskSchedulerServiceControl(
       // the user never asked for — mirrors the systemd `existsSync(unitPath)`
       // guard).
       const binPath = process.execPath;
-      if (!basename(binPath).startsWith("phantombot")) {
+      if (!isPhantombotBinary(binPath)) {
         return { rerendered: false };
       }
       const installed = await runner.run(["/Query", "/TN", PHANTOMBOT_TASK]);
