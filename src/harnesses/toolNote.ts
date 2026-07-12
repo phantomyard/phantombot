@@ -27,8 +27,16 @@
  *   - Never throws. Bad/partial input degrades to the legacy label.
  */
 
-/** Max length of a rendered tool-call title, including the name prefix. */
-export const MAX_TOOL_NOTE_LEN = 80;
+/**
+ * Max length of a rendered tool-call title, including the name prefix.
+ *
+ * Raised 80 → 160 (Andrew, 2026-07-12): 80 clipped mid-argument on ordinary
+ * calls (a `curl` with a header, a long file path), so the panel showed the
+ * tool name and little else. Note the redaction caveat above — a longer cap
+ * surfaces MORE of the raw args, so keep this sink (the editor panel) in mind
+ * before raising it further.
+ */
+export const MAX_TOOL_NOTE_LEN = 160;
 
 /**
  * ACP `ToolKind` — drives the per-tool icon Zed renders in its agent panel.
