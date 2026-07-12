@@ -1033,12 +1033,14 @@ async function processChatMessage(
     // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
     // answer. It reaches here as the streamed leftover: the splitter cut the
     // real bubble at a sentence boundary and PUBLISHED it, so there is nothing
-    // left to merge into — suppress it instead. Only once something real has
-    // already gone out; a reply that is genuinely just "👍" still sends.
-    if (
-      !hasTextSubstance(text) &&
-      narrationBubblesSent + finalBubblesSent > 0
-    ) {
+    // left to merge into — suppress it instead.
+    //
+    // Gate on FINAL bubbles only. Narration ("Restarting the service now…")
+    // is not an answer, so it must never license suppressing one: if the
+    // model's entire reply is "👍", that emoji IS the answer and has to ship
+    // even though narration already went out. An orphaned sign-off always
+    // trails a published *final* bubble, so this still catches every one.
+    if (!hasTextSubstance(text) && finalBubblesSent > 0) {
       return;
     }
     try {

@@ -1032,6 +1032,42 @@ describe("runTelegramServer dispatch", () => {
     expect(transport.sent.map((s) => s.text.trim())).toEqual(["👍"]);
   });
 
+  test("an emoji-only answer still sends after narration has gone out", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "restart it",
+    });
+    // The regression the first cut of this fix shipped: the suppression gate
+    // counted NARRATION bubbles too, so once "Restarting the service now"
+    // went out, an emoji-only final answer was silently dropped and the user
+    // got the narration as their last message — the confirmation never
+    // arrived. Narration is not an answer and must not license suppressing
+    // one. The text chunk carries no terminal punctuation on purpose: that
+    // keeps it below the final-answer splitter, so the progress chunk turns
+    // it into narration rather than a published final bubble.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Restarting the service now" },
+      { type: "progress", note: "systemctl restart" },
+      { type: "done", finalText: "👍" },
+    ]);
+    await runTelegramServer({
+      config: oneSentencePerBubble(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    const sent = transport.sent.map((s) => s.text.trim());
+    expect(sent).toContain("👍");
+    expect(sent[sent.length - 1]).toBe("👍");
+  });
+
   test("rejects messages from non-allowed users when allowlist is set", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({

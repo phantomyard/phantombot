@@ -996,6 +996,39 @@ describe("phantomchat streaming bubbles", () => {
     expect(await dmBubbles(pool, senderSk)).toEqual(["👍"]);
   });
 
+  test("an emoji-only answer still sends after narration has gone out", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // The regression the first cut of this fix shipped: the suppression gate
+    // counted NARRATION bubbles too, so an emoji-only final answer was
+    // dropped once narration had gone out — and here the newest event drives
+    // the push notification, so the user's phone would buzz with
+    // "Restarting the service now" and the actual confirmation would never
+    // arrive. Narration is not an answer. The text chunk carries no terminal
+    // punctuation on purpose: that keeps it below the final-answer splitter,
+    // so the progress chunk turns it into narration rather than a published
+    // final bubble.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "Restarting the service now" },
+      { type: "progress", note: "systemctl restart" },
+      { type: "done", finalText: "👍" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "restart it",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    const bubbles = await dmBubbles(pool, senderSk);
+    expect(bubbles).toContain("👍");
+    expect(bubbles[bubbles.length - 1]).toBe("👍");
+  });
+
   test("group reply streams as multiple group broadcasts", async () => {
     const andrewSk = generateSecretKey();
     const botSk = generateSecretKey();

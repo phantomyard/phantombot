@@ -681,10 +681,11 @@ export async function runPhantomchatServer(
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
     let requestedReplyMode: ReplyModeRequest | undefined;
-    // Bubbles actually published this turn (narration or final). Gates the
-    // orphaned-sign-off suppression in sendBubble: nothing out yet means the
-    // fragment IS the reply, so it must still send.
-    let bubblesSent = 0;
+    // FINAL bubbles actually published this turn. Gates the orphaned-sign-off
+    // suppression in sendBubble: no final bubble out yet means the fragment IS
+    // the reply, so it must still send. Narration is deliberately NOT counted
+    // here — see the comment in sendBubble.
+    let finalBubblesSent = 0;
 
     // Reply-modality routing (mirrors core/engine.ts). Default: mirror the
     // input — a voice note in → a voice note back, text in → text out. An
@@ -747,7 +748,10 @@ export async function runPhantomchatServer(
     // the final reply path. groupTypingMembers is the same set the reply path
     // broadcasts to (inbound p-tags ∪ { sender }). Best-effort: a failed bubble
     // is logged, not thrown, so one dropped progress line never aborts the turn.
-    const sendBubble = async (text: string): Promise<void> => {
+    const sendBubble = async (
+      text: string,
+      kind: "narration" | "final" = "final",
+    ): Promise<void> => {
       if (text.trim().length === 0) return;
       // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
       // answer. It reaches here as the streamed leftover: the splitter cut the
@@ -755,9 +759,14 @@ export async function runPhantomchatServer(
       // nothing left to merge into — suppress it instead. This matters most
       // here: the newest event drives the push notification, so an orphaned
       // emoji becomes a notification reading "max: ⚡" with the real answer
-      // buried above it. Only once something real has already gone out; a
-      // reply that is genuinely just "👍" still sends.
-      if (!hasTextSubstance(text) && bubblesSent > 0) return;
+      // buried above it.
+      //
+      // Gate on FINAL bubbles only. Narration is not an answer, so it must
+      // never license suppressing one: if the model's whole reply is "👍",
+      // that emoji IS the answer and has to ship even though narration
+      // already went out — otherwise the push notification becomes the
+      // narration and the confirmation never arrives.
+      if (!hasTextSubstance(text) && finalBubblesSent > 0) return;
       try {
         if (msg.groupId) {
           await transport.sendGroupMessage(
@@ -770,7 +779,7 @@ export async function runPhantomchatServer(
           // and publishes both wraps. conversationId === recipient hex pubkey.
           await transport.sendMessage(senderHex, text);
         }
-        bubblesSent++;
+        if (kind === "final") finalBubblesSent++;
       } catch (e) {
         log.warn("phantomchat: bubble send failed", {
           error: (e as Error).message,
@@ -803,7 +812,7 @@ export async function runPhantomchatServer(
     const narration = createNarrationController({
       streaming,
       enabled: narrationEnabled,
-      send: sendBubble,
+      send: (text) => sendBubble(text, "narration"),
     });
 
     const resetFinalCandidate = (): void => {
