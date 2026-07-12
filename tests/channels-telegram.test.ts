@@ -965,6 +965,73 @@ describe("runTelegramServer dispatch", () => {
     ]);
   });
 
+  // A reply that signs off with an emoji ("…all merged. ⚡") splits into two
+  // sentences, because the emoji follows terminal punctuation. The real bubble
+  // is already SENT by the time the emoji arrives as the leftover suffix, so it
+  // cannot be merged — it must be suppressed, or the user gets a bubble (and on
+  // PhantomChat, a push notification) that says nothing but "⚡".
+  const oneSentencePerBubble = (): Config => ({
+    ...baseConfig(),
+    telegramStreaming: {
+      narrationFlushMs: 0,
+      bubbleMaxSentences: 1,
+      bubbleMaxChars: 700,
+      bubbleDelayMs: 0,
+      voiceMaxSentences: 3,
+    },
+  });
+
+  test("a trailing sign-off never lands as its own bubble", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "did it land?",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "All merged. " },
+      { type: "done", finalText: "All merged. ⚡" },
+    ]);
+    await runTelegramServer({
+      config: oneSentencePerBubble(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.sent.map((s) => s.text.trim())).toEqual(["All merged."]);
+  });
+
+  test("a reply that is only a sign-off still sends", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 1,
+      conversationId: "1001",
+      senderId: "42",
+      text: "ship it",
+    });
+    // Nothing precedes it, so the emoji IS the answer — suppressing it here
+    // would turn a real reply into silence.
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "👍" },
+    ]);
+    await runTelegramServer({
+      config: oneSentencePerBubble(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(transport.sent.map((s) => s.text.trim())).toEqual(["👍"]);
+  });
+
   test("rejects messages from non-allowed users when allowlist is set", async () => {
     const transport = new FakeTransport();
     transport.pendingUpdates.push({

@@ -194,6 +194,41 @@ export class StreamSegmenter {
   }
 }
 
+/**
+ * Does this text carry any actual content — a letter or a digit?
+ *
+ * A bubble made only of emoji or punctuation ("⚡", "👍", "—") reads as a
+ * sign-off when it sits under a real answer, but it is not an answer. On
+ * surfaces where the newest message becomes the push notification and the
+ * chat-list preview (PhantomChat), a trailing sign-off bubble IS the whole
+ * notification — the user sees "max: ⚡" and reasonably concludes they were
+ * ignored. Callers use this to keep such fragments attached to the bubble
+ * they belong to, rather than shipping them standalone.
+ */
+export function hasTextSubstance(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
+/**
+ * Fold a trailing substance-free fragment back into the bubble before it.
+ *
+ * The sentence splitter treats "…all merged. ⚡" as two sentences, because the
+ * emoji follows terminal punctuation — so a reply that signs off with an emoji
+ * ends with a 1-character segment. Merging is only possible when the whole text
+ * is segmented in one pass (`splitIntoSegments`); a live `StreamSegmenter` may
+ * already have published the previous bubble, so the streaming callers suppress
+ * the orphan instead. Kept here so both strategies share one definition of
+ * "this fragment is not an answer".
+ */
+export function coalesceTrailingFragment(segments: string[]): string[] {
+  if (segments.length < 2) return segments;
+  const last = segments[segments.length - 1]!;
+  if (hasTextSubstance(last)) return segments;
+  const merged = segments.slice(0, -1);
+  merged[merged.length - 1] += last;
+  return merged;
+}
+
 export function splitIntoSegments(
   text: string,
   options: StreamSegmenterOptions,
@@ -201,7 +236,7 @@ export function splitIntoSegments(
   const s = new StreamSegmenter(options);
   const out = s.push(text).segments;
   out.push(...s.finish().segments);
-  return out;
+  return coalesceTrailingFragment(out);
 }
 
 function fenceMarker(line: string): "```" | "~~~" | undefined {

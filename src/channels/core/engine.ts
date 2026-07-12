@@ -59,6 +59,7 @@ import {
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
 import {
+  hasTextSubstance,
   splitIntoSegments,
   StreamSegmenter,
 } from "../streamSegmenter.ts";
@@ -1029,6 +1030,17 @@ async function processChatMessage(
     kind: "narration" | "final" | "error",
   ) => {
     if (text.trim().length === 0) return;
+    // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
+    // answer. It reaches here as the streamed leftover: the splitter cut the
+    // real bubble at a sentence boundary and PUBLISHED it, so there is nothing
+    // left to merge into — suppress it instead. Only once something real has
+    // already gone out; a reply that is genuinely just "👍" still sends.
+    if (
+      !hasTextSubstance(text) &&
+      narrationBubblesSent + finalBubblesSent > 0
+    ) {
+      return;
+    }
     try {
       await input.transport.sendMessage(msg.conversationId, text);
       if (kind === "narration") narrationBubblesSent++;

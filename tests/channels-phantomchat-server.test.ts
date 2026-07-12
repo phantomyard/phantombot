@@ -948,6 +948,54 @@ describe("phantomchat streaming bubbles", () => {
     expect(await dmBubbles(pool, senderSk)).toEqual(["First.", "Second."]);
   });
 
+  test("a trailing sign-off never lands as its own bubble", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // The shape that shipped "max: ⚡" as a push notification. The emoji
+    // follows terminal punctuation, so the sentence splitter calls it a
+    // sentence of its own; the real bubble is already PUBLISHED by the time it
+    // arrives as the leftover suffix, so there is nothing to merge into and it
+    // must be suppressed at the send boundary.
+    const harness = new ScriptedHarness("fake", [
+      { type: "text", text: "All merged. " },
+      { type: "done", finalText: "All merged. ⚡" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "did it land?",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    expect(await dmBubbles(pool, senderSk)).toEqual(["All merged."]);
+  });
+
+  test("a reply that is only a sign-off still sends", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // Nothing precedes it, so the emoji IS the answer — suppressing it here
+    // would turn a real reply into silence.
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "👍" },
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "ship it",
+      streaming: STREAM_ONE_PER_SENTENCE,
+      waitMs: 150,
+    });
+
+    expect(await dmBubbles(pool, senderSk)).toEqual(["👍"]);
+  });
+
   test("group reply streams as multiple group broadcasts", async () => {
     const andrewSk = generateSecretKey();
     const botSk = generateSecretKey();
