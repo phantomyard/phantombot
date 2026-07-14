@@ -161,10 +161,29 @@ export interface ToolCallUpdate {
   kind?: string;
 }
 
+/** One slash command the agent offers for this session. */
+export interface AcpAvailableCommand {
+  name: string;
+  description: string;
+  input?: { hint: string };
+}
+
+/**
+ * The agent's slash-command menu for a session. Sent by the server on BOTH
+ * `session/new` and `session/load` — i.e. when NO prompt is in flight. It is
+ * therefore session-scoped, not prompt-scoped, and must be routed outside the
+ * per-prompt handler map (see AcpClient.handleSessionUpdate).
+ */
+export interface AvailableCommandsUpdate {
+  sessionUpdate: "available_commands_update";
+  availableCommands: AcpAvailableCommand[];
+}
+
 export type AcpSessionUpdate =
   | AgentMessageChunkUpdate
   | UserMessageChunkUpdate
-  | ToolCallUpdate;
+  | ToolCallUpdate
+  | AvailableCommandsUpdate;
 
 export interface SessionUpdateParams {
   sessionId: string;
