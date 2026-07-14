@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
+import type { ActiveTurnHandle } from "../../channels/commands.ts";
 import { type Config, loadConfig, personaDir } from "../../config.ts";
 import { healDefaultPersonaIfBroken } from "../../lib/personaDefault.ts";
 import { buildHarnessChain } from "../../harnesses/buildChain.ts";
@@ -34,6 +35,7 @@ import { VERSION } from "../../version.ts";
 import {
   ACP_PROTOCOL_VERSION,
   agentMessageChunk,
+  availableCommandsUpdate,
   jsonRpcError,
   jsonRpcResult,
   JSON_RPC,
@@ -43,7 +45,9 @@ import {
   type JsonRpcId,
   type JsonRpcRequest,
 } from "./protocol.ts";
-import { SessionRegistry } from "./session.ts";
+import { ACP_AVAILABLE_COMMANDS, handleAcpCommand, isAcpCommand } from "./commands.ts";
+import { buildWorkspaceBriefing } from "./briefing.ts";
+import { SessionRegistry, type AcpSession } from "./session.ts";
 import { runBridgeTurn } from "./turnBridge.ts";
 import { inboxDir, extensionFromMime } from "../../channels/telegram/parse.ts";
 
@@ -135,6 +139,9 @@ export async function runAcpServer(
   const ownsMemory = !options.memory;
 
   const sessions = new SessionRegistry();
+  const startedAt = Date.now();
+  /** Slash commands dispatched out-of-band; drained before the store closes. */
+  const inflightCommands = new Set<Promise<void>>();
 
   // ── wire helpers — every write goes to OUTPUT (the protocol channel) ──
   const send = (obj: unknown): void => {
@@ -175,16 +182,27 @@ export async function runAcpServer(
     const p = (params ?? {}) as { cwd?: unknown };
     const cwd = typeof p.cwd === "string" && p.cwd.length > 0 ? p.cwd : process.cwd();
     // mcpServers (if any) are ignored in v1 — phantombot owns its own tools.
+    //
+    // A NEW THREAD IS A NEW CONVERSATION. The registry mints a thread-scoped
+    // key, so this session starts with EMPTY turn history — it does not inherit
+    // the previous thread's trailing "…and go do it" imperatives (see
+    // session.ts). What it knows about the workspace arrives instead as the
+    // system-role briefing built in handleSessionPrompt.
     const session = sessions.create(cwd, persona);
     send(jsonRpcResult(id, { sessionId: session.sessionId }));
+    // Must follow the result: the client needs the sessionId before it can
+    // route a session/update.
+    send(availableCommandsUpdate(session.sessionId, ACP_AVAILABLE_COMMANDS));
   }
 
   async function handleSessionLoad(id: JsonRpcId, params: unknown): Promise<void> {
     const p = (params ?? {}) as { sessionId?: unknown; cwd?: unknown };
     const cwd =
       typeof p.cwd === "string" && p.cwd.length > 0 ? p.cwd : process.cwd();
-    // Re-mint/register against the provided sessionId so subsequent prompts
-    // resolve. Conversation is re-derived from cwd (same key as session/new).
+    // Re-register against the provided sessionId so subsequent prompts resolve.
+    // The conversation key is re-derived FROM THAT TOKEN (it embeds the thread
+    // id), so reopening an old thread resumes exactly that thread — while a
+    // legacy pre-thread token still resolves to the old cwd-wide conversation.
     const sessionId =
       typeof p.sessionId === "string" && p.sessionId.length > 0
         ? p.sessionId
@@ -221,6 +239,7 @@ export async function runAcpServer(
     // LoadSessionResponse"), which kills the agent on startup and whenever an
     // old thread is reopened. `modes: null` is the valid empty form.
     send(jsonRpcResult(id, { modes: null }));
+    send(availableCommandsUpdate(session.sessionId, ACP_AVAILABLE_COMMANDS));
   }
 
   async function handleSessionPrompt(id: JsonRpcId, params: unknown): Promise<void> {
@@ -242,7 +261,9 @@ export async function runAcpServer(
     // Decode pasted/attached images to the inbox and append the
     // `[attached: <path>]` lines the harness reads. Image-only prompts (no
     // typed text) are valid — the attachment line carries the content.
-    const attachmentLines = await persistAcpImages(session.conversation, images, log);
+    // Inbox is keyed on the WORKSPACE, not the thread: one stable dir per
+    // project rather than a new one per editor thread.
+    const attachmentLines = await persistAcpImages(session.workspace, images, log);
     const finalMessage = attachmentLines.length
       ? [userMessage, ...attachmentLines].filter((s) => s.length > 0).join("\n\n")
       : userMessage;
@@ -258,9 +279,33 @@ export async function runAcpServer(
       return;
     }
 
-    // Fresh abort controller per turn; session/cancel fires it.
+    // What has been happening in this workspace, as system-role REFERENCE DATA
+    // — never as replayed user turns. See briefing.ts for why the role, not the
+    // volume, is the thing that matters. Best-effort: a briefing failure must
+    // never sink the user's actual turn.
+    let briefing: string | undefined;
+    try {
+      briefing = await buildWorkspaceBriefing(
+        memory,
+        session.persona,
+        session.workspace,
+        session.conversation,
+      );
+    } catch (e) {
+      log(`workspace briefing failed (continuing without it): ${(e as Error).message}`);
+    }
+    // Briefing first, @-mentions last: the mentioned files are what the user is
+    // pointing at RIGHT NOW, so they sit closest to the message.
+    const overlays = [briefing, referenceContext].filter(
+      (s): s is string => typeof s === "string" && s.length > 0,
+    );
+    const systemPromptSuffix = overlays.length > 0 ? overlays.join("\n\n") : undefined;
+
+    // Fresh abort controller per turn. session/cancel — and the out-of-band
+    // `/stop` and `/reset` commands — fire it through session.activeTurn.
     const abort = new AbortController();
-    session.abort = abort;
+    const activeTurn: ActiveTurnHandle = { controller: abort, startTime: Date.now() };
+    session.activeTurn = activeTurn;
     // Chain the process-level shutdown signal in too.
     if (options.signal) {
       if (options.signal.aborted) abort.abort();
@@ -280,13 +325,15 @@ export async function runAcpServer(
           memory,
           idleTimeoutMs: config.harnessIdleTimeoutMs,
           hardTimeoutMs: config.harnessHardTimeoutMs,
-          systemPromptSuffix: referenceContext,
+          systemPromptSuffix,
           signal: abort.signal,
           screen: options.screen,
         },
         {
           text: (delta) => send(agentMessageChunk(session.sessionId, delta)),
-          progress: (note, tool) =>
+          progress: (note, tool) => {
+            // Feeds /status, so a long turn can be told apart from a stuck one.
+            activeTurn.lastProgressNote = note;
             send(
               toolCallUpdate(
                 session.sessionId,
@@ -296,7 +343,8 @@ export async function runAcpServer(
                 "in_progress",
                 tool,
               ),
-            ),
+            );
+          },
         },
       );
     } catch (e) {
@@ -304,22 +352,109 @@ export async function runAcpServer(
       send(
         jsonRpcError(id, JSON_RPC.INTERNAL_ERROR, (e as Error).message),
       );
-      session.abort = undefined;
+      clearActiveTurn(session, activeTurn);
       return;
     }
 
     // If cancellation fired, report cancelled regardless of how the bridge
     // happened to settle.
     if (abort.signal.aborted) stopReason = "cancelled";
-    session.abort = undefined;
+    clearActiveTurn(session, activeTurn);
     send(jsonRpcResult(id, { stopReason }));
+  }
+
+  /**
+   * Clear the session's active turn — but ONLY if it is still the one we
+   * started. A `/reset` aborts the in-flight turn and a new prompt can begin
+   * before the aborted one has finished unwinding; a blind `= undefined` here
+   * would then wipe the NEW turn's handle, leaving the next `/stop` with
+   * nothing to abort.
+   */
+  function clearActiveTurn(session: AcpSession, turn: { controller: AbortController }): void {
+    if (session.activeTurn?.controller === turn.controller) {
+      session.activeTurn = undefined;
+    }
   }
 
   function handleSessionCancel(params: unknown): void {
     const p = (params ?? {}) as { sessionId?: unknown };
     const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
     const session = sessions.get(sessionId);
-    session?.abort?.abort();
+    session?.activeTurn?.controller.abort();
+  }
+
+  /**
+   * Run a slash command for a session and answer the prompt request.
+   *
+   * Called OUT OF BAND — never from the serial queue. The reply goes back as an
+   * ordinary agent message so the editor renders it in the thread, and the
+   * prompt resolves `end_turn`. Commands are control-plane, so nothing here is
+   * persisted to the conversation.
+   */
+  async function runAcpCommand(
+    session: AcpSession,
+    text: string,
+    id: JsonRpcId,
+  ): Promise<void> {
+    try {
+      const result = await handleAcpCommand(text, {
+        chatId: session.sessionId,
+        persona: session.persona,
+        conversation: session.conversation,
+        memory,
+        // The live array — `/harness` reorders it IN PLACE, and the next
+        // prompt reads the same reference, so the swap takes effect.
+        harnesses: harnesses!,
+        startedAt,
+        activeTurn: session.activeTurn,
+        config,
+      });
+      if (!result) {
+        // Unreachable: the caller only routes here when isAcpCommand() is true,
+        // and the allowlist is a subset of the dispatcher's. Answer anyway
+        // rather than leave the editor's request hanging forever.
+        send(jsonRpcResult(id, { stopReason: "end_turn" }));
+        return;
+      }
+      send(agentMessageChunk(session.sessionId, result.reply));
+      send(jsonRpcResult(id, { stopReason: "end_turn" }));
+      if (result.afterSend) await result.afterSend();
+    } catch (e) {
+      log(`command failed: ${(e as Error).message}`);
+      send(jsonRpcError(id, JSON_RPC.INTERNAL_ERROR, (e as Error).message));
+    }
+  }
+
+  /**
+   * If this message is a `session/prompt` carrying a slash command we own,
+   * dispatch it immediately and return true. Otherwise return false and let the
+   * caller queue the message normally.
+   *
+   * This MUST bypass the serial queue. `/stop` exists to kill the turn that is
+   * currently blocking that queue — queue it, and it would run only after the
+   * turn it was supposed to cancel had already finished. That is exactly the
+   * failure `session/cancel` is already exempted from.
+   */
+  function maybeDispatchCommand(msg: JsonRpcRequest): boolean {
+    if (msg.method !== "session/prompt" || msg.id === undefined) return false;
+    const p = (msg.params ?? {}) as { sessionId?: unknown; prompt?: unknown };
+    const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
+    const session = sessions.get(sessionId);
+    // Unknown session: don't intercept — let the queue produce the proper
+    // invalid-params error rather than inventing a second error path.
+    if (!session) return false;
+
+    const blocks: AcpContentBlock[] = Array.isArray(p.prompt)
+      ? (p.prompt as AcpContentBlock[])
+      : [];
+    const { userMessage } = flattenPromptBlocks(blocks);
+    if (!isAcpCommand(userMessage)) return false;
+
+    const task = runAcpCommand(session, userMessage, msg.id).finally(() => {
+      inflightCommands.delete(task);
+    });
+    inflightCommands.add(task);
+    return true;
   }
 
   // ── dispatch one parsed JSON-RPC message ─────────────────────────────
@@ -382,12 +517,18 @@ export async function runAcpServer(
   }
 
   // Requests (initialize / session.*) are serialized in arrival order — ACP
-  // wants ordered responses, and a prompt turn is long-running. But
-  // `session/cancel` MUST be handled out-of-band: it's the signal that cancels
-  // the very prompt currently blocking the queue, so awaiting it behind that
-  // prompt would deadlock. We therefore fire cancel immediately (it's a
-  // synchronous AbortController.abort()) and chain everything else onto a
-  // serial promise.
+  // wants ordered responses, and a prompt turn is long-running. But two things
+  // MUST be handled out-of-band, because both exist to act on the very prompt
+  // that is currently blocking the queue; awaiting them behind it would mean
+  // they only ran once the thing they were meant to interrupt had finished:
+  //
+  //   - `session/cancel` — the editor's stop button. Synchronous abort.
+  //   - a `session/prompt` whose text is a slash command we own (`/stop`,
+  //     `/reset`, …). This is why typed `/stop` never worked over ACP: the
+  //     command was never recognized at all, and even once recognized it would
+  //     have been useless queued behind the runaway turn.
+  //
+  // Everything else chains onto the serial promise.
   let queue: Promise<void> = Promise.resolve();
   try {
     for await (const rawLine of rl) {
@@ -417,12 +558,18 @@ export async function runAcpServer(
         continue;
       }
 
+      // Out-of-band: a slash command we own. Same reasoning as cancel — it has
+      // to be able to reach past a running turn.
+      if (maybeDispatchCommand(msg)) continue;
+
       // Serialize the rest behind the queue.
       const current = msg;
       queue = queue.then(() => dispatch(current));
     }
-    // Drain any in-flight queued work before closing the store.
+    // Drain queued work AND any out-of-band command still running before the
+    // store closes underneath them.
     await queue;
+    await Promise.allSettled([...inflightCommands]);
   } finally {
     if (ownsMemory) await memory.close();
   }
