@@ -136,6 +136,19 @@ export interface TurnIndexingSettings {
    * to 0 to disable the time-based flush (count trigger only).
    */
   flushAfterHours: number;
+  /**
+   * Self-healing budget for turns that reached the FTS index but whose
+   * embedding call failed (a 429, a network blip, a provider outage). Those
+   * turns sit *behind* the `lastTurnId` cursor, so no cursor-driven path —
+   * the batch trigger, the age flush, the sweep, not even
+   * `memory index --turns --force` — will ever look at them again. They stay
+   * lexical-only forever, silently, and embed failures arrive in bursts, so a
+   * bad ten minutes permanently demotes every turn in that window.
+   *
+   * Each sweep re-embeds up to this many such turns, found by a cursor-free
+   * scan for FTS rows with no embedding row. Set to 0 to disable the repair.
+   */
+  repairBatchSize: number;
 }
 
 export const DEFAULT_TURN_INDEXING: TurnIndexingSettings = {
@@ -143,6 +156,7 @@ export const DEFAULT_TURN_INDEXING: TurnIndexingSettings = {
   interval: 20,
   batchSize: 200,
   flushAfterHours: 2,
+  repairBatchSize: 32,
 };
 
 /**
@@ -732,12 +746,19 @@ function buildTurnIndexingConfig(
     asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS) ??
     asInt(tomlTurnIndexing.flush_after_hours) ??
     DEFAULT_TURN_INDEXING.flushAfterHours;
+  const repairBatchSize =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_REPAIR_BATCH_SIZE) ??
+    asInt(tomlTurnIndexing.repair_batch_size) ??
+    DEFAULT_TURN_INDEXING.repairBatchSize;
   return {
     enabled,
     interval: Math.max(1, Math.min(10_000, interval)),
     batchSize: Math.max(1, Math.min(5_000, batchSize)),
     // 0 disables the time-based flush; otherwise clamp to a sane 1h..1yr.
     flushAfterHours: Math.max(0, Math.min(8_760, flushAfterHours)),
+    // 0 disables the repair pass. Capped so one sweep can't fire off an
+    // unbounded burst of embedding calls at a provider that may be rate-limiting.
+    repairBatchSize: Math.max(0, Math.min(1_000, repairBatchSize)),
   };
 }
 

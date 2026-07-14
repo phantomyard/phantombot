@@ -15,7 +15,7 @@ import {
   memoryIndexPath,
   type TurnIndexingSettings,
 } from "../config.ts";
-import { defaultEmbedder, sha256 } from "../lib/embedJob.ts";
+import { defaultEmbedder, type Embedder, sha256 } from "../lib/embedJob.ts";
 import { log } from "../lib/logger.ts";
 import {
   MemoryIndex,
@@ -35,6 +35,11 @@ export interface IndexConversationTurnsInput {
    * A no-op when there is no unindexed tail.
    */
   force?: boolean;
+  /**
+   * Override the embedder resolved from config. Tests inject a stub here;
+   * production leaves it unset and gets `defaultEmbedder(config)`.
+   */
+  embedder?: Embedder;
 }
 
 export interface IndexConversationTurnsResult {
@@ -105,7 +110,7 @@ export async function indexConversationTurnsIfDue(
       };
     }
 
-    const embedder = defaultEmbedder(input.config);
+    const embedder = input.embedder ?? defaultEmbedder(input.config);
     let afterId = state?.lastTurnId ?? 0;
     let indexed = 0;
     let embedded = 0;
@@ -208,6 +213,8 @@ export interface FlushDueConversationsInput {
   settings: TurnIndexingSettings;
   /** Force-flush every conversation's tail regardless of count/age. */
   force?: boolean;
+  /** Test seam; production resolves the embedder from config. */
+  embedder?: Embedder;
 }
 
 export interface FlushDueConversationsResult {
@@ -218,6 +225,123 @@ export interface FlushDueConversationsResult {
   indexed: number;
   embedded: number;
   embeddingFailures: number;
+  /** Previously-failed turns that the repair pass re-embedded this sweep. */
+  repaired: number;
+  /** Turns the repair pass tried and failed to embed again. */
+  repairFailures: number;
+}
+
+/** How many consecutive repair failures before we assume the provider is down. */
+const REPAIR_GIVE_UP_AFTER_CONSECUTIVE_FAILURES = 3;
+
+export interface RepairMissingTurnEmbeddingsInput {
+  config: Config;
+  persona: string;
+  settings: TurnIndexingSettings;
+  embedder?: Embedder;
+}
+
+export interface RepairMissingTurnEmbeddingsResult {
+  repaired: number;
+  failures: number;
+}
+
+/**
+ * Re-embed turns that are in the FTS index but have no vector — the residue
+ * of embed calls that failed at index time (429s, outages, network blips).
+ *
+ * Why this needs to exist at all: `indexConversationTurnsIfDue` advances
+ * `lastTurnId` past a turn whether or not its embedding succeeded (it must —
+ * the alternative is a poisoned turn wedging the cursor and stalling the
+ * whole conversation). The consequence is that a failed turn falls *behind*
+ * the cursor and no cursor-driven path can ever revisit it: not the batch
+ * trigger, not the age flush, not the sweep, not `memory index --turns
+ * --force` (which force-flushes the *tail*, it does not rescan). Without this
+ * pass, a turn that failed to embed is lexical-only forever. That's a silent,
+ * one-way degradation, and because embed failures arrive in bursts it takes
+ * out whole contiguous windows of history at a time.
+ *
+ * Bounded (`repairBatchSize` per sweep) and idempotent: a repaired turn gains
+ * an embedding row and therefore drops out of the scan. If the embedder is
+ * still failing we bail after a few consecutive errors rather than spending
+ * the whole budget hammering a provider that is evidently down — the next
+ * sweep will pick up where this one left off.
+ *
+ * Never throws.
+ */
+export async function repairMissingTurnEmbeddings(
+  input: RepairMissingTurnEmbeddingsInput,
+): Promise<RepairMissingTurnEmbeddingsResult> {
+  const result: RepairMissingTurnEmbeddingsResult = {
+    repaired: 0,
+    failures: 0,
+  };
+  if (!input.settings.enabled) return result;
+  if (input.settings.repairBatchSize <= 0) return result;
+
+  const embedder = input.embedder ?? defaultEmbedder(input.config);
+  // No embedder configured: every turn is legitimately vector-less and there
+  // is nothing to repair. Bail before touching the DB — otherwise an
+  // embeddings-disabled install would scan its entire history every sweep.
+  if (!embedder) return result;
+
+  let ix: MemoryIndex | undefined;
+  try {
+    ix = await MemoryIndex.open(memoryIndexPath(input.persona));
+    const stale = ix.turnsMissingEmbeddings(
+      input.persona,
+      input.settings.repairBatchSize,
+    );
+    if (stale.length === 0) return result;
+
+    let consecutiveFailures = 0;
+    for (const row of stale) {
+      const r = await embedder(row.content);
+      if (r.ok) {
+        ix.upsertTurnEmbedding(row.path, r.values, sha256(row.content));
+        result.repaired++;
+        consecutiveFailures = 0;
+        continue;
+      }
+      result.failures++;
+      consecutiveFailures++;
+      if (
+        consecutiveFailures >= REPAIR_GIVE_UP_AFTER_CONSECUTIVE_FAILURES
+      ) {
+        log.warn("turn-index repair: embedder still failing; deferring", {
+          persona: input.persona,
+          repaired: result.repaired,
+          failures: result.failures,
+          error: r.error,
+        });
+        break;
+      }
+    }
+
+    if (result.repaired > 0 || result.failures > 0) {
+      log.info("turn-index repair: re-embedded previously failed turns", {
+        persona: input.persona,
+        repaired: result.repaired,
+        failures: result.failures,
+        // Turns this pass looked at, capped at repairBatchSize. Deliberately
+        // NOT a "remaining" count: the scan is bounded, so we don't know the
+        // true backlog without a second query, and reporting a batch-relative
+        // remainder as if it were the total would read as "all clear" on a run
+        // that in fact left thousands of turns unrepaired.
+        batch: stale.length,
+        batchFull: stale.length >= input.settings.repairBatchSize,
+      });
+    }
+    return result;
+  } catch (e) {
+    log.warn("turn-index repair: failed; embeddings left as-is", {
+      persona: input.persona,
+      error: (e as Error).message,
+    });
+    return result;
+  } finally {
+    ix?.close();
+  }
 }
 
 /**
@@ -242,6 +366,8 @@ export async function flushDueConversationTurns(
     indexed: 0,
     embedded: 0,
     embeddingFailures: 0,
+    repaired: 0,
+    repairFailures: 0,
   };
   if (!input.settings.enabled) return summary;
 
@@ -265,6 +391,7 @@ export async function flushDueConversationTurns(
       memory: input.memory,
       settings: input.settings,
       force: input.force,
+      embedder: input.embedder,
     });
     if (r?.triggered) {
       summary.triggered++;
@@ -274,7 +401,21 @@ export async function flushDueConversationTurns(
     }
   }
 
-  if (summary.triggered > 0) {
+  // Self-heal *after* the flush, so any turn whose embedding just failed above
+  // is already visible to the scan and gets its first retry on the very next
+  // sweep rather than waiting a cycle. Runs once per persona (the index DB is
+  // per-persona), not once per conversation — the scan isn't conversation-scoped,
+  // which is what lets it find turns stranded behind any conversation's cursor.
+  const repair = await repairMissingTurnEmbeddings({
+    config: input.config,
+    persona: input.persona,
+    settings: input.settings,
+    embedder: input.embedder,
+  });
+  summary.repaired = repair.repaired;
+  summary.repairFailures = repair.failures;
+
+  if (summary.triggered > 0 || summary.repaired > 0) {
     log.info("turn-index sweep: flushed conversation tails", { ...summary });
   }
   return summary;

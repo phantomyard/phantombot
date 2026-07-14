@@ -95,7 +95,7 @@ export async function runHeartbeatCli(
           memory: store,
           settings: turnIndexing,
         });
-        if (flush.triggered > 0) {
+        if (flush.triggered > 0 || flush.repaired > 0) {
           log.info("heartbeat: flushed conversation turn tails", { ...flush });
         }
       } finally {
