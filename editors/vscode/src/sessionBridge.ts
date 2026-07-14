@@ -267,6 +267,28 @@ export function promptBlocksFromRequest(
   return blocks;
 }
 
+/**
+ * Re-attach the slash command VS Code stripped off the prompt.
+ *
+ * When the user picks `/stop` from the `/`-menu, VS Code hands the handler a
+ * `ChatRequest` with `command: "stop"` and a `prompt` that NO LONGER contains
+ * the `/stop` text. The ACP server dispatches commands by PARSING the prompt
+ * text (`isAcpCommand` → `runAcpCommand`), so sending the bare prompt would
+ * send an empty turn to the model instead of running the command. Rebuild the
+ * canonical `/name [args]` line the server expects.
+ *
+ * Pure: no `vscode` types, unit-tested directly.
+ */
+export function promptTextWithCommand(
+  text: string,
+  command?: string,
+): string {
+  const cmd = command?.trim();
+  if (!cmd) return text;
+  const rest = text.trim();
+  return rest.length > 0 ? `/${cmd} ${rest}` : `/${cmd}`;
+}
+
 /** Mint an opaque ACP session token (client side). The server re-derives the
  * stable conversation key from cwd regardless, so any unique token works. */
 export function mintSessionId(): string {

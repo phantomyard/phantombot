@@ -33,6 +33,7 @@ import {
 import {
   pickOpenSessionCommand,
   promptBlocksFromRequest,
+  promptTextWithCommand,
   resolveSessionCreated,
   shouldAutoOpenSession,
   SIDEBAR_OPEN_COMMAND,
@@ -116,7 +117,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // attachments too — the session content provider already does this for the
     // normal in-session turns.
     const attachments = await extractAttachments(request, output);
-    const blocks = promptBlocksFromRequest(request.prompt, attachments);
+    const blocks = promptBlocksFromRequest(
+      promptTextWithCommand(request.prompt, request.command),
+      attachments,
+    );
 
     try {
       const { stopReason } = await bridgePromptToStream({

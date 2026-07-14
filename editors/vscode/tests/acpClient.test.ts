@@ -387,3 +387,83 @@ describe("buildAcpSpawnCommand — Windows shim safety", () => {
     expect(args).not.toContain("calc.exe");
   });
 });
+
+describe("available_commands_update", () => {
+  test("is captured at session/new, when NO prompt is in flight", async () => {
+    // THE BUG: session updates were routed only through `promptStreams`, which
+    // is empty outside a prompt — and the server sends the commands menu on
+    // session/new and session/load. So every advertisement hit the floor.
+    resetIdCounter();
+    const t = new FakeTransport();
+    const client = new AcpClient({ transport: t });
+
+    const p = client.newSession("/repo");
+    const req = t.lastSent();
+    t.push({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "stop", description: "Abort the turn that's currently running" },
+            {
+              name: "harness",
+              description: "List or switch the active harness",
+              input: { hint: "<harness id> — omit to list" },
+            },
+          ],
+        },
+      },
+    });
+    t.push({ jsonrpc: "2.0", id: req.id, result: { sessionId: "s1" } });
+    await p;
+
+    expect(client.availableCommands("s1").map((c) => c.name)).toEqual([
+      "stop",
+      "harness",
+    ]);
+    // Unknown sessions are empty, never undefined.
+    expect(client.availableCommands("nope")).toEqual([]);
+    client.dispose();
+  });
+
+  test("does not disturb prompt streaming", async () => {
+    resetIdCounter();
+    const t = new FakeTransport();
+    const client = new AcpClient({ transport: t });
+
+    const chunks: string[] = [];
+    const p = client.prompt("s1", "hi", { onText: (x) => chunks.push(x) });
+    const req = t.lastSent();
+    t.push({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [{ name: "help", description: "Show the available commands" }],
+        },
+      },
+    });
+    t.push({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hello" },
+        },
+      },
+    });
+    t.push({ jsonrpc: "2.0", id: req.id, result: { stopReason: "end_turn" } });
+
+    expect(await p).toBe("end_turn");
+    expect(chunks).toEqual(["hello"]);
+    expect(client.availableCommands("s1").map((c) => c.name)).toEqual(["help"]);
+    client.dispose();
+  });
+});
