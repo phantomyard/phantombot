@@ -514,6 +514,34 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).not.toContain("--tools");
   });
 
+  test("mcpMode 'none' (background/nightly) runs MCP-free via --strict-mcp-config + empty --mcp-config", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest({ mcpMode: "none" })));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // --strict-mcp-config ignores every ambient MCP source (~/.claude.json +
+    // remote connectors); the empty server map means zero servers to init, so
+    // an unauthenticated connector can't wedge the --print startup handshake.
+    expect(texts).toContain("--strict-mcp-config");
+    expect(texts).toContain("--mcp-config");
+    expect(texts).toContain('{"mcpServers":{}}');
+  });
+
+  test("a normal turn (no mcpMode) keeps MCP connectors — no --strict-mcp-config", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).not.toContain("--strict-mcp-config");
+    expect(texts).not.toContain("--mcp-config");
+  });
+
   test("pre-prompting trim flags ride along on every turn", async () => {
     process.env.FAKE_CLAUDE_MODE = "argv";
     const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });

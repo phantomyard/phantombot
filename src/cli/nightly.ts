@@ -94,6 +94,10 @@ async function runNightlyTurn(opts: {
       idleTimeoutMs: STAGE_IDLE_TIMEOUT_MS,
       hardTimeoutMs: STAGE_HARD_TIMEOUT_MS,
       systemPromptSuffix: NIGHTLY_SUFFIX,
+      // Nightly needs no MCP; running MCP-free stops an unauthenticated remote
+      // connector from wedging the --print startup and killing a stage on the
+      // idle timeout (essence "timed out with no output"). See HarnessRequest.mcpMode.
+      mcpMode: "none",
     })) {
       if (chunk.type === "text") finalReply += chunk.text;
       if (chunk.type === "done") finalReply = chunk.finalText;
