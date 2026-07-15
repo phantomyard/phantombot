@@ -86,6 +86,26 @@ export interface MemoryStore {
   ): Promise<Array<{ role: Role; text: string }>>;
   /** Most recent N turns across all conversations for one persona, full rows, oldest first. */
   recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]>;
+  /**
+   * Most recent N turns across every conversation whose key starts with
+   * `prefix`, oldest first, optionally excluding one conversation.
+   *
+   * The ACP connector uses this to brief a FRESH editor thread on what has been
+   * happening in its workspace: conversations are keyed `acp:<cwdhash>:<thread>`,
+   * so the workspace prefix `acp:<cwdhash>` spans every thread in that project
+   * while the new thread's own (empty) history stays untouched. `exclude` keeps
+   * the current thread's turns out — `runTurn` already replays those as real
+   * history and they must not be duplicated as reference data.
+   *
+   * `prefix` is matched with LIKE and is NOT escaped: callers pass an internally
+   * constructed key (hex + separators), never user input.
+   */
+  recentTurnsForConversationPrefix(
+    persona: string,
+    prefix: string,
+    n: number,
+    exclude?: string,
+  ): Promise<Array<{ conversation: string; role: Role; text: string }>>;
   /** Full turn rows after a known id within one conversation, oldest first. */
   turnsAfterId(
     persona: string,
@@ -192,6 +212,7 @@ interface RawDisplayRow {
 class SqliteMemoryStore implements MemoryStore {
   private appendStmt;
   private recentStmt;
+  private recentPrefixStmt;
   private recentDisplayStmt;
   private turnsAfterIdStmt;
   private deleteStmt;
@@ -229,6 +250,21 @@ class SqliteMemoryStore implements MemoryStore {
          SELECT id, role, text, created_at
          FROM turns
          WHERE persona = ? AND conversation = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?
+       ) ORDER BY created_at ASC, id ASC`,
+    );
+    // Newest N turns across every conversation under a key prefix, returned
+    // oldest-first. `exclude` is compared with `IS NOT`, not `<>`: a NULL
+    // exclude then matches nothing (SQL `<> NULL` is NULL, which would drop
+    // every row), so binding NULL keeps the whole window.
+    this.recentPrefixStmt = db.prepare(
+      `SELECT conversation, role, text FROM (
+         SELECT id, conversation, role, text, created_at
+         FROM turns
+         WHERE persona = ?
+           AND conversation LIKE ? || '%'
+           AND conversation IS NOT ?
          ORDER BY created_at DESC, id DESC
          LIMIT ?
        ) ORDER BY created_at ASC, id ASC`,
@@ -343,6 +379,20 @@ class SqliteMemoryStore implements MemoryStore {
       role: Role;
       text: string;
     }>;
+  }
+
+  async recentTurnsForConversationPrefix(
+    persona: string,
+    prefix: string,
+    n: number,
+    exclude?: string,
+  ): Promise<Array<{ conversation: string; role: Role; text: string }>> {
+    return this.recentPrefixStmt.all(
+      persona,
+      prefix,
+      exclude ?? null,
+      n,
+    ) as Array<{ conversation: string; role: Role; text: string }>;
   }
 
   async recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]> {

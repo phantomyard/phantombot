@@ -25,6 +25,7 @@ import {
   checkWritable,
   downloadAndVerify,
 } from "../lib/binaryUpdate.ts";
+import { installCompletions } from "../lib/completionInstall.ts";
 import {
   detectSupportedTarget,
   findLatestRelease,
@@ -80,6 +81,11 @@ export interface RunUpdateInput {
   healSystemdUnits?:
     | false
     | ((binPath: string) => Promise<EnsureUnitsCurrentResult | null>);
+  /**
+   * Override, or disable with `false`, the shell-completion refresh that runs
+   * after a successful binary swap. Defaults to installCompletions.
+   */
+  refreshCompletions?: false | ((opts: { out: WriteSink }) => Promise<unknown>);
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -225,6 +231,20 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
           `run 'phantombot install' manually if scheduled tasks stop firing.\n`,
       );
       // Non-fatal — fall through to restart handling.
+    }
+  }
+
+  // 7.6. Refresh shell tab-completion for the freshly-installed binary. This
+  // runs only after a real swap (never on --check or an up-to-date exit), so it
+  // also back-fills completion for anyone who installed an older build.
+  // Best-effort and non-fatal.
+  if (input.refreshCompletions !== false) {
+    try {
+      await (input.refreshCompletions ?? installCompletions)({ out });
+    } catch (e) {
+      err.write(
+        `warning: could not refresh shell completion: ${(e as Error).message}\n`,
+      );
     }
   }
 

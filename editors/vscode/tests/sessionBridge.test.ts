@@ -18,6 +18,7 @@ import {
   mintSessionId,
   pickOpenSessionCommand,
   promptBlocksFromRequest,
+  promptTextWithCommand,
   resolveSessionCandidates,
   resolveSessionCreated,
   sessionResourcePath,
@@ -273,5 +274,32 @@ describe("image mime helpers", () => {
     expect(imageMimeFromPath("/a/b.webp")).toBe("image/webp");
     expect(imageMimeFromPath("/a/b.ts")).toBeUndefined();
     expect(imageMimeFromPath("/a/noext")).toBeUndefined();
+  });
+});
+
+describe("promptTextWithCommand", () => {
+  test("re-attaches the slash command VS Code stripped off the prompt", () => {
+    // The /-menu hands us { command: "stop", prompt: "" } — the ACP server
+    // dispatches on the TEXT, so a bare "" would be an empty model turn.
+    expect(promptTextWithCommand("", "stop")).toBe("/stop");
+  });
+
+  test("keeps the argument for commands that take one", () => {
+    expect(promptTextWithCommand("claude-code", "harness")).toBe(
+      "/harness claude-code",
+    );
+  });
+
+  test("passes ordinary prompts through untouched", () => {
+    expect(promptTextWithCommand("what is on my calendar?", undefined)).toBe(
+      "what is on my calendar?",
+    );
+  });
+
+  test("does not mangle a prompt that merely starts with a slash", () => {
+    // No command selected: "/usr/bin/env is on PATH?" is just text.
+    expect(promptTextWithCommand("/usr/bin/env is on PATH?")).toBe(
+      "/usr/bin/env is on PATH?",
+    );
   });
 });

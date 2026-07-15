@@ -489,6 +489,58 @@ export class MemoryIndex {
     return row?.text_sha;
   }
 
+  /**
+   * Write ONLY the embedding row for an already-indexed turn. Unlike
+   * upsertTurn this never touches turn_docs, so the repair pass can add a
+   * missing vector without rewriting (or accidentally duplicating) the FTS
+   * row that is already there and correct.
+   */
+  upsertTurnEmbedding(path: string, vec: Float32Array, textSha: string): void {
+    const buf = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO turn_embeddings " +
+          "(path, vec, text_sha, embedded_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(path, buf, textSha, new Date().toISOString());
+  }
+
+  /**
+   * Turns that made it into the FTS index but have no embedding — i.e. the
+   * embed call failed at index time. Found by scanning for the *absence* of
+   * an embedding row rather than by walking the turn cursor, which is the
+   * whole point: these rows sit behind `last_turn_id`, so every cursor-driven
+   * path skips them permanently.
+   *
+   * Quarantined turns (embeddable=0) are structurally excluded — the indexer
+   * never writes a turn_docs row for them at all, so a scan rooted in
+   * turn_docs cannot reach one. The repair pass therefore cannot resurrect a
+   * held untrusted payload into the vector index, by construction and not by
+   * a filter someone could later drop.
+   *
+   * `content` is returned straight from the FTS row, so the text we re-embed
+   * is byte-identical to the text that is searchable — no round-trip to the
+   * raw turn store, and no risk of the two drifting.
+   */
+  turnsMissingEmbeddings(
+    persona: string,
+    limit: number,
+  ): Array<{ path: string; content: string }> {
+    if (limit <= 0) return [];
+    return this.db
+      .prepare(
+        `SELECT d.path AS path, d.content AS content
+           FROM turn_docs d
+           LEFT JOIN turn_embeddings e ON e.path = d.path
+          WHERE d.persona = ? AND e.path IS NULL
+          LIMIT ?`,
+      )
+      .all(persona, Math.floor(limit)) as Array<{
+      path: string;
+      content: string;
+    }>;
+  }
+
   turnIndexState(
     persona: string,
     conversation: string,

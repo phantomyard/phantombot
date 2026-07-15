@@ -280,6 +280,13 @@ export async function runMemoryIndex(
           (r.embeddingFailures > 0
             ? `, ${r.embeddingFailures} embed failure(s)`
             : "") +
+          // The repair pass is the only thing that can reach turns stranded
+          // behind the cursor by an earlier embed failure, so say so out loud
+          // when it does — otherwise a silent self-heal looks like a no-op run.
+          (r.repaired > 0 ? `, ${r.repaired} re-embedded (repair)` : "") +
+          (r.repairFailures > 0
+            ? `, ${r.repairFailures} repair failure(s)`
+            : "") +
           `\n`,
       );
     } finally {

@@ -15,6 +15,8 @@
 import { defineCommand } from "citty";
 import { basename } from "node:path";
 
+import { installCompletions } from "../lib/completionInstall.ts";
+
 import {
   BunLaunchctlRunner,
   defaultPlistPath,
@@ -250,6 +252,18 @@ export default defineCommand({
   },
   async run() {
     const code = await runInstall();
+    // A successful install wires up shell tab-completion so it works right
+    // away, with no extra step. Best-effort: a completion failure never turns
+    // a successful install into a failure.
+    if (code === 0) {
+      try {
+        await installCompletions();
+      } catch (e) {
+        process.stderr.write(
+          `warning: could not set up shell completion: ${(e as Error).message}\n`,
+        );
+      }
+    }
     process.exitCode = code;
   },
 });

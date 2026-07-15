@@ -424,6 +424,18 @@ Maintenance:
 | `phantombot nightly [--resume]` | Run or resume memory distillation |
 | `phantombot doctor [--no-repair]` | Check memory health and optionally repair |
 
+## Shell completion
+
+`phantombot install` sets up `<TAB>` completion for `bash`, `zsh`, and `fish`
+automatically — no extra command, no separate opt-in. `phantombot update`
+refreshes it, and `phantombot uninstall` removes it. Open a new shell after
+installing to pick it up.
+
+Completion is dynamic: a small stub in your shell calls back into the binary on
+every `<TAB>`, so it always matches the available subcommands and flags —
+`phantombot p<TAB>` → `persona`, `phantomchat`, `p2p`; `phantombot p2p <TAB>` →
+`status`; `phantombot logs --<TAB>` → `--follow`, `--no-follow`, `--lines`.
+
 ## Telegram
 
 Phantombot runs one or more Telegram long-poll listeners. Each listener needs a
@@ -731,6 +743,50 @@ Why it's better for real coding work:
   and misaligned decisions.
 - **One soul, every surface.** Editor, phone, terminal — same persona and
   memory behind all of them.
+
+### Threads and workspace context
+
+**A new editor thread is a new conversation.** Turn history is keyed per
+*thread*, not per project directory, so a fresh thread starts empty — say
+"hello" and you get a hello, not the resumption of whatever you were doing
+yesterday.
+
+A fresh thread is still *informed*, though. Recent activity from the other
+threads in the same workspace (the editor's cwd) is supplied as a **read-only
+briefing** in system context — explicitly framed as finished sessions whose
+approvals are void. So your Phantom knows what you shipped and what's still
+open, and can answer "where are we?" without a lookup, but it acts only on the
+turn you actually typed.
+
+Reopening a thread from the editor's history resumes it **verbatim**, with its
+full turn history, exactly as you left it.
+
+> Previously the conversation was keyed on the workspace directory alone, so
+> every "new" thread silently replayed the last 30 turns for that folder — as
+> *user* messages. A fresh thread opened onto a trailing queue of instructions
+> (*"open a PR…"*, *"Go."*) and the Phantom would pick the last one up and start
+> working, with nothing visible in the editor to cancel.
+
+### Editor Commands
+
+Slash commands are advertised to the editor, so they appear in its `/`-menu:
+
+| Command | Purpose |
+|---|---|
+| `/stop` | Abort the turn that's currently running |
+| `/reset` | Clear this thread's history |
+| `/status` | Show harness, uptime, and context usage |
+| `/harness` | List or switch the active harness |
+| `/help` | Show the available commands |
+
+They are dispatched **out of band** — ahead of the serial request queue — so
+`/stop` can kill the long-running turn that is *blocking* that queue. (Your
+editor's own cancel/stop button takes the same path and has always worked.)
+
+`/update` and `/restart` are deliberately **not** offered here: they swap the
+binary and bounce a service whose lifecycle the editor owns. They stay on
+Telegram. Unknown slash commands fall through to the harness, same as every
+other surface, so personas keep their own conventions.
 
 ## Pi Capability Routing
 

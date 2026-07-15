@@ -10,9 +10,10 @@
 /**
  * True when the invocation is a read-only one that must not touch disk or
  * provision any state: `--help`/`-h`, `--version`/`-v`, the `help` subcommand,
- * or a bare call with no subcommand (which just prints usage). CI uses
- * `--help`/`--version` as "does the binary run?" smoke tests, so these must be
- * pure — no vault migration, no persona creation.
+ * the hidden `_complete` tab-completion backend, or a bare call with no
+ * subcommand (which just prints usage). CI uses `--help`/`--version` as "does
+ * the binary run?" smoke tests, and every <TAB> spawns `_complete`, so these
+ * must be pure — no vault migration, no persona creation.
  *
  * @param argv the full `process.argv` (element 0 = runtime, 1 = script).
  */
@@ -25,6 +26,7 @@ export function isReadOnlyInvocation(argv: string[]): boolean {
     first === "-h" ||
     first === "--version" ||
     first === "-v" ||
-    first === "help"
+    first === "help" ||
+    first === "_complete"
   );
 }

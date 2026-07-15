@@ -35,6 +35,7 @@ import {
   jsonRpcNotification,
   jsonRpcRequest,
   textPrompt,
+  type AcpAvailableCommand,
   type AcpContentBlock,
   type AcpInitializeResult,
   type AcpLoadSessionResult,
@@ -105,6 +106,8 @@ export class AcpClient {
   private readonly onDiagnostic: (text: string) => void;
   /** sessionId → live prompt handlers, set for the duration of a prompt. */
   private readonly promptStreams = new Map<string, PromptHandlers>();
+  /** sessionId → the slash commands the agent advertised for that session. */
+  private readonly sessionCommands = new Map<string, AcpAvailableCommand[]>();
   private closed = false;
   private closeError: Error | undefined;
 
@@ -269,6 +272,20 @@ export class AcpClient {
     }
   }
 
+  /**
+   * The slash commands the agent advertised for `sessionId` (empty until the
+   * `available_commands_update` for that session has landed).
+   *
+   * VS Code has no dynamic slash-command API — the `/`-menu is built from the
+   * static `chatSessions.commands` manifest contribution — so this is not what
+   * renders the menu. It is the drift detector: the manifest is asserted equal
+   * to the server's list in tests, and this surfaces the live truth in the
+   * output channel if a future server ever advertises something else.
+   */
+  availableCommands(sessionId: string): readonly AcpAvailableCommand[] {
+    return this.sessionCommands.get(sessionId) ?? [];
+  }
+
   private handleResponse(res: JsonRpcResponse): void {
     const id = res.id;
     if (id === null || id === undefined) return;
@@ -287,10 +304,27 @@ export class AcpClient {
 
   private handleSessionUpdate(params: SessionUpdateParams | undefined): void {
     if (!params || typeof params !== "object") return;
-    const handlers = this.promptStreams.get(params.sessionId);
-    if (!handlers) return;
     const update = params.update;
     if (!update || typeof update !== "object") return;
+
+    // SESSION-scoped updates land BEFORE the per-prompt lookup. The commands
+    // menu arrives at session/new and session/load — no prompt is in flight
+    // then, so gating it on `promptStreams` (as we used to) dropped it on the
+    // floor every single time and the editor never learned /stop exists.
+    if (update.sessionUpdate === "available_commands_update") {
+      const cmds = Array.isArray(update.availableCommands)
+        ? update.availableCommands
+        : [];
+      this.sessionCommands.set(params.sessionId, cmds);
+      this.onDiagnostic(
+        `acp client: session ${params.sessionId} offers ${cmds.length} command(s): ` +
+          cmds.map((c) => `/${c.name}`).join(" "),
+      );
+      return;
+    }
+
+    const handlers = this.promptStreams.get(params.sessionId);
+    if (!handlers) return;
 
     handlers.onUpdate?.(update);
     switch (update.sessionUpdate) {
@@ -322,6 +356,7 @@ export class AcpClient {
     }
     this.pending.clear();
     this.promptStreams.clear();
+    this.sessionCommands.clear();
   }
 }
 

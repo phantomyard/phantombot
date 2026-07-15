@@ -16,6 +16,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { ACP_AVAILABLE_COMMANDS } from "../../../src/connectors/acp/commands.ts";
+
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(readFileSync(`${root}/package.json`, "utf8"));
 const extensionSrc = readFileSync(`${root}/src/extension.ts`, "utf8");
@@ -56,5 +58,29 @@ describe("manifest / participant invariants", () => {
     // A declared participant with this id would double-register the agent and
     // throw "Agent already registered" against the canDelegate agent.
     expect(declared).not.toContain(sessionType);
+  });
+
+  // ── slash commands ────────────────────────────────────────────────────
+  // VS Code has NO dynamic slash-command API: the delegate agent's menu is
+  // built from THIS contribution (`slashCommands: contribution.commands ?? []`
+  // in ChatSessionsService._registerAgent). The server's
+  // `available_commands_update` — which Zed and JetBrains consume natively —
+  // is therefore not enough here, and its five commands never appeared in the
+  // `/`-menu. Declaring them statically is the only surface VS Code offers, so
+  // this test is the drift guard that keeps the two lists honest.
+  test("chat-session commands mirror the ACP server's advertised list", () => {
+    const declared = sessions[0].commands ?? [];
+    expect(declared.map((c: { name: string }) => c.name)).toEqual(
+      ACP_AVAILABLE_COMMANDS.map((c) => c.name),
+    );
+    expect(declared.map((c: { description: string }) => c.description)).toEqual(
+      ACP_AVAILABLE_COMMANDS.map((c) => c.description),
+    );
+  });
+
+  test("declared commands carry no leading slash (VS Code adds it)", () => {
+    for (const c of sessions[0].commands ?? []) {
+      expect(c.name.startsWith("/")).toBe(false);
+    }
   });
 });

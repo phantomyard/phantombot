@@ -27,6 +27,7 @@ import {
   makeReplayCollector,
   mintSessionId,
   promptBlocksFromRequest,
+  promptTextWithCommand,
   resolveSessionCandidates,
   sessionResourcePath,
   SESSION_SCHEME,
@@ -213,7 +214,10 @@ export function registerChatSessionProvider(
       }
 
       const attachments = await extractAttachments(request, deps.output);
-      const blocks = promptBlocksFromRequest(request.prompt, attachments);
+      const blocks = promptBlocksFromRequest(
+        promptTextWithCommand(request.prompt, request.command),
+        attachments,
+      );
       if (blocks.length === 0) {
         stream.markdown("_(nothing to send)_");
         return {};

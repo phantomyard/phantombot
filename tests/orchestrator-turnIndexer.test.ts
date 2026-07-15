@@ -15,10 +15,12 @@ import {
 } from "../src/config.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
+import type { Embedder } from "../src/lib/embedJob.ts";
 import {
   flushDueConversationTurns,
   indexConversationTurnsIfDue,
   makeTurnIndexer,
+  repairMissingTurnEmbeddings,
 } from "../src/orchestrator/turnIndexer.ts";
 
 let workdir: string;
@@ -111,6 +113,7 @@ describe("indexConversationTurnsIfDue", () => {
       interval: 1,
       batchSize: 200,
       flushAfterHours: 0,
+      repairBatchSize: 0,
     };
 
     // Quarantined raw payload (would otherwise FTS-match "Etna secret").
@@ -362,5 +365,348 @@ describe("makeTurnIndexer", () => {
       memory,
     );
     expect(typeof fn).toBe("function");
+  });
+});
+
+/**
+ * Repair pass for turns that reached FTS but whose embedding call failed.
+ *
+ * The trap being pinned here (phantombot#293): the indexer advances
+ * `lastTurnId` past a turn whether or not its embed succeeded. A failed turn
+ * therefore sits BEHIND the cursor, and every cursor-driven path — batch
+ * trigger, age flush, sweep, and `memory index --turns --force` — selects work
+ * via `turnsAfterId(..., lastTurnId)`. None of them can ever see it again. It
+ * stays lexical-only forever, silently.
+ */
+describe("repairMissingTurnEmbeddings", () => {
+  /** Stub embedder: fails while `failing` is true, otherwise returns a vector. */
+  function stubEmbedder(): {
+    embedder: Embedder;
+    calls: () => number;
+    setFailing: (v: boolean) => void;
+  } {
+    let failing = false;
+    let calls = 0;
+    const embedder: Embedder = async (_text: string) => {
+      calls++;
+      if (failing) return { ok: false, error: "429 rate limited" };
+      return { ok: true, values: new Float32Array([0.1, 0.2, 0.3]), dims: 3 };
+    };
+    return {
+      embedder,
+      calls: () => calls,
+      setFailing: (v) => {
+        failing = v;
+      },
+    };
+  }
+
+  const settings = (over: Partial<typeof DEFAULT_RETRIEVAL.turnIndexing> = {}) => ({
+    ...DEFAULT_RETRIEVAL.turnIndexing,
+    interval: 1,
+    flushAfterHours: 0,
+    ...over,
+  });
+
+  /** How many indexed turns currently have no embedding row. */
+  async function missingCount(): Promise<number> {
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    const n = ix.turnsMissingEmbeddings("phantom", 1_000).length;
+    ix.close();
+    return n;
+  }
+
+  async function embeddedCount(): Promise<number> {
+    const db = new Database(memoryIndexPath("phantom"));
+    const row = db
+      .query("SELECT COUNT(*) AS c FROM turn_embeddings")
+      .get() as { c: number };
+    db.close();
+    return row.c;
+  }
+
+  test("a failed embed leaves an FTS row with no vector, and the cursor moves past it", async () => {
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await appendPair(1);
+
+    const r = await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    expect(r?.triggered).toBe(true);
+    expect(r?.embeddingFailures).toBe(2);
+    expect(r?.embedded).toBe(0);
+    // Searchable lexically...
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    expect(ix.search("Vesuvius pension", { scope: "turns" }).length).toBeGreaterThan(0);
+    ix.close();
+    // ...but with no vector at all.
+    expect(await embeddedCount()).toBe(0);
+    expect(await missingCount()).toBe(2);
+  });
+
+  test("no cursor-driven path can recover a failed turn — not even --force", async () => {
+    // This is the bug. Fail the embed, then run the operator escape hatch
+    // (force flush) with a HEALTHY embedder. It force-flushes the *tail*; it
+    // does not rescan. So the stranded turns stay vector-less.
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await appendPair(1);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(await embeddedCount()).toBe(0);
+
+    // Embedder recovers. Force-flush, but with the repair pass disabled so we
+    // isolate the cursor path.
+    stub.setFailing(false);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings({ repairBatchSize: 0 }),
+      force: true,
+      embedder: stub.embedder,
+    });
+
+    // Still zero: force-flush only looks at turns AFTER lastTurnId.
+    expect(await embeddedCount()).toBe(0);
+    expect(await missingCount()).toBe(2);
+  });
+
+  test("the repair pass re-embeds turns stranded behind the cursor", async () => {
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await appendPair(1);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(await embeddedCount()).toBe(0);
+
+    stub.setFailing(false);
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    expect(r.repaired).toBe(2);
+    expect(r.failures).toBe(0);
+    expect(await embeddedCount()).toBe(2);
+    expect(await missingCount()).toBe(0);
+  });
+
+  test("repair is idempotent — a second pass spends no embedding calls", async () => {
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await appendPair(1);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    stub.setFailing(false);
+    await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    const afterFirst = stub.calls();
+
+    const second = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    expect(second.repaired).toBe(0);
+    // A repaired turn now has an embedding row, so it drops out of the scan.
+    expect(stub.calls()).toBe(afterFirst);
+  });
+
+  test("the heartbeat sweep self-heals a previously failed turn", async () => {
+    // End-to-end: the sweep is what the 30-min heartbeat calls, so this is the
+    // path that actually makes the bug self-correcting in production.
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await appendPair(1);
+    await flushDueConversationTurns({
+      config: baseConfig(),
+      persona: "phantom",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(await embeddedCount()).toBe(0);
+
+    stub.setFailing(false);
+    const sweep = await flushDueConversationTurns({
+      config: baseConfig(),
+      persona: "phantom",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    expect(sweep.repaired).toBe(2);
+    expect(await embeddedCount()).toBe(2);
+  });
+
+  test("a quarantined turn is never resurrected by the repair pass", async () => {
+    // Security invariant. A held untrusted payload (embeddable=0) has no
+    // turn_docs row at all, so a scan rooted in turn_docs structurally cannot
+    // reach it. The repair pass must not become a back door into the vector
+    // index for quarantined content.
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "Etna secret quarantined payload",
+      embeddable: false,
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "Stromboli indexable",
+      embeddable: true,
+    });
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    stub.setFailing(false);
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+
+    // Only the embeddable turn was repaired — the quarantined one is invisible.
+    expect(r.repaired).toBe(1);
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    expect(ix.search("Etna secret quarantined", { scope: "turns" })).toEqual([]);
+    ix.close();
+  });
+
+  test("gives up early when the embedder is still down, instead of burning the budget", async () => {
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    for (let i = 1; i <= 10; i++) await appendPair(i);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    const afterIndex = stub.calls();
+    expect(await missingCount()).toBe(20);
+
+    // Embedder is STILL failing. Budget is 20, but we should bail after a few
+    // consecutive failures rather than firing 20 doomed calls at a provider
+    // that is evidently rate-limiting us.
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings({ repairBatchSize: 20 }),
+      embedder: stub.embedder,
+    });
+
+    expect(r.repaired).toBe(0);
+    expect(r.failures).toBe(3);
+    expect(stub.calls() - afterIndex).toBe(3);
+    // Nothing lost — the tail is still there for the next sweep.
+    expect(await missingCount()).toBe(20);
+  });
+
+  test("repairBatchSize bounds one pass, and 0 disables the repair", async () => {
+    const stub = stubEmbedder();
+    stub.setFailing(true);
+    for (let i = 1; i <= 5; i++) await appendPair(i);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+      embedder: stub.embedder,
+    });
+    expect(await missingCount()).toBe(10);
+
+    stub.setFailing(false);
+
+    const off = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings({ repairBatchSize: 0 }),
+      embedder: stub.embedder,
+    });
+    expect(off.repaired).toBe(0);
+    expect(await missingCount()).toBe(10);
+
+    const bounded = await repairMissingTurnEmbeddings({
+      config: baseConfig(),
+      persona: "phantom",
+      settings: settings({ repairBatchSize: 4 }),
+      embedder: stub.embedder,
+    });
+    expect(bounded.repaired).toBe(4);
+    expect(await missingCount()).toBe(6);
+  });
+
+  test("no embedder configured: nothing is treated as broken", async () => {
+    // An embeddings-disabled install has zero vectors by design. The repair
+    // pass must not decide the entire history is damaged and try to fix it.
+    await appendPair(1);
+    await indexConversationTurnsIfDue({
+      config: baseConfig(),
+      persona: "phantom",
+      conversation: "telegram:1001",
+      memory,
+      settings: settings(),
+    });
+
+    const r = await repairMissingTurnEmbeddings({
+      config: baseConfig(), // embeddings.provider = "none"
+      persona: "phantom",
+      settings: settings(),
+    });
+
+    expect(r.repaired).toBe(0);
+    expect(r.failures).toBe(0);
   });
 });

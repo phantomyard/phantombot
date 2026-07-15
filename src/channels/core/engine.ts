@@ -59,6 +59,7 @@ import {
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
 import {
+  hasTextSubstance,
   splitIntoSegments,
   StreamSegmenter,
 } from "../streamSegmenter.ts";
@@ -1029,6 +1030,19 @@ async function processChatMessage(
     kind: "narration" | "final" | "error",
   ) => {
     if (text.trim().length === 0) return;
+    // A bubble with no letters or digits ("⚡", "👍") is a sign-off, not an
+    // answer. It reaches here as the streamed leftover: the splitter cut the
+    // real bubble at a sentence boundary and PUBLISHED it, so there is nothing
+    // left to merge into — suppress it instead.
+    //
+    // Gate on FINAL bubbles only. Narration ("Restarting the service now…")
+    // is not an answer, so it must never license suppressing one: if the
+    // model's entire reply is "👍", that emoji IS the answer and has to ship
+    // even though narration already went out. An orphaned sign-off always
+    // trails a published *final* bubble, so this still catches every one.
+    if (!hasTextSubstance(text) && finalBubblesSent > 0) {
+      return;
+    }
     try {
       await input.transport.sendMessage(msg.conversationId, text);
       if (kind === "narration") narrationBubblesSent++;

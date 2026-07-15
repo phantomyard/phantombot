@@ -164,7 +164,32 @@ export interface ToolCallUpdate {
   content?: ToolCallContentBlock[];
 }
 
-export type AcpSessionUpdate = AgentMessageChunkUpdate | ToolCallUpdate;
+/**
+ * One slash command the editor should offer in its `/`-menu.
+ *
+ * `input` describes the free-text argument, if the command takes one — Zed
+ * renders `hint` as the placeholder after the command name.
+ */
+export interface AcpAvailableCommand {
+  name: string;
+  description: string;
+  input?: { hint: string };
+}
+
+/**
+ * Tells the client which slash commands this session accepts. Without it the
+ * editor has no idea `/stop` exists, so it never offers it and (worse) sends
+ * the typed text straight through as an ordinary prompt.
+ */
+export interface AvailableCommandsUpdate {
+  sessionUpdate: "available_commands_update";
+  availableCommands: AcpAvailableCommand[];
+}
+
+export type AcpSessionUpdate =
+  | AgentMessageChunkUpdate
+  | ToolCallUpdate
+  | AvailableCommandsUpdate;
 
 /** Why a `session/prompt` stopped. */
 export type AcpStopReason = "end_turn" | "cancelled" | "refusal" | "max_tokens";
@@ -206,6 +231,17 @@ export function agentMessageChunk(
   return sessionUpdateNotification(sessionId, {
     sessionUpdate: "agent_message_chunk",
     content: { type: "text", text },
+  });
+}
+
+/** Build an `available_commands_update` `session/update`. */
+export function availableCommandsUpdate(
+  sessionId: string,
+  availableCommands: AcpAvailableCommand[],
+): JsonRpcRequest {
+  return sessionUpdateNotification(sessionId, {
+    sessionUpdate: "available_commands_update",
+    availableCommands,
   });
 }
 
