@@ -70,6 +70,12 @@ export interface TurnInput {
   /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
   systemPromptSuffix?: string;
   /**
+   * Run this turn with ZERO MCP servers. Set by background callers (nightly)
+   * so an unauthenticated remote claude.ai connector can't wedge the
+   * non-interactive `--print` startup handshake. See HarnessRequest.mcpMode.
+   */
+  mcpMode?: "none";
+  /**
    * Append PRE_TOOL_NARRATION_INSTRUCTION to the system prompt — asks
    * the model to say one short sentence before each tool call so
    * streaming channels have something to render during the silence
@@ -255,6 +261,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       workingDir: input.workingDir ?? homedir(),
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      mcpMode: input.mcpMode,
       signal: input.signal,
     },
     { onToolCall: auditSink },

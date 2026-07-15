@@ -78,6 +78,24 @@ export interface HarnessRequest {
    * harnesses still gets screening on that one. Optional; normal turns omit.
    */
   toolsMode?: "none";
+  /**
+   * MCP capability mode. Omitted = the harness's normal turn, which loads
+   * every MCP server the CLI is configured with (including the user's remote
+   * claude.ai connectors). `"none"` runs the turn with ZERO MCP servers.
+   *
+   * This exists for BACKGROUND turns — the nightly maintenance stages — which
+   * need no MCP at all. On a non-interactive `--print` run an unauthenticated
+   * remote connector blocks the startup handshake on an OAuth flow that can
+   * never complete, so the turn emits nothing and is killed at the idle
+   * ceiling. Skipping MCP entirely removes that failure mode. Interactive
+   * persona turns omit this and keep their connectors.
+   *
+   * Each harness maps `"none"` to its CLI's native "restrict MCP config" flag:
+   *   - claude → `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`
+   * Harnesses without such a flag ignore it (they don't share claude's
+   * connector-startup hang). Optional; normal turns omit.
+   */
+  mcpMode?: "none";
 }
 
 export type HarnessChunk =

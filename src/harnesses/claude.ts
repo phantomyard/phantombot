@@ -114,7 +114,7 @@ export class ClaudeHarness implements Harness {
     }
     try {
 
-    const args = this.buildArgs(req.systemPrompt, req.toolsMode, systemPromptFile);
+    const args = this.buildArgs(req.systemPrompt, req.toolsMode, systemPromptFile, req.mcpMode);
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -180,6 +180,8 @@ export class ClaudeHarness implements Harness {
     // (`--system-prompt-file`) instead of inline (`--system-prompt <text>`)
     // to stay under the command-line length limit.
     systemPromptFile?: string,
+    // `"none"` runs this turn with ZERO MCP servers — see the block below.
+    mcpMode?: "none",
   ): string[] {
     const args = [
       "--print",
@@ -221,6 +223,20 @@ export class ClaudeHarness implements Harness {
     // is moot when there are no tools to permit — belt and suspenders.)
     if (toolsMode === "none") {
       args.push("--tools", "");
+    }
+    // MCP-free mode for background turns (nightly stages). By default claude
+    // initialises EVERY configured MCP server on startup, including the user's
+    // remote claude.ai connectors. An unauthenticated remote connector blocks
+    // the init handshake waiting on an OAuth flow that can never complete in a
+    // non-interactive `--print` run, so the FIRST stage (essence) emits nothing
+    // and gets killed at the idle ceiling ("timed out with no output"). Nightly
+    // needs no MCP at all, so `--strict-mcp-config` tells claude to use ONLY the
+    // servers in `--mcp-config` (ignoring ~/.claude.json + connectors), and an
+    // empty server map means zero servers → nothing to hang on. Interactive
+    // persona turns omit mcpMode and keep their Gmail / Calendar / Drive
+    // connectors untouched.
+    if (mcpMode === "none") {
+      args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
     }
     // Per-invocation settings injection. Layers additively on top of the user's
     // own ~/.claude/settings.json — we don't touch that file, so an operator
