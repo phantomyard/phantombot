@@ -513,4 +513,18 @@ describe("resolveSpawnCwd — untitled-editor ENOENT guard", () => {
     const cwd = resolveSpawnCwd("   ", () => true, () => "/home/andrew");
     expect(cwd).toBe("/home/andrew");
   });
+
+  test(
+    "falls back to home when the candidate exists but is a FILE, not a " +
+      "directory — an existsSync()-only check would wedge the spawn here " +
+      "since Windows cwd must be a real directory",
+    () => {
+      const cwd = resolveSpawnCwd(
+        "/home/andrew/project/notes.txt",
+        (p) => p !== "/home/andrew/project/notes.txt",
+        () => "/home/andrew",
+      );
+      expect(cwd).toBe("/home/andrew");
+    },
+  );
 });

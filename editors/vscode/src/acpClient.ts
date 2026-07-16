@@ -26,7 +26,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { snapAwareSpawnEnv } from "./snapEnv.ts";
@@ -425,12 +425,18 @@ export function buildAcpSpawnCommand(
  */
 export function resolveSpawnCwd(
   candidateCwd: string | undefined,
-  exists: (path: string) => boolean = existsSync,
+  isDirectory: (path: string) => boolean = (p) => {
+    try {
+      return statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  },
   home: () => string = homedir,
 ): string {
   if (candidateCwd && candidateCwd.trim()) {
     try {
-      if (exists(candidateCwd)) return candidateCwd;
+      if (isDirectory(candidateCwd)) return candidateCwd;
     } catch {
       // fall through to home
     }
