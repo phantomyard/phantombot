@@ -1153,4 +1153,39 @@ describe("ACP server — persona resolution & self-heal", () => {
     expect(code).toBe(2);
     expect(err).toContain("persona 'ghost' not found");
   });
+
+  test(
+    "startup logs resolved persona + full harness chain to stderr — the " +
+      "diagnostic that closes the VS Code Windows silent-collapse bug " +
+      "(2026-07-16): a wrong persona or a chain that silently dropped a " +
+      "harness used to be undetectable until an idle-timeout fired minutes " +
+      "later with zero clue why",
+    async () => {
+      const robbie = join(pdir, "personas", "robbie");
+      await mkdir(robbie, { recursive: true });
+      await writeFile(join(robbie, "BOOT.md"), "# Robbie\n", "utf8");
+
+      const input = new PassThrough();
+      const errSink = new CapturingErr();
+      const done = runAcpServer({
+        config: healConfig,
+        memory,
+        harnesses: [
+          new ScriptedHarness("claude", () => []),
+          new ScriptedHarness("pi", () => []),
+        ],
+        input,
+        output: new CapturingOut() as any,
+        logErr: errSink,
+        persona: "robbie",
+      });
+      input.end();
+      await done;
+
+      expect(errSink.buf).toContain("persona=robbie");
+      expect(errSink.buf).toContain("chain=[");
+      expect(errSink.buf).toContain("claude");
+      expect(errSink.buf).toContain("pi");
+    },
+  );
 });

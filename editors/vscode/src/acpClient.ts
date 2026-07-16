@@ -26,8 +26,11 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 
 import { snapAwareSpawnEnv } from "./snapEnv.ts";
+import { withHarnessInstallDirsOnPath } from "./harnessPath.ts";
 import {
   ACP_PROTOCOL_VERSION,
   allocId,
@@ -396,6 +399,45 @@ export function buildAcpSpawnCommand(
   return { command: bin, args };
 }
 
+/**
+ * Resolve the cwd to spawn `phantombot acp` in.
+ *
+ * THE BUG THIS FIXES (`spawn phantombot.exe ENOENT (-4058)` on `/untitled-*`
+ * editors, seen through the VS Code ACP extension on Windows): Node's `spawn`
+ * throws ENOENT when the `cwd` option names a directory that doesn't exist —
+ * NOT only when the binary is missing. An untitled/unsaved editor (or a
+ * folderless window before any file is opened) hands VS Code a resource whose
+ * `fsPath` looks like `/untitled-1` or similar — never a real directory on
+ * disk. That candidate cwd flows straight into `spawnAcpTransport`'s `cwd`
+ * option, and the spawn fails at the OS level before phantombot ever starts,
+ * which surfaces to the user as a wedged/declined turn with no useful error.
+ *
+ * The fix: verify the candidate cwd actually exists on disk (a real,
+ * existing directory). If it doesn't, fall back to the home directory —
+ * always real, always spawnable — same spirit as `currentWorkspaceCwd()`
+ * falling back to `process.cwd()` when no workspace folder is open. This is
+ * ONLY the process spawn cwd (`options.cwd` on `child_process.spawn`); it does
+ * NOT change which phantombot *session* the turn binds to — that's a separate
+ * cwd passed to `session/new`/`session/load` over the wire and is unaffected.
+ *
+ * Pure and side-effect-free apart from the injected `exists` check, so the
+ * untitled-editor repro is unit-tested without touching the real filesystem.
+ */
+export function resolveSpawnCwd(
+  candidateCwd: string | undefined,
+  exists: (path: string) => boolean = existsSync,
+  home: () => string = homedir,
+): string {
+  if (candidateCwd && candidateCwd.trim()) {
+    try {
+      if (exists(candidateCwd)) return candidateCwd;
+    } catch {
+      // fall through to home
+    }
+  }
+  return home();
+}
+
 export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
   const bin = options.binaryPath;
   if (!bin) {
@@ -407,7 +449,9 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
   const { command, args } = buildAcpSpawnCommand(bin, options.persona);
 
   const child = spawn(command, args, {
-    cwd: options.cwd,
+    // Guard against `spawn ENOENT (-4058)` on untitled/unsaved editors, whose
+    // resource path is not a real directory — see resolveSpawnCwd() above.
+    cwd: resolveSpawnCwd(options.cwd),
     stdio: ["pipe", "pipe", "pipe"],
     // Never use a shell: shim resolution is handled by cmd.exe above with
     // discrete argv, which keeps attacker-controlled args from being parsed as
@@ -424,7 +468,14 @@ export function spawnAcpTransport(options: AcpClientOptions): AcpTransport {
     // and only when — we're snap-confined; loadConfig then resolves personas_dir
     // from that config (default OR custom), so PHANTOMBOT_PERSONAS_DIR is left
     // unset to avoid overriding a custom persona root.
-    env: snapAwareSpawnEnv(process.env) as NodeJS.ProcessEnv,
+    // Also prepend the well-known harness install dirs (~/.local/bin,
+    // ~/.bun/bin, %APPDATA%\npm, …) so a harness detected by absolute path
+    // (e.g. claude.EXE resolved from state.json) still finds whatever ITS
+    // launch needs on the narrower PATH VS Code hands child processes — see
+    // harnessPath.ts for the parity rationale with the daemon's own search.
+    env: withHarnessInstallDirsOnPath(
+      snapAwareSpawnEnv(process.env),
+    ) as NodeJS.ProcessEnv,
   });
 
   let stdoutBuf = "";

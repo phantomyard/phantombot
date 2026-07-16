@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AcpClient,
   buildAcpSpawnCommand,
+  resolveSpawnCwd,
   type AcpTransport,
 } from "../src/acpClient.ts";
 import { resetIdCounter } from "../src/protocol.ts";
@@ -465,5 +466,51 @@ describe("available_commands_update", () => {
     expect(chunks).toEqual(["hello"]);
     expect(client.availableCommands("s1").map((c) => c.name)).toEqual(["help"]);
     client.dispose();
+  });
+});
+
+describe("resolveSpawnCwd — untitled-editor ENOENT guard", () => {
+  test("returns the candidate cwd when it exists on disk", () => {
+    const cwd = resolveSpawnCwd(
+      "/home/andrew/project",
+      (p) => p === "/home/andrew/project",
+      () => "/home/andrew",
+    );
+    expect(cwd).toBe("/home/andrew/project");
+  });
+
+  test(
+    "falls back to home when the candidate doesn't exist — the untitled-editor " +
+      "repro (spawn ENOENT -4058): VS Code hands an /untitled-1-style resource " +
+      "path that is never a real directory",
+    () => {
+      const cwd = resolveSpawnCwd(
+        "/untitled-1",
+        () => false,
+        () => "/home/andrew",
+      );
+      expect(cwd).toBe("/home/andrew");
+    },
+  );
+
+  test("falls back to home when no candidate is given at all", () => {
+    const cwd = resolveSpawnCwd(undefined, () => false, () => "/home/andrew");
+    expect(cwd).toBe("/home/andrew");
+  });
+
+  test("falls back to home when the exists() check itself throws", () => {
+    const cwd = resolveSpawnCwd(
+      "/some/weird/path",
+      () => {
+        throw new Error("EPERM");
+      },
+      () => "/home/andrew",
+    );
+    expect(cwd).toBe("/home/andrew");
+  });
+
+  test("empty-string candidate is treated as absent, falls back to home", () => {
+    const cwd = resolveSpawnCwd("   ", () => true, () => "/home/andrew");
+    expect(cwd).toBe("/home/andrew");
   });
 });
