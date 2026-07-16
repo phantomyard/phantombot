@@ -86,8 +86,22 @@ export interface RunUpdateInput {
    * after a successful binary swap. Defaults to installCompletions.
    */
   refreshCompletions?: false | ((opts: { out: WriteSink }) => Promise<unknown>);
+  /**
+   * Test seam — override the post-swap editor-extension install. Pass `false`
+   * to skip. In production this is undefined and runUpdate shells out to the
+   * freshly-installed binary via `defaultInstallEditorExtensions`.
+   */
+  installEditorExtensions?:
+    | false
+    | ((binPath: string) => Promise<EditorExtensionInstallResult>);
   out?: WriteSink;
   err?: WriteSink;
+}
+
+export interface EditorExtensionInstallResult {
+  ok: boolean;
+  /** The new binary's own one-line report, surfaced verbatim. */
+  message: string;
 }
 
 export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
@@ -248,6 +262,43 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     }
   }
 
+  // 7.7. Install/refresh the bundled editor extensions (VS Code today).
+  //
+  // `phantombot update` is the ONLY update path most users will ever run —
+  // nobody should need to know what a .vsix is, or hand-install anything, to
+  // pick up an editor fix. The daemon already reconciles editors at startup,
+  // but that only helps if the service is running AND gets restarted; a user
+  // who just runs `phantombot update` would otherwise keep a stale extension
+  // indefinitely.
+  //
+  // This MUST shell out to the freshly-swapped binary rather than call
+  // installVscode() in-process: this process was loaded from the OLD binary
+  // and still holds the OLD embedded .vsix in memory, so an in-process call
+  // would dutifully install the previous extension over the new one.
+  //
+  // Best-effort and non-fatal — the binary swap is the critical step, and
+  // `phantombot acp install vscode` remains available by hand.
+  if (input.installEditorExtensions !== false) {
+    try {
+      const r = input.installEditorExtensions
+        ? await input.installEditorExtensions(binPath)
+        : await defaultInstallEditorExtensions(binPath);
+      if (r.message) out.write(`${r.message}\n`);
+      if (!r.ok) {
+        err.write(
+          `warning: could not install the VS Code extension — ` +
+            `run 'phantombot acp install vscode' manually.\n`,
+        );
+      }
+    } catch (e) {
+      err.write(
+        `warning: could not install the VS Code extension: ` +
+          `${(e as Error).message} — run 'phantombot acp install vscode' manually.\n`,
+      );
+      // Non-fatal — fall through to restart handling.
+    }
+  }
+
   // 8. Restart handling. The running phantombot process keeps its
   // in-memory binary, so restart is needed to actually load the new bits.
   const svc = input.serviceControl ?? defaultServiceControl();
@@ -275,6 +326,38 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * Production wiring for the post-swap editor-extension install: run the
+ * NEWLY-INSTALLED binary's own `acp install vscode`.
+ *
+ * Shelling out is the whole point — see the call site. The new binary carries
+ * the new embedded .vsix; this process carries the old one.
+ *
+ * The subcommand is idempotent, version-aware, and exits 0 with a "not
+ * detected" message when VS Code isn't on the box, so this is safe to run
+ * unconditionally on every update. Never throws: a non-zero exit or a missing
+ * `code` CLI is reported, not raised.
+ */
+async function defaultInstallEditorExtensions(
+  binPath: string,
+): Promise<EditorExtensionInstallResult> {
+  const proc = Bun.spawn([binPath, "acp", "install", "vscode"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    // Don't let a wedged `code` CLI hang the whole update.
+    timeout: 120_000,
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  // Surface the subcommand's full report verbatim — it's already
+  // user-facing prose, and it carries the "restart VS Code" hint on its
+  // second line when an install actually happened.
+  return { ok: code === 0, message: (stdout.trim() || stderr.trim()).trim() };
 }
 
 /**

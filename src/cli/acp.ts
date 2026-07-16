@@ -68,6 +68,16 @@ const installVscodeCmd = defineCommand({
     // the "code CLI not found" / failure cases.
     const sink = result.code === 0 ? process.stdout : process.stderr;
     sink.write(`phantombot acp install vscode: ${result.message}\n`);
+    // VS Code loads extensions at startup, so a freshly installed/upgraded
+    // build sits on disk doing nothing until the window reloads. Say so —
+    // otherwise the user updates, sees the old broken behaviour, and
+    // reasonably concludes the update did nothing. Only worth saying when we
+    // actually changed something ("current" / "not-detected" need no action).
+    if (result.action === "installed" || result.action === "updated") {
+      sink.write(
+        "  restart VS Code (or run “Developer: Reload Window”) to load it.\n",
+      );
+    }
     // Same event-loop caveat as installZed: importing the ACP server keeps the
     // loop open, so force a clean exit once the install is done.
     process.exit(result.code);

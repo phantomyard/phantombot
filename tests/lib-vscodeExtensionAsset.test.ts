@@ -3,9 +3,17 @@
  *
  * The .vsix is a binary zip whose bytes are NOT reproducible across builds
  * (zip timestamps/metadata vary), so — unlike the pi-extension hash check — we
- * deliberately do NOT assert byte-exact drift. Instead we assert the two things
- * that actually matter and that DO catch the real failure mode (bumping
- * editors/vscode/package.json without regenerating the embedded module):
+ * deliberately do NOT assert byte-exact drift. Instead we assert the things
+ * below, which catch ONE failure mode: bumping editors/vscode/package.json
+ * without regenerating the embedded module.
+ *
+ * Be clear about the limit, because over-trusting these assertions shipped a
+ * broken v1.1.204: they canNOT catch "edited editors/vscode/ and regenerated
+ * nothing", since the version and the stale asset still agree and every check
+ * here passes. Freshness is enforced structurally instead — the release
+ * rebuilds the .vsix from source on every build and stamps it with the
+ * phantombot release version (see scripts/genVscodeVsix.ts). These assertions
+ * cover the checked-in dev asset, not the shipped one:
  *
  *   1. The embedded VSCODE_EXTENSION_VERSION matches editors/vscode/package.json.
  *   2. The embedded VSCODE_EXTENSION_ID matches publisher.name from that manifest.

@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runUpdate } from "../src/cli/update.ts";
@@ -687,5 +688,107 @@ describe("runUpdate confirm injection", () => {
     });
     expect(code).toBe(0);
     expect(calls).not.toContain("restart");
+  });
+});
+
+/**
+ * The VS Code extension ships EMBEDDED in the phantombot binary, and
+ * `phantombot update` is the only update path most users will ever run. If the
+ * swap doesn't also refresh the extension, an editor fix reaches nobody —
+ * exactly what happened with v1.1.204, where the release shipped a stale .vsix
+ * and every client skipped it as "current" while `update` reported success.
+ *
+ * The load-bearing detail is WHICH binary does the install: this process was
+ * loaded from the OLD binary and holds the OLD .vsix in memory, so the install
+ * must be delegated to the freshly-swapped binary on disk.
+ */
+describe("runUpdate installs the bundled editor extensions", () => {
+  test("delegates to the NEWLY-installed binary, not this process", async () => {
+    const seen: string[] = [];
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: async (p) => {
+        seen.push(p);
+        // The swap must have already happened: the binary at this path is the
+        // NEW one, which is the only copy carrying the NEW embedded .vsix.
+        expect(readFileSync(p).toString()).toBe(NEW_BYTES.toString());
+        return { ok: true, message: "" };
+      },
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual([binPath]);
+  });
+
+  test("surfaces the install report (incl. the restart hint) verbatim", async () => {
+    const out = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      out,
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: async () => ({
+        ok: true,
+        message:
+          "phantombot acp install vscode: Upgraded VS Code extension x 0.4.6 → 1.1.205.\n" +
+          "  restart VS Code (or run “Developer: Reload Window”) to load it.",
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("Upgraded VS Code extension");
+    // Without this line the user reloads nothing, sees the old behaviour, and
+    // concludes the update did nothing.
+    expect(out.text).toContain("restart VS Code");
+  });
+
+  test("a failed extension install warns but never fails the update", async () => {
+    const err = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      out: new CaptureStream(),
+      err,
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: async () => ({ ok: false, message: "boom" }),
+    });
+    // The binary swap is the critical step and it succeeded.
+    expect(code).toBe(0);
+    expect(err.text).toContain("phantombot acp install vscode");
+  });
+
+  test("a throwing extension install is caught, not propagated", async () => {
+    const err = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.42",
+      fetchImpl: fakeReleaseFetch(),
+      out: new CaptureStream(),
+      err,
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: async () => {
+        throw new Error("code CLI wedged");
+      },
+    });
+    expect(code).toBe(0);
+    expect(err.text).toContain("code CLI wedged");
   });
 });

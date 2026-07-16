@@ -2,7 +2,7 @@
   "name": "phantombot-vscode",
   "displayName": "phantombot",
   "description": "Chat with phantombot — your personality-first agent — in VS Code's native Chat panel via an embedded ACP client.",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "publisher": "phantomyard",
   "private": true,
   "license": "MIT",

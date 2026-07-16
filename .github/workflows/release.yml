@@ -139,6 +139,35 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Rebuild the embedded VS Code extension from THIS commit's source and
+      # stamp it with the release version, before any --compile step reads the
+      # generated module.
+      #
+      # This step exists because leaving it manual shipped a broken release:
+      # PR #296 fixed the extension, but nobody re-ran `gen:vscode-vsix` and
+      # nobody bumped editors/vscode/package.json, so v1.1.204 embedded a
+      # .vsix built from PRE-#296 source at the SAME version clients already
+      # had. `installVscode` compares versions and skips when
+      # `installed >= bundled`, so every client skipped it as "current". The
+      # fix reached nobody and `phantombot update` still reported success.
+      #
+      # Regenerating here makes both halves structurally impossible: the .vsix
+      # can never lag the merged source, and the version always increases
+      # (run_number is monotonic), so clients always install. `phantombot
+      # update` alone is now sufficient to deliver an extension fix — which is
+      # the only update path a user should ever need.
+      - name: Rebuild + stamp the embedded VS Code extension
+        env:
+          PHANTOMBOT_EXT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bun run gen:vscode-vsix
+          # The compiled binary is what users get; if it embedded the wrong
+          # version the install would be skipped client-side and we'd never
+          # know. Fail loudly here instead.
+          grep -q "VSCODE_EXTENSION_VERSION = \"${PHANTOMBOT_EXT_VERSION}\"" \
+            src/lib/vscodeExtensionAsset.generated.ts \
+            || { echo "vsix version stamp failed"; exit 1; }
+
       - name: Build x64 (baseline — no AVX2 required)
         env:
           TAG: ${{ steps.version.outputs.tag }}
