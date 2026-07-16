@@ -26,7 +26,7 @@ import type { ActiveTurnHandle } from "../../channels/commands.ts";
 import { type Config, loadConfig, personaDir } from "../../config.ts";
 import { healDefaultPersonaIfBroken } from "../../lib/personaDefault.ts";
 import { buildHarnessChain } from "../../harnesses/buildChain.ts";
-import { resolveHarnessBinsForConfig } from "../../lib/harnessAvailability.ts";
+import { harnessBin, resolveHarnessBinsForConfig } from "../../lib/harnessAvailability.ts";
 import type { Harness } from "../../harnesses/types.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { openMemoryStore, type MemoryStore } from "../../memory/store.ts";
@@ -134,6 +134,21 @@ export async function runAcpServer(
     );
     return 2;
   }
+
+  // Diagnostic startup line: which persona + which harness chain (with each
+  // harness's resolved bin) this ACP server actually bound to. Nothing about
+  // this ever surfaced before, so a wrong-persona/collapsed-chain wedge (the
+  // VS Code Windows bug, 2026-07-16) failed completely silently — the ONLY
+  // signal was a downstream idle-timeout minutes later with no way to tell
+  // whether claude was even attempted. This line is cheap and always emitted
+  // (not gated on a verbose flag) because stderr here is diagnostics-only
+  // (stdout is the protocol channel) and the extension already forwards it
+  // to the output channel the user can open on demand.
+  logErr.write(
+    `phantombot acp: persona=${persona} chain=[${harnesses
+      .map((h) => `${h.id}:${harnessBin(config, h.id) ?? "?"}`)
+      .join(", ")}]\n`,
+  );
 
   const memory = options.memory ?? (await openMemoryStore(config.memoryDbPath));
   const ownsMemory = !options.memory;
