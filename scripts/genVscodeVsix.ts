@@ -96,6 +96,28 @@ const version = versionOverride ?? pkg.version;
 const extensionId = `${pkg.publisher}.${pkg.name}`;
 const vsixFileName = `${pkg.name}-${version}.vsix`;
 
+// ── Make sure the extension's own devDeps are present. ──
+// editors/vscode/ is NOT a workspace of the root package.json — it has its own
+// bun.lock and its own (gitignored) node_modules. So the repo-root
+// `bun install` does NOT install esbuild/typescript for it, and a clean
+// checkout has no node_modules there at all.
+//
+// This bit us for real: the release job failed with `esbuild: command not
+// found` (vsce runs the extension's `vscode:prepublish` → `bun run build` →
+// esbuild), while the same script passed locally purely because a dev box
+// happens to have those deps lying around from previous work in that dir.
+// Classic works-on-my-machine, and exactly the kind of silent
+// environment-dependence this script exists to eliminate — so install them
+// here rather than relying on the caller's state.
+//
+// Deliberately BEFORE the version stamp below: --frozen-lockfile compares
+// package.json against bun.lock, and a stamped-in override version would make
+// it fail on a mismatch we created ourselves.
+execFileSync("bun", ["install", "--frozen-lockfile"], {
+  cwd: EXT_DIR,
+  stdio: "inherit",
+});
+
 // ── Build + package into a throwaway temp dir, then read the bytes back. ──
 const tmp = mkdtempSync(join(tmpdir(), "phantombot-vsix-"));
 const vsixPath = join(tmp, vsixFileName);
