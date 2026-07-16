@@ -24,6 +24,7 @@
 import { homedir } from "node:os";
 
 import { runWithFallback } from "./fallback.ts";
+import { createAuditSink } from "../lib/auditLog.ts";
 import {
   buildSystemPrompt,
   PRE_TOOL_NARRATION_INSTRUCTION,
@@ -244,18 +245,27 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
   let finalText = "";
   let succeeded = false;
 
-  for await (const chunk of runWithFallback(input.harnesses, {
-    systemPrompt,
-    userMessage: input.userMessage,
-    history,
-    persona: input.persona,
-    conversation: input.conversation,
-    workingDir: input.workingDir ?? homedir(),
-    idleTimeoutMs: input.idleTimeoutMs,
-    hardTimeoutMs: input.hardTimeoutMs,
-    mcpMode: input.mcpMode,
-    signal: input.signal,
-  })) {
+  // Tool-call audit (#282): default-on, writes to `<agentDir>/audit/<date>.log`.
+  // Every runTurn caller (Telegram, phantomchat, ask, tick, nightly, ACP) gets
+  // it for free; the sink self-disables when PHANTOMBOT_AUDIT_TOOL_CALLS is off.
+  const auditSink = createAuditSink(input.agentDir);
+
+  for await (const chunk of runWithFallback(
+    input.harnesses,
+    {
+      systemPrompt,
+      userMessage: input.userMessage,
+      history,
+      persona: input.persona,
+      conversation: input.conversation,
+      workingDir: input.workingDir ?? homedir(),
+      idleTimeoutMs: input.idleTimeoutMs,
+      hardTimeoutMs: input.hardTimeoutMs,
+      mcpMode: input.mcpMode,
+      signal: input.signal,
+    },
+    { onToolCall: auditSink },
+  )) {
     if (chunk.type === "text") finalText += chunk.text;
     if (chunk.type === "done") {
       // The done chunk carries the authoritative finalText — prefer it

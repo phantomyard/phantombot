@@ -29,6 +29,7 @@
 import type { Harness, HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 import { type CooldownStore, cooldownStore as defaultStore } from "../lib/cooldown.ts";
 import { log } from "../lib/logger.ts";
+import type { AuditSink } from "../lib/auditLog.ts";
 
 export interface RunWithFallbackOptions {
   /**
@@ -36,6 +37,15 @@ export interface RunWithFallbackOptions {
    * a fresh `new CooldownStore()` to avoid cross-test bleed.
    */
   cooldown?: CooldownStore;
+  /**
+   * Optional tool-call audit sink (issue #282). Called once per tool-call
+   * `progress` chunk, whichever harness produced it — this is the single
+   * point every harness's chunk stream flows through, so one hook here
+   * covers all four adapters. Undefined = no auditing (the default for
+   * tests and degraded paths). Contracted to never throw; it must not be
+   * able to break the turn.
+   */
+  onToolCall?: AuditSink;
 }
 
 export async function* runWithFallback(
@@ -213,6 +223,18 @@ export async function* runWithFallback(
         cooldown.markFailure(harness.id);
         recoverableError = true;
         break;
+      }
+      // Audit hook (#282): record every tool call the harness surfaces.
+      // Best-effort and defensive — a misbehaving sink must never break the
+      // turn, so we guard even though the production sink already can't throw.
+      if (chunk.type === "progress" && chunk.tool && options.onToolCall) {
+        try {
+          options.onToolCall(chunk.tool);
+        } catch (err) {
+          log.debug("orchestrator: audit sink threw (ignored)", {
+            err: String(err),
+          });
+        }
       }
       yield chunk;
       if (chunk.type === "done") succeeded = true;
