@@ -111,6 +111,87 @@ describe("auditLog", () => {
     await flushAuditWritesForTest();
   });
 
+  describe("retention (prune-on-write)", () => {
+    const prevDays = process.env.PHANTOMBOT_AUDIT_RETENTION_DAYS;
+    afterEach(() => {
+      if (prevDays === undefined)
+        delete process.env.PHANTOMBOT_AUDIT_RETENTION_DAYS;
+      else process.env.PHANTOMBOT_AUDIT_RETENTION_DAYS = prevDays;
+    });
+
+    async function seedLog(agentDir: string, stamp: string): Promise<void> {
+      const dir = join(agentDir, "audit");
+      await Bun.write(join(dir, `${stamp}.log`), "seed\n");
+    }
+
+    test("prunes files older than the 30-day default window", async () => {
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      await seedLog(agentDir, "2026-05-01"); // 76 days old → gone
+      await seedLog(agentDir, "2026-07-01"); // 15 days old → kept
+
+      recordToolCall(agentDir, detail(), now);
+      await flushAuditWritesForTest();
+
+      const files = (await readdir(join(agentDir, "audit"))).sort();
+      expect(files).toEqual(["2026-07-01.log", "2026-07-16.log"]);
+    });
+
+    test("keeps a file exactly at the window edge", async () => {
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      await seedLog(agentDir, "2026-06-16"); // exactly 30 days → kept
+
+      recordToolCall(agentDir, detail(), now);
+      await flushAuditWritesForTest();
+
+      const files = (await readdir(join(agentDir, "audit"))).sort();
+      expect(files).toContain("2026-06-16.log");
+    });
+
+    test("honors PHANTOMBOT_AUDIT_RETENTION_DAYS override", async () => {
+      process.env.PHANTOMBOT_AUDIT_RETENTION_DAYS = "7";
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      await seedLog(agentDir, "2026-07-01"); // 15 days > 7 → gone
+      await seedLog(agentDir, "2026-07-12"); // 4 days → kept
+
+      recordToolCall(agentDir, detail(), now);
+      await flushAuditWritesForTest();
+
+      const files = (await readdir(join(agentDir, "audit"))).sort();
+      expect(files).toEqual(["2026-07-12.log", "2026-07-16.log"]);
+    });
+
+    test("garbage retention value falls back to 30-day default", async () => {
+      for (const v of ["", "  ", "abc", "-5", "0", "NaN"]) {
+        process.env.PHANTOMBOT_AUDIT_RETENTION_DAYS = v;
+        const now = new Date("2026-07-16T12:00:00.000Z");
+        await seedLog(agentDir, "2026-05-01"); // old → pruned under default
+        await seedLog(agentDir, "2026-07-10"); // recent → kept
+
+        recordToolCall(agentDir, detail(), now);
+        await flushAuditWritesForTest();
+
+        const files = await readdir(join(agentDir, "audit"));
+        expect(files).not.toContain("2026-05-01.log");
+        expect(files).toContain("2026-07-10.log");
+        await rm(join(agentDir, "audit"), { recursive: true, force: true });
+      }
+    });
+
+    test("leaves non-audit files in the dir untouched", async () => {
+      const now = new Date("2026-07-16T12:00:00.000Z");
+      const dir = join(agentDir, "audit");
+      await Bun.write(join(dir, "README.txt"), "keep me\n");
+      await seedLog(agentDir, "2026-01-01"); // ancient audit log → gone
+
+      recordToolCall(agentDir, detail(), now);
+      await flushAuditWritesForTest();
+
+      const files = await readdir(dir);
+      expect(files).toContain("README.txt");
+      expect(files).not.toContain("2026-01-01.log");
+    });
+  });
+
   describe("auditEnabled / createAuditSink toggle", () => {
     test("on by default", () => {
       expect(auditEnabled()).toBe(true);
