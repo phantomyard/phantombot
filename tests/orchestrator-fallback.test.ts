@@ -375,3 +375,46 @@ describe("runWithFallback — cooldown integration", () => {
     expect(b.invocations).toBe(1);
   });
 });
+
+describe("runWithFallback onToolCall audit hook (#282)", () => {
+  test("fires once per tool-call progress chunk, in order", async () => {
+    const tool = (title: string) => ({
+      title,
+      kind: "execute" as const,
+      locations: [],
+    });
+    const h = new FakeHarness("h", [
+      { type: "progress", note: "Bash: a", tool: tool("Bash: a") },
+      { type: "progress", note: "no-tool narration" }, // no `tool` → skipped
+      { type: "progress", note: "Bash: b", tool: tool("Bash: b") },
+      { type: "text", text: "ok" },
+      { type: "done", finalText: "ok" },
+    ]);
+    const seen: string[] = [];
+    await collect(
+      runWithFallback([h], newRequest(), {
+        onToolCall: (d) => seen.push(d.title),
+      }),
+    );
+    expect(seen).toEqual(["Bash: a", "Bash: b"]);
+  });
+
+  test("a throwing sink never breaks the turn", async () => {
+    const h = new FakeHarness("h", [
+      {
+        type: "progress",
+        note: "Bash: x",
+        tool: { title: "Bash: x", kind: "execute", locations: [] },
+      },
+      { type: "done", finalText: "done" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([h], newRequest(), {
+        onToolCall: () => {
+          throw new Error("sink boom");
+        },
+      }),
+    );
+    expect(chunks.at(-1)).toEqual({ type: "done", finalText: "done" });
+  });
+});
