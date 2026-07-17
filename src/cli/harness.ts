@@ -30,8 +30,11 @@ import {
   modelId,
   type PiModel,
   primaryIsMultimodal,
+  providerChoices,
+  providerEnvVar,
 } from "../lib/piModels.ts";
 import {
+  computeRoutingClears,
   computeRoutingWrites,
   ENV_PI_API_KEY,
   resolvePiApiKeyWrite,
@@ -133,6 +136,33 @@ export async function applyRouting(
   });
   await updateEnvFile(envPath, writes.env);
   return writes;
+}
+
+/**
+ * Erase every routing value the wizard owns, from BOTH stores — the
+ * "Use Pi's own config" path. See `computeRoutingClears` for why this must
+ * actively clear rather than merely skip writing (the old "later" branch was a
+ * no-op that silently kept stale routing alive forever).
+ *
+ * The empty `[harnesses.pi.routing]` table is left behind rather than deleted:
+ * `resolveRouting` maps an empty table to all-undefined, which is exactly the
+ * "no overrides" state we want, and keeping the table avoids churning the TOML
+ * shape. `envPath` is injectable for tests, matching applyRouting.
+ */
+export async function clearPiRouting(
+  configPath: string,
+  envPath: string = userEnvPath(),
+): Promise<ReturnType<typeof computeRoutingClears>> {
+  const clears = computeRoutingClears();
+  await updateConfigToml(configPath, (toml) => {
+    const routing = getIn(toml, ["harnesses", "pi", "routing"]) as
+      | Record<string, unknown>
+      | undefined;
+    if (!routing) return;
+    for (const key of clears.tomlKeys) delete routing[key];
+  });
+  await updateEnvFile(envPath, clears.env);
+  return clears;
 }
 
 function setRoutingKey(
@@ -304,12 +334,19 @@ async function installPi(
  *   1. If Pi isn't on PATH, offer to run the official installer, then redetect
  *      (and update the shared `availability` map so the caller's later prompts
  *      see the freshly-installed binary).
- *   2. Ask "configure now or later?". LATER ⇒ stop here (binary present but
- *      unconfigured is fine — Pi falls back to its own local-store settings when
- *      no per-turn key is threaded).
- *   3. NOW ⇒ collect the Pi API key (stored in ~/.env as PHANTOMBOT_PI_API_KEY,
- *      threaded per-turn onto `--api-key`; NOT written into Pi's own store), then
- *      run the custom routing wizard directly (no "use defaults?" detour).
+ *   2. Ask WHO owns the model config — the real choice behind the old
+ *      "now / later" wording, which described *when* you'd configure rather than
+ *      *what* would drive Pi:
+ *        · "Use Pi's own config" ⇒ delegate to Pi's local settings (what the
+ *          user set by running `pi` and logging into a provider). CLEARS both of
+ *          phantombot's routing stores, then stops — see clearPiRouting for why
+ *          skipping the write isn't enough.
+ *        · "Configure models" ⇒ continue to 3.
+ *   3. Pick the provider (from Pi's full static catalogue, NOT just what's
+ *      already keyed), collect that provider's API key (stored in ~/.env as
+ *      PHANTOMBOT_PI_API_KEY, threaded per-turn onto `--api-key`; NOT written
+ *      into Pi's own store), refresh the model catalogue with it, then run the
+ *      routing wizard for primary / image / coding (no "use defaults?" detour).
  *
  * `availability` is mutated in place when an install succeeds. Returns `true`
  * only when the operator cancelled outright (Esc), so the caller can abort.
@@ -343,34 +380,50 @@ async function configurePi(
     }
   }
 
-  const when = await p.select<"now" | "later">({
-    message: `Configure Pi (${role}) now, or later?`,
+  const mode = await p.select<"configure" | "local">({
+    message: `Pi (${role}): how should models be configured?`,
     options: [
-      { value: "now", label: "now", hint: "API key + model routing" },
       {
-        value: "later",
-        label: "later",
-        hint: "skip — Pi uses its own local-store settings until configured",
+        value: "configure",
+        label: "Configure models",
+        hint: "pick provider + API key, then primary / vision / coding models",
+      },
+      {
+        value: "local",
+        label: "Use Pi's own config",
+        hint: "delegate to Pi's local settings (from `pi` login) — clears any routing here",
       },
     ],
-    initialValue: "now",
+    initialValue: "configure",
   });
-  if (p.isCancel(when)) return true;
-  if (when === "later") {
+  if (p.isCancel(mode)) return true;
+  if (mode === "local") {
+    // ACTIVELY clear both stores — see clearPiRouting/computeRoutingClears. The
+    // old "later" branch returned without clearing, so any previously-configured
+    // routing kept being threaded onto every turn and this option did nothing.
+    await clearPiRouting(config.configPath);
     p.note(
-      "skipped Pi config. With no per-turn API key set, Pi falls back to its own\n" +
-        "local-store settings; re-run `phantombot harness` to configure it later.",
-      "Pi: later",
+      [
+        "Pi will use its own local config (~/.pi/agent/settings.json) — the",
+        "provider + model you set by running `pi` and logging in.",
+        "",
+        `cleared phantombot's Pi routing from ${config.configPath}`,
+        `and ${userEnvPath()} (provider, primary/image/coding model, API key),`,
+        "so no --model/--provider/--api-key is passed and Pi decides for itself.",
+        "",
+        "Re-run `phantombot harness` and pick 'Configure models' to override.",
+      ].join("\n"),
+      "Pi: using Pi's own config",
     );
     return false;
   }
 
-  // NOW: provider FIRST. Pi's `--provider` defaults to google, so a key is
+  // CONFIGURE: provider FIRST. Pi's `--provider` defaults to google, so a key is
   // meaningless until we know which provider it's FOR — and the provider also
   // scopes the key prompt label and the model pickers. Query the model catalog
-  // once here: it yields both the provider list AND the models the routing
-  // wizard will filter, so we don't shell out to `pi --list-models` twice.
-  const models = availability.pi ? await listPiModels(availability.pi) : [];
+  // once here: it yields the models the routing wizard will filter (and marks
+  // which providers are already keyed), so we don't shell out twice.
+  let models = availability.pi ? await listPiModels(availability.pi) : [];
   const currentRouting = resolveRouting(
     getIn(await readConfigToml(config.configPath), [
       "harnesses",
@@ -399,6 +452,21 @@ async function configurePi(
   if (keyWrite.action === "set") {
     await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: keyWrite.value });
     p.note(`saved ${ENV_PI_API_KEY} to ${userEnvPath()}`, "Pi API key");
+    // Refresh the catalog with the key we just took. On a fresh install the
+    // first listing was EMPTY (Pi had no key, so `--list-models` printed "No
+    // models available"), which is what forced the model pickers into free-text.
+    // Now that we hold a key we can populate them — but only by injecting the
+    // provider's NATIVE env var: `--list-models` ignores `--api-key` and reads
+    // auth from its own store / native vars only (see PiProvider.envVar). No
+    // known var (or still empty ⇒ bad key, provider outage) leaves `models` as
+    // it was, and the pickers degrade to free-text rather than dead-ending.
+    const envVar = provider ? providerEnvVar(provider) : undefined;
+    if (availability.pi && envVar) {
+      const refreshed = await listPiModels(availability.pi, undefined, {
+        [envVar]: keyWrite.value,
+      });
+      if (refreshed.length > 0) models = refreshed;
+    }
   } else if (keyWrite.action === "clear") {
     await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: "" });
     p.note(
@@ -568,16 +636,23 @@ const CANCELLED = Symbol("cancelled");
 /**
  * Provider picker. The provider is asked BEFORE the API key (Pi's `--provider`
  * defaults to google, so the key is meaningless without it) and BEFORE the model
- * pickers (it scopes them). Options are the distinct `provider` values from the
- * `pi --list-models` catalog. "(none)" leaves Pi on its own default provider.
- * Falls back to free-text when the catalog is unavailable. Returns the chosen
- * provider name ("" = none), or CANCELLED on abort.
+ * pickers (it scopes them). "(none)" leaves Pi on its own default provider.
+ * Returns the chosen provider id ("" = none), or CANCELLED on abort.
+ *
+ * Options come from `providerChoices`: Pi's STATIC provider catalogue unioned
+ * with whatever `pi --list-models` reported. It used to derive the list from
+ * `--list-models` ALONE, which meant a fresh install — where Pi holds no key and
+ * lists nothing — got an empty picker and fell through to free-text. That's
+ * backwards: the operator is in this wizard precisely to add their first key, so
+ * the full catalogue must be offered regardless of what's already keyed. The
+ * free-text fallback now only triggers in the true degenerate case (no catalogue
+ * at all), which shouldn't happen since the catalogue is a constant.
  */
 async function pickProvider(
   models: readonly PiModel[],
   initial: string | undefined,
 ): Promise<string | typeof CANCELLED> {
-  const providers = [...new Set(models.map((m) => m.provider))].sort();
+  const providers = providerChoices(models);
   if (providers.length === 0) {
     const r = await p.text({
       message: "Pi provider (e.g. openrouter, openai) — blank = Pi's default",
@@ -590,9 +665,15 @@ async function pickProvider(
   const NONE = "";
   const options = [
     { value: NONE, label: "(none)", hint: "Pi's default provider (google)" },
-    ...providers.map((pr) => ({ value: pr, label: pr })),
+    ...providers.map((pr) => ({
+      value: pr.id,
+      label: pr.label,
+      // Surface which providers Pi can already serve models for, so a keyed box
+      // still reads at a glance now that the list is the full catalogue.
+      hint: pr.hasModels ? `${pr.id} — key already configured` : pr.id,
+    })),
   ];
-  const known = initial !== undefined && providers.includes(initial);
+  const known = initial !== undefined && providers.some((pr) => pr.id === initial);
   const r = await p.select<string>({
     message: "Provider (scopes the API key + model list)",
     options,
