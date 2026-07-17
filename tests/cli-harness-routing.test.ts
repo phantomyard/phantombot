@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyRouting } from "../src/cli/harness.ts";
-import { resolveRoutingProvider } from "../src/lib/piRouting.ts";
-import { loadEnvFile } from "../src/lib/envFile.ts";
+import { applyRouting, clearPiRouting } from "../src/cli/harness.ts";
+import {
+  computeRoutingClears,
+  resolveRoutingProvider,
+} from "../src/lib/piRouting.ts";
+import { loadEnvFile, updateEnvFile } from "../src/lib/envFile.ts";
 import { readConfigToml } from "../src/lib/configWriter.ts";
 
 let workdir: string;
@@ -19,6 +22,86 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
+});
+
+describe("clearPiRouting (the 'Use Pi's own config' path)", () => {
+  test("erases routing from BOTH toml and env after a configured run", async () => {
+    // THE regression: the old "later" option returned early without clearing,
+    // so once "now" had run, its routing persisted and pi.ts kept threading
+    // --model/--provider forever. Configure first, then delegate to Pi.
+    await applyRouting(
+      configPath,
+      {
+        provider: "openrouter",
+        primaryModel: "deepseek-v4-pro",
+        imageModel: "gpt-4o",
+        codingModel: "gpt-5.2-codex",
+      },
+      envPath,
+    );
+    await updateEnvFile(envPath, { PHANTOMBOT_PI_API_KEY: "sk-stale" });
+
+    await clearPiRouting(configPath, envPath);
+
+    const toml = await readConfigToml(configPath);
+    const routing = (toml as any).harnesses.pi.routing;
+    expect(routing.provider).toBeUndefined();
+    expect(routing.primary_model).toBeUndefined();
+    expect(routing.image_model).toBeUndefined();
+    expect(routing.coding_model).toBeUndefined();
+
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_PI_PROVIDER).toBeUndefined();
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(env.PHANTOMBOT_IMAGE_MODEL).toBeUndefined();
+    expect(env.PHANTOMBOT_CODING_MODEL).toBeUndefined();
+  });
+
+  test("clears the stale API key too (it would be fired at google)", async () => {
+    // pi --provider defaults to GOOGLE, so a surviving OpenRouter key with the
+    // provider erased auth-fails every turn. Clearing it restores Pi's own
+    // auth-store fallback, which is what 'use Pi's own config' means.
+    await applyRouting(
+      configPath,
+      { provider: "openrouter", primaryModel: "deepseek-v4-pro" },
+      envPath,
+    );
+    await updateEnvFile(envPath, { PHANTOMBOT_PI_API_KEY: "sk-stale" });
+
+    await clearPiRouting(configPath, envPath);
+
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_PI_API_KEY).toBeUndefined();
+  });
+
+  test("leaves unrelated env vars and config alone", async () => {
+    await applyRouting(configPath, { primaryModel: "gpt-5.2" }, envPath);
+    await updateEnvFile(envPath, { TELEGRAM_BOT_TOKEN: "keep-me" });
+
+    await clearPiRouting(configPath, envPath);
+
+    const env = await loadEnvFile(envPath);
+    expect(env.TELEGRAM_BOT_TOKEN).toBe("keep-me");
+  });
+
+  test("is a safe no-op on a virgin box (nothing configured yet)", async () => {
+    await clearPiRouting(configPath, envPath);
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+  });
+
+  test("clears every key applyRouting can write", () => {
+    // Guard against drift: if computeRoutingWrites learns a new key, this fails
+    // until computeRoutingClears erases it too.
+    const clears = computeRoutingClears();
+    expect([...clears.tomlKeys].sort()).toEqual([
+      "coding_model",
+      "image_model",
+      "primary_model",
+      "provider",
+    ]);
+    expect(Object.values(clears.env).every((v) => v === "")).toBe(true);
+  });
 });
 
 describe("applyRouting", () => {

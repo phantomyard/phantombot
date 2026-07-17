@@ -265,3 +265,57 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
 
   return { toml, env };
 }
+
+/**
+ * The TOML keys under `[harnesses.pi.routing]` that the wizard owns. Listed once
+ * so `computeRoutingClears` and the wizard's TOML delete stay in lockstep with
+ * what `computeRoutingWrites` sets.
+ */
+export const ROUTING_TOML_KEYS = [
+  "provider",
+  "primary_model",
+  "image_model",
+  "coding_model",
+] as const;
+
+/**
+ * The inverse of `computeRoutingWrites`: everything the wizard must ERASE for
+ * the "Use Pi's own config" path.
+ *
+ * WHY THIS EXISTS: choosing the old "later" option merely returned early — it
+ * wrote nothing, but it also CLEARED nothing. Routing lives in two places
+ * (config.toml's `[harnesses.pi.routing]` AND ~/.env), and harnesses/pi.ts
+ * re-reads them every turn to thread `--model`/`--provider`/`--api-key`. So once
+ * "now" had been run even once, its values persisted and "later" was a silent
+ * no-op: Pi kept getting the old primary/image/coding routing forever. The note
+ * claiming "Pi falls back to its own local-store settings" was only ever true on
+ * a virgin box. Delegating to Pi's own config REQUIRES actively erasing both
+ * stores, after which pi.ts pushes no flags (its writes are already guarded on
+ * the values being present) and Pi reads ~/.pi/agent/settings.json — the config
+ * the user created when they ran `pi` and logged into their provider.
+ *
+ * The API KEY is cleared too, and that is load-bearing rather than tidiness:
+ * `pi --provider` DEFAULTS TO GOOGLE, so a surviving PHANTOMBOT_PI_API_KEY (say
+ * an OpenRouter key) with the provider erased would be fired at Google every
+ * turn and auth-fail. Clearing the key restores the documented tier-2 fallback
+ * (no `--api-key` flag ⇒ Pi uses its own auth store), which is exactly what
+ * "use Pi's own config" means.
+ *
+ * "" is the unset sentinel for env writes (updateEnvFile / computeRoutingWrites
+ * delete semantics), so this mirrors that convention.
+ */
+export function computeRoutingClears(): {
+  tomlKeys: readonly string[];
+  env: Record<string, string>;
+} {
+  return {
+    tomlKeys: ROUTING_TOML_KEYS,
+    env: {
+      [ENV_PI_PROVIDER]: "",
+      [ENV_PRIMARY_MODEL]: "",
+      [ENV_IMAGE_MODEL]: "",
+      [ENV_CODING_MODEL]: "",
+      [ENV_PI_API_KEY]: "",
+    },
+  };
+}
