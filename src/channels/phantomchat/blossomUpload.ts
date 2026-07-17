@@ -24,6 +24,7 @@ export const BLOSSOM_SERVERS = DEFAULT_BLOSSOM_SERVERS;
 export interface BlossomUploadResult {
   /** Primary URL — first successful PUT. Goes in envelope.url. */
   url: string;
+  /** Local sha256 of the ciphertext we uploaded. Never trusted from a server. */
   sha256: string;
   /** Every successful URL including primary. Recipient tries these in order. */
   mirrors: string[];
@@ -71,7 +72,6 @@ export async function uploadToBlossom(
 
   const errors: string[] = [];
   const mirrors: string[] = [];
-  let firstSha = sha256Hex;
 
   for (const server of servers) {
     if (opts?.signal?.aborted) {
@@ -98,12 +98,21 @@ export async function uploadToBlossom(
         errors.push(`${server}: no url in response`);
         continue;
       }
+      // Integrity hash is always our local compute. A server-echoed sha is
+      // informational only — never authoritative for the envelope / receiver.
+      if (data.sha256 && data.sha256.toLowerCase() !== sha256Hex.toLowerCase()) {
+        log.debug("phantomchat: blossom server echoed mismatched sha256", {
+          server,
+          echoed: data.sha256,
+          expected: sha256Hex,
+        });
+      }
       if (!mirrors.includes(data.url)) mirrors.push(data.url);
-      if (data.sha256) firstSha = data.sha256;
     } catch (e) {
-      const msg = (e as Error).message;
-      if (msg === "upload aborted") throw e;
-      errors.push(`${server}: ${msg}`);
+      // Mid-PUT aborts surface as DOMException "The operation was aborted"
+      // (wording varies by runtime) — check the signal, not the message.
+      if (opts?.signal?.aborted) throw e;
+      errors.push(`${server}: ${(e as Error).message}`);
     }
   }
 
@@ -116,7 +125,7 @@ export async function uploadToBlossom(
 
   return {
     url: mirrors[0]!,
-    sha256: firstSha || sha256Hex,
+    sha256: sha256Hex,
     mirrors,
   };
 }

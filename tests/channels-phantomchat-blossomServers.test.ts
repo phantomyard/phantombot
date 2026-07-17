@@ -6,13 +6,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   DEFAULT_BLOSSOM_SERVERS,
   blossomHashUrl,
+  clearBlossomServersCache,
   expandBlossomFetchUrls,
   fetchCanonicalBlossomServers,
+  getBlossomServers,
 } from "../src/channels/phantomchat/blossomServers.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
   (globalThis as unknown as { fetch: typeof fetch }).fetch = realFetch;
+  clearBlossomServersCache();
 });
 
 function mockFetch(impl: (url: string) => Promise<Response>) {
@@ -88,6 +91,46 @@ describe("DEFAULT_BLOSSOM_SERVERS disaster net", () => {
       "https://blossom.ditto.pub",
       "https://blossom.data.haus",
     ]);
+  });
+});
+
+describe("getBlossomServers cache", () => {
+  test("caches a real website answer and does not re-fetch within TTL", async () => {
+    let hits = 0;
+    mockFetch(async () => {
+      hits += 1;
+      return new Response(
+        JSON.stringify({ servers: ["https://cached.example"] }),
+        { status: 200 },
+      );
+    });
+    expect(await getBlossomServers()).toEqual(["https://cached.example"]);
+    expect(await getBlossomServers()).toEqual(["https://cached.example"]);
+    expect(hits).toBe(1);
+  });
+
+  test("does not cache a 404 / empty answer onto the disaster-net seed", async () => {
+    let hits = 0;
+    mockFetch(async () => {
+      hits += 1;
+      return new Response("nope", { status: 404 });
+    });
+    expect(await getBlossomServers()).toEqual([...DEFAULT_BLOSSOM_SERVERS]);
+    expect(await getBlossomServers()).toEqual([...DEFAULT_BLOSSOM_SERVERS]);
+    // Both calls hit the website — seed fallback is not sticky for an hour.
+    expect(hits).toBe(2);
+  });
+
+  test("opts.servers override wins without fetching", async () => {
+    let hits = 0;
+    mockFetch(async () => {
+      hits += 1;
+      return new Response("should not run", { status: 500 });
+    });
+    expect(await getBlossomServers({ servers: ["https://pin.example/"] })).toEqual([
+      "https://pin.example",
+    ]);
+    expect(hits).toBe(0);
   });
 });
 

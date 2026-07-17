@@ -68,41 +68,69 @@ export async function fetchAndDecryptBlossom(
   }
 
   const fetchImpl = opts?.fetchImpl ?? fetch;
-  const known =
-    opts?.knownServers ??
-    (await getBlossomServers().catch(() => DEFAULT_BLOSSOM_SERVERS));
-  const candidates = expandBlossomFetchUrls(
-    url,
-    opts?.expectedSha256Hex,
-    opts?.mirrors,
-    known,
-  );
   const errors: string[] = [];
 
-  for (const candidate of candidates) {
-    try {
-      const res = await fetchImpl(candidate, { signal: opts?.signal });
-      if (!res.ok) {
-        errors.push(`${candidate}: HTTP ${res.status}`);
-        continue;
-      }
-      const ciphertext = Buffer.from(await res.arrayBuffer());
+  // Happy path first: primary URL + envelope mirrors only. Do NOT resolve the
+  // website server list until those fail *and* we have a sha256 to hash-GET
+  // against — otherwise every inbound voice note pays a blossom.json hop
+  // (today often a 404) out of the STT timeout budget.
+  const direct = expandBlossomFetchUrls(
+    url,
+    undefined,
+    opts?.mirrors,
+    [],
+  );
 
-      // Blossom is content-addressed by sha256 of the (encrypted) bytes.
-      // Verifying catches a corrupt/tampered/wrong-blob fetch before we waste
-      // a GCM auth failure (or a paid STT call) on it.
-      if (opts?.expectedSha256Hex) {
-        const got = createHash("sha256").update(ciphertext).digest("hex");
-        if (got !== opts.expectedSha256Hex.toLowerCase()) {
-          errors.push(`${candidate}: sha256 mismatch`);
+  const tryCandidates = async (candidates: string[]): Promise<Buffer | null> => {
+    for (const candidate of candidates) {
+      if (opts?.signal?.aborted) {
+        throw new Error("blossom fetch aborted");
+      }
+      try {
+        const res = await fetchImpl(candidate, { signal: opts?.signal });
+        if (!res.ok) {
+          errors.push(`${candidate}: HTTP ${res.status}`);
           continue;
         }
-      }
+        const ciphertext = Buffer.from(await res.arrayBuffer());
 
-      return decryptCiphertext(ciphertext, key, iv);
-    } catch (e) {
-      errors.push(`${candidate}: ${(e as Error).message}`);
+        // Blossom is content-addressed by sha256 of the (encrypted) bytes.
+        // Verifying catches a corrupt/tampered/wrong-blob fetch before we waste
+        // a GCM auth failure (or a paid STT call) on it.
+        if (opts?.expectedSha256Hex) {
+          const got = createHash("sha256").update(ciphertext).digest("hex");
+          if (got !== opts.expectedSha256Hex.toLowerCase()) {
+            errors.push(`${candidate}: sha256 mismatch`);
+            continue;
+          }
+        }
+
+        return decryptCiphertext(ciphertext, key, iv);
+      } catch (e) {
+        if (opts?.signal?.aborted) throw e;
+        errors.push(`${candidate}: ${(e as Error).message}`);
+      }
     }
+    return null;
+  };
+
+  const directHit = await tryCandidates(direct);
+  if (directHit) return directHit;
+
+  // Only pay for the known-server list when hash-GET can actually help.
+  if (opts?.expectedSha256Hex && /^[0-9a-fA-F]{64}$/.test(opts.expectedSha256Hex)) {
+    const known =
+      opts?.knownServers ??
+      (await getBlossomServers().catch(() => DEFAULT_BLOSSOM_SERVERS));
+    const hashUrls = expandBlossomFetchUrls(
+      // dummy primary already tried; expand only the hash GETs
+      "",
+      opts.expectedSha256Hex,
+      undefined,
+      known,
+    ).filter((u) => u && !direct.includes(u));
+    const hashHit = await tryCandidates(hashUrls);
+    if (hashHit) return hashHit;
   }
 
   throw new Error(`blossom fetch failed: ${errors.join("; ")}`);

@@ -2,8 +2,10 @@
  * Canonical Blossom server list — bot half of phantomchat `/blossom.json`.
  *
  * The server set is maintained in ONE place: a static `blossom.json` served by
- * the PhantomChat PWA (`https://chat.phantomyard.ai/blossom.json`). Continues
- * the same single-source pattern as `relays.json` / `relaysSource.ts`.
+ * the PhantomChat PWA (`https://chat.phantomyard.ai/blossom.json`). Same source
+ * of truth as `relays.json`, but loaded with a short in-process TTL cache (not a
+ * startup pin to phantomchat.json) so a 404/hang never burns the STT budget on
+ * every inbound voice note — and a temporary seed fallback is not sticky for an hour.
  *
  * Hardcoded DEFAULT_BLOSSOM_SERVERS is the disaster net only (offline / 404 /
  * malformed). Shape on the wire: `{ "servers": ["https://…", …] }`.
@@ -16,6 +18,16 @@
  */
 
 import { log } from "../../lib/logger.ts";
+
+/** How long a successful website list is reused in-process. */
+const BLOSSOM_LIST_TTL_MS = 60 * 60 * 1000;
+
+let blossomListCache: { servers: readonly string[]; at: number } | null = null;
+
+/** Test / force-refresh hook — not part of the public channel API. */
+export function clearBlossomServersCache(): void {
+  blossomListCache = null;
+}
 
 /** Where the canonical Blossom list is served. Overridable via env. */
 export const PHANTOMCHAT_BLOSSOM_URL =
@@ -95,6 +107,10 @@ export async function fetchCanonicalBlossomServers(
  * Resolve the server list for this call. Always returns ≥1 URL — either the
  * website list or the disaster-net default. Optional override wins (tests /
  * ops pin).
+ *
+ * Caches *successful* website answers for BLOSSOM_LIST_TTL_MS. A 404 / empty /
+ * throw does NOT pin the seed for an hour — we fall back for this call only and
+ * retry the website next time.
  */
 export async function getBlossomServers(opts?: {
   servers?: readonly string[];
@@ -102,8 +118,15 @@ export async function getBlossomServers(opts?: {
   if (opts?.servers && opts.servers.length > 0) {
     return opts.servers.map((s) => normalizeServer(s));
   }
+  if (blossomListCache && Date.now() - blossomListCache.at < BLOSSOM_LIST_TTL_MS) {
+    return blossomListCache.servers;
+  }
   const fetched = await fetchCanonicalBlossomServers();
-  return fetched && fetched.length > 0 ? fetched : DEFAULT_BLOSSOM_SERVERS;
+  if (fetched && fetched.length > 0) {
+    blossomListCache = { servers: fetched, at: Date.now() };
+    return fetched;
+  }
+  return DEFAULT_BLOSSOM_SERVERS;
 }
 
 /** Build a hash-addressed mirror URL on a given server (BUD-01). */

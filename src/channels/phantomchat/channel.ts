@@ -303,15 +303,20 @@ export function createPhantomchatChannel(
             if (keyHex && ivHex) {
               const mt = typeof fm.mediaType === "string" ? fm.mediaType : (envelope.type as string);
               // Optional multi-mirror list (phantomchat #88). Accept either
-              // `servers` (canonical) or `mirrors` (older draft) — string URLs only.
+              // `servers` (canonical) or `mirrors` (older draft). Sender-
+              // controlled, so https-only + hard cap of 8 (bound fan-out).
               const rawServers = Array.isArray(fm.servers)
                 ? fm.servers
                 : Array.isArray(fm.mirrors)
                   ? fm.mirrors
                   : undefined;
               const servers = rawServers
-                ?.filter((u: unknown): u is string => typeof u === "string" && u.startsWith("http"))
-                .map((u: string) => u.replace(/\/+$/, ""));
+                ?.filter(
+                  (u: unknown): u is string =>
+                    typeof u === "string" && u.startsWith("https://"),
+                )
+                .map((u: string) => u.replace(/\/+$/, ""))
+                .slice(0, 8);
               media = {
                 kind: mt === "voice" || mt === "image" || mt === "video" ? mt : "file",
                 url: fm.url,

@@ -6,9 +6,14 @@
  *
  * Also covers multi-GET receive: primary host dead → mirror / hash-GET works.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { fetchAndDecryptBlossom } from "../src/channels/phantomchat/blossomFetch.ts";
+import { clearBlossomServersCache } from "../src/channels/phantomchat/blossomServers.ts";
+
+afterEach(() => {
+  clearBlossomServersCache();
+});
 
 function toHex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -135,6 +140,41 @@ describe("blossomFetch — AES-256-GCM decrypt (PWA round-trip)", () => {
         },
       );
       expect(new Uint8Array(out)).toEqual(new Uint8Array(plaintext));
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  test("does not fetch blossom.json when the primary URL succeeds", async () => {
+    const plaintext = new TextEncoder().encode("happy-path");
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, [
+      "encrypt",
+    ]);
+    const ct = new Uint8Array(
+      await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, plaintext),
+    );
+    const sha256 = createHash("sha256").update(ct).digest("hex");
+
+    const hits: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) => {
+      const u = String(input);
+      hits.push(u);
+      if (u.includes("blossom.json")) return new Response("nope", { status: 404 });
+      return new Response(ct, { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const out = await fetchAndDecryptBlossom(
+        "https://primary.example/" + sha256,
+        toHex(key),
+        toHex(iv),
+        { expectedSha256Hex: sha256 },
+      );
+      expect(new Uint8Array(out)).toEqual(new Uint8Array(plaintext));
+      expect(hits.some((h) => h.includes("blossom.json"))).toBe(false);
+      expect(hits).toEqual(["https://primary.example/" + sha256]);
     } finally {
       globalThis.fetch = origFetch;
     }
