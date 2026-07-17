@@ -489,4 +489,75 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
       "https://blossom.data.haus/deadbeefimg",
     ]);
   });
+
+  test("drops non-https mirrors from sender-controlled servers list", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "http-drop-1",
+      type: "voice",
+      content: JSON.stringify({
+        url: "https://a.example/x",
+        sha256: "aa".repeat(32),
+        mimeType: "audio/ogg",
+        size: 1,
+        key: "bb".repeat(32),
+        iv: "cc".repeat(12),
+        mediaType: "voice",
+        // http:// is sender-controlled and must not survive the filter.
+        servers: ["https://a.example/x", "http://b.example/x"],
+      }),
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    expect(got[0]!.media!.servers).toEqual(["https://a.example/x"]);
+  });
+
+  test("bounds fan-out at 8 servers on receive", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const many = Array.from({ length: 20 }, (_, i) => `https://s${i}.example/x`);
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "bound-8-1",
+      type: "voice",
+      content: JSON.stringify({
+        url: many[0],
+        sha256: "dd".repeat(32),
+        mimeType: "audio/ogg",
+        size: 1,
+        key: "ee".repeat(32),
+        iv: "ff".repeat(12),
+        mediaType: "voice",
+        servers: many,
+      }),
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    expect(got[0]!.media!.servers).toHaveLength(8);
+    expect(got[0]!.media!.servers).toEqual(many.slice(0, 8));
+  });
 });
