@@ -131,6 +131,12 @@ export interface ChannelMessage {
     durationS?: number;
     /** Plaintext byte size from the envelope (used to skip oversized downloads). */
     size?: number;
+    /**
+     * Optional mirror URLs from the envelope (`servers` field). Receive falls
+     * back across these (and hash GETs on the known Blossom list) when the
+     * primary host is down. Absent on pre-#88 clients — primary URL still works.
+     */
+    servers?: string[];
   };
 }
 

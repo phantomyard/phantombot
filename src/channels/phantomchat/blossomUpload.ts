@@ -1,25 +1,32 @@
 /*
  * PhantomChat media: upload an encrypted blob to Blossom.
  *
- * Port of the PWA's uploadToBlossom (phantomchat/src/lib/phantomchat/
- * blossom-upload.ts). Signs a NIP-24242 auth event with our PhantomChat secret
- * key and PUTs the ciphertext to a fallback chain of public Blossom servers,
- * returning the URL of the first server that accepts it. The content address is
- * the sha256 of the encrypted bytes (computed by the caller and carried in the
- * auth event's `x` tag).
+ * Port of the PWA's multi-mirror upload (phantomchat blossom-upload-progress.ts).
+ * Signs a NIP-24242 auth event with our PhantomChat secret key and PUTs the
+ * ciphertext to public Blossom servers until we have ≥BLOSSOM_MIRROR_MIN
+ * successes (or the list is exhausted). Returns the primary URL plus every
+ * successful mirror so the envelope can carry them for multi-GET receive.
+ *
+ * Server list comes from the PWA-served /blossom.json (see blossomServers.ts);
+ * the hardcoded DEFAULT_BLOSSOM_SERVERS is disaster-net only.
  */
 import { finalizeEvent } from "nostr-tools/pure";
 import { log } from "../../lib/logger.ts";
+import {
+  BLOSSOM_MIRROR_MIN,
+  DEFAULT_BLOSSOM_SERVERS,
+  getBlossomServers,
+} from "./blossomServers.ts";
 
-export const BLOSSOM_SERVERS = [
-  "https://blossom.primal.net",
-  "https://cdn.satellite.earth",
-  "https://blossom.band",
-] as const;
+/** @deprecated Prefer DEFAULT_BLOSSOM_SERVERS / getBlossomServers(). */
+export const BLOSSOM_SERVERS = DEFAULT_BLOSSOM_SERVERS;
 
 export interface BlossomUploadResult {
+  /** Primary URL — first successful PUT. Goes in envelope.url. */
   url: string;
   sha256: string;
+  /** Every successful URL including primary. Recipient tries these in order. */
+  mirrors: string[];
 }
 
 /** Upload window the signed auth event stays valid for (matches the PWA). */
@@ -32,12 +39,15 @@ export async function uploadToBlossom(
   mime: string,
   opts?: {
     servers?: readonly string[];
+    /** Min successful mirrors (default BLOSSOM_MIRROR_MIN). At least 1. */
+    minMirrors?: number;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
   },
 ): Promise<BlossomUploadResult> {
-  const servers = opts?.servers ?? BLOSSOM_SERVERS;
+  const servers = await getBlossomServers({ servers: opts?.servers });
   const fetchImpl = opts?.fetchImpl ?? fetch;
+  const minMirrors = Math.max(1, opts?.minMirrors ?? BLOSSOM_MIRROR_MIN);
   const now = Math.floor(Date.now() / 1000);
 
   // NIP-24242 Blossom auth: kind-24242 with the action ('upload'), the blob
@@ -60,7 +70,15 @@ export async function uploadToBlossom(
   const authHeader = "Nostr " + Buffer.from(JSON.stringify(event)).toString("base64");
 
   const errors: string[] = [];
+  const mirrors: string[] = [];
+  let firstSha = sha256Hex;
+
   for (const server of servers) {
+    if (opts?.signal?.aborted) {
+      throw new Error("upload aborted");
+    }
+    if (mirrors.length >= minMirrors) break;
+
     try {
       const res = await fetchImpl(`${server}/upload`, {
         method: "PUT",
@@ -80,14 +98,25 @@ export async function uploadToBlossom(
         errors.push(`${server}: no url in response`);
         continue;
       }
-      return { url: data.url, sha256: data.sha256 || sha256Hex };
+      if (!mirrors.includes(data.url)) mirrors.push(data.url);
+      if (data.sha256) firstSha = data.sha256;
     } catch (e) {
-      errors.push(`${server}: ${(e as Error).message}`);
+      const msg = (e as Error).message;
+      if (msg === "upload aborted") throw e;
+      errors.push(`${server}: ${msg}`);
     }
   }
 
-  log.warn("phantomchat: blossom upload failed on all servers", {
-    servers: servers.length,
-  });
-  throw new Error(`all blossom servers failed: ${errors.join("; ")}`);
+  if (mirrors.length === 0) {
+    log.warn("phantomchat: blossom upload failed on all servers", {
+      servers: servers.length,
+    });
+    throw new Error(`all blossom servers failed: ${errors.join("; ")}`);
+  }
+
+  return {
+    url: mirrors[0]!,
+    sha256: firstSha || sha256Hex,
+    mirrors,
+  };
 }
