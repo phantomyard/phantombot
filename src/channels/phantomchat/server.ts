@@ -561,6 +561,7 @@ export async function runPhantomchatServer(
             (async () => {
               const audio = await fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
                 expectedSha256Hex: m.sha256,
+                mirrors: m.servers,
                 signal: input.signal,
               });
               return transcribe(input.config, audio, m.mimeType);
@@ -611,6 +612,7 @@ export async function runPhantomchatServer(
             const data = await withTimeout(
               fetchAndDecryptBlossom(m.url, m.keyHex, m.ivHex, {
                 expectedSha256Hex: m.sha256,
+                mirrors: m.servers,
                 signal: input.signal,
               }),
               input.config.voice.sttTimeoutMs ?? DEFAULT_STT_TIMEOUT_MS,

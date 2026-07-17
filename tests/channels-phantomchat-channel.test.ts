@@ -391,7 +391,7 @@ describe("phantomchat channel — voice / media intake", () => {
     // Real DM wire shape (chat-api.sendFileMessage → sendMessage): a typed
     // envelope whose `content` is the file-metadata JSON STRING (key/iv).
     const fileMeta = {
-      url: "https://blossom.primal.net/b8447b96c67839dc9aa4632408a0d35375",
+      url: "https://nostr.download/b8447b96c67839dc9aa4632408a0d35375",
       sha256: "b8447b96c67839dc9aa4632408a0d35375ad6d9c0f42ee6057a5be47eb074b03",
       mimeType: "audio/ogg",
       size: 26050,
@@ -400,6 +400,10 @@ describe("phantomchat channel — voice / media intake", () => {
       mediaType: "voice",
       duration: 9,
       waveform: [0, 0, 8, 255, 255],
+      servers: [
+        "https://nostr.download/b8447b96c67839dc9aa4632408a0d35375",
+        "https://blossom.ditto.pub/b8447b96c67839dc9aa4632408a0d35375",
+      ],
     };
     const { wrap } = wrapEnvelopeToUs(ourPub, {
       id: "chat-99-0",
@@ -427,6 +431,8 @@ describe("phantomchat channel — voice / media intake", () => {
     expect(m.media!.ivHex).toBe(fileMeta.iv); // accepts `iv`
     expect(m.media!.mimeType).toBe("audio/ogg");
     expect(m.media!.durationS).toBe(9);
+    // Multi-mirror list plumbed through for receive multi-GET (#88 bot half).
+    expect(m.media!.servers).toEqual(fileMeta.servers);
     // Receipt keyed off the envelope's app id (PWA file delivery tracker).
     expect(m.messageId).toBe("chat-99-0");
   });
@@ -450,7 +456,7 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
       content: "check this out",
       timestamp: Date.now(),
       fileMetadata: {
-        url: "https://blossom.primal.net/deadbeefimg",
+        url: "https://nostr.download/deadbeefimg",
         sha256: "deadbeef00000000000000000000000000000000000000000000000000000000",
         mimeType: "image/jpeg",
         size: 845123,
@@ -458,6 +464,10 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
         ivHex: "22".repeat(12),
         width: 1200,
         height: 800,
+        servers: [
+          "https://nostr.download/deadbeefimg",
+          "https://blossom.data.haus/deadbeefimg",
+        ],
       },
     });
     pool.feed(wrap);
@@ -470,9 +480,84 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
     const m = got[0]!;
     expect(m.text).toBe("check this out"); // caption preserved
     expect(m.media?.kind).toBe("image");
-    expect(m.media?.url).toBe("https://blossom.primal.net/deadbeefimg");
+    expect(m.media?.url).toBe("https://nostr.download/deadbeefimg");
     expect(m.media?.keyHex).toBe("11".repeat(32)); // accepts `keyHex`
     expect(m.media?.ivHex).toBe("22".repeat(12));
     expect(m.media?.size).toBe(845123);
+    expect(m.media?.servers).toEqual([
+      "https://nostr.download/deadbeefimg",
+      "https://blossom.data.haus/deadbeefimg",
+    ]);
+  });
+
+  test("drops non-https mirrors from sender-controlled servers list", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "http-drop-1",
+      type: "voice",
+      content: JSON.stringify({
+        url: "https://a.example/x",
+        sha256: "aa".repeat(32),
+        mimeType: "audio/ogg",
+        size: 1,
+        key: "bb".repeat(32),
+        iv: "cc".repeat(12),
+        mediaType: "voice",
+        // http:// is sender-controlled and must not survive the filter.
+        servers: ["https://a.example/x", "http://b.example/x"],
+      }),
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    expect(got[0]!.media!.servers).toEqual(["https://a.example/x"]);
+  });
+
+  test("bounds fan-out at 8 servers on receive", async () => {
+    const { ourPub, pool, channel } = setup();
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const many = Array.from({ length: 20 }, (_, i) => `https://s${i}.example/x`);
+    const { wrap } = wrapEnvelopeToUs(ourPub, {
+      id: "bound-8-1",
+      type: "voice",
+      content: JSON.stringify({
+        url: many[0],
+        sha256: "dd".repeat(32),
+        mimeType: "audio/ogg",
+        size: 1,
+        key: "ee".repeat(32),
+        iv: "ff".repeat(12),
+        mediaType: "voice",
+        servers: many,
+      }),
+      timestamp: Date.now(),
+    });
+    pool.feed(wrap);
+
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    expect(got[0]!.media!.servers).toHaveLength(8);
+    expect(got[0]!.media!.servers).toEqual(many.slice(0, 8));
   });
 });

@@ -302,6 +302,21 @@ export function createPhantomchatChannel(
               typeof fm.ivHex === "string" ? fm.ivHex : typeof fm.iv === "string" ? fm.iv : "";
             if (keyHex && ivHex) {
               const mt = typeof fm.mediaType === "string" ? fm.mediaType : (envelope.type as string);
+              // Optional multi-mirror list (phantomchat #88). Accept either
+              // `servers` (canonical) or `mirrors` (older draft). Sender-
+              // controlled, so https-only + hard cap of 8 (bound fan-out).
+              const rawServers = Array.isArray(fm.servers)
+                ? fm.servers
+                : Array.isArray(fm.mirrors)
+                  ? fm.mirrors
+                  : undefined;
+              const servers = rawServers
+                ?.filter(
+                  (u: unknown): u is string =>
+                    typeof u === "string" && u.startsWith("https://"),
+                )
+                .map((u: string) => u.replace(/\/+$/, ""))
+                .slice(0, 8);
               media = {
                 kind: mt === "voice" || mt === "image" || mt === "video" ? mt : "file",
                 url: fm.url,
@@ -311,6 +326,7 @@ export function createPhantomchatChannel(
                 mimeType: typeof fm.mimeType === "string" ? fm.mimeType : "application/octet-stream",
                 durationS: typeof fm.duration === "number" ? fm.duration : undefined,
                 size: typeof fm.size === "number" ? fm.size : undefined,
+                ...(servers && servers.length > 0 ? { servers } : {}),
               };
             }
           }

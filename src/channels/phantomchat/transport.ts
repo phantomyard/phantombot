@@ -559,7 +559,9 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   ): Promise<void> {
     const mimeType = mime || "audio/ogg";
     const enc = encryptFileBytes(audio);
-    const { url } = await uploadToBlossom(
+    // Multi-mirror write (≥2 when possible). Primary URL + every successful
+    // mirror go on the envelope so the PWA can multi-GET if a host dies.
+    const uploaded = await uploadToBlossom(
       enc.ciphertext,
       enc.sha256Hex,
       this.ourSecretKey,
@@ -577,7 +579,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // no decode. "" ⇒ unparseable; omit and let the bubble show length-only.
     const waveform = oggOpusWaveformBase64(audio);
     const fileMeta = JSON.stringify({
-      url,
+      url: uploaded.url,
       sha256: enc.sha256Hex,
       mimeType,
       size: audio.length,
@@ -585,6 +587,8 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       iv: enc.ivHex,
       // Authoritative media class so the receiver never re-guesses voice vs file.
       mediaType: "voice",
+      // Multi-mirror list (phantomchat #88). Primary first; receivers multi-GET.
+      servers: uploaded.mirrors,
       ...(durationS > 0 ? { duration: durationS } : {}),
       ...(waveform ? { waveform } : {}),
     });

@@ -29,7 +29,7 @@ describe("fileEncrypt — AES-256-GCM encrypt (PWA round-trip)", () => {
         "https://blossom.example/x",
         enc.keyHex,
         enc.ivHex,
-        { expectedSha256Hex: enc.sha256Hex },
+        { expectedSha256Hex: enc.sha256Hex, knownServers: [] },
       );
       expect(new Uint8Array(out)).toEqual(new Uint8Array(plaintext));
     } finally {
