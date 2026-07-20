@@ -50,7 +50,7 @@
         "commands": [
           {
             "name": "stop",
-            "description": "Abort the turn that's currently running"
+            "description": "Abort the running turn and drop anything queued behind it"
           },
           {
             "name": "reset",
