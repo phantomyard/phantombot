@@ -708,6 +708,10 @@ export async function runTelegramServer(
         const tracked = next.finally(() => {
           if (chatChains.get(msg.conversationId) === tracked) {
             chatChains.delete(msg.conversationId);
+            // We are the settled tail: nothing is queued behind us for this
+            // conversation, so drop its backlog slot too. `release` is a no-op
+            // if anything is still pending, so this can't strand a live epoch.
+            backlog.release(msg.conversationId);
           }
           inFlight.delete(tracked);
         });

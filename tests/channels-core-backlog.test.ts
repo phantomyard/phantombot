@@ -84,6 +84,37 @@ describe("ConversationBacklog", () => {
     b.release("c1");
     expect(b.pending("c1")).toBe(0);
   });
+
+  test("release truly deletes the slot — a re-created conversation starts fresh at epoch 0", () => {
+    // This is the property the settled-tail cleanup in the Telegram engine and
+    // PhantomChat server rely on to bound memory: `release` must DROP the slot,
+    // not merely zero its counter the way `flush` does. We prove deletion
+    // observably — the only in-band signal that the slot is gone is that the
+    // NEXT enqueue on the same key hands back epoch 0 (a fresh slot) rather
+    // than the bumped epoch a surviving slot would still carry.
+    const b = new ConversationBacklog();
+    b.enqueue("c1");
+    b.flush("c1", "stop"); // epoch is now 1, pending zeroed but slot survives
+    expect(b.enqueue("c1")).toBe(1); // same slot → still epoch 1
+    b.claim("c1", 1); // drain it back to idle so release can fire
+    b.release("c1"); // idle → slot deleted
+    // Fresh slot: epoch reset to 0. Had release only zeroed like flush, this
+    // would still be 1 and a stale epoch-0 task could never spuriously claim.
+    expect(b.enqueue("c1")).toBe(0);
+  });
+
+  test("release after a full drop-and-drain cycle leaves no residue", () => {
+    // Mirrors the consumer lifecycle: enqueue → interrupt-flush → the running
+    // tail settles and calls release. Afterwards the conversation must be
+    // indistinguishable from one never seen (pending 0, epoch 0).
+    const b = new ConversationBacklog();
+    b.enqueue("c1");
+    b.enqueue("c1");
+    expect(b.flush("c1", "interrupt")).toBe(2); // two queued dropped
+    b.release("c1"); // idle after flush → slot gone
+    expect(b.pending("c1")).toBe(0);
+    expect(b.enqueue("c1")).toBe(0); // brand-new slot
+  });
 });
 
 describe("stopNoteText", () => {

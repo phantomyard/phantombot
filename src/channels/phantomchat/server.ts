@@ -1171,7 +1171,13 @@ export async function runPhantomchatServer(
       inFlight.delete(next);
       // Drop the chain entry once it's the tail and settled, so the map doesn't
       // grow without bound across many peers.
-      if (chains.get(key) === next) chains.delete(key);
+      if (chains.get(key) === next) {
+        chains.delete(key);
+        // Settled tail for this peer: release its backlog slot as well so
+        // `slots` doesn't accumulate one entry per peer forever. `release`
+        // no-ops while anything is still pending, so a live epoch is safe.
+        backlog.release(msg.conversationId);
+      }
     });
   };
 
