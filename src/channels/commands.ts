@@ -20,6 +20,7 @@
  *     so the LLM can interpret it (some personas use `/remember`, etc.).
  */
 
+import { stopNoteText } from "./core/backlog.ts";
 import { memoryIndexPath, type Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
@@ -95,6 +96,16 @@ export interface SlashCommandContext {
    * in contexts (DMs, tests) where targeting is irrelevant.
    */
   botUsername?: string;
+  /**
+   * Discard this conversation's pending backlog — every message the user
+   * queued behind the running turn that has not started executing yet — and
+   * return how many were dropped. Wired in by each channel from its
+   * `ConversationBacklog` (src/channels/core/backlog.ts); see `handleStop`.
+   *
+   * Optional so tests and any future embedder can omit it: without it `/stop`
+   * degrades to its historical behaviour of aborting only the active turn.
+   */
+  flushBacklog?: () => number;
 }
 
 export interface SlashCommandResult {
@@ -133,7 +144,10 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
   description: string;
 }> = [
   { command: "start", description: "Show this command list" },
-  { command: "stop", description: "Abort the current turn" },
+  {
+    command: "stop",
+    description: "Abort the current turn and drop anything queued behind it",
+  },
   { command: "reset", description: "Clear this chat's history" },
   { command: "status", description: "Show harness, uptime, context usage" },
   { command: "harness", description: "List or switch the active harness" },
@@ -216,7 +230,7 @@ export async function handleSlashCommand(
 
   switch (cmd) {
     case "/stop":
-      return handleStop(ctx);
+      return await handleStop(ctx);
     case "/reset":
       return handleReset(ctx);
     case "/status":
@@ -462,14 +476,78 @@ async function handleChattiness(
   return { reply };
 }
 
-function handleStop(ctx: SlashCommandContext): SlashCommandResult {
-  if (!ctx.activeTurn) {
+/**
+ * /stop — break-glass panic button. "Kill everything, and make sure you know
+ * you were killed."
+ *
+ * Three things happen, in this order (GitHub #301):
+ *   1. The pending backlog is flushed, so messages the user queued behind the
+ *      running turn never execute. Flushing FIRST matters: aborting the active
+ *      turn lets the serial chain advance, and if the backlog were still live
+ *      the next queued message would start running before we got to drop it.
+ *   2. The active turn is aborted.
+ *   3. An agent-facing note is appended to the conversation history, so the
+ *      NEXT turn reads "you were stopped, don't resume" instead of inferring
+ *      from a truncated history that it should pick the work back up.
+ *
+ * This is the loud sibling of a plain interrupt (a new ordinary message while a
+ * turn runs), which performs steps 1 and 2 SILENTLY and writes no note — there
+ * the user's follow-up message is itself the context the agent needs.
+ */
+async function handleStop(
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  const dropped = ctx.flushBacklog?.() ?? 0;
+  const hadActive = Boolean(ctx.activeTurn);
+
+  // Nothing running and nothing queued — genuinely a no-op. Say so and skip
+  // the history note: writing "you were stopped" when nothing was stopped
+  // would just be a confusing lie in the agent's context window.
+  if (!hadActive && dropped === 0) {
     return { reply: "no active turn to stop" };
   }
-  const elapsedS = ((Date.now() - ctx.activeTurn.startTime) / 1000).toFixed(1);
-  ctx.activeTurn.controller.abort("stop");
-  log.info("commands: /stop fired", { chatId: ctx.chatId, elapsedS });
-  return { reply: `stopped (was running ${elapsedS}s)` };
+
+  let elapsedS = "0.0";
+  if (ctx.activeTurn) {
+    elapsedS = ((Date.now() - ctx.activeTurn.startTime) / 1000).toFixed(1);
+    ctx.activeTurn.controller.abort("stop");
+  }
+
+  // Best-effort: a failed history write must not swallow the acknowledgement
+  // for a command whose entire job — aborting and flushing — has already
+  // succeeded by this point.
+  try {
+    await ctx.memory.appendTurn({
+      persona: ctx.persona,
+      conversation: ctx.conversation,
+      role: "user",
+      text: stopNoteText(dropped),
+      // Control-plane bookkeeping, not something worth retrieving later.
+      embeddable: false,
+    });
+  } catch (e) {
+    log.warn("commands: /stop failed to append the agent-facing note", {
+      chatId: ctx.chatId,
+      conversation: ctx.conversation,
+      error: (e as Error).message,
+    });
+  }
+
+  log.info("commands: /stop fired", {
+    chatId: ctx.chatId,
+    elapsedS,
+    abortedActiveTurn: hadActive,
+    droppedQueued: dropped,
+  });
+
+  const activePart = hadActive
+    ? `stopped (was running ${elapsedS}s)`
+    : "stopped";
+  const backlogPart =
+    dropped > 0
+      ? ` — dropped ${dropped} queued message${dropped === 1 ? "" : "s"}`
+      : "";
+  return { reply: `${activePart}${backlogPart}` };
 }
 
 async function handleReset(

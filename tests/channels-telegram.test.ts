@@ -3451,10 +3451,21 @@ describe("runTelegramServer slash commands", () => {
     // was just wiped) or the message text is empty (voice STT aborted
     // before it ran).
     const stored = await memory.recentTurns("phantom", "telegram:1001", 10);
-    expect(stored).toEqual([
-      { role: "user", text: "kick off something slow" },
-      { role: "assistant", text: "[interrupted before reply]" },
-    ]);
+    expect(stored).toContainEqual({
+      role: "user",
+      text: "kick off something slow",
+    });
+    expect(stored).toContainEqual({
+      role: "assistant",
+      text: "[interrupted before reply]",
+    });
+    // /stop also leaves an agent-facing note (#301) so the next turn knows it
+    // was stopped on purpose and must not resume the abandoned work.
+    expect(
+      stored.some(
+        (t) => t.role === "user" && t.text.includes("The user issued /stop"),
+      ),
+    ).toBe(true);
   });
 
   test("a second non-slash message interrupts an in-flight turn (no reply for the aborted one)", async () => {

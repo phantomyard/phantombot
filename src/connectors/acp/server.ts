@@ -45,6 +45,7 @@ import {
   type JsonRpcId,
   type JsonRpcRequest,
 } from "./protocol.ts";
+import { ConversationBacklog } from "../../channels/core/backlog.ts";
 import { ACP_AVAILABLE_COMMANDS, handleAcpCommand, isAcpCommand } from "./commands.ts";
 import { buildWorkspaceBriefing } from "./briefing.ts";
 import { SessionRegistry, type AcpSession } from "./session.ts";
@@ -157,6 +158,12 @@ export async function runAcpServer(
   const startedAt = Date.now();
   /** Slash commands dispatched out-of-band; drained before the store closes. */
   const inflightCommands = new Set<Promise<void>>();
+  /**
+   * Per-session backlog epochs, keyed by sessionId (#301). Gives ACP the same
+   * interrupt / `/stop` semantics as the chat channels: prompts queued behind a
+   * turn that gets interrupted or stopped are never executed.
+   */
+  const backlog = new ConversationBacklog();
 
   // ── wire helpers — every write goes to OUTPUT (the protocol channel) ──
   const send = (obj: unknown): void => {
@@ -423,6 +430,9 @@ export async function runAcpServer(
         startedAt,
         activeTurn: session.activeTurn,
         config,
+        // /stop flushes this session's queued-but-unstarted prompts, exactly
+        // as an interrupt does, and reports the count in its reply.
+        flushBacklog: () => backlog.flush(session.sessionId, "stop"),
       });
       if (!result) {
         // Unreachable: the caller only routes here when isAcpCommand() is true,
@@ -469,6 +479,53 @@ export async function runAcpServer(
       inflightCommands.delete(task);
     });
     inflightCommands.add(task);
+    return true;
+  }
+
+  /**
+   * Queue a `session/prompt` under this session's backlog epoch (#301).
+   *
+   * Returns false when the message is not a prompt for a session we know, in
+   * which case the caller queues it the plain way (an unknown session must
+   * still reach `dispatch` so it produces the proper invalid-params error).
+   *
+   * INTERRUPT: if a turn is already running for this session, a newly arriving
+   * prompt means the same thing it means on Telegram and PhantomChat — abort
+   * the running turn and discard everything queued behind it, silently. Editors
+   * normally wait for one prompt to resolve before sending the next, so in
+   * practice this is a no-op; it exists so the semantics are identical on every
+   * surface rather than accidentally correct on this one.
+   *
+   * A superseded prompt must still be ANSWERED — a JSON-RPC request we simply
+   * drop would leave the editor's thread spinning forever — so it resolves with
+   * `cancelled`, which is the same stopReason the editor's own stop button
+   * produces and which it already knows how to render.
+   */
+  function maybeQueuePrompt(msg: JsonRpcRequest): boolean {
+    if (msg.method !== "session/prompt" || msg.id === undefined) return false;
+    const p = (msg.params ?? {}) as { sessionId?: unknown };
+    const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
+    const session = sessions.get(sessionId);
+    if (!session) return false;
+
+    const active = session.activeTurn;
+    if (active) {
+      const dropped = backlog.flush(sessionId, "interrupt");
+      log(
+        `new prompt — interrupting active turn (dropped ${dropped} queued)`,
+      );
+      active.controller.abort("interrupt");
+    }
+
+    const epoch = backlog.enqueue(sessionId);
+    const id = msg.id;
+    queue = queue.then(async () => {
+      if (!backlog.claim(sessionId, epoch)) {
+        send(jsonRpcResult(id, { stopReason: "cancelled" }));
+        return;
+      }
+      await dispatch(msg);
+    });
     return true;
   }
 
@@ -576,6 +633,10 @@ export async function runAcpServer(
       // Out-of-band: a slash command we own. Same reasoning as cancel — it has
       // to be able to reach past a running turn.
       if (maybeDispatchCommand(msg)) continue;
+
+      // A prompt for a known session queues under that session's backlog epoch
+      // so an interrupt or /stop can supersede it while it waits.
+      if (maybeQueuePrompt(msg)) continue;
 
       // Serialize the rest behind the queue.
       const current = msg;

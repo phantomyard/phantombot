@@ -40,7 +40,10 @@ import type { AcpAvailableCommand } from "./protocol.ts";
  * disappears.)
  */
 export const ACP_AVAILABLE_COMMANDS: AcpAvailableCommand[] = [
-  { name: "stop", description: "Abort the turn that's currently running" },
+  {
+    name: "stop",
+    description: "Abort the running turn and drop anything queued behind it",
+  },
   { name: "reset", description: "Clear this thread's history" },
   { name: "status", description: "Show harness, uptime, context usage" },
   {

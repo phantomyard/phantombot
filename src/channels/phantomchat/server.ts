@@ -37,6 +37,7 @@ import {
   type ActiveTurnHandle,
   handleSlashCommand,
 } from "../commands.ts";
+import { ConversationBacklog } from "../core/backlog.ts";
 import {
   TELEGRAM_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
@@ -364,6 +365,12 @@ export async function runPhantomchatServer(
   // Per-peer promise chain so messages from one peer stay strictly ordered.
   const chains = new Map<string, Promise<void>>();
   const inFlight = new Set<Promise<void>>();
+  // Epoch registry backing interrupt / `/stop` backlog flushes (#301). Keyed by
+  // conversationId — the SAME key as `activeTurns` and the slash context above,
+  // so an interrupt, a `/stop` and a `/status` all address one queue. (The
+  // promise chain itself is keyed by senderId; for DMs, where slash commands
+  // and interrupts live, the two are identical.)
+  const backlog = new ConversationBacklog();
 
   // ===================== AUTH GATE =====================
   // Gate on the CRYPTOGRAPHIC sender (rumor.pubkey, carried as senderId — the
@@ -1092,6 +1099,8 @@ export async function runPhantomchatServer(
       activeTurn: activeTurns.get(msg.conversationId),
       config: input.config,
       serviceControl: input.serviceControl,
+      // /stop flushes the same per-conversation backlog an interrupt does.
+      flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
       // No @username concept on Nostr, and slash handling is DM-only, so there
       // is nothing to disambiguate — leave botUsername undefined.
     }).catch((e: unknown) => {
@@ -1124,13 +1133,38 @@ export async function runPhantomchatServer(
   // Serialize per peer: chain the new work onto that peer's last promise.
   const enqueue = (msg: ChannelMessage): void => {
     const key = msg.senderId;
+
+    // INTERRUPT (#301): a new ordinary message arriving while a turn is running
+    // means "stop what you're doing and listen to me." Abort the active turn
+    // AND discard everything queued behind it — otherwise the bot grinds
+    // through instructions the user has already superseded. Silent by design:
+    // only `/stop` tells the user what it threw away. Gated on an active turn
+    // so that a burst of messages sent while idle is still answered in full.
+    const active = activeTurns.get(msg.conversationId);
+    if (active) {
+      const dropped = backlog.flush(msg.conversationId, "interrupt");
+      log.info("phantomchat: new message — interrupting active turn", {
+        sender: msg.senderId.slice(0, 12) + "…",
+        elapsedS: ((Date.now() - active.startTime) / 1000).toFixed(1),
+        droppedQueued: dropped,
+      });
+      active.controller.abort("interrupt");
+    }
+
+    // Captured synchronously, before the callback is attached — see the
+    // Telegram engine for the full rationale.
+    const epoch = backlog.enqueue(msg.conversationId);
     const prev = chains.get(key) ?? Promise.resolve();
     const next = prev
       .catch(() => {
         // A failed prior turn must not poison the chain — swallow so the next
         // message for this peer still runs.
       })
-      .then(() => handle(msg));
+      .then(async () => {
+        // Superseded while queued — evaporate without running.
+        if (!backlog.claim(msg.conversationId, epoch)) return;
+        await handle(msg);
+      });
     chains.set(key, next);
     inFlight.add(next);
     void next.finally(() => {

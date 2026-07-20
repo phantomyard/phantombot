@@ -58,6 +58,7 @@ import {
   slashCommandTarget,
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
+import { ConversationBacklog } from "./backlog.ts";
 import {
   hasTextSubstance,
   splitIntoSegments,
@@ -314,6 +315,11 @@ export async function runTelegramServer(
   // We chain `next = prev.then(work)` and store `next` here. When the
   // next message arrives, it chains off the latest entry.
   const chatChains = new Map<string, Promise<void>>();
+  // Epoch registry backing interrupt / `/stop` backlog flushes (#301). The
+  // `.then()` callbacks queued on `chatChains` above cannot be un-attached, so
+  // superseded ones are neutered by bumping this conversation's epoch — see
+  // src/channels/core/backlog.ts.
+  const backlog = new ConversationBacklog();
   // Set of every in-flight worker promise — drained at shutdown / oneShot.
   const inFlight = new Set<Promise<void>>();
 
@@ -508,6 +514,9 @@ export async function runTelegramServer(
             config: input.config,
             serviceControl: input.serviceControl,
             botUsername,
+            // /stop flushes the same per-chat backlog an interrupt does, and
+            // reports the count back to the user.
+            flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
           });
           if (result) {
             try {
@@ -637,13 +646,27 @@ export async function runTelegramServer(
         // chains off `prev` (the aborted turn's worker promise) so
         // the harness's process group has time to clean up before we
         // spawn the next subprocess.
+        //
+        // The interrupt also discards this chat's PENDING BACKLOG — messages
+        // the user queued behind the running turn that have not started yet
+        // (#301). "Pay attention to this instead" has to mean the whole
+        // superseded queue, not just the one turn in flight; otherwise the bot
+        // works through stale instructions one by one after the interrupt.
+        // This is deliberately SILENT: no notice to the user about what was
+        // dropped (that is `/stop`'s job) — just an info log.
+        //
+        // Gated on there actually being an active turn, which is what makes
+        // this an *interrupt*. With nothing running, several messages arriving
+        // together are just a multi-line thought and must all be answered.
         const active = activeTurns.get(msg.conversationId);
         if (active) {
+          const dropped = backlog.flush(msg.conversationId, "interrupt");
           log.info("telegram: new message — interrupting active turn", {
             chatId: msg.conversationId,
             elapsedS: (
               (Date.now() - active.startTime) / 1000
             ).toFixed(1),
+            droppedQueued: dropped,
           });
           active.controller.abort("interrupt");
         }
@@ -654,8 +677,16 @@ export async function runTelegramServer(
         const prev = (chatChains.get(msg.conversationId) ?? Promise.resolve()).catch(
           () => {},
         );
-        const next = prev.then(() =>
-          processChatMessage(msg, {
+        // Captured synchronously, BEFORE the callback is attached: this is the
+        // generation the task belongs to. If an interrupt or /stop bumps the
+        // epoch before the task gets to run, `claim` returns false below and
+        // the task evaporates instead of executing superseded work.
+        const epoch = backlog.enqueue(msg.conversationId);
+        const next = prev.then(async () => {
+          // Superseded by an interrupt or /stop while we sat in the queue —
+          // drop the message on the floor without running it.
+          if (!backlog.claim(msg.conversationId, epoch)) return;
+          await processChatMessage(msg, {
             input,
             harnesses,
             activeTurns,
@@ -671,8 +702,8 @@ export async function runTelegramServer(
             // to write security rules is not.
             principalAuthenticated:
               allowedSet.size > 0 && allowedSet.has(Number(msg.senderId)),
-          }),
-        );
+          });
+        });
         // Detach completed entries so the maps don't leak.
         const tracked = next.finally(() => {
           if (chatChains.get(msg.conversationId) === tracked) {
