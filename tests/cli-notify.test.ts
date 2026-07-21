@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { nip19 } from "nostr-tools";
 import { runNotify, type PhantomchatNotifySend } from "../src/cli/notify.ts";
+import { openMemoryStore } from "../src/memory/store.ts";
 import type {
   TelegramMessage,
   TelegramTransport,
@@ -460,5 +461,108 @@ describe("runNotify phantomchat (broadcast)", () => {
     expect(got).toEqual([bHex]);
     expect(err.text).toBe("");
     expect(out.text).toContain("phantomchat(text=1)");
+  });
+});
+
+describe("runNotify turn persistence", () => {
+  // A delivered notification must land in the turn store as an assistant turn
+  // under the recipient's conversation key — otherwise the user's reply to it
+  // has no context anchor (issue #303).
+
+  test("telegram message persists [notification] assistant turn per delivered recipient", async () => {
+    const memory = await openMemoryStore(":memory:");
+    try {
+      const code = await runNotify({
+        config: baseConfig(),
+        message: "deploy finished — want the diff?",
+        transport: new FakeTransport(),
+        memory,
+        out: new CaptureStream(),
+        err: new CaptureStream(),
+      });
+      expect(code).toBe(0);
+      for (const chatId of ["42", "99"]) {
+        const turns = await memory.recentTurns("phantom", `telegram:${chatId}`, 10);
+        expect(turns).toEqual([
+          { role: "assistant", text: "[notification] deploy finished — want the diff?" },
+        ]);
+      }
+    } finally {
+      await memory.close();
+    }
+  });
+
+  test("a failed recipient gets no persisted turn (history stays truthful)", async () => {
+    const memory = await openMemoryStore(":memory:");
+    try {
+      const code = await runNotify({
+        config: baseConfig(),
+        message: "partial fan-out",
+        transport: new FakeTransport(["42"]),
+        memory,
+        out: new CaptureStream(),
+        err: new CaptureStream(),
+      });
+      expect(code).toBe(0); // 99 still landed
+      expect(await memory.recentTurns("phantom", "telegram:42", 10)).toEqual([]);
+      expect(await memory.recentTurns("phantom", "telegram:99", 10)).toEqual([
+        { role: "assistant", text: "[notification] partial fan-out" },
+      ]);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  test("phantomchat notify persists under phantomchat:<recipientHex>", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pc-notify-persist-"));
+    const dir = join(root, "phantom");
+    mkdirSync(dir, { recursive: true });
+    const nsec = nip19.nsecEncode(generateSecretKey());
+    const ownerNpub = nip19.npubEncode(getPublicKey(generateSecretKey()));
+    writeFileSync(
+      join(dir, "phantomchat.json"),
+      JSON.stringify({ nsec, relays: ["wss://relay.example"], allowed_npubs: [ownerNpub] }),
+      { mode: 0o600 },
+    );
+    const cfg = baseConfig();
+    cfg.personasDir = root;
+    cfg.channels.telegram = undefined;
+
+    const memory = await openMemoryStore(":memory:");
+    try {
+      const ownerHex = nip19.decode(ownerNpub).data as string;
+      const code = await runNotify({
+        config: cfg,
+        message: "relay incident resolved",
+        phantomchatSend: async () => {},
+        memory,
+        out: new CaptureStream(),
+        err: new CaptureStream(),
+      });
+      expect(code).toBe(0);
+      expect(
+        await memory.recentTurns("phantom", `phantomchat:${ownerHex}`, 10),
+      ).toEqual([
+        { role: "assistant", text: "[notification] relay incident resolved" },
+      ]);
+    } finally {
+      await memory.close();
+    }
+  });
+
+  test("persistence failure is swallowed — delivery still succeeds, exit 0", async () => {
+    const memory = await openMemoryStore(":memory:");
+    await memory.close(); // closed store → appendTurn throws on write
+    const transport = new FakeTransport();
+    const code = await runNotify({
+      config: baseConfig(),
+      message: "bookkeeping is down",
+      transport,
+      memory,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(transport.sent).toHaveLength(2); // both recipients still notified
   });
 });
