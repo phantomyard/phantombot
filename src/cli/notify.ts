@@ -47,6 +47,10 @@ import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaSto
 import { synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import {
+  openMemoryStore,
+  type MemoryStore,
+} from "../memory/store.ts";
 
 /**
  * Send a phantomchat (Nostr NIP-17 DM) text to `recipientHex`. Default builds a
@@ -101,6 +105,12 @@ export interface RunNotifyInput {
   transport?: TelegramTransport;
   /** Inject for testing. Default: one-shot SimplePool gift-wrap publish. */
   phantomchatSend?: PhantomchatNotifySend;
+  /**
+   * Inject for testing. Default: openMemoryStore(config.memoryDbPath), opened
+   * lazily on the first successful send and closed by runNotify. An injected
+   * store is NOT closed (ownership stays with the caller).
+   */
+  memory?: MemoryStore;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -186,9 +196,41 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     return 2;
   }
 
+  // ── Notification persistence ─────────────────────────────────────────
+  // A notify that only goes out the transport is invisible to the persona:
+  // the turn store never sees it, so a user replying to the notification has
+  // no assistant turn anchoring what they're replying about. Persist each
+  // delivered notification as an assistant turn under the recipient's
+  // conversation key (same conventions as the channels: `telegram:<chatId>`,
+  // `phantomchat:<recipientHex>`). Best-effort: persistence failure is logged
+  // and swallowed — delivery already happened and the exit code reflects
+  // delivery, not bookkeeping. The store opens lazily on first use so a
+  // fully-failed notify never touches the DB.
+  let ownedStore: MemoryStore | undefined;
+  const persistNotification = async (conversation: string, text: string) => {
+    try {
+      const store =
+        input.memory ??
+        (ownedStore ??= await openMemoryStore(config.memoryDbPath));
+      await store.appendTurn({
+        persona,
+        conversation,
+        role: "assistant",
+        text: `[notification] ${text}`,
+      });
+    } catch (e) {
+      log.warn("notify: failed to persist notification turn", {
+        conversation,
+        error: (e as Error).message,
+      });
+    }
+  };
+
   // ── Telegram send (broadcast to all owners) ───────────────────────────
   let textSent = 0;
   let voiceSent = 0;
+  let pcSent = 0;
+  try {
   if (tgTargets.length > 0) {
     // Pre-synthesize ONCE if voice was requested (not per recipient, not per
     // account). Telegram-only — Nostr DMs carry no audio. Doing it before the
@@ -231,10 +273,17 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
           if (input.message) {
             await transport.sendMessage(chatId, input.message);
             textSent++;
+            await persistNotification(`telegram:${chatId}`, input.message);
           }
           if (voiceAudio) {
             await transport.sendVoice(chatId, voiceAudio.data, voiceAudio.mime);
             voiceSent++;
+            // Voice-only notify: persist the spoken text so the reply threads
+            // against what the user actually heard. (When both flags are given
+            // the message row above already anchors the conversation.)
+            if (!input.message && input.voice) {
+              await persistNotification(`telegram:${chatId}`, input.voice);
+            }
           }
         } catch (e) {
           log.warn("notify: telegram send failed", {
@@ -250,7 +299,6 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // Nostr DMs are text-only: send --message, or fall back to the --voice text
   // so a voice-only notify still reaches owners here as text. Each recipient is
   // an independent send — a failure is logged and swallowed.
-  let pcSent = 0;
   if (pcTarget) {
     const text = input.message ?? input.voice;
     if (text) {
@@ -264,6 +312,7 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
             text,
           });
           pcSent++;
+          await persistNotification(`phantomchat:${recipientHex}`, text);
         } catch (e) {
           log.warn("notify: phantomchat send failed", {
             recipient: recipientHex.slice(0, 12) + "…",
@@ -272,6 +321,9 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
         }
       }
     }
+  }
+  } finally {
+    if (ownedStore) await ownedStore.close();
   }
 
   const channels = [
