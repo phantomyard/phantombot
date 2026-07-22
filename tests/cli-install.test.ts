@@ -24,7 +24,6 @@ import type {
   SystemctlRunner,
   UserSystemdEnv,
 } from "../src/lib/systemd.ts";
-import type { ScResult, ScRunner } from "../src/lib/windowsService.ts";
 
 class FakeSystemctl implements SystemctlRunner {
   calls: string[][] = [];
@@ -46,15 +45,6 @@ class FakeSchtasks implements SchtasksRunner {
   calls: string[][] = [];
   responses: SchtasksResult[] = [];
   async run(args: readonly string[]): Promise<SchtasksResult> {
-    this.calls.push([...args]);
-    return this.responses.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
-  }
-}
-
-class FakeSc implements ScRunner {
-  calls: string[][] = [];
-  responses: ScResult[] = [];
-  async run(args: string[]): Promise<ScResult> {
     this.calls.push([...args]);
     return this.responses.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
   }
@@ -298,15 +288,11 @@ describe("runInstall (windows/schtasks)", () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const st = new FakeSchtasks();
-    const sc = new FakeSc();
     const code = await runInstall({
       binPath: WIN_BIN,
       sid: "S-1-5-21-1-2-3-1001",
       xmlDir: workdir,
       schtasks: st,
-      sc,
-      servicePassword: "test-password",
-      serviceHostPath: join(workdir, "phantombot-service.exe"),
       out,
       err,
       platform: "windows",
@@ -316,15 +302,13 @@ describe("runInstall (windows/schtasks)", () => {
     const creates = st.calls.filter((c) => c[0] === "/Create");
     expect(creates.length).toBe(4);
     expect(out.text).toContain("registered");
-    expect(sc.calls.some((c) => c[0] === "create" || c[0] === "config")).toBe(true);
-    expect(out.text).toContain("headless Windows service");
+    expect(out.text).toContain("while logged in");
   });
 
   test("doesn't fall through to systemctl or launchctl on windows", async () => {
     const sys = new FakeSystemctl();
     const lc = new FakeLaunchctl();
     const st = new FakeSchtasks();
-    const sc = new FakeSc();
     const code = await runInstall({
       binPath: WIN_BIN,
       sid: "S-1-5-21-1-2-3-1001",
@@ -332,9 +316,6 @@ describe("runInstall (windows/schtasks)", () => {
       systemctl: sys,
       launchctl: lc,
       schtasks: st,
-      sc,
-      servicePassword: "test-password",
-      serviceHostPath: join(workdir, "phantombot-service.exe"),
       out: new CaptureStream(),
       err: new CaptureStream(),
       platform: "windows",
@@ -347,16 +328,12 @@ describe("runInstall (windows/schtasks)", () => {
   test("propagates a schtasks import failure as a non-zero exit", async () => {
     const err = new CaptureStream();
     const st = new FakeSchtasks();
-    const sc = new FakeSc();
     st.responses = [{ exitCode: 1, stdout: "", stderr: "Access is denied" }];
     const code = await runInstall({
       binPath: WIN_BIN,
       sid: "S-1-5-21-1-2-3-1001",
       xmlDir: workdir,
       schtasks: st,
-      sc,
-      servicePassword: "test-password",
-      serviceHostPath: join(workdir, "phantombot-service.exe"),
       out: new CaptureStream(),
       err,
       platform: "windows",
@@ -386,10 +363,8 @@ describe("runUninstall (windows/schtasks)", () => {
   test("deletes all four tasks and reports complete", async () => {
     const out = new CaptureStream();
     const st = new FakeSchtasks();
-    const sc = new FakeSc();
     const code = await runUninstall({
       schtasks: st,
-      sc,
       out,
       err: new CaptureStream(),
       platform: "windows",

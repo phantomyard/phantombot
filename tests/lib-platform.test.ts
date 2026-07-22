@@ -50,10 +50,10 @@ describe("hint commands shape per platform", () => {
     expect(logsCommand()).toContain("Library/Logs/phantombot");
   });
 
-  test("on windows: SCM strings", () => {
+  test("on windows: Task Scheduler strings", () => {
     if (process.platform !== "win32") return;
-    expect(restartCommand()).toContain("sc stop Phantombot");
-    expect(statusCommand()).toContain("sc query Phantombot");
+    expect(restartCommand()).toContain("schtasks /End");
+    expect(statusCommand()).toContain("schtasks /Query");
     expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
   });
 });
@@ -72,10 +72,10 @@ describe("start/stop hint commands per platform", () => {
     expect(stopCommand()).toContain("launchctl bootout");
   });
 
-  test("on windows: SCM start/stop", () => {
+  test("on windows: Task Scheduler start/stop", () => {
     if (process.platform !== "win32") return;
-    expect(startCommand()).toBe("sc start Phantombot");
-    expect(stopCommand()).toBe("sc stop Phantombot");
+    expect(startCommand()).toContain("schtasks /Change");
+    expect(stopCommand()).toContain("schtasks /Change");
   });
 });
 

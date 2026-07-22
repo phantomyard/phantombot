@@ -66,24 +66,7 @@ permissions:
   pull-requests: read    # commits->pulls lookup for release title/notes audit trail
 
 jobs:
-  windows-service-host:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compile SCM service host
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:exe /out:dist\phantombot-service-host.exe /reference:System.ServiceProcess.dll src\windows\PhantombotServiceHost.cs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: phantombot-windows-service-host
-          path: dist/phantombot-service-host.exe
-
   release:
-    needs: windows-service-host
     runs-on: ubuntu-latest
 
     steps:
@@ -246,12 +229,6 @@ jobs:
             ./src/index.ts \
             --outfile "dist/phantombot-${TAG}-windows-arm64.exe"
 
-      - name: Download Windows SCM service host
-        uses: actions/download-artifact@v4
-        with:
-          name: phantombot-windows-service-host
-          path: dist
-
       - name: Compute SHA256SUMS
         working-directory: dist
         env:
@@ -264,7 +241,6 @@ jobs:
             "phantombot-${TAG}-darwin-arm64" \
             "phantombot-${TAG}-windows-x64.exe" \
             "phantombot-${TAG}-windows-arm64.exe" \
-            "phantombot-service-host.exe" \
             > SHA256SUMS
           cat SHA256SUMS
 
@@ -303,7 +279,6 @@ jobs:
           - phantombot-${TAG}-darwin-arm64 — macOS Apple Silicon (unsigned; see below)
           - phantombot-${TAG}-windows-x64.exe - Windows x86-64 (unsigned; see below)
           - phantombot-${TAG}-windows-arm64.exe - Windows ARM64 (unsigned; see below)
-          - phantombot-service-host.exe - Windows SCM service host (AnyCPU)
 
           Verify with: sha256sum -c SHA256SUMS
 
@@ -351,5 +326,4 @@ jobs:
             "dist/phantombot-${TAG}-darwin-arm64" \
             "dist/phantombot-${TAG}-windows-x64.exe" \
             "dist/phantombot-${TAG}-windows-arm64.exe" \
-            "dist/phantombot-service-host.exe" \
             "dist/SHA256SUMS"

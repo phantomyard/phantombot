@@ -416,12 +416,12 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     });
     expect(r.rewrote).toEqual([]);
     expect(st.created()).toEqual([]);
-    // Three companion queries and nothing else; SCM owns the daemon.
+    // All four per-user tasks are checked for drift.
     expect(st.calls.every((c) => c[0] === "/Query")).toBe(true);
-    expect(st.calls.length).toBe(3);
+    expect(st.calls.length).toBe(4);
   });
 
-  test("moved binary: companion tasks drifted → all re-registered", async () => {
+  test("moved binary: all tasks drifted → all re-registered", async () => {
     const st = new HealFake(registeredXml(OLD_BIN));
     const r = await ensureTasksCurrent({
       binPath: BIN,
@@ -430,11 +430,13 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
       schtasks: st,
     });
     expect(r.rewrote).toEqual([
+      PHANTOMBOT_TASK,
       HEARTBEAT_TASK,
       NIGHTLY_TASK,
       TICK_TASK,
     ]);
     expect(st.created()).toEqual([
+      PHANTOMBOT_TASK,
       HEARTBEAT_TASK,
       NIGHTLY_TASK,
       TICK_TASK,

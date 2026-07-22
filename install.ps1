@@ -10,7 +10,7 @@
   What it does:
     1. Detects arch (AMD64 -> x64, ARM64 -> arm64). Refuses anything else.
     2. Fetches the latest GitHub release tag.
-    3. Downloads the matching phantombot-<tag>-windows-<arch>.exe, SCM service host + SHA256SUMS.
+    3. Downloads the matching phantombot-<tag>-windows-<arch>.exe + SHA256SUMS.
     4. Verifies the SHA256 (Get-FileHash). Refuses on mismatch.
     5. Runs Unblock-File so SmartScreen does not flag the downloaded binary
        (the Windows parallel to macOS quarantine-stripping in install.sh).
@@ -18,7 +18,7 @@
        no admin required).
     7. Adds the install dir to the USER PATH if it is not already there.
     8. Launches `phantombot init` to set up harness, persona, telegram, and the
-       Windows SCM service and periodic companion tasks.
+       per-user Windows logon and periodic tasks.
 
   Override the install dir with $env:PHANTOMBOT_INSTALL_DIR.
   Skip the init TUI launch with $env:PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
@@ -118,13 +118,11 @@ if (-not $tag) {
 }
 
 $asset      = "phantombot-$tag-windows-$arch.exe"
-$serviceAsset = 'phantombot-service-host.exe'
 $binaryUrl  = "https://github.com/$Repo/releases/download/$tag/$asset"
 $sumsUrl    = "https://github.com/$Repo/releases/download/$tag/SHA256SUMS"
 
 # --- download + verify ----------------------------------------------------
 $tmpBin = Join-Path ([IO.Path]::GetTempPath()) ("phantombot-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
-$tmpService = Join-Path ([IO.Path]::GetTempPath()) ("phantombot-service-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
 
 try {
     Write-Host "phantombot: downloading $asset"
@@ -157,23 +155,10 @@ try {
         Fail "SHA256SUMS has no entry for $asset"
     }
 
-    $serviceExpected = $null
-    foreach ($line in ($sumsText -split "`n")) {
-        $trimmed = $line.Trim()
-        if ($trimmed -match '^([0-9a-fA-F]{64})\s+\*?([^\s]+)\s*$' -and $Matches[2] -eq $serviceAsset) {
-            $serviceExpected = $Matches[1].ToLower(); break
-        }
-    }
-    if (-not $serviceExpected) { Fail "SHA256SUMS has no entry for $serviceAsset" }
-
     $actual = (Get-FileHash -Algorithm SHA256 -Path $tmpBin).Hash.ToLower()
     if ($expected -ne $actual) {
         Fail "SHA256 mismatch (expected $expected, got $actual) - refusing to install"
     }
-
-    Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$tag/$serviceAsset" -OutFile $tmpService -Headers $headers -UseBasicParsing
-    $serviceActual = (Get-FileHash -Algorithm SHA256 -Path $tmpService).Hash.ToLower()
-    if ($serviceExpected -ne $serviceActual) { Fail "SHA256 mismatch for $serviceAsset" }
 
     # --- SmartScreen prep -------------------------------------------------
     # Downloads carry a Zone.Identifier mark-of-the-web that trips SmartScreen
@@ -184,11 +169,9 @@ try {
     # --- install ----------------------------------------------------------
     $dest = Join-Path $InstallDir 'phantombot.exe'
     Move-Item -Force -Path $tmpBin -Destination $dest
-    Move-Item -Force -Path $tmpService -Destination (Join-Path $InstallDir $serviceAsset)
     Write-Host "phantombot: installed $tag to $dest"
 } finally {
     if (Test-Path $tmpBin) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpBin }
-    if (Test-Path $tmpService) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpService }
 }
 
 # --- PATH -----------------------------------------------------------------

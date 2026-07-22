@@ -258,27 +258,23 @@ Linux. The crown-jewel `identity.json` is created with an owner-only ACL
 **Install as a background service.**
 
 ```powershell
-phantombot install      # installs the SCM service and periodic companion tasks
+phantombot install      # installs the per-user logon task and periodic tasks
 phantombot uninstall    # removes the service and tasks
 ```
 
-`install` registers a real Windows SCM service for `run`, configured to run as
-the installing account, plus three scheduled companion tasks (`heartbeat`,
-`nightly`, `tick`). SCM stores the service password encrypted; set
-`PHANTOMBOT_WINDOWS_SERVICE_PASSWORD` before running install (SCM registration
-may require an elevated terminal). The service host
-restarts the daemon after any exit and kills its entire child tree on stop.
-
-The service is session-independent and survives logoff/reboot. The legacy
-`\\Phantombot\\phantombot` scheduled task is removed during migration.
+`install` registers four tasks in the current user's `\\Phantombot\\` folder:
+the always-on daemon (`run`) and the periodic `heartbeat`, `nightly`, and
+`tick` tasks. They use the current user's SID and `InteractiveToken`, so no
+password, elevation, or machine-wide service is required. The daemon starts at
+logon, retries after failure, and its process-tree cleanup keeps stop/restart
+deterministic while that user is logged in.
 
 **Self-update.** `phantombot update` and the `/update` chat command work on
 Windows. Because Windows locks a running `.exe` against overwrite, the updater
 renames the live binary aside to `phantombot.exe.old` (allowed while it runs),
-drops the verified new binary into place, then exits cleanly; the SCM host
-relaunches the agent on the new binary. The relaunched process deletes the
-leftover `.old` on startup once it is unlocked. In-place self-update needs the
-service installed (`phantombot install`).
+drops the verified new binary into place, then exits cleanly; the scheduled
+task's keep-alive trigger relaunches the agent on the new binary while the user
+is logged in. In-place self-update needs the task installed (`phantombot install`).
 
 **Logs.** Service stdout/stderr are redirected to
 `%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. These
@@ -303,16 +299,16 @@ phantombot logs       # tail its logs (Ctrl-C to stop)
 phantombot logs --no-follow --lines 200   # dump the last 200 lines and exit
 ```
 
-| Verb | Linux (systemd) | macOS (launchd) | Windows (SCM service) |
+| Verb | Linux (systemd) | macOS (launchd) | Windows (Task Scheduler) |
 |---|---|---|---|
-| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `sc start Phantombot` |
-| `stop` | `systemctl --user stop` | `bootout` | `sc stop Phantombot` |
-| `restart` | `systemctl --user restart` | `kickstart -k` | `sc stop/start Phantombot` |
+| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `schtasks /Change ... /ENABLE` + `/Run` |
+| `stop` | `systemctl --user stop` | `bootout` | `schtasks /Change ... /DISABLE` + `/End` |
+| `restart` | `systemctl --user restart` | `kickstart -k` | `schtasks /End` + `/Run` |
 | `logs` | `journalctl --user -u phantombot` | `tail` the out/err log files | `Get-Content -Wait` the out log |
 
 **Why `stop` does more than kill the process.** On macOS the agent is a
 KeepAlive LaunchAgent; a plain kill would be relaunched within seconds. On
-Windows, SCM owns the daemon and `stop` stops the service. On Linux the main unit is
+Windows, Task Scheduler owns the per-user daemon and `stop` disables and ends the task. On Linux the main unit is
 `Restart=on-failure`, so a clean `stop` already stays stopped with nothing extra
 to do.
 
@@ -384,7 +380,7 @@ Runtime:
 | `phantombot run` | Foreground Telegram listener |
 | `phantombot install` | Install the host service and periodic jobs |
 | `phantombot uninstall` | Remove the host service and periodic jobs |
-| `phantombot start` | Start the installed background service (systemd/launchd/Windows SCM) |
+| `phantombot start` | Start the installed background service (systemd/launchd/Windows Task Scheduler) |
 | `phantombot stop` | Stop the background service and keep it down until `start` |
 | `phantombot restart` | Restart the background service |
 | `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Windows log) |

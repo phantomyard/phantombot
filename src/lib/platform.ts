@@ -2,8 +2,8 @@
  * Cross-platform service-manager router.
  *
  * Phantombot ships on Linux (systemd --user), macOS (launchd, per-user
- * LaunchAgents) and Windows (the SCM service plus periodic Task Scheduler
- * tasks). The backends have different unit-file shapes, different control
+ * LaunchAgents) and Windows (per-user Task Scheduler logon/periodic tasks).
+ * The backends have different unit-file shapes, different control
  * verbs, and different log destinations — this module is the single place
  * where CLI code decides which one to talk to.
  *
@@ -34,8 +34,10 @@ import {
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
-import { taskLogPaths } from "./taskScheduler.ts";
-import { defaultWindowsServiceControl } from "./windowsService.ts";
+import {
+  defaultTaskSchedulerServiceControl,
+  taskLogPaths,
+} from "./taskScheduler.ts";
 
 export type { ServiceControl };
 
@@ -64,7 +66,7 @@ export function defaultServiceControl(): ServiceControl {
     case "darwin":
       return defaultLaunchdServiceControl();
     case "windows":
-      return defaultWindowsServiceControl();
+      return defaultTaskSchedulerServiceControl();
     default:
       return noopServiceControl();
   }
@@ -95,8 +97,8 @@ export interface SelfRestartOpts {
  * the supervisor relaunches — safe to call from within the unit.
  *
  * Windows: exit cleanly (emit SIGTERM → the run loop's handler drains and
- * returns); the SCM host observes the exit and relaunches the swapped binary.
- * The relaunched process deletes the stale `.old` on startup.
+ * returns); the always-on scheduled task's keep-alive trigger relaunches the
+ * swapped binary while the user remains logged in.
  */
 export async function selfRestart(
   opts: SelfRestartOpts,
@@ -146,7 +148,7 @@ export function restartCommand(): string {
     case "darwin":
       return `launchctl kickstart -k gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return "sc stop Phantombot & sc start Phantombot";
+      return `schtasks /End /TN "\\Phantombot\\phantombot" & schtasks /Run /TN "\\Phantombot\\phantombot"`;
     case "linux":
     default:
       return "systemctl --user restart phantombot";
@@ -159,7 +161,7 @@ export function startCommand(): string {
     case "darwin":
       return `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.phantombot.phantombot.plist`;
     case "windows":
-      return "sc start Phantombot";
+      return `schtasks /Change /TN "\\Phantombot\\phantombot" /ENABLE & schtasks /Run /TN "\\Phantombot\\phantombot"`;
     case "linux":
     default:
       return "systemctl --user start phantombot";
@@ -172,7 +174,7 @@ export function stopCommand(): string {
     case "darwin":
       return `launchctl bootout gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return "sc stop Phantombot";
+      return `schtasks /Change /TN "\\Phantombot\\phantombot" /DISABLE & schtasks /End /TN "\\Phantombot\\phantombot"`;
     case "linux":
     default:
       return "systemctl --user stop phantombot";
@@ -185,7 +187,7 @@ export function statusCommand(): string {
     case "darwin":
       return `launchctl print gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return "sc query Phantombot";
+      return `schtasks /Query /TN "\\Phantombot\\phantombot" /V /FO LIST`;
     case "linux":
     default:
       return "systemctl --user status phantombot";
