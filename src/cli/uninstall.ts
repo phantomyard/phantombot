@@ -52,6 +52,11 @@ export interface RunUninstallInput {
   ensureSystemdEnv?: () => UserSystemdEnv;
   platform?: "linux" | "darwin" | "windows" | "unsupported";
   domain?: string;
+  /** Persona whose Windows tasks to remove (defaults to current persona). */
+  persona?: string;
+  /** Override the current Windows user's SID (tests). Production resolves
+   * it live — only tasks owned by this account are deleted. */
+  sid?: string;
 }
 
 export async function runUninstall(
@@ -136,7 +141,13 @@ async function runUninstallWindows(
   err: WriteSink,
 ): Promise<number> {
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
-  await uninstallPhantombotTasks({ schtasks, out, err });
+  await uninstallPhantombotTasks({
+    persona: input.persona,
+    sid: input.sid,
+    schtasks,
+    out,
+    err,
+  });
   out.write("uninstall complete\n");
   return 0;
 }

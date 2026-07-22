@@ -10,24 +10,27 @@
  * Design constraints (from issue #201):
  *   - NO admin. Registering a task in the CURRENT user's own tree via
  *     `schtasks /Create` needs no elevation, unlike a true Windows Service
- *     (a real SCM registration, which is what WinSW does). The trade-off is that a
- *     user-scoped scheduled task with an InteractiveToken principal only runs
- *     while that user is logged in — exactly the macOS/launchd model Andrew
- *     accepted. Someone wanting true headless-without-login should install a
- *     real service (e.g. WinSW); the README documents that.
- *   - Runs as the current user, only when logged in:
- *       <LogonType>InteractiveToken</LogonType> + <UserId> = current SID.
- *     InteractiveToken means Task Scheduler needs no stored password.
+ *     (a real SCM registration, which is what WinSW does).
+ *   - Two logon modes, chosen at `phantombot install` time and persisted in
+ *     windows-logon-<persona>.json beside the launcher script:
+ *       · "interactive" (default): InteractiveToken principal, no stored
+ *         password — but the tasks only run while the user is LOGGED ON
+ *         (the launchd-like model from #201).
+ *       · "password": LogonType Password with the credential stored by
+ *         Task Scheduler — the always-on task gains a BootTrigger and runs
+ *         whether or not anyone is logged on (headless VMs, WUS reboots).
  *   - Grant/identify the principal by SID, never by name — a workgroup box has
  *     %USERDOMAIN%=WORKGROUP which does not resolve (same lesson as the Phase 2
  *     identity.json ACL). `currentUserSid()` is reused from filePermissions.ts.
+ *     (Password mode additionally needs the `COMPUTER\user` name for /RU.)
  *
- * Task layout (all under a \Phantombot\ folder so they group in taskschd.msc):
+ * Task layout (all under a \Phantombot\ folder so they group in taskschd.msc,
+ * persona-suffixed so multi-persona boxes stay greppable):
  *
- *   \Phantombot\phantombot   — always-on `phantombot run`   (keep-alive)
- *   \Phantombot\heartbeat    — `phantombot heartbeat`       (every 30 min)
- *   \Phantombot\nightly      — `phantombot nightly`         (daily 02:00)
- *   \Phantombot\tick         — `phantombot tick`            (every 60 s)
+ *   \Phantombot\phantombot-<persona>   — always-on `phantombot run`   (keep-alive)
+ *   \Phantombot\heartbeat-<persona>    — `phantombot heartbeat`       (every 30 min)
+ *   \Phantombot\nightly-<persona>      — `phantombot nightly`         (daily 02:00)
+ *   \Phantombot\tick-<persona>         — `phantombot tick`            (every 60 s)
  *
  * Keep-alive without a supervisor: Task Scheduler has no true "restart on
  * clean exit" like launchd's KeepAlive. We emulate it for the always-on task
@@ -57,21 +60,132 @@
  * moved binary by inspecting the registered task XML.
  */
 
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { xdgDataHome } from "../config.ts";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
-import { currentUserSid } from "./filePermissions.ts";
+import { currentUserName, currentUserSid } from "./filePermissions.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
 
 export const TASK_FOLDER = "\\Phantombot";
-export const PHANTOMBOT_TASK = "\\Phantombot\\phantombot";
-export const HEARTBEAT_TASK = "\\Phantombot\\heartbeat";
-export const NIGHTLY_TASK = "\\Phantombot\\nightly";
-export const TICK_TASK = "\\Phantombot\\tick";
+
+/**
+ * Legacy task names (pre persona-scoping). Installations registered before
+ * the `phantombot-<persona>` rename use these; install/heal/uninstall delete
+ * them best-effort so an upgrade never leaves a stale duplicate daemon task
+ * behind.
+ */
+export const LEGACY_TASK_NAMES = [
+  "\\Phantombot\\phantombot",
+  "\\Phantombot\\heartbeat",
+  "\\Phantombot\\nightly",
+  "\\Phantombot\\tick",
+] as const;
+
+/**
+ * Persona-scoped task names — `phantombot-<persona>` etc. — so a box running
+ * several personas has one identifiable task set per persona, and so the set
+ * is greppable in taskschd.msc / `schtasks /Query`.
+ */
+export interface TaskNames {
+  main: string;
+  heartbeat: string;
+  nightly: string;
+  tick: string;
+  all: readonly string[];
+}
+
+export function taskNames(persona: string): TaskNames {
+  const main = `${TASK_FOLDER}\\phantombot-${persona}`;
+  const heartbeat = `${TASK_FOLDER}\\heartbeat-${persona}`;
+  const nightly = `${TASK_FOLDER}\\nightly-${persona}`;
+  const tick = `${TASK_FOLDER}\\tick-${persona}`;
+  return { main, heartbeat, nightly, tick, all: [main, heartbeat, nightly, tick] };
+}
+
+/**
+ * Resolve the persona this process belongs to: an explicit
+ * PHANTOMBOT_PERSONA (set for channel-spawned children) wins, otherwise the
+ * configured default persona. The task names must match the persona whose
+ * daemon they supervise.
+ */
+export async function currentPersonaName(): Promise<string> {
+  const fromEnv = process.env.PHANTOMBOT_PERSONA?.trim();
+  if (fromEnv) return fromEnv;
+  const { loadConfig } = await import("../config.ts");
+  return (await loadConfig()).defaultPersona;
+}
+
+/**
+ * How the tasks authenticate with Task Scheduler.
+ *   - "interactive": InteractiveToken — no stored password, runs ONLY while
+ *     the user has an interactive session (the launchd-like default).
+ *   - "password": stored credential — Task Scheduler can start the task at
+ *     boot with NOBODY logged on. This is the headless/WUS-reboot-resilient
+ *     mode; the trade-off is the Windows password is stored (encrypted,
+ *     admin-retrievable) with the task.
+ */
+export type TaskLogonMode = "interactive" | "password";
+
+export interface TaskLogon {
+  mode: TaskLogonMode;
+  /** `COMPUTER\user` (or `DOMAIN\user`) — the /RU account. */
+  username?: string;
+}
+
+/** Persisted install-time logon choice, so the heartbeat self-heal can
+ * regenerate XML that matches instead of silently downgrading a
+ * password-mode install back to interactive (which would strip the stored
+ * credential and re-break boot-without-logon). The marker is PER PERSONA —
+ * several personas can share one Windows account, and a single shared
+ * marker would let persona B's install overwrite persona A's mode, so A's
+ * heartbeat would then heal its tasks into the wrong logon mode. */
+function logonMarkerPath(persona: string): string {
+  return join(launcherDir(), `windows-logon-${persona}.json`);
+}
+
+/** Pre-persona-scoping marker location; kept only as a read fallback so
+ * installs made before the scoping still heal in their original mode until
+ * the next `phantombot install` rewrites the persona-scoped marker. */
+function legacyLogonMarkerPath(): string {
+  return join(launcherDir(), "windows-logon.json");
+}
+
+export async function writeTaskLogon(
+  persona: string,
+  logon: TaskLogon,
+): Promise<void> {
+  await mkdir(launcherDir(), { recursive: true });
+  await writeFile(logonMarkerPath(persona), JSON.stringify(logon, null, 2), "utf8");
+  // The legacy shared marker is deliberately LEFT IN PLACE: it is the only
+  // record of the logon mode for personas installed before the scoping, and
+  // deleting it here (when persona B installs) would silently downgrade
+  // persona A's heal/relaunch to interactive, re-breaking headless operation.
+  // Scoped markers always win reads, so the stale file is inert for anyone
+  // who has reinstalled.
+}
+
+/** Read the persisted logon choice for `persona`; defaults to interactive
+ * when absent. Falls back to the legacy shared marker (above) so a
+ * pre-scoping install isn't mis-healed as interactive before its next
+ * reinstall. */
+export async function readTaskLogon(persona: string): Promise<TaskLogon> {
+  for (const path of [logonMarkerPath(persona), legacyLogonMarkerPath()]) {
+    try {
+      const raw = JSON.parse(await readFile(path, "utf8"));
+      if (raw && raw.mode === "password" && typeof raw.username === "string") {
+        return { mode: "password", username: raw.username };
+      }
+      if (raw && raw.mode === "interactive") return { mode: "interactive" };
+    } catch {
+      // Missing/corrupt marker → try the next one.
+    }
+  }
+  return { mode: "interactive" };
+}
 
 /** Short label used for the per-task log filenames. */
 type TaskLabel = "phantombot" | "heartbeat" | "nightly" | "tick";
@@ -103,8 +217,17 @@ function launcherDir(): string {
   return join(xdgDataHome(), "phantombot");
 }
 
-/** Absolute path of the shared hidden-launcher VBScript. */
-export function launcherVbsPath(): string {
+/** Absolute path of THIS persona's hidden-launcher VBScript. The launcher
+ * is persona-scoped because uninstall deletes it — a shared script would
+ * leave every other persona's tasks pointing at a file that no longer
+ * exists. */
+export function launcherVbsPath(persona: string): string {
+  return join(launcherDir(), `phantombot-launch-${persona}.vbs`);
+}
+
+/** Pre-persona-scoping shared launcher location. Only the legacy pre-rename
+ * tasks still reference it, so it may only be removed once those are gone. */
+export function legacyLauncherVbsPath(): string {
   return join(launcherDir(), "phantombot-launch.vbs");
 }
 
@@ -134,14 +257,14 @@ export const LAUNCHER_VBS =
   "sh.Run cmd, 0, True\r\n";
 
 /**
- * Write the shared hidden-launcher script to its stable location (idempotent;
- * overwrites so a template change lands on the next install/self-heal). The
- * parent dir doubles as the data dir whose logs\ subfolder the tasks redirect
- * into, so we ensure it exists here too.
+ * Write this persona's hidden-launcher script to its stable location
+ * (idempotent; overwrites so a template change lands on the next
+ * install/self-heal). The parent dir doubles as the data dir whose logs\
+ * subfolder the tasks redirect into, so we ensure it exists here too.
  */
-async function writeLauncherVbs(): Promise<void> {
+async function writeLauncherVbs(persona: string): Promise<void> {
   await mkdir(launcherDir(), { recursive: true });
-  await writeFile(launcherVbsPath(), LAUNCHER_VBS, "utf8");
+  await writeFile(launcherVbsPath(persona), LAUNCHER_VBS, "utf8");
 }
 
 /**
@@ -156,6 +279,7 @@ export function buildLauncherArguments(
   args: readonly string[],
   outLog: string,
   errLog: string,
+  launcherPath: string,
 ): string {
   const q = (s: string) => `"${s}"`;
   return [
@@ -163,7 +287,7 @@ export function buildLauncherArguments(
     // default), which would itself be a visible popup - the exact thing this
     // launcher exists to avoid.
     "//B",
-    q(launcherVbsPath()),
+    q(launcherPath),
     q(binPath),
     q(args.join(" ")),
     q(outLog),
@@ -176,6 +300,8 @@ interface TaskXmlOptions {
   description: string;
   /** Current user's SID — principal + logon-trigger UserId. */
   sid: string;
+  /** Persona — scopes the hidden-launcher path baked into the action. */
+  persona: string;
   label: TaskLabel;
   binPath: string;
   args: readonly string[];
@@ -185,6 +311,8 @@ interface TaskXmlOptions {
   executionTimeLimit: string;
   /** Emit a <RestartOnFailure> safety net (the always-on task only). */
   restartOnFailure?: boolean;
+  /** Authentication mode. "password" runs whether or not anyone is logged on. */
+  logon?: TaskLogon;
 }
 
 function generateTaskXml(opts: TaskXmlOptions): string {
@@ -194,6 +322,7 @@ function generateTaskXml(opts: TaskXmlOptions): string {
     opts.args,
     outLog,
     errLog,
+    launcherVbsPath(opts.persona),
   );
   const workingDir = homedir();
 
@@ -203,6 +332,24 @@ function generateTaskXml(opts: TaskXmlOptions): string {
       "      <Count>3</Count>\n" +
       "    </RestartOnFailure>\n"
     : "";
+
+  // Password mode: the principal carries the `COMPUTER\user` account and
+  // LogonType Password so Task Scheduler can build a non-interactive session
+  // at boot. The credential itself is supplied at registration time
+  // (schtasks /RP) — it never goes into the XML.
+  const logon = opts.logon ?? { mode: "interactive" as const };
+  const principal =
+    logon.mode === "password"
+      ? '    <Principal id="Author">\n' +
+        `      <UserId>${xmlEscape(logon.username ?? opts.sid)}</UserId>\n` +
+        "      <LogonType>Password</LogonType>\n" +
+        "      <RunLevel>LeastPrivilege</RunLevel>\n" +
+        "    </Principal>\n"
+      : '    <Principal id="Author">\n' +
+        `      <UserId>${xmlEscape(opts.sid)}</UserId>\n` +
+        "      <LogonType>InteractiveToken</LogonType>\n" +
+        "      <RunLevel>LeastPrivilege</RunLevel>\n" +
+        "    </Principal>\n";
 
   return (
     '<?xml version="1.0" encoding="UTF-16"?>\n' +
@@ -215,11 +362,7 @@ function generateTaskXml(opts: TaskXmlOptions): string {
     opts.triggersXml +
     "  </Triggers>\n" +
     "  <Principals>\n" +
-    '    <Principal id="Author">\n' +
-    `      <UserId>${xmlEscape(opts.sid)}</UserId>\n` +
-    "      <LogonType>InteractiveToken</LogonType>\n" +
-    "      <RunLevel>LeastPrivilege</RunLevel>\n" +
-    "    </Principal>\n" +
+    principal +
     "  </Principals>\n" +
     "  <Settings>\n" +
     "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n" +
@@ -273,45 +416,74 @@ function repeatingTimeTrigger(interval: string): string {
   );
 }
 
+/** Boot trigger — fires when the machine boots, nobody logged on. Only
+ * meaningful with a Password-logon principal (an InteractiveToken task has
+ * no session to start in at boot and would be skipped). */
+function bootTrigger(): string {
+  return "    <BootTrigger>\n" + "      <Enabled>true</Enabled>\n" + "    </BootTrigger>\n";
+}
+
 /** Generate the always-on phantombot agent task XML (keep-alive). */
-export function generatePhantombotTaskXml(sid: string, binPath: string): string {
+export function generatePhantombotTaskXml(
+  sid: string,
+  binPath: string,
+  persona: string,
+  logon: TaskLogon = { mode: "interactive" },
+): string {
   // LogonTrigger starts it at logon; the 1-minute TimeTrigger + IgnoreNew
-  // restarts it if it ever dies. Together: keep-alive while logged in.
+  // restarts it if it ever dies. In password mode a BootTrigger is added so
+  // the daemon also comes up straight after a reboot with nobody logged on
+  // (the WUS-update scenario). Together: keep-alive in the mode's scope.
   const triggers =
+    (logon.mode === "password" ? bootTrigger() : "") +
     "    <LogonTrigger>\n" +
     "      <Enabled>true</Enabled>\n" +
     `      <UserId>${xmlEscape(sid)}</UserId>\n` +
     "    </LogonTrigger>\n" +
     repeatingTimeTrigger("PT1M");
   return generateTaskXml({
-    uri: PHANTOMBOT_TASK,
-    description: "phantombot always-on agent (phantombot run)",
+    uri: taskNames(persona).main,
+    description: `phantombot always-on agent (phantombot run) [${persona}]`,
     sid,
+    persona,
     label: "phantombot",
     binPath,
     args: ["run"],
     triggersXml: triggers,
     executionTimeLimit: "PT0S", // unlimited — long-running daemon
     restartOnFailure: true,
+    logon,
   });
 }
 
 /** Generate the heartbeat task XML — fires every 30 minutes. */
-export function generateHeartbeatTaskXml(sid: string, binPath: string): string {
+export function generateHeartbeatTaskXml(
+  sid: string,
+  binPath: string,
+  persona: string,
+  logon: TaskLogon = { mode: "interactive" },
+): string {
   return generateTaskXml({
-    uri: HEARTBEAT_TASK,
-    description: "phantombot heartbeat (every 30 minutes)",
+    uri: taskNames(persona).heartbeat,
+    description: `phantombot heartbeat (every 30 minutes) [${persona}]`,
     sid,
+    persona,
     label: "heartbeat",
     binPath,
     args: ["heartbeat"],
     triggersXml: repeatingTimeTrigger("PT30M"),
     executionTimeLimit: "PT1H",
+    logon,
   });
 }
 
 /** Generate the nightly task XML — fires daily at 02:00. */
-export function generateNightlyTaskXml(sid: string, binPath: string): string {
+export function generateNightlyTaskXml(
+  sid: string,
+  binPath: string,
+  persona: string,
+  logon: TaskLogon = { mode: "interactive" },
+): string {
   const triggers =
     "    <CalendarTrigger>\n" +
     "      <Enabled>true</Enabled>\n" +
@@ -321,28 +493,37 @@ export function generateNightlyTaskXml(sid: string, binPath: string): string {
     "      </ScheduleByDay>\n" +
     "    </CalendarTrigger>\n";
   return generateTaskXml({
-    uri: NIGHTLY_TASK,
-    description: "phantombot nightly (daily at 02:00)",
+    uri: taskNames(persona).nightly,
+    description: `phantombot nightly (daily at 02:00) [${persona}]`,
     sid,
+    persona,
     label: "nightly",
     binPath,
     args: ["nightly"],
     triggersXml: triggers,
     executionTimeLimit: "PT1H",
+    logon,
   });
 }
 
 /** Generate the tick task XML — fires every 60 seconds. */
-export function generateTickTaskXml(sid: string, binPath: string): string {
+export function generateTickTaskXml(
+  sid: string,
+  binPath: string,
+  persona: string,
+  logon: TaskLogon = { mode: "interactive" },
+): string {
   return generateTaskXml({
-    uri: TICK_TASK,
-    description: "phantombot tick (every 60 seconds)",
+    uri: taskNames(persona).tick,
+    description: `phantombot tick (every 60 seconds) [${persona}]`,
     sid,
+    persona,
     label: "tick",
     binPath,
     args: ["tick"],
     triggersXml: repeatingTimeTrigger("PT1M"),
     executionTimeLimit: "PT1H",
+    logon,
   });
 }
 
@@ -779,54 +960,160 @@ interface TaskSpec {
  * `schtasks /Create /XML … /F` (idempotent — /F overwrites an existing task
  * of the same name), then delete the transient file. Shared by the full
  * install and the heartbeat self-heal so both encode/quote identically.
+ *
+ * In password mode the credential rides along as `/RU <user> /RP <pass>`:
+ * schtasks applies them on top of the XML principal and stores the password
+ * (encrypted) with the task. NOTE the password transits the schtasks command
+ * line — briefly visible to same-user process inspection; unavoidable with
+ * schtasks, and the reason the marker file stores only the username.
  */
 async function importTaskSpec(
   spec: TaskSpec,
   xmlDir: string,
   schtasks: SchtasksRunner,
+  logon?: TaskLogon & { password?: string },
 ): Promise<SchtasksResult> {
   const xmlPath = join(xmlDir, `phantombot-task-${spec.label}.xml`);
   await writeTaskXml(xmlPath, spec.xml);
-  const r = await schtasks.run([
-    "/Create",
-    "/TN",
-    spec.name,
-    "/XML",
-    xmlPath,
-    "/F",
-  ]);
+  const args = ["/Create", "/TN", spec.name, "/XML", xmlPath];
+  if (logon?.mode === "password" && logon.username && logon.password) {
+    args.push("/RU", logon.username, "/RP", logon.password);
+  }
+  args.push("/F");
+  const r = await schtasks.run(args);
   // Best-effort cleanup of the transient import file.
   await unlink(xmlPath).catch(() => {});
   return r;
 }
 
-function allTaskSpecs(sid: string, binPath: string): TaskSpec[] {
+function allTaskSpecs(
+  sid: string,
+  binPath: string,
+  persona: string,
+  logon: TaskLogon = { mode: "interactive" },
+): TaskSpec[] {
   return [
     {
-      name: PHANTOMBOT_TASK,
+      name: taskNames(persona).main,
       label: "phantombot",
-      xml: generatePhantombotTaskXml(sid, binPath),
+      xml: generatePhantombotTaskXml(sid, binPath, persona, logon),
     },
     {
-      name: HEARTBEAT_TASK,
+      name: taskNames(persona).heartbeat,
       label: "heartbeat",
-      xml: generateHeartbeatTaskXml(sid, binPath),
+      xml: generateHeartbeatTaskXml(sid, binPath, persona, logon),
     },
     {
-      name: NIGHTLY_TASK,
+      name: taskNames(persona).nightly,
       label: "nightly",
-      xml: generateNightlyTaskXml(sid, binPath),
+      xml: generateNightlyTaskXml(sid, binPath, persona, logon),
     },
-    { name: TICK_TASK, label: "tick", xml: generateTickTaskXml(sid, binPath) },
+    {
+      name: taskNames(persona).tick,
+      label: "tick",
+      xml: generateTickTaskXml(sid, binPath, persona, logon),
+    },
   ];
+}
+
+/**
+ * The Principal UserId from a task's exported XML. Real
+ * `schtasks /Query /XML` output carries the account SID here (e.g.
+ * `S-1-5-21-…-1008`), which compares cleanly across renamed accounts and
+ * localized principal names.
+ */
+export function taskPrincipalUserId(xml: string): string | undefined {
+  const m =
+    /<Principals>[\s\S]*?<Principal\b[^>]*>[\s\S]*?<UserId>\s*([^<]+?)\s*<\/UserId>/i.exec(
+      xml,
+    );
+  return m?.[1];
+}
+
+type OwnedDeleteOutcome = "deleted" | "absent" | "kept-foreign" | "failed";
+
+/** Identity a task principal is matched against for ownership. Password-mode
+ * tasks carry `COMPUTER\\user` (not a SID) in their Principal <UserId>, so
+ * the account name is needed in addition to the SID. */
+interface TaskOwner {
+  sid: string;
+  username?: string;
+}
+
+function principalMatchesOwner(principal: string, owner: TaskOwner): boolean {
+  const p = principal.toLowerCase();
+  return (
+    p === owner.sid.toLowerCase() ||
+    (owner.username !== undefined && p === owner.username.toLowerCase())
+  );
+}
+
+/**
+ * Delete a scheduled task ONLY when it provably belongs to this Windows
+ * account. Task Scheduler folders are machine-global — every local user's
+ * tasks live in the same `\Phantombot\` namespace — so a blind `/Delete`
+ * from persona A's install could kill persona B's (or another Windows
+ * user's) still-active daemon task. Ownership is proven by the principal
+ * in the task's exported XML matching either the current SID (interactive
+ * tasks) or the current `COMPUTER\\user` account name (password-mode
+ * tasks); when the task is missing, the XML won't parse, or the principal
+ * belongs to someone else, the task is left untouched.
+ */
+async function deleteTaskIfOwned(
+  schtasks: SchtasksRunner,
+  name: string,
+  owner: TaskOwner,
+): Promise<OwnedDeleteOutcome> {
+  const q = await schtasks.run(["/Query", "/TN", name, "/XML"]);
+  if (q.exitCode !== 0) return "absent";
+  const principal = taskPrincipalUserId(q.stdout);
+  if (principal === undefined || !principalMatchesOwner(principal, owner)) {
+    return "kept-foreign";
+  }
+  const r = await schtasks.run(["/Delete", "/TN", name, "/F"]);
+  return r.exitCode === 0 ? "deleted" : "failed";
+}
+
+/**
+ * Delete the pre-persona-rename task names, but only those owned by the
+ * installing Windows account (see deleteTaskIfOwned). Without this an
+ * upgraded install would leave the old `\Phantombot\phantombot` keep-alive
+ * running alongside the new `phantombot-<persona>` one — two supervisors
+ * fighting over one run-lock.
+ */
+export async function deleteLegacyTasks(
+  schtasks: SchtasksRunner,
+  keep: readonly string[],
+  owner: TaskOwner,
+): Promise<{ removed: string[]; keptForeign: string[] }> {
+  const removed: string[] = [];
+  const keptForeign: string[] = [];
+  for (const name of LEGACY_TASK_NAMES) {
+    if (keep.includes(name)) continue;
+    const outcome = await deleteTaskIfOwned(schtasks, name, owner);
+    if (outcome === "deleted") removed.push(name);
+    else if (outcome === "kept-foreign") keptForeign.push(name);
+  }
+  return { removed, keptForeign };
 }
 
 export interface InstallTaskSchedulerOptions {
   binPath: string;
+  /** Persona the tasks supervise — names become `phantombot-<persona>` etc. */
+  persona: string;
   /** Override the current user's SID (tests). Production resolves it live. */
   sid?: string;
+  /** Override the current `COMPUTER\\user` account name (tests). Needed to
+   * prove ownership of PASSWORD-mode tasks, whose principal is the account
+   * name rather than the SID. */
+  accountName?: string;
   /** Directory for the transient XML import files (tests). Defaults to %TEMP%. */
   xmlDir?: string;
+  /**
+   * Logon mode chosen at install. "password" requires `username` + `password`;
+   * the password is handed to schtasks at registration and NOT persisted by us.
+   */
+  logon?: TaskLogon & { password?: string };
   schtasks: SchtasksRunner;
   out: WriteSink;
   err: WriteSink;
@@ -837,18 +1124,36 @@ export interface InstallTaskSchedulerOptions {
  * installation. Missing tasks, or tasks that point at an old binary path, are
  * imported from the current templates; tasks that already point at `binPath`
  * retain their existing triggers, principal, settings, and action shape.
+ *
+ * The chosen logon mode is persisted (WITHOUT the password) so the heartbeat
+ * self-heal regenerates matching XML instead of silently downgrading a
+ * password-mode install back to interactive.
  */
 export async function installPhantombotTasks(
   opts: InstallTaskSchedulerOptions,
 ): Promise<{ installed: boolean }> {
   const sid = opts.sid ?? currentUserSid();
+  const owner: TaskOwner = {
+    sid,
+    username: opts.accountName ?? currentUserName(),
+  };
   const xmlDir = opts.xmlDir ?? tmpdir();
+  const logon = opts.logon ?? { mode: "interactive" as const };
+
+  // Persist the logon choice BEFORE registering, so a later heal sees it even
+  // if a registration below fails halfway.
+  await writeTaskLogon(opts.persona, { mode: logon.mode, username: logon.username });
 
   const r = await ensureTasksCurrent({
     binPath: opts.binPath,
+    persona: opts.persona,
     sid,
     xmlDir,
     schtasks: opts.schtasks,
+    // A (re)install must apply the chosen mode + credential even when the
+    // existing tasks already reference this binary — force re-import.
+    force: true,
+    logon,
   });
 
   for (const name of r.rewrote) opts.out.write(`registered scheduled task: ${name}\n`);
@@ -856,41 +1161,88 @@ export async function installPhantombotTasks(
     opts.err.write(`could not register scheduled task(s): ${r.failed.join(", ")}\n`);
     return { installed: false };
   }
+
+  // Remove pre-rename legacy task names so an upgrade never double-supervises.
+  // Only tasks provably owned by THIS Windows account are touched.
+  const legacy = await deleteLegacyTasks(
+    opts.schtasks,
+    taskNames(opts.persona).all,
+    owner,
+  );
+  for (const name of legacy.removed) {
+    opts.out.write(`removed legacy scheduled task: ${name}\n`);
+  }
+  for (const name of legacy.keptForeign) {
+    opts.out.write(
+      `left ${name} untouched (owned by another Windows account)\n`,
+    );
+  }
+
   opts.out.write(
-    `registered ${PHANTOMBOT_TASK} + heartbeat + nightly + tick\n`,
+    `registered ${taskNames(opts.persona).main} + heartbeat + nightly + tick\n`,
   );
   return { installed: true };
 }
 
 export interface UninstallTaskSchedulerOptions {
+  /** Persona whose tasks to remove. Defaults to the current persona. */
+  persona?: string;
+  /** Override the current user's SID (tests). Production resolves it live. */
+  sid?: string;
+  /** Override the current `COMPUTER\\user` account name (tests) — see
+   * InstallTaskSchedulerOptions.accountName. */
+  accountName?: string;
   schtasks: SchtasksRunner;
   out: WriteSink;
   err: WriteSink;
 }
 
 /**
- * Delete all four scheduled tasks (best-effort). A missing task returns
- * non-zero from schtasks — logged and skipped, never fatal. The empty
- * \Phantombot folder is harmless and left in place (schtasks has no reliable
- * folder-delete verb across Windows versions).
+ * Delete this persona's four scheduled tasks, plus any legacy pre-rename
+ * names still around — but ONLY tasks provably owned by this Windows
+ * account (Task Scheduler folders are machine-global, so another user's
+ * same-named tasks are left untouched). A missing task is skipped quietly;
+ * a failed delete is logged, never fatal. The empty \Phantombot folder is
+ * harmless and left in place (schtasks has no reliable folder-delete verb
+ * across Windows versions).
  */
 export async function uninstallPhantombotTasks(
   opts: UninstallTaskSchedulerOptions,
 ): Promise<{ removed: boolean }> {
-  const names = [TICK_TASK, NIGHTLY_TASK, HEARTBEAT_TASK, PHANTOMBOT_TASK];
-  for (const name of names) {
-    const r = await opts.schtasks.run(["/Delete", "/TN", name, "/F"]);
-    if (r.exitCode !== 0) {
-      opts.out.write(
-        `schtasks /Delete ${name} returned ${r.exitCode} (continuing)\n`,
-      );
-    } else {
-      opts.out.write(`removed scheduled task: ${name}\n`);
+  const persona = opts.persona ?? (await currentPersonaName());
+  const owner: TaskOwner = {
+    sid: opts.sid ?? currentUserSid(),
+    username: opts.accountName ?? currentUserName(),
+  };
+  const names = taskNames(persona);
+  const ordered = [names.tick, names.nightly, names.heartbeat, names.main];
+  const legacyOutcomes: OwnedDeleteOutcome[] = [];
+  for (const name of [...ordered, ...LEGACY_TASK_NAMES]) {
+    const outcome = await deleteTaskIfOwned(opts.schtasks, name, owner);
+    if (LEGACY_TASK_NAMES.includes(name as (typeof LEGACY_TASK_NAMES)[number])) {
+      legacyOutcomes.push(outcome);
     }
+    if (outcome === "deleted") {
+      opts.out.write(`removed scheduled task: ${name}\n`);
+    } else if (outcome === "kept-foreign") {
+      opts.out.write(
+        `left ${name} untouched (owned by another Windows account)\n`,
+      );
+    } else if (outcome === "failed") {
+      opts.out.write(`schtasks /Delete ${name} failed (continuing)\n`);
+    }
+    // "absent" → nothing to report.
   }
-  // Best-effort removal of the shared launcher script (the tasks are gone, so
-  // nothing references it any more). A missing file is fine.
-  await unlink(launcherVbsPath()).catch(() => {});
+  // Remove THIS persona's launcher script — other personas have their own
+  // (persona-scoped since the launcher rename), so this can't strand them.
+  await unlink(launcherVbsPath(persona)).catch(() => {});
+  // The legacy SHARED launcher is referenced only by the legacy pre-rename
+  // tasks. Remove it only when none of those survived: a foreign-owned
+  // legacy task we were not allowed to delete still needs the file.
+  if (legacyOutcomes.every((o) => o === "absent" || o === "deleted")) {
+    await unlink(legacyLauncherVbsPath()).catch(() => {});
+  }
+  await unlink(logonMarkerPath(persona)).catch(() => {});
   return { removed: true };
 }
 
@@ -906,12 +1258,61 @@ function xmlReferencesBin(xml: string, binPath: string): boolean {
 
 export interface EnsureTasksCurrentOptions {
   binPath: string;
+  /** Persona whose tasks to heal. Defaults to the current persona. */
+  persona?: string;
   /** Override the current user's SID (tests). Production resolves it live. */
   sid?: string;
   /** Directory for the transient XML import files (tests). Defaults to %TEMP%. */
   xmlDir?: string;
+  /** Re-import even when the registered task already references `binPath`
+   * (install applies a fresh logon mode / credential). */
+  force?: boolean;
+  /**
+   * Logon mode to write. When omitted the persisted install-time choice is
+   * used, so the heal never downgrades a password-mode install. A password
+   * is only present on the install path; the heal path repairs password-mode
+   * drift via a PowerShell action patch (no credential re-entry needed).
+   */
+  logon?: TaskLogon & { password?: string };
   schtasks: SchtasksRunner;
+  /** Test seam for the password-mode action patcher. */
+  patchAction?: PatchActionFn;
 }
+
+/**
+ * Patch a registered task's action arguments in place via PowerShell
+ * (`Set-ScheduledTask`), preserving the stored credential. This is the ONLY
+ * way to repair binary-path drift on a password-mode task without asking
+ * for the Windows password again — `schtasks /Create` on a Password-logon
+ * task insists on /RP.
+ */
+export type PatchActionFn = (
+  taskName: string,
+  newArguments: string,
+) => Promise<{ ok: boolean; stderr?: string }>;
+
+const defaultPatchAction: PatchActionFn = async (taskName, newArguments) => {
+  // Split "\\Phantombot\\phantombot-megan" into folder + leaf for the
+  // ScheduledTasks cmdlets. Single-quote escaping for PowerShell.
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const leaf = taskName.split("\\").pop() ?? taskName;
+  const folder = taskName.slice(0, taskName.length - leaf.length) || "\\";
+  const script =
+    `$t = Get-ScheduledTask -TaskName ${q(leaf)} -TaskPath ${q(folder)}; ` +
+    `$t.Actions[0].Arguments = ${q(newArguments)}; ` +
+    `Set-ScheduledTask -InputObject $t | Out-Null`;
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe", windowsHide: true },
+  );
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return exitCode === 0
+    ? { ok: true }
+    : { ok: false, stderr: stderr.trim() || `powershell exited ${exitCode}` };
+};
 
 export interface EnsureTasksCurrentResult {
   /**
@@ -946,15 +1347,60 @@ export async function ensureTasksCurrent(
 ): Promise<EnsureTasksCurrentResult> {
   const sid = opts.sid ?? currentUserSid();
   const xmlDir = opts.xmlDir ?? tmpdir();
+  const persona = opts.persona ?? (await currentPersonaName());
+  const logon: TaskLogon & { password?: string } =
+    opts.logon ??
+    (opts.force ? { mode: "interactive" as const } : await readTaskLogon(persona));
   const rewrote: string[] = [];
   const failed: string[] = [];
   let ensuredDirs = false;
 
-  for (const spec of allTaskSpecs(sid, opts.binPath)) {
+  for (const spec of allTaskSpecs(sid, opts.binPath, persona, logon)) {
     const q = await opts.schtasks.run(["/Query", "/TN", spec.name, "/XML"]);
+    const registered = q.exitCode === 0;
     const current =
-      q.exitCode === 0 && xmlReferencesBin(q.stdout, opts.binPath);
-    if (current) continue; // registered and already points at this binary
+      registered && xmlReferencesBin(q.stdout, opts.binPath);
+    if (current && !opts.force) continue; // registered and points at this binary
+
+    // Password-mode heal without a credential: schtasks /Create would demand
+    // /RP interactively, so instead patch the registered task's action
+    // arguments in place (credential untouched). A MISSING task can't be
+    // patched — that needs a re-install with the password.
+    if (logon.mode === "password" && !logon.password) {
+      if (!registered) {
+        failed.push(spec.name);
+        log.warn("taskScheduler: password-mode task missing; re-run `phantombot install` to restore it", {
+          task: spec.name,
+        });
+        continue;
+      }
+      if (opts.force) {
+        // force implies install, which always carries the password — this
+        // branch is defensive only.
+        failed.push(spec.name);
+        continue;
+      }
+      const { out: outLog, err: errLog } = taskLogPaths(spec.label);
+      const newArgs = buildLauncherArguments(
+        opts.binPath,
+        specArgsForLabel(spec.label),
+        outLog,
+        errLog,
+        launcherVbsPath(persona),
+      );
+      const patch = opts.patchAction ?? defaultPatchAction;
+      const pr = await patch(spec.name, newArgs);
+      if (pr.ok) {
+        rewrote.push(spec.name);
+      } else {
+        failed.push(spec.name);
+        log.warn("taskScheduler: could not patch password-mode task", {
+          task: spec.name,
+          error: pr.stderr,
+        });
+      }
+      continue;
+    }
 
     // Missing or drifted → re-import. Ensure the log + temp dirs and the hidden
     // launcher exist first (a fresh box healing a never-installed task needs
@@ -963,10 +1409,10 @@ export async function ensureTasksCurrent(
     if (!ensuredDirs) {
       await mkdir(logsDir(), { recursive: true });
       await mkdir(xmlDir, { recursive: true });
-      await writeLauncherVbs();
+      await writeLauncherVbs(persona);
       ensuredDirs = true;
     }
-    const r = await importTaskSpec(spec, xmlDir, opts.schtasks);
+    const r = await importTaskSpec(spec, xmlDir, opts.schtasks, logon);
     if (r.exitCode === 0) {
       rewrote.push(spec.name);
     } else {
@@ -980,6 +1426,11 @@ export async function ensureTasksCurrent(
   }
 
   return { rewrote, failed };
+}
+
+/** Subcommand line each task label runs — kept in sync with allTaskSpecs. */
+function specArgsForLabel(label: TaskLabel): string[] {
+  return [label === "phantombot" ? "run" : label];
 }
 
 export interface TaskSchedulerServiceControl {
@@ -1044,6 +1495,8 @@ export interface ScheduleWindowsRelaunchOpts {
   graceSeconds?: number;
   /** Defaults to process.execPath — the on-disk (freshly-swapped) binary. */
   binPath?: string;
+  /** Persona whose task/marker to use (tests). Defaults to the current persona. */
+  persona?: string;
   /** Test seam. Defaults to a detached Bun.spawn of powershell. */
   spawnImpl?: RelaunchSpawn;
 }
@@ -1079,19 +1532,30 @@ export async function scheduleWindowsRelaunch(
   const binPath = opts.binPath ?? process.execPath;
   const { out, err } = taskLogPaths("phantombot");
 
+  // Password-mode installs relaunch via `schtasks /Run`: the scheduler (not
+  // our dying process tree) owns the new daemon, so nothing can be reaped
+  // when the old task instance ends. Interactive mode keeps the Start-Process
+  // watcher — /Run into the console session is exactly what historically
+  // wedged the scheduler's run-accounting.
+  const persona = opts.persona ?? (await currentPersonaName());
+  const passwordMode = (await readTaskLogon(persona)).mode === "password";
+
   // Inner watcher: wait for the current daemon to exit (Wait-Process returns
   // immediately if the pid is already gone; -Timeout caps a wedged shutdown so
   // we still relaunch), then launch the swapped binary detached. Encoded as
   // base64 UTF-16LE so the outer -Command layer needs no nested quoting.
-  const watcher = [
-    `Wait-Process -Id ${selfPid} -Timeout ${graceSeconds} -ErrorAction SilentlyContinue;`,
-    `Start-Process -FilePath ${powershellQuote(binPath)}`,
-    `-ArgumentList @('run')`,
-    `-WorkingDirectory ${powershellQuote(process.cwd())}`,
-    `-WindowStyle Hidden`,
-    `-RedirectStandardOutput ${powershellQuote(out)}`,
-    `-RedirectStandardError ${powershellQuote(err)}`,
-  ].join(" ");
+  const waitForExit = `Wait-Process -Id ${selfPid} -Timeout ${graceSeconds} -ErrorAction SilentlyContinue;`;
+  const watcher = passwordMode
+    ? `${waitForExit} schtasks /Run /TN "${taskNames(persona).main}"`
+    : [
+        waitForExit,
+        `Start-Process -FilePath ${powershellQuote(binPath)}`,
+        `-ArgumentList @('run')`,
+        `-WorkingDirectory ${powershellQuote(process.cwd())}`,
+        `-WindowStyle Hidden`,
+        `-RedirectStandardOutput ${powershellQuote(out)}`,
+        `-RedirectStandardError ${powershellQuote(err)}`,
+      ].join(" ");
   const encoded = Buffer.from(watcher, "utf16le").toString("base64");
 
   // Outer layer: detach the watcher from our process tree so it survives our
@@ -1139,23 +1603,43 @@ export function defaultTaskSchedulerServiceControl(
   selfPid: number = process.pid,
   // Injectable so stop()/restart() are testable without real 10s waits.
   waitDeps: WaitDeps = defaultWaitDeps,
+  /** Persona whose tasks to control. Defaults to the current persona. */
+  persona?: string,
 ): TaskSchedulerServiceControl {
-  const launchDirectly =
-    process.platform === "win32" && runner instanceof BunSchtasksRunner;
+  // Resolve the persona once, lazily — the task names and the logon marker
+  // are both persona-scoped, and every method awaits the same promise.
+  const personaPromise = (async () => persona ?? (await currentPersonaName()))();
+  const mainTaskPromise = (async () => taskNames(await personaPromise).main)();
+
+  // Password-mode tasks are scheduler-owned: `schtasks /Run` launches them in
+  // session 0 under the stored credential, so the daemon survives the
+  // disconnect of whatever SSH/console session typed `start`. The direct
+  // Start-Process path is only for interactive mode, where a scheduler run
+  // would pop the daemon into the console session anyway — and where /Run
+  // historically wedged. Resolved lazily per call so an install that flips
+  // modes mid-session is picked up.
+  const useSchedulerRun = async (): Promise<boolean> => {
+    if (!(process.platform === "win32" && runner instanceof BunSchtasksRunner)) {
+      return true; // tests / non-Windows: the fake runner path
+    }
+    return (await readTaskLogon(await personaPromise)).mode === "password";
+  };
+
   return {
     async isActive() {
       // `schtasks /Query /TN <name>` exits 0 when the task is registered —
       // the Task Scheduler analogue of a launchd unit being loaded.
-      const r = await runner.run(["/Query", "/TN", PHANTOMBOT_TASK]);
+      const r = await runner.run(["/Query", "/TN", await mainTaskPromise]);
       return r.exitCode === 0;
     },
     async start() {
       // The main task carries a 1-minute keep-alive TimeTrigger, which `stop()`
       // disables. Re-enable it first so the supervisor keeps the process up,
       // then kick off a run immediately rather than waiting up to 60s for the
-      await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
-      if (!launchDirectly) {
-        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+      const mainTask = await mainTaskPromise;
+      await runner.run(["/Change", "/TN", mainTask, "/ENABLE"]);
+      if (await useSchedulerRun()) {
+        const r = await runner.run(["/Run", "/TN", mainTask]);
         return r.exitCode === 0
           ? { ok: true }
           : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
@@ -1177,8 +1661,9 @@ export function defaultTaskSchedulerServiceControl(
       // disable the trigger, /End the task, then kill any surviving `phantombot
       // run` daemon directly. /Disable on an already-disabled task is harmless;
       // /End on a stopped task is harmless.
-      const r = await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/DISABLE"]);
-      await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
+      const mainTask = await mainTaskPromise;
+      const r = await runner.run(["/Change", "/TN", mainTask, "/DISABLE"]);
+      await runner.run(["/End", "/TN", mainTask]);
       const kill = await killDaemonProcesses(processManager, selfPid, waitDeps);
       if (r.exitCode !== 0) {
         return { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
@@ -1201,8 +1686,9 @@ export function defaultTaskSchedulerServiceControl(
       // 1-minute trigger relaunches the swapped binary within 60s regardless.
       // /End is best-effort; killDaemonProcesses guarantees the old process is
       // actually gone so /Run doesn't bounce off the single-instance lock.
-      await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
-      await runner.run(["/End", "/TN", PHANTOMBOT_TASK]);
+      const mainTask = await mainTaskPromise;
+      await runner.run(["/Change", "/TN", mainTask, "/ENABLE"]);
+      await runner.run(["/End", "/TN", mainTask]);
       const kill = await killDaemonProcesses(processManager, selfPid, waitDeps);
       // Fail closed. If we can't prove the old daemon is gone, `/Run` would
       // bounce off its still-held run-lock and silently no-op — leaving the old
@@ -1220,8 +1706,8 @@ export function defaultTaskSchedulerServiceControl(
             `skipped /Run — the keep-alive trigger will relaunch within 60s`,
         };
       }
-      if (!launchDirectly) {
-        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+      if (await useSchedulerRun()) {
+        const r = await runner.run(["/Run", "/TN", mainTask]);
         return r.exitCode === 0
           ? { ok: true }
           : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
@@ -1247,7 +1733,7 @@ export function defaultTaskSchedulerServiceControl(
       if (!isPhantombotBinary(binPath)) {
         return { rerendered: false };
       }
-      const installed = await runner.run(["/Query", "/TN", PHANTOMBOT_TASK]);
+      const installed = await runner.run(["/Query", "/TN", await mainTaskPromise]);
       if (installed.exitCode !== 0) return { rerendered: false };
       let sid: string;
       try {
@@ -1255,7 +1741,12 @@ export function defaultTaskSchedulerServiceControl(
       } catch {
         return { rerendered: false };
       }
-      const r = await ensureTasksCurrent({ binPath, sid, schtasks: runner });
+      const r = await ensureTasksCurrent({
+        binPath,
+        sid,
+        persona: persona ?? (await currentPersonaName()),
+        schtasks: runner,
+      });
       return { rerendered: r.rewrote.length > 0 };
     },
   };

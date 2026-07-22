@@ -35,9 +35,11 @@ import {
   type ServiceControl,
 } from "./systemd.ts";
 import {
+  currentPersonaName,
   defaultTaskSchedulerServiceControl,
   scheduleWindowsRelaunch,
   taskLogPaths,
+  taskNames,
 } from "./taskScheduler.ts";
 
 export type { ServiceControl };
@@ -169,13 +171,36 @@ function noopServiceControl(): ServiceControl {
   };
 }
 
+/**
+ * Overrides for the command-hint helpers. `platform` fakes the host OS and
+ * `persona` fakes the persona name so the Windows hint shapes are testable
+ * on any host; production callers pass nothing.
+ */
+export interface HintOverrides {
+  platform?: Platform;
+  persona?: string;
+}
+
+/**
+ * The persona-scoped main daemon task this process belongs to. Install
+ * registers `\Phantombot\phantombot-<persona>` (see taskScheduler.ts), so
+ * every Windows hint below must name THAT task — the legacy unsuffixed name
+ * addresses a task that no longer exists after install.
+ */
+async function windowsMainTaskName(over?: HintOverrides): Promise<string> {
+  const persona = over?.persona ?? (await currentPersonaName());
+  return taskNames(persona).main;
+}
+
 /** Copy-pasteable command string the user can run to restart phantombot. */
-export function restartCommand(): string {
-  switch (currentPlatform()) {
+export async function restartCommand(over?: HintOverrides): Promise<string> {
+  switch (over?.platform ?? currentPlatform()) {
     case "darwin":
       return `launchctl kickstart -k gui/$(id -u)/dev.phantombot.phantombot`;
-    case "windows":
-      return `schtasks /End /TN "\\Phantombot\\phantombot" & schtasks /Run /TN "\\Phantombot\\phantombot"`;
+    case "windows": {
+      const task = await windowsMainTaskName(over);
+      return `schtasks /End /TN "${task}" & schtasks /Run /TN "${task}"`;
+    }
     case "linux":
     default:
       return "systemctl --user restart phantombot";
@@ -183,12 +208,14 @@ export function restartCommand(): string {
 }
 
 /** Copy-pasteable command string the user can run to start phantombot. */
-export function startCommand(): string {
-  switch (currentPlatform()) {
+export async function startCommand(over?: HintOverrides): Promise<string> {
+  switch (over?.platform ?? currentPlatform()) {
     case "darwin":
       return `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.phantombot.phantombot.plist`;
-    case "windows":
-      return `schtasks /Change /TN "\\Phantombot\\phantombot" /ENABLE & schtasks /Run /TN "\\Phantombot\\phantombot"`;
+    case "windows": {
+      const task = await windowsMainTaskName(over);
+      return `schtasks /Change /TN "${task}" /ENABLE & schtasks /Run /TN "${task}"`;
+    }
     case "linux":
     default:
       return "systemctl --user start phantombot";
@@ -196,12 +223,14 @@ export function startCommand(): string {
 }
 
 /** Copy-pasteable command string the user can run to stop phantombot. */
-export function stopCommand(): string {
-  switch (currentPlatform()) {
+export async function stopCommand(over?: HintOverrides): Promise<string> {
+  switch (over?.platform ?? currentPlatform()) {
     case "darwin":
       return `launchctl bootout gui/$(id -u)/dev.phantombot.phantombot`;
-    case "windows":
-      return `schtasks /Change /TN "\\Phantombot\\phantombot" /DISABLE & schtasks /End /TN "\\Phantombot\\phantombot"`;
+    case "windows": {
+      const task = await windowsMainTaskName(over);
+      return `schtasks /Change /TN "${task}" /DISABLE & schtasks /End /TN "${task}"`;
+    }
     case "linux":
     default:
       return "systemctl --user stop phantombot";
@@ -209,12 +238,12 @@ export function stopCommand(): string {
 }
 
 /** Copy-pasteable command string for "show me the service status". */
-export function statusCommand(): string {
-  switch (currentPlatform()) {
+export async function statusCommand(over?: HintOverrides): Promise<string> {
+  switch (over?.platform ?? currentPlatform()) {
     case "darwin":
       return `launchctl print gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return `schtasks /Query /TN "\\Phantombot\\phantombot" /V /FO LIST`;
+      return `schtasks /Query /TN "${await windowsMainTaskName(over)}" /V /FO LIST`;
     case "linux":
     default:
       return "systemctl --user status phantombot";

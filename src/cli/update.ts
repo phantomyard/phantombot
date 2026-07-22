@@ -316,13 +316,13 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
       out.write("restarted phantombot.service.\n");
     } else {
       err.write(
-        `restart failed: ${r.stderr ?? "unknown"} — run '${restartCommand()}' manually.\n`,
+        `restart failed: ${r.stderr ?? "unknown"} — run '${await restartCommand()}' manually.\n`,
       );
       // Don't fail the whole command; the binary swap succeeded. The
       // user just needs to restart by hand.
     }
   } else if (!input.force) {
-    out.write(`restart with: ${restartCommand()}\n`);
+    out.write(`restart with: ${await restartCommand()}\n`);
   }
 
   return 0;

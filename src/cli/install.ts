@@ -14,6 +14,7 @@
 
 import { defineCommand } from "citty";
 import { basename } from "node:path";
+import * as p from "@clack/prompts";
 
 import { installCompletions } from "../lib/completionInstall.ts";
 
@@ -39,8 +40,10 @@ import {
 } from "../lib/systemd.ts";
 import {
   BunSchtasksRunner,
+  currentPersonaName,
   installPhantombotTasks,
   type SchtasksRunner,
+  type TaskLogon,
 } from "../lib/taskScheduler.ts";
 import type { WriteSink } from "../lib/io.ts";
 
@@ -93,6 +96,26 @@ export interface RunInstallInput {
   schtasks?: SchtasksRunner;
   /** Override the current-user SID for testing (Windows). */
   sid?: string;
+  /** Override the persona the Windows tasks supervise (testing). */
+  persona?: string;
+  /**
+   * Windows logon-mode prompt seams (testing). When absent, the real
+   * @clack/prompts flow runs — but only on a TTY; a non-interactive install
+   * (scripted, CI, SSH without -t) silently takes the interactive-token
+   * default.
+   */
+  promptRunLoggedOff?: () => Promise<boolean | null>;
+  promptPassword?: () => Promise<string | null>;
+  /** `COMPUTER\user` resolution seam (testing). Defaults to `whoami`. */
+  whoami?: () => Promise<string>;
+  /**
+   * Scripted-mode flags (Windows): skip the TUI prompt entirely. With
+   * `--run-logged-off`, the password comes from --windows-password or the
+   * PHANTOMBOT_WINDOWS_PASSWORD env var; without either (and no TTY to ask),
+   * install fails with a clear message rather than hanging.
+   */
+  runLoggedOff?: boolean;
+  windowsPassword?: string;
   /** Directory for transient Task Scheduler XML import files (Windows tests). */
   xmlDir?: string;
   /** Override systemd-env detection for testing. */
@@ -224,10 +247,22 @@ async function runInstallWindows(
   err: WriteSink,
 ): Promise<number> {
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
+  const persona = input.persona ?? (await currentPersonaName());
+
+  // Ask whether the daemon should also run when NOBODY is logged on
+  // (headless VM, Windows-update reboots). That requires Task Scheduler to
+  // store the Windows password with the task; default stays the safer
+  // interactive-token mode. Prompts only run on a real TTY — scripted
+  // installs keep the default.
+  const logon = await resolveWindowsLogon(input, err);
+  if (!logon) return 2; // user cancelled the prompt
+
   const result = await installPhantombotTasks({
     binPath,
+    persona,
     sid: input.sid,
     xmlDir: input.xmlDir,
+    logon,
     schtasks,
     out,
     err,
@@ -235,10 +270,96 @@ async function runInstallWindows(
   if (!result.installed) return 1;
 
   out.write(
-    `\nThese tasks run for the current Windows user while logged in.\n` +
-      manageHints(),
+    logon.mode === "password"
+      ? `\nThese tasks run as ${logon.username} whether or not anyone is logged on (starts at boot).\n` +
+          manageHints()
+      : `\nThese tasks run for the current Windows user while logged in.\n` +
+          manageHints(),
   );
   return 0;
+}
+
+type WindowsLogonChoice = TaskLogon & { password?: string };
+
+/**
+ * The install-time "run when logged off?" flow. Returns the chosen logon
+ * config, or null when the user cancels. Non-interactive invocations (no
+ * TTY) skip the prompts and take the interactive default — a scripted
+ * install must never block on a question nobody can answer.
+ */
+async function resolveWindowsLogon(
+  input: RunInstallInput,
+  err: WriteSink,
+): Promise<WindowsLogonChoice | null> {
+  // Scripted mode: flags/env decide, no prompts. Explicit false is the same
+  // interactive-token install as answering "no".
+  if (input.runLoggedOff !== undefined) {
+    if (!input.runLoggedOff) return { mode: "interactive" };
+    const username = await (input.whoami ?? defaultWhoami)();
+    const password =
+      input.windowsPassword ?? process.env.PHANTOMBOT_WINDOWS_PASSWORD;
+    if (!password) {
+      err.write(
+        "--run-logged-off needs the Windows password via --windows-password or PHANTOMBOT_WINDOWS_PASSWORD\n",
+      );
+      return null;
+    }
+    return { mode: "password", username, password };
+  }
+
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const askLoggedOff =
+    input.promptRunLoggedOff ??
+    (interactive
+      ? async () => {
+          const answer = await p.confirm({
+            message:
+              "Run phantombot when you are logged off? (survives reboots without login; requires your Windows password)",
+            initialValue: false,
+          });
+          if (p.isCancel(answer)) return null;
+          return answer;
+        }
+      : undefined);
+  if (!askLoggedOff) return { mode: "interactive" };
+
+  const wantsLoggedOff = await askLoggedOff();
+  if (wantsLoggedOff === null) {
+    err.write("install cancelled\n");
+    return null;
+  }
+  if (!wantsLoggedOff) return { mode: "interactive" };
+
+  const username = await (input.whoami ?? defaultWhoami)();
+  const askPassword =
+    input.promptPassword ??
+    (async () => {
+      const answer = await p.password({
+        message: `Windows password for ${username} (stored encrypted with the scheduled task):`,
+        validate: (v) =>
+          !v || v.length === 0 ? "password may not be empty" : undefined,
+      });
+      if (p.isCancel(answer)) return null;
+      return answer;
+    });
+  const password = await askPassword();
+  if (password === null) {
+    err.write("install cancelled\n");
+    return null;
+  }
+  return { mode: "password", username, password };
+}
+
+/** `COMPUTER\user` (or `DOMAIN\user`) for schtasks /RU. */
+async function defaultWhoami(): Promise<string> {
+  const proc = Bun.spawn(["whoami"], { stdout: "pipe", stderr: "pipe" });
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  const name = stdout.trim();
+  if (exitCode !== 0 || !name) {
+    throw new Error("could not resolve the current Windows user via whoami");
+  }
+  return name;
 }
 
 export default defineCommand({
@@ -247,8 +368,32 @@ export default defineCommand({
     description:
       "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler logon task on Windows) and start it.",
   },
-  async run() {
-    const code = await runInstall();
+  args: {
+    "run-logged-off": {
+      type: "boolean",
+      description:
+        "Windows: run whether or not anyone is logged on (stores the Windows password with the scheduled task; pair with --windows-password or PHANTOMBOT_WINDOWS_PASSWORD). Skips the prompt.",
+    },
+    "interactive": {
+      type: "boolean",
+      description:
+        "Windows: run only while the user is logged on (skips the prompt; the default).",
+    },
+    "windows-password": {
+      type: "string",
+      description:
+        "Windows: account password for --run-logged-off. Prefer the PHANTOMBOT_WINDOWS_PASSWORD env var to keep it out of shell history.",
+    },
+  },
+  async run({ args }) {
+    const code = await runInstall({
+      runLoggedOff: args["run-logged-off"]
+        ? true
+        : args["interactive"]
+          ? false
+          : undefined,
+      windowsPassword: args["windows-password"],
+    });
     // A successful install wires up shell tab-completion so it works right
     // away, with no extra step. Best-effort: a completion failure never turns
     // a successful install into a failure.

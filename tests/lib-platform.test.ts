@@ -35,47 +35,88 @@ describe("currentPlatform", () => {
 });
 
 describe("hint commands shape per platform", () => {
-  test("on linux: systemctl/journalctl strings", () => {
+  test("on linux: systemctl/journalctl strings", async () => {
     if (process.platform !== "linux") return; // guard for CI on darwin
-    expect(restartCommand()).toContain("systemctl --user restart phantombot");
-    expect(statusCommand()).toContain("systemctl --user status phantombot");
+    expect(await restartCommand()).toContain("systemctl --user restart phantombot");
+    expect(await statusCommand()).toContain("systemctl --user status phantombot");
     expect(logsCommand()).toContain("journalctl --user -u phantombot");
   });
 
-  test("on darwin: launchctl strings", () => {
+  test("on darwin: launchctl strings", async () => {
     if (process.platform !== "darwin") return;
-    expect(restartCommand()).toContain("launchctl kickstart -k");
-    expect(restartCommand()).toContain("dev.phantombot.phantombot");
-    expect(statusCommand()).toContain("launchctl print");
+    expect(await restartCommand()).toContain("launchctl kickstart -k");
+    expect(await restartCommand()).toContain("dev.phantombot.phantombot");
+    expect(await statusCommand()).toContain("launchctl print");
     expect(logsCommand()).toContain("Library/Logs/phantombot");
   });
 
-  test("on windows: Task Scheduler strings", () => {
+  test("on windows: Task Scheduler strings", async () => {
     if (process.platform !== "win32") return;
-    expect(restartCommand()).toContain("schtasks /End");
-    expect(statusCommand()).toContain("schtasks /Query");
+    expect(await restartCommand()).toContain("schtasks /End");
+    expect(await statusCommand()).toContain("schtasks /Query");
     expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
   });
 });
 
 describe("start/stop hint commands per platform", () => {
-  test("on linux: systemctl start/stop", () => {
+  test("on linux: systemctl start/stop", async () => {
     if (process.platform !== "linux") return;
-    expect(startCommand()).toBe("systemctl --user start phantombot");
-    expect(stopCommand()).toBe("systemctl --user stop phantombot");
+    expect(await startCommand()).toBe("systemctl --user start phantombot");
+    expect(await stopCommand()).toBe("systemctl --user stop phantombot");
   });
 
-  test("on darwin: launchctl bootstrap/bootout", () => {
+  test("on darwin: launchctl bootstrap/bootout", async () => {
     if (process.platform !== "darwin") return;
-    expect(startCommand()).toContain("launchctl bootstrap");
-    expect(startCommand()).toContain("dev.phantombot.phantombot");
-    expect(stopCommand()).toContain("launchctl bootout");
+    expect(await startCommand()).toContain("launchctl bootstrap");
+    expect(await startCommand()).toContain("dev.phantombot.phantombot");
+    expect(await stopCommand()).toContain("launchctl bootout");
   });
 
-  test("on windows: Task Scheduler start/stop", () => {
+  test("on windows: Task Scheduler start/stop", async () => {
     if (process.platform !== "win32") return;
-    expect(startCommand()).toContain("schtasks /Change");
-    expect(stopCommand()).toContain("schtasks /Change");
+    expect(await startCommand()).toContain("schtasks /Change");
+    expect(await stopCommand()).toContain("schtasks /Change");
+  });
+});
+
+describe("windows hints name the persona-scoped task", () => {
+  // The whole point of the persona-suffixed rename: every hint the CLI
+  // prints must address `\Phantombot\phantombot-<persona>` — the legacy
+  // unsuffixed task no longer exists after install, so a hint that names
+  // it is a copy-pasteable command that fails.
+  const win = { platform: "windows" as const, persona: "megan" };
+  const task = "\\Phantombot\\phantombot-megan";
+
+  test("restart", async () => {
+    const cmd = await restartCommand(win);
+    expect(cmd).toBe(`schtasks /End /TN "${task}" & schtasks /Run /TN "${task}"`);
+  });
+
+  test("start", async () => {
+    const cmd = await startCommand(win);
+    expect(cmd).toBe(`schtasks /Change /TN "${task}" /ENABLE & schtasks /Run /TN "${task}"`);
+  });
+
+  test("stop", async () => {
+    const cmd = await stopCommand(win);
+    expect(cmd).toBe(`schtasks /Change /TN "${task}" /DISABLE & schtasks /End /TN "${task}"`);
+  });
+
+  test("status", async () => {
+    const cmd = await statusCommand(win);
+    expect(cmd).toBe(`schtasks /Query /TN "${task}" /V /FO LIST`);
+  });
+
+  test("no hint contains the legacy unsuffixed task name", async () => {
+    for (const cmd of [
+      await restartCommand(win),
+      await startCommand(win),
+      await stopCommand(win),
+      await statusCommand(win),
+    ]) {
+      expect(cmd).not.toContain('"\\Phantombot\\phantombot"');
+      expect(cmd).toContain("phantombot-megan");
+    }
   });
 });
 

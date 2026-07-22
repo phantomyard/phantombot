@@ -119,7 +119,7 @@ export async function runHeartbeatCli(
       if (input.healSystemd) {
         await input.healSystemd();
       } else {
-        await defaultHealService();
+        await defaultHealService(persona);
       }
     } catch (e) {
       log.warn("heartbeat: service self-heal threw unexpectedly", {
@@ -151,12 +151,12 @@ export async function runHeartbeatCli(
  * Silent on healthy boxes; logs a notice only on repair. A no-op on any
  * platform without a backend.
  */
-async function defaultHealService(): Promise<void> {
+async function defaultHealService(persona?: string): Promise<void> {
   switch (currentPlatform()) {
     case "linux":
       return defaultHealSystemd();
     case "windows":
-      return defaultHealTaskScheduler();
+      return defaultHealTaskScheduler(persona);
     default:
       return; // macOS (launchd self-heals via KeepAlive) and unsupported hosts
   }
@@ -188,11 +188,12 @@ async function defaultHealSystemd(): Promise<void> {
  * updated-binary case). Only fires when we ARE the compiled binary
  * (`phantombot.exe`), so a dev `bun src/index.ts` run never rewrites tasks.
  */
-async function defaultHealTaskScheduler(): Promise<void> {
+async function defaultHealTaskScheduler(persona?: string): Promise<void> {
   const binPath = process.execPath;
   if (!isPhantombotBinary(binPath)) return;
   const r = await ensureTasksCurrent({
     binPath,
+    persona,
     schtasks: new BunSchtasksRunner(),
   });
   if (r.rewrote.length > 0) {

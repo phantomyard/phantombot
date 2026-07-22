@@ -38,7 +38,7 @@ export interface LifecycleOptions {
 /** Past-tense success line + the copy-pasteable manual hint per action. */
 function actionText(action: LifecycleAction): {
   done: string;
-  hint: () => string;
+  hint: () => Promise<string>;
 } {
   switch (action) {
     case "start":
@@ -70,8 +70,8 @@ export async function runLifecycleAction(
     return 0;
   }
   err.write(
-    `${opts.action} failed: ${r.stderr ?? "unknown"} — run '${hint()}' manually.\n` +
-      `(check status with: ${statusCommand()})\n`,
+    `${opts.action} failed: ${r.stderr ?? "unknown"} — run '${await hint()}' manually.\n` +
+      `(check status with: ${await statusCommand()})\n`,
   );
   return 1;
 }

@@ -446,7 +446,7 @@ async function maybeRestartHint(
   if (await svc.isActive()) {
     out.write(
       "\nphantombot is currently running. Restart to pick up the imported persona/config:\n" +
-        `  ${restartCommand()}\n`,
+        `  ${await restartCommand()}\n`,
     );
   }
 }
