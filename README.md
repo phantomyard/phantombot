@@ -303,9 +303,9 @@ phantombot logs --no-follow --lines 200   # dump the last 200 lines and exit
 
 | Verb | Linux (systemd) | macOS (launchd) | Windows (Task Scheduler) |
 |---|---|---|---|
-| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `schtasks /Change ... /ENABLE` + `/Run` |
+| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | enable task + hidden detached launch |
 | `stop` | `systemctl --user stop` | `bootout` | `schtasks /Change ... /DISABLE` + `/End` |
-| `restart` | `systemctl --user restart` | `kickstart -k` | `schtasks /End` + `/Run` |
+| `restart` | `systemctl --user restart` | `kickstart -k` | end/kill tree + hidden detached launch |
 | `logs` | `journalctl --user -u phantombot` | `tail` the out/err log files | `Get-Content -Wait` the out log |
 
 **Why `stop` does more than kill the process.** On macOS the agent is a

@@ -990,6 +990,44 @@ export interface TaskSchedulerServiceControl {
   rerenderUnitIfStale(): Promise<{ rerendered: boolean; backupPath?: string }>;
 }
 
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Launch the daemon from an external CLI, including CLIs invoked over SSH. */
+async function launchDaemonDirectly(): Promise<void> {
+  const { out, err } = taskLogPaths("phantombot");
+  const script = [
+    "$p = Start-Process",
+    `-FilePath ${powershellQuote(process.execPath)}`,
+    "-ArgumentList @('run')",
+    `-WorkingDirectory ${powershellQuote(process.cwd())}`,
+    "-WindowStyle Hidden",
+    `-RedirectStandardOutput ${powershellQuote(out)}`,
+    `-RedirectStandardError ${powershellQuote(err)}`,
+    "-PassThru",
+    "; if ($null -eq $p) { exit 1 }",
+  ].join(" ");
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+      env: { ...process.env },
+    },
+  );
+  const [, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || `powershell exited ${exitCode}`);
+  }
+}
+
 /**
  * Default TaskSchedulerServiceControl backed by real schtasks. Returns
  * isActive=false on any error so callers can treat "task unknown" the same as
@@ -1002,6 +1040,8 @@ export function defaultTaskSchedulerServiceControl(
   // Injectable so stop()/restart() are testable without real 10s waits.
   waitDeps: WaitDeps = defaultWaitDeps,
 ): TaskSchedulerServiceControl {
+  const launchDirectly =
+    process.platform === "win32" && runner instanceof BunSchtasksRunner;
   return {
     async isActive() {
       // `schtasks /Query /TN <name>` exits 0 when the task is registered —
@@ -1014,10 +1054,21 @@ export function defaultTaskSchedulerServiceControl(
       // disables. Re-enable it first so the supervisor keeps the process up,
       // then kick off a run immediately rather than waiting up to 60s for the
       await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
-      const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      if (!launchDirectly) {
+        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+        return r.exitCode === 0
+          ? { ok: true }
+          : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      try {
+        await launchDaemonDirectly();
+        return { ok: true };
+      } catch (e) {
+        return {
+          ok: false,
+          stderr: `could not launch daemon: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     },
     async stop() {
       // /End alone isn't enough on two counts: the 1-minute keep-alive
@@ -1069,10 +1120,21 @@ export function defaultTaskSchedulerServiceControl(
             `skipped /Run — the keep-alive trigger will relaunch within 60s`,
         };
       }
-      const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      if (!launchDirectly) {
+        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+        return r.exitCode === 0
+          ? { ok: true }
+          : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      try {
+        await launchDaemonDirectly();
+        return { ok: true };
+      } catch (e) {
+        return {
+          ok: false,
+          stderr: `could not launch daemon: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     },
     async rerenderUnitIfStale() {
       // Auto-heal a moved binary: if any registered task no longer references
