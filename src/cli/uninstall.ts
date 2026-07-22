@@ -54,6 +54,9 @@ export interface RunUninstallInput {
   domain?: string;
   /** Persona whose Windows tasks to remove (defaults to current persona). */
   persona?: string;
+  /** Override the current Windows user's SID (tests). Production resolves
+   * it live — only tasks owned by this account are deleted. */
+  sid?: string;
 }
 
 export async function runUninstall(
@@ -140,6 +143,7 @@ async function runUninstallWindows(
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
   await uninstallPhantombotTasks({
     persona: input.persona,
+    sid: input.sid,
     schtasks,
     out,
     err,

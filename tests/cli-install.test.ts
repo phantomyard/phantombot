@@ -44,10 +44,37 @@ class FakeLaunchctl implements LaunchctlRunner {
 class FakeSchtasks implements SchtasksRunner {
   calls: string[][] = [];
   responses: SchtasksResult[] = [];
+  /** Per-task registered XML; /Query answers from this (missing → exit 1). */
+  registry: Record<string, string | undefined> = {};
   async run(args: readonly string[]): Promise<SchtasksResult> {
     this.calls.push([...args]);
-    return this.responses.shift() ?? { exitCode: 0, stdout: "", stderr: "" };
+    if (this.responses.length > 0) return this.responses.shift()!;
+    if (args[0] === "/Query") {
+      const tn = args[args.indexOf("/TN") + 1]!;
+      const xml = this.registry[tn];
+      return xml === undefined
+        ? { exitCode: 1, stdout: "", stderr: "cannot find" }
+        : { exitCode: 0, stdout: xml, stderr: "" };
+    }
+    if (args[0] === "/Delete") {
+      const tn = args[args.indexOf("/TN") + 1]!;
+      if (this.registry[tn] === undefined) {
+        return { exitCode: 1, stdout: "", stderr: "cannot find" };
+      }
+      this.registry[tn] = undefined;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
   }
+}
+
+/** Minimal task XML carrying a Principal with the given SID (ownership check). */
+function principalXml(sid: string): string {
+  return (
+    `<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
+    `<Principals><Principal id="Author"><UserId>${sid}</UserId>` +
+    `<LogonType>InteractiveToken</LogonType></Principal></Principals></Task>`
+  );
 }
 
 class CaptureStream {
@@ -372,18 +399,50 @@ describe("runUninstall (windows/schtasks)", () => {
   test("deletes all four tasks and reports complete", async () => {
     const out = new CaptureStream();
     const st = new FakeSchtasks();
+    const sid = "S-1-5-21-1-2-3-1001";
+    // 4 persona-scoped tasks + 4 legacy pre-rename names, all owned by us.
+    const names = [
+      "phantombot-testbot",
+      "heartbeat-testbot",
+      "nightly-testbot",
+      "tick-testbot",
+      "phantombot",
+      "heartbeat",
+      "nightly",
+      "tick",
+    ];
+    for (const n of names) st.registry[`\\Phantombot\\${n}`] = principalXml(sid);
     const code = await runUninstall({
       persona: "testbot",
+      sid,
       schtasks: st,
       out,
       err: new CaptureStream(),
       platform: "windows",
     });
     expect(code).toBe(0);
-    // 4 persona-scoped tasks + 4 legacy pre-rename names.
     const deletes = st.calls.filter((c) => c[0] === "/Delete");
     expect(deletes.length).toBe(8);
     expect(out.text).toContain("uninstall complete");
+  });
+
+  test("leaves another Windows account's tasks alone", async () => {
+    const out = new CaptureStream();
+    const st = new FakeSchtasks();
+    const foreign = "S-1-5-21-9-9-9-1005";
+    st.registry["\\Phantombot\\phantombot-testbot"] = principalXml(foreign);
+    const code = await runUninstall({
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+    });
+    expect(code).toBe(0);
+    expect(st.calls.filter((c) => c[0] === "/Delete")).toEqual([]);
+    expect(st.registry["\\Phantombot\\phantombot-testbot"]).toBeDefined();
+    expect(out.text).toContain("owned by another Windows account");
   });
 });
 
