@@ -27,6 +27,7 @@ import {
   killDaemonProcesses,
   launcherVbsPath,
   LAUNCHER_VBS,
+  scheduleWindowsRelaunch,
   ProcessEnumerationError,
   type ProcessManager,
   type RunningProcess,
@@ -816,5 +817,49 @@ describe("service control stop/restart kill the stray daemon", () => {
     const r = await svc.stop();
     expect(r.ok).toBe(false);
     expect(r.stderr ?? "").toContain("could not confirm");
+  });
+});
+
+describe("scheduleWindowsRelaunch", () => {
+  test("detaches a watcher that waits on our pid, then relaunches — via one Start-Process", async () => {
+    let captured: string[] | null = null;
+    const r = await scheduleWindowsRelaunch({
+      selfPid: 4242,
+      graceSeconds: 30,
+      binPath: "C:\\Users\\me\\phantombot.exe",
+      spawnImpl: async (argv) => {
+        captured = argv;
+        return { ok: true };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(captured).not.toBeNull();
+    const argv = captured as unknown as string[];
+    // Outer invocation is a hidden, detaching Start-Process of powershell.
+    expect(argv[0]).toBe("powershell");
+    const outer = argv[argv.length - 1] ?? "";
+    expect(outer).toContain("Start-Process powershell");
+    expect(outer).toContain("-WindowStyle Hidden");
+    expect(outer).toContain("-EncodedCommand");
+
+    // The encoded inner watcher must block on our pid, then launch the binary.
+    const m = outer.match(/-EncodedCommand','([^']+)'/);
+    expect(m).not.toBeNull();
+    const inner = Buffer.from((m as RegExpMatchArray)[1] ?? "", "base64").toString(
+      "utf16le",
+    );
+    expect(inner).toContain("Wait-Process -Id 4242 -Timeout 30");
+    expect(inner).toContain("phantombot.exe");
+    expect(inner).toContain("@('run')");
+    expect(inner).toContain("-WindowStyle Hidden");
+    expect(inner).toContain("-RedirectStandardOutput");
+  });
+
+  test("surfaces a spawn failure without throwing", async () => {
+    const r = await scheduleWindowsRelaunch({
+      spawnImpl: async () => ({ ok: false, stderr: "powershell exited 1" }),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain("powershell exited 1");
   });
 });
