@@ -118,9 +118,11 @@ phantombot/
 │       ├── coderSwap.ts chattiness.ts  # per-conversation overrides: coding-brain swap + progress-bubble on/off (JSON state under xdgStateHome)
 │       ├── threatJudge.ts    # tool-less untrusted-input judge (see "Security perimeter")
 │       ├── redact.ts         # secret redaction for log lines + task_runs audit table
-│       ├── platform.ts       # cross-platform service-manager router (systemd ↔ launchd)
+│       ├── platform.ts       # cross-platform service-manager router (systemd ↔ launchd ↔ SCM)
 │       ├── systemd.ts        # Linux unit generators + install/uninstall + ensureUnitCurrent
 │       ├── launchd.ts        # macOS LaunchAgent (plist) generators + install/uninstall (mirrors systemd.ts)
+│       ├── windowsService.ts  # Windows SCM service registration/control
+│       ├── windowsJob.ts      # Windows Job Object process-tree ownership
 │       ├── envBootstrap.ts   # self-load ~/.env + .config/.env at startup; reloadEnvFiles() before each spawn
 │       ├── harnessRunner.ts  # shared spawn/kill/idle-timeout/abort coordination for all harnesses
 │       ├── harnessAvailability.ts cooldown.ts  # binary-on-PATH detection + per-harness fast-fallback cooldown
@@ -179,9 +181,9 @@ If you add a new untrusted entry point (a new inbound channel, a new `ask`-style
 
 **One persona is active at a time.** This surprises people. The persona "library" on disk (under `~/.local/share/phantombot/personas/`) can have many directories, but `phantombot run` binds to one — `config.defaultPersona` — and the `runLock` (`src/lib/runLock.ts`) prevents two `phantombot run` processes from coexisting on the same box. If a feature needs "different personas for different chats" or "two personas at once," that's a real architectural change (per-persona Telegram tokens, per-persona XDG dirs, lifted runLock) — not a config knob. The README's [Personas](README.md#personas) section is the authoritative explanation; if you change this model, update both.
 
-## Service model (systemd + launchd)
+## Service model (systemd + launchd + Windows SCM)
 
-Phantombot ships on **Linux (systemd --user)** and **macOS (launchd, per-user LaunchAgents)**. `lib/platform.ts` is the single router that decides which backend to talk to; `lib/systemd.ts` and `lib/launchd.ts` are the two backends behind a common `ServiceControl` surface (each takes an injectable runner — `SystemctlRunner` / `LaunchctlRunner` — so tests never touch the real service manager). The four logical units are identical across platforms; only the unit-file shape and control verbs differ.
+Phantombot ships on **Linux (systemd --user)**, **macOS (launchd, per-user LaunchAgents)**, and **Windows (SCM service plus three periodic scheduled tasks)**. `lib/platform.ts` is the single router that decides which backend to talk to; each backend sits behind a common `ServiceControl` surface with an injectable runner so tests never touch the real service manager. Windows uses the bundled `phantombot-service-host.exe` to supervise `phantombot run` headlessly; `windowsJob.ts` assigns harness children to kill-on-close Job Objects.
 
 On Linux, `phantombot install` creates **four** systemd-user units:
 

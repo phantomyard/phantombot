@@ -900,6 +900,14 @@ export async function uninstallPhantombotTasks(
   return { removed: true };
 }
 
+/** Remove only the legacy always-on task during SCM migration. */
+export async function uninstallPhantombotDaemonTask(
+  opts: UninstallTaskSchedulerOptions,
+): Promise<void> {
+  const r = await opts.schtasks.run(["/Delete", "/TN", PHANTOMBOT_TASK, "/F"]);
+  if (r.exitCode === 0) opts.out.write(`removed scheduled task: ${PHANTOMBOT_TASK}\n`);
+}
+
 /**
  * Windows paths are case-insensitive, and `schtasks /Query /XML` may echo the
  * stored command line back with different casing than `process.execPath`
@@ -921,8 +929,8 @@ export interface EnsureTasksCurrentOptions {
 
 export interface EnsureTasksCurrentResult {
   /**
-   * Task names that were (re)registered because they were missing or still
-   * referenced a stale binary path. Empty = every task was already current.
+   * Companion task names that were (re)registered because they were missing or
+   * still referenced a stale binary path. The SCM-owned daemon is excluded.
    */
   rewrote: string[];
 }
@@ -934,7 +942,9 @@ export interface EnsureTasksCurrentResult {
  * (the moved/updated-binary case), re-import it from the current template.
  *
  * Idempotent: a task that already references `binPath` is left untouched, so
- * on a healthy box this is four cheap `/Query` calls and nothing else.
+ * on a healthy box this is three cheap `/Query` calls and nothing else. The
+ * always-on daemon is owned by the Windows SCM service and is intentionally
+ * excluded so heartbeat cannot resurrect the legacy scheduled-task daemon.
  *
  * Called on the heartbeat's regular cadence (see `defaultHealTaskScheduler` in
  * cli/heartbeat.ts), so a long-running box that never restarts still re-checks
@@ -953,7 +963,7 @@ export async function ensureTasksCurrent(
   const rewrote: string[] = [];
   let ensuredDirs = false;
 
-  for (const spec of allTaskSpecs(sid, opts.binPath)) {
+  for (const spec of allTaskSpecs(sid, opts.binPath).filter((s) => s.name !== PHANTOMBOT_TASK)) {
     const q = await opts.schtasks.run(["/Query", "/TN", spec.name, "/XML"]);
     const current =
       q.exitCode === 0 && xmlReferencesBin(q.stdout, opts.binPath);

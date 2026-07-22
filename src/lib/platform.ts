@@ -2,7 +2,7 @@
  * Cross-platform service-manager router.
  *
  * Phantombot ships on Linux (systemd --user), macOS (launchd, per-user
- * LaunchAgents) and Windows (Task Scheduler, per-user logon-triggered
+ * LaunchAgents) and Windows (the SCM service plus periodic Task Scheduler
  * tasks). The backends have different unit-file shapes, different control
  * verbs, and different log destinations — this module is the single place
  * where CLI code decides which one to talk to.
@@ -34,10 +34,8 @@ import {
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
-import {
-  defaultTaskSchedulerServiceControl,
-  taskLogPaths,
-} from "./taskScheduler.ts";
+import { taskLogPaths } from "./taskScheduler.ts";
+import { defaultWindowsServiceControl } from "./windowsService.ts";
 
 export type { ServiceControl };
 
@@ -66,7 +64,7 @@ export function defaultServiceControl(): ServiceControl {
     case "darwin":
       return defaultLaunchdServiceControl();
     case "windows":
-      return defaultTaskSchedulerServiceControl();
+      return defaultWindowsServiceControl();
     default:
       return noopServiceControl();
   }
@@ -96,13 +94,9 @@ export interface SelfRestartOpts {
  * (`systemctl --user restart` / `launchctl kickstart`). Those SIGTERM us and
  * the supervisor relaunches — safe to call from within the unit.
  *
- * Windows: we must NOT call `schtasks /End` + `/Run` from inside the task's
- * own process tree — `/End` tears down that tree (including the child
- * `schtasks.exe` we just spawned to issue `/Run`), so the relaunch can be
- * dropped. Instead we exit cleanly (emit SIGTERM → the run loop's handler
- * drains and returns), and the always-on task's 1-minute keep-alive
- * TimeTrigger relaunches from the swapped binary within ≤60s. The relaunched
- * process deletes the stale `.old` on startup. No console window, no watcher.
+ * Windows: exit cleanly (emit SIGTERM → the run loop's handler drains and
+ * returns); the SCM host observes the exit and relaunches the swapped binary.
+ * The relaunched process deletes the stale `.old` on startup.
  */
 export async function selfRestart(
   opts: SelfRestartOpts,
@@ -152,7 +146,7 @@ export function restartCommand(): string {
     case "darwin":
       return `launchctl kickstart -k gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return `schtasks /End /TN "\\Phantombot\\phantombot" & schtasks /Run /TN "\\Phantombot\\phantombot"`;
+      return "sc stop Phantombot & sc start Phantombot";
     case "linux":
     default:
       return "systemctl --user restart phantombot";
@@ -165,7 +159,7 @@ export function startCommand(): string {
     case "darwin":
       return `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.phantombot.phantombot.plist`;
     case "windows":
-      return `schtasks /Change /TN "\\Phantombot\\phantombot" /ENABLE & schtasks /Run /TN "\\Phantombot\\phantombot"`;
+      return "sc start Phantombot";
     case "linux":
     default:
       return "systemctl --user start phantombot";
@@ -178,7 +172,7 @@ export function stopCommand(): string {
     case "darwin":
       return `launchctl bootout gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return `schtasks /Change /TN "\\Phantombot\\phantombot" /DISABLE & schtasks /End /TN "\\Phantombot\\phantombot"`;
+      return "sc stop Phantombot";
     case "linux":
     default:
       return "systemctl --user stop phantombot";
@@ -191,7 +185,7 @@ export function statusCommand(): string {
     case "darwin":
       return `launchctl print gui/$(id -u)/dev.phantombot.phantombot`;
     case "windows":
-      return `schtasks /Query /TN "\\Phantombot\\phantombot" /V /FO LIST`;
+      return "sc query Phantombot";
     case "linux":
     default:
       return "systemctl --user status phantombot";

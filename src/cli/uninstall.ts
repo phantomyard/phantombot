@@ -5,7 +5,7 @@
  *
  *   - Linux   → systemctl --user stop/disable + remove unit files
  *   - macOS   → launchctl bootout + remove plists
- *   - Windows → schtasks /Delete of the \Phantombot\ tasks
+ *   - Windows → SCM service plus schtasks companion tasks
  */
 
 import { defineCommand } from "citty";
@@ -36,6 +36,11 @@ import {
   type SchtasksRunner,
   uninstallPhantombotTasks,
 } from "../lib/taskScheduler.ts";
+import {
+  BunScRunner,
+  uninstallWindowsService,
+  type ScRunner,
+} from "../lib/windowsService.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 export interface RunUninstallInput {
@@ -47,6 +52,7 @@ export interface RunUninstallInput {
   systemctl?: SystemctlRunner;
   launchctl?: LaunchctlRunner;
   schtasks?: SchtasksRunner;
+  sc?: ScRunner;
   out?: WriteSink;
   err?: WriteSink;
   ensureSystemdEnv?: () => UserSystemdEnv;
@@ -136,6 +142,7 @@ async function runUninstallWindows(
   err: WriteSink,
 ): Promise<number> {
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
+  await uninstallWindowsService({ sc: input.sc ?? new BunScRunner(), out, err });
   await uninstallPhantombotTasks({ schtasks, out, err });
   out.write("uninstall complete\n");
   return 0;
@@ -145,7 +152,7 @@ export default defineCommand({
   meta: {
     name: "uninstall",
     description:
-      "Stop, disable, and remove the phantombot service-manager units (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler tasks on Windows).",
+      "Stop, disable, and remove the phantombot service-manager units (systemd --user on Linux, launchd LaunchAgent on macOS, SCM service and companion tasks on Windows).",
   },
   async run() {
     const code = await runUninstall();

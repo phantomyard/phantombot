@@ -258,35 +258,27 @@ Linux. The crown-jewel `identity.json` is created with an owner-only ACL
 **Install as a background service.**
 
 ```powershell
-phantombot install      # registers per-user Task Scheduler tasks under \Phantombot\
-phantombot uninstall    # removes them
+phantombot install      # installs the SCM service and periodic companion tasks
+phantombot uninstall    # removes the service and tasks
 ```
 
-`install` registers four logon-triggered scheduled tasks (`run`, `heartbeat`,
-`nightly`, `tick`). They run as **you**, using an interactive-token principal —
-**no admin rights and no stored password required**.
+`install` registers a real Windows SCM service for `run`, configured to run as
+the installing account, plus three scheduled companion tasks (`heartbeat`,
+`nightly`, `tick`). SCM stores the service password encrypted; set
+`PHANTOMBOT_WINDOWS_SERVICE_PASSWORD` before running install (SCM registration
+may require an elevated terminal). The service host
+restarts the daemon after any exit and kills its entire child tree on stop.
 
-**Important — the agent runs only while you are logged in.** This mirrors the
-macOS (launchd `Aqua`) model, not the Linux `enable-linger` model. When you log
-out, Windows tears down your session and the tasks stop; they start again at
-your next logon. A LogonTrigger plus a one-minute keep-alive re-launches the
-agent if it crashes while you are logged in.
-
-For a **true headless service** that runs without an interactive login (a
-kiosk, a server, or a machine that reboots unattended), wrap `phantombot run`
-in a service supervisor such as [WinSW](https://github.com/winsw/winsw) or NSSM
-and run it under a dedicated service account. That path is not yet scripted by
-`phantombot install`; it is the documented escape hatch for now.
+The service is session-independent and survives logoff/reboot. The legacy
+`\\Phantombot\\phantombot` scheduled task is removed during migration.
 
 **Self-update.** `phantombot update` and the `/update` chat command work on
 Windows. Because Windows locks a running `.exe` against overwrite, the updater
 renames the live binary aside to `phantombot.exe.old` (allowed while it runs),
-drops the verified new binary into place, then exits cleanly - the one-minute
-keep-alive trigger relaunches the agent on the new binary within ≈60 seconds
-(no console windows, no manual restart). The relaunched process deletes the
+drops the verified new binary into place, then exits cleanly; the SCM host
+relaunches the agent on the new binary. The relaunched process deletes the
 leftover `.old` on startup once it is unlocked. In-place self-update needs the
-service installed (`phantombot install`) so the keep-alive is present to bring
-the agent back up.
+service installed (`phantombot install`).
 
 **Logs.** Service stdout/stderr are redirected to
 `%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. These
@@ -311,18 +303,16 @@ phantombot logs       # tail its logs (Ctrl-C to stop)
 phantombot logs --no-follow --lines 200   # dump the last 200 lines and exit
 ```
 
-| Verb | Linux (systemd) | macOS (launchd) | Windows (Task Scheduler) |
+| Verb | Linux (systemd) | macOS (launchd) | Windows (SCM service) |
 |---|---|---|---|
-| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `/Change /ENABLE` + `/Run` |
-| `stop` | `systemctl --user stop` | `bootout` | `/Change /DISABLE` + `/End` |
-| `restart` | `systemctl --user restart` | `kickstart -k` | `/End` + `/Run` |
+| `start` | `systemctl --user start` | `bootstrap` (or `kickstart`) | `sc start Phantombot` |
+| `stop` | `systemctl --user stop` | `bootout` | `sc stop Phantombot` |
+| `restart` | `systemctl --user restart` | `kickstart -k` | `sc stop/start Phantombot` |
 | `logs` | `journalctl --user -u phantombot` | `tail` the out/err log files | `Get-Content -Wait` the out log |
 
 **Why `stop` does more than kill the process.** On macOS the agent is a
-KeepAlive LaunchAgent and on Windows it has a one-minute keep-alive trigger — a
-plain kill would be relaunched within seconds. So `stop` *disables* the
-keep-alive (launchd `bootout` / schtasks `/DISABLE`) so the service actually
-stays down, and `start` re-arms it. On Linux the main unit is
+KeepAlive LaunchAgent; a plain kill would be relaunched within seconds. On
+Windows, SCM owns the daemon and `stop` stops the service. On Linux the main unit is
 `Restart=on-failure`, so a clean `stop` already stays stopped with nothing extra
 to do.
 
@@ -392,12 +382,12 @@ Runtime:
 | Command | Purpose |
 |---|---|
 | `phantombot run` | Foreground Telegram listener |
-| `phantombot install` | Install systemd user service and timers |
-| `phantombot uninstall` | Remove systemd user service and timers |
-| `phantombot start` | Start the installed background service (systemd/launchd/Task Scheduler) |
+| `phantombot install` | Install the host service and periodic jobs |
+| `phantombot uninstall` | Remove the host service and periodic jobs |
+| `phantombot start` | Start the installed background service (systemd/launchd/Windows SCM) |
 | `phantombot stop` | Stop the background service and keep it down until `start` |
 | `phantombot restart` | Restart the background service |
-| `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Task Scheduler log) |
+| `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Windows log) |
 | `phantombot ask "<prompt>"` | One-shot prompt through the persona and harness chain |
 | `phantombot update [--check] [--force] [--restart]` | Check, install, or restart after updates |
 | `phantombot p2p status` | Show relay-free P2P transport config and whether a local node is listening |

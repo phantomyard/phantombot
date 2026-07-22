@@ -40,6 +40,7 @@ import { execFileSync } from "node:child_process";
 import { basename, delimiter, dirname, isAbsolute } from "node:path";
 import type { Subprocess, SpawnOptions } from "bun";
 import { log } from "./logger.ts";
+import { createWindowsJob } from "./windowsJob.ts";
 
 /**
  * Ensure an absolute executable's OWN directory is on the child's PATH.
@@ -249,7 +250,7 @@ export function spawnInNewSession<
         ),
       )
     : opts.env;
-  return Bun.spawn(cmd, {
+  const proc = Bun.spawn(cmd, {
     ...opts,
     env,
     // POSIX only: `detached` (undocumented but stable Bun option, maps to
@@ -269,6 +270,21 @@ export function spawnInNewSession<
     // in one place since they all spawn through here.
     windowsHide: true,
   } as typeof opts) as Subprocess<Stdin, Stdout, Stderr>;
+
+  // Windows has no process groups. Own the entire descendant tree with the
+  // kernel instead of relying solely on the racy taskkill PID walk.
+  if (process.platform === "win32" && typeof proc.pid === "number") {
+    const job = createWindowsJob();
+    if (job?.assign(proc.pid)) {
+      void proc.exited.finally(() => job.close());
+    } else {
+      job?.close();
+      log.warn("processGroup: could not assign child to a Windows Job Object", {
+        pid: proc.pid,
+      });
+    }
+  }
+  return proc;
 }
 
 /**

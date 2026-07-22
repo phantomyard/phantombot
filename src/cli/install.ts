@@ -4,7 +4,7 @@
  *
  *   - Linux   → systemd --user units in ~/.config/systemd/user/
  *   - macOS   → launchd plists in ~/Library/LaunchAgents/
- *   - Windows → Task Scheduler logon tasks under \Phantombot\
+ *   - Windows → SCM service plus periodic Task Scheduler companion tasks
  *
  * Requires the compiled binary (process.execPath ends in 'phantombot' or
  * the user passes --bin). Running from `bun src/index.ts` won't work
@@ -13,7 +13,7 @@
  */
 
 import { defineCommand } from "citty";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 
 import { installCompletions } from "../lib/completionInstall.ts";
 
@@ -40,14 +40,21 @@ import {
 import {
   BunSchtasksRunner,
   installPhantombotTasks,
+  uninstallPhantombotDaemonTask,
   type SchtasksRunner,
 } from "../lib/taskScheduler.ts";
+import {
+  BunScRunner,
+  defaultWindowsServiceHostPath,
+  installWindowsService,
+  type ScRunner,
+} from "../lib/windowsService.ts";
 import type { WriteSink } from "../lib/io.ts";
 
 /**
  * Trailing "here's how to manage it" block shown after a successful install,
  * identical on every OS. Advertises the clean `phantombot <verb>` subcommands
- * rather than the raw systemctl/launchctl/schtasks incantations — the CLI wraps
+ * rather than the raw systemctl/launchctl/sc.exe incantations — the CLI wraps
  * those per-platform, so the user never has to see or type them.
  */
 export function manageHints(): string {
@@ -91,6 +98,10 @@ export interface RunInstallInput {
   launchctl?: LaunchctlRunner;
   /** Override schtasks runner for testing (Windows). */
   schtasks?: SchtasksRunner;
+  sc?: ScRunner;
+  serviceHostPath?: string;
+  serviceUser?: string;
+  servicePassword?: string;
   /** Override the current-user SID for testing (Windows). */
   sid?: string;
   /** Directory for transient Task Scheduler XML import files (Windows tests). */
@@ -224,6 +235,23 @@ async function runInstallWindows(
   err: WriteSink,
 ): Promise<number> {
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
+  const servicePassword = input.servicePassword ?? process.env.PHANTOMBOT_WINDOWS_SERVICE_PASSWORD;
+  if (!servicePassword) {
+    err.write(
+      "Windows service install needs the installing account password. Set PHANTOMBOT_WINDOWS_SERVICE_PASSWORD and retry.\n",
+    );
+    return 2;
+  }
+  const service = await installWindowsService({
+    hostPath: input.serviceHostPath ?? defaultWindowsServiceHostPath(dirname(binPath)),
+    binPath,
+    user: input.serviceUser ?? `.${String.raw`\\`}${process.env.USERNAME ?? ""}`,
+    password: servicePassword,
+    sc: input.sc ?? new BunScRunner(),
+    out,
+    err,
+  });
+  if (!service) return 1;
 
   const result = await installPhantombotTasks({
     binPath,
@@ -234,11 +262,10 @@ async function runInstallWindows(
     err,
   });
   if (!result.installed) return 1;
+  await uninstallPhantombotDaemonTask({ schtasks, out, err });
 
   out.write(
-    `\nThese tasks run only while you are logged in (the macOS model). For\n` +
-      `true headless-without-login, install a real service — see the README\n` +
-      `(WinSW is the recommended route).\n` +
+    `\nThe daemon is now a headless Windows service running as ${input.serviceUser ?? `.${String.raw`\\`}${process.env.USERNAME ?? "the installing user"}`}.\n` +
       manageHints(),
   );
   return 0;
@@ -248,7 +275,7 @@ export default defineCommand({
   meta: {
     name: "install",
     description:
-      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS, Task Scheduler logon task on Windows) and start it.",
+      "Install the host-appropriate service unit for `phantombot run` (systemd --user on Linux, launchd LaunchAgent on macOS, Windows SCM service) and start it.",
   },
   async run() {
     const code = await runInstall();
