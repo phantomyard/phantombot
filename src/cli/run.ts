@@ -307,7 +307,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     err.write(
       `phantombot is already running (pid ${Number.isFinite(lock.pid) ? lock.pid : "unknown"}; lock at ${lock.path})\n` +
         `view logs:    ${logsCommand()}\n` +
-        `status:       ${statusCommand()}\n` +
+        `status:       ${await statusCommand()}\n` +
         "stop the other instance first, or remove the lock if it's stale.\n",
     );
     return 1;

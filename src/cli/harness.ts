@@ -766,7 +766,7 @@ export async function maybePromptRestart(
   );
   if (!proceed) {
     p.note(
-      `skipped — restart later with: ${restartCommand()}`,
+      `skipped — restart later with: ${await restartCommand()}`,
       "Restart",
     );
     return;
