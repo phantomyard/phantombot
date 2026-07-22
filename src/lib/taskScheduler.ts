@@ -12,7 +12,7 @@
  *     `schtasks /Create` needs no elevation, unlike a true Windows Service
  *     (a real SCM registration, which is what WinSW does).
  *   - Two logon modes, chosen at `phantombot install` time and persisted in
- *     windows-logon.json beside the launcher script:
+ *     windows-logon-<persona>.json beside the launcher script:
  *       · "interactive" (default): InteractiveToken principal, no stored
  *         password — but the tasks only run while the user is LOGGED ON
  *         (the launchd-like model from #201).
@@ -66,7 +66,7 @@ import { join } from "node:path";
 
 import { xdgDataHome } from "../config.ts";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
-import { currentUserSid } from "./filePermissions.ts";
+import { currentUserName, currentUserSid } from "./filePermissions.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
 
@@ -160,10 +160,12 @@ export async function writeTaskLogon(
 ): Promise<void> {
   await mkdir(launcherDir(), { recursive: true });
   await writeFile(logonMarkerPath(persona), JSON.stringify(logon, null, 2), "utf8");
-  // Migrate away from the shared pre-scoping marker once any persona has a
-  // scoped one — leaving it would keep it authoritative for other personas'
-  // fallback reads.
-  await unlink(legacyLogonMarkerPath()).catch(() => {});
+  // The legacy shared marker is deliberately LEFT IN PLACE: it is the only
+  // record of the logon mode for personas installed before the scoping, and
+  // deleting it here (when persona B installs) would silently downgrade
+  // persona A's heal/relaunch to interactive, re-breaking headless operation.
+  // Scoped markers always win reads, so the stale file is inert for anyone
+  // who has reinstalled.
 }
 
 /** Read the persisted logon choice for `persona`; defaults to interactive
@@ -215,8 +217,17 @@ function launcherDir(): string {
   return join(xdgDataHome(), "phantombot");
 }
 
-/** Absolute path of the shared hidden-launcher VBScript. */
-export function launcherVbsPath(): string {
+/** Absolute path of THIS persona's hidden-launcher VBScript. The launcher
+ * is persona-scoped because uninstall deletes it — a shared script would
+ * leave every other persona's tasks pointing at a file that no longer
+ * exists. */
+export function launcherVbsPath(persona: string): string {
+  return join(launcherDir(), `phantombot-launch-${persona}.vbs`);
+}
+
+/** Pre-persona-scoping shared launcher location. Only the legacy pre-rename
+ * tasks still reference it, so it may only be removed once those are gone. */
+export function legacyLauncherVbsPath(): string {
   return join(launcherDir(), "phantombot-launch.vbs");
 }
 
@@ -246,14 +257,14 @@ export const LAUNCHER_VBS =
   "sh.Run cmd, 0, True\r\n";
 
 /**
- * Write the shared hidden-launcher script to its stable location (idempotent;
- * overwrites so a template change lands on the next install/self-heal). The
- * parent dir doubles as the data dir whose logs\ subfolder the tasks redirect
- * into, so we ensure it exists here too.
+ * Write this persona's hidden-launcher script to its stable location
+ * (idempotent; overwrites so a template change lands on the next
+ * install/self-heal). The parent dir doubles as the data dir whose logs\
+ * subfolder the tasks redirect into, so we ensure it exists here too.
  */
-async function writeLauncherVbs(): Promise<void> {
+async function writeLauncherVbs(persona: string): Promise<void> {
   await mkdir(launcherDir(), { recursive: true });
-  await writeFile(launcherVbsPath(), LAUNCHER_VBS, "utf8");
+  await writeFile(launcherVbsPath(persona), LAUNCHER_VBS, "utf8");
 }
 
 /**
@@ -268,6 +279,7 @@ export function buildLauncherArguments(
   args: readonly string[],
   outLog: string,
   errLog: string,
+  launcherPath: string,
 ): string {
   const q = (s: string) => `"${s}"`;
   return [
@@ -275,7 +287,7 @@ export function buildLauncherArguments(
     // default), which would itself be a visible popup - the exact thing this
     // launcher exists to avoid.
     "//B",
-    q(launcherVbsPath()),
+    q(launcherPath),
     q(binPath),
     q(args.join(" ")),
     q(outLog),
@@ -288,6 +300,8 @@ interface TaskXmlOptions {
   description: string;
   /** Current user's SID — principal + logon-trigger UserId. */
   sid: string;
+  /** Persona — scopes the hidden-launcher path baked into the action. */
+  persona: string;
   label: TaskLabel;
   binPath: string;
   args: readonly string[];
@@ -308,6 +322,7 @@ function generateTaskXml(opts: TaskXmlOptions): string {
     opts.args,
     outLog,
     errLog,
+    launcherVbsPath(opts.persona),
   );
   const workingDir = homedir();
 
@@ -430,6 +445,7 @@ export function generatePhantombotTaskXml(
     uri: taskNames(persona).main,
     description: `phantombot always-on agent (phantombot run) [${persona}]`,
     sid,
+    persona,
     label: "phantombot",
     binPath,
     args: ["run"],
@@ -451,6 +467,7 @@ export function generateHeartbeatTaskXml(
     uri: taskNames(persona).heartbeat,
     description: `phantombot heartbeat (every 30 minutes) [${persona}]`,
     sid,
+    persona,
     label: "heartbeat",
     binPath,
     args: ["heartbeat"],
@@ -479,6 +496,7 @@ export function generateNightlyTaskXml(
     uri: taskNames(persona).nightly,
     description: `phantombot nightly (daily at 02:00) [${persona}]`,
     sid,
+    persona,
     label: "nightly",
     binPath,
     args: ["nightly"],
@@ -499,6 +517,7 @@ export function generateTickTaskXml(
     uri: taskNames(persona).tick,
     description: `phantombot tick (every 60 seconds) [${persona}]`,
     sid,
+    persona,
     label: "tick",
     binPath,
     args: ["tick"],
@@ -1013,24 +1032,42 @@ export function taskPrincipalUserId(xml: string): string | undefined {
 
 type OwnedDeleteOutcome = "deleted" | "absent" | "kept-foreign" | "failed";
 
+/** Identity a task principal is matched against for ownership. Password-mode
+ * tasks carry `COMPUTER\\user` (not a SID) in their Principal <UserId>, so
+ * the account name is needed in addition to the SID. */
+interface TaskOwner {
+  sid: string;
+  username?: string;
+}
+
+function principalMatchesOwner(principal: string, owner: TaskOwner): boolean {
+  const p = principal.toLowerCase();
+  return (
+    p === owner.sid.toLowerCase() ||
+    (owner.username !== undefined && p === owner.username.toLowerCase())
+  );
+}
+
 /**
  * Delete a scheduled task ONLY when it provably belongs to this Windows
  * account. Task Scheduler folders are machine-global — every local user's
  * tasks live in the same `\Phantombot\` namespace — so a blind `/Delete`
  * from persona A's install could kill persona B's (or another Windows
  * user's) still-active daemon task. Ownership is proven by the principal
- * SID in the task's exported XML; when the task is missing, the XML won't
- * parse, or the SID belongs to someone else, the task is left untouched.
+ * in the task's exported XML matching either the current SID (interactive
+ * tasks) or the current `COMPUTER\\user` account name (password-mode
+ * tasks); when the task is missing, the XML won't parse, or the principal
+ * belongs to someone else, the task is left untouched.
  */
 async function deleteTaskIfOwned(
   schtasks: SchtasksRunner,
   name: string,
-  ownerSid: string,
+  owner: TaskOwner,
 ): Promise<OwnedDeleteOutcome> {
   const q = await schtasks.run(["/Query", "/TN", name, "/XML"]);
   if (q.exitCode !== 0) return "absent";
   const principal = taskPrincipalUserId(q.stdout);
-  if (principal === undefined || principal.toLowerCase() !== ownerSid.toLowerCase()) {
+  if (principal === undefined || !principalMatchesOwner(principal, owner)) {
     return "kept-foreign";
   }
   const r = await schtasks.run(["/Delete", "/TN", name, "/F"]);
@@ -1047,13 +1084,13 @@ async function deleteTaskIfOwned(
 export async function deleteLegacyTasks(
   schtasks: SchtasksRunner,
   keep: readonly string[],
-  ownerSid: string,
+  owner: TaskOwner,
 ): Promise<{ removed: string[]; keptForeign: string[] }> {
   const removed: string[] = [];
   const keptForeign: string[] = [];
   for (const name of LEGACY_TASK_NAMES) {
     if (keep.includes(name)) continue;
-    const outcome = await deleteTaskIfOwned(schtasks, name, ownerSid);
+    const outcome = await deleteTaskIfOwned(schtasks, name, owner);
     if (outcome === "deleted") removed.push(name);
     else if (outcome === "kept-foreign") keptForeign.push(name);
   }
@@ -1066,6 +1103,10 @@ export interface InstallTaskSchedulerOptions {
   persona: string;
   /** Override the current user's SID (tests). Production resolves it live. */
   sid?: string;
+  /** Override the current `COMPUTER\\user` account name (tests). Needed to
+   * prove ownership of PASSWORD-mode tasks, whose principal is the account
+   * name rather than the SID. */
+  accountName?: string;
   /** Directory for the transient XML import files (tests). Defaults to %TEMP%. */
   xmlDir?: string;
   /**
@@ -1092,6 +1133,10 @@ export async function installPhantombotTasks(
   opts: InstallTaskSchedulerOptions,
 ): Promise<{ installed: boolean }> {
   const sid = opts.sid ?? currentUserSid();
+  const owner: TaskOwner = {
+    sid,
+    username: opts.accountName ?? currentUserName(),
+  };
   const xmlDir = opts.xmlDir ?? tmpdir();
   const logon = opts.logon ?? { mode: "interactive" as const };
 
@@ -1122,7 +1167,7 @@ export async function installPhantombotTasks(
   const legacy = await deleteLegacyTasks(
     opts.schtasks,
     taskNames(opts.persona).all,
-    sid,
+    owner,
   );
   for (const name of legacy.removed) {
     opts.out.write(`removed legacy scheduled task: ${name}\n`);
@@ -1144,6 +1189,9 @@ export interface UninstallTaskSchedulerOptions {
   persona?: string;
   /** Override the current user's SID (tests). Production resolves it live. */
   sid?: string;
+  /** Override the current `COMPUTER\\user` account name (tests) — see
+   * InstallTaskSchedulerOptions.accountName. */
+  accountName?: string;
   schtasks: SchtasksRunner;
   out: WriteSink;
   err: WriteSink;
@@ -1162,11 +1210,18 @@ export async function uninstallPhantombotTasks(
   opts: UninstallTaskSchedulerOptions,
 ): Promise<{ removed: boolean }> {
   const persona = opts.persona ?? (await currentPersonaName());
-  const sid = opts.sid ?? currentUserSid();
+  const owner: TaskOwner = {
+    sid: opts.sid ?? currentUserSid(),
+    username: opts.accountName ?? currentUserName(),
+  };
   const names = taskNames(persona);
   const ordered = [names.tick, names.nightly, names.heartbeat, names.main];
+  const legacyOutcomes: OwnedDeleteOutcome[] = [];
   for (const name of [...ordered, ...LEGACY_TASK_NAMES]) {
-    const outcome = await deleteTaskIfOwned(opts.schtasks, name, sid);
+    const outcome = await deleteTaskIfOwned(opts.schtasks, name, owner);
+    if (LEGACY_TASK_NAMES.includes(name as (typeof LEGACY_TASK_NAMES)[number])) {
+      legacyOutcomes.push(outcome);
+    }
     if (outcome === "deleted") {
       opts.out.write(`removed scheduled task: ${name}\n`);
     } else if (outcome === "kept-foreign") {
@@ -1178,10 +1233,15 @@ export async function uninstallPhantombotTasks(
     }
     // "absent" → nothing to report.
   }
-  // Best-effort removal of the shared launcher script and the persisted
-  // logon choice (the tasks are gone, so nothing references them any more).
-  // Missing files are fine.
-  await unlink(launcherVbsPath()).catch(() => {});
+  // Remove THIS persona's launcher script — other personas have their own
+  // (persona-scoped since the launcher rename), so this can't strand them.
+  await unlink(launcherVbsPath(persona)).catch(() => {});
+  // The legacy SHARED launcher is referenced only by the legacy pre-rename
+  // tasks. Remove it only when none of those survived: a foreign-owned
+  // legacy task we were not allowed to delete still needs the file.
+  if (legacyOutcomes.every((o) => o === "absent" || o === "deleted")) {
+    await unlink(legacyLauncherVbsPath()).catch(() => {});
+  }
   await unlink(logonMarkerPath(persona)).catch(() => {});
   return { removed: true };
 }
@@ -1326,6 +1386,7 @@ export async function ensureTasksCurrent(
         specArgsForLabel(spec.label),
         outLog,
         errLog,
+        launcherVbsPath(persona),
       );
       const patch = opts.patchAction ?? defaultPatchAction;
       const pr = await patch(spec.name, newArgs);
@@ -1348,7 +1409,7 @@ export async function ensureTasksCurrent(
     if (!ensuredDirs) {
       await mkdir(logsDir(), { recursive: true });
       await mkdir(xmlDir, { recursive: true });
-      await writeLauncherVbs();
+      await writeLauncherVbs(persona);
       ensuredDirs = true;
     }
     const r = await importTaskSpec(spec, xmlDir, opts.schtasks, logon);

@@ -43,6 +43,21 @@ export function currentUserSid(): string {
 }
 
 /**
+ * Current account as `COMPUTER\\user` (or `DOMAIN\\user`) — what plain
+ * `whoami` prints. Password-mode scheduled tasks carry THIS string (not a
+ * SID) in their Principal <UserId>, so ownership checks need it alongside
+ * currentUserSid().
+ */
+export function currentUserName(): string {
+  const res = Bun.spawnSync(["whoami"]);
+  const out = new TextDecoder().decode(res.stdout).trim();
+  if (res.exitCode !== 0 || !out) {
+    throw new Error("could not resolve current user name (whoami: no output)");
+  }
+  return out;
+}
+
+/**
  * Restrict `path` so ONLY the current user can access it. No-op on POSIX (the
  * file's mode 0o600 already governs); applies an owner-only ACL on Windows.
  * Throws on Windows if the lockdown cannot be verified to have succeeded.

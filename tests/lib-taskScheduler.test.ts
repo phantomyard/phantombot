@@ -26,6 +26,7 @@ import {
   isDaemonCommandLine,
   killDaemonProcesses,
   launcherVbsPath,
+  legacyLauncherVbsPath,
   LAUNCHER_VBS,
   scheduleWindowsRelaunch,
   ProcessEnumerationError,
@@ -44,6 +45,7 @@ import {
 } from "../src/lib/taskScheduler.ts";
 
 const SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+const FOREIGN_SID = "S-1-5-21-9999999999-8888888888-7777777777-1005";
 const BIN = "C:\\Users\\andrew\\AppData\\Local\\phantombot\\bin\\phantombot.exe";
 const PERSONA = "megan";
 const NAMES = taskNames(PERSONA);
@@ -87,6 +89,16 @@ function principalXml(sid: string): string {
     `<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
     `<Principals><Principal id="Author"><UserId>${sid}</UserId>` +
     `<LogonType>InteractiveToken</LogonType></Principal></Principals></Task>`
+  );
+}
+
+/** Password-mode task XML: the Principal UserId is the `COMPUTER\\user`
+ * account name (what was passed as /RU), NOT a SID. */
+function passwordPrincipalXml(account: string): string {
+  return (
+    `<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">` +
+    `<Principals><Principal id="Author"><UserId>${account}</UserId>` +
+    `<LogonType>Password</LogonType></Principal></Principals></Task>`
   );
 }
 
@@ -145,12 +157,13 @@ describe("buildLauncherArguments", () => {
       ["run"],
       "C:\\logs\\phantombot.out.log",
       "C:\\logs\\phantombot.err.log",
+      launcherVbsPath(PERSONA),
     );
     // //B (batch mode) suppresses any runtime script-error dialog. Each value
     // is its own quoted token so a spaced path survives arg parsing, and the
     // binary path stays visible (drift detection reads it back).
     expect(args).toBe(
-      `//B "${launcherVbsPath()}" "${BIN}" "run" "C:\\logs\\phantombot.out.log" "C:\\logs\\phantombot.err.log"`,
+      `//B "${launcherVbsPath(PERSONA)}" "${BIN}" "run" "C:\\logs\\phantombot.out.log" "C:\\logs\\phantombot.err.log"`,
     );
   });
 });
@@ -210,7 +223,7 @@ describe("generatePhantombotTaskXml", () => {
     // wscript runs in batch mode so a script error never pops its own dialog.
     expect(xml).toContain("//B");
     // The launcher path and the binary path are both quoted args…
-    expect(xml).toContain(`"${launcherVbsPath()}"`);
+    expect(xml).toContain(`"${launcherVbsPath(PERSONA)}"`);
     expect(xml).toContain(`"${BIN}"`);
     // …and the per-task log paths are handed to the launcher.
     expect(xml).toContain("phantombot.out.log");
@@ -298,7 +311,7 @@ describe("installPhantombotTasks", () => {
     expect(out.text).toContain("registered");
   });
 
-  test("writes the shared hidden launcher so wscript.exe has a script to run", async () => {
+  test("writes the persona-scoped hidden launcher so wscript.exe has a script to run", async () => {
     const { existsSync, readFileSync } = await import("node:fs");
     await installPhantombotTasks({
       binPath: BIN,
@@ -309,8 +322,8 @@ describe("installPhantombotTasks", () => {
       out: new CaptureStream(),
       err: new CaptureStream(),
     });
-    expect(existsSync(launcherVbsPath())).toBe(true);
-    expect(readFileSync(launcherVbsPath(), "utf8")).toBe(LAUNCHER_VBS);
+    expect(existsSync(launcherVbsPath(PERSONA))).toBe(true);
+    expect(readFileSync(launcherVbsPath(PERSONA), "utf8")).toBe(LAUNCHER_VBS);
   });
 
   test("transient XML import files are cleaned up after import", async () => {
@@ -451,7 +464,6 @@ describe("uninstallPhantombotTasks", () => {
   test("tasks owned by ANOTHER Windows account are left untouched", async () => {
     // Task Scheduler folders are machine-global: another local user's
     // same-named tasks must survive our uninstall.
-    const FOREIGN_SID = "S-1-5-21-9999999999-8888888888-7777777777-1005";
     const out = new CaptureStream();
     const st = new FakeSchtasks();
     for (const name of [...NAMES.all, ...LEGACY_TASK_NAMES]) {
@@ -473,9 +485,9 @@ describe("uninstallPhantombotTasks", () => {
     }
   });
 
-  test("removes the shared launcher script when the tasks are torn down", async () => {
-    const { existsSync } = await import("node:fs");
-    // Put the launcher in place first (install writes it), then uninstall.
+  test("removes THIS persona's launcher script — other personas' launchers survive", async () => {
+    const { existsSync, writeFileSync } = await import("node:fs");
+    // Install persona A (writes A's launcher), and fake persona B's launcher.
     await installPhantombotTasks({
       binPath: BIN,
       persona: PERSONA,
@@ -485,7 +497,8 @@ describe("uninstallPhantombotTasks", () => {
       out: new CaptureStream(),
       err: new CaptureStream(),
     });
-    expect(existsSync(launcherVbsPath())).toBe(true);
+    writeFileSync(launcherVbsPath("beta"), LAUNCHER_VBS, "utf8");
+    expect(existsSync(launcherVbsPath(PERSONA))).toBe(true);
     await uninstallPhantombotTasks({
       persona: PERSONA,
       sid: SID,
@@ -493,7 +506,64 @@ describe("uninstallPhantombotTasks", () => {
       out: new CaptureStream(),
       err: new CaptureStream(),
     });
-    expect(existsSync(launcherVbsPath())).toBe(false);
+    expect(existsSync(launcherVbsPath(PERSONA))).toBe(false);
+    // Persona B's tasks point at B's launcher — uninstalling A must not
+    // strand them.
+    expect(existsSync(launcherVbsPath("beta"))).toBe(true);
+  });
+
+  test("legacy shared launcher is removed only when no legacy task survives", async () => {
+    const { existsSync, writeFileSync, mkdirSync } = await import("node:fs");
+    mkdirSync(join(workdir, "phantombot"), { recursive: true });
+    const legacy = legacyLauncherVbsPath();
+    writeFileSync(legacy, LAUNCHER_VBS, "utf8");
+    // Case 1: all legacy tasks owned by us → deleted → shared launcher goes.
+    const st1 = new FakeSchtasks();
+    for (const name of LEGACY_TASK_NAMES) st1.registry[name] = principalXml(SID);
+    await uninstallPhantombotTasks({
+      persona: PERSONA,
+      sid: SID,
+      schtasks: st1,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(legacy)).toBe(false);
+    // Case 2: a FOREIGN-owned legacy task survives → it still references the
+    // shared launcher, so the file must stay.
+    writeFileSync(legacy, LAUNCHER_VBS, "utf8");
+    const st2 = new FakeSchtasks();
+    st2.registry[LEGACY_TASK_NAMES[0]!] = principalXml(FOREIGN_SID);
+    await uninstallPhantombotTasks({
+      persona: PERSONA,
+      sid: SID,
+      schtasks: st2,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(legacy)).toBe(true);
+  });
+
+  test("password-mode tasks (principal = account name, not SID) are still owned", async () => {
+    // Password-mode task XML carries `<UserId>MEGAN\megan</UserId>` with
+    // LogonType Password — no SID. Ownership must match the current account
+    // NAME or uninstall would strand every password-mode task while still
+    // deleting the persona marker.
+    const out = new CaptureStream();
+    const st = new FakeSchtasks();
+    for (const name of NAMES.all) {
+      st.registry[name] = passwordPrincipalXml("MEGAN\\megan");
+    }
+    const result = await uninstallPhantombotTasks({
+      persona: PERSONA,
+      sid: SID,
+      accountName: "megan\\megan", // whoami — case differs, must still match
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(result.removed).toBe(true);
+    expect(st.calls.filter((c) => c[0] === "/Delete").length).toBe(4);
+    for (const name of NAMES.all) expect(st.registry[name]).toBeUndefined();
   });
 
   test("missing tasks are skipped quietly — no deletes, not fatal", async () => {
@@ -1138,7 +1208,6 @@ describe("password logon mode (run when logged off)", () => {
   });
 
   test("legacy tasks owned by ANOTHER Windows account are kept on install", async () => {
-    const FOREIGN_SID = "S-1-5-21-9999999999-8888888888-7777777777-1005";
     const out = new CaptureStream();
     const st = new FakeSchtasks();
     for (const legacy of LEGACY_TASK_NAMES) st.registry[legacy] = principalXml(FOREIGN_SID);
@@ -1173,21 +1242,25 @@ describe("per-persona logon marker", () => {
     expect(await readTaskLogon("gamma")).toEqual({ mode: "interactive" });
   });
 
-  test("falls back to the pre-scoping shared marker, and a write migrates it", async () => {
+  test("falls back to the pre-scoping shared marker, and a write PRESERVES it", async () => {
     const { writeFileSync, existsSync } = await import("node:fs");
     const legacy = join(workdir, "phantombot", "windows-logon.json");
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(workdir, "phantombot"), { recursive: true });
     writeFileSync(legacy, JSON.stringify({ mode: "password", username: "PC\\old" }));
     // A persona installed before the scoping still heals in password mode.
-    expect(await readTaskLogon("newbot")).toEqual({
+    expect(await readTaskLogon("oldbot")).toEqual({
       mode: "password",
       username: "PC\\old",
     });
-    // The next install writes the scoped marker and removes the shared one.
-    await writeTaskLogon("newbot", { mode: "password", username: "PC\\old" });
-    expect(existsSync(legacy)).toBe(false);
-    expect(await readTaskLogon("newbot")).toEqual({
+    // A SECOND persona installing must NOT delete the shared marker: doing so
+    // would silently downgrade oldbot's heal/relaunch to interactive and
+    // re-break headless operation. Scoped markers win reads, so the stale
+    // file is inert for the persona that just installed.
+    await writeTaskLogon("newbot", { mode: "interactive" });
+    expect(existsSync(legacy)).toBe(true);
+    expect(await readTaskLogon("newbot")).toEqual({ mode: "interactive" });
+    expect(await readTaskLogon("oldbot")).toEqual({
       mode: "password",
       username: "PC\\old",
     });
