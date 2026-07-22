@@ -36,6 +36,7 @@ import {
 } from "./systemd.ts";
 import {
   defaultTaskSchedulerServiceControl,
+  scheduleWindowsRelaunch,
   taskLogPaths,
 } from "./taskScheduler.ts";
 
@@ -82,6 +83,14 @@ export interface SelfRestartOpts {
    * SIGTERM so `phantombot run`'s existing shutdown handler drains cleanly.
    */
   triggerShutdown?: () => void;
+  /**
+   * Test seam for the Windows deferred-relaunch scheduler. Production uses
+   * `scheduleWindowsRelaunch`, which detaches a watcher that waits for this
+   * process to exit and then starts the swapped binary.
+   */
+  scheduleRelaunch?: (opts: {
+    selfPid: number;
+  }) => Promise<{ ok: boolean; stderr?: string }>;
 }
 
 /**
@@ -96,15 +105,26 @@ export interface SelfRestartOpts {
  * (`systemctl --user restart` / `launchctl kickstart`). Those SIGTERM us and
  * the supervisor relaunches — safe to call from within the unit.
  *
- * Windows: exit cleanly (emit SIGTERM → the run loop's handler drains and
- * returns); the always-on scheduled task's keep-alive trigger relaunches the
- * swapped binary while the user remains logged in.
+ * Windows: schedule a detached deferred relaunch of the swapped binary FIRST,
+ * then exit cleanly (emit SIGTERM → the run loop's handler drains and returns).
+ * The watcher waits for us to release the run-lock, then starts the new binary
+ * — mirroring the Linux systemd-run deferred restart. We no longer rely on the
+ * always-on task's keep-alive trigger as the primary relaunch path: its
+ * IgnoreNew run-accounting can wedge and never relaunch (the Megan v1.1.212
+ * self-update that sat dead for hours). Keep-alive remains a backstop if the
+ * watcher fails to spawn.
  */
 export async function selfRestart(
   opts: SelfRestartOpts,
 ): Promise<{ ok: boolean; stderr?: string }> {
   const platform = opts.procPlatform ?? process.platform;
   if (platform === "win32") {
+    // Schedule the relaunch BEFORE tripping shutdown: the watcher captures our
+    // pid, blocks on our exit, then launches the swapped binary. A spawn
+    // failure here is non-fatal — we still exit and fall back to the keep-alive
+    // trigger — but we surface it so the caller can log it.
+    const scheduleRelaunch = opts.scheduleRelaunch ?? scheduleWindowsRelaunch;
+    const relaunch = await scheduleRelaunch({ selfPid: process.pid });
     const trigger =
       opts.triggerShutdown ??
       (() => {
@@ -113,7 +133,14 @@ export async function selfRestart(
         process.emit("SIGTERM" as NodeJS.Signals);
       });
     trigger();
-    return { ok: true };
+    return relaunch.ok
+      ? { ok: true }
+      : {
+          ok: false,
+          stderr:
+            `deferred relaunch scheduling failed (${relaunch.stderr ?? "unknown"}); ` +
+            `falling back to the keep-alive trigger`,
+        };
   }
   return opts.serviceControl.restart();
 }

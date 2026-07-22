@@ -1028,6 +1028,106 @@ async function launchDaemonDirectly(): Promise<void> {
   }
 }
 
+/** Injectable spawn seam so {@link scheduleWindowsRelaunch} is unit-testable. */
+export type RelaunchSpawn = (
+  argv: string[],
+) => Promise<{ ok: boolean; stderr?: string }>;
+
+export interface ScheduleWindowsRelaunchOpts {
+  /** PID whose exit the watcher blocks on. Defaults to process.pid. */
+  selfPid?: number;
+  /**
+   * How long the watcher waits for the current daemon to exit before it
+   * launches anyway. Should exceed run.ts's SHUTDOWN_GRACE_MS (5s force-exit
+   * watchdog) with headroom. Default 30s.
+   */
+  graceSeconds?: number;
+  /** Defaults to process.execPath — the on-disk (freshly-swapped) binary. */
+  binPath?: string;
+  /** Test seam. Defaults to a detached Bun.spawn of powershell. */
+  spawnImpl?: RelaunchSpawn;
+}
+
+/**
+ * Schedule a DEFERRED, self-detached relaunch of the phantombot daemon, then
+ * return so the caller can exit.
+ *
+ * Why this exists: on Windows the `/update` and `/restart` in-process flows
+ * (see {@link selfRestart} in platform.ts) used to just SIGTERM themselves and
+ * trust the always-on task's 1-minute keep-alive TimeTrigger to bring the
+ * swapped binary back. That trigger is NOT a dependable relaunch path: it runs
+ * under MultipleInstancesPolicy=IgnoreNew, and once the task's run-accounting
+ * wedges (a terminated instance the scheduler never clears) the "missed runs"
+ * counter climbs while the daemon never actually starts. That is exactly how
+ * Megan self-updated to v1.1.212 and then sat dead for hours — the update
+ * installed cleanly, the old process force-exited, and nothing relaunched.
+ *
+ * The fix mirrors the Linux `systemd-run` deferred-restart pattern: spawn a
+ * tiny detached PowerShell watcher that (1) blocks until THIS process exits —
+ * releasing the single-instance run-lock — then (2) `Start-Process`es the
+ * freshly-swapped binary hidden, with the same redirected logs the scheduler
+ * writes. It is launched via an outer `Start-Process` so it fully detaches
+ * from our process tree and outlives our own exit (a bare Bun.spawn child would
+ * be reaped when the task instance ends). The keep-alive trigger stays as a
+ * backstop if the watcher ever fails to spawn.
+ */
+export async function scheduleWindowsRelaunch(
+  opts: ScheduleWindowsRelaunchOpts = {},
+): Promise<{ ok: boolean; stderr?: string }> {
+  const selfPid = opts.selfPid ?? process.pid;
+  const graceSeconds = opts.graceSeconds ?? 30;
+  const binPath = opts.binPath ?? process.execPath;
+  const { out, err } = taskLogPaths("phantombot");
+
+  // Inner watcher: wait for the current daemon to exit (Wait-Process returns
+  // immediately if the pid is already gone; -Timeout caps a wedged shutdown so
+  // we still relaunch), then launch the swapped binary detached. Encoded as
+  // base64 UTF-16LE so the outer -Command layer needs no nested quoting.
+  const watcher = [
+    `Wait-Process -Id ${selfPid} -Timeout ${graceSeconds} -ErrorAction SilentlyContinue;`,
+    `Start-Process -FilePath ${powershellQuote(binPath)}`,
+    `-ArgumentList @('run')`,
+    `-WorkingDirectory ${powershellQuote(process.cwd())}`,
+    `-WindowStyle Hidden`,
+    `-RedirectStandardOutput ${powershellQuote(out)}`,
+    `-RedirectStandardError ${powershellQuote(err)}`,
+  ].join(" ");
+  const encoded = Buffer.from(watcher, "utf16le").toString("base64");
+
+  // Outer layer: detach the watcher from our process tree so it survives our
+  // exit. Start-Process returns as soon as the watcher is launched.
+  const detach =
+    `Start-Process powershell ` +
+    `-ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','${encoded}') ` +
+    `-WindowStyle Hidden`;
+
+  const spawnImpl = opts.spawnImpl ?? defaultRelaunchSpawn;
+  return spawnImpl([
+    "powershell",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    detach,
+  ]);
+}
+
+const defaultRelaunchSpawn: RelaunchSpawn = async (argv) => {
+  const child = Bun.spawn(argv, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    windowsHide: true,
+    env: { ...process.env },
+  });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return exitCode === 0
+    ? { ok: true }
+    : { ok: false, stderr: stderr.trim() || `powershell exited ${exitCode}` };
+};
+
 /**
  * Default TaskSchedulerServiceControl backed by real schtasks. Returns
  * isActive=false on any error so callers can treat "task unknown" the same as

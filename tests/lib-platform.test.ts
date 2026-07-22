@@ -169,19 +169,44 @@ describe("selfRestart", () => {
     expect(r.stderr).toBe("boom");
   });
 
-  test("Windows: triggers a clean exit and never calls schtasks restart()", async () => {
+  test("Windows: schedules a deferred relaunch, then triggers a clean exit and never calls schtasks restart()", async () => {
     const { svc, calls } = trackingSvc({ ok: true });
     let shutdowns = 0;
+    const relaunchCalls: number[] = [];
     const r = await selfRestart({
       serviceControl: svc,
       procPlatform: "win32",
+      scheduleRelaunch: async ({ selfPid }) => {
+        relaunchCalls.push(selfPid);
+        return { ok: true };
+      },
       triggerShutdown: () => {
         shutdowns++;
       },
     });
     expect(r.ok).toBe(true);
-    // The keep-alive relaunches us; we must NOT End/Run our own task tree.
+    // We must NOT End/Run our own task tree — the detached watcher relaunches us.
     expect(calls.length).toBe(0);
+    // Relaunch is scheduled with our pid BEFORE we go down.
+    expect(relaunchCalls).toEqual([process.pid]);
     expect(shutdowns).toBe(1);
+  });
+
+  test("Windows: still exits when relaunch scheduling fails, and surfaces the fallback", async () => {
+    const { svc } = trackingSvc({ ok: true });
+    let shutdowns = 0;
+    const r = await selfRestart({
+      serviceControl: svc,
+      procPlatform: "win32",
+      scheduleRelaunch: async () => ({ ok: false, stderr: "powershell exited 1" }),
+      triggerShutdown: () => {
+        shutdowns++;
+      },
+    });
+    // Non-fatal: we still trigger shutdown (keep-alive is the backstop)...
+    expect(shutdowns).toBe(1);
+    // ...but the failure is surfaced for logging.
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain("keep-alive");
   });
 });
