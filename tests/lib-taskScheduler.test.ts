@@ -37,14 +37,16 @@ import {
   type SchtasksRunner,
   taskLogPaths,
   uninstallPhantombotTasks,
-  HEARTBEAT_TASK,
-  NIGHTLY_TASK,
-  PHANTOMBOT_TASK,
-  TICK_TASK,
+  taskNames,
+  readTaskLogon,
+  writeTaskLogon,
+  LEGACY_TASK_NAMES,
 } from "../src/lib/taskScheduler.ts";
 
 const SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 const BIN = "C:\\Users\\andrew\\AppData\\Local\\phantombot\\bin\\phantombot.exe";
+const PERSONA = "megan";
+const NAMES = taskNames(PERSONA);
 
 class FakeSchtasks implements SchtasksRunner {
   calls: string[][] = [];
@@ -67,12 +69,18 @@ class CaptureStream {
 }
 
 let workdir: string;
+let prevXdg: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-schtasks-"));
+  // Keep marker-file and launcher writes inside the tmpdir.
+  prevXdg = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = workdir;
 });
 
 afterEach(async () => {
+  if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = prevXdg;
   await rmrf(workdir);
 });
 
@@ -130,14 +138,19 @@ describe("LAUNCHER_VBS", () => {
 });
 
 describe("generatePhantombotTaskXml", () => {
-  const xml = generatePhantombotTaskXml(SID, BIN);
+  // Generated lazily: the launcher path resolves through XDG_DATA_HOME,
+  // which the outer beforeEach only points at the tmpdir per-test.
+  let xml: string;
+  beforeEach(() => {
+    xml = generatePhantombotTaskXml(SID, BIN, PERSONA);
+  });
 
   test("is a Task Scheduler 1.2 document with the right URI", () => {
     expect(xml).toContain('<?xml version="1.0" encoding="UTF-16"?>');
     expect(xml).toContain(
       '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
     );
-    expect(xml).toContain(`<URI>${PHANTOMBOT_TASK}</URI>`);
+    expect(xml).toContain(`<URI>${NAMES.main}</URI>`);
   });
 
   test("runs as the current user by SID, only while logged in, no elevation", () => {
@@ -177,16 +190,16 @@ describe("generatePhantombotTaskXml", () => {
 
 describe("companion task schedules", () => {
   test("heartbeat repeats every 30 minutes", () => {
-    const xml = generateHeartbeatTaskXml(SID, BIN);
-    expect(xml).toContain(`<URI>${HEARTBEAT_TASK}</URI>`);
+    const xml = generateHeartbeatTaskXml(SID, BIN, PERSONA);
+    expect(xml).toContain(`<URI>${NAMES.heartbeat}</URI>`);
     expect(xml).toContain("<Interval>PT30M</Interval>");
     expect(xml).toContain("heartbeat.out.log");
     expect(xml).not.toContain("<RestartOnFailure>");
   });
 
   test("nightly fires daily at 02:00 (calendar trigger)", () => {
-    const xml = generateNightlyTaskXml(SID, BIN);
-    expect(xml).toContain(`<URI>${NIGHTLY_TASK}</URI>`);
+    const xml = generateNightlyTaskXml(SID, BIN, PERSONA);
+    expect(xml).toContain(`<URI>${NAMES.nightly}</URI>`);
     expect(xml).toContain("<CalendarTrigger>");
     expect(xml).toContain("<ScheduleByDay>");
     expect(xml).toContain("<DaysInterval>1</DaysInterval>");
@@ -194,8 +207,8 @@ describe("companion task schedules", () => {
   });
 
   test("tick repeats every minute", () => {
-    const xml = generateTickTaskXml(SID, BIN);
-    expect(xml).toContain(`<URI>${TICK_TASK}</URI>`);
+    const xml = generateTickTaskXml(SID, BIN, PERSONA);
+    expect(xml).toContain(`<URI>${NAMES.tick}</URI>`);
     expect(xml).toContain("<Interval>PT1M</Interval>");
     expect(xml).toContain("tick.out.log");
   });
@@ -203,7 +216,7 @@ describe("companion task schedules", () => {
 
 describe("XML escaping", () => {
   test("ampersands and angle brackets in the bin path become entities", () => {
-    const xml = generatePhantombotTaskXml(SID, "C:\\odd&path\\<bot>.exe");
+    const xml = generatePhantombotTaskXml(SID, "C:\\odd&path\\<bot>.exe", PERSONA);
     expect(xml).toContain("C:\\odd&amp;path\\&lt;bot&gt;.exe");
   });
 });
@@ -215,6 +228,7 @@ describe("installPhantombotTasks", () => {
     const st = new FakeSchtasks();
     const result = await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -225,14 +239,20 @@ describe("installPhantombotTasks", () => {
 
     const seq = st.calls.map((c) => c.join(" "));
     expect(seq).toEqual([
-      `/Query /TN ${PHANTOMBOT_TASK} /XML`,
-      `/Create /TN ${PHANTOMBOT_TASK} /XML ${join(workdir, "phantombot-task-phantombot.xml")} /F`,
-      `/Query /TN ${HEARTBEAT_TASK} /XML`,
-      `/Create /TN ${HEARTBEAT_TASK} /XML ${join(workdir, "phantombot-task-heartbeat.xml")} /F`,
-      `/Query /TN ${NIGHTLY_TASK} /XML`,
-      `/Create /TN ${NIGHTLY_TASK} /XML ${join(workdir, "phantombot-task-nightly.xml")} /F`,
-      `/Query /TN ${TICK_TASK} /XML`,
-      `/Create /TN ${TICK_TASK} /XML ${join(workdir, "phantombot-task-tick.xml")} /F`,
+      `/Query /TN ${NAMES.main} /XML`,
+      `/Create /TN ${NAMES.main} /XML ${join(workdir, "phantombot-task-phantombot.xml")} /F`,
+      `/Query /TN ${NAMES.heartbeat} /XML`,
+      `/Create /TN ${NAMES.heartbeat} /XML ${join(workdir, "phantombot-task-heartbeat.xml")} /F`,
+      `/Query /TN ${NAMES.nightly} /XML`,
+      `/Create /TN ${NAMES.nightly} /XML ${join(workdir, "phantombot-task-nightly.xml")} /F`,
+      `/Query /TN ${NAMES.tick} /XML`,
+      `/Create /TN ${NAMES.tick} /XML ${join(workdir, "phantombot-task-tick.xml")} /F`,
+      // Pre-rename legacy tasks are cleaned up so an upgrade never
+      // double-supervises the daemon.
+      `/Delete /TN ${LEGACY_TASK_NAMES[0]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[1]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[2]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[3]} /F`,
     ]);
     expect(out.text).toContain("registered");
   });
@@ -241,6 +261,7 @@ describe("installPhantombotTasks", () => {
     const { existsSync, readFileSync } = await import("node:fs");
     await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: new FakeSchtasks(),
@@ -258,6 +279,7 @@ describe("installPhantombotTasks", () => {
     const st = new FakeSchtasks();
     await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -286,6 +308,7 @@ describe("installPhantombotTasks", () => {
     };
     await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -308,6 +331,7 @@ describe("installPhantombotTasks", () => {
     };
     const result = await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -318,16 +342,21 @@ describe("installPhantombotTasks", () => {
     expect(err.text).toContain("could not register scheduled task");
   });
 
-  test("preserves healthy existing task definitions", async () => {
-    const xml = generatePhantombotTaskXml(SID, BIN);
+  test("re-imports even healthy existing tasks (applies the chosen template + logon mode)", async () => {
+    const xml = generatePhantombotTaskXml(SID, BIN, PERSONA);
+    const created: string[] = [];
     const st: SchtasksRunner = {
       async run(args: readonly string[]): Promise<SchtasksResult> {
         if (args[0] === "/Query") return { exitCode: 0, stdout: xml, stderr: "" };
-        throw new Error("healthy tasks must not be rewritten");
+        if (args[0] === "/Create") {
+          created.push(args[args.indexOf("/TN") + 1]!);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
     const result = await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -335,6 +364,15 @@ describe("installPhantombotTasks", () => {
       err: new CaptureStream(),
     });
     expect(result.installed).toBe(true);
+    // Install is not the heal: a re-install must apply the current template
+    // (and any fresh credential) even when the registered XML already points
+    // at this binary. Drift-only preservation is ensureTasksCurrent's job.
+    expect(created).toEqual([
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
+    ]);
   });
 });
 
@@ -343,13 +381,17 @@ describe("uninstallPhantombotTasks", () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const st = new FakeSchtasks();
-    const result = await uninstallPhantombotTasks({ schtasks: st, out, err });
+    const result = await uninstallPhantombotTasks({ persona: PERSONA, schtasks: st, out, err });
     expect(result.removed).toBe(true);
     expect(st.calls.map((c) => c.join(" "))).toEqual([
-      `/Delete /TN ${TICK_TASK} /F`,
-      `/Delete /TN ${NIGHTLY_TASK} /F`,
-      `/Delete /TN ${HEARTBEAT_TASK} /F`,
-      `/Delete /TN ${PHANTOMBOT_TASK} /F`,
+      `/Delete /TN ${NAMES.tick} /F`,
+      `/Delete /TN ${NAMES.nightly} /F`,
+      `/Delete /TN ${NAMES.heartbeat} /F`,
+      `/Delete /TN ${NAMES.main} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[0]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[1]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[2]} /F`,
+      `/Delete /TN ${LEGACY_TASK_NAMES[3]} /F`,
     ]);
     expect(out.text).toContain("removed scheduled task");
   });
@@ -359,6 +401,7 @@ describe("uninstallPhantombotTasks", () => {
     // Put the launcher in place first (install writes it), then uninstall.
     await installPhantombotTasks({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: new FakeSchtasks(),
@@ -367,6 +410,7 @@ describe("uninstallPhantombotTasks", () => {
     });
     expect(existsSync(launcherVbsPath())).toBe(true);
     await uninstallPhantombotTasks({
+      persona: PERSONA,
       schtasks: new FakeSchtasks(),
       out: new CaptureStream(),
       err: new CaptureStream(),
@@ -384,7 +428,7 @@ describe("uninstallPhantombotTasks", () => {
       { exitCode: 1, stdout: "", stderr: "cannot find the file specified" },
       { exitCode: 1, stdout: "", stderr: "cannot find the file specified" },
     ];
-    const result = await uninstallPhantombotTasks({ schtasks: st, out, err });
+    const result = await uninstallPhantombotTasks({ persona: PERSONA, schtasks: st, out, err });
     expect(result.removed).toBe(true);
     expect(out.text).toContain("returned 1 (continuing)");
   });
@@ -397,10 +441,10 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
   /** The registered XML each task's `/Query /XML` should return, keyed by name. */
   function registeredXml(bin: string): Record<string, string> {
     return {
-      [PHANTOMBOT_TASK]: generatePhantombotTaskXml(SID, bin),
-      [HEARTBEAT_TASK]: generateHeartbeatTaskXml(SID, bin),
-      [NIGHTLY_TASK]: generateNightlyTaskXml(SID, bin),
-      [TICK_TASK]: generateTickTaskXml(SID, bin),
+      [NAMES.main]: generatePhantombotTaskXml(SID, bin, PERSONA),
+      [NAMES.heartbeat]: generateHeartbeatTaskXml(SID, bin, PERSONA),
+      [NAMES.nightly]: generateNightlyTaskXml(SID, bin, PERSONA),
+      [NAMES.tick]: generateTickTaskXml(SID, bin, PERSONA),
     };
   }
 
@@ -436,6 +480,7 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     const st = new HealFake(registeredXml(BIN));
     const r = await ensureTasksCurrent({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -451,36 +496,38 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     const st = new HealFake(registeredXml(OLD_BIN));
     const r = await ensureTasksCurrent({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
     });
     expect(r.rewrote).toEqual([
-      PHANTOMBOT_TASK,
-      HEARTBEAT_TASK,
-      NIGHTLY_TASK,
-      TICK_TASK,
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
     ]);
     expect(st.created()).toEqual([
-      PHANTOMBOT_TASK,
-      HEARTBEAT_TASK,
-      NIGHTLY_TASK,
-      TICK_TASK,
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
     ]);
   });
 
   test("a single missing task is re-registered; the current ones are left alone", async () => {
     const xml = registeredXml(BIN);
-    xml[TICK_TASK] = undefined as unknown as string; // tick was deleted
+    xml[NAMES.tick] = undefined as unknown as string; // tick was deleted
     const st = new HealFake(xml);
     const r = await ensureTasksCurrent({
       binPath: BIN,
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
     });
-    expect(r.rewrote).toEqual([TICK_TASK]);
-    expect(st.created()).toEqual([TICK_TASK]);
+    expect(r.rewrote).toEqual([NAMES.tick]);
+    expect(st.created()).toEqual([NAMES.tick]);
   });
 
   test("path casing differences alone are not treated as drift", async () => {
@@ -489,6 +536,7 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     const st = new HealFake(registeredXml(BIN.toUpperCase()));
     const r = await ensureTasksCurrent({
       binPath: BIN.toLowerCase(),
+      persona: PERSONA,
       sid: SID,
       xmlDir: workdir,
       schtasks: st,
@@ -750,7 +798,7 @@ describe("service control stop/restart kill the stray daemon", () => {
   test("stop(): disable + end + kill daemon (not the CLI invoker)", async () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run"), pb(555, "stop")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     const r = await svc.stop();
     expect(r.ok).toBe(true);
     const verbs = st.calls.map((c) => c[0]);
@@ -762,7 +810,7 @@ describe("service control stop/restart kill the stray daemon", () => {
   test("restart(): enable + end + kill daemon + run", async () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     const r = await svc.restart();
     expect(r.ok).toBe(true);
     const verbs = st.calls.map((c) => c[0]);
@@ -775,7 +823,7 @@ describe("service control stop/restart kill the stray daemon", () => {
     // still held the single-instance lock, so the new daemon refused to start.
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     await svc.restart();
     const runIdx = st.calls.findIndex((c) => c[0] === "/Run");
     expect(runIdx).toBeGreaterThanOrEqual(0);
@@ -790,7 +838,7 @@ describe("service control stop/restart kill the stray daemon", () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
     pm.alwaysFailList = true;
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     const r = await svc.restart();
     expect(r.ok).toBe(false);
     expect(st.calls.map((c) => c[0])).not.toContain("/Run");
@@ -803,7 +851,7 @@ describe("service control stop/restart kill the stray daemon", () => {
   test("restart(): an unkillable daemon must NOT fire /Run", async () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")], [100]);
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     const r = await svc.restart();
     expect(r.ok).toBe(false);
     expect(st.calls.map((c) => c[0])).not.toContain("/Run");
@@ -813,7 +861,7 @@ describe("service control stop/restart kill the stray daemon", () => {
     const st = new FakeSchtasks();
     const pm = new FakeProcessManager([pb(100, "run")]);
     pm.alwaysFailList = true;
-    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait);
+    const svc = defaultTaskSchedulerServiceControl(st, pm, 555, fastWait, PERSONA);
     const r = await svc.stop();
     expect(r.ok).toBe(false);
     expect(r.stderr ?? "").toContain("could not confirm");
@@ -861,5 +909,156 @@ describe("scheduleWindowsRelaunch", () => {
     });
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("powershell exited 1");
+  });
+});
+
+describe("password logon mode (run when logged off)", () => {
+  const ACCOUNT = "MEGAN-PC\\megan";
+
+  test("task XML carries LogonType Password, the account name, and a boot trigger", () => {
+    const xml = generatePhantombotTaskXml(SID, BIN, PERSONA, {
+      mode: "password",
+      username: ACCOUNT,
+    });
+    expect(xml).toContain("<LogonType>Password</LogonType>");
+    expect(xml).toContain(`<UserId>${ACCOUNT}</UserId>`);
+    expect(xml).toContain("<BootTrigger>");
+    // The credential itself never goes into the XML.
+    expect(xml).not.toContain("s3cret");
+  });
+
+  test("companion tasks are password-mode too, but only the daemon gets a boot trigger", () => {
+    const hb = generateHeartbeatTaskXml(SID, BIN, PERSONA, {
+      mode: "password",
+      username: ACCOUNT,
+    });
+    expect(hb).toContain("<LogonType>Password</LogonType>");
+    expect(hb).not.toContain("<BootTrigger>");
+  });
+
+  test("install registers with /RU + /RP and persists the mode (without the password)", async () => {
+    const st = new FakeSchtasks();
+    const result = await installPhantombotTasks({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      logon: { mode: "password", username: ACCOUNT, password: "s3cret" },
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(result.installed).toBe(true);
+    const creates = st.calls.filter((c) => c[0] === "/Create");
+    expect(creates.length).toBe(4);
+    for (const c of creates) {
+      expect(c).toContain("/RU");
+      expect(c).toContain(ACCOUNT);
+      expect(c).toContain("/RP");
+      expect(c).toContain("s3cret");
+    }
+    // The marker remembers the mode + account for the heal path, but the
+    // password stays with Task Scheduler — never on our disk.
+    expect(await readTaskLogon()).toEqual({
+      mode: "password",
+      username: ACCOUNT,
+    });
+  });
+
+  test("heal patches a drifted password-mode task's action in place (no credential needed)", async () => {
+    await writeTaskLogon({ mode: "password", username: ACCOUNT });
+    const OLD_BIN = "C:\\old\\phantombot.exe";
+    const registered: Record<string, string | undefined> = {
+      [NAMES.main]: generatePhantombotTaskXml(SID, OLD_BIN, PERSONA, {
+        mode: "password",
+        username: ACCOUNT,
+      }),
+      [NAMES.heartbeat]: generateHeartbeatTaskXml(SID, BIN, PERSONA, {
+        mode: "password",
+        username: ACCOUNT,
+      }),
+      [NAMES.nightly]: generateNightlyTaskXml(SID, BIN, PERSONA, {
+        mode: "password",
+        username: ACCOUNT,
+      }),
+      [NAMES.tick]: generateTickTaskXml(SID, BIN, PERSONA, {
+        mode: "password",
+        username: ACCOUNT,
+      }),
+    };
+    const st: SchtasksRunner = {
+      async run(args: readonly string[]): Promise<SchtasksResult> {
+        if (args[0] === "/Query") {
+          const xml = registered[args[args.indexOf("/TN") + 1]!];
+          return xml === undefined
+            ? { exitCode: 1, stdout: "", stderr: "cannot find" }
+            : { exitCode: 0, stdout: xml, stderr: "" };
+        }
+        throw new Error("password-mode heal must NOT re-import via schtasks");
+      },
+    };
+    const patched: Array<[string, string]> = [];
+    const r = await ensureTasksCurrent({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      patchAction: async (name, args) => {
+        patched.push([name, args]);
+        return { ok: true };
+      },
+    });
+    // Only the drifted daemon task was patched, with the new binary path in
+    // the launcher arguments.
+    expect(r.rewrote).toEqual([NAMES.main]);
+    expect(r.failed).toEqual([]);
+    expect(patched.length).toBe(1);
+    expect(patched[0]![0]).toBe(NAMES.main);
+    expect(patched[0]![1]).toContain(BIN);
+    expect(patched[0]![1]).not.toContain(OLD_BIN);
+  });
+
+  test("heal cannot recreate a MISSING password-mode task — it says to re-install", async () => {
+    await writeTaskLogon({ mode: "password", username: ACCOUNT });
+    const st: SchtasksRunner = {
+      async run(): Promise<SchtasksResult> {
+        return { exitCode: 1, stdout: "", stderr: "cannot find" };
+      },
+    };
+    const r = await ensureTasksCurrent({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      patchAction: async () => ({ ok: true }),
+    });
+    expect(r.rewrote).toEqual([]);
+    expect(r.failed).toEqual([
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
+    ]);
+  });
+
+  test("legacy (pre persona-rename) tasks are removed on install", async () => {
+    const st = new FakeSchtasks();
+    await installPhantombotTasks({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    const deletes = st.calls
+      .filter((c) => c[0] === "/Delete")
+      .map((c) => c[c.indexOf("/TN") + 1]);
+    for (const legacy of LEGACY_TASK_NAMES) {
+      expect(deletes).toContain(legacy);
+    }
   });
 });

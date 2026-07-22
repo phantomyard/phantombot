@@ -280,6 +280,9 @@ describe("runInstall (darwin/launchd)", () => {
   });
 });
 
+const WIN_BIN2 =
+  "C:\\Users\\megan\\AppData\\Local\\phantombot\\bin\\phantombot.exe";
+
 describe("runInstall (windows/schtasks)", () => {
   const WIN_BIN =
     "C:\\Users\\andrew\\AppData\\Local\\phantombot\\bin\\phantombot.exe";
@@ -290,6 +293,7 @@ describe("runInstall (windows/schtasks)", () => {
     const st = new FakeSchtasks();
     const code = await runInstall({
       binPath: WIN_BIN,
+      persona: "testbot",
       sid: "S-1-5-21-1-2-3-1001",
       xmlDir: workdir,
       schtasks: st,
@@ -311,6 +315,7 @@ describe("runInstall (windows/schtasks)", () => {
     const st = new FakeSchtasks();
     const code = await runInstall({
       binPath: WIN_BIN,
+      persona: "testbot",
       sid: "S-1-5-21-1-2-3-1001",
       xmlDir: workdir,
       systemctl: sys,
@@ -334,6 +339,7 @@ describe("runInstall (windows/schtasks)", () => {
     ];
     const code = await runInstall({
       binPath: WIN_BIN,
+      persona: "testbot",
       sid: "S-1-5-21-1-2-3-1001",
       xmlDir: workdir,
       schtasks: st,
@@ -367,14 +373,16 @@ describe("runUninstall (windows/schtasks)", () => {
     const out = new CaptureStream();
     const st = new FakeSchtasks();
     const code = await runUninstall({
+      persona: "testbot",
       schtasks: st,
       out,
       err: new CaptureStream(),
       platform: "windows",
     });
     expect(code).toBe(0);
+    // 4 persona-scoped tasks + 4 legacy pre-rename names.
     const deletes = st.calls.filter((c) => c[0] === "/Delete");
-    expect(deletes.length).toBe(4);
+    expect(deletes.length).toBe(8);
     expect(out.text).toContain("uninstall complete");
   });
 });
@@ -449,3 +457,136 @@ describe("runUninstall (darwin/launchd)", () => {
     expect(out.text).toContain("uninstall complete");
   });
 });
+
+describe("runInstall (windows) logged-off prompt flow", () => {
+
+  test("answering no keeps interactive mode (no /RU, no password)", async () => {
+    const st = new FakeSchtasks();
+    const out = new CaptureStream();
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+      promptRunLoggedOff: async () => false,
+    });
+    expect(code).toBe(0);
+    const creates = st.calls.filter((c) => c[0] === "/Create");
+    expect(creates.length).toBe(4);
+    for (const c of creates) {
+      expect(c).not.toContain("/RU");
+      expect(c).not.toContain("/RP");
+    }
+    expect(out.text).toContain("while logged in");
+  });
+
+  test("answering yes asks for the password and registers with /RU + /RP", async () => {
+    const st = new FakeSchtasks();
+    const out = new CaptureStream();
+    let askedPassword = false;
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+      promptRunLoggedOff: async () => true,
+      promptPassword: async () => {
+        askedPassword = true;
+        return "s3cret!";
+      },
+      whoami: async () => "MEGAN-PC\\megan",
+    });
+    expect(code).toBe(0);
+    expect(askedPassword).toBe(true);
+    const creates = st.calls.filter((c) => c[0] === "/Create");
+    expect(creates.length).toBe(4);
+    for (const c of creates) {
+      expect(c).toContain("/RU");
+      expect(c).toContain("MEGAN-PC\\megan");
+      expect(c).toContain("/RP");
+    }
+    expect(out.text).toContain("whether or not anyone is logged on");
+  });
+
+  test("cancelling the prompt aborts the install with exit 2", async () => {
+    const st = new FakeSchtasks();
+    const err = new CaptureStream();
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err,
+      platform: "windows",
+      promptRunLoggedOff: async () => null,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("cancelled");
+    expect(st.calls).toEqual([]);
+  });
+});
+
+  test("scripted mode: runLoggedOff + password flag skips all prompts", async () => {
+    const st = new FakeSchtasks();
+    const out = new CaptureStream();
+    let prompted = false;
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+      runLoggedOff: true,
+      windowsPassword: "s3cret!",
+      whoami: async () => "MEGAN-PC\\megan",
+      promptRunLoggedOff: async () => {
+        prompted = true;
+        return false;
+      },
+    });
+    expect(code).toBe(0);
+    expect(prompted).toBe(false);
+    const creates = st.calls.filter((c) => c[0] === "/Create");
+    expect(creates.length).toBe(4);
+    for (const c of creates) expect(c).toContain("/RP");
+    expect(out.text).toContain("whether or not anyone is logged on");
+  });
+
+  test("scripted mode: runLoggedOff without a password fails clearly", async () => {
+    const st = new FakeSchtasks();
+    const err = new CaptureStream();
+    const prev = process.env.PHANTOMBOT_WINDOWS_PASSWORD;
+    delete process.env.PHANTOMBOT_WINDOWS_PASSWORD;
+    try {
+      const code = await runInstall({
+        binPath: WIN_BIN2,
+        persona: "testbot",
+        sid: "S-1-5-21-1-2-3-1001",
+        xmlDir: workdir,
+        schtasks: st,
+        out: new CaptureStream(),
+        err,
+        platform: "windows",
+        runLoggedOff: true,
+        whoami: async () => "MEGAN-PC\\megan",
+      });
+      expect(code).toBe(2);
+      expect(err.text).toContain("needs the Windows password");
+      expect(st.calls).toEqual([]);
+    } finally {
+      if (prev !== undefined) process.env.PHANTOMBOT_WINDOWS_PASSWORD = prev;
+    }
+  });
