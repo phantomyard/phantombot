@@ -182,7 +182,7 @@ If you add a new untrusted entry point (a new inbound channel, a new `ask`-style
 
 ## Service model (systemd + launchd + Windows Task Scheduler)
 
-Phantombot ships on **Linux (systemd --user)**, **macOS (launchd, per-user LaunchAgents)**, and **Windows (per-user Task Scheduler logon task plus three periodic tasks)**. `lib/platform.ts` is the single router that decides which backend to talk to; each backend sits behind a common `ServiceControl` surface with an injectable runner so tests never touch the real service manager. Windows uses `InteractiveToken` and the current user's SID, so installation needs no password or elevation; `windowsJob.ts` assigns harness children to kill-on-close Job Objects.
+Phantombot ships on **Linux (systemd --user)**, **macOS (launchd, per-user LaunchAgents)**, and **Windows (per-user Task Scheduler logon task plus three periodic tasks)**. `lib/platform.ts` is the single router that decides which backend to talk to; each backend sits behind a common `ServiceControl` surface with an injectable runner so tests never touch the real service manager. Windows uses `InteractiveToken` and the current user's SID, so installation needs no password or elevation; installation preserves healthy existing task definitions and only repairs missing/stale entries; `windowsJob.ts` assigns harness children to kill-on-close Job Objects.
 
 On Linux, `phantombot install` creates **four** systemd-user units:
 

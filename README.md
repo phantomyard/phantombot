@@ -262,12 +262,14 @@ phantombot install      # installs the per-user logon task and periodic tasks
 phantombot uninstall    # removes the service and tasks
 ```
 
-`install` registers four tasks in the current user's `\\Phantombot\\` folder:
+`install` ensures four tasks in the current user's `\\Phantombot\\` folder:
 the always-on daemon (`run`) and the periodic `heartbeat`, `nightly`, and
 `tick` tasks. They use the current user's SID and `InteractiveToken`, so no
 password, elevation, or machine-wide service is required. The daemon starts at
 logon, retries after failure, and its process-tree cleanup keeps stop/restart
-deterministic while that user is logged in.
+deterministic while that user is logged in. On an existing installation,
+`install` leaves healthy task definitions unchanged and only repairs missing
+tasks or paths pointing at an older binary.
 
 **Self-update.** `phantombot update` and the `/update` chat command work on
 Windows. Because Windows locks a running `.exe` against overwrite, the updater

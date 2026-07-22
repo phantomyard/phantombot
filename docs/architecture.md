@@ -47,7 +47,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/lib/logger.ts` | Structured logs to stdout. | stdout |
 | `src/lib/io.ts` | Shared `WriteSink` interface. | — |
 | `src/lib/platform.ts` | Cross-platform service-manager router. Picks the backend (systemd/launchd/Windows Task Scheduler) and exposes one `ServiceControl` (`isActive`/`start`/`stop`/`restart`/`rerenderUnitIfStale`), plus hint strings and `logsSpec()` for tailing. | `systemd.ts`, `launchd.ts`, `taskScheduler.ts` |
-| `src/lib/{systemd,launchd,taskScheduler}.ts` | Per-OS backends. Windows Task Scheduler owns the per-user logon daemon and periodic jobs. | `systemctl`/`launchctl`/`schtasks` |
+| `src/lib/{systemd,launchd,taskScheduler}.ts` | Per-OS backends. Windows Task Scheduler owns the per-user logon daemon and periodic jobs; install/self-heal preserves healthy task definitions and repairs only missing/stale entries. | `systemctl`/`launchctl`/`schtasks` |
 | `src/lib/serviceLifecycle.ts` | `runLifecycleAction` — the shared driver behind `phantombot start/stop/restart`. OS-agnostic: only ever calls `ServiceControl`, never a supervisor directly. | `platform.ts` |
 | `src/cli/{start,stop,restart,logs}.ts` | Thin CLI wrappers over `serviceLifecycle`/`logsSpec` for the service-lifecycle verbs. | `lib/serviceLifecycle`, `lib/platform` |
 | `src/p2p/` | Relay-free P2P transport (issue #258). The node is a dumb, encrypted-wrap relay: it forwards opaque gift-wraps node-to-node and never decrypts them. On by default; each persona binds its own OS-ephemeral loopback port (`config.p2p`). | `werift`, `nostrCrypto`, `RelayPool`, Bun ws |

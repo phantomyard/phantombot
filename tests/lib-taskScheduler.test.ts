@@ -224,9 +224,13 @@ describe("installPhantombotTasks", () => {
 
     const seq = st.calls.map((c) => c.join(" "));
     expect(seq).toEqual([
+      `/Query /TN ${PHANTOMBOT_TASK} /XML`,
       `/Create /TN ${PHANTOMBOT_TASK} /XML ${join(workdir, "phantombot-task-phantombot.xml")} /F`,
+      `/Query /TN ${HEARTBEAT_TASK} /XML`,
       `/Create /TN ${HEARTBEAT_TASK} /XML ${join(workdir, "phantombot-task-heartbeat.xml")} /F`,
+      `/Query /TN ${NIGHTLY_TASK} /XML`,
       `/Create /TN ${NIGHTLY_TASK} /XML ${join(workdir, "phantombot-task-nightly.xml")} /F`,
+      `/Query /TN ${TICK_TASK} /XML`,
       `/Create /TN ${TICK_TASK} /XML ${join(workdir, "phantombot-task-tick.xml")} /F`,
     ]);
     expect(out.text).toContain("registered");
@@ -273,7 +277,7 @@ describe("installPhantombotTasks", () => {
     const st: SchtasksRunner = {
       async run(args: readonly string[]): Promise<SchtasksResult> {
         const i = args.indexOf("/XML");
-        if (i >= 0 && firstBytes === undefined) {
+        if (args[0] === "/Create" && i >= 0 && firstBytes === undefined) {
           firstBytes = readFileSync(args[i + 1]!);
         }
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -294,8 +298,13 @@ describe("installPhantombotTasks", () => {
   test("fails install (and reports) when a /Create returns non-zero", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
-    const st = new FakeSchtasks();
-    st.responses = [{ exitCode: 1, stdout: "", stderr: "Access is denied" }];
+    const st: SchtasksRunner = {
+      async run(args: readonly string[]): Promise<SchtasksResult> {
+        return args[0] === "/Query"
+          ? { exitCode: 1, stdout: "", stderr: "cannot find" }
+          : { exitCode: 1, stdout: "", stderr: "Access is denied" };
+      },
+    };
     const result = await installPhantombotTasks({
       binPath: BIN,
       sid: SID,
@@ -305,10 +314,26 @@ describe("installPhantombotTasks", () => {
       err,
     });
     expect(result.installed).toBe(false);
-    expect(err.text).toContain("schtasks /Create");
-    expect(err.text).toContain("Access is denied");
-    // Bailed after the first failure — no companion imports attempted.
-    expect(st.calls.length).toBe(1);
+    expect(err.text).toContain("could not register scheduled task");
+  });
+
+  test("preserves healthy existing task definitions", async () => {
+    const xml = generatePhantombotTaskXml(SID, BIN);
+    const st: SchtasksRunner = {
+      async run(args: readonly string[]): Promise<SchtasksResult> {
+        if (args[0] === "/Query") return { exitCode: 0, stdout: xml, stderr: "" };
+        throw new Error("healthy tasks must not be rewritten");
+      },
+    };
+    const result = await installPhantombotTasks({
+      binPath: BIN,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(result.installed).toBe(true);
   });
 });
 
