@@ -302,8 +302,7 @@ describe("runInstall (windows/schtasks)", () => {
     const creates = st.calls.filter((c) => c[0] === "/Create");
     expect(creates.length).toBe(4);
     expect(out.text).toContain("registered");
-    // The logged-in-only caveat is surfaced to the user.
-    expect(out.text).toContain("logged in");
+    expect(out.text).toContain("while logged in");
   });
 
   test("doesn't fall through to systemctl or launchctl on windows", async () => {
@@ -329,7 +328,10 @@ describe("runInstall (windows/schtasks)", () => {
   test("propagates a schtasks import failure as a non-zero exit", async () => {
     const err = new CaptureStream();
     const st = new FakeSchtasks();
-    st.responses = [{ exitCode: 1, stdout: "", stderr: "Access is denied" }];
+    st.responses = [
+      { exitCode: 1, stdout: "", stderr: "cannot find" },
+      { exitCode: 1, stdout: "", stderr: "Access is denied" },
+    ];
     const code = await runInstall({
       binPath: WIN_BIN,
       sid: "S-1-5-21-1-2-3-1001",
@@ -340,7 +342,7 @@ describe("runInstall (windows/schtasks)", () => {
       platform: "windows",
     });
     expect(code).toBe(1);
-    expect(err.text).toContain("schtasks /Create");
+    expect(err.text).toContain("could not register scheduled task");
   });
 
   test("rejects a non-phantombot binary on windows too", async () => {

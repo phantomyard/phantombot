@@ -2,8 +2,8 @@
  * Cross-platform service-manager router.
  *
  * Phantombot ships on Linux (systemd --user), macOS (launchd, per-user
- * LaunchAgents) and Windows (Task Scheduler, per-user logon-triggered
- * tasks). The backends have different unit-file shapes, different control
+ * LaunchAgents) and Windows (per-user Task Scheduler logon/periodic tasks).
+ * The backends have different unit-file shapes, different control
  * verbs, and different log destinations — this module is the single place
  * where CLI code decides which one to talk to.
  *
@@ -96,13 +96,9 @@ export interface SelfRestartOpts {
  * (`systemctl --user restart` / `launchctl kickstart`). Those SIGTERM us and
  * the supervisor relaunches — safe to call from within the unit.
  *
- * Windows: we must NOT call `schtasks /End` + `/Run` from inside the task's
- * own process tree — `/End` tears down that tree (including the child
- * `schtasks.exe` we just spawned to issue `/Run`), so the relaunch can be
- * dropped. Instead we exit cleanly (emit SIGTERM → the run loop's handler
- * drains and returns), and the always-on task's 1-minute keep-alive
- * TimeTrigger relaunches from the swapped binary within ≤60s. The relaunched
- * process deletes the stale `.old` on startup. No console window, no watcher.
+ * Windows: exit cleanly (emit SIGTERM → the run loop's handler drains and
+ * returns); the always-on scheduled task's keep-alive trigger relaunches the
+ * swapped binary while the user remains logged in.
  */
 export async function selfRestart(
   opts: SelfRestartOpts,

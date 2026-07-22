@@ -224,7 +224,6 @@ async function runInstallWindows(
   err: WriteSink,
 ): Promise<number> {
   const schtasks = input.schtasks ?? new BunSchtasksRunner();
-
   const result = await installPhantombotTasks({
     binPath,
     sid: input.sid,
@@ -236,9 +235,7 @@ async function runInstallWindows(
   if (!result.installed) return 1;
 
   out.write(
-    `\nThese tasks run only while you are logged in (the macOS model). For\n` +
-      `true headless-without-login, install a real service — see the README\n` +
-      `(WinSW is the recommended route).\n` +
+    `\nThese tasks run for the current Windows user while logged in.\n` +
       manageHints(),
   );
   return 0;

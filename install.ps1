@@ -18,7 +18,7 @@
        no admin required).
     7. Adds the install dir to the USER PATH if it is not already there.
     8. Launches `phantombot init` to set up harness, persona, telegram, and the
-       Task Scheduler background service.
+       per-user Windows logon and periodic tasks.
 
   Override the install dir with $env:PHANTOMBOT_INSTALL_DIR.
   Skip the init TUI launch with $env:PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).

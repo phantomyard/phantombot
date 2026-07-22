@@ -10,7 +10,7 @@
  * Design constraints (from issue #201):
  *   - NO admin. Registering a task in the CURRENT user's own tree via
  *     `schtasks /Create` needs no elevation, unlike a true Windows Service
- *     (SCM registration, which is what WinSW does). The trade-off is that a
+ *     (a real SCM registration, which is what WinSW does). The trade-off is that a
  *     user-scoped scheduled task with an InteractiveToken principal only runs
  *     while that user is logged in — exactly the macOS/launchd model Andrew
  *     accepted. Someone wanting true headless-without-login should install a
@@ -37,7 +37,7 @@
  * minute-tick is ignored; if it died, the next tick restarts it. This gives
  * effectively-infinite restart while logged in, admin-free.
  *
- * Logging (WinSW-inspired, minus the SCM): Task Scheduler does not capture a
+ * Logging (WinSW-inspired): Task Scheduler does not capture a
  * process's stdout/stderr, so the action is run through `cmd /c` with the
  * streams redirected (append) to per-task .out.log / .err.log under the
  * phantombot data dir's logs\ folder - the same out/err split launchd writes
@@ -833,10 +833,10 @@ export interface InstallTaskSchedulerOptions {
 }
 
 /**
- * Register (or refresh) all four scheduled tasks. Writes each task's XML to a
- * transient file, imports it with `schtasks /Create /XML … /F` (the /F makes
- * the operation idempotent — it overwrites an existing task of the same name),
- * then deletes the transient file.
+ * Install the four scheduled tasks without disturbing a healthy existing
+ * installation. Missing tasks, or tasks that point at an old binary path, are
+ * imported from the current templates; tasks that already point at `binPath`
+ * retain their existing triggers, principal, settings, and action shape.
  */
 export async function installPhantombotTasks(
   opts: InstallTaskSchedulerOptions,
@@ -844,24 +844,18 @@ export async function installPhantombotTasks(
   const sid = opts.sid ?? currentUserSid();
   const xmlDir = opts.xmlDir ?? tmpdir();
 
-  // Log dir must exist before the tasks first fire — cmd's `>>` redirection
-  // will fail to create a file inside a missing directory. The hidden launcher
-  // the tasks invoke must exist too, or wscript.exe has nothing to run.
-  await mkdir(logsDir(), { recursive: true });
-  await mkdir(xmlDir, { recursive: true });
-  await writeLauncherVbs();
+  const r = await ensureTasksCurrent({
+    binPath: opts.binPath,
+    sid,
+    xmlDir,
+    schtasks: opts.schtasks,
+  });
 
-  for (const spec of allTaskSpecs(sid, opts.binPath)) {
-    const r = await importTaskSpec(spec, xmlDir, opts.schtasks);
-    if (r.exitCode !== 0) {
-      opts.err.write(
-        `schtasks /Create ${spec.name} failed (${r.exitCode}): ${r.stderr.trim() || r.stdout.trim()}\n`,
-      );
-      return { installed: false };
-    }
-    opts.out.write(`registered scheduled task: ${spec.name}\n`);
+  for (const name of r.rewrote) opts.out.write(`registered scheduled task: ${name}\n`);
+  if (r.failed.length > 0) {
+    opts.err.write(`could not register scheduled task(s): ${r.failed.join(", ")}\n`);
+    return { installed: false };
   }
-
   opts.out.write(
     `registered ${PHANTOMBOT_TASK} + heartbeat + nightly + tick\n`,
   );
@@ -921,10 +915,12 @@ export interface EnsureTasksCurrentOptions {
 
 export interface EnsureTasksCurrentResult {
   /**
-   * Task names that were (re)registered because they were missing or still
-   * referenced a stale binary path. Empty = every task was already current.
+   * Companion task names that were (re)registered because they were missing or
+   * still referenced a stale binary path.
    */
   rewrote: string[];
+  /** Tasks that were missing/stale but could not be imported. */
+  failed: string[];
 }
 
 /**
@@ -951,6 +947,7 @@ export async function ensureTasksCurrent(
   const sid = opts.sid ?? currentUserSid();
   const xmlDir = opts.xmlDir ?? tmpdir();
   const rewrote: string[] = [];
+  const failed: string[] = [];
   let ensuredDirs = false;
 
   for (const spec of allTaskSpecs(sid, opts.binPath)) {
@@ -970,10 +967,19 @@ export async function ensureTasksCurrent(
       ensuredDirs = true;
     }
     const r = await importTaskSpec(spec, xmlDir, opts.schtasks);
-    if (r.exitCode === 0) rewrote.push(spec.name);
+    if (r.exitCode === 0) {
+      rewrote.push(spec.name);
+    } else {
+      failed.push(spec.name);
+      log.warn("taskScheduler: could not register task", {
+        task: spec.name,
+        exitCode: r.exitCode,
+        stderr: r.stderr.trim() || r.stdout.trim(),
+      });
+    }
   }
 
-  return { rewrote };
+  return { rewrote, failed };
 }
 
 export interface TaskSchedulerServiceControl {
@@ -982,6 +988,44 @@ export interface TaskSchedulerServiceControl {
   stop(): Promise<{ ok: boolean; stderr?: string }>;
   restart(): Promise<{ ok: boolean; stderr?: string }>;
   rerenderUnitIfStale(): Promise<{ rerendered: boolean; backupPath?: string }>;
+}
+
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Launch the daemon from an external CLI, including CLIs invoked over SSH. */
+async function launchDaemonDirectly(): Promise<void> {
+  const { out, err } = taskLogPaths("phantombot");
+  const script = [
+    "$p = Start-Process",
+    `-FilePath ${powershellQuote(process.execPath)}`,
+    "-ArgumentList @('run')",
+    `-WorkingDirectory ${powershellQuote(process.cwd())}`,
+    "-WindowStyle Hidden",
+    `-RedirectStandardOutput ${powershellQuote(out)}`,
+    `-RedirectStandardError ${powershellQuote(err)}`,
+    "-PassThru",
+    "; if ($null -eq $p) { exit 1 }",
+  ].join(" ");
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+      env: { ...process.env },
+    },
+  );
+  const [, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || `powershell exited ${exitCode}`);
+  }
 }
 
 /**
@@ -996,6 +1040,8 @@ export function defaultTaskSchedulerServiceControl(
   // Injectable so stop()/restart() are testable without real 10s waits.
   waitDeps: WaitDeps = defaultWaitDeps,
 ): TaskSchedulerServiceControl {
+  const launchDirectly =
+    process.platform === "win32" && runner instanceof BunSchtasksRunner;
   return {
     async isActive() {
       // `schtasks /Query /TN <name>` exits 0 when the task is registered —
@@ -1007,12 +1053,22 @@ export function defaultTaskSchedulerServiceControl(
       // The main task carries a 1-minute keep-alive TimeTrigger, which `stop()`
       // disables. Re-enable it first so the supervisor keeps the process up,
       // then kick off a run immediately rather than waiting up to 60s for the
-      // next trigger. /Change /ENABLE on an already-enabled task is harmless.
       await runner.run(["/Change", "/TN", PHANTOMBOT_TASK, "/ENABLE"]);
-      const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      if (!launchDirectly) {
+        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+        return r.exitCode === 0
+          ? { ok: true }
+          : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      try {
+        await launchDaemonDirectly();
+        return { ok: true };
+      } catch (e) {
+        return {
+          ok: false,
+          stderr: `could not launch daemon: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     },
     async stop() {
       // /End alone isn't enough on two counts: the 1-minute keep-alive
@@ -1064,10 +1120,21 @@ export function defaultTaskSchedulerServiceControl(
             `skipped /Run — the keep-alive trigger will relaunch within 60s`,
         };
       }
-      const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      if (!launchDirectly) {
+        const r = await runner.run(["/Run", "/TN", PHANTOMBOT_TASK]);
+        return r.exitCode === 0
+          ? { ok: true }
+          : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      }
+      try {
+        await launchDaemonDirectly();
+        return { ok: true };
+      } catch (e) {
+        return {
+          ok: false,
+          stderr: `could not launch daemon: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
     },
     async rerenderUnitIfStale() {
       // Auto-heal a moved binary: if any registered task no longer references
