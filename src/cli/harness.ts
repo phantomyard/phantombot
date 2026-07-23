@@ -43,6 +43,7 @@ import {
   type RoutingChoices,
 } from "../lib/piRouting.ts";
 import { updateEnvFile } from "../lib/envFile.ts";
+import { writePiApiKey } from "../lib/piAuthStore.ts";
 import { userEnvPath } from "./env.ts";
 import { saveHarnessBins } from "../state.ts";
 
@@ -344,9 +345,11 @@ async function installPi(
  *        · "Configure models" ⇒ continue to 3.
  *   3. Pick the provider (from Pi's full static catalogue, NOT just what's
  *      already keyed), collect that provider's API key (stored in ~/.env as
- *      PHANTOMBOT_PI_API_KEY, threaded per-turn onto `--api-key`; NOT written
- *      into Pi's own store), refresh the model catalogue with it, then run the
- *      routing wizard for primary / image / coding (no "use defaults?" detour).
+ *      PHANTOMBOT_PI_API_KEY, threaded per-turn onto `--api-key`; AND
+ *      merge-written into Pi's own auth.json so `pi --list-models` sees it —
+ *      the env-injected refresh alone proved unreliable off-Linux, #312),
+ *      refresh the model catalogue with it, then run the routing wizard for
+ *      primary / image / coding (no "use defaults?" detour).
  *
  * `availability` is mutated in place when an install succeeds. Returns `true`
  * only when the operator cancelled outright (Esc), so the caller can abort.
@@ -455,18 +458,52 @@ async function configurePi(
     // Refresh the catalog with the key we just took. On a fresh install the
     // first listing was EMPTY (Pi had no key, so `--list-models` printed "No
     // models available"), which is what forced the model pickers into free-text.
-    // Now that we hold a key we can populate them — but only by injecting the
-    // provider's NATIVE env var: `--list-models` ignores `--api-key` and reads
-    // auth from its own store / native vars only (see PiProvider.envVar). No
-    // known var (or still empty ⇒ bad key, provider outage) leaves `models` as
-    // it was, and the pickers degrade to free-text rather than dead-ending.
-    const envVar = provider ? providerEnvVar(provider) : undefined;
-    if (availability.pi && envVar) {
-      const refreshed = await listPiModels(availability.pi, undefined, {
-        [envVar]: keyWrite.value,
-      });
-      if (refreshed.length > 0) models = refreshed;
+    //
+    // PRIMARY path (#312): merge-write the key into Pi's OWN auth store
+    // (~/.pi/agent/auth.json). `--list-models` reads auth from that file and
+    // the native env vars only — once the key is in the store a plain listing
+    // is populated, no env tricks needed. This is what keying Pi interactively
+    // does, and it fixed the macOS fresh-onboarding repro where the
+    // env-injected child never saw the var.
+    //
+    // FALLBACK: if the write is skipped (an oauth login already keys this
+    // provider — the listing is populated anyway) or fails (unparseable
+    // user-owned file we refuse to clobber), keep the pre-#312 behavior:
+    // inject the provider's NATIVE env var into the `--list-models` child (see
+    // PiProvider.envVar). No known var (or still empty ⇒ bad key, provider
+    // outage) leaves `models` as it was, and the pickers degrade to free-text
+    // rather than dead-ending.
+    let refreshed: PiModel[] = [];
+    if (provider) {
+      const authWrite = await writePiApiKey(provider, keyWrite.value);
+      if (authWrite.ok && !authWrite.skipped) {
+        p.note(
+          `also keyed Pi's own store (${authWrite.path}) so \`pi --list-models\` works`,
+          "Pi API key",
+        );
+      } else if (!authWrite.ok) {
+        p.note(
+          `couldn't write Pi's auth store: ${authWrite.reason}\n` +
+            `falling back to an env-injected model refresh`,
+          "Pi API key",
+        );
+      }
+      // Plain listing first whenever the store keys this provider — either we
+      // just wrote the key, or an oauth login already did (skipped ⇒ the
+      // provider is keyed, so a plain listing is populated).
+      if (authWrite.ok && availability.pi) {
+        refreshed = await listPiModels(availability.pi);
+      }
     }
+    if (refreshed.length === 0) {
+      const envVar = provider ? providerEnvVar(provider) : undefined;
+      if (availability.pi && envVar) {
+        refreshed = await listPiModels(availability.pi, undefined, {
+          [envVar]: keyWrite.value,
+        });
+      }
+    }
+    if (refreshed.length > 0) models = refreshed;
   } else if (keyWrite.action === "clear") {
     await updateEnvFile(userEnvPath(), { [ENV_PI_API_KEY]: "" });
     p.note(
