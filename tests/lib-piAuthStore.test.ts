@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -124,6 +124,31 @@ describe("writePiApiKey", () => {
     const r = await writePiApiKey("google-gemini-cli", "gk", home);
     expect(r).toMatchObject({ ok: true, skipped: "oauth-present" });
     expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("concurrent writers for different providers both land (no lost update)", async () => {
+    // Regression for PR #314 review: a shared fixed tempfile plus unserialized
+    // read→merge→rename let overlapping writers drop each other's entry.
+    const providers = Array.from({ length: 8 }, (_, i) => `provider-${i}`);
+    const results = await Promise.all(
+      providers.map((p) => writePiApiKey(p, `key-${p}`, home)),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const path = piAuthJsonPath(home);
+    const store = JSON.parse(await readFile(path, "utf8"));
+    for (const p of providers) {
+      expect(store[p]).toEqual({ type: "api_key", key: `key-${p}` });
+    }
+  });
+
+  test("concurrent writers leave no stray tempfiles behind", async () => {
+    await Promise.all([
+      writePiApiKey("a", "ka", home),
+      writePiApiKey("b", "kb", home),
+    ]);
+    const dir = join(home, ".pi", "agent");
+    const leftovers = (await readdir(dir)).filter((f) => f.includes(".tmp"));
+    expect(leftovers).toEqual([]);
   });
 
   test("unparseable existing file: reports failure and does not clobber", async () => {

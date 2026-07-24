@@ -26,9 +26,36 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+/**
+ * In-process serialization of writers, keyed by target path. Pi's auth.json
+ * is updated read→merge→rename, which is only safe if no two writers overlap:
+ * without this, two concurrent calls can both read the same old store and the
+ * later rename silently drops the other's provider entry. The chain makes
+ * each call's read+merge+rename atomic relative to other phantombot writers
+ * in this process. (Cross-process overlap — e.g. an interactive `pi /login`
+ * racing the wizard — is out of scope for a lock-free file; the oauth guard
+ * and refuse-to-clobber rules keep that case safe-by-refusal.)
+ */
+const writeChains = new Map<string, Promise<void>>();
+
+async function serialized<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeChains.get(path) ?? Promise.resolve();
+  let result!: T;
+  const next = prev.then(async () => {
+    result = await fn();
+  });
+  writeChains.set(path, next);
+  try {
+    await next;
+  } finally {
+    if (writeChains.get(path) === next) writeChains.delete(path);
+  }
+  return result;
+}
 
 export function piAuthJsonPath(home: string = homedir()): string {
   return join(home, ".pi", "agent", "auth.json");
@@ -101,6 +128,14 @@ export async function writePiApiKey(
   home?: string,
 ): Promise<PiAuthWriteResult> {
   const path = piAuthJsonPath(home);
+  return serialized(path, () => writePiApiKeyInner(provider, apiKey, path));
+}
+
+async function writePiApiKeyInner(
+  provider: string,
+  apiKey: string,
+  path: string,
+): Promise<PiAuthWriteResult> {
   try {
     const existing = existsSync(path)
       ? await readFile(path, "utf8")
@@ -113,14 +148,20 @@ export async function writePiApiKey(
       return { ok: true, path, skipped: "oauth-present" };
     }
     await mkdir(dirname(path), { recursive: true });
-    // Write to a tempfile at mode 0o600 then atomically rename over the target,
-    // so a fresh file is never briefly world-readable (mirrors saveEnvFile).
-    const tmp = `${path}.tmp`;
+    // Write to a unique, exclusively-created tempfile at mode 0o600 then
+    // atomically rename over the target, so a fresh file is never briefly
+    // world-readable (mirrors saveEnvFile). The tempfile is unique per call
+    // and opened O_EXCL: a fixed `auth.json.tmp` would let overlapping
+    // writers clobber each other's tempfile (and one writer's cleanup unlink
+    // the other's pending rename) — see PR #314 review.
+    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     try {
-      await writeFile(tmp, JSON.stringify(merge.store, null, 2) + "\n", {
-        encoding: "utf8",
-        mode: 0o600,
-      });
+      const fh = await open(tmp, "wx", 0o600);
+      try {
+        await fh.writeFile(JSON.stringify(merge.store, null, 2) + "\n", "utf8");
+      } finally {
+        await fh.close();
+      }
       await rename(tmp, path);
     } catch (e) {
       try {
