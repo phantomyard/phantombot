@@ -38,6 +38,12 @@ import {
   normalizeChattinessRequest,
 } from "../lib/chattiness.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import {
+  applyModelRequest,
+  formatModelShow,
+  parseModelRequest,
+} from "../lib/modelCommand.ts";
+import { listPiModels } from "../lib/piModels.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { DEFAULT_HISTORY_LIMIT } from "../orchestrator/turn.ts";
 import { VERSION } from "../version.ts";
@@ -161,6 +167,10 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
     command: "chattiness",
     description: "Show/hide progress bubbles here (on | off | <on|off> default)",
   },
+  {
+    command: "model",
+    description: "Show or switch the active harness model (list | <slug> | coding|image <slug> | clear)",
+  },
   { command: "help", description: "Show this command list" },
 ];
 
@@ -246,6 +256,8 @@ export async function handleSlashCommand(
       return await handleCoderSwap(arg || "on", ctx);
     case "/chattiness":
       return await handleChattiness(arg, ctx);
+    case "/model":
+      return await handleModel(arg, ctx);
     case "/start":
     case "/help":
       return { reply: HELP };
@@ -603,12 +615,27 @@ async function handleReset(
   };
 }
 
+/** Format the harness chain with availability annotations.
+ * Shared by /status and /harness so the output stays consistent. */
+async function formatHarnessChain(harnesses: Harness[]): Promise<string> {
+  if (harnesses.length === 0) return "(none)";
+  const parts = await Promise.all(
+    harnesses.map(async (h, i) => {
+      const ok = await h.available();
+      const marker = i === 0 ? "→" : " ";
+      const suffix = ok ? "" : " (unavailable)";
+      return `${marker} ${h.id}${suffix}`;
+    }),
+  );
+  return parts.join("\n");
+}
+
 async function handleStatus(
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
   const uptimeS = Math.floor((Date.now() - ctx.startedAt) / 1000);
   const primary = ctx.harnesses[0]?.id ?? "(none)";
-  const chain = ctx.harnesses.map((h) => h.id).join(" → ") || "(none)";
+  const chain = await formatHarnessChain(ctx.harnesses);
 
   // Rough context estimate: total chars across the rolling history turns, divided
   // by 4 (the standard chars-per-token heuristic). Doesn't include the
@@ -631,6 +658,19 @@ async function handleStatus(
     ? `yes (${((Date.now() - ctx.activeTurn.startTime) / 1000).toFixed(1)}s)`
     : "no";
 
+  // Per-harness configured model(s) (issue #313) — the operator's "what
+  // brain am I actually running?" answer. Harnesses without modelInfo
+  // (test stubs, third-party) are simply omitted from the line.
+  const modelParts = ctx.harnesses
+    .map((h) => {
+      const mi = h.modelInfo?.();
+      if (!mi) return undefined;
+      return `${h.id}: ${mi.model}${mi.provider ? ` (${mi.provider})` : ""}`;
+    })
+    .filter((p): p is string => p !== undefined);
+  const modelsLine =
+    modelParts.length > 0 ? `models:  ${modelParts.join(" | ")}\n` : "";
+
   // If a turn is in flight AND we've captured a progress note, append a
   // "running:" line so the user can see what the harness is currently
   // doing — important for the "is it stuck or just busy?" question that
@@ -642,8 +682,10 @@ async function handleStatus(
 
   return {
     reply:
+      `phantom: ${ctx.persona} (pid ${process.pid}, v${VERSION})\n` +
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
+      modelsLine +
       `uptime:  ${formatElapsedSeconds(uptimeS)}\n` +
       `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last ${DEFAULT_HISTORY_LIMIT} turns)\n` +
       `active:  ${active}` +
@@ -661,17 +703,10 @@ async function handleHarness(
 
   if (!arg) {
     // No arg → list current chain with availability.
-    const lines: string[] = [];
-    for (let i = 0; i < ctx.harnesses.length; i++) {
-      const h = ctx.harnesses[i]!;
-      const ok = await h.available();
-      const marker = i === 0 ? "→" : " ";
-      const suffix = ok ? "" : " (unavailable)";
-      lines.push(`${marker} ${h.id}${suffix}`);
-    }
+    const chainLines = await formatHarnessChain(ctx.harnesses);
     return {
       reply:
-        `current chain (→ = primary):\n${lines.join("\n")}\n\n` +
+        `current chain (→ = primary):\n${chainLines}\n\n` +
         `use /harness <id> to switch primary`,
     };
   }
@@ -700,6 +735,140 @@ async function handleHarness(
     primary: wanted,
   });
   return { reply: `switched to ${wanted}` };
+}
+
+/**
+ * /model — view, list, and flip the primary harness's model (issue #313).
+ *
+ * Every write persists to BOTH config.toml and ~/.env (env wins at startup,
+ * so a TOML-only write would be silently ignored on wizard-configured
+ * installs), syncs the in-memory Config, then restarts — all four harnesses
+ * bake their model config at construction, so nothing short of a bounce
+ * activates the new model. Same afterSend dance as /restart: the user reads
+ * the confirmation first, THEN we go down.
+ */
+const MODEL_USAGE =
+  "usage: /model [list [filter] | <slug> | primary <slug> | coding <slug> | image <slug> | clear]\n" +
+  "  /model            — show the primary harness's current model\n" +
+  "  /model list       — list models the primary harness can run (pi only)\n" +
+  "  /model <slug>     — switch the primary model (restarts phantombot)\n" +
+  "  /model coding <slug> / image <slug> — pi capability-routing delegates\n" +
+  "  /model clear      — revert gemini/codex to their CLI default";
+
+async function handleModel(
+  arg: string,
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  const req = parseModelRequest(arg);
+  if (req.kind === "usage") return { reply: MODEL_USAGE };
+
+  const primary = ctx.harnesses[0];
+  if (!primary) return { reply: "no harnesses configured" };
+
+  if (req.kind === "show") {
+    return { reply: formatModelShow(primary.id, primary.modelInfo?.()) };
+  }
+  if (req.kind === "list") {
+    return await handleModelList(req.filter, primary, ctx);
+  }
+
+  // set / clear — needs config for the two-store write.
+  if (!ctx.config) {
+    return {
+      reply: "can't change models: channel didn't pass config to the dispatcher",
+    };
+  }
+  const result = await applyModelRequest(req, primary.id, ctx.config);
+  if (!result.ok) return { reply: result.error };
+
+  log.info("commands: /model applied", {
+    chatId: ctx.chatId,
+    persona: ctx.persona,
+    harness: primary.id,
+    request: req,
+  });
+
+  const svc = ctx.serviceControl ?? defaultServiceControl();
+  const afterSend = async (): Promise<void> => {
+    const r = await selfRestart({ serviceControl: svc });
+    if (!r.ok) {
+      log.error("commands: /model restart failed", {
+        chatId: ctx.chatId,
+        stderr: r.stderr,
+      });
+    }
+  };
+  return { reply: `${result.summary} — restarting…`, afterSend };
+}
+
+/**
+ * `/model list` — pi is the only harness with a programmatic model catalog
+ * (`pi --list-models`, reused from lib/piModels.ts). The others get guidance
+ * text: claude is alias-based, gemini/codex pin-or-default.
+ */
+async function handleModelList(
+  filter: string | undefined,
+  primary: Harness,
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  switch (primary.id) {
+    case "pi": {
+      const bin = ctx.config?.harnesses.pi.bin ?? "pi";
+      const provider = primary.modelInfo?.().provider;
+      let models = await listPiModels(bin);
+      if (provider) models = models.filter((m) => m.provider === provider);
+      if (filter) {
+        const needle = filter.toLowerCase();
+        models = models.filter((m) =>
+          `${m.provider}/${m.model}`.toLowerCase().includes(needle),
+        );
+      }
+      if (models.length === 0) {
+        return {
+          reply:
+            "no models found" +
+            (provider ? ` for provider '${provider}'` : "") +
+            " — is the provider keyed? (`pi --list-models` returned nothing)",
+        };
+      }
+      // Cap for phone readability; note the truncation so a missing model
+      // sends the user to the filter form rather than to confusion.
+      const MAX_ROWS = 25;
+      const rows = models
+        .slice(0, MAX_ROWS)
+        .map((m) => `${m.provider}/${m.model}${m.supportsImages ? " 🖼" : ""}`);
+      const truncated =
+        models.length > MAX_ROWS
+          ? `\n… and ${models.length - MAX_ROWS} more — use /model list <filter> to narrow`
+          : "";
+      return {
+        reply:
+          `models (${models.length}${provider ? `, provider: ${provider}` : ""}):\n` +
+          rows.join("\n") +
+          truncated,
+      };
+    }
+    case "claude":
+      return {
+        reply:
+          "claude models are set by alias: opus, sonnet, haiku. " +
+          "use /model <alias> to switch.",
+      };
+    case "gemini":
+      return {
+        reply:
+          "gemini-cli picks its default model when unset — there's no catalog to list. " +
+          "use /model <model-id> to pin one, or /model clear to reset to default.",
+      };
+    case "codex":
+      return {
+        reply:
+          "codex picks its default model when unset — there's no catalog to list. " +
+          "use /model <model-id> to pin one, or /model clear to reset to default.",
+      };
+    default:
+      return { reply: `/model list isn't supported for '${primary.id}'` };
+  }
 }
 
 /**

@@ -136,9 +136,33 @@ export type HarnessChunk =
    */
   | { type: "error"; error: string; recoverable: boolean; httpStatus?: number };
 
+/**
+ * Snapshot of the harness's configured model(s), for `/status` and `/model`
+ * display (issue #313). Purely presentational — nothing reads this to make
+ * routing decisions; the harness's own config remains the source of truth.
+ */
+export interface HarnessModelInfo {
+  /** Primary model the harness runs, or "(default)" when unpinned. */
+  model: string;
+  /** Provider id when meaningful (Pi routing, e.g. "openrouter"). */
+  provider?: string;
+  /** Pi capability-routing delegates, when configured. */
+  codingModel?: string;
+  imageModel?: string;
+  /** Claude's --fallback-model, when configured. */
+  fallbackModel?: string;
+}
+
 export interface Harness {
   /** Stable identifier — matches the wrapper file name. */
   readonly id: string;
+
+  /**
+   * Configured model snapshot for /status and /model. Optional so test stubs
+   * and third-party harnesses don't have to implement it — the command layer
+   * degrades to omitting the harness from the models line when absent.
+   */
+  modelInfo?(): HarnessModelInfo;
 
   /**
    * Largest allowable rendered payload (system prompt + history + new

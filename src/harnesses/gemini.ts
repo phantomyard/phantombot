@@ -37,7 +37,12 @@
  */
 
 import { access, constants } from "node:fs/promises";
-import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessModelInfo,
+  HarnessRequest,
+} from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
@@ -76,6 +81,10 @@ export class GeminiHarness implements Harness {
   readonly id = "gemini";
 
   constructor(private readonly config: GeminiHarnessConfig) {}
+
+  modelInfo(): HarnessModelInfo {
+    return { model: this.config.model || "(default)" };
+  }
 
   async available(): Promise<boolean> {
     try {

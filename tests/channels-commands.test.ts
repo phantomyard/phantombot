@@ -16,7 +16,12 @@ import {
   type ActiveTurnHandle,
   type SlashCommandContext,
 } from "../src/channels/commands.ts";
-import type { Harness, HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessModelInfo,
+  HarnessRequest,
+} from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import {
   getChattinessOverride,
@@ -31,9 +36,13 @@ class StubHarness implements Harness {
   constructor(
     public readonly id: string,
     private readonly _available: boolean = true,
+    private readonly _modelInfo?: HarnessModelInfo,
   ) {}
   async available(): Promise<boolean> {
     return this._available;
+  }
+  modelInfo(): HarnessModelInfo {
+    return this._modelInfo ?? { model: "(default)" };
   }
   async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     yield { type: "done", finalText: "" };
@@ -252,7 +261,8 @@ describe("/status", () => {
     });
     const r = await handleSlashCommand("/status", ctx());
     expect(r!.reply).toContain("harness: claude");
-    expect(r!.reply).toContain("claude → pi");
+    expect(r!.reply).toContain("→ claude");
+    expect(r!.reply).toContain("pi");
     expect(r!.reply).toMatch(/uptime:\s+1m \d+s/);
     expect(r!.reply).toContain("context:");
     expect(r!.reply).toContain("active:  no");
@@ -605,5 +615,142 @@ describe("nominalContextWindow", () => {
     expect(nominalContextWindow("gemini")).toBe(1_000_000);
     expect(nominalContextWindow("pi")).toBe(64_000);
     expect(nominalContextWindow("unknown")).toBe(128_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /status — phantom + models lines (issue #313)
+// ---------------------------------------------------------------------------
+
+describe("/status phantom + models surface", () => {
+  test("reports persona name, pid, and version", async () => {
+    const r = await handleSlashCommand("/status", ctx());
+    expect(r!.reply).toContain(`phantom: phantom (pid ${process.pid}`);
+  });
+
+  test("includes a models line when harnesses report modelInfo", async () => {
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({
+        harnesses: [
+          new StubHarness("pi", true, {
+            model: "deepseek-v3",
+            provider: "openrouter",
+          }),
+          new StubHarness("claude", true, { model: "opus" }),
+        ],
+      }),
+    );
+    expect(r!.reply).toContain(
+      "models:  pi: deepseek-v3 (openrouter) | claude: opus",
+    );
+  });
+
+  test("marks unavailable harnesses in the chain line", async () => {
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({
+        harnesses: [
+          new StubHarness("pi", true),
+          new StubHarness("claude", false),
+        ],
+      }),
+    );
+    expect(r!.reply).toContain("→ pi");
+    expect(r!.reply).toContain("claude (unavailable)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /model (issue #313)
+// ---------------------------------------------------------------------------
+
+describe("/model", () => {
+  const SAVED_ENV_FILE = process.env.PHANTOMBOT_ENV_FILE;
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "phantombot-cmd-model-"));
+    process.env.PHANTOMBOT_ENV_FILE = join(dir, ".env");
+  });
+  afterEach(async () => {
+    if (SAVED_ENV_FILE === undefined) delete process.env.PHANTOMBOT_ENV_FILE;
+    else process.env.PHANTOMBOT_ENV_FILE = SAVED_ENV_FILE;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function modelConfig(): import("../src/config.ts").Config {
+    return {
+      configPath: join(dir, "config.toml"),
+      harnesses: {
+        chain: ["pi"],
+        claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+        pi: { bin: "pi" },
+        gemini: { bin: "gemini", model: "" },
+      },
+    } as unknown as import("../src/config.ts").Config;
+  }
+
+  test("bare /model shows the primary harness's model", async () => {
+    const r = await handleSlashCommand(
+      "/model",
+      ctx({
+        harnesses: [
+          new StubHarness("pi", true, {
+            model: "deepseek-v3",
+            provider: "openrouter",
+            codingModel: "qwen-coder",
+          }),
+        ],
+      }),
+    );
+    expect(r!.reply).toContain("pi primary: deepseek-v3");
+    expect(r!.reply).toContain("openrouter");
+  });
+
+  test("bad args show usage", async () => {
+    const r = await handleSlashCommand("/model coding", ctx());
+    expect(r!.reply).toContain("usage: /model");
+  });
+
+  test("/model list gives claude the alias guidance", async () => {
+    const r = await handleSlashCommand("/model list", ctx());
+    expect(r!.reply).toContain("opus, sonnet, haiku");
+  });
+
+  test("/model set without config fails loud", async () => {
+    const r = await handleSlashCommand("/model opus", ctx());
+    expect(r!.reply).toContain("didn't pass config");
+  });
+
+  test("/model <slug> writes config.toml and schedules a restart", async () => {
+    const config = modelConfig();
+    const r = await handleSlashCommand(
+      "/model deepseek-v3",
+      ctx({
+        harnesses: [new StubHarness("pi", true, { model: "old-model" })],
+        config,
+      }),
+    );
+    expect(r!.reply).toContain("pi primary model → deepseek-v3");
+    expect(r!.reply).toContain("restarting");
+    expect(typeof r!.afterSend).toBe("function");
+    // NOTE: afterSend is NOT invoked — it self-restarts the process.
+    const toml = await readConfigToml(config.configPath);
+    expect(getIn(toml, ["harnesses", "pi", "routing", "primary_model"])).toBe(
+      "deepseek-v3",
+    );
+  });
+
+  test("claude rejects a typo'd alias without writing anything", async () => {
+    const config = modelConfig();
+    const r = await handleSlashCommand(
+      "/model opys",
+      ctx({ harnesses: [new StubHarness("claude")], config }),
+    );
+    expect(r!.reply).toContain("unknown claude alias");
+    expect(r!.afterSend).toBeUndefined();
+    const toml = await readConfigToml(config.configPath);
+    expect(getIn(toml, ["harnesses", "claude", "model"])).toBeUndefined();
   });
 });

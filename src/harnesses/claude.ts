@@ -48,7 +48,12 @@
  */
 
 import { access, constants } from "node:fs/promises";
-import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessModelInfo,
+  HarnessRequest,
+} from "./types.ts";
 import { buildToolCall } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
@@ -83,6 +88,13 @@ export class ClaudeHarness implements Harness {
     // platform.
     private readonly platform: NodeJS.Platform = process.platform,
   ) {}
+
+  modelInfo(): HarnessModelInfo {
+    return {
+      model: this.config.model,
+      fallbackModel: this.config.fallbackModel || undefined,
+    };
+  }
 
   async available(): Promise<boolean> {
     try {

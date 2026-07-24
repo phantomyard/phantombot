@@ -3582,7 +3582,8 @@ describe("runTelegramServer slash commands", () => {
     });
     expect(transport.sent).toHaveLength(1);
     expect(transport.sent[0]!.text).toContain("harness: claude");
-    expect(transport.sent[0]!.text).toContain("claude → pi");
+    expect(transport.sent[0]!.text).toContain("→ claude");
+    expect(transport.sent[0]!.text).toContain("pi");
   });
 
   test("/harness <id> switches the primary so the next turn uses it", async () => {

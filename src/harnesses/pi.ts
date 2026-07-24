@@ -34,7 +34,12 @@
  */
 
 import { access, constants } from "node:fs/promises";
-import type { Harness, HarnessChunk, HarnessRequest } from "./types.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessModelInfo,
+  HarnessRequest,
+} from "./types.ts";
 import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
@@ -71,6 +76,16 @@ export class PiHarness implements Harness {
   readonly id = "pi";
 
   constructor(private readonly config: PiHarnessConfig) {}
+
+  modelInfo(): HarnessModelInfo {
+    const r = this.config.routing;
+    return {
+      model: r?.primaryModel ?? "(pi default)",
+      provider: r?.provider,
+      codingModel: r?.codingModel,
+      imageModel: r?.imageModel,
+    };
+  }
 
   async available(): Promise<boolean> {
     try {
