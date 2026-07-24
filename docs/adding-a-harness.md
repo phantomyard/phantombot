@@ -25,6 +25,11 @@ A harness is a CLI binary that takes a system prompt + a user message (and optio
        // verify the binary exists
      }
 
+     modelInfo?(): HarnessModelInfo {
+       // optional: the configured model (+ provider) — surfaced by
+       // /status and bare /model so operators can see which brain is live
+     }
+
      async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
        // 1. spawn the CLI subprocess via Bun.spawn
        // 2. write req.userMessage (and history) to stdin OR pass as argv
@@ -53,6 +58,7 @@ A harness is a CLI binary that takes a system prompt + a user message (and optio
 - **Respects `req.timeoutMs`.** Track a state machine: `running | timed_out | exited`. On timeout, kill the subprocess and emit a recoverable error — DO NOT also emit a `done` chunk with whatever partial text accumulated. (This bug existed in the Node skeleton; the Bun port at `src/harnesses/claude.ts` fixes it. Don't reintroduce it.)
 - **Doesn't try to translate tools.** The harness's tools belong to the harness. Phantombot won't send `tools[]` and the harness won't return `tool_calls` to phantombot. See the bottom-of-file warning in `claude.ts`.
 - **Filters secrets when appropriate.** If your harness uses OAuth on the host, strip the corresponding `*_API_KEY` from the subprocess env (see `filterAuthEnv` in `claude.ts`) so the OAuth path is forced.
+- **Implements `modelInfo()`.** The optional `Harness.modelInfo()` returns the configured model id (and provider, if meaningful) from the harness's own config. `/status` renders it as the per-harness `models:` line and bare `/model` uses it for the "what am I running" reply — harnesses without it are simply omitted from both.
 
 ## Reference: the Claude harness
 
