@@ -55,7 +55,6 @@ Supported harnesses:
 
 - [Pi](https://pi.dev) - recommended primary harness.
 - Claude Code - first-class fallback or primary.
-- Google Gemini CLI - first-class fallback or primary.
 - OpenAI Codex CLI - first-class fallback or primary.
 
 ## Contents
@@ -158,9 +157,6 @@ pi
 # Claude Code
 npm install -g @anthropic-ai/claude-code
 claude /login
-
-# Gemini CLI
-gemini
 
 # Codex CLI
 codex login
@@ -344,7 +340,7 @@ Minimal config example:
 default_persona = "phantom"
 
 [harnesses]
-chain = ["pi", "claude", "gemini", "codex"]
+chain = ["pi", "claude", "codex"]
 
 [channels.telegram]
 token = "123456:telegram-bot-token"
@@ -355,7 +351,7 @@ Harness notes:
 
 - Pi is the recommended primary harness.
 - Claude Code is normally authenticated with OAuth on the host.
-- Gemini can use CLI auth or `GEMINI_API_KEY`.
+- Gemini remains available for optional semantic-memory embeddings via `phantombot embedding`; it is not an agent harness.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
 
@@ -1071,8 +1067,8 @@ harness sees them — and **before any of your private memory is pulled into a
 prompt** (screening runs ahead of memory retrieval, so an untrusted message
 can never ride into a memory-laden prompt before it has been judged). The
 judge is a bare, capability-restricted completion **on whichever harness you
-configured as primary** — Claude, Pi, Gemini, or Codex. It does **not** assume
-a particular CLI is installed: if you install only one of the four, screening
+configured as primary** — Claude, Pi, or Codex. It does **not** assume
+a particular CLI is installed: if you install only one of the three, screening
 still runs on that one. It is not a keyword engine and not a separate API key.
 Its only job is to *read* the incoming content and score it 0–100 for threat.
 The screener consumes only that number.
@@ -1084,10 +1080,9 @@ flag, not a hand-maintained deny-list (which rots as new tools ship):
 |---------|------------|-------|
 | Claude  | `--tools ""`            | true zero-tools |
 | Pi      | `--no-tools`            | true zero-tools |
-| Gemini  | `--approval-mode plan`  | read-only (may read, cannot act) |
 | Codex   | `--sandbox read-only`   | read-only (may read, cannot act) |
 
-Claude/Pi reach genuine zero-tools; Gemini/Codex reach read-only. Read-only is
+Claude/Pi reach genuine zero-tools; Codex reaches read-only. Read-only is
 a sufficient floor because the screener consumes only the judge's number and
 never executes anything it "decides" — so even a fooled judge can at worst move
 the number, never *act*.
@@ -1328,7 +1323,7 @@ Turn coordinator
         |-- threat-screen untrusted input (see Security)
         |
         v
-Harness chain: pi -> claude -> gemini -> codex
+Harness chain: pi -> claude -> codex
         |
         |-- native harness tool loop
         |-- fallback on recoverable failure

@@ -42,7 +42,6 @@ function makeConfig(provider: Config["voice"]["provider"]): Config {
       chain: [],
       claude: { bin: "x", model: "y", fallbackModel: "" },
       pi: { bin: "x", maxPayloadBytes: 1 },
-      gemini: { bin: "x", model: "" },
     },
     channels: {},
     embeddings: { provider: "none" },

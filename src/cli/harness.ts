@@ -49,7 +49,7 @@ import { saveHarnessBins } from "../state.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
 
-export type HarnessId = "claude" | "pi" | "gemini" | "codex";
+export type HarnessId = "claude" | "pi" | "codex";
 // Pi is listed FIRST so it is the default primary in the wizard (both the
 // pre-selected option and the SUPPORTED_HARNESSES[0] fallback). Pi is
 // phantombot's reference harness — capability routing, the coding-brain swap,
@@ -58,7 +58,6 @@ export type HarnessId = "claude" | "pi" | "gemini" | "codex";
 export const SUPPORTED_HARNESSES: ReadonlyArray<HarnessId> = [
   "pi",
   "claude",
-  "gemini",
   "codex",
 ];
 
@@ -96,7 +95,6 @@ export async function detectAvailability(
   return {
     claude: await whichBinary(config.harnesses.claude.bin),
     pi: await whichBinary(config.harnesses.pi.bin),
-    gemini: await whichBinary(config.harnesses.gemini.bin),
     codex: await whichBinary(config.harnesses.codex?.bin ?? "codex"),
   };
 }
@@ -210,7 +208,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
   if (!hasAnyHarness) {
     p.note(
-      "No supported harness (claude, pi, gemini, codex) was found on your PATH.\n" +
+      "No supported harness (claude, pi, codex) was found on your PATH.\n" +
       "You will need to install at least one of them before the agent can think.\n" +
       "We will continue the setup anyway so your configuration is ready.",
       "Warning: No Harness Found",

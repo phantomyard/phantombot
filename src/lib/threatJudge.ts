@@ -22,18 +22,18 @@
  * exactly the kind of false-confidence that ages into enshittification.
  * The point of an LLM is that it reads MEANING, not strings.
  *
- * Why the HARNESS and not a separate Gemini key: the judge runs as a bare,
+ * Why the HARNESS and not an embedding key: the judge runs as a bare,
  * tool-less completion on the turn's PRIMARY harness — whichever one the user
- * configured (claude, pi, gemini, or codex). It NEVER assumes a specific
- * binary is installed: a user who installs only one of the four still gets
+ * configured (claude, pi, or codex). It NEVER assumes a specific
+ * binary is installed: a user who installs only one of the three still gets
  * screening on that one. Running on the harness also removes the "no Gemini
  * key ⇒ screening silently off" footgun entirely — screening works whenever
  * the harness works, which is always. (Only decision RECALL still touches
  * embeddings, and it degrades to FTS/no-priors, never to no-screening.)
  *
  * Capability floor per harness (see HarnessRequest.toolsMode): claude/pi
- * reach TRUE zero-tools (`--tools ""` / `--no-tools`); gemini/codex reach
- * READ-ONLY (`--approval-mode plan` / `--sandbox read-only`) — they may read
+ * reach TRUE zero-tools (`--tools ""` / `--no-tools`); codex reaches
+ * READ-ONLY (`--sandbox read-only`) — it may read
  * but cannot act. Read-only is a sufficient floor here because the screener
  * consumes only the judge's number and never executes anything it "decides".
  *
@@ -405,7 +405,7 @@ function clamp(n: number, lo: number, hi: number): number {
  * The judge runs on the turn's PRIMARY harness — chain[0], whichever binary
  * the user configured. We deliberately do NOT look for a specific harness id
  * (the earlier cut hard-coded "claude", which silently disabled screening for
- * anyone who installed only pi/gemini/codex — exactly the assumption Andrew
+ * anyone who installed only pi/codex — exactly the assumption Andrew
  * flagged). Every supported harness can run a capability-restricted completion
  * (toolsMode "none"), so the primary is always a valid judge.
  *

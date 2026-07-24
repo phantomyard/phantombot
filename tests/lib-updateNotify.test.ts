@@ -73,7 +73,6 @@ function baseConfig(): Config {
       chain: ["claude"],
       claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
       pi: { bin: "pi", maxPayloadBytes: 1 },
-      gemini: { bin: "gemini", model: "" },
     },
     channels: {
       telegram: {

@@ -1,5 +1,5 @@
 /**
- * modelInfo() on the four harness classes (issue #313) — the /status and
+ * modelInfo() on the three harness classes (issue #313) — the /status and
  * /model display surface. Each class projects its own config shape into the
  * shared HarnessModelInfo; these pin that projection, especially the
  * "unpinned → (default)" sentinels.
@@ -8,7 +8,6 @@
 import { describe, expect, test } from "bun:test";
 import { PiHarness } from "../src/harnesses/pi.ts";
 import { ClaudeHarness } from "../src/harnesses/claude.ts";
-import { GeminiHarness } from "../src/harnesses/gemini.ts";
 import { CodexHarness } from "../src/harnesses/codex.ts";
 
 describe("PiHarness.modelInfo", () => {
@@ -52,20 +51,6 @@ describe("ClaudeHarness.modelInfo", () => {
   test("empty fallback is omitted", () => {
     const h = new ClaudeHarness({ bin: "claude", model: "opus", fallbackModel: "" });
     expect(h.modelInfo().fallbackModel).toBeUndefined();
-  });
-});
-
-describe("GeminiHarness.modelInfo", () => {
-  test("pinned model", () => {
-    expect(
-      new GeminiHarness({ bin: "gemini", model: "gemini-2.5-pro" }).modelInfo(),
-    ).toEqual({ model: "gemini-2.5-pro" });
-  });
-
-  test("empty model → (default)", () => {
-    expect(new GeminiHarness({ bin: "gemini", model: "" }).modelInfo()).toEqual({
-      model: "(default)",
-    });
   });
 });
 

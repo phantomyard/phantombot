@@ -11,7 +11,7 @@
  * pins the resolved ABSOLUTE path into `state.json`. Absolute-path resolution
  * means the extension's spawn of `phantombot acp` finds claude/pi/etc fine
  * regardless of PATH. But once phantombot decides to run that harness, IT
- * spawns claude/pi/gemini/codex as ITS OWN child \u2014 and those binaries are
+ * spawns claude/pi/codex as ITS OWN child \u2014 and those binaries are
  * frequently Node scripts (`#!/usr/bin/env node`) or wrapper shims that shell
  * out to other tools on PATH (see the shebang-needs-interpreter-on-path
  * lesson, phantombot#240 / withCommandDirOnPath). The daemon (systemd/

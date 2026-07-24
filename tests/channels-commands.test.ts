@@ -436,7 +436,6 @@ describe("/update", () => {
         chain: ["claude"],
         claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
         pi: { bin: "pi", maxPayloadBytes: 1 },
-        gemini: { bin: "gemini", model: "" },
       },
       channels: {
         telegram: {
@@ -612,7 +611,6 @@ describe("/chattiness", () => {
 describe("nominalContextWindow", () => {
   test("returns sensible defaults per harness id", () => {
     expect(nominalContextWindow("claude")).toBe(200_000);
-    expect(nominalContextWindow("gemini")).toBe(1_000_000);
     expect(nominalContextWindow("pi")).toBe(64_000);
     expect(nominalContextWindow("unknown")).toBe(128_000);
   });
@@ -686,7 +684,6 @@ describe("/model", () => {
         chain: ["pi"],
         claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
         pi: { bin: "pi" },
-        gemini: { bin: "gemini", model: "" },
       },
     } as unknown as import("../src/config.ts").Config;
   }

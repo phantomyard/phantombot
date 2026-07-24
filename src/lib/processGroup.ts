@@ -1,16 +1,16 @@
 /**
  * Process-group spawn + kill helpers.
  *
- * Why this exists: a phantombot harness (claude/gemini/pi) commonly
+ * Why this exists: a phantombot harness commonly
  * spawns its own subprocesses to execute tool calls — `Bash`, `WebFetch`,
- * `gemini usage`, etc. When phantombot kills the harness on timeout or
+ * and others. When phantombot kills the harness on timeout or
  * /stop, `Bun.spawn`'s `proc.kill(SIGTERM)` only signals the direct
  * subprocess. The grandchildren are reparented to PID 1 and keep
  * running.
  *
- * The motivating bug (kw-openclaw, 2026-05-02): a `gemini usage` tool
- * call wedged on a TCP read inside the gemini subprocess. After the
- * 600s wall-clock timeout fired, gemini died — but `gemini usage`
+ * The motivating bug (kw-openclaw, 2026-05-02): a tool call wedged on a TCP
+ * read inside a harness subprocess. After the wall-clock timeout fired, the
+ * parent died — but the child
  * survived as an orphan with the open socket, eating fds and
  * confusing later runs.
  *
@@ -238,7 +238,7 @@ export function spawnInNewSession<
   //     daemon was launched with a narrow PATH (Windows Scheduled Task /
   //     machine-PATH-only, "phantombot: command not found", 2026-07-07).
   //  3. withHarnessBinDirsOnPath — the dirs of every RESOLVED harness binary
-  //     (pi/claude/gemini/codex), so the agent's Bash tool can invoke a sibling
+  //     (pi/claude/codex), so the agent's Bash tool can invoke a sibling
   //     harness by bare name too, retiring the machine-PATH band-aid (same day).
   const env = opts.env
     ? withHarnessBinDirsOnPath(
@@ -266,7 +266,7 @@ export function spawnInNewSession<
     // Windows only (issue #271): suppress the console window Windows opens for
     // every child of a GUI/service process. Without it, each harness turn (and
     // each tool subprocess it spawns) flashes a cmd/console window on the
-    // desktop. No-op on POSIX. Covers all four harnesses (claude/gemini/codex/pi)
+    // desktop. No-op on POSIX. Covers all supported harnesses.
     // in one place since they all spawn through here.
     windowsHide: true,
   } as typeof opts) as Subprocess<Stdin, Stdout, Stderr>;

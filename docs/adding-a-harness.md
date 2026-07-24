@@ -4,7 +4,7 @@ A harness is a CLI binary that takes a system prompt + a user message (and optio
 
 ## Recipe
 
-1. **Pick a name.** Use the CLI's binary name: `claude`, `pi`, `gemini`, `codex`, etc. The name becomes the harness `id` and the env-var prefix.
+1. **Pick a name.** Use the CLI's binary name: `claude`, `pi`, `codex`, etc. The name becomes the harness `id` and the env-var prefix. Gemini CLI is retired; Gemini remains an embeddings provider only.
 
 2. **Verify the CLI's `--print`-equivalent.** Every harness needs a non-interactive mode that:
    - Reads a prompt (from stdin or argv)
@@ -72,4 +72,4 @@ A harness is a CLI binary that takes a system prompt + a user message (and optio
 - **No `--api-key`** — phantombot's OAuth-on-host model trusts Pi's own configured credentials.
 - Different stream-json schema: `message_update` events with `text_delta` → text chunks; `tool_execution_start` → progress chunks.
 
-When adding a third harness (Codex / Gemini / etc.), expect to repeat the equivalent investigations for *that* CLI. Read its `--help` carefully and document any equivalent gotchas in the wrapper file.
+When adding another harness (such as Codex), expect to repeat the equivalent investigations for *that* CLI. Read its `--help` carefully and document any equivalent gotchas in the wrapper file. Gemini CLI is retired and must not be reintroduced as an agent harness.

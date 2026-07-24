@@ -274,7 +274,7 @@ export interface Config {
   configPath: string;
 
   harnesses: {
-    /** Order = primary → fallback. Recognized ids: "claude", "pi", "gemini", "codex". */
+    /** Order = primary → fallback. Recognized ids: "claude", "pi", "codex". */
     chain: string[];
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
@@ -294,7 +294,6 @@ export interface Config {
        */
       routing?: import("./lib/piRouting.ts").PiRoutingConfig;
     };
-    gemini: { bin: string; model: string };
     codex?: { bin: string; model: string };
   };
 
@@ -435,7 +434,6 @@ export async function loadConfig(): Promise<Config> {
   ) {
     warnPiMaxPayloadDeprecated();
   }
-  const tomlGeminiHarness = (tomlHarnesses.gemini ?? {}) as Record<string, unknown>;
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
@@ -448,6 +446,22 @@ export async function loadConfig(): Promise<Config> {
     unknown
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
+
+  const configuredChain =
+    process.env.PHANTOMBOT_HARNESS_CHAIN
+      ?.split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0) ??
+    asStringArray(tomlHarnesses.chain) ??
+    [...DEFAULT_HARNESS_CHAIN];
+  const migratedChain = configuredChain.filter((id) => id !== "gemini");
+  if (migratedChain.length !== configuredChain.length) {
+    console.warn(
+      "warning: the Gemini CLI harness was removed; it was dropped from " +
+        "harnesses.chain. Run `phantombot harness` to choose a replacement.",
+    );
+  }
+  if (migratedChain.length === 0) migratedChain.push(...DEFAULT_HARNESS_CHAIN);
 
   return {
     defaultPersona:
@@ -500,13 +514,7 @@ export async function loadConfig(): Promise<Config> {
     configPath,
 
     harnesses: {
-      chain:
-        process.env.PHANTOMBOT_HARNESS_CHAIN
-          ?.split(",")
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0) ??
-        asStringArray(tomlHarnesses.chain) ??
-        [...DEFAULT_HARNESS_CHAIN],
+      chain: migratedChain,
 
       claude: {
         bin:
@@ -531,20 +539,6 @@ export async function loadConfig(): Promise<Config> {
           state.harness_bins?.pi ??
           "pi",
         routing: buildPiRoutingConfig(tomlPi),
-      },
-
-      gemini: {
-        bin:
-          process.env.PHANTOMBOT_GEMINI_BIN ??
-          asString(tomlGeminiHarness.bin) ??
-          state.harness_bins?.gemini ??
-          "gemini",
-        // Empty string = "let gemini-cli pick its own default" — see
-        // GeminiHarness for why we don't pass -m in that case.
-        model:
-          process.env.PHANTOMBOT_GEMINI_MODEL ??
-          asString(tomlGeminiHarness.model) ??
-          "",
       },
 
       codex: {

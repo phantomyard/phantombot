@@ -104,7 +104,6 @@ describe("checkConfiguredHarnesses", () => {
       chain: ["claude", "pi"],
       claude: { bin: "sh" },
       pi: { bin: "definitely-missing-pi" },
-      gemini: { bin: "gemini" },
     },
   } as unknown as Config;
 
@@ -136,7 +135,6 @@ describe("checkConfiguredHarnesses", () => {
         chain: ["pi"],
         claude: { bin: "claude" },
         pi: { bin: join(dir, "old", "pi") },
-        gemini: { bin: "gemini" },
       },
     } as unknown as Config;
 
@@ -162,7 +160,6 @@ describe("resolveHarnessBinsForConfig", () => {
       chain: ["claude", "pi"],
       claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
       pi: { bin: "pi", maxPayloadBytes: 1000 },
-      gemini: { bin: "gemini", model: "" },
     },
   } as unknown as Config;
 

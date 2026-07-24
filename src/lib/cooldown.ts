@@ -1,8 +1,8 @@
 /**
  * In-memory per-harness cooldown store.
  *
- * Why this exists: the gemini harness can sit on a 429 (or any 4XX) for
- * ~2 min while gemini-cli runs its built-in retryWithBackoff loop, then
+ * Why this exists: a harness can sit on a provider 429 (or any 4XX) while
+ * its client retries, then
  * the phantombot orchestrator falls through to the next harness anyway.
  * We want two improvements:
  *
@@ -13,7 +13,7 @@
  *
  *   2. COOLDOWN — once a harness has failed, don't try it again for a
  *      while. If a Google capacity exhaustion just kicked us off
- *      gemini-3-flash-preview, hammering it on every turn over the
+ *      the provider, hammering it on every turn over the
  *      next minute is pure latency for the user. Skip it; come back to
  *      it after a cooldown window.
  *
