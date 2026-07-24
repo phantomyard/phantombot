@@ -7,7 +7,7 @@ import { saveHarnessBins } from "../state.ts";
 import { recordHarnessBinDirs } from "./processGroup.ts";
 import type { WriteSink } from "./io.ts";
 
-export type KnownHarnessId = "claude" | "pi" | "gemini" | "codex";
+export type KnownHarnessId = "claude" | "pi" | "codex";
 
 export interface HarnessAvailability {
   id: string;
@@ -24,7 +24,6 @@ export interface ResolvedHarnessBinary {
 export function harnessBin(config: Config, id: string): string | undefined {
   if (id === "claude") return config.harnesses.claude.bin;
   if (id === "pi") return config.harnesses.pi.bin;
-  if (id === "gemini") return config.harnesses.gemini.bin;
   if (id === "codex") return config.harnesses.codex?.bin ?? "codex";
   return undefined;
 }
@@ -32,7 +31,6 @@ export function harnessBin(config: Config, id: string): string | undefined {
 function defaultHarnessBin(id: string): string | undefined {
   if (id === "claude") return "claude";
   if (id === "pi") return "pi";
-  if (id === "gemini") return "gemini";
   if (id === "codex") return "codex";
   return undefined;
 }
@@ -265,7 +263,7 @@ export async function resolveHarnessBinsForConfig(
     : await checkConfiguredHarnesses(config);
   const resolved = resolvedHarnessBins(checks);
   // Make the resolved harness dirs available on every harness child's PATH so
-  // the agent's Bash tool can invoke pi/claude/gemini/codex by bare name even
+  // the agent's Bash tool can invoke pi/claude/codex by bare name even
   // under a narrow launcher PATH (Windows machine-PATH-only Scheduled Task).
   // Retires the by-hand machine-PATH band-aid. See processGroup.harnessBinDirs.
   recordHarnessBinDirs(Object.values(resolved));
@@ -301,9 +299,6 @@ export function applyResolvedHarnessBins(
         ? { ...config.harnesses.claude, bin: bins.claude }
         : config.harnesses.claude,
       pi: bins.pi ? { ...config.harnesses.pi, bin: bins.pi } : config.harnesses.pi,
-      gemini: bins.gemini
-        ? { ...config.harnesses.gemini, bin: bins.gemini }
-        : config.harnesses.gemini,
       codex: bins.codex
         ? { ...(config.harnesses.codex ?? { bin: "codex", model: "" }), bin: bins.codex }
         : config.harnesses.codex,

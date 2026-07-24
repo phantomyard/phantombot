@@ -50,7 +50,7 @@ export type ModelRequest =
  *
  *   ""                  → show
  *   "list [filter]"     → list
- *   "clear"             → clear (gemini/codex only)
+ *   "clear"             → clear (codex only)
  *   "primary <slug>"    → set primary (explicit alias of the bare form)
  *   "coding <slug>"     → set coding (pi only)
  *   "image <slug>"      → set image (pi only)
@@ -157,8 +157,6 @@ export async function applyModelRequest(
       return applyPi(req, config, envPath);
     case "claude":
       return applyClaude(req, config, envPath);
-    case "gemini":
-      return applySimple(req, config, envPath, "gemini", "PHANTOMBOT_GEMINI_MODEL");
     case "codex":
       return applySimple(req, config, envPath, "codex", "PHANTOMBOT_CODEX_MODEL");
     default:
@@ -232,7 +230,7 @@ async function applyClaude(
 }
 
 /**
- * gemini + codex share their shape: a single `model` string where "" means
+ * Codex uses a single `model` string where "" means
  * "let the CLI pick its default". Set pins it; clear reverts to the default
  * by DELETING the TOML key and unsetting the env var ("" is the env-file
  * unset sentinel), so the config genuinely returns to its unpinned state
@@ -242,7 +240,7 @@ async function applySimple(
   req: ModelRequest & { kind: "set" | "clear" },
   config: Config,
   envPath: string,
-  id: "gemini" | "codex",
+  id: "codex",
   envVar: string,
 ): Promise<ModelApplyResult> {
   if (req.kind === "set" && req.role !== "primary") {
@@ -260,8 +258,7 @@ async function applySimple(
       if (harness) delete harness.model;
     });
     await updateEnvFile(envPath, { [envVar]: "" });
-    if (id === "gemini") config.harnesses.gemini.model = "";
-    else if (config.harnesses.codex) config.harnesses.codex.model = "";
+    if (config.harnesses.codex) config.harnesses.codex.model = "";
     delete process.env[envVar];
     return { ok: true, summary: `${id} model → (default)` };
   }
@@ -270,8 +267,7 @@ async function applySimple(
     setIn(toml, ["harnesses", id, "model"], req.slug);
   });
   await updateEnvFile(envPath, { [envVar]: req.slug });
-  if (id === "gemini") config.harnesses.gemini.model = req.slug;
-  else if (config.harnesses.codex) config.harnesses.codex.model = req.slug;
+  if (config.harnesses.codex) config.harnesses.codex.model = req.slug;
   process.env[envVar] = req.slug;
   return { ok: true, summary: `${id} model → ${req.slug}` };
 }

@@ -6,7 +6,7 @@
  * channel layer so they keep working even when the LLM is hung on a
  * subprocess tool call — that was the failure mode that motivated this
  * module: PhantomBot's old design routed every message through the harness,
- * so a stuck `gemini usage` subprocess would block `/stop` along with
+ * so a stuck child subprocess would block `/stop` along with
  * everything else.
  *
  * The handler is intentionally pure-ish: it returns a result object and
@@ -753,7 +753,7 @@ const MODEL_USAGE =
   "  /model list       — list models the primary harness can run (pi only)\n" +
   "  /model <slug>     — switch the primary model (restarts phantombot)\n" +
   "  /model coding <slug> / image <slug> — pi capability-routing delegates\n" +
-  "  /model clear      — revert gemini/codex to their CLI default";
+  "  /model clear      — revert codex to its CLI default";
 
 async function handleModel(
   arg: string,
@@ -804,7 +804,7 @@ async function handleModel(
 /**
  * `/model list` — pi is the only harness with a programmatic model catalog
  * (`pi --list-models`, reused from lib/piModels.ts). The others get guidance
- * text: claude is alias-based, gemini/codex pin-or-default.
+ * text: claude is alias-based, codex pins or uses its default.
  */
 async function handleModelList(
   filter: string | undefined,
@@ -854,12 +854,6 @@ async function handleModelList(
           "claude models are set by alias: opus, sonnet, haiku. " +
           "use /model <alias> to switch.",
       };
-    case "gemini":
-      return {
-        reply:
-          "gemini-cli picks its default model when unset — there's no catalog to list. " +
-          "use /model <model-id> to pin one, or /model clear to reset to default.",
-      };
     case "codex":
       return {
         reply:
@@ -881,8 +875,6 @@ export function nominalContextWindow(harnessId: string): number {
   switch (harnessId) {
     case "claude":
       return 200_000;
-    case "gemini":
-      return 1_000_000;
     case "pi":
       return 64_000;
     default:

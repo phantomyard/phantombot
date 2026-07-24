@@ -96,7 +96,7 @@ export async function runInitFlow(
  * actually want to know: is the binary on PATH and able to run.
  *
  * This does NOT detect "binary present but not authenticated" — that's a
- * harness-specific check (different for claude vs pi vs gemini) and is
+ * harness-specific check (different for claude vs pi) and is
  * deferred to a follow-up.
  */
 async function probeHarness(bin: string): Promise<boolean> {
@@ -117,7 +117,7 @@ export default defineCommand({
 
     p.note(
       "This wizard will guide you through a few quick steps to get your agent running:\n" +
-      "  1. Pick your AI harness (claude, pi, gemini, or codex)\n" +
+      "  1. Pick your AI harness (claude, pi, or codex)\n" +
       "  2. Create a persona (identity & memory)\n" +
       "  3. Connect PhantomChat (your private Nostr DM channel)\n" +
       "  4. Connect Telegram (optional — skippable)\n" +
@@ -166,7 +166,7 @@ export default defineCommand({
     } else {
       p.note(
         "No AI harness responded to '--version'.\n" +
-        "You might need to install one (claude, pi, gemini, or codex) first, " +
+      "You might need to install one (claude, pi, or codex) first, " +
         "but we can still set up the configuration now.",
         "Probe result"
       );
@@ -297,7 +297,7 @@ export default defineCommand({
         return;
       }
       if (onPath.length === 0) {
-        p.outro("All done! Your Phantombot is running, but no AI harness was found on PATH.\nOnce you install and configure a harness (like gemini or claude), run `phantombot harness` to wire it up.");
+      p.outro("All done! Your Phantombot is running, but no AI harness was found on PATH.\nOnce you install and configure a harness (like claude or pi), run `phantombot harness` to wire it up.");
       } else {
         p.outro("All done! Your Phantombot is now running and ready to chat.");
       }

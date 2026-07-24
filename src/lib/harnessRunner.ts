@@ -1,7 +1,7 @@
 /**
  * Shared kill/timeout coordination for harness subprocesses.
  *
- * Every harness (claude/gemini/pi) needs the same machinery:
+ * Every harness needs the same machinery:
  *
  *   - spawn the binary in a fresh process group (so grandchildren die too)
  *   - run an idle timer that resets on useful activity from stdout
@@ -10,9 +10,7 @@
  *   - on any of those firing, SIGTERM → 5s grace → SIGKILL the whole group
  *
  * Factoring this into one place keeps the three harness files focused on
- * their per-CLI parsing and prevents the kill semantics from drifting
- * between them (which is exactly what bit us before — claude knew about
- * /stop but gemini didn't).
+ * their per-CLI parsing and prevents the kill semantics from drifting.
  *
  * Usage shape:
  *
@@ -240,7 +238,7 @@ export interface HarnessProcessSpec {
   /**
    * Build the terminal `done` chunk's meta from the accumulated final text and
    * the meta captured from any mid-stream `done` event the parser emitted
-   * (codex usage, gemini stats). Always includes whatever the harness wants —
+   * (codex usage, provider stats). Always includes whatever the harness wants —
    * harnessId is the caller's responsibility to add.
    */
   buildDoneMeta: (
@@ -249,15 +247,15 @@ export interface HarnessProcessSpec {
   ) => Record<string, unknown>;
   /** Cap for a non-JSON progress note. Omit for the full line (claude/pi). */
   progressNoteLimit?: number;
-  /** Side-effect for each non-JSON stdout line (e.g. gemini debug log). */
+   /** Side-effect for each non-JSON stdout line (e.g. provider debug log). */
   onNonJsonLine?: (line: string) => void;
   /** Per-line stderr handler. Defaults to a debug log tagged with harnessId. */
   onStderrLine?: (line: string) => void;
-  /** Parse the decoder tail after stdout closes (gemini's trailing line). */
+   /** Parse the decoder tail after stdout closes, when an adapter needs it. */
   flushTail?: boolean;
   /**
    * Terminal error to emit with priority over kill-cause / exit-code, e.g.
-   * gemini's mid-stream 4XX fast-fallback. Called after the loop; if it returns
+   * An adapter's mid-stream 4XX fast-fallback. Called after the loop; if it returns
    * a chunk, the engine drains the process and yields that instead.
    */
   earlyError?: () =>
@@ -371,7 +369,7 @@ export async function* runHarnessProcess(
   }
 
   // Priority order matches the old hand-written loops: a harness-specific
-  // early error (gemini 4XX) wins over kill-cause, which wins over exit code.
+  // early provider error wins over kill-cause, which wins over exit code.
   const early = spec.earlyError?.();
   if (early) {
     await proc.exited;

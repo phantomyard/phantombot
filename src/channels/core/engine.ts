@@ -178,7 +178,7 @@ export function emitOpeningIndicator(
  *      thinking deltas (pi routed to an OpenRouter-served model, or a failover
  *      from a rate-limited claude down to pi) produces nothing at all until
  *      its first token — a multi-minute silent think that reads as "hung".
- *   2. During tool execution — gemini-cli emits zero events while a tool runs
+ *   2. During tool execution — a harness may emit zero events while a tool runs
  *      (potentially minutes).
  *
  * A single reusable interval: `start()` arms it (idempotent — a second call
@@ -983,7 +983,7 @@ async function processChatMessage(
   // progress). When chunks stop, the indicator naturally expires after
   // ~5s — that vanishing IS the user-visible "harness has gone silent /
   // possibly frozen" signal. One exception: during tool execution,
-  // gemini-cli emits zero events (potentially for minutes), which would
+  // A harness may emit zero events (potentially for minutes), which would
   // make the indicator expire and look frozen. For that gap we run a
   // background refresh timer (startToolRefresh / stopToolRefresh). The
   // throttle just prevents stream-json bursts from hitting Telegram's
@@ -1002,7 +1002,7 @@ async function processChatMessage(
   // after ~5s: (1) turn start → first chunk (a model reasoning without
   // streaming deltas — pi on an OpenRouter model, or the claude→pi rate-limit
   // failover — sends nothing until its first token), and (2) tool execution
-  // (gemini-cli emits zero events while a tool runs). Armed at turn start and
+  // (a harness emits zero events while a tool runs). Armed at turn start and
   // on each `progress`; disarmed on the next `text`/`heartbeat`/`done`/
   // `error`/`finally`. See `createIndicatorKeepalive` for the semantics.
   const indicatorKeepalive = createIndicatorKeepalive(
@@ -1280,7 +1280,7 @@ async function processChatMessage(
         resetFinalCandidate();
         await narration.flush();
         // Re-arm the background keepalive for the tool run. Without this,
-        // gemini-cli's multi-minute tool runs cause Telegram's indicator
+        // Multi-minute tool runs cause Telegram's indicator
         // to expire after ~5s, making it look like the bot has frozen.
         // Stopped on the next text/heartbeat/done/error.
         startIndicatorKeepalive();
@@ -1515,4 +1515,3 @@ async function processChatMessage(
     recovered: !!errored && !unrecoverable,
   });
 }
-

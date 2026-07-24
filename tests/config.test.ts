@@ -188,6 +188,43 @@ describe("loadConfig — chattiness default", () => {
 });
 
 describe("loadConfig — TOML overlay", () => {
+  test("migrates a legacy Gemini CLI chain without touching embeddings", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses]
+chain = ["gemini", "codex"]
+
+[harnesses.gemini]
+bin = "gemini"
+model = "gemini-2.5-pro"
+
+[embeddings]
+provider = "gemini"
+
+[embeddings.gemini]
+api_key = "embedding-key"
+model = "gemini-embedding-001"
+dims = 1536
+`,
+      "utf8",
+    );
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      const c = await loadConfig();
+      expect(c.harnesses.chain).toEqual(["codex"]);
+      expect(c.harnesses).not.toHaveProperty("gemini");
+      expect(c.embeddings.provider).toBe("gemini");
+      expect(c.embeddings.gemini?.apiKey).toBe("embedding-key");
+      expect(warnings.some((line) => line.includes("Gemini CLI harness was removed"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   test("reads values from config.toml when present", async () => {
     const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });

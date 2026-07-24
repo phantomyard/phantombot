@@ -122,7 +122,6 @@ const baseConfig = (): Config => ({
     chain: ["claude"],
     claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
     pi: { bin: "pi", maxPayloadBytes: 1_000_000 },
-    gemini: { bin: "gemini", model: "" },
   },
   channels: {},
   // Streaming tests below exercise the progress-bubble path, so enable

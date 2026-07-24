@@ -27,7 +27,6 @@ const TOUCHED_ENV = [
   "PHANTOMBOT_CODING_MODEL",
   "PHANTOMBOT_IMAGE_MODEL",
   "PHANTOMBOT_CLAUDE_MODEL",
-  "PHANTOMBOT_GEMINI_MODEL",
   "PHANTOMBOT_CODEX_MODEL",
 ] as const;
 
@@ -67,7 +66,6 @@ function makeConfig(overrides: Partial<Config["harnesses"]> = {}): Config {
       chain: ["pi"],
       claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
       pi: { bin: "pi" },
-      gemini: { bin: "gemini", model: "" },
       ...overrides,
     },
     channels: {},
@@ -169,10 +167,7 @@ describe("formatModelShow", () => {
     expect(out).toContain("fallback:     sonnet");
   });
 
-  test("gemini/codex single line; missing info degrades", () => {
-    expect(formatModelShow("gemini", { model: "(default)" })).toBe(
-      "gemini model: (default)",
-    );
+  test("missing info degrades", () => {
     expect(formatModelShow("pi", undefined)).toContain("unavailable");
   });
 });
@@ -290,45 +285,11 @@ describe("applyModelRequest claude", () => {
 });
 
 // ---------------------------------------------------------------------------
-// applyModelRequest — gemini / codex
+// applyModelRequest — codex
 // ---------------------------------------------------------------------------
 
-describe("applyModelRequest gemini + codex", () => {
-  test("set pins the model in both stores", async () => {
-    const config = makeConfig();
-    const r = await applyModelRequest(
-      { kind: "set", role: "primary", slug: "gemini-2.5-pro" },
-      "gemini",
-      config,
-      envPath,
-    );
-    expect(r.ok).toBe(true);
-    const toml = await readConfigToml(configPath);
-    expect(getIn(toml, ["harnesses", "gemini", "model"])).toBe("gemini-2.5-pro");
-    const env = await loadEnvFile(envPath);
-    expect(env.PHANTOMBOT_GEMINI_MODEL).toBe("gemini-2.5-pro");
-    expect(config.harnesses.gemini.model).toBe("gemini-2.5-pro");
-  });
-
-  test("clear deletes the toml key and unsets env (back to CLI default)", async () => {
-    const config = makeConfig();
-    await applyModelRequest(
-      { kind: "set", role: "primary", slug: "gemini-2.5-pro" },
-      "gemini",
-      config,
-      envPath,
-    );
-    const r = await applyModelRequest({ kind: "clear" }, "gemini", config, envPath);
-    expect(r).toEqual({ ok: true, summary: "gemini model → (default)" });
-    const toml = await readConfigToml(configPath);
-    expect(getIn(toml, ["harnesses", "gemini", "model"])).toBeUndefined();
-    const env = await loadEnvFile(envPath);
-    expect(env.PHANTOMBOT_GEMINI_MODEL).toBeUndefined();
-    expect(config.harnesses.gemini.model).toBe("");
-    expect(process.env.PHANTOMBOT_GEMINI_MODEL).toBeUndefined();
-  });
-
-  test("codex set/clear mirrors gemini", async () => {
+describe("applyModelRequest codex", () => {
+  test("codex set/clear works", async () => {
     const config = makeConfig({ codex: { bin: "codex", model: "" } });
     const set = await applyModelRequest(
       { kind: "set", role: "primary", slug: "gpt-5.2-codex" },
@@ -356,10 +317,10 @@ describe("applyModelRequest gemini + codex", () => {
     expect(getIn(toml, ["harnesses", "codex", "model"])).toBe("gpt-5.2-codex");
   });
 
-  test("rejects coding/image roles — single-model harnesses", async () => {
+  test("rejects coding/image roles — single-model harness", async () => {
     const r = await applyModelRequest(
       { kind: "set", role: "image", slug: "x" },
-      "gemini",
+      "codex",
       makeConfig(),
       envPath,
     );
