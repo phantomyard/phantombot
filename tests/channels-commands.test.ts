@@ -644,6 +644,19 @@ describe("/status phantom + models surface", () => {
       "models:  pi: deepseek-v3 (openrouter) | claude: opus",
     );
   });
+
+  test("marks unavailable harnesses in the chain line", async () => {
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({
+        harnesses: [
+          new StubHarness("pi", true),
+          new StubHarness("claude", false),
+        ],
+      }),
+    );
+    expect(r!.reply).toContain("chain:   pi → claude (unavailable)");
+  });
 });
 
 // ---------------------------------------------------------------------------

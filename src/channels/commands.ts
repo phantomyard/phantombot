@@ -620,7 +620,13 @@ async function handleStatus(
 ): Promise<SlashCommandResult> {
   const uptimeS = Math.floor((Date.now() - ctx.startedAt) / 1000);
   const primary = ctx.harnesses[0]?.id ?? "(none)";
-  const chain = ctx.harnesses.map((h) => h.id).join(" → ") || "(none)";
+  const chainParts = await Promise.all(
+    ctx.harnesses.map(async (h) => {
+      const ok = await h.available();
+      return ok ? h.id : `${h.id} (unavailable)`;
+    }),
+  );
+  const chain = chainParts.join(" → ") || "(none)";
 
   // Rough context estimate: total chars across the rolling history turns, divided
   // by 4 (the standard chars-per-token heuristic). Doesn't include the
