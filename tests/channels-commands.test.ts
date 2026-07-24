@@ -261,7 +261,8 @@ describe("/status", () => {
     });
     const r = await handleSlashCommand("/status", ctx());
     expect(r!.reply).toContain("harness: claude");
-    expect(r!.reply).toContain("claude → pi");
+    expect(r!.reply).toContain("→ claude");
+    expect(r!.reply).toContain("pi");
     expect(r!.reply).toMatch(/uptime:\s+1m \d+s/);
     expect(r!.reply).toContain("context:");
     expect(r!.reply).toContain("active:  no");
@@ -655,7 +656,8 @@ describe("/status phantom + models surface", () => {
         ],
       }),
     );
-    expect(r!.reply).toContain("chain:   pi → claude (unavailable)");
+    expect(r!.reply).toContain("→ pi");
+    expect(r!.reply).toContain("claude (unavailable)");
   });
 });
 

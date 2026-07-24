@@ -615,18 +615,27 @@ async function handleReset(
   };
 }
 
+/** Format the harness chain with availability annotations.
+ * Shared by /status and /harness so the output stays consistent. */
+async function formatHarnessChain(harnesses: Harness[]): Promise<string> {
+  if (harnesses.length === 0) return "(none)";
+  const parts = await Promise.all(
+    harnesses.map(async (h, i) => {
+      const ok = await h.available();
+      const marker = i === 0 ? "→" : " ";
+      const suffix = ok ? "" : " (unavailable)";
+      return `${marker} ${h.id}${suffix}`;
+    }),
+  );
+  return parts.join("\n");
+}
+
 async function handleStatus(
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
   const uptimeS = Math.floor((Date.now() - ctx.startedAt) / 1000);
   const primary = ctx.harnesses[0]?.id ?? "(none)";
-  const chainParts = await Promise.all(
-    ctx.harnesses.map(async (h) => {
-      const ok = await h.available();
-      return ok ? h.id : `${h.id} (unavailable)`;
-    }),
-  );
-  const chain = chainParts.join(" → ") || "(none)";
+  const chain = await formatHarnessChain(ctx.harnesses);
 
   // Rough context estimate: total chars across the rolling history turns, divided
   // by 4 (the standard chars-per-token heuristic). Doesn't include the
@@ -694,17 +703,10 @@ async function handleHarness(
 
   if (!arg) {
     // No arg → list current chain with availability.
-    const lines: string[] = [];
-    for (let i = 0; i < ctx.harnesses.length; i++) {
-      const h = ctx.harnesses[i]!;
-      const ok = await h.available();
-      const marker = i === 0 ? "→" : " ";
-      const suffix = ok ? "" : " (unavailable)";
-      lines.push(`${marker} ${h.id}${suffix}`);
-    }
+    const chainLines = await formatHarnessChain(ctx.harnesses);
     return {
       reply:
-        `current chain (→ = primary):\n${lines.join("\n")}\n\n` +
+        `current chain (→ = primary):\n${chainLines}\n\n` +
         `use /harness <id> to switch primary`,
     };
   }
