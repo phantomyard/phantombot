@@ -46,7 +46,7 @@ work.
   [chat.phantomyard.ai](https://chat.phantomyard.ai).
 - **Telegram** — first-class text, voice, group, and attachment I/O, right
   from your pocket.
-- **[VS Code & Zed extensions](#editors-vs-code--zed)** — the same persona,
+- **[VS Code & Zed extensions](#editors-vs-code-zed--jetbrains)** — the same persona,
   memory, and judgment inside your editor's chat panel over ACP. Pick
   *Phantombot* from the agent list and code with an agent that already knows
   your repo, your decisions, and you.
@@ -68,8 +68,9 @@ Supported harnesses:
 - [Command Reference](#command-reference)
 - [Telegram](#telegram)
 - [PhantomChat](#phantomchat)
-- [Editors: VS Code & Zed](#editors-vs-code--zed)
+- [Editors: VS Code, Zed & JetBrains](#editors-vs-code-zed--jetbrains)
 - [Pi Capability Routing](#pi-capability-routing)
+- [Model Management (`/model`)](#model-management-model)
 - [Group Chats](#group-chats)
 - [Voice Replies](#voice-replies)
 - [Scheduled Tasks](#scheduled-tasks)
@@ -100,7 +101,7 @@ Phantombot keeps the parts a personal assistant actually needs:
 - A persistent persona loaded from markdown.
 - Telegram text, group, attachment, and voice I/O.
 - A [PhantomChat](https://github.com/phantomyard/phantomchat) (Nostr, end-to-end-encrypted) DM channel, running alongside Telegram. Onboard at [chat.phantomyard.ai](https://chat.phantomyard.ai).
-- First-party [VS Code and Zed extensions](#editors-vs-code--zed) — the same persona, memory, and judgment, right inside your editor over ACP.
+- First-party [VS Code and Zed extensions](#editors-vs-code-zed--jetbrains) — the same persona, memory, and judgment, right inside your editor over ACP.
 - Rolling conversation context.
 - Durable markdown memory and KB.
 - Scheduled tasks.
@@ -262,21 +263,43 @@ phantombot install      # installs the per-user logon task and periodic tasks
 phantombot uninstall    # removes the service and tasks
 ```
 
-`install` ensures four tasks in the current user's `\\Phantombot\\` folder:
-the always-on daemon (`run`) and the periodic `heartbeat`, `nightly`, and
-`tick` tasks. They use the current user's SID and `InteractiveToken`, so no
-password, elevation, or machine-wide service is required. The daemon starts at
-logon, retries after failure, and its process-tree cleanup keeps stop/restart
-deterministic while that user is logged in. On an existing installation,
+`install` first asks: **"Run phantombot when you are logged off?"** (default:
+**no**). It then ensures four tasks in the current user's `\Phantombot\`
+folder, named per persona so multi-persona boxes stay identifiable in
+taskschd.msc: the always-on daemon (`phantombot-<persona>`) and the periodic
+`heartbeat-<persona>`, `nightly-<persona>`, and `tick-<persona>` tasks.
+
+- **Interactive mode (default)** — the tasks use the current user's SID and
+  `InteractiveToken`, so no password, elevation, or machine-wide service is
+  required. The daemon starts at logon, retries after failure, and its
+  process-tree cleanup keeps stop/restart deterministic while that user is
+  logged in.
+- **Logged-off mode** — answering yes prompts for the Windows password and
+  registers the tasks with `LogonType Password` plus a `BootTrigger`, so the
+  daemon starts at boot with **no interactive session** — the headless-VM /
+  Windows-update-reboot scenario. The password is held by Task Scheduler;
+  phantombot persists only the mode and username (never the password) in
+  `windows-logon-<persona>.json` beside the launcher, so the heartbeat
+  self-heal regenerates matching task XML. In this mode `start` / `restart`
+  and the self-update relaunch go through `schtasks /Run`, so the daemon runs
+  in session 0 owned by the scheduler and is never reaped when the launching
+  SSH/console session ends.
+
+For scripted installs, `--run-logged-off` / `--interactive` skip the prompt and
+`--windows-password` (or `PHANTOMBOT_WINDOWS_PASSWORD`) supplies the
+credential non-interactively. On an existing installation,
 `install` leaves healthy task definitions unchanged and only repairs missing
 tasks or paths pointing at an older binary.
 
 **Self-update.** `phantombot update` and the `/update` chat command work on
 Windows. Because Windows locks a running `.exe` against overwrite, the updater
 renames the live binary aside to `phantombot.exe.old` (allowed while it runs),
-drops the verified new binary into place, then exits cleanly; the scheduled
-task's keep-alive trigger relaunches the agent on the new binary while the user
-is logged in. In-place self-update needs the task installed (`phantombot install`).
+drops the verified new binary into place, then exits cleanly. Before exiting
+it schedules a **detached relaunch watcher** — a tiny PowerShell process that
+outlives our process tree, waits for the old process to exit and release the
+single-instance run-lock, then starts the new binary (via `schtasks /Run` in
+logged-off mode). The scheduled task's keep-alive trigger remains as a
+backstop. In-place self-update needs the task installed (`phantombot install`).
 
 **Logs.** Service stdout/stderr are redirected to
 `%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. These
@@ -354,6 +377,11 @@ allowed_user_ids = [123456789]
 Harness notes:
 
 - Pi is the recommended primary harness.
+- When the `phantombot harness` wizard takes a Pi provider API key (e.g.
+  OpenRouter), it merge-writes the key into Pi's own auth store
+  (`~/.pi/agent/auth.json`) — the same place an interactive `pi` login
+  writes — so `pi --list-models` and the wizard's model pickers populate. An
+  existing OAuth entry for the same provider is left untouched.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini can use CLI auth or `GEMINI_API_KEY`.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
@@ -477,12 +505,13 @@ overwrites stale BotFather commands. The supported commands are:
 |---|---|
 | `/stop` | Abort the current turn |
 | `/reset` | Clear this chat's history |
-| `/status` | Show harness, uptime, and context usage |
+| `/status` | Show phantom name, PID, version, harness chain with availability, per-harness models, uptime, and context usage |
 | `/harness` | List or switch the active harness |
 | `/update` | Install the latest phantombot release |
 | `/restart` | Restart the phantombot service |
 | `/coder` | Force the coding brain on for this chat (`off` / `default` to revert) |
 | `/chattiness` | Show or hide progress bubbles in this chat (`on` / `off` / `<on\|off> default`) |
+| `/model` | Show or switch harness models (`list` / `<slug>` / `coding <slug>` / `image <slug>` / `clear`) |
 | `/help` | Show the command list |
 
 Unknown slash commands fall through to the harness so personas can define
@@ -772,9 +801,12 @@ They are dispatched **out of band** — ahead of the serial request queue — so
 editor's own cancel/stop button takes the same path and has always worked.)
 
 `/update` and `/restart` are deliberately **not** offered here: they swap the
-binary and bounce a service whose lifecycle the editor owns. They stay on
-Telegram. Unknown slash commands fall through to the harness, same as every
-other surface, so personas keep their own conventions.
+binary and bounce a service whose lifecycle the editor owns. `/model` stays on
+the chat surfaces too — it rewrites global model config and restarts the
+service, which is the wrong blast radius for an editor thread. (`/coder` and
+`/chattiness` are likewise chat-surface commands; typed in the editor they
+fall through to the harness.) Unknown slash commands fall through to the
+harness, same as every other surface, so personas keep their own conventions.
 
 ## Pi Capability Routing
 
@@ -799,11 +831,56 @@ recency-decayed window with a small-sample prior), not just the latest message.
 That keeps a Phantom on the coding brain through natural follow-ups in a review,
 then releases it the moment the topic moves off code — stateless and
 self-correcting, no sticky mode. Force it with `/coder`, disable with
-`/nocoder`, or clear back to scoring with `/coder default`.
+`/coder off`, or clear back to scoring with `/coder default`.
 
 Configure all three roles with the `phantombot harness` wizard; the choices are
 mirrored into `config.toml` under `[harnesses.pi.routing]` and visible to
-`phantombot doctor`.
+`phantombot doctor`. They can also be changed live from chat with
+[`/model`](#model-management-model).
+
+## Model Management (`/model`)
+
+`/model` shows and switches the model every configured harness runs — from
+chat, with no config-file editing. It works across all four supported
+harnesses, and writes are **permanent and survive restarts**: every change
+lands in *both* `config.toml` and `~/.env` (env takes precedence at startup,
+so a TOML-only write would be silently ignored on installs where the setup
+wizard already wrote `PHANTOMBOT_*_MODEL` vars), the in-memory config is
+synced, and phantombot restarts itself — the same dance as `/restart`, since
+harness model config is baked in at process start.
+
+```text
+/model                      what the primary harness is running now
+/model list [filter]        Pi model catalog (pi --list-models), optionally filtered
+/model <slug>               switch the primary harness's model
+/model primary <slug>       same, spelled out (Pi primary role)
+/model coding <slug>        set the Pi coding-brain model
+/model image <slug>         set the Pi vision/image model
+/model clear                remove an override (gemini/codex only)
+```
+
+Per-harness behavior:
+
+- **Pi** — full routing control: primary, coding, and image roles map to
+  `[harnesses.pi.routing]` in `config.toml` and the
+  `PHANTOMBOT_PRIMARY_MODEL` / `PHANTOMBOT_CODING_MODEL` /
+  `PHANTOMBOT_IMAGE_MODEL` env vars. `/model list` shells out to
+  `pi --list-models`, so it shows the models Pi has credentials for. `clear`
+  is refused — routing needs an explicit primary.
+- **Claude** — a single model, validated against the `opus` / `sonnet` /
+  `haiku` aliases (`PHANTOMBOT_CLAUDE_MODEL`). No catalog listing exists, and
+  `clear` is refused (there is no default to fall back to) — pick an alias
+  explicitly.
+- **Gemini / Codex** — a single model pinned by id
+  (`PHANTOMBOT_GEMINI_MODEL` / `PHANTOMBOT_CODEX_MODEL`). These CLIs expose no
+  model catalog, so `list` is unavailable; `clear` deletes the pin and the
+  env var so the CLI's own default applies again.
+
+Model choice is per-harness config, not per-chat — switching brains affects
+every conversation that harness serves. `/status` always shows the result: a
+`models:` line with each harness's configured model (and provider, for Pi),
+next to the phantom name, PID, version, and the availability-annotated
+harness chain.
 
 ## Group Chats
 
