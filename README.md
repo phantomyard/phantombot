@@ -265,6 +265,15 @@ folder, named per persona so multi-persona boxes stay identifiable in
 taskschd.msc: the always-on daemon (`phantombot-<persona>`) and the periodic
 `heartbeat-<persona>`, `nightly-<persona>`, and `tick-<persona>` tasks.
 
+For example, a persona named `robbie` gets:
+
+```text
+\Phantombot\phantombot-robbie
+\Phantombot\heartbeat-robbie
+\Phantombot\nightly-robbie
+\Phantombot\tick-robbie
+```
+
 - **Interactive mode (default)** — the tasks use the current user's SID and
   `InteractiveToken`, so no password, elevation, or machine-wide service is
   required. The daemon starts at logon, retries after failure, and its
@@ -377,7 +386,10 @@ Harness notes:
   OpenRouter), it merge-writes the key into Pi's own auth store
   (`~/.pi/agent/auth.json`) — the same place an interactive `pi` login
   writes — so `pi --list-models` and the wizard's model pickers populate. An
-  existing OAuth entry for the same provider is left untouched.
+  existing OAuth entry for the same provider is left untouched. Note that
+  auth.json stores one API key per provider: if you have multiple keys for
+  the same provider (e.g. two OpenRouter keys), the merge-write replaces the
+  previous key, and Pi's model catalog only uses the one on file.
 - Claude Code is normally authenticated with OAuth on the host.
 - Gemini remains available for optional semantic-memory embeddings via `phantombot embedding`; it is not an agent harness.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
