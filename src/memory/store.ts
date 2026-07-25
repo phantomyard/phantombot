@@ -373,6 +373,9 @@ class SqliteMemoryStore implements MemoryStore {
   private recentDisplayStmt;
   private turnsAfterIdStmt;
   private deleteStmt;
+  private deleteDurableFactsStmt;
+  private deleteDurableFactCursorStmt;
+  private deleteConversationTxn;
   private purgeQuarantinedStmt;
   private appendCaptureStmt;
   private lastCaptureStmt;
@@ -452,6 +455,30 @@ class SqliteMemoryStore implements MemoryStore {
     );
     this.deleteStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ?",
+    );
+    // /reset (deleteConversation) must wipe ALL per-conversation state, not
+    // just turns. Durable facts and the extractor cursor are keyed by the same
+    // (persona, conversation), so leaving them behind would (a) inject a prior
+    // conversation's facts into the fresh one that reuses the key, and (b)
+    // leave the cursor ahead of the new turns' ids, skipping extraction until
+    // the autoincrement climbs past the stale value. Clear both alongside
+    // turns. (Kai's /reset blocker, PR #320 review.)
+    this.deleteDurableFactsStmt = db.prepare(
+      "DELETE FROM durable_facts WHERE persona = ? AND conversation = ?",
+    );
+    this.deleteDurableFactCursorStmt = db.prepare(
+      "DELETE FROM durable_fact_cursor WHERE persona = ? AND conversation = ?",
+    );
+    // One transaction so a reset can never partially clear the conversation
+    // (e.g. drop turns but leave durable facts). Returns the turns-deleted
+    // count to preserve deleteConversation's existing contract.
+    this.deleteConversationTxn = db.transaction(
+      (persona: string, conversation: string): number => {
+        const removed = this.deleteStmt.run(persona, conversation).changes;
+        this.deleteDurableFactsStmt.run(persona, conversation);
+        this.deleteDurableFactCursorStmt.run(persona, conversation);
+        return removed;
+      },
     );
     this.purgeQuarantinedStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ? AND embeddable = 0",
@@ -873,8 +900,10 @@ class SqliteMemoryStore implements MemoryStore {
     persona: string,
     conversation: string,
   ): Promise<number> {
-    const result = this.deleteStmt.run(persona, conversation);
-    return result.changes;
+    // Clears turns AND durable facts + extractor cursor in one transaction,
+    // so /reset leaves no per-conversation state that could leak into a fresh
+    // conversation reusing the same key.
+    return this.deleteConversationTxn(persona, conversation);
   }
 
   async purgeQuarantined(

@@ -373,3 +373,58 @@ describe("claimEvictedForExtraction (atomic claim-and-advance)", () => {
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
   });
 });
+
+describe("deleteConversation clears durable-fact state (/reset)", () => {
+  test("wipes durable facts AND the extractor cursor, not just turns", async () => {
+    // Seed a conversation with turns, extracted facts, and an advanced cursor.
+    for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "Andrew lives in Arnhem.",
+      confidence: 0.9,
+    });
+    await memory.setDurableFactCursor(PERSONA, CONV, 3);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(3);
+
+    // /reset.
+    await memory.deleteConversation(PERSONA, CONV);
+
+    // Every per-conversation trace is gone: no facts leak into a fresh
+    // conversation reusing the key, and the cursor is back to 0 so new turns
+    // (whose ids may be below the old cursor after a fresh DB, or which must
+    // be re-extracted) are considered again.
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+    expect(await memory.topDurableFacts(PERSONA, CONV, { limit: 10 })).toEqual(
+      [],
+    );
+  });
+
+  test("only clears the target (persona, conversation), leaving others intact", async () => {
+    const OTHER = "telegram:2002";
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "Fact in conversation A.",
+      confidence: 0.8,
+    });
+    await memory.setDurableFactCursor(PERSONA, CONV, 5);
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: OTHER,
+      fact: "Fact in conversation B.",
+      confidence: 0.8,
+    });
+    await memory.setDurableFactCursor(PERSONA, OTHER, 7);
+
+    await memory.deleteConversation(PERSONA, CONV);
+
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+    // The untouched conversation keeps its facts and cursor.
+    expect(await memory.countDurableFacts(PERSONA, OTHER)).toBe(1);
+    expect(await memory.durableFactCursor(PERSONA, OTHER)).toBe(7);
+  });
+});
