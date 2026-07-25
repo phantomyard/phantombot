@@ -17,6 +17,7 @@ import {
   PHANTOMBOT_INJECTED_CLAUDE_SETTINGS,
   filterAuthEnv,
   apiErrorStatus,
+  isSubagentActivity,
   parseStreamJson,
   renderStdinPayload,
 } from "../src/harnesses/claude.ts";
@@ -649,5 +650,141 @@ describe("ClaudeHarness.available", () => {
       fallbackModel: "",
     });
     expect(await h.available()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background-agent lockdown. Product policy: no subagents, ever. Three layers
+// are tested here: the env flag that strips run_in_background from the tool
+// schemas, Task in --disallowedTools, and the parser tripwire that turns any
+// subagent-stamped envelope into a recoverable error.
+// ---------------------------------------------------------------------------
+
+describe("isSubagentActivity", () => {
+  test("flags an envelope stamped with subagent_type", () => {
+    expect(
+      isSubagentActivity({
+        type: "assistant",
+        subagent_type: "Explore",
+        message: { content: [{ type: "text", text: "hi" }] },
+      }),
+    ).toBe(true);
+  });
+
+  test("flags a sidechain envelope", () => {
+    expect(
+      isSubagentActivity({
+        type: "assistant",
+        isSidechain: true,
+        message: { content: [{ type: "text", text: "hi" }] },
+      }),
+    ).toBe(true);
+  });
+
+  test("flags a Task tool_use block", () => {
+    expect(
+      isSubagentActivity({
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", name: "Task", input: {} }],
+        },
+      }),
+    ).toBe(true);
+  });
+
+  test("ignores ordinary main-chain messages", () => {
+    expect(
+      isSubagentActivity({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "hello" }] },
+      }),
+    ).toBe(false);
+    expect(
+      isSubagentActivity({
+        type: "assistant",
+        isSidechain: false,
+        message: {
+          content: [{ type: "tool_use", name: "Bash", input: {} }],
+        },
+      }),
+    ).toBe(false);
+    expect(isSubagentActivity({ type: "result" })).toBe(false);
+  });
+});
+
+describe("parseStreamJson subagent tripwire", () => {
+  test("subagent-stamped text becomes a recoverable error, never user text", () => {
+    const chunk = parseStreamJson({
+      type: "assistant",
+      subagent_type: "Explore",
+      message: { content: [{ type: "text", text: "secret sidechain reply" }] },
+    });
+    expect(chunk).toEqual({
+      type: "error",
+      error: "claude emitted subagent activity (disabled by phantombot policy)",
+      recoverable: true,
+      terminal: true,
+    });
+  });
+
+  test("a Task tool_use becomes a recoverable error, not progress", () => {
+    const chunk = parseStreamJson({
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_use", name: "Task", input: { prompt: "x" } }],
+      },
+    });
+    expect(chunk?.type).toBe("error");
+    if (chunk?.type === "error") {
+      expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
+    }
+  });
+});
+
+describe("ClaudeHarness background-agent lockdown", () => {
+  test("--disallowedTools removes Task as well as Workflow", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).toContain("--disallowedTools");
+    expect(texts).toContain("Workflow,Task");
+  });
+
+  test("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 reaches the subprocess env", async () => {
+    process.env.FAKE_CLAUDE_MODE = "env";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest()));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).toContain("BGTASKS=1");
+  });
+
+  test("an inherited CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=0 cannot re-enable backgrounding", async () => {
+    // The whole CLAUDE_CODE_* namespace is stripped from the inherited env
+    // (auth filter) and the flag is re-injected as 1 afterwards — so a stray
+    // =0 in ~/.env or the daemon's shell must not survive to the subprocess.
+    const prev = process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+    process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "0";
+    try {
+      process.env.FAKE_CLAUDE_MODE = "env";
+      const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+      const chunks = await collect(h.invoke(newRequest()));
+      const texts = chunks
+        .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+        .map((c) => c.text)
+        .join("");
+      expect(texts).toContain("BGTASKS=1");
+      expect(texts).not.toContain("BGTASKS=0");
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+      else process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = prev;
+    }
   });
 });

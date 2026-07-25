@@ -148,7 +148,19 @@ export class ClaudeHarness implements Harness {
     // routing var into the subprocess env (reloadEnvFiles just re-sourced
     // ~/.env), so claude resolves credentials from ~/.claude/.credentials.json.
     const env = withPersonaEnv(
-      filterAuthEnv(process.env),
+      {
+        ...filterAuthEnv(process.env),
+        // Background agents are disabled by product policy. This flag makes
+        // the CLI strip `run_in_background` from the Bash and Task tool
+        // SCHEMAS entirely (verified against claude 2.1.170), so the model
+        // cannot background anything — the capability is never advertised.
+        // It must be set HERE, after filterAuthEnv: the filter strips the
+        // whole CLAUDE_CODE_* namespace from the inherited env, so exporting
+        // it in ~/.env or the shell would silently NOT reach the subprocess
+        // (and a stray CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=0 out there must
+        // not be able to re-enable backgrounding).
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+      },
       req.persona,
       req.conversation,
     );
@@ -205,13 +217,20 @@ export class ClaudeHarness implements Harness {
       "--model", this.config.model,
       // Pre-prompting trim (phantombot supplies persona / memory / scheduling
       // itself, so Claude Code's daily-driver scaffolding is pure noise here):
-      //   --disallowedTools Workflow
-      //     Drops the Workflow tool from the available set. The "you typed
-      //     'workflow', use the Workflow tool" system nudge ONLY fires because
-      //     that tool is loaded — removing the tool kills the nudge at source.
-      //     (We deny by name rather than via the --settings deny-list because
-      //     disallowedTools removes it from the advertised surface, which is
-      //     what actually suppresses the injected reminder.)
+      //   --disallowedTools Workflow,Task
+      //     Workflow: drops the Workflow tool from the available set. The
+      //     "you typed 'workflow', use the Workflow tool" system nudge ONLY
+      //     fires because that tool is loaded — removing the tool kills the
+      //     nudge at source. (We deny by name rather than via the --settings
+      //     deny-list because disallowedTools removes it from the advertised
+      //     surface, which is what actually suppresses the injected reminder.)
+      //     Task: removes the subagent tool entirely — foreground AND
+      //     background. Subagents are disabled by product policy (the owner's
+      //     standing rule is "no subagents, ever"); combined with
+      //     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in the env (strips
+      //     run_in_background from the remaining tool schemas) and the
+      //     subagent tripwire in parseStreamJson, background/side agents are
+      //     structurally impossible rather than merely discouraged.
       //   --disable-slash-commands
       //     Suppresses the entire injected "available skills" block
       //     (deep-research / loop / schedule / verify / code-review / …).
@@ -220,7 +239,7 @@ export class ClaudeHarness implements Harness {
       //     already drops most of it; this is the canonical belt-and-suspenders.
       // NB: MCP connectors (Gmail / Calendar / Drive) are tools, not skills or
       // Workflow, so they are UNAFFECTED — Andrew uses those and they stay.
-      "--disallowedTools", "Workflow",
+      "--disallowedTools", "Workflow,Task",
       "--disable-slash-commands",
       "--exclude-dynamic-system-prompt-sections",
     ];
@@ -444,6 +463,32 @@ export function renderStdinPayload(req: HarnessRequest): string {
 const NON_ERROR_API_STATUSES = new Set(["max_output_tokens"]);
 
 /**
+ * Does this stream-json envelope carry subagent lineage? Three markers,
+ * all verified against claude 2.1.170:
+ *   - `subagent_type` on the envelope — stamped on messages belonging to a
+ *     Task-spawned subagent.
+ *   - `isSidechain: true` — the CLI's own sidechain (subagent) flag.
+ *   - a `tool_use` block named `Task` — the spawn call itself.
+ * Exported for testing.
+ */
+export function isSubagentActivity(obj: Record<string, unknown>): boolean {
+  if (typeof obj.subagent_type === "string" && obj.subagent_type.length > 0) {
+    return true;
+  }
+  if (obj.isSidechain === true) return true;
+  const message = obj.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part !== "object" || part === null) continue;
+      const p = part as Record<string, unknown>;
+      if (p.type === "tool_use" && p.name === "Task") return true;
+    }
+  }
+  return false;
+}
+
+/**
  * The API-error status stamped on a stream-json envelope, if any.
  *
  * NOTE: this is exit-code independent, and that matters. Observed on the wire
@@ -468,6 +513,24 @@ export function apiErrorStatus(obj: Record<string, unknown>): string | undefined
 export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
+
+  // Subagent tripwire. Background agents and the Task tool are disabled by
+  // policy (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in the env + Task in
+  // --disallowedTools), so the CLI should never emit subagent activity. If a
+  // future CLI version routes around those guards, any envelope carrying
+  // subagent lineage becomes a RECOVERABLE, TERMINAL error: the runner kills
+  // the subprocess immediately and suppresses every line after this one, and
+  // the orchestrator falls through to the next harness instead of letting an
+  // unmonitored agent run loose. Fail-safe direction, same as the API-error
+  // gate below.
+  if (isSubagentActivity(obj)) {
+    return {
+      type: "error",
+      error: "claude emitted subagent activity (disabled by phantombot policy)",
+      recoverable: true,
+      terminal: true,
+    };
+  }
 
   // API-error gate. Checked BEFORE content, and before the `message`/`content`
   // shape guards, so not one byte of a CLI-authored error message can stream to

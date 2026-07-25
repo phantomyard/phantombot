@@ -138,6 +138,18 @@ export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
   // `--ignore-rules` below so Codex's local AGENTS.md / project rules / memory
   // do NOT leak into behavior — phantombot's persona stays authoritative.
   "--ignore-rules",
+  // Subagents are disabled by product policy (the owner's standing rule is
+  // "no subagents, ever"). Codex ships real subagent tools (spawn_agent /
+  // resume_agent / close_agent / wait_agent) behind the multi_agent feature,
+  // which is STABLE and ON BY DEFAULT (verified against codex 0.145.0
+  // `features list`). multi_agent_v2 is off by default but a user config
+  // could enable it — so both are explicitly disabled here. `-c` overrides
+  // beat ~/.codex/config.toml, which matters on normal turns where user
+  // config intentionally loads (connectors, above). Belt: the parser
+  // tripwire in parseCodexEvent kills any turn that still emits subagent
+  // activity.
+  "-c", "features.multi_agent=false",
+  "-c", "features.multi_agent_v2=false",
 ] as const;
 
 /**
@@ -153,12 +165,63 @@ export const PHANTOMBOT_JUDGE_CODEX_FLAGS = [
   "--ephemeral",
   "--ignore-user-config",
   "--ignore-rules",
+  // Same subagent lockdown as normal turns — see PHANTOMBOT_INJECTED_CODEX_FLAGS.
+  "-c", "features.multi_agent=false",
+  "-c", "features.multi_agent_v2=false",
 ] as const;
+
+/** Codex's subagent tool names (verified against codex 0.145.0). */
+const CODEX_AGENT_TOOL_NAMES = new Set([
+  "spawn_agent",
+  "resume_agent",
+  "close_agent",
+  "wait_agent",
+]);
+
+/**
+ * Does this item represent subagent activity? Item types verified against
+ * codex 0.145.0: collab_agent_spawn_begin/end, collab_agent_interaction_
+ * begin/end, collab_agent_tool_call, collab_waiting_*, collab_close_*,
+ * collab_resume_*, sub_agent_activity — plus the agent tool names above.
+ * Exported for testing.
+ */
+export function isCodexSubagentActivity(
+  itemType: unknown,
+  itemName: unknown,
+): boolean {
+  if (typeof itemName === "string" && CODEX_AGENT_TOOL_NAMES.has(itemName)) {
+    return true;
+  }
+  if (typeof itemType !== "string") return false;
+  return itemType.startsWith("collab_") || itemType === "sub_agent_activity";
+}
 
 export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const obj = parsed as Record<string, unknown>;
   const type = obj.type;
+
+  // Subagent tripwire. multi_agent is disabled via -c flags on every spawn,
+  // so codex should never emit collab/sub-agent items. If a future version
+  // routes around that (or a config layer we don't control re-enables it),
+  // the turn becomes a RECOVERABLE, TERMINAL error: the runner kills the
+  // subprocess immediately and suppresses every line after this one, and the
+  // orchestrator falls through instead of letting an unmonitored agent run.
+  if (type === "item.started" || type === "item.completed") {
+    const item = obj.item;
+    if (typeof item === "object" && item !== null) {
+      const it = item as Record<string, unknown>;
+      if (isCodexSubagentActivity(it.type, it.name)) {
+        return {
+          type: "error",
+          error: `codex emitted subagent activity (disabled by phantombot policy): ${String(it.type ?? it.name)}`,
+          recoverable: true,
+          terminal: true,
+        };
+      }
+    }
+  }
+
   if (type === "item.started") {
     const item = obj.item;
     if (typeof item !== "object" || item === null) return undefined;

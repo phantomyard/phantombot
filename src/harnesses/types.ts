@@ -133,8 +133,22 @@ export type HarnessChunk =
    * means "this CLI's auth/quota/model state is bad" rather than a transient
    * blip a retry would fix. 5XX is just logged; we don't treat server-side
    * blips as a reason to cool the harness off.
+   *
+   * `terminal: true` marks a terminal POLICY violation (e.g. the subagent
+   * tripwires): the harness runner kills the subprocess immediately and
+   * suppresses ALL further output from the stream — no later text/tool
+   * chunks reach the user and no terminal `done` is synthesized. Without
+   * this a compromised/future CLI could emit the tripwire envelope and then
+   * ordinary output that would still stream to the user before fallback.
+   * Orchestrator handling is unchanged (`recoverable` → next harness).
    */
-  | { type: "error"; error: string; recoverable: boolean; httpStatus?: number };
+  | {
+      type: "error";
+      error: string;
+      recoverable: boolean;
+      httpStatus?: number;
+      terminal?: true;
+    };
 
 /**
  * Snapshot of the harness's configured model(s), for `/status` and `/model`

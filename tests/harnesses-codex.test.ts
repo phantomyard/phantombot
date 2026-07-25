@@ -3,8 +3,10 @@ import { chmod } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   CodexHarness,
+  isCodexSubagentActivity,
   parseCodexEvent,
   PHANTOMBOT_INJECTED_CODEX_FLAGS,
+  PHANTOMBOT_JUDGE_CODEX_FLAGS,
   renderStdinPayload,
 } from "../src/harnesses/codex.ts";
 import type { HarnessChunk, HarnessRequest } from "../src/harnesses/types.ts";
@@ -247,5 +249,98 @@ describe("CodexHarness.invoke", () => {
       expect(text).toContain(flag);
     }
     expect(text).toContain("-m gpt-5.3-codex");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Subagent lockdown. Product policy: no subagents, ever. codex's multi_agent
+// feature is stable and ON by default, so every spawn disables it via -c
+// overrides, and the parser tripwire turns any collab/sub-agent item into a
+// recoverable error.
+// ---------------------------------------------------------------------------
+
+describe("codex subagent lockdown flags", () => {
+  test("normal-turn flags disable multi_agent and multi_agent_v2", () => {
+    const flags = PHANTOMBOT_INJECTED_CODEX_FLAGS.join(" ");
+    expect(flags).toContain("-c features.multi_agent=false");
+    expect(flags).toContain("-c features.multi_agent_v2=false");
+  });
+
+  test("judge flags disable multi_agent and multi_agent_v2 too", () => {
+    const flags = PHANTOMBOT_JUDGE_CODEX_FLAGS.join(" ");
+    expect(flags).toContain("-c features.multi_agent=false");
+    expect(flags).toContain("-c features.multi_agent_v2=false");
+  });
+});
+
+describe("isCodexSubagentActivity", () => {
+  test("flags collab_* item types", () => {
+    for (const t of [
+      "collab_agent_spawn_begin",
+      "collab_agent_spawn_end",
+      "collab_agent_interaction_begin",
+      "collab_agent_tool_call",
+      "collab_waiting_begin",
+    ]) {
+      expect(isCodexSubagentActivity(t, undefined)).toBe(true);
+    }
+    expect(isCodexSubagentActivity("sub_agent_activity", undefined)).toBe(true);
+  });
+
+  test("flags the agent tool names regardless of item type", () => {
+    for (const n of ["spawn_agent", "resume_agent", "close_agent", "wait_agent"]) {
+      expect(isCodexSubagentActivity("tool_call", n)).toBe(true);
+    }
+  });
+
+  test("ignores ordinary items", () => {
+    expect(isCodexSubagentActivity("agent_message", undefined)).toBe(false);
+    expect(isCodexSubagentActivity("command_execution", "bash")).toBe(false);
+    expect(isCodexSubagentActivity(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("parseCodexEvent subagent tripwire", () => {
+  test("a collab_agent_spawn item becomes a recoverable error", () => {
+    const chunk = parseCodexEvent({
+      type: "item.started",
+      item: { type: "collab_agent_spawn_begin", name: "spawn_agent" },
+    });
+    expect(chunk?.type).toBe("error");
+    if (chunk?.type === "error") {
+      expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
+      expect(chunk.error).toContain("subagent activity");
+    }
+  });
+
+  test("a spawn_agent tool call becomes a recoverable error, not progress", () => {
+    const chunk = parseCodexEvent({
+      type: "item.started",
+      item: { type: "tool_call", name: "spawn_agent" },
+    });
+    expect(chunk?.type).toBe("error");
+    if (chunk?.type === "error") {
+      expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
+    }
+  });
+
+  test("a completed sub_agent_activity item is caught too", () => {
+    const chunk = parseCodexEvent({
+      type: "item.completed",
+      item: { type: "sub_agent_activity" },
+    });
+    expect(chunk?.type).toBe("error");
+  });
+
+  test("ordinary items are unaffected by the tripwire", () => {
+    const msg = parseCodexEvent({
+      type: "item.completed",
+      item: { type: "agent_message", text: "hello" },
+    });
+    expect(msg).toEqual({ type: "text", text: "hello" });
+    const hb = parseCodexEvent({ type: "turn.started" });
+    expect(hb).toEqual({ type: "heartbeat" });
   });
 });

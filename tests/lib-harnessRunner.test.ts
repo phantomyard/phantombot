@@ -266,3 +266,124 @@ describe("runHarnessProcess — regression: stdin blocking hang", () => {
     expect(errorChunk.recoverable).toBe(true);
   });
 });
+
+describe("runHarnessProcess — terminal policy tripwire", () => {
+  test("kills the child and suppresses ALL post-tripwire output", async () => {
+    // Regression for the PR #321 review: pre-fix, a parser's recoverable
+    // tripwire error was yielded but the runner kept consuming stdout, so a
+    // CLI emitting [text, tripwire, more text] would stream "more text" to
+    // the user before fallback. Now the terminal error must end the stream:
+    // the child is killed and no chunk after the error is yielded — not even
+    // lines that arrived in the SAME stdout batch.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'echo \'{"kind":"text","v":"before "}\'; ' +
+          'echo \'{"kind":"tripwire"}\'; ' +
+          'echo \'{"kind":"text","v":"after"}\'; ' +
+          "sleep 30",
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const start = Date.now();
+    const chunks: unknown[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 20_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as never,
+      parseEvent: (parsed: unknown) => {
+        const p = parsed as { kind?: string; v?: string };
+        if (p.kind === "tripwire") {
+          return {
+            type: "error",
+            error: "policy violation",
+            recoverable: true,
+            terminal: true,
+          } as const;
+        }
+        if (p.kind === "text") return { type: "text", text: p.v ?? "" } as const;
+        return undefined;
+      },
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    // Exactly two chunks: pre-tripwire text, then the terminal error. The
+    // post-tripwire "after" line must NOT appear, and no `done` is
+    // synthesized on top of a policy violation.
+    expect(chunks).toEqual([
+      { type: "text", text: "before " },
+      {
+        type: "error",
+        error: "policy violation",
+        recoverable: true,
+        terminal: true,
+      },
+    ]);
+
+    // The child was killed promptly — not left to run out its sleep 30 and
+    // the 10s idle timer.
+    const code = await proc.exited;
+    expect(Date.now() - start).toBeLessThan(10_000);
+    expect(code).not.toBe(0);
+  });
+
+  test("a non-terminal recoverable error still streams like before", async () => {
+    // Guard the other direction: ordinary recoverable parser errors (API
+    // gate, mid-stream 4XX-style) do NOT kill the child or truncate the
+    // stream — only `terminal: true` gets the new semantics.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'echo \'{"kind":"err"}\'; echo \'{"kind":"text","v":"still here"}\'',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: unknown[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 5_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as never,
+      parseEvent: (parsed: unknown) => {
+        const p = parsed as { kind?: string; v?: string };
+        if (p.kind === "err") {
+          return { type: "error", error: "transient", recoverable: true } as const;
+        }
+        if (p.kind === "text") return { type: "text", text: p.v ?? "" } as const;
+        return undefined;
+      },
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { type: "error", error: "transient", recoverable: true },
+      { type: "text", text: "still here" },
+      { type: "done", finalText: "still here", meta: {} },
+    ]);
+    expect(await proc.exited).toBe(0);
+  });
+});

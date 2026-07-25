@@ -12,6 +12,8 @@
 #   hang     — sleep forever (used for the timeout test)
 #   argv     — emit argv as a single assistant text event (so the test can
 #              inspect what flags the harness passed), then exit 0
+#   env      — emit select env vars as a text event (so the test can inspect
+#              the env the harness spawned us with), then exit 0
 #   posttool_thinking — tool_use -> user tool_result -> spaced thinking
 #              heartbeats -> final text. Proves user-side tool_result clears
 #              the tool-running idle latch.
@@ -51,6 +53,15 @@ case "$mode" in
     payload="${payload//\\/\\\\}"
     payload="${payload//\"/\\\"}"
     printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"${payload}\"}]}}"
+    printf '%s\n' '{"type":"result"}'
+    exit 0
+    ;;
+  env)
+    # Echo the background-tasks flag the harness is expected to inject, so
+    # tests can prove it reaches the subprocess env (and that an inherited
+    # CLAUDE_CODE_* value can't smuggle a different one through filterAuthEnv).
+    v="${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-<unset>}"
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"BGTASKS=${v}\"}]}}"
     printf '%s\n' '{"type":"result"}'
     exit 0
     ;;
