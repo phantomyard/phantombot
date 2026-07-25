@@ -142,6 +142,7 @@ describe("loadConfig — defaults (no file)", () => {
       maxInjected: 8,
       minConfidence: 0.5,
       maxExtractPerTurn: 4,
+      leaseMs: 300_000,
     });
   });
 
@@ -497,12 +498,14 @@ max_extract_per_turn = 4
     // hit on flush_after_hours). 0.35 must survive as 0.35.
     process.env.PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE = "0.35";
     process.env.PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN = "6";
+    process.env.PHANTOMBOT_DURABLE_FACTS_LEASE_MS = "60000";
     const c = await loadConfig();
     expect(c.durableFacts).toEqual({
       enabled: false,
       maxInjected: 12,
       minConfidence: 0.35,
       maxExtractPerTurn: 6,
+      leaseMs: 60000,
     });
   });
 

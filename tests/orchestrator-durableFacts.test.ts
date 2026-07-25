@@ -235,7 +235,7 @@ describe("extractDurableFactsOnEviction", () => {
     expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
   });
 
-  test("mid-batch failure rolls the cursor back to the last handled turn, so the rest re-extracts next pass", async () => {
+  test("mid-batch failure releases the failed turn + tail, so only those re-extract next pass", async () => {
     for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
     // window 2 → turns 1..4 evicted (ids 1..4), claimed in one pass (cap 4).
     // Extract turn 1 fine, then the harness dies on turn 2.
@@ -254,11 +254,12 @@ describe("extractDurableFactsOnEviction", () => {
     });
     expect(res.turnsProcessed).toBe(1);
     expect(res.factsWritten).toBe(1);
-    // Cursor rolled back to turn 1 (id 1) — NOT left at the claimed max (id 4),
-    // which would silently skip turns 2..4 forever (Kai's at-most-once flag).
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(1);
+    // The cursor is a MONOTONIC high-water mark (never rewound); recovery rides
+    // the lease ledger, not the cursor. Turn 1 was committed (lease dropped);
+    // turns 2..4 were released (leases expired) so they re-claim — no permanent
+    // skip, which is Kai's second race (PR #320).
 
-    // A later healthy pass re-claims turns 2..4 and extracts what they hold.
+    // A later healthy pass re-claims exactly turns 2..4 (turn 1 stays committed).
     const healthy = fakeComplete({
       "turn 2": '[{"fact":"He uses Deye inverters","confidence":0.8}]',
       "turn 3": '[{"fact":"His homelab runs Proxmox","confidence":0.7}]',
@@ -271,16 +272,27 @@ describe("extractDurableFactsOnEviction", () => {
       complete: healthy,
       windowSize: 2,
     });
-    expect(res2.turnsProcessed).toBe(3); // turns 2, 3, 4 re-claimed
+    expect(res2.turnsProcessed).toBe(3); // turns 2, 3, 4 re-claimed — NOT turn 1
     expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(3); // 1 + 2
+
+    // And now everything is committed: a third pass finds nothing.
+    const res3 = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: healthy,
+      windowSize: 2,
+    });
+    expect(res3.turnsProcessed).toBe(0);
   });
 
-  test("total failure rewinds the whole batch — cursor back to the start, nothing skipped", async () => {
+  test("total failure releases the whole batch — every turn re-extracts, nothing skipped", async () => {
     for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
     const dead: ExtractComplete = async () => {
       throw new Error("harness down");
     };
-    await extractDurableFactsOnEviction({
+    const failedPass = await extractDurableFactsOnEviction({
       persona: PERSONA,
       conversation: CONV,
       memory,
@@ -288,10 +300,9 @@ describe("extractDurableFactsOnEviction", () => {
       complete: dead,
       windowSize: 2,
     });
-    // First evicted turn is id 1 → nothing handled → cursor rewound to 0.
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+    expect(failedPass.turnsProcessed).toBe(0);
 
-    // Recovery: a healthy pass re-extracts the entire batch (turns 1..4).
+    // Recovery: a healthy pass re-claims the entire batch (turns 1..4).
     const healthy = fakeComplete({
       "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
     });
@@ -307,7 +318,59 @@ describe("extractDurableFactsOnEviction", () => {
     expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
   });
 
-  test("a clean pass does NOT roll back — cursor stays at the claimed max", async () => {
+  test("a crashed pass (leases left live) does NOT re-extract until the lease expires", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    // Simulate a hard crash: claim leases the batch, but the process dies before
+    // commit OR release. We model that by claiming directly against the store
+    // with a long lease and never committing.
+    const leased = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      2, // window → turns 1..4 evicted
+      SETTINGS.maxExtractPerTurn,
+      60_000, // 60s lease still live
+    );
+    expect(leased).toHaveLength(4);
+
+    // A fresh pass must NOT touch the live-leased turns (no double-extraction).
+    let calls = 0;
+    const complete: ExtractComplete = async () => {
+      calls++;
+      return "[]";
+    };
+    const res = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete,
+      windowSize: 2,
+    });
+    expect(res.turnsProcessed).toBe(0);
+    expect(calls).toBe(0);
+
+    // Once the lease has expired, the turns become re-claimable again.
+    await memory.releaseExtractionLease(
+      PERSONA,
+      CONV,
+      leased.map((t) => t.id),
+    );
+    const healthy = fakeComplete({
+      "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
+    });
+    const res2 = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: healthy,
+      windowSize: 2,
+    });
+    expect(res2.turnsProcessed).toBe(4);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+  });
+
+  test("a clean pass commits everything — the cursor advances and a second pass is a no-op", async () => {
     for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
     const complete = fakeComplete({
       "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
@@ -320,8 +383,8 @@ describe("extractDurableFactsOnEviction", () => {
       complete,
       windowSize: 2,
     });
-    // Turns 1..4 evicted and fully handled → cursor sits at id 4, and a second
-    // pass finds nothing new to claim.
+    // Turns 1..4 evicted and fully committed → monotonic cursor sits at id 4,
+    // no pending leases, and a second pass finds nothing new to claim.
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(4);
     const again = await extractDurableFactsOnEviction({
       persona: PERSONA,

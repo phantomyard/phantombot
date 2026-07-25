@@ -164,7 +164,11 @@ export interface MemoryStore {
    * to find every conversation that might have an unindexed tail.
    */
   listConversations(persona: string): Promise<string[]>;
-  /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
+  /**
+   * Delete ALL per-conversation state for a (persona, conversation) pair —
+   * turns AND the durable-fact stores (facts, extractor cursor, in-flight
+   * leases) — in one transaction. Used by /reset; returns the turn count.
+   */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /**
    * Delete the quarantined (embeddable=0) turns for a (persona,
@@ -192,22 +196,49 @@ export interface MemoryStore {
     limit: number,
   ): Promise<Turn[]>;
   /**
-   * ATOMICALLY claim the next slice of newly-evicted turns for the durable-fact
-   * extractor. In a single serialized transaction this reads the cursor,
-   * selects the evicted turns after it, and advances the cursor PAST the whole
-   * batch (monotonically — it never moves backwards) BEFORE returning. That
-   * atomic read-and-advance is what makes concurrent out-of-band extractors
-   * safe: SQLite serializes the transaction, so two racing passes get DISJOINT
-   * batches instead of both re-processing the same rows (duplicate model calls)
-   * and a slow pass can never lower a cursor a newer pass already advanced.
-   * Returns the claimed turns, oldest first (possibly empty).
+   * ATOMICALLY claim (lease) the next slice of evicted turns for the
+   * durable-fact extractor. In one serialized transaction this reads the
+   * high-water cursor, selects eligible evicted turns — those above the cursor
+   * OR with a STALE lease (a failed/crashed prior pass), and never those under a
+   * LIVE lease — writes a lease row for each, and advances the cursor
+   * monotonically. `leaseMs` is the crash-recovery window: a claimed turn whose
+   * pass dies without commit/release becomes re-claimable once the lease
+   * expires. Concurrency-safe (SQLite serializes the txn, so racing passes get
+   * DISJOINT batches) and, unlike a claim-and-advance cursor, LOSSLESS under
+   * partial failure — retries ride the lease ledger, not a cursor rewind
+   * (Kai, PR #320). Returns the claimed turns, oldest first (possibly empty).
+   * Pair every claimed turn with exactly one commitExtractedTurn (success) or
+   * releaseExtractionLease (failure).
    */
   claimEvictedForExtraction(
     persona: string,
     conversation: string,
     windowSize: number,
     limit: number,
+    leaseMs: number,
   ): Promise<Turn[]>;
+  /**
+   * COMMIT a claimed turn after its extraction succeeded (or it was
+   * legitimately skipped): drop its lease row. The turn now sits below the
+   * cursor with no pending row, so it is never claimed again. Idempotent.
+   */
+  commitExtractedTurn(
+    persona: string,
+    conversation: string,
+    turnId: number,
+  ): Promise<void>;
+  /**
+   * RELEASE claimed turns whose extraction failed: set each lease to expired so
+   * the next pass re-claims them immediately, without waiting out `leaseMs`.
+   * This is the at-least-once recovery for the common harness reject/timeout —
+   * a hard crash between claim and release is covered by the lease expiry
+   * instead. No-op for turn ids with no pending row.
+   */
+  releaseExtractionLease(
+    persona: string,
+    conversation: string,
+    turnIds: number[],
+  ): Promise<void>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
    * for this (persona, conversation) — bump its recency (`last_seen_at`),
@@ -243,24 +274,6 @@ export interface MemoryStore {
     conversation: string,
     turnId: number,
   ): Promise<void>;
-  /**
-   * Roll the extractor's cursor BACK to `toId`, but ONLY if it currently sits
-   * exactly at `expectedId` (a compare-and-swap). This is the recovery path for
-   * a failed extraction pass: the atomic claim advanced the cursor past the
-   * whole batch before the model ran, so when the harness call throws we lower
-   * the cursor to the last successfully-extracted turn so the failed turn + the
-   * rest of the batch are re-claimed next pass — closing the at-most-once data
-   * loss Kai flagged (PR #320). The `expectedId` guard means a CONCURRENT pass
-   * that has already advanced the cursor further is never clobbered: if it moved,
-   * the update matches nothing and we leave it alone. Returns true when the
-   * cursor was rolled back, false when the guard skipped it.
-   */
-  rollbackDurableFactCursorIfAt(
-    persona: string,
-    conversation: string,
-    expectedId: number,
-    toId: number,
-  ): Promise<boolean>;
   /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
   appendCapture(input: AppendCaptureInput): Promise<void>;
   /**
@@ -346,7 +359,10 @@ CREATE INDEX IF NOT EXISTS idx_durable_facts_rank
   ON durable_facts (persona, conversation, confidence DESC, last_seen_at DESC);
 
 -- Per-conversation cursor for the durable-fact extractor: the highest
--- turns.id already considered, so already-seen turns aren't re-extracted.
+-- turns.id ever CLAIMED, so newly-evicted turns aren't re-claimed from the top
+-- each pass. Monotonic — it only ever rises. Retrying a turn that failed after
+-- the cursor passed it is driven by durable_fact_pending (below), NOT by
+-- lowering this cursor, which is what keeps concurrent passes race-free.
 CREATE TABLE IF NOT EXISTS durable_fact_cursor (
   persona                TEXT NOT NULL,
   conversation           TEXT NOT NULL,
@@ -354,6 +370,25 @@ CREATE TABLE IF NOT EXISTS durable_fact_cursor (
   updated_at             TEXT NOT NULL,
   PRIMARY KEY (persona, conversation)
 );
+
+-- In-flight lease ledger for the durable-fact extractor (claim/commit/release).
+-- A row means "turn_id has been CLAIMED but not yet committed". lease_expires_at
+-- (epoch ms) is the crash-recovery deadline: once now >= it, the lease is stale
+-- and the turn is re-claimable even though it sits below the cursor. On a
+-- successful extraction the row is DELETED (commit); on a harness failure it is
+-- released (lease set to 0 = immediately re-claimable). This per-turn state is
+-- what makes extraction at-least-once under concurrency + failure: a turn is
+-- never dropped just because the cursor advanced past it (Kai, PR #320).
+CREATE TABLE IF NOT EXISTS durable_fact_pending (
+  persona          TEXT NOT NULL,
+  conversation     TEXT NOT NULL,
+  turn_id          INTEGER NOT NULL,
+  lease_expires_at INTEGER NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (persona, conversation, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_durable_fact_pending_conv
+  ON durable_fact_pending (persona, conversation, turn_id);
 `;
 
 interface RawDisplayRow {
@@ -373,9 +408,6 @@ class SqliteMemoryStore implements MemoryStore {
   private recentDisplayStmt;
   private turnsAfterIdStmt;
   private deleteStmt;
-  private deleteDurableFactsStmt;
-  private deleteDurableFactCursorStmt;
-  private deleteConversationTxn;
   private purgeQuarantinedStmt;
   private appendCaptureStmt;
   private lastCaptureStmt;
@@ -389,8 +421,15 @@ class SqliteMemoryStore implements MemoryStore {
   private countDurableFactsStmt;
   private durableFactCursorStmt;
   private setDurableFactCursorStmt;
-  private rollbackDurableFactCursorStmt;
+  private claimEvictedSelectStmt;
+  private upsertPendingStmt;
+  private commitPendingStmt;
+  private releasePendingStmt;
+  private deleteDurableFactsStmt;
+  private deleteDurableFactCursorStmt;
+  private deleteDurableFactPendingStmt;
   private claimEvictedTxn;
+  private deleteConversationTxn;
   private appendPairTxn;
   private closed = false;
 
@@ -455,30 +494,6 @@ class SqliteMemoryStore implements MemoryStore {
     );
     this.deleteStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ?",
-    );
-    // /reset (deleteConversation) must wipe ALL per-conversation state, not
-    // just turns. Durable facts and the extractor cursor are keyed by the same
-    // (persona, conversation), so leaving them behind would (a) inject a prior
-    // conversation's facts into the fresh one that reuses the key, and (b)
-    // leave the cursor ahead of the new turns' ids, skipping extraction until
-    // the autoincrement climbs past the stale value. Clear both alongside
-    // turns. (Kai's /reset blocker, PR #320 review.)
-    this.deleteDurableFactsStmt = db.prepare(
-      "DELETE FROM durable_facts WHERE persona = ? AND conversation = ?",
-    );
-    this.deleteDurableFactCursorStmt = db.prepare(
-      "DELETE FROM durable_fact_cursor WHERE persona = ? AND conversation = ?",
-    );
-    // One transaction so a reset can never partially clear the conversation
-    // (e.g. drop turns but leave durable facts). Returns the turns-deleted
-    // count to preserve deleteConversation's existing contract.
-    this.deleteConversationTxn = db.transaction(
-      (persona: string, conversation: string): number => {
-        const removed = this.deleteStmt.run(persona, conversation).changes;
-        this.deleteDurableFactsStmt.run(persona, conversation);
-        this.deleteDurableFactCursorStmt.run(persona, conversation);
-        return removed;
-      },
     );
     this.purgeQuarantinedStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ? AND embeddable = 0",
@@ -560,55 +575,137 @@ class SqliteMemoryStore implements MemoryStore {
            MAX(last_extracted_turn_id, excluded.last_extracted_turn_id),
          updated_at             = excluded.updated_at`,
     );
-    // Compare-and-swap rollback for the failure-recovery path. Unlike the
-    // MAX()-guarded upsert above (which can only ever RAISE the cursor), this
-    // deliberately LOWERS it — but only when it still equals the id our claim
-    // left it at, so a concurrent pass that advanced further wins and is never
-    // rewound. Matched-row count (via changes()) tells the caller whether the
-    // guard fired.
-    this.rollbackDurableFactCursorStmt = db.prepare(
-      `UPDATE durable_fact_cursor
-         SET last_extracted_turn_id = ?, updated_at = ?
-       WHERE persona = ? AND conversation = ? AND last_extracted_turn_id = ?`,
+    // Claim SELECT for the lease-based extractor. Returns evicted turns that are
+    // eligible to claim: those ABOVE the high-water cursor (newly evicted), OR
+    // those with a STALE pending lease (lease_expires_at <= now — a failed/
+    // crashed pass, re-claimable even though the cursor already passed them);
+    // and NEVER those holding a LIVE lease (a concurrent pass owns them). That
+    // "stale-lease re-claim below the cursor" branch is what lets a monotonic
+    // cursor coexist with at-least-once retries (Kai, PR #320): the cursor never
+    // has to move backwards, so it can never race, yet no turn is lost.
+    // Params: persona, conversation, persona, conversation, windowSize,
+    //         cursor, now(stale), now(live), limit.
+    this.claimEvictedSelectStmt = db.prepare(
+      `SELECT t.id, t.persona, t.conversation, t.role, t.text, t.created_at, t.embeddable
+       FROM turns t
+       WHERE t.persona = ? AND t.conversation = ?
+         AND t.id NOT IN (
+           SELECT id FROM turns
+           WHERE persona = ? AND conversation = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?
+         )
+         AND (
+           t.id > ?
+           OR EXISTS (
+             SELECT 1 FROM durable_fact_pending p
+             WHERE p.persona = t.persona AND p.conversation = t.conversation
+               AND p.turn_id = t.id AND p.lease_expires_at <= ?
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM durable_fact_pending p2
+           WHERE p2.persona = t.persona AND p2.conversation = t.conversation
+             AND p2.turn_id = t.id AND p2.lease_expires_at > ?
+         )
+       ORDER BY t.id ASC
+       LIMIT ?`,
     );
-    // Atomic claim-and-advance for the durable-fact extractor. Wrapping the
-    // cursor read, the evicted-slice select, and the cursor advance in ONE
-    // db.transaction() makes them a single serialized unit: bun:sqlite runs it
-    // synchronously and SQLite serializes writers, so two concurrent
-    // out-of-band extractors can never observe the same cursor and claim
-    // overlapping rows. The cursor is advanced to the batch's max id before the
-    // rows are returned, so the model call happens only AFTER the turns are
-    // claimed.
+    // Claim/lease a turn: insert a pending row (or refresh its lease deadline if
+    // re-claiming a stale one).
+    this.upsertPendingStmt = db.prepare(
+      `INSERT INTO durable_fact_pending
+         (persona, conversation, turn_id, lease_expires_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (persona, conversation, turn_id) DO UPDATE SET
+         lease_expires_at = excluded.lease_expires_at,
+         updated_at       = excluded.updated_at`,
+    );
+    // Commit a turn: drop its pending row. It now sits below the cursor with no
+    // pending row, so the claim SELECT will never return it again.
+    this.commitPendingStmt = db.prepare(
+      `DELETE FROM durable_fact_pending
+       WHERE persona = ? AND conversation = ? AND turn_id = ?`,
+    );
+    // Release a turn's lease on failure: set the deadline to 0 so the very next
+    // pass re-claims it immediately (no wait for the crash-recovery timeout).
+    this.releasePendingStmt = db.prepare(
+      `UPDATE durable_fact_pending SET lease_expires_at = 0, updated_at = ?
+       WHERE persona = ? AND conversation = ? AND turn_id = ?`,
+    );
+    // /reset helpers — the three per-conversation durable stores wiped alongside
+    // turns in deleteConversationTxn.
+    this.deleteDurableFactsStmt = db.prepare(
+      "DELETE FROM durable_facts WHERE persona = ? AND conversation = ?",
+    );
+    this.deleteDurableFactCursorStmt = db.prepare(
+      "DELETE FROM durable_fact_cursor WHERE persona = ? AND conversation = ?",
+    );
+    this.deleteDurableFactPendingStmt = db.prepare(
+      "DELETE FROM durable_fact_pending WHERE persona = ? AND conversation = ?",
+    );
+    // Atomic claim for the durable-fact extractor. Wrapping the cursor read, the
+    // eligibility SELECT, the per-turn lease writes, and the monotonic cursor
+    // advance in ONE db.transaction() makes them a single serialized unit:
+    // bun:sqlite runs it synchronously and SQLite serializes writers, so two
+    // concurrent out-of-band extractors never claim overlapping turns (each
+    // leased turn is excluded from the other's SELECT). Unlike the old
+    // claim-and-advance-then-rollback, the cursor here only ever RISES; retries
+    // ride on durable_fact_pending, so there is no cursor regression to race.
     this.claimEvictedTxn = db.transaction(
       (
         persona: string,
         conversation: string,
         windowSize: number,
         limit: number,
+        leaseMs: number,
       ): RawDisplayRow[] => {
         const cur = this.durableFactCursorStmt.get(persona, conversation) as
           | { id: number }
           | undefined;
         const cursor = cur?.id ?? 0;
-        const rows = this.turnsEvictedStmt.all(
+        const now = Date.now();
+        const rows = this.claimEvictedSelectStmt.all(
           persona,
           conversation,
-          cursor,
           persona,
           conversation,
           Math.max(0, Math.floor(windowSize)),
+          cursor,
+          now,
+          now,
           Math.max(1, Math.floor(limit)),
         ) as RawDisplayRow[];
         if (rows.length === 0) return rows;
+        const iso = new Date().toISOString();
+        const expiry = now + Math.max(0, Math.floor(leaseMs));
         let maxId = cursor;
-        for (const r of rows) if (r.id > maxId) maxId = r.id;
-        this.setDurableFactCursorStmt.run(
-          persona,
-          conversation,
-          maxId,
-          new Date().toISOString(),
-        );
+        for (const r of rows) {
+          this.upsertPendingStmt.run(
+            persona,
+            conversation,
+            r.id,
+            expiry,
+            iso,
+          );
+          if (r.id > maxId) maxId = r.id;
+        }
+        // Monotonic advance to the batch max (>= current cursor by construction).
+        this.setDurableFactCursorStmt.run(persona, conversation, maxId, iso);
         return rows;
+      },
+    );
+    // /reset must wipe EVERY per-conversation store, not just turns: durable
+    // facts, the extractor cursor, and any in-flight leases. One transaction so
+    // a reset can't half-clear and leak facts into the next conversation on the
+    // same key (Kai, PR #320).
+    this.deleteConversationTxn = db.transaction(
+      (persona: string, conversation: string): number => {
+        const turns = this.deleteStmt.run(persona, conversation).changes;
+        this.deleteDurableFactsStmt.run(persona, conversation);
+        this.deleteDurableFactCursorStmt.run(persona, conversation);
+        this.deleteDurableFactPendingStmt.run(persona, conversation);
+        return turns;
       },
     );
     // Atomic user+assistant pair insert. Both rows share the same
@@ -748,14 +845,36 @@ class SqliteMemoryStore implements MemoryStore {
     conversation: string,
     windowSize: number,
     limit: number,
+    leaseMs: number,
   ): Promise<Turn[]> {
     const rows = this.claimEvictedTxn(
       persona,
       conversation,
       windowSize,
       limit,
+      Math.max(0, Math.floor(leaseMs)),
     ) as RawDisplayRow[];
     return mapDisplayRows(rows);
+  }
+
+  async commitExtractedTurn(
+    persona: string,
+    conversation: string,
+    turnId: number,
+  ): Promise<void> {
+    this.commitPendingStmt.run(persona, conversation, Math.floor(turnId));
+  }
+
+  async releaseExtractionLease(
+    persona: string,
+    conversation: string,
+    turnIds: number[],
+  ): Promise<void> {
+    if (turnIds.length === 0) return;
+    const iso = new Date().toISOString();
+    for (const id of turnIds) {
+      this.releasePendingStmt.run(iso, persona, conversation, Math.floor(id));
+    }
   }
 
   async upsertDurableFact(input: UpsertDurableFactInput): Promise<void> {
@@ -817,22 +936,6 @@ class SqliteMemoryStore implements MemoryStore {
       Math.max(0, Math.floor(turnId)),
       new Date().toISOString(),
     );
-  }
-
-  async rollbackDurableFactCursorIfAt(
-    persona: string,
-    conversation: string,
-    expectedId: number,
-    toId: number,
-  ): Promise<boolean> {
-    const res = this.rollbackDurableFactCursorStmt.run(
-      Math.max(0, Math.floor(toId)),
-      new Date().toISOString(),
-      persona,
-      conversation,
-      Math.max(0, Math.floor(expectedId)),
-    );
-    return res.changes > 0;
   }
 
   async appendCapture(input: AppendCaptureInput): Promise<void> {
@@ -900,10 +1003,10 @@ class SqliteMemoryStore implements MemoryStore {
     persona: string,
     conversation: string,
   ): Promise<number> {
-    // Clears turns AND durable facts + extractor cursor in one transaction,
-    // so /reset leaves no per-conversation state that could leak into a fresh
-    // conversation reusing the same key.
-    return this.deleteConversationTxn(persona, conversation);
+    // Wipes turns AND the durable-fact stores (facts, cursor, leases) in one
+    // transaction so a reset never leaks facts into the next conversation on the
+    // same key. Returns the turn count for back-compat.
+    return this.deleteConversationTxn(persona, conversation) as number;
   }
 
   async purgeQuarantined(

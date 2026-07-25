@@ -252,6 +252,14 @@ export interface DurableFactsSettings {
   minConfidence: number;
   /** Max evicted turns extracted from in one out-of-band pass. */
   maxExtractPerTurn: number;
+  /**
+   * Crash-recovery lease window (ms) for a claimed-but-not-yet-committed turn.
+   * If the pass that claimed a turn dies without committing or releasing it,
+   * the lease expires after this long and the turn becomes re-claimable. The
+   * common failure (harness reject/timeout) releases immediately and does not
+   * wait this out; only a hard process crash does.
+   */
+  leaseMs: number;
 }
 
 export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {
@@ -259,6 +267,7 @@ export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {
   maxInjected: 8,
   minConfidence: 0.5,
   maxExtractPerTurn: 4,
+  leaseMs: 300_000,
 };
 
 export interface TelegramStreamingSettings {
@@ -840,6 +849,10 @@ function buildDurableFactsConfig(
     asInt(process.env.PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN) ??
     asInt(toml.max_extract_per_turn) ??
     DEFAULT_DURABLE_FACTS.maxExtractPerTurn;
+  const leaseMs =
+    asInt(process.env.PHANTOMBOT_DURABLE_FACTS_LEASE_MS) ??
+    asInt(toml.lease_ms) ??
+    DEFAULT_DURABLE_FACTS.leaseMs;
   return {
     enabled,
     // 0 disables injection; capped so one turn can't stuff the prompt.
@@ -849,6 +862,9 @@ function buildDurableFactsConfig(
     // At least 1 evicted turn per pass; capped so a long backfill can't fire
     // an unbounded burst of harness calls in one out-of-band pass.
     maxExtractPerTurn: Math.max(1, Math.min(100, maxExtractPerTurn)),
+    // Floor at 1s so a misconfig can't make every claim instantly re-claimable
+    // (which would let concurrent passes double-extract).
+    leaseMs: Math.max(1000, Math.floor(leaseMs)),
   };
 }
 

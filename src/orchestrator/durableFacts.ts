@@ -163,18 +163,19 @@ export interface ExtractDurableFactsResult {
 }
 
 /**
- * Extract durable facts from every turn that has newly aged out of the live
- * window (after the extractor cursor), and upsert them. The atomic claim
- * advances the cursor past the whole batch up front (so concurrent passes stay
- * disjoint); a quiet turn that produced no facts is therefore not re-extracted.
+ * Extract durable facts from every turn that has aged out of the live window,
+ * and upsert them. Turns are CLAIMED with a per-turn lease (see the store's
+ * claim/commit/release trio): the claim leases a disjoint batch, each turn is
+ * committed the moment its facts are written, and a quiet turn that produced no
+ * facts is committed too (so it isn't re-extracted).
  *
- * On a harness FAILURE partway through the batch, the cursor is rolled back
- * (compare-and-swap) to the last turn actually handled, so the failed turn and
- * the rest of the batch are re-claimed on the next pass instead of being
- * silently skipped forever. That makes the common failure mode (harness
- * reject / timeout) at-least-once rather than at-most-once; a hard process
- * crash between the claim and the rollback is the one remaining gap, still
- * recoverable via re-statement / nightly.
+ * On a harness FAILURE partway through the batch, the failed turn and the tail
+ * we never reached are RELEASED — their leases expire immediately, so the next
+ * pass re-claims exactly those, while turns already committed are never redone.
+ * That makes the common failure mode (harness reject / timeout) at-least-once.
+ * A hard process crash mid-pass leaves live leases behind; those turns become
+ * re-claimable once the lease window (`settings.leaseMs`) elapses — so even a
+ * crash is at-least-once, just delayed, with no permanent skip.
  *
  * NEVER throws: it sits on the (out-of-band) tail of the hot path and a
  * failure here must never surface to the user. Bounded to
@@ -193,38 +194,41 @@ export async function extractDurableFactsOnEviction(
 
   const windowSize = input.windowSize ?? DEFAULT_HISTORY_LIMIT;
   try {
-    // Claim the evicted slice ATOMICALLY: this single serialized transaction
-    // reads the cursor, selects the batch, and advances the cursor past it
-    // before returning. Two concurrent extractors therefore get DISJOINT
-    // batches — no duplicate model calls, and the cursor never regresses
-    // (Kai's race, PR #320 review). The model call below runs only over turns
-    // this pass has already claimed.
+    // Claim (lease) the evicted slice ATOMICALLY: this single serialized
+    // transaction reads the high-water cursor, selects eligible turns (above the
+    // cursor OR with a stale lease, never a live-leased one), writes a lease per
+    // turn, and advances the cursor monotonically. Two concurrent extractors get
+    // DISJOINT batches, and — critically — a turn is committed/released PER TURN
+    // below, so a partial failure never strands the rest of the batch behind an
+    // advanced cursor (Kai's second race, PR #320). The model call runs only
+    // over turns this pass has leased.
     const evicted = await input.memory.claimEvictedForExtraction(
       input.persona,
       input.conversation,
       windowSize,
       input.settings.maxExtractPerTurn,
+      input.settings.leaseMs,
     );
     if (evicted.length === 0) return result;
 
-    // The claim already advanced the cursor to the batch's max id. Remember it
-    // so we can compare-and-swap the cursor back on failure (below). Turns are
-    // returned oldest-first, so the last row is the max.
-    const claimedMaxId = evicted[evicted.length - 1]!.id;
-    // Highest turn id we've FULLY handled (extracted, or legitimately skipped).
-    // On a harness failure we roll the cursor back to here, so the failed turn
-    // and everything after it are re-claimed next pass, while turns already
-    // extracted are not re-done. Starts one below the first claimed id, i.e.
-    // "nothing handled yet" → a total failure rewinds the whole batch.
-    let lastHandledId = evicted[0]!.id - 1;
-    let failed = false;
+    // Turns we still hold an uncommitted lease on. Each turn is removed as it is
+    // committed (extracted or legitimately skipped); whatever remains after the
+    // loop — the turn that failed plus everything we never reached — is released
+    // so the NEXT pass re-claims exactly those, with no double-extraction of the
+    // ones already committed. This is the at-least-once guarantee.
+    const outstanding = new Set(evicted.map((t) => t.id));
 
     for (const turn of evicted) {
-      // Skip QUARANTINED untrusted payload (embeddable=0) — it must never
-      // reach durable memory, same guarantee turnIndexer.ts gives the search
-      // index — and empty rows. These count as handled: advance past them.
+      // Skip QUARANTINED untrusted payload (embeddable=0) — it must never reach
+      // durable memory, same guarantee turnIndexer.ts gives the search index —
+      // and empty rows. These are legitimately handled: commit (drop the lease).
       if (turn.embeddable === false || turn.text.trim().length === 0) {
-        lastHandledId = turn.id;
+        await input.memory.commitExtractedTurn(
+          input.persona,
+          input.conversation,
+          turn.id,
+        );
+        outstanding.delete(turn.id);
         continue;
       }
 
@@ -236,11 +240,9 @@ export async function extractDurableFactsOnEviction(
           input.signal,
         );
       } catch (e) {
-        // Harness reject / timeout / abort. Stop here: this turn and the rest
-        // of the batch stay unhandled and get re-claimed next pass after the
-        // rollback below. This is what turns at-most-once into at-least-once
-        // for the common (non-crash) failure mode Kai flagged.
-        failed = true;
+        // Harness reject / timeout / abort. Stop here: this turn and every turn
+        // after it in the batch stay in `outstanding` and are released below, so
+        // they're re-claimed next pass. Already-committed turns are untouched.
         log.warn("durable-facts: extraction call failed; will retry batch", {
           persona: input.persona,
           conversation: input.conversation,
@@ -261,27 +263,27 @@ export async function extractDurableFactsOnEviction(
         });
         result.factsWritten++;
       }
-      result.turnsProcessed++;
-      lastHandledId = turn.id;
-    }
-
-    // Recovery: if the harness threw partway, roll the cursor back from the
-    // claimed max to the last turn we actually handled — but only if no
-    // concurrent pass has since advanced it (compare-and-swap in the store).
-    // A clean pass leaves the cursor exactly where the atomic claim put it.
-    if (failed && lastHandledId < claimedMaxId) {
-      const rolledBack = await input.memory.rollbackDurableFactCursorIfAt(
+      // Commit only AFTER the facts are durably written, so a crash between the
+      // upsert and the commit re-does the turn (at-least-once) rather than
+      // dropping it.
+      await input.memory.commitExtractedTurn(
         input.persona,
         input.conversation,
-        claimedMaxId,
-        Math.max(0, lastHandledId),
+        turn.id,
       );
-      if (!rolledBack) {
-        log.info("durable-facts: rollback skipped, cursor moved on", {
-          persona: input.persona,
-          conversation: input.conversation,
-        });
-      }
+      outstanding.delete(turn.id);
+      result.turnsProcessed++;
+    }
+
+    // Release any turns we claimed but didn't commit (the failed turn + the tail
+    // we never reached) so the next pass re-claims them immediately, without
+    // waiting out the lease. A clean pass leaves `outstanding` empty.
+    if (outstanding.size > 0) {
+      await input.memory.releaseExtractionLease(
+        input.persona,
+        input.conversation,
+        [...outstanding],
+      );
     }
 
     result.triggered = result.turnsProcessed > 0;

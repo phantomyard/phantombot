@@ -1,7 +1,8 @@
 /**
  * Tests for the durable_facts store surface: upsert/de-dupe, confidence-max +
  * recency semantics, ranked reads with a confidence floor, the eviction-window
- * query, the extractor cursor, and fact normalization.
+ * query, the monotonic extractor cursor, the claim/commit/release lease ledger
+ * (including concurrent-partial-failure recovery), and fact normalization.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -20,6 +21,8 @@ let memory: MemoryStore;
 
 const PERSONA = "phantom";
 const CONV = "telegram:1001";
+/** A long lease so claims stay live across a test unless we commit/release. */
+const LEASE = 300_000;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-durable-facts-"));
@@ -304,61 +307,41 @@ describe("durable fact cursor", () => {
   });
 });
 
-describe("rollbackDurableFactCursorIfAt (failure recovery, CAS)", () => {
-  test("rolls the cursor back when it still sits at the expected id", async () => {
-    await memory.setDurableFactCursor(PERSONA, CONV, 20);
-    const ok = await memory.rollbackDurableFactCursorIfAt(PERSONA, CONV, 20, 12);
-    expect(ok).toBe(true);
-    // Deliberately LOWERS the cursor — the one place we bypass the MAX guard —
-    // so the failed turn (13) and the rest of the batch are re-claimed.
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(12);
-  });
-
-  test("no-ops when a concurrent pass has moved the cursor past expected", async () => {
-    await memory.setDurableFactCursor(PERSONA, CONV, 30);
-    // Our failed pass thinks the cursor is still at 20, but a newer pass already
-    // advanced it to 30. The CAS guard must NOT clobber that (would re-process).
-    const ok = await memory.rollbackDurableFactCursorIfAt(PERSONA, CONV, 20, 12);
-    expect(ok).toBe(false);
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(30);
-  });
-
-  test("is scoped per (persona, conversation)", async () => {
-    await memory.setDurableFactCursor(PERSONA, CONV, 20);
-    const ok = await memory.rollbackDurableFactCursorIfAt(
-      PERSONA,
-      "telegram:2002",
-      20,
-      12,
-    );
-    expect(ok).toBe(false);
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(20);
-  });
-});
-
-describe("claimEvictedForExtraction (atomic claim-and-advance)", () => {
-  test("advances the cursor past the claimed batch so the next claim is disjoint", async () => {
+describe("claimEvictedForExtraction (lease-based claim)", () => {
+  test("advances the monotonic cursor and leases the batch so the next claim is disjoint", async () => {
     for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);
-    // windowSize 4 evicts 1..6; claim 2 at a time.
-    const first = await memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2);
+    // windowSize 4 evicts 1..6; claim 2 at a time, never committing.
+    const first = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      4,
+      2,
+      LEASE,
+    );
     expect(first.map((t) => t.text)).toEqual(["turn 1", "turn 2"]);
     // Cursor moved past the batch WITHOUT a separate setDurableFactCursor call.
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(first[1]!.id);
 
-    const second = await memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2);
+    const second = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      4,
+      2,
+      LEASE,
+    );
     expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
-    // No overlap between the two batches — the whole point of the atomic claim.
+    // No overlap: turns 1..2 hold live leases and are excluded from the SELECT.
     const firstIds = new Set(first.map((t) => t.id));
     expect(second.some((t) => firstIds.has(t.id))).toBe(false);
   });
 
   test("racing claims get disjoint batches and never double-process a turn", async () => {
     for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);
-    // Fire many claims concurrently; the serialized transaction must partition
-    // the evicted turns (1..6) with zero overlap and zero loss.
+    // Fire many claims concurrently; the serialized transaction + live-lease
+    // exclusion must partition the evicted turns (1..6) with zero overlap.
     const claims = await Promise.all(
       Array.from({ length: 6 }, () =>
-        memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2),
+        memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2, LEASE),
       ),
     );
     const ids = claims.flat().map((t) => t.id);
@@ -368,9 +351,165 @@ describe("claimEvictedForExtraction (atomic claim-and-advance)", () => {
 
   test("empty claim leaves the cursor untouched", async () => {
     for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
-    const claimed = await memory.claimEvictedForExtraction(PERSONA, CONV, 30, 5);
+    const claimed = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      30,
+      5,
+      LEASE,
+    );
     expect(claimed).toHaveLength(0);
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+  });
+
+  test("a committed turn is never re-claimed; a released one is re-claimed at once", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`); // window 2 → 1..4 evicted
+    const first = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      2,
+      4,
+      LEASE,
+    );
+    expect(first.map((t) => t.text)).toEqual([
+      "turn 1",
+      "turn 2",
+      "turn 3",
+      "turn 4",
+    ]);
+    // Commit turns 1 & 2; release 3 & 4 (as a failed pass would).
+    await memory.commitExtractedTurn(PERSONA, CONV, first[0]!.id);
+    await memory.commitExtractedTurn(PERSONA, CONV, first[1]!.id);
+    await memory.releaseExtractionLease(PERSONA, CONV, [
+      first[2]!.id,
+      first[3]!.id,
+    ]);
+
+    // Next claim sees ONLY the released turns — committed ones stay gone even
+    // though they sit below the (monotonic) cursor.
+    const second = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      2,
+      4,
+      LEASE,
+    );
+    expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
+  });
+
+  test("Kai's interleave: a partial failure never strands turns behind an advanced cursor", async () => {
+    // The exact scenario from PR #320 review: pass A claims 1..4, pass B claims
+    // 5..8 and finishes first (cursor → 8), then A fails on turn 2. With a
+    // monotonic cursor + lease ledger, A's released 2..4 are still re-claimable
+    // even though they sit far below cursor 8.
+    for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`); // window 2 → 1..8 evicted
+
+    const passA = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    expect(passA.map((t) => t.text)).toEqual([
+      "turn 1",
+      "turn 2",
+      "turn 3",
+      "turn 4",
+    ]);
+    const passB = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    expect(passB.map((t) => t.text)).toEqual([
+      "turn 5",
+      "turn 6",
+      "turn 7",
+      "turn 8",
+    ]);
+
+    // B commits its whole batch; cursor is now well past A's turns.
+    for (const t of passB) await memory.commitExtractedTurn(PERSONA, CONV, t.id);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(passB[3]!.id);
+
+    // A commits turn 1, then fails → releases 2,3,4.
+    await memory.commitExtractedTurn(PERSONA, CONV, passA[0]!.id);
+    await memory.releaseExtractionLease(PERSONA, CONV, [
+      passA[1]!.id,
+      passA[2]!.id,
+      passA[3]!.id,
+    ]);
+
+    // The stranded turns come back — re-claimable despite being below cursor 8.
+    const recovered = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      2,
+      10,
+      LEASE,
+    );
+    expect(recovered.map((t) => t.text)).toEqual(["turn 2", "turn 3", "turn 4"]);
+  });
+
+  test("live leases are excluded but STALE leases (expired) are re-claimable", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`); // window 2 → 1..4 evicted
+    // Zero-length lease: every claimed turn is instantly stale.
+    const first = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, 0);
+    expect(first).toHaveLength(4);
+    // Because the leases are already expired, a second claim re-selects them.
+    const second = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    expect(second.map((t) => t.id).sort((a, b) => a - b)).toEqual(
+      first.map((t) => t.id).sort((a, b) => a - b),
+    );
+  });
+});
+
+describe("deleteConversation clears durable-fact leases + fresh-claim (/reset)", () => {
+  test("wipes facts, cursor, and leases — nothing leaks into a fresh conversation", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    // Claim (leaves a cursor + live leases) and write a fact.
+    await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "Andrew lives in Arnhem.",
+      confidence: 0.9,
+    });
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBeGreaterThan(0);
+
+    const deleted = await memory.deleteConversation(PERSONA, CONV);
+    expect(deleted).toBeGreaterThan(0); // returns the turn count
+
+    // Every durable store is now empty for this key.
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+    expect(
+      await memory.topDurableFacts(PERSONA, CONV, { limit: 10 }),
+    ).toHaveLength(0);
+
+    // And a fresh claim after reset starts from a clean slate: with no turns and
+    // no leftover leases/cursor, nothing is claimable.
+    for (let i = 1; i <= 6; i++) await appendTurn(`fresh ${i}`);
+    const claimed = await memory.claimEvictedForExtraction(
+      PERSONA,
+      CONV,
+      2,
+      10,
+      LEASE,
+    );
+    // Only the brand-new turns are eligible — no stale lease resurrects an old
+    // turn id, and the cursor started at 0 again.
+    expect(claimed.every((t) => t.text.startsWith("fresh"))).toBe(true);
+  });
+
+  test("reset is scoped — a sibling conversation's facts survive", async () => {
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "conv A fact",
+      confidence: 0.9,
+    });
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: "telegram:2002",
+      fact: "conv B fact",
+      confidence: 0.9,
+    });
+    await memory.deleteConversation(PERSONA, CONV);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.countDurableFacts(PERSONA, "telegram:2002")).toBe(1);
   });
 });
 
