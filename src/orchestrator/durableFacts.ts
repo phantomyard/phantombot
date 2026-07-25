@@ -164,9 +164,17 @@ export interface ExtractDurableFactsResult {
 
 /**
  * Extract durable facts from every turn that has newly aged out of the live
- * window (after the extractor cursor), and upsert them. Advances the cursor
- * past every turn it considers — including turns that produced no facts — so a
- * quiet turn is not re-extracted forever.
+ * window (after the extractor cursor), and upsert them. The atomic claim
+ * advances the cursor past the whole batch up front (so concurrent passes stay
+ * disjoint); a quiet turn that produced no facts is therefore not re-extracted.
+ *
+ * On a harness FAILURE partway through the batch, the cursor is rolled back
+ * (compare-and-swap) to the last turn actually handled, so the failed turn and
+ * the rest of the batch are re-claimed on the next pass instead of being
+ * silently skipped forever. That makes the common failure mode (harness
+ * reject / timeout) at-least-once rather than at-most-once; a hard process
+ * crash between the claim and the rollback is the one remaining gap, still
+ * recoverable via re-statement / nightly.
  *
  * NEVER throws: it sits on the (out-of-band) tail of the hot path and a
  * failure here must never surface to the user. Bounded to
@@ -199,19 +207,49 @@ export async function extractDurableFactsOnEviction(
     );
     if (evicted.length === 0) return result;
 
+    // The claim already advanced the cursor to the batch's max id. Remember it
+    // so we can compare-and-swap the cursor back on failure (below). Turns are
+    // returned oldest-first, so the last row is the max.
+    const claimedMaxId = evicted[evicted.length - 1]!.id;
+    // Highest turn id we've FULLY handled (extracted, or legitimately skipped).
+    // On a harness failure we roll the cursor back to here, so the failed turn
+    // and everything after it are re-claimed next pass, while turns already
+    // extracted are not re-done. Starts one below the first claimed id, i.e.
+    // "nothing handled yet" → a total failure rewinds the whole batch.
+    let lastHandledId = evicted[0]!.id - 1;
+    let failed = false;
+
     for (const turn of evicted) {
-      result.turnsProcessed++;
       // Skip QUARANTINED untrusted payload (embeddable=0) — it must never
       // reach durable memory, same guarantee turnIndexer.ts gives the search
-      // index — and empty rows. The cursor still advances past them.
-      if (turn.embeddable === false) continue;
-      if (turn.text.trim().length === 0) continue;
+      // index — and empty rows. These count as handled: advance past them.
+      if (turn.embeddable === false || turn.text.trim().length === 0) {
+        lastHandledId = turn.id;
+        continue;
+      }
 
-      const raw = await input.complete(
-        EXTRACTION_SYSTEM,
-        renderTurnForExtraction(turn),
-        input.signal,
-      );
+      let raw: string;
+      try {
+        raw = await input.complete(
+          EXTRACTION_SYSTEM,
+          renderTurnForExtraction(turn),
+          input.signal,
+        );
+      } catch (e) {
+        // Harness reject / timeout / abort. Stop here: this turn and the rest
+        // of the batch stay unhandled and get re-claimed next pass after the
+        // rollback below. This is what turns at-most-once into at-least-once
+        // for the common (non-crash) failure mode Kai flagged.
+        failed = true;
+        log.warn("durable-facts: extraction call failed; will retry batch", {
+          persona: input.persona,
+          conversation: input.conversation,
+          turnId: turn.id,
+          error: (e as Error).message,
+        });
+        break;
+      }
+
       const facts = parseExtractedFacts(raw);
       for (const f of facts) {
         await input.memory.upsertDurableFact({
@@ -223,13 +261,29 @@ export async function extractDurableFactsOnEviction(
         });
         result.factsWritten++;
       }
+      result.turnsProcessed++;
+      lastHandledId = turn.id;
     }
 
-    // No cursor advance here: claimEvictedForExtraction already advanced it
-    // atomically when it handed us this batch. Extraction runs at-most-once per
-    // turn as a result — if the model call fails mid-batch the swallowed error
-    // just means those already-claimed turns yield no facts (recoverable via
-    // re-statement / nightly), which we accept to keep concurrent passes safe.
+    // Recovery: if the harness threw partway, roll the cursor back from the
+    // claimed max to the last turn we actually handled — but only if no
+    // concurrent pass has since advanced it (compare-and-swap in the store).
+    // A clean pass leaves the cursor exactly where the atomic claim put it.
+    if (failed && lastHandledId < claimedMaxId) {
+      const rolledBack = await input.memory.rollbackDurableFactCursorIfAt(
+        input.persona,
+        input.conversation,
+        claimedMaxId,
+        Math.max(0, lastHandledId),
+      );
+      if (!rolledBack) {
+        log.info("durable-facts: rollback skipped, cursor moved on", {
+          persona: input.persona,
+          conversation: input.conversation,
+        });
+      }
+    }
+
     result.triggered = result.turnsProcessed > 0;
 
     if (result.factsWritten > 0) {

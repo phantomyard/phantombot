@@ -304,6 +304,38 @@ describe("durable fact cursor", () => {
   });
 });
 
+describe("rollbackDurableFactCursorIfAt (failure recovery, CAS)", () => {
+  test("rolls the cursor back when it still sits at the expected id", async () => {
+    await memory.setDurableFactCursor(PERSONA, CONV, 20);
+    const ok = await memory.rollbackDurableFactCursorIfAt(PERSONA, CONV, 20, 12);
+    expect(ok).toBe(true);
+    // Deliberately LOWERS the cursor — the one place we bypass the MAX guard —
+    // so the failed turn (13) and the rest of the batch are re-claimed.
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(12);
+  });
+
+  test("no-ops when a concurrent pass has moved the cursor past expected", async () => {
+    await memory.setDurableFactCursor(PERSONA, CONV, 30);
+    // Our failed pass thinks the cursor is still at 20, but a newer pass already
+    // advanced it to 30. The CAS guard must NOT clobber that (would re-process).
+    const ok = await memory.rollbackDurableFactCursorIfAt(PERSONA, CONV, 20, 12);
+    expect(ok).toBe(false);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(30);
+  });
+
+  test("is scoped per (persona, conversation)", async () => {
+    await memory.setDurableFactCursor(PERSONA, CONV, 20);
+    const ok = await memory.rollbackDurableFactCursorIfAt(
+      PERSONA,
+      "telegram:2002",
+      20,
+      12,
+    );
+    expect(ok).toBe(false);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(20);
+  });
+});
+
 describe("claimEvictedForExtraction (atomic claim-and-advance)", () => {
   test("advances the cursor past the claimed batch so the next claim is disjoint", async () => {
     for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);

@@ -234,6 +234,105 @@ describe("extractDurableFactsOnEviction", () => {
     expect(res.factsWritten).toBe(0);
     expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
   });
+
+  test("mid-batch failure rolls the cursor back to the last handled turn, so the rest re-extracts next pass", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    // window 2 → turns 1..4 evicted (ids 1..4), claimed in one pass (cap 4).
+    // Extract turn 1 fine, then the harness dies on turn 2.
+    const flaky: ExtractComplete = async (_s, userMessage) => {
+      if (userMessage.includes("turn 1"))
+        return '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]';
+      throw new Error("harness timeout");
+    };
+    const res = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: flaky,
+      windowSize: 2,
+    });
+    expect(res.turnsProcessed).toBe(1);
+    expect(res.factsWritten).toBe(1);
+    // Cursor rolled back to turn 1 (id 1) — NOT left at the claimed max (id 4),
+    // which would silently skip turns 2..4 forever (Kai's at-most-once flag).
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(1);
+
+    // A later healthy pass re-claims turns 2..4 and extracts what they hold.
+    const healthy = fakeComplete({
+      "turn 2": '[{"fact":"He uses Deye inverters","confidence":0.8}]',
+      "turn 3": '[{"fact":"His homelab runs Proxmox","confidence":0.7}]',
+    });
+    const res2 = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: healthy,
+      windowSize: 2,
+    });
+    expect(res2.turnsProcessed).toBe(3); // turns 2, 3, 4 re-claimed
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(3); // 1 + 2
+  });
+
+  test("total failure rewinds the whole batch — cursor back to the start, nothing skipped", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    const dead: ExtractComplete = async () => {
+      throw new Error("harness down");
+    };
+    await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: dead,
+      windowSize: 2,
+    });
+    // First evicted turn is id 1 → nothing handled → cursor rewound to 0.
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+
+    // Recovery: a healthy pass re-extracts the entire batch (turns 1..4).
+    const healthy = fakeComplete({
+      "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
+    });
+    const res = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete: healthy,
+      windowSize: 2,
+    });
+    expect(res.turnsProcessed).toBe(4);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+  });
+
+  test("a clean pass does NOT roll back — cursor stays at the claimed max", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    const complete = fakeComplete({
+      "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
+    });
+    await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete,
+      windowSize: 2,
+    });
+    // Turns 1..4 evicted and fully handled → cursor sits at id 4, and a second
+    // pass finds nothing new to claim.
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(4);
+    const again = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete,
+      windowSize: 2,
+    });
+    expect(again.turnsProcessed).toBe(0);
+  });
 });
 
 describe("pullDurableFacts / formatDurableFacts", () => {

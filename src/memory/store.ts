@@ -243,6 +243,24 @@ export interface MemoryStore {
     conversation: string,
     turnId: number,
   ): Promise<void>;
+  /**
+   * Roll the extractor's cursor BACK to `toId`, but ONLY if it currently sits
+   * exactly at `expectedId` (a compare-and-swap). This is the recovery path for
+   * a failed extraction pass: the atomic claim advanced the cursor past the
+   * whole batch before the model ran, so when the harness call throws we lower
+   * the cursor to the last successfully-extracted turn so the failed turn + the
+   * rest of the batch are re-claimed next pass — closing the at-most-once data
+   * loss Kai flagged (PR #320). The `expectedId` guard means a CONCURRENT pass
+   * that has already advanced the cursor further is never clobbered: if it moved,
+   * the update matches nothing and we leave it alone. Returns true when the
+   * cursor was rolled back, false when the guard skipped it.
+   */
+  rollbackDurableFactCursorIfAt(
+    persona: string,
+    conversation: string,
+    expectedId: number,
+    toId: number,
+  ): Promise<boolean>;
   /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
   appendCapture(input: AppendCaptureInput): Promise<void>;
   /**
@@ -368,6 +386,7 @@ class SqliteMemoryStore implements MemoryStore {
   private countDurableFactsStmt;
   private durableFactCursorStmt;
   private setDurableFactCursorStmt;
+  private rollbackDurableFactCursorStmt;
   private claimEvictedTxn;
   private appendPairTxn;
   private closed = false;
@@ -513,6 +532,17 @@ class SqliteMemoryStore implements MemoryStore {
          last_extracted_turn_id =
            MAX(last_extracted_turn_id, excluded.last_extracted_turn_id),
          updated_at             = excluded.updated_at`,
+    );
+    // Compare-and-swap rollback for the failure-recovery path. Unlike the
+    // MAX()-guarded upsert above (which can only ever RAISE the cursor), this
+    // deliberately LOWERS it — but only when it still equals the id our claim
+    // left it at, so a concurrent pass that advanced further wins and is never
+    // rewound. Matched-row count (via changes()) tells the caller whether the
+    // guard fired.
+    this.rollbackDurableFactCursorStmt = db.prepare(
+      `UPDATE durable_fact_cursor
+         SET last_extracted_turn_id = ?, updated_at = ?
+       WHERE persona = ? AND conversation = ? AND last_extracted_turn_id = ?`,
     );
     // Atomic claim-and-advance for the durable-fact extractor. Wrapping the
     // cursor read, the evicted-slice select, and the cursor advance in ONE
@@ -760,6 +790,22 @@ class SqliteMemoryStore implements MemoryStore {
       Math.max(0, Math.floor(turnId)),
       new Date().toISOString(),
     );
+  }
+
+  async rollbackDurableFactCursorIfAt(
+    persona: string,
+    conversation: string,
+    expectedId: number,
+    toId: number,
+  ): Promise<boolean> {
+    const res = this.rollbackDurableFactCursorStmt.run(
+      Math.max(0, Math.floor(toId)),
+      new Date().toISOString(),
+      persona,
+      conversation,
+      Math.max(0, Math.floor(expectedId)),
+    );
+    return res.changes > 0;
   }
 
   async appendCapture(input: AppendCaptureInput): Promise<void> {
