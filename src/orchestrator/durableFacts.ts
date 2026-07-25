@@ -185,22 +185,21 @@ export async function extractDurableFactsOnEviction(
 
   const windowSize = input.windowSize ?? DEFAULT_HISTORY_LIMIT;
   try {
-    const cursor = await input.memory.durableFactCursor(
-      input.persona,
-      input.conversation,
-    );
-    const evicted = await input.memory.turnsEvictedFromWindow(
+    // Claim the evicted slice ATOMICALLY: this single serialized transaction
+    // reads the cursor, selects the batch, and advances the cursor past it
+    // before returning. Two concurrent extractors therefore get DISJOINT
+    // batches — no duplicate model calls, and the cursor never regresses
+    // (Kai's race, PR #320 review). The model call below runs only over turns
+    // this pass has already claimed.
+    const evicted = await input.memory.claimEvictedForExtraction(
       input.persona,
       input.conversation,
       windowSize,
-      cursor,
       input.settings.maxExtractPerTurn,
     );
     if (evicted.length === 0) return result;
 
-    let lastId = cursor;
     for (const turn of evicted) {
-      lastId = turn.id;
       result.turnsProcessed++;
       // Skip QUARANTINED untrusted payload (embeddable=0) — it must never
       // reach durable memory, same guarantee turnIndexer.ts gives the search
@@ -226,11 +225,11 @@ export async function extractDurableFactsOnEviction(
       }
     }
 
-    await input.memory.setDurableFactCursor(
-      input.persona,
-      input.conversation,
-      lastId,
-    );
+    // No cursor advance here: claimEvictedForExtraction already advanced it
+    // atomically when it handed us this batch. Extraction runs at-most-once per
+    // turn as a result — if the model call fails mid-batch the swallowed error
+    // just means those already-claimed turns yield no facts (recoverable via
+    // re-statement / nightly), which we accept to keep concurrent passes safe.
     result.triggered = result.turnsProcessed > 0;
 
     if (result.factsWritten > 0) {

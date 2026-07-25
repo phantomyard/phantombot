@@ -192,6 +192,23 @@ export interface MemoryStore {
     limit: number,
   ): Promise<Turn[]>;
   /**
+   * ATOMICALLY claim the next slice of newly-evicted turns for the durable-fact
+   * extractor. In a single serialized transaction this reads the cursor,
+   * selects the evicted turns after it, and advances the cursor PAST the whole
+   * batch (monotonically — it never moves backwards) BEFORE returning. That
+   * atomic read-and-advance is what makes concurrent out-of-band extractors
+   * safe: SQLite serializes the transaction, so two racing passes get DISJOINT
+   * batches instead of both re-processing the same rows (duplicate model calls)
+   * and a slow pass can never lower a cursor a newer pass already advanced.
+   * Returns the claimed turns, oldest first (possibly empty).
+   */
+  claimEvictedForExtraction(
+    persona: string,
+    conversation: string,
+    windowSize: number,
+    limit: number,
+  ): Promise<Turn[]>;
+  /**
    * Insert a durable fact, or — when the same normalized text already exists
    * for this (persona, conversation) — bump its recency (`last_seen_at`),
    * keep the higher `confidence`, and refresh its source ref. De-dupe key is
@@ -351,6 +368,7 @@ class SqliteMemoryStore implements MemoryStore {
   private countDurableFactsStmt;
   private durableFactCursorStmt;
   private setDurableFactCursorStmt;
+  private claimEvictedTxn;
   private appendPairTxn;
   private closed = false;
 
@@ -492,8 +510,49 @@ class SqliteMemoryStore implements MemoryStore {
          (persona, conversation, last_extracted_turn_id, updated_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT (persona, conversation) DO UPDATE SET
-         last_extracted_turn_id = excluded.last_extracted_turn_id,
+         last_extracted_turn_id =
+           MAX(last_extracted_turn_id, excluded.last_extracted_turn_id),
          updated_at             = excluded.updated_at`,
+    );
+    // Atomic claim-and-advance for the durable-fact extractor. Wrapping the
+    // cursor read, the evicted-slice select, and the cursor advance in ONE
+    // db.transaction() makes them a single serialized unit: bun:sqlite runs it
+    // synchronously and SQLite serializes writers, so two concurrent
+    // out-of-band extractors can never observe the same cursor and claim
+    // overlapping rows. The cursor is advanced to the batch's max id before the
+    // rows are returned, so the model call happens only AFTER the turns are
+    // claimed.
+    this.claimEvictedTxn = db.transaction(
+      (
+        persona: string,
+        conversation: string,
+        windowSize: number,
+        limit: number,
+      ): RawDisplayRow[] => {
+        const cur = this.durableFactCursorStmt.get(persona, conversation) as
+          | { id: number }
+          | undefined;
+        const cursor = cur?.id ?? 0;
+        const rows = this.turnsEvictedStmt.all(
+          persona,
+          conversation,
+          cursor,
+          persona,
+          conversation,
+          Math.max(0, Math.floor(windowSize)),
+          Math.max(1, Math.floor(limit)),
+        ) as RawDisplayRow[];
+        if (rows.length === 0) return rows;
+        let maxId = cursor;
+        for (const r of rows) if (r.id > maxId) maxId = r.id;
+        this.setDurableFactCursorStmt.run(
+          persona,
+          conversation,
+          maxId,
+          new Date().toISOString(),
+        );
+        return rows;
+      },
     );
     // Atomic user+assistant pair insert. Both rows share the same
     // created_at; ordering tiebreaks on the autoincrement id, so the
@@ -623,6 +682,21 @@ class SqliteMemoryStore implements MemoryStore {
       conversation,
       Math.max(0, Math.floor(windowSize)),
       Math.max(1, Math.floor(limit)),
+    ) as RawDisplayRow[];
+    return mapDisplayRows(rows);
+  }
+
+  async claimEvictedForExtraction(
+    persona: string,
+    conversation: string,
+    windowSize: number,
+    limit: number,
+  ): Promise<Turn[]> {
+    const rows = this.claimEvictedTxn(
+      persona,
+      conversation,
+      windowSize,
+      limit,
     ) as RawDisplayRow[];
     return mapDisplayRows(rows);
   }

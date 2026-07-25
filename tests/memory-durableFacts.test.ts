@@ -294,4 +294,50 @@ describe("durable fact cursor", () => {
     await memory.setDurableFactCursor(PERSONA, CONV, 7);
     expect(await memory.durableFactCursor(PERSONA, "telegram:2002")).toBe(0);
   });
+
+  test("cursor advance is monotonic — a stale lower write never regresses it", async () => {
+    await memory.setDurableFactCursor(PERSONA, CONV, 99);
+    // A slower/older extraction pass tries to set a lower value; the MAX guard
+    // keeps the newer cursor (Kai's cursor-regression concern, PR #320).
+    await memory.setDurableFactCursor(PERSONA, CONV, 5);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(99);
+  });
+});
+
+describe("claimEvictedForExtraction (atomic claim-and-advance)", () => {
+  test("advances the cursor past the claimed batch so the next claim is disjoint", async () => {
+    for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);
+    // windowSize 4 evicts 1..6; claim 2 at a time.
+    const first = await memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2);
+    expect(first.map((t) => t.text)).toEqual(["turn 1", "turn 2"]);
+    // Cursor moved past the batch WITHOUT a separate setDurableFactCursor call.
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(first[1]!.id);
+
+    const second = await memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2);
+    expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
+    // No overlap between the two batches — the whole point of the atomic claim.
+    const firstIds = new Set(first.map((t) => t.id));
+    expect(second.some((t) => firstIds.has(t.id))).toBe(false);
+  });
+
+  test("racing claims get disjoint batches and never double-process a turn", async () => {
+    for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);
+    // Fire many claims concurrently; the serialized transaction must partition
+    // the evicted turns (1..6) with zero overlap and zero loss.
+    const claims = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2),
+      ),
+    );
+    const ids = claims.flat().map((t) => t.id);
+    expect(new Set(ids).size).toBe(ids.length); // no id claimed twice
+    expect(new Set(ids).size).toBe(6); // all six evicted turns claimed once
+  });
+
+  test("empty claim leaves the cursor untouched", async () => {
+    for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
+    const claimed = await memory.claimEvictedForExtraction(PERSONA, CONV, 30, 5);
+    expect(claimed).toHaveLength(0);
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
+  });
 });
