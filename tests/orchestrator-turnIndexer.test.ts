@@ -72,7 +72,10 @@ describe("indexConversationTurnsIfDue", () => {
       persona: "phantom",
       conversation: "telegram:1001",
       memory,
-      settings: DEFAULT_RETRIEVAL.turnIndexing,
+      // Pin interval explicitly so this mechanism test is decoupled from the
+      // shipped default (which is intentionally small); 19 < 20 → no count flush,
+      // and the tail is fresh so the age trigger stays quiet too.
+      settings: { ...DEFAULT_RETRIEVAL.turnIndexing, interval: 20 },
     });
 
     expect(result?.triggered).toBe(false);
@@ -221,7 +224,9 @@ describe("time-based and forced flush", () => {
       for (let i = 1; i <= 19; i++) await appendUserPair(store, "telegram:2002", i);
       backdateAllTurns(path, 3); // age the whole tail 3h into the past
 
-      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, flushAfterHours: 2 };
+      // interval pinned high so the 19-turn tail can't count-trigger; this test
+      // isolates the time-based (flushAfterHours) path.
+      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, interval: 20, flushAfterHours: 2 };
       const result = await indexConversationTurnsIfDue({
         config: baseConfig(),
         persona: "phantom",
@@ -247,7 +252,9 @@ describe("time-based and forced flush", () => {
     try {
       for (let i = 1; i <= 19; i++) await appendUserPair(store, "telegram:2003", i);
       // No backdating: the tail is brand new, so the 2h window hasn't elapsed.
-      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, flushAfterHours: 2 };
+      // interval pinned high so the 19-turn tail can't count-trigger; this test
+      // isolates the time-based (flushAfterHours) path.
+      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, interval: 20, flushAfterHours: 2 };
       const result = await indexConversationTurnsIfDue({
         config: baseConfig(),
         persona: "phantom",
@@ -267,7 +274,9 @@ describe("time-based and forced flush", () => {
     try {
       for (let i = 1; i <= 19; i++) await appendUserPair(store, "telegram:2004", i);
       backdateAllTurns(path, 100); // very old, but time flush is disabled
-      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, flushAfterHours: 0 };
+      // interval pinned high so the 19-turn tail can't count-trigger; this test
+      // isolates the "flushAfterHours = 0 disables the age flush" path.
+      const settings = { ...DEFAULT_RETRIEVAL.turnIndexing, interval: 20, flushAfterHours: 0 };
       const result = await indexConversationTurnsIfDue({
         config: baseConfig(),
         persona: "phantom",

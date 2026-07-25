@@ -10,7 +10,9 @@ import { existsSync } from "node:fs";
 
 import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
+import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
+import { MemoryIndex } from "../lib/memoryIndex.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { currentPlatform } from "../lib/platform.ts";
@@ -108,6 +110,41 @@ export async function runHeartbeatCli(
     });
   }
 
+  // Embed newly-written notes on the heartbeat's regular cadence so a
+  // `memory capture`, a fresh KB note, or a drawer promotion becomes
+  // *semantically* recallable within ~30 min instead of waiting for the
+  // nightly `memory index --rebuild` (a full day of lag). runHeartbeat has
+  // already refreshed the FTS index above, so the `files` table is current;
+  // this incremental pass embeds only chunks whose text_sha changed (new or
+  // edited notes) and skips everything else — no API call for unchanged
+  // content. The nightly rebuild still runs for full consistency (deletions,
+  // model/dim changes, drift repair). Wrapped in try/catch: an embed hiccup
+  // must never break the primary heartbeat work.
+  let noteEmbedLine = "";
+  try {
+    const embedder = defaultEmbedder(config);
+    if (embedder) {
+      const ix = await MemoryIndex.open(indexPath(persona));
+      try {
+        const e = await runEmbedJob({ personaDir: dir, index: ix, embedder });
+        if (e.embedded > 0 || e.failed > 0) {
+          noteEmbedLine = `, embedded ${e.embedded}`;
+          log.info("heartbeat: embedded fresh notes", {
+            embedded: e.embedded,
+            skipped: e.skipped,
+            failed: e.failed,
+          });
+        }
+      } finally {
+        ix.close();
+      }
+    }
+  } catch (e) {
+    log.warn("heartbeat: note-embed pass threw unexpectedly", {
+      error: (e as Error).message,
+    });
+  }
+
   // Self-heal the service-manager units on the heartbeat's regular cadence.
   // This is the long-uptime cure for the drifted-unit class of bug (a broken
   // symlink on Linux, a moved binary on Windows) — a box that never restarts
@@ -141,7 +178,7 @@ export async function runHeartbeatCli(
   out.write(
     `heartbeat ok: promoted ${r.promoted.length}, ` +
       `stale ${r.staleRecent.length}, ` +
-      `indexed ${r.indexedFiles}${updateLine}\n`,
+      `indexed ${r.indexedFiles}${noteEmbedLine}${updateLine}\n`,
   );
   return 0;
 }
@@ -205,7 +242,7 @@ export default defineCommand({
   meta: {
     name: "heartbeat",
     description:
-      "Mechanical 30-min maintenance: promote tagged daily-file lines to drawers, scan ## Recent for staleness, refresh FTS index. No LLM call.",
+      "Mechanical 30-min maintenance: promote tagged daily-file lines to drawers, scan ## Recent for staleness, refresh FTS index, flush due conversation-turn tails, and embed newly-written notes. No LLM call.",
   },
   args: {
     persona: {

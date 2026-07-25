@@ -155,9 +155,18 @@ Layout (relative to your working dir):
 
 Two hard rules — apply on every nontrivial task:
 
-1. SEARCH BEFORE DEBUGGING. Run \`phantombot memory search "<topic>"\`
-   first. If memory or KB has prior knowledge, use it. Investigate
-   from scratch only if neither found anything.
+1. SEARCH BEFORE YOU ACT. Before debugging, before running an infra
+   or connection procedure (SSH, deploy, cluster access, a service
+   restart), and before re-deriving anything you suspect you have hit
+   before, run \`phantombot memory search "<topic>"\` FIRST — make it
+   reflexive, not optional. Your live context only holds the last ~30
+   turns, so a fact established earlier in THIS same conversation may
+   have already scrolled out of view; the search index still has it.
+   If a search returns prior knowledge, use it instead of working it
+   out again. If you notice you are re-deriving the same fact a second
+   time in one session, that is the signal to search — and to
+   \`memory capture\` it so it is not lost a third time. Investigate
+   from scratch only when search genuinely comes up empty.
 
 2. CAPTURE AS YOU GO. When a decision, lesson, person fact,
    commitment, or norm comes up, record it with:

@@ -22,7 +22,7 @@ describe("buildSystemPrompt — memory tools section", () => {
     );
     expect(prompt).toContain("# Memory tools");
     expect(prompt).toContain("phantombot memory search");
-    expect(prompt).toContain("SEARCH BEFORE DEBUGGING");
+    expect(prompt).toContain("SEARCH BEFORE YOU ACT");
     expect(prompt).toContain("CAPTURE AS YOU GO");
   });
 

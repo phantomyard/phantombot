@@ -153,9 +153,17 @@ export interface TurnIndexingSettings {
 
 export const DEFAULT_TURN_INDEXING: TurnIndexingSettings = {
   enabled: true,
-  interval: 20,
+  // Tight batch so an early-established fact (a procedure, a connection string)
+  // becomes semantically recallable within a few user turns instead of after
+  // 20 — the window where it has scrolled past the verbatim history but isn't
+  // yet indexed is the mechanical cause of "forgot mid-conversation, remembered
+  // when nudged". Cheap: each flush is sha-deduped, so only the growing tail
+  // costs an embed call.
+  interval: 3,
   batchSize: 200,
-  flushAfterHours: 2,
+  // Align the time-based safety net with the 30-min heartbeat cadence so a
+  // quiet sub-threshold tail is never more than ~30 min from being recallable.
+  flushAfterHours: 0.5,
   repairBatchSize: 32,
 };
 
