@@ -39,7 +39,7 @@ type HarnessSubprocess = Subprocess<
   SpawnOptions.Readable
 >;
 
-export type KillCause = "timeout" | "idle" | "aborted" | undefined;
+export type KillCause = "timeout" | "idle" | "aborted" | "policy" | undefined;
 export type HarnessActivity = "model" | "tool" | "productive";
 
 export interface KillCoordinatorOpts {
@@ -68,6 +68,13 @@ export interface KillCoordinator {
   touch(activity?: HarnessActivity): void;
   /** Stop all timers and detach signal listener. Idempotent. */
   dispose(): Promise<void>;
+  /**
+   * Kill the process group immediately as a POLICY violation (terminal
+   * tripwire fired). Same SIGTERM → grace → SIGKILL path as the timers;
+   * idempotent and a no-op once a cause is set or the coordinator is
+   * disposed.
+   */
+  terminate(): void;
   /** Why the process was killed, if it was. undefined = exited normally. */
   killCause(): KillCause;
 }
@@ -126,6 +133,9 @@ export function createKillCoordinator(
         opts.idleTimeoutMs,
       );
     },
+    terminate(): void {
+      triggerKill("policy");
+    },
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
@@ -148,6 +158,9 @@ export function createKillCoordinator(
  *   - "timeout"  → recoverable (orchestrator advances to next harness)
  *   - "idle"     → recoverable (same — wedged subprocess, try a different one)
  *   - "aborted"  → non-recoverable (user said /stop and meant it)
+ *   - "policy"   → recoverable (terminal tripwire; normally unreachable here
+ *     because the tripwire's own error chunk was already yielded and the
+ *     generator returned — this is the belt-and-suspenders fallback)
  */
 export function killCauseToErrorChunk(
   cause: KillCause,
@@ -173,6 +186,13 @@ export function killCauseToErrorChunk(
   }
   if (cause === "aborted") {
     return { type: "error", error: "stopped", recoverable: false };
+  }
+  if (cause === "policy") {
+    return {
+      type: "error",
+      error: `${harnessId} killed by policy tripwire`,
+      recoverable: true,
+    };
   }
   return undefined;
 }
@@ -308,6 +328,11 @@ export async function* runHarnessProcess(
   let buffer = "";
   let finalText = "";
   let captured: Record<string, unknown> | undefined;
+  // Set when a parser returns a terminal policy error (e.g. the subagent
+  // tripwire). The error chunk is yielded, the subprocess is killed NOW,
+  // and every line after it — same batch or later — is dropped: nothing a
+  // process says after violating policy may reach the user.
+  let terminalError: HarnessChunk | undefined;
   const decoder = new TextDecoder();
 
   // Translate one parsed line, feed the idle timer, fold text/done. Yields the
@@ -316,6 +341,12 @@ export async function* runHarnessProcess(
   function* consume(parsed: unknown): Generator<HarnessChunk> {
     const c = spec.parseEvent(parsed);
     if (!c) return;
+    if (c.type === "error" && c.terminal) {
+      terminalError = c;
+      killer.terminate(); // SIGTERM → grace → SIGKILL the whole group
+      yield c;
+      return;
+    }
     killer.touch(spec.activity(parsed, c));
     if (c.type === "text") finalText += c.text;
     if (c.type === "done") {
@@ -351,9 +382,11 @@ export async function* runHarnessProcess(
           continue;
         }
         yield* consume(parsed);
+        if (terminalError) break; // policy violation: drop the rest of the batch
       }
+      if (terminalError) break; // ...and stop reading stdout entirely
     }
-    if (spec.flushTail) {
+    if (spec.flushTail && !terminalError) {
       buffer += decoder.decode();
       const tail = buffer.trim();
       if (tail) {
@@ -368,8 +401,15 @@ export async function* runHarnessProcess(
     await killer.dispose();
   }
 
-  // Priority order matches the old hand-written loops: a harness-specific
-  // early provider error wins over kill-cause, which wins over exit code.
+  // Priority order matches the old hand-written loops: a terminal policy
+  // error wins over everything (its chunk was already yielded mid-loop; the
+  // orchestrator has it, so just stop), then a harness-specific early
+  // provider error wins over kill-cause, which wins over exit code.
+  if (terminalError) {
+    await proc.exited;
+    return;
+  }
+
   const early = spec.earlyError?.();
   if (early) {
     await proc.exited;

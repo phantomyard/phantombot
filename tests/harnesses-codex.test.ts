@@ -309,6 +309,7 @@ describe("parseCodexEvent subagent tripwire", () => {
     expect(chunk?.type).toBe("error");
     if (chunk?.type === "error") {
       expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
       expect(chunk.error).toContain("subagent activity");
     }
   });
@@ -319,7 +320,10 @@ describe("parseCodexEvent subagent tripwire", () => {
       item: { type: "tool_call", name: "spawn_agent" },
     });
     expect(chunk?.type).toBe("error");
-    if (chunk?.type === "error") expect(chunk.recoverable).toBe(true);
+    if (chunk?.type === "error") {
+      expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
+    }
   });
 
   test("a completed sub_agent_activity item is caught too", () => {

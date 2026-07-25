@@ -518,8 +518,9 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
   // policy (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in the env + Task in
   // --disallowedTools), so the CLI should never emit subagent activity. If a
   // future CLI version routes around those guards, any envelope carrying
-  // subagent lineage becomes a RECOVERABLE error: the orchestrator kills
-  // this harness and falls through to the next one instead of letting an
+  // subagent lineage becomes a RECOVERABLE, TERMINAL error: the runner kills
+  // the subprocess immediately and suppresses every line after this one, and
+  // the orchestrator falls through to the next harness instead of letting an
   // unmonitored agent run loose. Fail-safe direction, same as the API-error
   // gate below.
   if (isSubagentActivity(obj)) {
@@ -527,6 +528,7 @@ export function parseStreamJson(parsed: unknown): HarnessChunk | undefined {
       type: "error",
       error: "claude emitted subagent activity (disabled by phantombot policy)",
       recoverable: true,
+      terminal: true,
     };
   }
 

@@ -723,6 +723,7 @@ describe("parseStreamJson subagent tripwire", () => {
       type: "error",
       error: "claude emitted subagent activity (disabled by phantombot policy)",
       recoverable: true,
+      terminal: true,
     });
   });
 
@@ -734,7 +735,10 @@ describe("parseStreamJson subagent tripwire", () => {
       },
     });
     expect(chunk?.type).toBe("error");
-    if (chunk?.type === "error") expect(chunk.recoverable).toBe(true);
+    if (chunk?.type === "error") {
+      expect(chunk.recoverable).toBe(true);
+      expect(chunk.terminal).toBe(true);
+    }
   });
 });
 

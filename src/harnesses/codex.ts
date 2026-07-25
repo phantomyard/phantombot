@@ -204,8 +204,9 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
   // Subagent tripwire. multi_agent is disabled via -c flags on every spawn,
   // so codex should never emit collab/sub-agent items. If a future version
   // routes around that (or a config layer we don't control re-enables it),
-  // the turn becomes a RECOVERABLE error: the orchestrator kills this
-  // harness and falls through instead of letting an unmonitored agent run.
+  // the turn becomes a RECOVERABLE, TERMINAL error: the runner kills the
+  // subprocess immediately and suppresses every line after this one, and the
+  // orchestrator falls through instead of letting an unmonitored agent run.
   if (type === "item.started" || type === "item.completed") {
     const item = obj.item;
     if (typeof item === "object" && item !== null) {
@@ -215,6 +216,7 @@ export function parseCodexEvent(parsed: unknown): HarnessChunk | undefined {
           type: "error",
           error: `codex emitted subagent activity (disabled by phantombot policy): ${String(it.type ?? it.name)}`,
           recoverable: true,
+          terminal: true,
         };
       }
     }
