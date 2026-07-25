@@ -66,6 +66,49 @@ export interface AppendCaptureInput {
   tags: string[];
 }
 
+/**
+ * A durable fact — a long-lived statement about the principal / their world,
+ * extracted at the eviction cliff (orchestrator/durableFacts.ts) from a turn
+ * that is about to scroll out of the live window, and injected back into the
+ * system prompt on later turns via a plain SQL read (no LLM on the read path).
+ *
+ * Scoped by (persona, conversation), like turns. De-duplicated within that
+ * scope by `factNorm` (normalized text) so the same fact restated across many
+ * turns is one row whose `confidence` is the best seen and whose `lastSeenAt`
+ * tracks recency.
+ */
+export interface DurableFact {
+  id: number;
+  persona: string;
+  conversation: string;
+  /** Verbatim fact text as extracted. */
+  fact: string;
+  /** Extractor confidence, 0..1. Higher = more likely durable/true. */
+  confidence: number;
+  /** The turns.id this fact aged out of when extracted (best-effort ref). */
+  sourceTurnId?: number;
+  createdAt: Date;
+  /** Recency: bumped every time the same normalized fact is re-extracted. */
+  lastSeenAt: Date;
+}
+
+export interface UpsertDurableFactInput {
+  persona: string;
+  conversation: string;
+  fact: string;
+  /** 0..1; clamped on write. Defaults to 0.5 when omitted. */
+  confidence?: number;
+  /** turns.id the fact was extracted from, for provenance. */
+  sourceTurnId?: number;
+}
+
+export interface TopDurableFactsOptions {
+  /** Max facts to return. */
+  limit: number;
+  /** Only return facts at or above this confidence. Default 0 (no floor). */
+  minConfidence?: number;
+}
+
 export interface MemoryStore {
   /** Persist one turn. Auto-stamps created_at to "now" UTC. */
   appendTurn(turn: AppendTurnInput): Promise<void>;
@@ -133,6 +176,56 @@ export interface MemoryStore {
    * quarantined rows.
    */
   purgeQuarantined(persona: string, conversation: string): Promise<number>;
+  /**
+   * Full turn rows that have aged OUT of the most-recent `windowSize` turns
+   * (the live-history cliff) AND have id > `afterId`, oldest first. This is
+   * the newly-evicted, not-yet-extracted slice the durable-fact extractor
+   * pulls at the cliff. `afterId` is the extractor's cursor
+   * (see durableFactCursor); pass 0 to scan from the beginning. Returns at
+   * most `limit` rows.
+   */
+  turnsEvictedFromWindow(
+    persona: string,
+    conversation: string,
+    windowSize: number,
+    afterId: number,
+    limit: number,
+  ): Promise<Turn[]>;
+  /**
+   * Insert a durable fact, or — when the same normalized text already exists
+   * for this (persona, conversation) — bump its recency (`last_seen_at`),
+   * keep the higher `confidence`, and refresh its source ref. De-dupe key is
+   * the normalized fact text, so "He uses Deye inverters." and "he uses deye
+   * inverters" collapse to one row.
+   */
+  upsertDurableFact(input: UpsertDurableFactInput): Promise<void>;
+  /**
+   * Top durable facts for (persona, conversation), ranked by confidence then
+   * recency (`last_seen_at`). PURE SQL — the per-turn read path that injects
+   * facts into the prompt; it MUST never invoke an LLM. Empty when there are
+   * no facts at/above `minConfidence`.
+   */
+  topDurableFacts(
+    persona: string,
+    conversation: string,
+    opts: TopDurableFactsOptions,
+  ): Promise<DurableFact[]>;
+  /** Count durable facts for (persona, conversation). For tests / diagnostics. */
+  countDurableFacts(persona: string, conversation: string): Promise<number>;
+  /**
+   * The durable-fact extractor's cursor for (persona, conversation): the
+   * highest turns.id already considered for extraction. 0 when unset. Mirrors
+   * the turn-index cursor — it lets the extractor skip turns it has already
+   * seen (including turns that produced no facts), so a quiet turn isn't
+   * re-extracted forever.
+   */
+  durableFactCursor(persona: string, conversation: string): Promise<number>;
+  /** Advance the durable-fact extractor's cursor. Upserts the row. */
+  setDurableFactCursor(
+    persona: string,
+    conversation: string,
+    turnId: number,
+  ): Promise<void>;
   /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
   appendCapture(input: AppendCaptureInput): Promise<void>;
   /**
@@ -197,6 +290,35 @@ CREATE TABLE IF NOT EXISTS capture_log (
 );
 CREATE INDEX IF NOT EXISTS idx_capture_persona_conv_time
   ON capture_log (persona, conversation, created_at);
+
+-- Durable facts extracted at the eviction cliff. De-duplicated within a
+-- (persona, conversation) by fact_norm (normalized text); confidence is the
+-- best seen, last_seen_at tracks recency. Read back per-turn with a plain
+-- SELECT — no LLM on the read path.
+CREATE TABLE IF NOT EXISTS durable_facts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  persona        TEXT NOT NULL,
+  conversation   TEXT NOT NULL,
+  fact           TEXT NOT NULL,
+  fact_norm      TEXT NOT NULL,
+  confidence     REAL NOT NULL DEFAULT 0.5,
+  source_turn_id INTEGER,
+  created_at     TEXT NOT NULL,
+  last_seen_at   TEXT NOT NULL,
+  UNIQUE (persona, conversation, fact_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_durable_facts_rank
+  ON durable_facts (persona, conversation, confidence DESC, last_seen_at DESC);
+
+-- Per-conversation cursor for the durable-fact extractor: the highest
+-- turns.id already considered, so already-seen turns aren't re-extracted.
+CREATE TABLE IF NOT EXISTS durable_fact_cursor (
+  persona                TEXT NOT NULL,
+  conversation           TEXT NOT NULL,
+  last_extracted_turn_id INTEGER NOT NULL DEFAULT 0,
+  updated_at             TEXT NOT NULL,
+  PRIMARY KEY (persona, conversation)
+);
 `;
 
 interface RawDisplayRow {
@@ -223,6 +345,12 @@ class SqliteMemoryStore implements MemoryStore {
   private listConversationsStmt;
   private countTurnsSinceStmt;
   private countCapturesSinceStmt;
+  private turnsEvictedStmt;
+  private upsertDurableFactStmt;
+  private topDurableFactsStmt;
+  private countDurableFactsStmt;
+  private durableFactCursorStmt;
+  private setDurableFactCursorStmt;
   private appendPairTxn;
   private closed = false;
 
@@ -315,6 +443,57 @@ class SqliteMemoryStore implements MemoryStore {
     this.countCapturesSinceStmt = db.prepare(
       `SELECT COUNT(*) AS n FROM capture_log
        WHERE persona = ? AND created_at >= ?`,
+    );
+    // Turns that have fallen OUT of the most-recent `windowSize` rows (the
+    // subquery is the live window) and sit after the extractor's cursor.
+    // Oldest-first so the cursor advances monotonically.
+    this.turnsEvictedStmt = db.prepare(
+      `SELECT id, persona, conversation, role, text, created_at, embeddable
+       FROM turns
+       WHERE persona = ? AND conversation = ? AND id > ?
+         AND id NOT IN (
+           SELECT id FROM turns
+           WHERE persona = ? AND conversation = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?
+         )
+       ORDER BY id ASC
+       LIMIT ?`,
+    );
+    // Upsert on the (persona, conversation, fact_norm) de-dupe key: a restated
+    // fact keeps the higher confidence and refreshes recency + provenance.
+    this.upsertDurableFactStmt = db.prepare(
+      `INSERT INTO durable_facts
+         (persona, conversation, fact, fact_norm, confidence, source_turn_id, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (persona, conversation, fact_norm) DO UPDATE SET
+         confidence     = MAX(confidence, excluded.confidence),
+         last_seen_at   = excluded.last_seen_at,
+         source_turn_id = excluded.source_turn_id`,
+    );
+    this.topDurableFactsStmt = db.prepare(
+      `SELECT id, persona, conversation, fact, confidence, source_turn_id,
+              created_at, last_seen_at
+       FROM durable_facts
+       WHERE persona = ? AND conversation = ? AND confidence >= ?
+       ORDER BY confidence DESC, last_seen_at DESC, id DESC
+       LIMIT ?`,
+    );
+    this.countDurableFactsStmt = db.prepare(
+      `SELECT COUNT(*) AS n FROM durable_facts
+       WHERE persona = ? AND conversation = ?`,
+    );
+    this.durableFactCursorStmt = db.prepare(
+      `SELECT last_extracted_turn_id AS id FROM durable_fact_cursor
+       WHERE persona = ? AND conversation = ?`,
+    );
+    this.setDurableFactCursorStmt = db.prepare(
+      `INSERT INTO durable_fact_cursor
+         (persona, conversation, last_extracted_turn_id, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (persona, conversation) DO UPDATE SET
+         last_extracted_turn_id = excluded.last_extracted_turn_id,
+         updated_at             = excluded.updated_at`,
     );
     // Atomic user+assistant pair insert. Both rows share the same
     // created_at; ordering tiebreaks on the autoincrement id, so the
@@ -429,6 +608,86 @@ class SqliteMemoryStore implements MemoryStore {
     return rows.map((r) => r.conversation);
   }
 
+  async turnsEvictedFromWindow(
+    persona: string,
+    conversation: string,
+    windowSize: number,
+    afterId: number,
+    limit: number,
+  ): Promise<Turn[]> {
+    const rows = this.turnsEvictedStmt.all(
+      persona,
+      conversation,
+      Math.max(0, Math.floor(afterId)),
+      persona,
+      conversation,
+      Math.max(0, Math.floor(windowSize)),
+      Math.max(1, Math.floor(limit)),
+    ) as RawDisplayRow[];
+    return mapDisplayRows(rows);
+  }
+
+  async upsertDurableFact(input: UpsertDurableFactInput): Promise<void> {
+    const now = new Date().toISOString();
+    this.upsertDurableFactStmt.run(
+      input.persona,
+      input.conversation,
+      input.fact,
+      normalizeFact(input.fact),
+      clampConfidence(input.confidence),
+      input.sourceTurnId ?? null,
+      now,
+      now,
+    );
+  }
+
+  async topDurableFacts(
+    persona: string,
+    conversation: string,
+    opts: TopDurableFactsOptions,
+  ): Promise<DurableFact[]> {
+    const rows = this.topDurableFactsStmt.all(
+      persona,
+      conversation,
+      opts.minConfidence ?? 0,
+      Math.max(1, Math.floor(opts.limit)),
+    ) as RawDurableFactRow[];
+    return rows.map(mapDurableFactRow);
+  }
+
+  async countDurableFacts(
+    persona: string,
+    conversation: string,
+  ): Promise<number> {
+    const row = this.countDurableFactsStmt.get(persona, conversation) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  async durableFactCursor(
+    persona: string,
+    conversation: string,
+  ): Promise<number> {
+    const row = this.durableFactCursorStmt.get(persona, conversation) as
+      | { id: number }
+      | undefined;
+    return row?.id ?? 0;
+  }
+
+  async setDurableFactCursor(
+    persona: string,
+    conversation: string,
+    turnId: number,
+  ): Promise<void> {
+    this.setDurableFactCursorStmt.run(
+      persona,
+      conversation,
+      Math.max(0, Math.floor(turnId)),
+      new Date().toISOString(),
+    );
+  }
+
   async appendCapture(input: AppendCaptureInput): Promise<void> {
     this.appendCaptureStmt.run(
       input.persona,
@@ -510,6 +769,52 @@ class SqliteMemoryStore implements MemoryStore {
 /** Normalize the optional embeddable flag to a SQLite int (default 1 = true). */
 function embeddableInt(embeddable: boolean | undefined): number {
   return embeddable === false ? 0 : 1;
+}
+
+/**
+ * Normalized form of a fact used as the de-dupe key: lowercased, whitespace
+ * collapsed, surrounding quotes and trailing sentence punctuation stripped.
+ * "He uses Deye inverters." and "  he uses  deye inverters  " collapse to the
+ * same key. Exported for the extractor + tests.
+ */
+export function normalizeFact(fact: string): string {
+  return fact
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[.,;:!?]+$/g, "")
+    .trim();
+}
+
+/** Clamp a confidence into 0..1, defaulting to 0.5 for undefined/NaN. */
+function clampConfidence(c: number | undefined): number {
+  if (c === undefined || !Number.isFinite(c)) return 0.5;
+  return Math.max(0, Math.min(1, c));
+}
+
+interface RawDurableFactRow {
+  id: number;
+  persona: string;
+  conversation: string;
+  fact: string;
+  confidence: number;
+  source_turn_id: number | null;
+  created_at: string;
+  last_seen_at: string;
+}
+
+function mapDurableFactRow(r: RawDurableFactRow): DurableFact {
+  return {
+    id: r.id,
+    persona: r.persona,
+    conversation: r.conversation,
+    fact: r.fact,
+    confidence: r.confidence,
+    sourceTurnId: r.source_turn_id ?? undefined,
+    createdAt: new Date(r.created_at),
+    lastSeenAt: new Date(r.last_seen_at),
+  };
 }
 
 function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {

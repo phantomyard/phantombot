@@ -38,6 +38,10 @@ import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 import { makeRetriever } from "../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
+import {
+  makeDurableFactPuller,
+  makeFactExtractor,
+} from "../orchestrator/durableFacts.ts";
 import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 
 export interface RunAskInput {
@@ -160,6 +164,23 @@ export async function runAsk(input: RunAskInput): Promise<number> {
         : undefined,
       indexTurns: input.history
         ? makeTurnIndexer(config, persona, conversation, memory)
+        : undefined,
+      // Durable facts — same conversational-only gating as retrieval: a
+      // scripted one-shot ask has no window to age out of and no prompt to
+      // enrich. READ half (pure SQL pull) + WRITE half (extract-at-cliff,
+      // out of band on the primary harness).
+      pullFacts: input.history
+        ? makeDurableFactPuller(config, persona, conversation, memory)
+        : undefined,
+      extractFacts: input.history
+        ? makeFactExtractor(
+            config,
+            persona,
+            conversation,
+            memory,
+            harnesses,
+            agentDir,
+          )
         : undefined,
       // Threat screen. `ask` is always untrusted, so every turn is judged
       // by the tool-less classifier (running on the chain's claude harness)

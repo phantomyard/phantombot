@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 import {
+  DEFAULT_DURABLE_FACTS,
   DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
   DEFAULT_TELEGRAM_STREAMING,
@@ -49,6 +50,10 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_REPAIR_BATCH_SIZE",
+  "PHANTOMBOT_DURABLE_FACTS_ENABLED",
+  "PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED",
+  "PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE",
+  "PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN",
   "PHANTOMBOT_STATE",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
@@ -125,6 +130,19 @@ describe("loadConfig — defaults (no file)", () => {
     // Fresh / not-yet-configured install (no config.toml on disk) NARRATES —
     // the standing default that keeps the agent anchored on long runs.
     expect(c.chattiness).toBe(true);
+  });
+
+  test("durable-facts defaults are pinned (drift guard)", async () => {
+    const c = await loadConfig();
+    // Extract-at-cliff + inject-every-prompt ships ON by default so recall
+    // works out of the box; the read path is pure SQL, so it's cheap per turn.
+    expect(c.durableFacts).toEqual(DEFAULT_DURABLE_FACTS);
+    expect(c.durableFacts).toEqual({
+      enabled: true,
+      maxInjected: 8,
+      minConfidence: 0.5,
+      maxExtractPerTurn: 4,
+    });
   });
 
   test("XDG paths resolve to ~/.config and ~/.local/share by default", async () => {
@@ -458,6 +476,48 @@ voice_max_sentences = 2
       bubbleDelayMs: 100,
       voiceMaxSentences: 4,
     });
+  });
+
+  test("durable-facts env vars override TOML; min_confidence stays fractional", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[durable_facts]
+enabled = true
+max_injected = 8
+min_confidence = 0.5
+max_extract_per_turn = 4
+`,
+      "utf8",
+    );
+    process.env.PHANTOMBOT_DURABLE_FACTS_ENABLED = "false";
+    process.env.PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED = "12";
+    // Regression guard: parsed as a float, NOT floored to 0 (the bug PR #319
+    // hit on flush_after_hours). 0.35 must survive as 0.35.
+    process.env.PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE = "0.35";
+    process.env.PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN = "6";
+    const c = await loadConfig();
+    expect(c.durableFacts).toEqual({
+      enabled: false,
+      maxInjected: 12,
+      minConfidence: 0.35,
+      maxExtractPerTurn: 6,
+    });
+  });
+
+  test("durable-facts min_confidence from TOML survives as a float", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[durable_facts]
+min_confidence = 0.65
+`,
+      "utf8",
+    );
+    const c = await loadConfig();
+    expect(c.durableFacts?.minConfidence).toBeCloseTo(0.65);
   });
 
   test("PHANTOMBOT_CONFIG overrides the config file path", async () => {

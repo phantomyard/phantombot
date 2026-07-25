@@ -31,6 +31,10 @@ import { resolveNarrationEnabled } from "../../lib/chattiness.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
+import {
+  makeDurableFactPuller,
+  makeFactExtractor,
+} from "../../orchestrator/durableFacts.ts";
 import { makeScreener } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
 import {
@@ -888,6 +892,22 @@ export async function runPhantomchatServer(
           input.persona,
           conversationKey,
           input.memory,
+        ),
+        // Durable facts — READ half (pure SQL pull, no model call) + WRITE
+        // half (extract-at-cliff, out of band on the primary harness).
+        pullFacts: makeDurableFactPuller(
+          input.config,
+          input.persona,
+          conversationKey,
+          input.memory,
+        ),
+        extractFacts: makeFactExtractor(
+          input.config,
+          input.persona,
+          conversationKey,
+          input.memory,
+          harnesses,
+          input.agentDir,
         ),
         // Reuse Telegram's short-reply / plan-then-confirm guidance — the user
         // is on a phone-style chat client here too. Stack the voice overlay

@@ -51,6 +51,10 @@ import { runTurn } from "../../orchestrator/turn.ts";
 import { generateRecoveryReply } from "../../orchestrator/recovery.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
+import {
+  makeDurableFactPuller,
+  makeFactExtractor,
+} from "../../orchestrator/durableFacts.ts";
 import { makeScreener } from "../../orchestrator/screen.ts";
 import {
   type ActiveTurnHandle,
@@ -1200,6 +1204,25 @@ async function processChatMessage(
         input.persona,
         conversationKey,
         input.memory,
+      ),
+      // Durable facts — READ half: plain SQL pull of the top standing facts
+      // for this conversation, injected into the prompt. No model call.
+      pullFacts: makeDurableFactPuller(
+        input.config,
+        input.persona,
+        conversationKey,
+        input.memory,
+      ),
+      // Durable facts — WRITE half: extract at the eviction cliff, out of
+      // band. runTurn fires this NOT-awaited after persisting, so the temp-0
+      // extraction pass on the primary harness never delays the reply.
+      extractFacts: makeFactExtractor(
+        input.config,
+        input.persona,
+        conversationKey,
+        input.memory,
+        harnesses,
+        input.agentDir,
       ),
       // Channel-layer prompt suffix:
       //   - Always: TELEGRAM_REPLY_INSTRUCTION — short conversational

@@ -227,6 +227,40 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   graphExpansion: DEFAULT_GRAPH_EXPANSION,
 };
 
+/**
+ * Durable-facts settings (PhantomOps-style, adapted). Two halves:
+ *
+ *   WRITE (extract-at-cliff): when a turn ages out of the ~30-turn live
+ *   window, an out-of-band temp-0 pass on the PRIMARY harness pulls durable
+ *   facts out of it BEFORE it is lost, and stores them in the `durable_facts`
+ *   table. Non-blocking — it never delays the interactive reply.
+ *
+ *   READ (inject-every-prompt): at prompt-assembly time a plain SQL SELECT
+ *   pulls the top facts for this persona/conversation (confidence + recency)
+ *   into the system prompt. No model call on the read path.
+ *
+ * Optional on Config (like retrieval): `loadConfig` always populates it, but
+ * ad-hoc test configs may omit it, in which case the `make*` factories return
+ * undefined and neither half runs.
+ */
+export interface DurableFactsSettings {
+  /** Master switch for BOTH the extract and inject halves. */
+  enabled: boolean;
+  /** Max facts injected into the system prompt per turn (read path). */
+  maxInjected: number;
+  /** Only inject facts at or above this confidence (0..1). */
+  minConfidence: number;
+  /** Max evicted turns extracted from in one out-of-band pass. */
+  maxExtractPerTurn: number;
+}
+
+export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {
+  enabled: true,
+  maxInjected: 8,
+  minConfidence: 0.5,
+  maxExtractPerTurn: 4,
+};
+
 export interface TelegramStreamingSettings {
   /** Coalesce progress narration bubbles to at most this cadence. */
   narrationFlushMs: number;
@@ -359,6 +393,15 @@ export interface Config {
    */
   retrieval?: RetrievalSettings;
 
+  /**
+   * Durable facts (extract-at-cliff + inject-every-prompt). See
+   * DurableFactsSettings. Optional on the type so ad-hoc Config constructors
+   * needn't spell it out — `loadConfig` ALWAYS populates it. When absent (or
+   * `enabled: false`), `makeFactExtractor`/`makeDurableFactPuller` return
+   * undefined and neither half runs.
+   */
+  durableFacts?: DurableFactsSettings;
+
   voice: import("./lib/voice.ts").VoiceConfig;
 
   /**
@@ -450,6 +493,10 @@ export async function loadConfig(): Promise<Config> {
   const tomlGemini = (tomlEmbeddings.gemini ?? {}) as Record<string, unknown>;
   const tomlRetrieval = (toml.retrieval ?? {}) as Record<string, unknown>;
   const tomlTurnIndexing = (tomlRetrieval.turn_indexing ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const tomlDurableFacts = (toml.durable_facts ?? {}) as Record<
     string,
     unknown
   >;
@@ -583,6 +630,7 @@ export async function loadConfig(): Promise<Config> {
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
+    durableFacts: buildDurableFactsConfig(tomlDurableFacts),
 
     voice: buildVoiceConfig(tomlVoice),
 
@@ -763,6 +811,44 @@ function buildTurnIndexingConfig(
     // 0 disables the repair pass. Capped so one sweep can't fire off an
     // unbounded burst of embedding calls at a provider that may be rate-limiting.
     repairBatchSize: Math.max(0, Math.min(1_000, repairBatchSize)),
+  };
+}
+
+/**
+ * Resolve durable-facts settings. Env wins over TOML wins over defaults, and
+ * values are clamped so a fat-fingered config can't blow the per-turn prompt
+ * budget or the extraction fan-out.
+ */
+function buildDurableFactsConfig(
+  toml: Record<string, unknown>,
+): DurableFactsSettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_DURABLE_FACTS_ENABLED) ??
+    asBool(toml.enabled) ??
+    DEFAULT_DURABLE_FACTS.enabled;
+  const maxInjected =
+    asInt(process.env.PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED) ??
+    asInt(toml.max_injected) ??
+    DEFAULT_DURABLE_FACTS.maxInjected;
+  // Parsed as a float (not asInt): the default (0.5) is fractional and
+  // Math.floor would round it to 0, silently removing the confidence floor.
+  const minConfidence =
+    asNumber(process.env.PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE) ??
+    asNumber(toml.min_confidence) ??
+    DEFAULT_DURABLE_FACTS.minConfidence;
+  const maxExtractPerTurn =
+    asInt(process.env.PHANTOMBOT_DURABLE_FACTS_MAX_EXTRACT_PER_TURN) ??
+    asInt(toml.max_extract_per_turn) ??
+    DEFAULT_DURABLE_FACTS.maxExtractPerTurn;
+  return {
+    enabled,
+    // 0 disables injection; capped so one turn can't stuff the prompt.
+    maxInjected: Math.max(0, Math.min(100, maxInjected)),
+    // A probability floor: clamp to 0..1.
+    minConfidence: Math.max(0, Math.min(1, minConfidence)),
+    // At least 1 evicted turn per pass; capped so a long backfill can't fire
+    // an unbounded burst of harness calls in one out-of-band pass.
+    maxExtractPerTurn: Math.max(1, Math.min(100, maxExtractPerTurn)),
   };
 }
 

@@ -121,6 +121,24 @@ export interface TurnInput {
    */
   indexTurns?: () => Promise<void>;
   /**
+   * Optional per-turn durable-fact pull. When provided, runTurn calls it at
+   * prompt-assembly time (alongside `retrieve`) and injects whatever it
+   * returns into the "# Durable facts" prompt slot. This is the READ half of
+   * the durable-facts feature and is contractually PURE SQL — it must NEVER
+   * invoke an LLM (see orchestrator/durableFacts.ts#pullDurableFacts). Built
+   * by `makeDurableFactPuller`; omitted by system turns (tick, nightly).
+   * Contracted not to throw; runTurn guards defensively regardless.
+   */
+  pullFacts?: (signal?: AbortSignal) => Promise<string | undefined>;
+  /**
+   * Optional out-of-band durable-fact EXTRACTION hook — the WRITE half. Fired
+   * (NOT awaited) after a successful turn is persisted, so its temp-0 pass on
+   * the primary harness never delays the interactive reply. `false` (or
+   * undefined) skips it; a fn runs it. A throw is swallowed — a failing
+   * extraction must never break the turn. Built by `makeFactExtractor`.
+   */
+  extractFacts?: false | (() => Promise<void>);
+  /**
    * Security-perimeter provenance bit. True ONLY when an authenticated
    * allowed principal issued this turn (the Telegram channel sets it
    * after the allowed-user check passes). Defaults false/undefined for
@@ -217,6 +235,20 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     }
   }
 
+  // Durable facts: a plain SQL pull of the top standing facts for this
+  // persona/conversation, injected into the "# Durable facts" slot. NO LLM on
+  // this path (that's the whole point — it runs on every turn). Belt-and-
+  // suspenders try/catch: pullFacts already swallows its own failures, but a
+  // turn must never die on the fact read.
+  let durableFacts: string | undefined;
+  if (input.pullFacts) {
+    try {
+      durableFacts = await input.pullFacts(input.signal);
+    } catch {
+      durableFacts = undefined;
+    }
+  }
+
   const baseSystemPrompt = buildSystemPrompt(
     persona,
     {
@@ -226,6 +258,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       trusted: input.trusted === true,
     },
     retrievedMemory,
+    durableFacts,
   );
   // Channel-layer overlays in append order:
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's
@@ -319,6 +352,22 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       } catch {
         // Derived indexing must never turn a successful reply into an error.
       }
+    }
+
+    // Durable-fact extraction at the eviction cliff — the WRITE half. Fired
+    // OUT OF BAND: unlike indexTurns (a cheap embed we await), extraction runs
+    // a full model call on the primary harness, so awaiting it would delay the
+    // interactive turn's completion. We deliberately do NOT await — the reply
+    // is already fully streamed by now; extraction catches up in the
+    // background. A throw is swallowed so a failing extraction can never break
+    // the turn. `false`/undefined skips it entirely (the test seam).
+    if (input.extractFacts) {
+      const extract = input.extractFacts;
+      void Promise.resolve()
+        .then(() => extract())
+        .catch(() => {
+          // Out-of-band extraction must never surface to the user.
+        });
     }
   }
 }

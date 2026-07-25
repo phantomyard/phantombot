@@ -30,6 +30,7 @@ export function buildSystemPrompt(
   persona: PersonaFiles,
   channelCtx: ChannelContext,
   retrievedMemory?: string,
+  durableFacts?: string,
 ): string {
   const sections: string[] = [];
 
@@ -80,6 +81,15 @@ export function buildSystemPrompt(
       ? SECURITY_PERIMETER_TRUSTED_SECTION
       : SECURITY_PERIMETER_UNTRUSTED_SECTION,
   );
+
+  // Durable facts established earlier in THIS conversation, pulled by a plain
+  // SQL read (no model call) at prompt-assembly time. Sits just above the
+  // embedding-based retrieved context: these are the standing, de-duplicated
+  // facts extracted at the eviction cliff, so they anchor the turn even after
+  // the originating messages have scrolled out of the verbatim window.
+  if (durableFacts && durableFacts.trim().length > 0) {
+    sections.push("# Durable facts\n\n" + durableFacts.trim());
+  }
 
   if (retrievedMemory && retrievedMemory.trim().length > 0) {
     sections.push("# Retrieved context for this turn\n\n" + retrievedMemory.trim());
