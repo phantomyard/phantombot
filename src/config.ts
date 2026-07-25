@@ -744,9 +744,11 @@ function buildTurnIndexingConfig(
     asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE) ??
     asInt(tomlTurnIndexing.batch_size) ??
     DEFAULT_TURN_INDEXING.batchSize;
+  // Parsed as a float (not asInt): the default is fractional (0.5h) and
+  // Math.floor would round 0.5 down to 0, silently disabling the flush.
   const flushAfterHours =
-    asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS) ??
-    asInt(tomlTurnIndexing.flush_after_hours) ??
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS) ??
+    asNumber(tomlTurnIndexing.flush_after_hours) ??
     DEFAULT_TURN_INDEXING.flushAfterHours;
   const repairBatchSize =
     asInt(process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_REPAIR_BATCH_SIZE) ??
@@ -756,7 +758,7 @@ function buildTurnIndexingConfig(
     enabled,
     interval: Math.max(1, Math.min(10_000, interval)),
     batchSize: Math.max(1, Math.min(5_000, batchSize)),
-    // 0 disables the time-based flush; otherwise clamp to a sane 1h..1yr.
+    // 0 disables the time-based flush; otherwise clamp to a sane 0.5h..1yr.
     flushAfterHours: Math.max(0, Math.min(8_760, flushAfterHours)),
     // 0 disables the repair pass. Capped so one sweep can't fire off an
     // unbounded burst of embedding calls at a provider that may be rate-limiting.

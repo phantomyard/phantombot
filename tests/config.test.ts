@@ -728,6 +728,33 @@ repair_batch_size = 8
     });
   });
 
+  test("flush_after_hours parses a fractional value (TOML and env)", async () => {
+    // Regression: flush_after_hours went through asInt (Math.floor), so the
+    // shipped fractional default 0.5 was silently floored to 0 — disabling the
+    // time-based flush. It must parse as a float now.
+    await writeToml(`
+[retrieval.turn_indexing]
+flush_after_hours = 0.5
+`);
+    expect((await loadConfig()).retrieval!.turnIndexing.flushAfterHours).toBe(
+      0.5,
+    );
+
+    process.env.PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS = "0.5";
+    expect((await loadConfig()).retrieval!.turnIndexing.flushAfterHours).toBe(
+      0.5,
+    );
+  });
+
+  test("turn-indexing defaults are the shipped fast-recall values", async () => {
+    // Guards the two levers this feature ships against accidental drift.
+    expect(DEFAULT_TURN_INDEXING.interval).toBe(3);
+    expect(DEFAULT_TURN_INDEXING.flushAfterHours).toBe(0.5);
+    const c = await loadConfig();
+    expect(c.retrieval!.turnIndexing.interval).toBe(3);
+    expect(c.retrieval!.turnIndexing.flushAfterHours).toBe(0.5);
+  });
+
   test("limit is clamped to 1..50", async () => {
     process.env.PHANTOMBOT_RETRIEVAL_LIMIT = "999";
     expect((await loadConfig()).retrieval!.limit).toBe(50);

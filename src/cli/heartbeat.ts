@@ -98,8 +98,8 @@ export async function runHeartbeatCli(
 
   // Drain sub-threshold conversation turn tails on the heartbeat's regular
   // cadence. The live service only flushes a conversation when a new message
-  // crosses the 20-turn batch, so a quiet conversation stuck below it (e.g.
-  // 19 turns) would stay unembedded for days — recent chat goes invisible to
+  // crosses the turn-index batch, so a quiet conversation stuck below it
+  // would stay unembedded for days — recent chat goes invisible to
   // recall. This time-based sweep (flushAfterHours) closes that gap for every
   // conversation, mechanically, with no LLM call. Wrapped in try/catch so a
   // turn-flush hiccup never breaks the primary heartbeat work.

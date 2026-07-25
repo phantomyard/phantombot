@@ -236,7 +236,7 @@ export interface RunIndexInputV2 extends RunIndexInput {
    * Force-flush unindexed conversation turn tails across ALL conversations
    * instead of (re)building the notes/KB index. This is the operator
    * backfill path for the time-based turn flush — drains tails that are
-   * below the 20-turn batch and haven't aged into the heartbeat window yet.
+   * below the turn-index batch and haven't aged into the heartbeat window yet.
    */
   flushTurns?: boolean;
 }
