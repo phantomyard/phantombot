@@ -52,6 +52,23 @@ export interface RunHeartbeatCliInput {
    * systemd bus and only run if available.
    */
   healSystemd?: false | (() => Promise<void>);
+  /**
+   * Test seam for the fresh-note embed pass. Pass `false` to skip it
+   * entirely (keeps the real Gemini embedder out of the path — this is
+   * effectively what a `provider: "none"` config already does, but the
+   * flag is explicit). Pass a function to substitute a fake that returns
+   * the embed counts the pass should have produced (or `null` to model
+   * "no embedder configured"). Production passes undefined → we build the
+   * real embedder from config and run runEmbedJob against the note index.
+   */
+  embedNotes?: false | (() => Promise<EmbedNotesResult | null>);
+}
+
+/** Outcome of the heartbeat's incremental note-embed pass. */
+export interface EmbedNotesResult {
+  embedded: number;
+  skipped: number;
+  failed: number;
 }
 
 export async function runHeartbeatCli(
@@ -121,28 +138,24 @@ export async function runHeartbeatCli(
   // model/dim changes, drift repair). Wrapped in try/catch: an embed hiccup
   // must never break the primary heartbeat work.
   let noteEmbedLine = "";
-  try {
-    const embedder = defaultEmbedder(config);
-    if (embedder) {
-      const ix = await MemoryIndex.open(indexPath(persona));
-      try {
-        const e = await runEmbedJob({ personaDir: dir, index: ix, embedder });
-        if (e.embedded > 0 || e.failed > 0) {
-          noteEmbedLine = `, embedded ${e.embedded}`;
-          log.info("heartbeat: embedded fresh notes", {
-            embedded: e.embedded,
-            skipped: e.skipped,
-            failed: e.failed,
-          });
-        }
-      } finally {
-        ix.close();
+  if (input.embedNotes !== false) {
+    try {
+      const e = input.embedNotes
+        ? await input.embedNotes()
+        : await defaultEmbedNotes(config, dir, persona);
+      if (e && (e.embedded > 0 || e.failed > 0)) {
+        noteEmbedLine = `, embedded ${e.embedded}`;
+        log.info("heartbeat: embedded fresh notes", {
+          embedded: e.embedded,
+          skipped: e.skipped,
+          failed: e.failed,
+        });
       }
+    } catch (e) {
+      log.warn("heartbeat: note-embed pass threw unexpectedly", {
+        error: (e as Error).message,
+      });
     }
-  } catch (e) {
-    log.warn("heartbeat: note-embed pass threw unexpectedly", {
-      error: (e as Error).message,
-    });
   }
 
   // Self-heal the service-manager units on the heartbeat's regular cadence.
@@ -181,6 +194,29 @@ export async function runHeartbeatCli(
       `indexed ${r.indexedFiles}${noteEmbedLine}${updateLine}\n`,
   );
   return 0;
+}
+
+/**
+ * Production note-embed pass: build the configured embedder and run an
+ * incremental embed job over the note index. Returns `null` when no
+ * embedder is configured (e.g. `embeddings.provider: "none"` or a missing
+ * Gemini key) so the caller prints no embed line. Owns the MemoryIndex
+ * handle it opens and closes it in a finally.
+ */
+async function defaultEmbedNotes(
+  config: Config,
+  dir: string,
+  persona: string,
+): Promise<EmbedNotesResult | null> {
+  const embedder = defaultEmbedder(config);
+  if (!embedder) return null;
+  const ix = await MemoryIndex.open(indexPath(persona));
+  try {
+    const e = await runEmbedJob({ personaDir: dir, index: ix, embedder });
+    return { embedded: e.embedded, skipped: e.skipped, failed: e.failed };
+  } finally {
+    ix.close();
+  }
 }
 
 /**

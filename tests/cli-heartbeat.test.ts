@@ -131,4 +131,95 @@ describe("runHeartbeatCli", () => {
     expect(code).toBe(0);
     expect(out.text).toContain("heartbeat ok");
   });
+
+  test("embedNotes seam result appends the embedded count to the summary", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: async () => ({ embedded: 3, skipped: 7, failed: 0 }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("embedded 3");
+  });
+
+  test("embedNotes seam with nothing to embed prints no embed line", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: async () => ({ embedded: 0, skipped: 12, failed: 0 }),
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("embedded");
+  });
+
+  test("embedNotes returning null (no embedder) prints no embed line", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: async () => null,
+    });
+    expect(code).toBe(0);
+    expect(out.text).not.toContain("embedded");
+  });
+
+  test("embedNotes throwing does not break the heartbeat", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: async () => {
+        throw new Error("gemini exploded");
+      },
+    });
+    // Embed failure is logged but swallowed; primary work still completes.
+    expect(code).toBe(0);
+    expect(out.text).toContain("heartbeat ok");
+  });
+
+  test("embedNotes: false skips the pass and still completes cleanly", async () => {
+    await writeFile(
+      join(workdir, "personas", "phantom", "memory", "decisions.md"),
+      "# Decisions\n",
+    );
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      // `false` short-circuits the pass entirely — the primary heartbeat
+      // work still runs and no embed line is printed.
+      embedNotes: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("heartbeat ok");
+    expect(out.text).not.toContain("embedded");
+  });
 });
