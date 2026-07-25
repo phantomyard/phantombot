@@ -849,7 +849,7 @@ mirrored into `config.toml` under `[harnesses.pi.routing]` and visible to
 ## Model Management (`/model`)
 
 `/model` shows and switches the model every configured harness runs — from
-chat, with no config-file editing. It works across all four supported
+chat, with no config-file editing. It works across all three supported
 harnesses, and writes are **permanent and survive restarts**: every change
 lands in *both* `config.toml` and `~/.env` (env takes precedence at startup,
 so a TOML-only write would be silently ignored on installs where the setup
@@ -864,7 +864,7 @@ harness model config is baked in at process start.
 /model primary <slug>       same, spelled out (Pi primary role)
 /model coding <slug>        set the Pi coding-brain model
 /model image <slug>         set the Pi vision/image model
-/model clear                remove an override (gemini/codex only)
+/model clear                remove an override (codex only)
 ```
 
 Per-harness behavior:
@@ -879,10 +879,9 @@ Per-harness behavior:
   `haiku` aliases (`PHANTOMBOT_CLAUDE_MODEL`). No catalog listing exists, and
   `clear` is refused (there is no default to fall back to) — pick an alias
   explicitly.
-- **Gemini / Codex** — a single model pinned by id
-  (`PHANTOMBOT_GEMINI_MODEL` / `PHANTOMBOT_CODEX_MODEL`). These CLIs expose no
-  model catalog, so `list` is unavailable; `clear` deletes the pin and the
-  env var so the CLI's own default applies again.
+- **Codex** — a single model pinned by id (`PHANTOMBOT_CODEX_MODEL`). The CLI
+  exposes no model catalog, so `list` is unavailable; `clear` deletes the pin
+  and the env var so the CLI's own default applies again.
 
 Model choice is per-harness config, not per-chat — switching brains affects
 every conversation that harness serves. `/status` always shows the result: a
