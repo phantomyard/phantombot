@@ -323,7 +323,7 @@ describe("extractDurableFactsOnEviction", () => {
     // Simulate a hard crash: claim leases the batch, but the process dies before
     // commit OR release. We model that by claiming directly against the store
     // with a long lease and never committing.
-    const leased = await memory.claimEvictedForExtraction(
+    const { token, turns: leased } = await memory.claimEvictedForExtraction(
       PERSONA,
       CONV,
       2, // window → turns 1..4 evicted
@@ -354,6 +354,7 @@ describe("extractDurableFactsOnEviction", () => {
       PERSONA,
       CONV,
       leased.map((t) => t.id),
+      token,
     );
     const healthy = fakeComplete({
       "turn 1": '[{"fact":"Andrew lives in Arnhem","confidence":0.9}]',
@@ -395,6 +396,30 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(again.turnsProcessed).toBe(0);
+  });
+
+  test("a /reset landing mid-extraction does NOT repopulate the wiped conversation", async () => {
+    // Kai's reset-repopulation race (PR #320): the slow, un-transactioned
+    // complete() gives a concurrent /reset a window to wipe the conversation
+    // AFTER the turn was claimed but BEFORE its facts are written. We model the
+    // interleave by wiping the conversation from INSIDE complete(), then
+    // returning a fact. The lease was cleared by the reset, so the token-gated
+    // commit must discard the write — nothing leaks into the fresh conversation.
+    for (let i = 1; i <= 4; i++) await appendTurn(`turn ${i}`); // window 2 → 1..2 evicted
+    const complete: ExtractComplete = async () => {
+      await memory.deleteConversation(PERSONA, CONV);
+      return '[{"fact":"stale pre-reset fact","confidence":0.9}]';
+    };
+    const res = await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete,
+      windowSize: 2,
+    });
+    expect(res.factsWritten).toBe(0);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
   });
 });
 

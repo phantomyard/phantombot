@@ -48,6 +48,27 @@ async function appendTurn(
   });
 }
 
+/**
+ * Claim and return only the leased turns, discarding the ownership token — for
+ * the many assertions that inspect only which turns were claimed. Tests that
+ * exercise commit/release keep the full { token, turns } so they can pass the
+ * token back.
+ */
+async function claimTurns(
+  windowSize: number,
+  limit: number,
+  lease = LEASE,
+): Promise<Awaited<ReturnType<MemoryStore["claimEvictedForExtraction"]>>["turns"]> {
+  const { turns } = await memory.claimEvictedForExtraction(
+    PERSONA,
+    CONV,
+    windowSize,
+    limit,
+    lease,
+  );
+  return turns;
+}
+
 describe("normalizeFact", () => {
   test("lowercases, collapses whitespace, strips quotes + trailing punct", () => {
     expect(normalizeFact("He uses Deye inverters.")).toBe(
@@ -311,28 +332,25 @@ describe("claimEvictedForExtraction (lease-based claim)", () => {
   test("advances the monotonic cursor and leases the batch so the next claim is disjoint", async () => {
     for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`);
     // windowSize 4 evicts 1..6; claim 2 at a time, never committing.
-    const first = await memory.claimEvictedForExtraction(
-      PERSONA,
-      CONV,
-      4,
-      2,
-      LEASE,
-    );
+    const first = await claimTurns(4, 2);
     expect(first.map((t) => t.text)).toEqual(["turn 1", "turn 2"]);
     // Cursor moved past the batch WITHOUT a separate setDurableFactCursor call.
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(first[1]!.id);
 
-    const second = await memory.claimEvictedForExtraction(
-      PERSONA,
-      CONV,
-      4,
-      2,
-      LEASE,
-    );
+    const second = await claimTurns(4, 2);
     expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
     // No overlap: turns 1..2 hold live leases and are excluded from the SELECT.
     const firstIds = new Set(first.map((t) => t.id));
     expect(second.some((t) => firstIds.has(t.id))).toBe(false);
+  });
+
+  test("each claim returns a distinct ownership token", async () => {
+    for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`);
+    const a = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 2, LEASE);
+    const b = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 2, LEASE);
+    expect(a.token).toBeTruthy();
+    expect(b.token).toBeTruthy();
+    expect(a.token).not.toBe(b.token);
   });
 
   test("racing claims get disjoint batches and never double-process a turn", async () => {
@@ -344,33 +362,22 @@ describe("claimEvictedForExtraction (lease-based claim)", () => {
         memory.claimEvictedForExtraction(PERSONA, CONV, 4, 2, LEASE),
       ),
     );
-    const ids = claims.flat().map((t) => t.id);
+    const ids = claims.flatMap((c) => c.turns).map((t) => t.id);
     expect(new Set(ids).size).toBe(ids.length); // no id claimed twice
     expect(new Set(ids).size).toBe(6); // all six evicted turns claimed once
   });
 
   test("empty claim leaves the cursor untouched", async () => {
     for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
-    const claimed = await memory.claimEvictedForExtraction(
-      PERSONA,
-      CONV,
-      30,
-      5,
-      LEASE,
-    );
+    const claimed = await claimTurns(30, 5);
     expect(claimed).toHaveLength(0);
     expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(0);
   });
 
   test("a committed turn is never re-claimed; a released one is re-claimed at once", async () => {
     for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`); // window 2 → 1..4 evicted
-    const first = await memory.claimEvictedForExtraction(
-      PERSONA,
-      CONV,
-      2,
-      4,
-      LEASE,
-    );
+    const { token, turns: first } =
+      await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
     expect(first.map((t) => t.text)).toEqual([
       "turn 1",
       "turn 2",
@@ -378,23 +385,89 @@ describe("claimEvictedForExtraction (lease-based claim)", () => {
       "turn 4",
     ]);
     // Commit turns 1 & 2; release 3 & 4 (as a failed pass would).
-    await memory.commitExtractedTurn(PERSONA, CONV, first[0]!.id);
-    await memory.commitExtractedTurn(PERSONA, CONV, first[1]!.id);
-    await memory.releaseExtractionLease(PERSONA, CONV, [
-      first[2]!.id,
-      first[3]!.id,
-    ]);
+    await memory.commitExtractedTurn(PERSONA, CONV, first[0]!.id, token);
+    await memory.commitExtractedTurn(PERSONA, CONV, first[1]!.id, token);
+    await memory.releaseExtractionLease(
+      PERSONA,
+      CONV,
+      [first[2]!.id, first[3]!.id],
+      token,
+    );
 
     // Next claim sees ONLY the released turns — committed ones stay gone even
     // though they sit below the (monotonic) cursor.
-    const second = await memory.claimEvictedForExtraction(
+    const second = await claimTurns(2, 4);
+    expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
+  });
+
+  test("commitExtraction writes facts AND drops the lease under a matching token", async () => {
+    for (let i = 1; i <= 4; i++) await appendTurn(`turn ${i}`); // window 2 → 1..2 evicted
+    const { token, turns } =
+      await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    const wrote = await memory.commitExtraction(
       PERSONA,
       CONV,
-      2,
-      4,
-      LEASE,
+      turns[0]!.id,
+      token,
+      [{ fact: "Andrew lives in Arnhem.", confidence: 0.9 }],
     );
-    expect(second.map((t) => t.text)).toEqual(["turn 3", "turn 4"]);
+    expect(wrote).toBe(true);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+    // Lease dropped: turn is not re-claimed on the next pass.
+    const next = await claimTurns(2, 4);
+    expect(next.some((t) => t.id === turns[0]!.id)).toBe(false);
+  });
+
+  test("commitExtraction writes NOTHING when the token no longer matches (stale finisher)", async () => {
+    for (let i = 1; i <= 4; i++) await appendTurn(`turn ${i}`); // window 2 → 1..2 evicted
+    const { turns } =
+      await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    // A stale pass tries to commit with a token it never held.
+    const wrote = await memory.commitExtraction(
+      PERSONA,
+      CONV,
+      turns[0]!.id,
+      "not-the-real-token",
+      [{ fact: "should not be written", confidence: 0.9 }],
+    );
+    expect(wrote).toBe(false);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+  });
+
+  test("lease-expiry re-claim: the ORIGINAL owner's late commit is discarded, no duplicate fact", async () => {
+    // Kai's lease-expiry race (PR #320): pass A claims turn 1 with a zero-length
+    // (already-stale) lease, pass B re-claims the same turn (fresh token), B
+    // commits its fact — then A, having finally finished its slow harness call,
+    // tries to commit the SAME turn. A's token is stale, so its write is dropped
+    // and there is exactly one fact, not two.
+    for (let i = 1; i <= 4; i++) await appendTurn(`turn ${i}`); // window 2 → 1..2 evicted
+    const passA = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 1, 0);
+    const turnId = passA.turns[0]!.id;
+    const passB = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 1, LEASE);
+    expect(passB.turns[0]!.id).toBe(turnId); // B re-claimed the stale turn
+
+    const bWrote = await memory.commitExtraction(PERSONA, CONV, turnId, passB.token, [
+      { fact: "Andrew lives in Arnhem.", confidence: 0.9 },
+    ]);
+    expect(bWrote).toBe(true);
+    const aWrote = await memory.commitExtraction(PERSONA, CONV, turnId, passA.token, [
+      { fact: "Andrew lives in Arnhem.", confidence: 0.9 },
+    ]);
+    expect(aWrote).toBe(false);
+    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+  });
+
+  test("release is token-gated: a stale owner cannot resurrect a turn another pass holds", async () => {
+    for (let i = 1; i <= 4; i++) await appendTurn(`turn ${i}`); // window 2 → 1..2 evicted
+    const passA = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 2, 0);
+    const passB = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 2, LEASE);
+    const bIds = passB.turns.map((t) => t.id);
+    // A (now stale) tries to release turns B legitimately holds — must be a no-op
+    // so B's live leases aren't reset out from under it.
+    await memory.releaseExtractionLease(PERSONA, CONV, bIds, passA.token);
+    const next = await claimTurns(2, 4);
+    // B still holds live leases on those turns; nothing new is claimable.
+    expect(next).toHaveLength(0);
   });
 
   test("Kai's interleave: a partial failure never strands turns behind an advanced cursor", async () => {
@@ -405,14 +478,14 @@ describe("claimEvictedForExtraction (lease-based claim)", () => {
     for (let i = 1; i <= 10; i++) await appendTurn(`turn ${i}`); // window 2 → 1..8 evicted
 
     const passA = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
-    expect(passA.map((t) => t.text)).toEqual([
+    expect(passA.turns.map((t) => t.text)).toEqual([
       "turn 1",
       "turn 2",
       "turn 3",
       "turn 4",
     ]);
     const passB = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
-    expect(passB.map((t) => t.text)).toEqual([
+    expect(passB.turns.map((t) => t.text)).toEqual([
       "turn 5",
       "turn 6",
       "turn 7",
@@ -420,35 +493,32 @@ describe("claimEvictedForExtraction (lease-based claim)", () => {
     ]);
 
     // B commits its whole batch; cursor is now well past A's turns.
-    for (const t of passB) await memory.commitExtractedTurn(PERSONA, CONV, t.id);
-    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(passB[3]!.id);
+    for (const t of passB.turns) {
+      await memory.commitExtractedTurn(PERSONA, CONV, t.id, passB.token);
+    }
+    expect(await memory.durableFactCursor(PERSONA, CONV)).toBe(passB.turns[3]!.id);
 
     // A commits turn 1, then fails → releases 2,3,4.
-    await memory.commitExtractedTurn(PERSONA, CONV, passA[0]!.id);
-    await memory.releaseExtractionLease(PERSONA, CONV, [
-      passA[1]!.id,
-      passA[2]!.id,
-      passA[3]!.id,
-    ]);
-
-    // The stranded turns come back — re-claimable despite being below cursor 8.
-    const recovered = await memory.claimEvictedForExtraction(
+    await memory.commitExtractedTurn(PERSONA, CONV, passA.turns[0]!.id, passA.token);
+    await memory.releaseExtractionLease(
       PERSONA,
       CONV,
-      2,
-      10,
-      LEASE,
+      [passA.turns[1]!.id, passA.turns[2]!.id, passA.turns[3]!.id],
+      passA.token,
     );
+
+    // The stranded turns come back — re-claimable despite being below cursor 8.
+    const recovered = await claimTurns(2, 10);
     expect(recovered.map((t) => t.text)).toEqual(["turn 2", "turn 3", "turn 4"]);
   });
 
   test("live leases are excluded but STALE leases (expired) are re-claimable", async () => {
     for (let i = 1; i <= 6; i++) await appendTurn(`turn ${i}`); // window 2 → 1..4 evicted
     // Zero-length lease: every claimed turn is instantly stale.
-    const first = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, 0);
+    const first = await claimTurns(2, 4, 0);
     expect(first).toHaveLength(4);
     // Because the leases are already expired, a second claim re-selects them.
-    const second = await memory.claimEvictedForExtraction(PERSONA, CONV, 2, 4, LEASE);
+    const second = await claimTurns(2, 4);
     expect(second.map((t) => t.id).sort((a, b) => a - b)).toEqual(
       first.map((t) => t.id).sort((a, b) => a - b),
     );
@@ -482,13 +552,7 @@ describe("deleteConversation clears durable-fact leases + fresh-claim (/reset)",
     // And a fresh claim after reset starts from a clean slate: with no turns and
     // no leftover leases/cursor, nothing is claimable.
     for (let i = 1; i <= 6; i++) await appendTurn(`fresh ${i}`);
-    const claimed = await memory.claimEvictedForExtraction(
-      PERSONA,
-      CONV,
-      2,
-      10,
-      LEASE,
-    );
+    const claimed = await claimTurns(2, 10);
     // Only the brand-new turns are eligible — no stale lease resurrects an old
     // turn id, and the cursor started at 0 again.
     expect(claimed.every((t) => t.text.startsWith("fresh"))).toBe(true);

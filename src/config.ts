@@ -258,16 +258,34 @@ export interface DurableFactsSettings {
    * the lease expires after this long and the turn becomes re-claimable. The
    * common failure (harness reject/timeout) releases immediately and does not
    * wait this out; only a hard process crash does.
+   *
+   * MUST outlast a full harness extraction, or a slow-but-successful pass would
+   * have its lease expire mid-call and let a concurrent pass re-claim the same
+   * turn — a duplicate model call plus a stale late write (Kai, PR #320).
+   * buildDurableFactsConfig floors this at harnessHardTimeoutMs plus a commit
+   * margin, so only a genuine crash (which never finishes) can hit expiry.
    */
   leaseMs: number;
 }
+
+/**
+ * Safety margin (ms) added on top of the harness hard timeout when flooring
+ * leaseMs — covers the commit/release write that runs AFTER a slow extraction
+ * returns, so the lease can't lapse in the gap between the harness completing
+ * and the commit landing.
+ */
+export const LEASE_COMMIT_MARGIN_MS = 300_000;
 
 export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {
   enabled: true,
   maxInjected: 8,
   minConfidence: 0.5,
   maxExtractPerTurn: 4,
-  leaseMs: 300_000,
+  // Default harness hard timeout (3_600_000) + LEASE_COMMIT_MARGIN_MS. Kept
+  // self-consistent with the default hard timeout so even a Config assembled
+  // without buildDurableFactsConfig (e.g. an ad-hoc test) is race-safe;
+  // buildDurableFactsConfig re-enforces the floor against the ACTUAL timeout.
+  leaseMs: 3_900_000,
 };
 
 export interface TelegramStreamingSettings {
@@ -527,6 +545,16 @@ export async function loadConfig(): Promise<Config> {
   }
   if (migratedChain.length === 0) migratedChain.push(...DEFAULT_HARNESS_CHAIN);
 
+  // Resolved once here (not just inline in the object) because the durable-fact
+  // lease floor is derived from it — see buildDurableFactsConfig.
+  const harnessHardTimeoutMs =
+    asInt(process.env.PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS) ??
+    (asInt(toml.harness_hard_timeout_s) !== undefined
+      ? asInt(toml.harness_hard_timeout_s)! * 1000
+      : undefined) ??
+    legacyTurnTimeoutMs(toml) ??
+    3_600_000;
+
   return {
     defaultPersona:
       process.env.PHANTOMBOT_DEFAULT_PERSONA ??
@@ -557,13 +585,7 @@ export async function loadConfig(): Promise<Config> {
       legacyTurnTimeoutMs(toml) ??
       300_000,
 
-    harnessHardTimeoutMs:
-      asInt(process.env.PHANTOMBOT_HARNESS_HARD_TIMEOUT_MS) ??
-      (asInt(toml.harness_hard_timeout_s) !== undefined
-        ? asInt(toml.harness_hard_timeout_s)! * 1000
-        : undefined) ??
-      legacyTurnTimeoutMs(toml) ??
-      3_600_000,
+    harnessHardTimeoutMs,
 
     personasDir:
       process.env.PHANTOMBOT_PERSONAS_DIR ??
@@ -639,7 +661,10 @@ export async function loadConfig(): Promise<Config> {
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
-    durableFacts: buildDurableFactsConfig(tomlDurableFacts),
+    durableFacts: buildDurableFactsConfig(
+      tomlDurableFacts,
+      harnessHardTimeoutMs,
+    ),
 
     voice: buildVoiceConfig(tomlVoice),
 
@@ -830,6 +855,7 @@ function buildTurnIndexingConfig(
  */
 function buildDurableFactsConfig(
   toml: Record<string, unknown>,
+  harnessHardTimeoutMs: number,
 ): DurableFactsSettings {
   const enabled =
     asBool(process.env.PHANTOMBOT_DURABLE_FACTS_ENABLED) ??
@@ -862,9 +888,17 @@ function buildDurableFactsConfig(
     // At least 1 evicted turn per pass; capped so a long backfill can't fire
     // an unbounded burst of harness calls in one out-of-band pass.
     maxExtractPerTurn: Math.max(1, Math.min(100, maxExtractPerTurn)),
-    // Floor at 1s so a misconfig can't make every claim instantly re-claimable
-    // (which would let concurrent passes double-extract).
-    leaseMs: Math.max(1000, Math.floor(leaseMs)),
+    // Floor at the harness hard timeout + a commit margin (and never below 1s).
+    // A lease that could expire before a slow extraction finishes would let a
+    // concurrent pass re-claim the turn and fire a DUPLICATE model call while
+    // the original is still running, then have the original's late write land
+    // behind it (Kai, PR #320). Flooring above the maximum a single extraction
+    // can take means only a genuine crash — which never completes — hits expiry.
+    leaseMs: Math.max(
+      1000,
+      harnessHardTimeoutMs + LEASE_COMMIT_MARGIN_MS,
+      Math.floor(leaseMs),
+    ),
   };
 }
 

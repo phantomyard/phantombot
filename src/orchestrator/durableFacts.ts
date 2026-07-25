@@ -202,13 +202,14 @@ export async function extractDurableFactsOnEviction(
     // below, so a partial failure never strands the rest of the batch behind an
     // advanced cursor (Kai's second race, PR #320). The model call runs only
     // over turns this pass has leased.
-    const evicted = await input.memory.claimEvictedForExtraction(
-      input.persona,
-      input.conversation,
-      windowSize,
-      input.settings.maxExtractPerTurn,
-      input.settings.leaseMs,
-    );
+    const { token, turns: evicted } =
+      await input.memory.claimEvictedForExtraction(
+        input.persona,
+        input.conversation,
+        windowSize,
+        input.settings.maxExtractPerTurn,
+        input.settings.leaseMs,
+      );
     if (evicted.length === 0) return result;
 
     // Turns we still hold an uncommitted lease on. Each turn is removed as it is
@@ -227,6 +228,7 @@ export async function extractDurableFactsOnEviction(
           input.persona,
           input.conversation,
           turn.id,
+          token,
         );
         outstanding.delete(turn.id);
         continue;
@@ -253,36 +255,40 @@ export async function extractDurableFactsOnEviction(
       }
 
       const facts = parseExtractedFacts(raw);
-      for (const f of facts) {
-        await input.memory.upsertDurableFact({
-          persona: input.persona,
-          conversation: input.conversation,
-          fact: f.fact,
-          confidence: f.confidence,
-          sourceTurnId: turn.id,
-        });
-        result.factsWritten++;
-      }
-      // Commit only AFTER the facts are durably written, so a crash between the
-      // upsert and the commit re-does the turn (at-least-once) rather than
-      // dropping it.
-      await input.memory.commitExtractedTurn(
+      // Write facts + drop the lease ATOMICALLY, gated on this pass still owning
+      // the lease. `complete()` above is slow and un-transactioned, so a /reset
+      // (or a lease-expiry re-claim by another pass) can land while it runs; the
+      // token gate makes those extracted facts a no-op rather than repopulating
+      // a wiped conversation or double-writing a re-claimed turn (Kai, PR #320).
+      const committed = await input.memory.commitExtraction(
         input.persona,
         input.conversation,
         turn.id,
+        token,
+        facts.map((f) => ({
+          fact: f.fact,
+          confidence: f.confidence,
+          sourceTurnId: turn.id,
+        })),
       );
+      // Either way this turn is no longer ours to release: committed → done;
+      // not committed → the lease is gone or another pass owns it, so releasing
+      // would be wrong. Drop it from outstanding without releasing.
       outstanding.delete(turn.id);
+      if (committed) result.factsWritten += facts.length;
       result.turnsProcessed++;
     }
 
-    // Release any turns we claimed but didn't commit (the failed turn + the tail
-    // we never reached) so the next pass re-claims them immediately, without
-    // waiting out the lease. A clean pass leaves `outstanding` empty.
+    // Release any turns we claimed but didn't reach (the failed turn + the tail
+    // after it) so the next pass re-claims them immediately, without waiting out
+    // the lease. Token-gated in the store, so a turn already re-claimed by
+    // another pass is never clobbered. A clean pass leaves `outstanding` empty.
     if (outstanding.size > 0) {
       await input.memory.releaseExtractionLease(
         input.persona,
         input.conversation,
         [...outstanding],
+        token,
       );
     }
 

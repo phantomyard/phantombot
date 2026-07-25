@@ -20,6 +20,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -100,6 +101,25 @@ export interface UpsertDurableFactInput {
   confidence?: number;
   /** turns.id the fact was extracted from, for provenance. */
   sourceTurnId?: number;
+}
+
+/** One fact to persist inside a token-guarded commitExtraction. */
+export interface ExtractedFactWrite {
+  fact: string;
+  /** 0..1; clamped on write. */
+  confidence: number;
+  /** turns.id the fact was extracted from, for provenance. */
+  sourceTurnId?: number;
+}
+
+/**
+ * The result of claimEvictedForExtraction: the leased turns plus the ownership
+ * token stamped on their lease rows. The token gates every subsequent
+ * commit/release so only the pass that still holds the lease can write.
+ */
+export interface ClaimedExtraction {
+  token: string;
+  turns: Turn[];
 }
 
 export interface TopDurableFactsOptions {
@@ -206,8 +226,15 @@ export interface MemoryStore {
    * expires. Concurrency-safe (SQLite serializes the txn, so racing passes get
    * DISJOINT batches) and, unlike a claim-and-advance cursor, LOSSLESS under
    * partial failure — retries ride the lease ledger, not a cursor rewind
-   * (Kai, PR #320). Returns the claimed turns, oldest first (possibly empty).
-   * Pair every claimed turn with exactly one commitExtractedTurn (success) or
+   * (Kai, PR #320). Returns the claimed turns (oldest first) plus a per-claim
+   * OWNERSHIP TOKEN stamped on every lease row: pass it back to commitExtraction
+   * / commitExtractedTurn / releaseExtractionLease so those writes act ONLY
+   * while this pass still holds the lease. If the lease was wiped (a concurrent
+   * /reset) or re-stamped by another pass (this lease expired and was
+   * re-claimed), the token no longer matches and the stale write is discarded —
+   * which is what stops a late finisher repopulating a reset conversation or
+   * double-writing a re-claimed turn (Kai, PR #320). Pair every claimed turn
+   * with exactly one commitExtraction/commitExtractedTurn (success) or
    * releaseExtractionLease (failure).
    */
   claimEvictedForExtraction(
@@ -216,28 +243,51 @@ export interface MemoryStore {
     windowSize: number,
     limit: number,
     leaseMs: number,
-  ): Promise<Turn[]>;
+  ): Promise<ClaimedExtraction>;
   /**
-   * COMMIT a claimed turn after its extraction succeeded (or it was
-   * legitimately skipped): drop its lease row. The turn now sits below the
-   * cursor with no pending row, so it is never claimed again. Idempotent.
+   * ATOMICALLY commit an extraction: in one transaction, verify the turn still
+   * holds THIS pass's lease (pending row present AND lease_token === token),
+   * write its facts, and drop the lease. Returns true when it committed, false
+   * when it wrote NOTHING because the lease was gone or owned by another pass —
+   * a concurrent /reset wiped it (so the facts belong to a conversation that no
+   * longer exists and must not be repopulated) or the lease expired and another
+   * pass re-claimed the turn (so that pass owns the write). Guarding the fact
+   * write behind the live lease is what closes the reset-repopulation and
+   * lease-expiry races (Kai, PR #320).
+   */
+  commitExtraction(
+    persona: string,
+    conversation: string,
+    turnId: number,
+    token: string,
+    facts: ExtractedFactWrite[],
+  ): Promise<boolean>;
+  /**
+   * COMMIT a claimed turn that produced no facts (quiet/skipped): drop its lease
+   * row IFF it still carries THIS pass's token. The turn then sits below the
+   * cursor with no pending row, so it is never claimed again. No-op when the
+   * lease is gone or re-stamped by another pass. Idempotent.
    */
   commitExtractedTurn(
     persona: string,
     conversation: string,
     turnId: number,
+    token: string,
   ): Promise<void>;
   /**
    * RELEASE claimed turns whose extraction failed: set each lease to expired so
-   * the next pass re-claims them immediately, without waiting out `leaseMs`.
-   * This is the at-least-once recovery for the common harness reject/timeout —
-   * a hard crash between claim and release is covered by the lease expiry
-   * instead. No-op for turn ids with no pending row.
+   * the next pass re-claims them immediately, without waiting out `leaseMs` —
+   * but only for leases this pass still owns (lease_token === token), so a
+   * turn already re-claimed by another pass is never clobbered. This is the
+   * at-least-once recovery for the common harness reject/timeout — a hard crash
+   * between claim and release is covered by the lease expiry instead. No-op for
+   * turn ids with no matching pending row.
    */
   releaseExtractionLease(
     persona: string,
     conversation: string,
     turnIds: number[],
+    token: string,
   ): Promise<void>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
@@ -379,11 +429,16 @@ CREATE TABLE IF NOT EXISTS durable_fact_cursor (
 -- released (lease set to 0 = immediately re-claimable). This per-turn state is
 -- what makes extraction at-least-once under concurrency + failure: a turn is
 -- never dropped just because the cursor advanced past it (Kai, PR #320).
+-- lease_token: a per-claim ownership token (see claimEvictedTxn). Every
+-- commit/release is gated on it, so a write from a pass that no longer holds
+-- the lease — because a /reset wiped the row, or the lease expired and another
+-- pass re-stamped it — is discarded instead of corrupting the store (Kai, #320).
 CREATE TABLE IF NOT EXISTS durable_fact_pending (
   persona          TEXT NOT NULL,
   conversation     TEXT NOT NULL,
   turn_id          INTEGER NOT NULL,
   lease_expires_at INTEGER NOT NULL,
+  lease_token      TEXT NOT NULL DEFAULT '',
   updated_at       TEXT NOT NULL,
   PRIMARY KEY (persona, conversation, turn_id)
 );
@@ -423,12 +478,14 @@ class SqliteMemoryStore implements MemoryStore {
   private setDurableFactCursorStmt;
   private claimEvictedSelectStmt;
   private upsertPendingStmt;
+  private getPendingTokenStmt;
   private commitPendingStmt;
   private releasePendingStmt;
   private deleteDurableFactsStmt;
   private deleteDurableFactCursorStmt;
   private deleteDurableFactPendingStmt;
   private claimEvictedTxn;
+  private commitExtractionTxn;
   private deleteConversationTxn;
   private appendPairTxn;
   private closed = false;
@@ -611,27 +668,38 @@ class SqliteMemoryStore implements MemoryStore {
        ORDER BY t.id ASC
        LIMIT ?`,
     );
-    // Claim/lease a turn: insert a pending row (or refresh its lease deadline if
-    // re-claiming a stale one).
+    // Claim/lease a turn: insert a pending row (or refresh its lease deadline +
+    // stamp a fresh ownership token if re-claiming a stale one). Re-stamping the
+    // token on re-claim is what invalidates a prior owner's late write.
     this.upsertPendingStmt = db.prepare(
       `INSERT INTO durable_fact_pending
-         (persona, conversation, turn_id, lease_expires_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+         (persona, conversation, turn_id, lease_expires_at, lease_token, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (persona, conversation, turn_id) DO UPDATE SET
          lease_expires_at = excluded.lease_expires_at,
+         lease_token      = excluded.lease_token,
          updated_at       = excluded.updated_at`,
     );
-    // Commit a turn: drop its pending row. It now sits below the cursor with no
-    // pending row, so the claim SELECT will never return it again.
+    // Read a turn's current lease token (used inside commitExtractionTxn to gate
+    // the fact write on continued ownership).
+    this.getPendingTokenStmt = db.prepare(
+      `SELECT lease_token FROM durable_fact_pending
+       WHERE persona = ? AND conversation = ? AND turn_id = ?`,
+    );
+    // Commit a turn: drop its pending row IFF it still carries this pass's token.
+    // Gating on the token means a row wiped by /reset (gone) or re-stamped by a
+    // newer pass (different token) is left untouched. It now sits below the
+    // cursor with no pending row, so the claim SELECT will never return it again.
     this.commitPendingStmt = db.prepare(
       `DELETE FROM durable_fact_pending
-       WHERE persona = ? AND conversation = ? AND turn_id = ?`,
+       WHERE persona = ? AND conversation = ? AND turn_id = ? AND lease_token = ?`,
     );
     // Release a turn's lease on failure: set the deadline to 0 so the very next
     // pass re-claims it immediately (no wait for the crash-recovery timeout).
+    // Token-gated so a lease already re-claimed by another pass isn't clobbered.
     this.releasePendingStmt = db.prepare(
       `UPDATE durable_fact_pending SET lease_expires_at = 0, updated_at = ?
-       WHERE persona = ? AND conversation = ? AND turn_id = ?`,
+       WHERE persona = ? AND conversation = ? AND turn_id = ? AND lease_token = ?`,
     );
     // /reset helpers — the three per-conversation durable stores wiped alongside
     // turns in deleteConversationTxn.
@@ -659,6 +727,7 @@ class SqliteMemoryStore implements MemoryStore {
         windowSize: number,
         limit: number,
         leaseMs: number,
+        token: string,
       ): RawDisplayRow[] => {
         const cur = this.durableFactCursorStmt.get(persona, conversation) as
           | { id: number }
@@ -681,11 +750,14 @@ class SqliteMemoryStore implements MemoryStore {
         const expiry = now + Math.max(0, Math.floor(leaseMs));
         let maxId = cursor;
         for (const r of rows) {
+          // Stamp every leased row with this claim's ownership token; a later
+          // re-claim overwrites it, invalidating the prior owner's late write.
           this.upsertPendingStmt.run(
             persona,
             conversation,
             r.id,
             expiry,
+            token,
             iso,
           );
           if (r.id > maxId) maxId = r.id;
@@ -693,6 +765,42 @@ class SqliteMemoryStore implements MemoryStore {
         // Monotonic advance to the batch max (>= current cursor by construction).
         this.setDurableFactCursorStmt.run(persona, conversation, maxId, iso);
         return rows;
+      },
+    );
+    // Atomic, token-gated commit of one turn's extraction: verify the lease is
+    // still ours, write the facts, drop the lease — one serialized unit so a
+    // concurrent /reset can't interleave BETWEEN the ownership check and the
+    // fact write. Returns whether it actually wrote (false = lease gone/reclaimed
+    // → facts discarded, closing the reset-repopulation + lease-expiry races).
+    this.commitExtractionTxn = db.transaction(
+      (
+        persona: string,
+        conversation: string,
+        turnId: number,
+        token: string,
+        facts: ExtractedFactWrite[],
+      ): boolean => {
+        const row = this.getPendingTokenStmt.get(
+          persona,
+          conversation,
+          turnId,
+        ) as { lease_token: string } | undefined;
+        if (!row || row.lease_token !== token) return false;
+        const now = new Date().toISOString();
+        for (const f of facts) {
+          this.upsertDurableFactStmt.run(
+            persona,
+            conversation,
+            f.fact,
+            normalizeFact(f.fact),
+            clampConfidence(f.confidence),
+            f.sourceTurnId ?? null,
+            now,
+            now,
+          );
+        }
+        this.commitPendingStmt.run(persona, conversation, turnId, token);
+        return true;
       },
     );
     // /reset must wipe EVERY per-conversation store, not just turns: durable
@@ -846,34 +954,67 @@ class SqliteMemoryStore implements MemoryStore {
     windowSize: number,
     limit: number,
     leaseMs: number,
-  ): Promise<Turn[]> {
+  ): Promise<ClaimedExtraction> {
+    // One fresh token per claim, stamped on every leased row. Everything this
+    // pass writes later is gated on it (see commitExtraction).
+    const token = randomUUID();
     const rows = this.claimEvictedTxn(
       persona,
       conversation,
       windowSize,
       limit,
       Math.max(0, Math.floor(leaseMs)),
+      token,
     ) as RawDisplayRow[];
-    return mapDisplayRows(rows);
+    return { token, turns: mapDisplayRows(rows) };
+  }
+
+  async commitExtraction(
+    persona: string,
+    conversation: string,
+    turnId: number,
+    token: string,
+    facts: ExtractedFactWrite[],
+  ): Promise<boolean> {
+    return this.commitExtractionTxn(
+      persona,
+      conversation,
+      Math.floor(turnId),
+      token,
+      facts,
+    ) as boolean;
   }
 
   async commitExtractedTurn(
     persona: string,
     conversation: string,
     turnId: number,
+    token: string,
   ): Promise<void> {
-    this.commitPendingStmt.run(persona, conversation, Math.floor(turnId));
+    this.commitPendingStmt.run(
+      persona,
+      conversation,
+      Math.floor(turnId),
+      token,
+    );
   }
 
   async releaseExtractionLease(
     persona: string,
     conversation: string,
     turnIds: number[],
+    token: string,
   ): Promise<void> {
     if (turnIds.length === 0) return;
     const iso = new Date().toISOString();
     for (const id of turnIds) {
-      this.releasePendingStmt.run(iso, persona, conversation, Math.floor(id));
+      this.releasePendingStmt.run(
+        iso,
+        persona,
+        conversation,
+        Math.floor(id),
+        token,
+      );
     }
   }
 
