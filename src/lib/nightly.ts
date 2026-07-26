@@ -277,7 +277,10 @@ PHASE 3 — Feed the KB
   Re-read the daily file for durable knowledge (procedures, configs, runbooks, concepts, decisions worth keeping).
   For each candidate:
     a) phantombot memory search "<topic>" to check for existing coverage
-    b) If a note already covers the area: open and update it (add the new case, edge cases, links)
+    b) If a note already covers the area, open it and RECONCILE it against today's knowledge — don't just append:
+       - ADDS (new case, edge case, link): update in place.
+       - CONTRADICTS / INVALIDATES it (a fact changed, something was decommissioned, an old assumption proved wrong): do NOT silently overwrite, and do NOT leave the stale claim standing beside the new one. Rewrite the note so its body states the CURRENT truth, bump \`updated:\`, and append a dated line under a "## Changelog" section recording what was invalidated — "${today}: was X → now Y, because Z". The old belief survives as history; it just stops being served as current truth.
+       - The whole subject is DECOMMISSIONED / no longer real: set frontmatter \`status: obsolete\` with a dated one-line reason (and a [[wikilink]] to any replacement) instead of deleting — recall must know it's dead, not silently lose it.
     c) Otherwise create a new atomic note in the right kb/<category>/ subdir using one of kb/templates/ as a starting point. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
   Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
   Run \`phantombot memory index --rebuild\` at the end so new notes have embeddings.
@@ -332,10 +335,13 @@ Re-read the daily file (memory/${today}.md). For each promote-able item the hear
   - Mistakes and learnings   → memory/lessons.md
   - Deadlines / obligations  → memory/commitments.md
 Append under a "## ${today}" header. Do not duplicate items the heartbeat already promoted.`,
-  kb: () => `STAGE: FEED THE KB
+  kb: (today) => `STAGE: FEED THE KB
 Re-read today's daily file for durable knowledge (procedures, configs, runbooks, concepts, decisions worth keeping). For each candidate:
   a) phantombot memory search "<topic>" to check for existing coverage
-  b) If a note already covers the area, open and update it (new case, edge cases, links)
+  b) If a note already covers the area, open it and RECONCILE — don't just append:
+     - ADDS (new case, edge case, link): update in place.
+     - CONTRADICTS / INVALIDATES it (fact changed, thing decommissioned, old assumption wrong): rewrite the body to the CURRENT truth, bump \`updated:\`, and append a dated line under a "## Changelog" section — "${today}: was X → now Y, because Z". Don't leave the stale claim standing beside the new one; the old belief lives on only as changelog history.
+     - Whole subject DECOMMISSIONED: set frontmatter \`status: obsolete\` with a dated reason (+ [[wikilink]] to any replacement) instead of deleting.
   c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a kb/templates/ scaffold. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
 Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
 Finish with \`phantombot memory index --rebuild\` so new notes get embeddings.`,

@@ -305,4 +305,18 @@ describe("buildNightlyStagePrompt", () => {
     // and still keeps the trim half
     expect(body).toContain("TRIM");
   });
+
+  // The KB stage used to be purely additive ("open and update it"), so a note
+  // that became WRONG (subject decommissioned / assumption invalidated) kept the
+  // stale claim standing next to the new one. It must now RECONCILE: rewrite to
+  // current truth, leave a dated changelog trail, and mark dead subjects obsolete.
+  test("the KB stage instructs supersession, not just append", () => {
+    const body = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    expect(body).toContain("RECONCILE");
+    expect(body).toMatch(/CONTRADICTS|INVALIDATES/);
+    expect(body).toContain("## Changelog");
+    expect(body).toContain("status: obsolete");
+    // the changelog instruction is dated with the run's date (today binding)
+    expect(body).toContain("2026-05-18: was X → now Y");
+  });
 });
