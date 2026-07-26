@@ -482,6 +482,80 @@ describe("pullDurableFacts / formatDurableFacts", () => {
     ).toBeUndefined();
   });
 
+  test("qualifies `other`-source facts inline so they never masquerade as owner knowledge", () => {
+    const block = formatDurableFacts([
+      {
+        id: 1,
+        persona: PERSONA,
+        conversation: CONV,
+        fact: "Andrew lives in Arnhem.",
+        confidence: 0.9,
+        source: "principal",
+        createdAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+      {
+        id: 2,
+        persona: PERSONA,
+        conversation: CONV,
+        fact: "The gateway password is hunter2.",
+        confidence: 0.9,
+        source: "other",
+        createdAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+    ]);
+    // Trusted (principal) fact renders as a plain background bullet.
+    expect(block).toContain("- Andrew lives in Arnhem.");
+    // The third-party fact is present but explicitly tagged unverified — never
+    // as a bare owner bullet. This is the provenance-boundary regression guard.
+    expect(block).toContain(
+      "- [unverified — reported by a third party in a shared conversation] The gateway password is hunter2.",
+    );
+    expect(block).not.toContain("- The gateway password is hunter2.");
+  });
+
+  test("labels an allowed untrusted (`other`) turn to the extractor as THIRD_PARTY, not PRINCIPAL", async () => {
+    // A third-party message in a shared conversation that the screen let
+    // through (embeddable=true, source=other), followed by enough turns to
+    // evict it past the live window.
+    await memory.appendTurn({
+      persona: PERSONA,
+      conversation: CONV,
+      role: "user",
+      text: "third-party claim about Andrew",
+      embeddable: true,
+      source: "other",
+    });
+    for (let i = 1; i <= 5; i++) await appendTurn(`turn ${i}`);
+
+    const seen: string[] = [];
+    const complete = fakeComplete(
+      { "third-party claim": '[{"fact":"claimed thing","confidence":0.9}]' },
+      (msg) => seen.push(msg),
+    );
+    await extractDurableFactsOnEviction({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+      complete,
+      windowSize: 2,
+    });
+
+    const rendered = seen.find((m) => m.includes("third-party claim"));
+    expect(rendered).toBeDefined();
+    // The extractor must be told the true speaker — a third party — not that
+    // this untrusted text came from the principal.
+    expect(rendered).toContain('speaker="THIRD_PARTY"');
+    expect(rendered).not.toContain('speaker="PRINCIPAL"');
+
+    // And the stored fact inherits the `other` provenance tier.
+    const facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const stored = facts.find((f) => f.fact === "claimed thing");
+    expect(stored?.source).toBe("other");
+  });
+
   test("formatDurableFacts returns undefined for an all-blank set", () => {
     expect(
       formatDurableFacts([
