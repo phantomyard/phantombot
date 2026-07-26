@@ -9,8 +9,10 @@ import { join } from "node:path";
 import {
   MemoryIndex,
   NOTES_SCHEMA_VERSION,
+  parseTurnCreatedAtMs,
   resolveMdLink,
   sanitizeFtsQuery,
+  turnDecayFactor,
   turnPath,
   walkMarkdown,
 } from "../src/lib/memoryIndex.ts";
@@ -556,5 +558,134 @@ describe("notes-schema self-heal", () => {
       healed.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("turnDecayFactor", () => {
+  test("halves the score at one half-life, quarters at two", () => {
+    const d = { halfLifeDays: 30, floor: 0 };
+    expect(turnDecayFactor(0, d)).toBeCloseTo(1, 6);
+    expect(turnDecayFactor(30, d)).toBeCloseTo(0.5, 6);
+    expect(turnDecayFactor(60, d)).toBeCloseTo(0.25, 6);
+  });
+
+  test("clamps to the floor for ancient turns", () => {
+    const d = { halfLifeDays: 30, floor: 0.02 };
+    // 300 days ≈ 10 half-lives → ~0.001, below the floor.
+    expect(turnDecayFactor(300, d)).toBe(0.02);
+  });
+
+  test("half-life <= 0 disables decay (factor 1)", () => {
+    expect(turnDecayFactor(9999, { halfLifeDays: 0, floor: 0 })).toBe(1);
+    expect(turnDecayFactor(9999, { halfLifeDays: -5, floor: 0 })).toBe(1);
+  });
+
+  test("negative age (future turn) never exceeds 1", () => {
+    expect(turnDecayFactor(-10, { halfLifeDays: 30, floor: 0 })).toBe(1);
+  });
+});
+
+describe("parseTurnCreatedAtMs", () => {
+  test("extracts the ISO timestamp from a rendered turn", () => {
+    const iso = "2026-05-28T06:00:00.000Z";
+    expect(parseTurnCreatedAtMs(`[user ${iso}]\nhello`)).toBe(Date.parse(iso));
+  });
+
+  test("returns undefined for a row without the bracketed prefix", () => {
+    expect(parseTurnCreatedAtMs("just some text")).toBeUndefined();
+    expect(parseTurnCreatedAtMs("[user not-a-date]\nx")).toBeUndefined();
+  });
+});
+
+describe("turn-hit time decay (search / hybridSearch)", () => {
+  const now = new Date("2026-06-01T00:00:00Z").getTime();
+  const daysAgo = (n: number) => new Date(now - n * 86_400_000);
+
+  function seedGhostAndFresh() {
+    // Stale turn is a STRONGER lexical match (term repeated) so raw BM25 ranks
+    // it first — the exact kw-openclaw ghost shape.
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "assistant",
+      text: "kw-openclaw kw-openclaw kw-openclaw is the runtime here",
+      createdAt: daysAgo(300),
+      embeddable: true,
+      source: "self",
+    });
+    ix.upsertTurn({
+      id: 2,
+      persona: "phantom",
+      conversation: "telegram:1001",
+      role: "user",
+      text: "kw-openclaw was replaced by phantombot",
+      createdAt: daysAgo(0),
+      embeddable: true,
+      source: "principal",
+    });
+  }
+
+  test("without decay the stale-but-stronger turn ranks first", () => {
+    seedGhostAndFresh();
+    const hits = ix.search("kw-openclaw", { scope: "turns" });
+    expect(hits[0]?.path).toContain("/1"); // the 300-day-old ghost wins
+  });
+
+  test("with decay the fresh turn overtakes the stale ghost", () => {
+    seedGhostAndFresh();
+    const hits = ix.search("kw-openclaw", {
+      scope: "turns",
+      decay: { halfLifeDays: 30, floor: 0.02, nowMs: now },
+    });
+    expect(hits[0]?.path).toContain("/2"); // fresh correction now on top
+    expect(hits[1]?.path).toContain("/1");
+  });
+
+  test("hybridSearch applies decay to fused turn scores", () => {
+    seedGhostAndFresh();
+    // No queryVec → hybridSearch falls back through search(); pass decay and
+    // confirm the fresh turn wins there too.
+    const hits = ix.hybridSearch("kw-openclaw", undefined, {
+      scope: "turns",
+      decay: { halfLifeDays: 30, floor: 0.02, nowMs: now },
+    });
+    expect(hits[0]?.path).toContain("/2");
+  });
+
+  test("curated notes are immune — a note's score is unchanged by decay", async () => {
+    await note("kb/infra/runtime.md", "kw-openclaw runtime backup procedure");
+    await ix.refreshStale(personaDir);
+    const plain = ix.search("kw-openclaw", { scope: "kb" });
+    const decayed = ix.search("kw-openclaw", {
+      scope: "kb",
+      decay: { halfLifeDays: 1, floor: 0.01, nowMs: now },
+    });
+    expect(decayed[0]?.path).toBe("kb/infra/runtime.md");
+    // Same score with and without decay → notes never aged.
+    expect(decayed[0]?.ftsScore).toBe(plain[0]?.ftsScore);
+  });
+
+  test("a turn with unparseable age is not decayed (factor 1)", () => {
+    // Manually insert a turn_docs row whose content lacks the ISO prefix.
+    const db = (ix as unknown as { db: import("bun:sqlite").Database }).db;
+    db.prepare(
+      "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, content) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      "turns/phantom/telegram%3A1001/5",
+      "phantom",
+      "telegram:1001",
+      "user",
+      5,
+      "kw-openclaw with no timestamp prefix",
+    );
+    const withDecay = ix.search("kw-openclaw", {
+      scope: "turns",
+      decay: { halfLifeDays: 1, floor: 0.01, nowMs: now },
+    });
+    const without = ix.search("kw-openclaw", { scope: "turns" });
+    // Unparseable age → factor 1 → identical score.
+    expect(withDecay[0]?.ftsScore).toBe(without[0]?.ftsScore);
   });
 });

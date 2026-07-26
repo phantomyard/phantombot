@@ -31,6 +31,46 @@ import { parseOkf } from "./okf.ts";
 export type Scope = "memory" | "kb" | "turns";
 
 /**
+ * Time-decay parameters for raw conversation-turn ranking. Passed down from the
+ * retrieval settings; when omitted, ranking is purely relevance-based (the
+ * historical behaviour, still used by the CLI `memory search`). Decay applies
+ * ONLY to `turns` — curated memory/ + kb/ notes are never aged.
+ */
+export interface TurnDecay {
+  /** Half-life in days; `<= 0` disables (factor stays 1). */
+  halfLifeDays: number;
+  /** Lower bound on the multiplier so ancient turns damp but never hit 0. */
+  floor: number;
+  /** Injectable clock for tests; defaults to Date.now() at call time. */
+  nowMs?: number;
+}
+
+/**
+ * Multiplicative time-decay factor for a turn `ageDays` old: `0.5^(age/half)`,
+ * clamped to `[floor, 1]`. A half-life of 0 (or less) disables decay → 1.
+ * Exported for testing.
+ */
+export function turnDecayFactor(ageDays: number, decay: TurnDecay): number {
+  if (decay.halfLifeDays <= 0) return 1;
+  const f = Math.pow(0.5, Math.max(0, ageDays) / decay.halfLifeDays);
+  return Math.max(decay.floor, Math.min(1, f));
+}
+
+/**
+ * Extract the turn's creation time from an indexed `turn_docs.content` string.
+ * renderTurnForIndex writes `[<role> <ISO8601>]\n<text>`, so the ISO timestamp
+ * is the second whitespace-delimited token inside the leading bracket. Returns
+ * undefined if the prefix doesn't match (older/hand-written rows) — callers
+ * treat that as "no decay" rather than guessing an age. Exported for testing.
+ */
+export function parseTurnCreatedAtMs(content: string): number | undefined {
+  const m = /^\[\S+ (\S+)\]/.exec(content);
+  if (!m) return undefined;
+  const t = Date.parse(m[1]!);
+  return Number.isFinite(t) ? t : undefined;
+}
+
+/**
  * BM25F field weights for the `notes` table. A term hit in a concept's title,
  * tags, or aliases is worth far more than the same term buried in the body —
  * this is the lexical-precision half of the OKF superpowers, and it makes the
@@ -42,6 +82,14 @@ export const NOTE_FIELD_WEIGHTS = [0, 0, 8.0, 6.0, 6.0, 3.0, 1.0] as const;
 
 /** Column index of `body` in `notes` (for snippet()). */
 const NOTES_BODY_COL = 6;
+
+/**
+ * How many raw-BM25 turn candidates to pull before decay re-ranks them (per
+ * search when decay is active). Wider than the usual `limit` so a fresh turn
+ * that BM25 ranks just outside the top-N can climb in once older front-runners
+ * are damped. 25 matches hybridSearch's internal candidate pool.
+ */
+const DECAY_CANDIDATE_POOL = 25;
 
 export interface IndexedFile {
   path: string; // relative to personaDir
@@ -685,6 +733,13 @@ export class MemoryIndex {
        * never surfaces chat B's turns. (Kai's review on PR #132.)
        */
       conversation?: string;
+      /**
+       * Time-decay for turn hits (see TurnDecay). When set, turn scores are
+       * multiplied by a half-life factor before the final sort/slice, so a
+       * fresh turn beyond the raw-BM25 top-N can still surface over a stale
+       * ghost. Omitted → relevance-only ranking (CLI `memory search`).
+       */
+      decay?: TurnDecay;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -692,6 +747,12 @@ export class MemoryIndex {
     if (!query.trim()) return [];
 
     const ftsQuery = sanitizeFtsQuery(query);
+
+    // When decay is active, pull a wider pool of turn candidates than `limit`
+    // before re-ranking: a fresh turn that BM25 puts just outside the top-N
+    // should be able to climb in once the stale front-runners are damped.
+    // Notes are unaffected (immune to decay), so their pool stays at `limit`.
+    const turnLimit = opts.decay ? Math.max(limit, DECAY_CANDIDATE_POOL) : limit;
 
     // BM25F: weight title/tags/aliases/headings above body. Weights are SQL
     // literals (bm25() doesn't bind them), sourced from NOTE_FIELD_WEIGHTS.
@@ -735,7 +796,7 @@ export class MemoryIndex {
                   "FROM turn_docs WHERE content MATCH ? AND conversation = ? " +
                   "ORDER BY rank LIMIT ?",
               )
-              .all(ftsQuery, opts.conversation, limit) as Array<{
+              .all(ftsQuery, opts.conversation, turnLimit) as Array<{
               path: string;
               rank: number;
               snip: string;
@@ -747,12 +808,21 @@ export class MemoryIndex {
                   "FROM turn_docs WHERE content MATCH ? " +
                   "ORDER BY rank LIMIT ?",
               )
-              .all(ftsQuery, limit) as Array<{
+              .all(ftsQuery, turnLimit) as Array<{
               path: string;
               rank: number;
               snip: string;
             }>)
         : [];
+
+    // Turn scores get time-decayed (curated notes are immune); look up each
+    // candidate turn's age once, in a single batched query.
+    const decayFactors = opts.decay
+      ? this.turnDecayFactors(
+          turnRows.map((r) => r.path),
+          opts.decay,
+        )
+      : undefined;
 
     return [
       ...noteRows.map((r) => ({
@@ -766,7 +836,9 @@ export class MemoryIndex {
       ...turnRows.map((r) => ({
         path: r.path,
         scope: "turns" as const,
-        ftsScore: -r.rank,
+        // Decay damps stale turns (factor in [floor,1]); default 1 when decay
+        // is off or the turn's age couldn't be parsed.
+        ftsScore: -r.rank * (decayFactors?.get(r.path) ?? 1),
         snippet: r.snip,
       })),
     ]
@@ -798,6 +870,8 @@ export class MemoryIndex {
       hops?: number;
       /** Max neighbours to fold in. Default 3. */
       maxAdd?: number;
+      /** Time-decay for turn hits (see TurnDecay); forwarded to search(). */
+      decay?: TurnDecay;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -805,6 +879,7 @@ export class MemoryIndex {
       scope: opts.scope,
       limit,
       conversation: opts.conversation,
+      decay: opts.decay,
     });
     const maxAdd = Math.max(0, opts.maxAdd ?? 3);
     if (maxAdd === 0) return hits;
@@ -918,6 +993,13 @@ export class MemoryIndex {
       limit?: number;
       /** See `search()` — scopes conversation-turn rows to one conversation. */
       conversation?: string;
+      /**
+       * Time-decay for turn hits (see TurnDecay). Applied ONCE, to the final
+       * fused RRF scores of turn paths, before the top-`limit` slice. The inner
+       * FTS/vector candidate lists stay relevance-ordered so RRF fuses on merit
+       * and decay isn't double-counted.
+       */
+      decay?: TurnDecay;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -927,7 +1009,23 @@ export class MemoryIndex {
       conversation: opts.conversation,
     });
 
-    if (!queryVec || queryVec.length === 0) return ftsHits.slice(0, limit);
+    // No vector → FTS-only fallback. Still honour decay here (the inner search
+    // above is left undecayed so the RRF path below fuses on raw relevance),
+    // otherwise a vector-less call would silently skip decay.
+    if (!queryVec || queryVec.length === 0) {
+      if (!opts.decay) return ftsHits.slice(0, limit);
+      const factors = this.turnDecayFactors(
+        ftsHits.map((h) => h.path),
+        opts.decay,
+      );
+      return [...ftsHits]
+        .sort(
+          (a, b) =>
+            (b.ftsScore ?? 0) * (factors.get(b.path) ?? 1) -
+            (a.ftsScore ?? 0) * (factors.get(a.path) ?? 1),
+        )
+        .slice(0, limit);
+    }
 
     // Vector search. Brute-force cosine over all embeddings.
     const all = this.allEmbeddings();
@@ -987,10 +1085,22 @@ export class MemoryIndex {
     const vecPaths = vecRanked.map(([path]) => path);
     const rrf = rrfMerge([ftsRanked, vecPaths]);
 
-    // Build the final hit list, ordered by rrf score, including both
-    // sub-scores when available.
+    // Time-decay the fused scores of turn paths (curated notes are immune), so
+    // a stale turn that fused high on raw relevance still sinks below a fresher
+    // one. Done here — after the merge, before the slice — so decay is applied
+    // exactly once and can reorder the whole candidate pool. `rrfScore` in the
+    // emitted hit stays the RAW fused score (what callers threshold on); only
+    // the ordering key carries the decay multiplier.
+    const decayFactors = opts.decay
+      ? this.turnDecayFactors([...rrf.keys()], opts.decay)
+      : undefined;
+    const orderKey = (path: string, rrfScore: number): number =>
+      rrfScore * (decayFactors?.get(path) ?? 1);
+
+    // Build the final hit list, ordered by decay-adjusted rrf score, including
+    // both sub-scores when available.
     const merged: SearchHit[] = [...rrf.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => orderKey(b[0], b[1]) - orderKey(a[0], a[1]))
       .slice(0, limit)
       .map(([path, rrfScore]) => {
         const ftsHit = ftsHits.find((h) => h.path === path);
@@ -1008,6 +1118,37 @@ export class MemoryIndex {
         };
       });
     return merged;
+  }
+
+  /**
+   * Map each candidate `turns/…` path to its decay multiplier. Non-turn paths
+   * are skipped (they're immune → caller defaults them to 1). Ages come from
+   * the ISO timestamp renderTurnForIndex bakes into each turn's content, so no
+   * schema change or extra column is needed. A single batched query fetches all
+   * candidate contents; rows whose age can't be parsed are omitted (→ factor 1,
+   * i.e. no decay rather than a guessed age).
+   */
+  private turnDecayFactors(
+    paths: string[],
+    decay: TurnDecay,
+  ): Map<string, number> {
+    const factors = new Map<string, number>();
+    const turnPaths = paths.filter((p) => p.startsWith("turns/"));
+    if (turnPaths.length === 0) return factors;
+    const now = decay.nowMs ?? Date.now();
+    const placeholders = turnPaths.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT path, content FROM turn_docs WHERE path IN (${placeholders})`,
+      )
+      .all(...turnPaths) as Array<{ path: string; content: string }>;
+    for (const r of rows) {
+      const createdMs = parseTurnCreatedAtMs(r.content);
+      if (createdMs === undefined) continue;
+      const ageDays = (now - createdMs) / 86_400_000;
+      factors.set(r.path, turnDecayFactor(ageDays, decay));
+    }
+    return factors;
   }
 
   private lookupScope(path: string): Scope | undefined {

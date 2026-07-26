@@ -14,6 +14,7 @@ import {
   DEFAULT_DURABLE_FACTS,
   DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
+  DEFAULT_RETRIEVAL_DECAY,
   DEFAULT_TELEGRAM_STREAMING,
   DEFAULT_TURN_INDEXING,
   loadConfig,
@@ -50,6 +51,9 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_BATCH_SIZE",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_FLUSH_AFTER_HOURS",
   "PHANTOMBOT_RETRIEVAL_TURN_INDEXING_REPAIR_BATCH_SIZE",
+  "PHANTOMBOT_RETRIEVAL_DECAY_ENABLED",
+  "PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS",
+  "PHANTOMBOT_RETRIEVAL_DECAY_FLOOR",
   "PHANTOMBOT_DURABLE_FACTS_ENABLED",
   "PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED",
   "PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE",
@@ -770,6 +774,7 @@ min_score = 0.25
       minScore: 0.25,
       turnIndexing: DEFAULT_TURN_INDEXING,
       graphExpansion: DEFAULT_GRAPH_EXPANSION,
+      decay: DEFAULT_RETRIEVAL_DECAY,
     });
   });
 
@@ -791,7 +796,52 @@ limit = 5
       minScore: 0.4,
       turnIndexing: DEFAULT_TURN_INDEXING,
       graphExpansion: DEFAULT_GRAPH_EXPANSION,
+      decay: DEFAULT_RETRIEVAL_DECAY,
     });
+  });
+
+  test("TOML [retrieval.decay] overrides defaults", async () => {
+    await writeToml(`
+[retrieval.decay]
+enabled = false
+half_life_days = 90
+floor = 0.1
+`);
+    const c = await loadConfig();
+    expect(c.retrieval!.decay).toEqual({
+      enabled: false,
+      halfLifeDays: 90,
+      floor: 0.1,
+    });
+  });
+
+  test("decay env vars override TOML and clamp the floor to [0,1]", async () => {
+    await writeToml(`
+[retrieval.decay]
+enabled = false
+half_life_days = 90
+floor = 0.1
+`);
+    process.env.PHANTOMBOT_RETRIEVAL_DECAY_ENABLED = "true";
+    process.env.PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS = "45";
+    process.env.PHANTOMBOT_RETRIEVAL_DECAY_FLOOR = "5"; // out of range → 1
+    const c = await loadConfig();
+    expect(c.retrieval!.decay).toEqual({
+      enabled: true,
+      halfLifeDays: 45,
+      floor: 1,
+    });
+  });
+
+  test("decay half_life_days parses a fractional value and floors at 0", async () => {
+    await writeToml(`
+[retrieval.decay]
+half_life_days = 0.5
+`);
+    expect((await loadConfig()).retrieval!.decay.halfLifeDays).toBe(0.5);
+
+    process.env.PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS = "-3";
+    expect((await loadConfig()).retrieval!.decay.halfLifeDays).toBe(0);
   });
 
   test("TOML [retrieval.turn_indexing] overrides defaults", async () => {

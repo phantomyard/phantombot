@@ -100,15 +100,25 @@ export async function retrieveContext(
         });
     }
 
+    // Time-decay for raw conversation-turn hits (curated memory/kb immune).
+    // Off, or half-life <= 0, → undefined, and ranking stays relevance-only.
+    const dc = opts.settings.decay;
+    const decay =
+      dc?.enabled && dc.halfLifeDays > 0
+        ? { halfLifeDays: dc.halfLifeDays, floor: dc.floor }
+        : undefined;
+
     // Gemini path: hybrid (BM25 + vector via RRF), unchanged. No-embeddings
     // path: fielded BM25 plus OKF link-graph expansion (the superpower) when
     // enabled — so keyword-only personas get semantic-ish spread for free.
+    // Turn-decay rides along every path so stale turns sink regardless.
     const ge = opts.settings.graphExpansion;
     const hits = queryVec
       ? ix.hybridSearch(query, queryVec, {
           scope: "all",
           limit: opts.settings.limit,
           conversation: opts.conversation,
+          decay,
         })
       : ge?.enabled
         ? ix.searchExpanded(query, {
@@ -117,11 +127,13 @@ export async function retrieveContext(
             conversation: opts.conversation,
             hops: ge.hops,
             maxAdd: ge.maxAdd,
+            decay,
           })
         : ix.search(query, {
             scope: "all",
             limit: opts.settings.limit,
             conversation: opts.conversation,
+            decay,
           });
 
     return formatRetrieved(hits, opts.settings);

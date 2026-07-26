@@ -200,6 +200,37 @@ export interface RetrievalSettings {
    * vector path is used instead, so Gemini users are unaffected).
    */
   graphExpansion: GraphExpansionSettings;
+  /**
+   * Time-decay on raw conversation-turn hits. Ranking has no clock of its own —
+   * BM25 + RRF are purely relevance-based, so a stale turn that lexically
+   * matches (e.g. a superseded infra note repeated in old chat) competes with a
+   * fresh correction on equal footing and can win forever. Decay multiplies a
+   * turn hit's score by `0.5^(ageDays/halfLifeDays)` (floored), so old turns
+   * sink no matter how strongly they match. Applies ONLY to `turns` scope —
+   * curated memory/ + kb/ notes are immune (factor 1.0) and never age out, so
+   * rarely-recalled-but-important runbooks survive for years. There is no
+   * refresh-on-recall by design: a ghost is recalled *because* it matches, so
+   * bumping it on recall would keep it alive — the opposite of the goal.
+   */
+  decay: RetrievalDecaySettings;
+}
+
+/** Time-decay knobs for raw conversation-turn hits (curated notes are immune). */
+export interface RetrievalDecaySettings {
+  /** Master switch. When false, turn hits are ranked without any time-decay. */
+  enabled: boolean;
+  /**
+   * Half-life in days for a turn hit's relevance score. After this many days a
+   * turn's score is halved; after 2× it is quartered; etc. Lower = turns age
+   * out faster. Only affects `turns` scope. `<= 0` disables decay (factor 1).
+   */
+  halfLifeDays: number;
+  /**
+   * Lower bound on the decay multiplier so a very old turn's score is damped
+   * but never driven to exactly 0 — it stays a tie-broken last resort rather
+   * than vanishing. 0..1; 0 lets ancient turns decay to nothing.
+   */
+  floor: number;
 }
 
 /** OKF link-graph expansion knobs (BM25-only retrieval path). */
@@ -218,6 +249,16 @@ export const DEFAULT_GRAPH_EXPANSION: GraphExpansionSettings = {
   maxAdd: 3,
 };
 
+export const DEFAULT_RETRIEVAL_DECAY: RetrievalDecaySettings = {
+  enabled: true,
+  // 30 days: raw chat history a month old is worth about half a fresh turn.
+  // Long enough that this-week's context is barely touched; short enough that
+  // a months-old ghost is effectively dead (180d → 0.5^6 ≈ 0.016 × floor).
+  halfLifeDays: 30,
+  // Keep a sliver so an ancient turn is a last-resort tie-break, not erased.
+  floor: 0.02,
+};
+
 export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   enabled: true,
   limit: 5,
@@ -225,6 +266,7 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   minScore: 0,
   turnIndexing: DEFAULT_TURN_INDEXING,
   graphExpansion: DEFAULT_GRAPH_EXPANSION,
+  decay: DEFAULT_RETRIEVAL_DECAY,
 };
 
 /**
@@ -862,6 +904,35 @@ function buildRetrievalConfig(
     graphExpansion: buildGraphExpansionConfig(
       (tomlRetrieval.graph_expansion ?? {}) as Record<string, unknown>,
     ),
+    decay: buildRetrievalDecayConfig(
+      (tomlRetrieval.decay ?? {}) as Record<string, unknown>,
+    ),
+  };
+}
+
+function buildRetrievalDecayConfig(
+  toml: Record<string, unknown>,
+): RetrievalDecaySettings {
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_DECAY_ENABLED) ??
+    asBool(toml.enabled) ??
+    DEFAULT_RETRIEVAL_DECAY.enabled;
+  const halfLifeDays =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS) ??
+    asNumber(toml.half_life_days) ??
+    DEFAULT_RETRIEVAL_DECAY.halfLifeDays;
+  const floor =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_DECAY_FLOOR) ??
+    asNumber(toml.floor) ??
+    DEFAULT_RETRIEVAL_DECAY.floor;
+  return {
+    enabled,
+    // Floor at 0 (0 or below disables decay in the index). No hard ceiling —
+    // an operator wanting effectively-immortal turns can set this very large.
+    halfLifeDays: Math.max(0, halfLifeDays),
+    // Clamp to a valid multiplier range so a fat-fingered value can't invert
+    // ordering (floor > 1) or push scores negative.
+    floor: Math.max(0, Math.min(1, floor)),
   };
 }
 
