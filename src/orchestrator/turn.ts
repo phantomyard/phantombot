@@ -32,6 +32,7 @@ import {
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { MemoryStore } from "../memory/store.ts";
+import type { FactSource } from "../config.ts";
 import type { ScreenVerdict } from "./screen.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
@@ -153,6 +154,26 @@ export interface TurnInput {
    *      screened by the tool-less judge before any capable harness runs.
    */
   trusted?: boolean;
+  /**
+   * Optional override for the USER-turn durable-fact provenance tier.
+   *
+   * By default the user turn is stamped `principal` when `trusted`, else
+   * `other` — the security-perimeter framing: the owner speaking vs. a third
+   * party in a shared context. That default is right for human-authored input,
+   * but wrong for a turn the persona schedules for ITSELF: a `tick` task wake
+   * feeds its own scheduled prompt, which is neither the principal live nor an
+   * untrusted stranger. Such callers pass `userSource: "self"` so task-derived
+   * observations land in the self tier (first-hand, faster-decayed) instead of
+   * masquerading as `other` (untrusted, fast-decay, low-weight).
+   *
+   * Decoupled from `trusted` on purpose: provenance-tier and the
+   * security-perimeter bit answer different questions and must not be conflated
+   * (a task wake is `self`-provenance but still NOT `trusted` — it does not get
+   * the principal's command authority). Undefined preserves the legacy
+   * `trusted ? "principal" : "other"` behaviour exactly. The assistant reply is
+   * always stamped `self` regardless — this only affects the user turn.
+   */
+  userSource?: FactSource;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
@@ -320,8 +341,10 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         // principal (owner) speaking → highest trust. An untrusted turn is a
         // third party in a shared context → `other`, down-weighted and
         // fast-decayed so a group member's claim can't masquerade as something
-        // the owner told us in the persona-wide fact pool.
-        source: input.trusted === true ? "principal" : "other",
+        // the owner told us in the persona-wide fact pool. `userSource` lets a
+        // self-scheduled caller (tick task wake) override this to `self` so its
+        // own prompt isn't stamped as an untrusted stranger — see the field doc.
+        source: input.userSource ?? (input.trusted === true ? "principal" : "other"),
       },
       {
         persona: input.persona,

@@ -238,6 +238,47 @@ describe("runTick — normal task fire", () => {
     }));
   });
 
+  test("agent-woken task stamps its user turn `self` (not `other`)", async () => {
+    // #324: a task feeds the persona its OWN scheduled prompt, so the user
+    // turn must land in the self tier — NOT `other` (untrusted stranger).
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    const pairCalls: Array<{ user: { source?: string } }> = [];
+    const spied = new Proxy(memory, {
+      get(target, prop, receiver) {
+        if (prop === "appendTurnPair") {
+          return async (user: { source?: string }, assistant: unknown) => {
+            pairCalls.push({ user });
+            return (
+              memory.appendTurnPair as (u: unknown, a: unknown) => Promise<void>
+            )(user, assistant);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    await runTick({
+      config,
+      taskStore: store,
+      memory: spied,
+      harnesses: [new ScriptedHarness("h", [{ type: "done", finalText: "ok" }])],
+      lockPath,
+      out: { write() {} },
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+
+    expect(pairCalls).toHaveLength(1);
+    expect(pairCalls[0]!.user.source).toBe("self");
+  });
+
   test("background wake previews redact obvious secrets and cap long chunks", () => {
     const token = "ghp_" + "a".repeat(36);
     const preview = previewForLog(

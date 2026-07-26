@@ -51,6 +51,12 @@ import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+import { makeRetriever } from "../orchestrator/retrieval.ts";
+import { makeTurnIndexer } from "../orchestrator/turnIndexer.ts";
+import {
+  makeDurableFactPuller,
+  makeFactExtractor,
+} from "../orchestrator/durableFacts.ts";
 
 const WAKE_STREAM_PREVIEW_CHARS = 2000;
 const BACKGROUND_WAKE_HARD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -187,6 +193,37 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             memory,
             idleTimeoutMs: config.harnessIdleTimeoutMs,
             hardTimeoutMs: BACKGROUND_WAKE_HARD_TIMEOUT_MS,
+            // #324: an agent-woken task should wake with the same memory
+            // instincts a conversation turn gets — semantic recall + durable
+            // facts on the READ side, and consolidate its observations back on
+            // the WRITE side — instead of running context-blind and mute. Each
+            // factory self-gates: it returns undefined when its feature is
+            // disabled in config, so this is a no-op when retrieval/durable
+            // facts are off. (--command tasks never reach here — they stay
+            // blind/mute by design.)
+            retrieve: makeRetriever(config, task.persona, agentDir, conversation),
+            indexTurns: makeTurnIndexer(config, task.persona, conversation, memory),
+            pullFacts: makeDurableFactPuller(
+              config,
+              task.persona,
+              conversation,
+              memory,
+            ),
+            extractFacts: makeFactExtractor(
+              config,
+              task.persona,
+              conversation,
+              memory,
+              harnesses,
+              agentDir,
+            ),
+            // Provenance: a task wake feeds the persona its OWN scheduled
+            // prompt — first-hand self-observation, not an untrusted stranger.
+            // Stamp the user turn `self` so task-derived facts don't land in the
+            // untrusted `other` tier. NOT `trusted`: a task has no principal
+            // command authority, and untrusted content it might ingest stays
+            // untrusted (see #327 for the mid-turn-fetch hardening follow-up).
+            userSource: "self",
           })) {
             logBackgroundWakeChunk(task, conversation, chunk);
             if (chunk.type === "text") finalText += chunk.text;
