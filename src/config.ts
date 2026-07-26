@@ -243,6 +243,50 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
  * ad-hoc test configs may omit it, in which case the `make*` factories return
  * undefined and neither half runs.
  */
+/**
+ * Provenance of a durable fact — WHO asserted it, which sets how much we trust
+ * it and how fast it goes stale. Derived at turn-append time (orchestrator/
+ * turn.ts) from the turn's role + trust bit, carried onto the fact:
+ *   - `principal` — the owner said it in a trusted turn. Highest trust, slowest
+ *     decay: a standing fact the owner gave us holds until they correct it.
+ *   - `self`      — the persona's OWN assistant turn (a first-hand observation
+ *     it made, e.g. running a task). Trust the sighting, but decay it fast:
+ *     infra state churns, so a stale reading must not masquerade as current.
+ *   - `other`     — anyone else in a shared/group conversation (another agent,
+ *     a third party). Lowest trust, shortest life: heard in a room, not told to
+ *     us one-on-one.
+ */
+export type FactSource = "principal" | "self" | "other";
+
+export const FACT_SOURCES: readonly FactSource[] = [
+  "principal",
+  "self",
+  "other",
+] as const;
+
+/**
+ * The three knobs that make persona-scoping a fact SAFE. Without them, merging
+ * every conversation's facts into one persona pool would let a group member's
+ * claim land in the owner's private pool at equal weight (the trust-bleed we
+ * flagged in design). Each tier ranks, decays, and retires on its own clock.
+ */
+export interface FactSourceTier {
+  /** Ranking multiplier on confidence. principal ≥ self ≥ other. */
+  weight: number;
+  /** Decay half-life in days: score halves every `halfLifeDays` unseen. */
+  halfLifeDays: number;
+  /**
+   * Retirement floor: a fact not re-seen/re-injected for longer than this is
+   * PRUNED (hard-deleted) out of band. Any recall refreshes `last_seen_at`, so
+   * only genuinely-unused facts age out — a yearly-reviewed procedure the owner
+   * gave us (principal, 365d) survives to its next natural use, while a
+   * transient self-observation retires quickly.
+   */
+  maxAgeDays: number;
+}
+
+export type FactSourceTiers = Record<FactSource, FactSourceTier>;
+
 export interface DurableFactsSettings {
   /** Master switch for BOTH the extract and inject halves. */
   enabled: boolean;
@@ -252,6 +296,25 @@ export interface DurableFactsSettings {
   minConfidence: number;
   /** Max evicted turns extracted from in one out-of-band pass. */
   maxExtractPerTurn: number;
+  /**
+   * Per-source provenance tiers (ranking weight, decay half-life, retirement
+   * age). The read path scores every candidate as
+   * `weight · confidence · 2^(-ageDays / halfLifeDays)` and drops anything
+   * under `injectFloor`; the write path prunes anything past its tier's
+   * `maxAgeDays`.
+   */
+  tiers: FactSourceTiers;
+  /**
+   * Minimum decay-adjusted score for a fact to be injected. Keeps a deeply
+   * decayed or low-trust fact from surfacing even when the prompt has room.
+   */
+  injectFloor: number;
+  /**
+   * Verbose per-fact logging on the extract / inject / prune paths, for
+   * dogfooding the provenance+decay model (e.g. on Lena) before trusting it.
+   * Off by default; flip on with PHANTOMBOT_DURABLE_FACTS_DEBUG=1.
+   */
+  debug: boolean;
   /**
    * Crash-recovery lease window (ms) for a claimed-but-not-yet-committed turn.
    * If the pass that claimed a turn dies without committing or releasing it,
@@ -276,11 +339,27 @@ export interface DurableFactsSettings {
  */
 export const LEASE_COMMIT_MARGIN_MS = 300_000;
 
+/**
+ * Default provenance tiers. Half-lives and retirement ages encode the trust
+ * model agreed in design: the owner's standing facts live ~a year (a procedure
+ * reviewed once a year must not be forgotten just because it's rarely recalled),
+ * the persona's own observations rot in a quarter (infra state churns), and
+ * overheard third-party claims fade fastest.
+ */
+export const DEFAULT_FACT_TIERS: FactSourceTiers = {
+  principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
+  self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
+  other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+};
+
 export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {
   enabled: true,
   maxInjected: 8,
   minConfidence: 0.5,
   maxExtractPerTurn: 4,
+  tiers: DEFAULT_FACT_TIERS,
+  injectFloor: 0.05,
+  debug: false,
   // Default harness hard timeout (3_600_000) + LEASE_COMMIT_MARGIN_MS. Kept
   // self-consistent with the default hard timeout so even a Config assembled
   // without buildDurableFactsConfig (e.g. an ad-hoc test) is race-safe;
@@ -879,8 +958,19 @@ function buildDurableFactsConfig(
     asInt(process.env.PHANTOMBOT_DURABLE_FACTS_LEASE_MS) ??
     asInt(toml.lease_ms) ??
     DEFAULT_DURABLE_FACTS.leaseMs;
+  const injectFloor =
+    asNumber(process.env.PHANTOMBOT_DURABLE_FACTS_INJECT_FLOOR) ??
+    asNumber(toml.inject_floor) ??
+    DEFAULT_DURABLE_FACTS.injectFloor;
+  const debug =
+    asBool(process.env.PHANTOMBOT_DURABLE_FACTS_DEBUG) ??
+    asBool(toml.debug) ??
+    DEFAULT_DURABLE_FACTS.debug;
   return {
     enabled,
+    tiers: buildFactTiers(asRecord(toml.tiers)),
+    injectFloor: Math.max(0, Math.min(1, injectFloor)),
+    debug,
     // 0 disables injection; capped so one turn can't stuff the prompt.
     maxInjected: Math.max(0, Math.min(100, maxInjected)),
     // A probability floor: clamp to 0..1.
@@ -900,6 +990,39 @@ function buildDurableFactsConfig(
       Math.floor(leaseMs),
     ),
   };
+}
+
+/**
+ * Merge per-source tier overrides from TOML on top of DEFAULT_FACT_TIERS.
+ * Each field is validated + clamped independently so a partial or malformed
+ * `[durable_facts.tiers.self]` block can only tune what it sets, never disable
+ * a tier. weight/halfLifeDays/maxAgeDays are all floored positive.
+ */
+function buildFactTiers(toml: Record<string, unknown>): FactSourceTiers {
+  const out = {} as FactSourceTiers;
+  for (const source of FACT_SOURCES) {
+    const base = DEFAULT_FACT_TIERS[source];
+    const o = asRecord(toml[source]);
+    const weight = asNumber(o.weight) ?? base.weight;
+    const halfLifeDays = asNumber(o.half_life_days) ?? base.halfLifeDays;
+    const maxAgeDays = asNumber(o.max_age_days) ?? base.maxAgeDays;
+    out[source] = {
+      weight: Math.max(0, Math.min(1, weight)),
+      // A half-life of 0 would divide-by-zero the decay; floor at a day.
+      halfLifeDays: Math.max(1, halfLifeDays),
+      // Retirement age must never sit below the half-life or a fact would be
+      // pruned before it even finishes its first decay step.
+      maxAgeDays: Math.max(1, maxAgeDays),
+    };
+  }
+  return out;
+}
+
+/** Coerce an unknown TOML value to a plain record; {} when it isn't one. */
+function asRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {};
 }
 
 function buildVoiceConfig(

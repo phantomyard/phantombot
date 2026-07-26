@@ -237,6 +237,7 @@ describe("retrieveContext", () => {
       text: "The private figure we discussed in chat AAA was 12345.",
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
+      source: "principal",
     });
     ix.upsertTurn({
       id: 2,
@@ -246,6 +247,7 @@ describe("retrieveContext", () => {
       text: "The private figure we discussed in chat BBB was 67890.",
       createdAt: new Date("2026-05-28T06:01:00Z"),
       embeddable: true,
+      source: "principal",
     });
     ix.close();
 

@@ -144,6 +144,16 @@ describe("loadConfig — defaults (no file)", () => {
       maxInjected: 8,
       minConfidence: 0.5,
       maxExtractPerTurn: 4,
+      // Provenance tiers: principal (owner) is highest-trust, slowest decay,
+      // ~1yr retention; self (own observations) rots in a quarter; other
+      // (overheard) fades fastest. These make persona-wide facts safe.
+      tiers: {
+        principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
+        self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
+        other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+      },
+      injectFloor: 0.05,
+      debug: false,
       // Default harness hard timeout (3_600_000) + LEASE_COMMIT_MARGIN_MS
       // (300_000): the lease MUST outlast a full extraction so a slow pass can't
       // have its lease expire mid-call and let a concurrent pass re-claim it.
@@ -512,6 +522,14 @@ max_extract_per_turn = 4
       maxInjected: 12,
       minConfidence: 0.35,
       maxExtractPerTurn: 6,
+      // Not overridden here → defaults.
+      tiers: {
+        principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
+        self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
+        other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+      },
+      injectFloor: 0.05,
+      debug: false,
       leaseMs: 7_200_000,
     });
   });

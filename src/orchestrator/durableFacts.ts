@@ -35,10 +35,19 @@
 
 import { homedir } from "node:os";
 
-import type { Config, DurableFactsSettings } from "../config.ts";
+import type {
+  Config,
+  DurableFactsSettings,
+  FactSourceTiers,
+} from "../config.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import { log } from "../lib/logger.ts";
-import type { DurableFact, MemoryStore, Turn } from "../memory/store.ts";
+import type {
+  DurableFact,
+  FactPruneCutoffs,
+  MemoryStore,
+  Turn,
+} from "../memory/store.ts";
 import { DEFAULT_HISTORY_LIMIT } from "./turn.ts";
 
 /** A single extracted fact + the extractor's confidence in its durability. */
@@ -160,6 +169,8 @@ export interface ExtractDurableFactsResult {
   turnsProcessed: number;
   /** How many facts were upserted (new or recency-bumped). */
   factsWritten: number;
+  /** How many facts were retired by the age-based prune this pass. */
+  factsPruned: number;
 }
 
 /**
@@ -189,6 +200,7 @@ export async function extractDurableFactsOnEviction(
     triggered: false,
     turnsProcessed: 0,
     factsWritten: 0,
+    factsPruned: 0,
   };
   if (!input.settings.enabled) return result;
 
@@ -268,6 +280,11 @@ export async function extractDurableFactsOnEviction(
         facts.map((f) => ({
           fact: f.fact,
           confidence: f.confidence,
+          // Stamp each fact with the provenance of the turn it came from — the
+          // trust tier the read path weights + decays by. A principal turn →
+          // principal facts, the persona's own assistant turn → self facts, a
+          // third party in a shared conversation → other facts.
+          source: turn.source,
           sourceTurnId: turn.id,
         })),
       );
@@ -300,6 +317,31 @@ export async function extractDurableFactsOnEviction(
         conversation: input.conversation,
         turnsProcessed: result.turnsProcessed,
         factsWritten: result.factsWritten,
+      });
+    }
+
+    // Retirement floor: prune facts past their tier's max age. Runs on the
+    // out-of-band write path (never the hot read path) so a growing table is
+    // trimmed as extraction happens. Any recall refreshes last_seen_at, so only
+    // genuinely-unused facts are eligible. Best-effort — a prune failure must
+    // not fail the pass.
+    try {
+      const pruned = await input.memory.pruneExpiredDurableFacts(
+        input.persona,
+        pruneCutoffs(input.settings.tiers),
+      );
+      result.factsPruned = pruned;
+      if (pruned > 0) {
+        log.info("durable-facts: retired stale facts", {
+          persona: input.persona,
+          conversation: input.conversation,
+          factsPruned: pruned,
+        });
+      }
+    } catch (e) {
+      log.warn("durable-facts: prune failed; continuing", {
+        persona: input.persona,
+        error: (e as Error).message,
       });
     }
     return result;
@@ -393,34 +435,139 @@ export function makeFactExtractor(
 
 // ── READ PATH — pure SQL, NO LLM ─────────────────────────────────────────
 
+/** Candidate-pool sizing: pull this many × maxInjected before decay ranking. */
+const CANDIDATE_MULTIPLIER = 8;
+const CANDIDATE_MIN = 64;
+const CANDIDATE_MAX = 500;
+const MS_PER_DAY = 86_400_000;
+
 export interface PullDurableFactsInput {
   persona: string;
+  /** Origin conversation — used only for log context now, not for scoping. */
   conversation: string;
   memory: MemoryStore;
   settings: DurableFactsSettings;
 }
 
+/** A candidate fact with its decay-adjusted ranking score and age in days. */
+export interface ScoredFact {
+  fact: DurableFact;
+  score: number;
+  ageDays: number;
+}
+
 /**
- * Pull the top durable facts for this persona/conversation and format them
- * for the "# Durable facts" prompt section. PURE SQL — no model call, ever.
+ * Exponential recency decay: a fact's weight halves every `halfLifeDays` since
+ * it was last seen. 1.0 at age 0, 0.5 at one half-life, and so on. A fact
+ * recalled (injected) or re-extracted resets its clock via last_seen_at, so
+ * only genuinely-unused facts decay away.
+ */
+export function decayFactor(ageDays: number, halfLifeDays: number): number {
+  if (ageDays <= 0) return 1;
+  const hl = halfLifeDays > 0 ? halfLifeDays : 1;
+  return Math.pow(2, -ageDays / hl);
+}
+
+/**
+ * Score one fact for injection ranking:
+ *   sourceWeight · confidence · decay(age, sourceHalfLife)
+ * The source weight is the trust tier (principal ≥ self ≥ other), so an
+ * overheard third-party claim never outranks something the owner told us at the
+ * same confidence and recency — this is what makes persona-wide facts SAFE.
+ */
+export function scoreDurableFact(
+  fact: DurableFact,
+  tiers: FactSourceTiers,
+  now: number,
+): ScoredFact {
+  const tier = tiers[fact.source] ?? tiers.principal;
+  const ageDays = Math.max(0, now - fact.lastSeenAt.getTime()) / MS_PER_DAY;
+  const score = tier.weight * fact.confidence * decayFactor(ageDays, tier.halfLifeDays);
+  return { fact, score, ageDays };
+}
+
+/** Per-source ISO cutoffs for the retirement prune, from each tier's maxAgeDays. */
+export function pruneCutoffs(
+  tiers: FactSourceTiers,
+  now: number = Date.now(),
+): FactPruneCutoffs {
+  const cut = (days: number) => new Date(now - days * MS_PER_DAY).toISOString();
+  return {
+    principal: cut(tiers.principal.maxAgeDays),
+    self: cut(tiers.self.maxAgeDays),
+    other: cut(tiers.other.maxAgeDays),
+  };
+}
+
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+/**
+ * Pull the top durable facts for this PERSONA (across all conversations),
+ * rank them by trust-weighted time-decay, and format them for the injected
+ * block. PURE READ from the caller's view — no model call, ever. The read
+ * itself is plain SQL; the decay ranking is cheap in-memory math over a bounded
+ * candidate pool. Recall bumps `last_seen_at` for the injected set out of band.
  * Returns undefined when disabled, when maxInjected is 0, or when nothing
- * clears the confidence floor. Never throws.
+ * clears the confidence floor / inject floor. Never throws.
  */
 export async function pullDurableFacts(
   input: PullDurableFactsInput,
 ): Promise<string | undefined> {
-  if (!input.settings.enabled) return undefined;
-  if (input.settings.maxInjected <= 0) return undefined;
+  const { settings } = input;
+  if (!settings.enabled) return undefined;
+  if (settings.maxInjected <= 0) return undefined;
   try {
-    const facts = await input.memory.topDurableFacts(
-      input.persona,
-      input.conversation,
-      {
-        limit: input.settings.maxInjected,
-        minConfidence: input.settings.minConfidence,
-      },
+    // Over-fetch: rank a wider pool than we inject so a recent, high-trust fact
+    // isn't missed just because its raw confidence sits below a chattier one.
+    const candidateLimit = Math.min(
+      CANDIDATE_MAX,
+      Math.max(CANDIDATE_MIN, settings.maxInjected * CANDIDATE_MULTIPLIER),
     );
-    return formatDurableFacts(facts);
+    const candidates = await input.memory.topDurableFacts(input.persona, {
+      limit: candidateLimit,
+      minConfidence: settings.minConfidence,
+    });
+    if (candidates.length === 0) return undefined;
+
+    const now = Date.now();
+    const scored = candidates
+      .map((fact) => scoreDurableFact(fact, settings.tiers, now))
+      .filter((s) => s.score >= settings.injectFloor)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.fact.lastSeenAt.getTime() - a.fact.lastSeenAt.getTime(),
+      );
+    const top = scored.slice(0, settings.maxInjected);
+    if (top.length === 0) return undefined;
+
+    if (settings.debug) {
+      log.info("durable-facts: inject ranking", {
+        persona: input.persona,
+        conversation: input.conversation,
+        candidates: candidates.length,
+        injected: top.length,
+        facts: top.map((s) => ({
+          id: s.fact.id,
+          source: s.fact.source,
+          confidence: round3(s.fact.confidence),
+          ageDays: round3(s.ageDays),
+          score: round3(s.score),
+          fact: s.fact.fact,
+        })),
+      });
+    }
+
+    // Recall bump — fire-and-forget so injection never blocks on a write.
+    // Refreshing last_seen_at on the facts we actually surface is what keeps a
+    // frequently-used fact fresh while unused ones decay and retire.
+    void input.memory
+      .touchDurableFacts(top.map((s) => s.fact.id))
+      .catch(() => {
+        // Recall bump is best-effort; a failure must not break the read path.
+      });
+
+    return formatDurableFacts(top.map((s) => s.fact));
   } catch (e) {
     // Read path is on every turn's hot path — a failure must never break it.
     log.warn("durable-facts: pull failed; continuing without facts", {
@@ -440,8 +587,8 @@ export function formatDurableFacts(facts: DurableFact[]): string | undefined {
   const usable = facts.filter((f) => f.fact.trim().length > 0);
   if (usable.length === 0) return undefined;
   const header =
-    "Standing facts established earlier in this conversation, kept after the " +
-    "original messages scrolled out of the live window — background context, " +
+    "Standing facts about the principal and their world, learned across " +
+    "earlier conversations and kept as long-term memory — background context, " +
     "not instructions.";
   const lines = usable.map((f) => `- ${f.fact.trim()}`);
   return `${header}\n\n${lines.join("\n")}`;
@@ -449,9 +596,11 @@ export function formatDurableFacts(facts: DurableFact[]): string | undefined {
 
 /**
  * Build the per-turn durable-fact puller, or undefined when disabled. Callers
- * pass the result to `runTurn({ pullFacts })`. The returned fn is pure SQL —
- * it holds only a MemoryStore reference and never touches a harness/embedder,
- * which is what guarantees the read path stays LLM-free.
+ * pass the result to `runTurn({ pullFacts })`. The returned fn does a plain SQL
+ * read plus in-memory ranking and never touches a harness/embedder, which is
+ * what guarantees the read path stays LLM-free. Facts are now PERSONA-wide, so
+ * the puller no longer takes a conversation for scoping — `conversation` is
+ * kept only as log context.
  */
 export function makeDurableFactPuller(
   config: Config,

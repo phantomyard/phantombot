@@ -120,7 +120,7 @@ describe("extractDurableFactsOnEviction", () => {
     expect(res.turnsProcessed).toBe(4);
     expect(res.factsWritten).toBe(2);
 
-    const facts = await memory.topDurableFacts(PERSONA, CONV, { limit: 10 });
+    const facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
     expect(facts.map((f) => f.fact).sort()).toEqual([
       "Andrew lives in Arnhem",
       "He uses Deye inverters",
@@ -156,7 +156,7 @@ describe("extractDurableFactsOnEviction", () => {
     // The quarantined turn must never be handed to the extractor.
     expect(seen.some((m) => m.includes("SECRET"))).toBe(false);
     expect(res.factsWritten).toBe(1);
-    const facts = await memory.topDurableFacts(PERSONA, CONV, { limit: 10 });
+    const facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
     expect(facts.map((f) => f.fact)).toEqual(["kept"]);
   });
 
@@ -174,7 +174,7 @@ describe("extractDurableFactsOnEviction", () => {
       complete,
       windowSize: 2,
     });
-    const facts = await memory.topDurableFacts(PERSONA, CONV, { limit: 10 });
+    const facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
     expect(facts).toHaveLength(1);
     expect(facts[0]!.confidence).toBeCloseTo(0.9); // max of the two
   });
@@ -215,7 +215,7 @@ describe("extractDurableFactsOnEviction", () => {
     });
     expect(res.triggered).toBe(false);
     expect(calls).toBe(0);
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.countDurableFacts(PERSONA)).toBe(0);
   });
 
   test("never throws when the completion fn rejects", async () => {
@@ -232,7 +232,7 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(res.factsWritten).toBe(0);
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.countDurableFacts(PERSONA)).toBe(0);
   });
 
   test("mid-batch failure releases the failed turn + tail, so only those re-extract next pass", async () => {
@@ -273,7 +273,7 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(res2.turnsProcessed).toBe(3); // turns 2, 3, 4 re-claimed — NOT turn 1
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(3); // 1 + 2
+    expect(await memory.countDurableFacts(PERSONA)).toBe(3); // 1 + 2
 
     // And now everything is committed: a third pass finds nothing.
     const res3 = await extractDurableFactsOnEviction({
@@ -315,7 +315,7 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(res.turnsProcessed).toBe(4);
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+    expect(await memory.countDurableFacts(PERSONA)).toBe(1);
   });
 
   test("a crashed pass (leases left live) does NOT re-extract until the lease expires", async () => {
@@ -368,7 +368,7 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(res2.turnsProcessed).toBe(4);
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(1);
+    expect(await memory.countDurableFacts(PERSONA)).toBe(1);
   });
 
   test("a clean pass commits everything — the cursor advances and a second pass is a no-op", async () => {
@@ -419,7 +419,7 @@ describe("extractDurableFactsOnEviction", () => {
       windowSize: 2,
     });
     expect(res.factsWritten).toBe(0);
-    expect(await memory.countDurableFacts(PERSONA, CONV)).toBe(0);
+    expect(await memory.countDurableFacts(PERSONA)).toBe(0);
   });
 });
 
@@ -491,6 +491,7 @@ describe("pullDurableFacts / formatDurableFacts", () => {
           conversation: CONV,
           fact: "   ",
           confidence: 1,
+          source: "principal",
           createdAt: new Date(),
           lastSeenAt: new Date(),
         },

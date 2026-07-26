@@ -316,12 +316,21 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         conversation: input.conversation,
         role: "user",
         text: input.userMessage,
+        // Provenance for durable-fact extraction. A TRUSTED turn is the
+        // principal (owner) speaking → highest trust. An untrusted turn is a
+        // third party in a shared context → `other`, down-weighted and
+        // fast-decayed so a group member's claim can't masquerade as something
+        // the owner told us in the persona-wide fact pool.
+        source: input.trusted === true ? "principal" : "other",
       },
       {
         persona: input.persona,
         conversation: input.conversation,
         role: "assistant",
         text: finalText,
+        // The persona's own reply — a first-hand observation. Trusted, but
+        // decayed faster than principal facts since self-observations go stale.
+        source: "self",
       },
     );
 

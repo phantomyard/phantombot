@@ -24,7 +24,26 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import type { FactSource } from "../config.ts";
+
 export type Role = "user" | "assistant";
+
+/**
+ * Numeric trust priority per fact source. Used both in SQL (the upsert conflict
+ * clause, inlined) and in JS to decide which source wins when the same
+ * normalized fact arrives from two conversations under the persona-wide key:
+ * the higher-trust source is kept. principal > self > other.
+ */
+export const FACT_SOURCE_PRIORITY: Record<FactSource, number> = {
+  principal: 3,
+  self: 2,
+  other: 1,
+};
+
+/** Coerce a raw DB string to a known FactSource, defaulting to `principal`. */
+export function asFactSource(v: unknown): FactSource {
+  return v === "self" || v === "other" ? v : "principal";
+}
 
 export interface Turn {
   id: number;
@@ -43,6 +62,14 @@ export interface Turn {
    * once a trusted turn has ruled on them.
    */
   embeddable: boolean;
+  /**
+   * Provenance of this turn's content, used by durable-fact extraction to
+   * stamp each fact's trust tier. `principal` (owner, trusted turn), `self`
+   * (the persona's own assistant turn), or `other` (a third party in a shared
+   * conversation). Legacy rows written before this column default to
+   * `principal`; the migration backfills assistant rows to `self`.
+   */
+  source: FactSource;
 }
 
 export interface AppendTurnInput {
@@ -50,6 +77,12 @@ export interface AppendTurnInput {
   conversation: string;
   role: Role;
   text: string;
+  /**
+   * Provenance tier for durable-fact extraction (see Turn.source). Optional on
+   * input: when omitted it defaults to `self` for assistant turns and
+   * `principal` for user turns, matching the pre-provenance behaviour.
+   */
+  source?: FactSource;
   /**
    * Index-eligibility flag. Defaults to true. Set false to QUARANTINE the
    * row — it persists and replays in history, but the turn indexer skips it
@@ -73,10 +106,14 @@ export interface AppendCaptureInput {
  * that is about to scroll out of the live window, and injected back into the
  * system prompt on later turns via a plain SQL read (no LLM on the read path).
  *
- * Scoped by (persona, conversation), like turns. De-duplicated within that
- * scope by `factNorm` (normalized text) so the same fact restated across many
- * turns is one row whose `confidence` is the best seen and whose `lastSeenAt`
- * tracks recency.
+ * Scoped by PERSONA (not conversation): every conversation for one persona
+ * reads and writes ONE shared pool, so a fact learned in a task run or one DM
+ * is available in the next. De-duplicated per persona by `factNorm`
+ * (normalized text) — the same fact restated across turns or conversations
+ * collapses to one row whose `confidence` is the best seen, whose `source` is
+ * the highest-trust asserter seen, and whose `lastSeenAt` tracks recency. The
+ * `conversation` column is retained as origin provenance only; it is not part
+ * of the de-dupe key or the read scope.
  */
 export interface DurableFact {
   id: number;
@@ -86,10 +123,20 @@ export interface DurableFact {
   fact: string;
   /** Extractor confidence, 0..1. Higher = more likely durable/true. */
   confidence: number;
+  /**
+   * Provenance/trust tier of this fact (highest source seen for this
+   * normalized text). Drives the read path's source-weighting + per-tier decay
+   * and the write path's retirement floor.
+   */
+  source: FactSource;
   /** The turns.id this fact aged out of when extracted (best-effort ref). */
   sourceTurnId?: number;
   createdAt: Date;
-  /** Recency: bumped every time the same normalized fact is re-extracted. */
+  /**
+   * Recency clock: bumped when the same normalized fact is re-extracted AND
+   * when the fact is recalled (injected). Age from now drives decay + prune, so
+   * any use resets the clock and only genuinely-unused facts age out.
+   */
   lastSeenAt: Date;
 }
 
@@ -99,6 +146,8 @@ export interface UpsertDurableFactInput {
   fact: string;
   /** 0..1; clamped on write. Defaults to 0.5 when omitted. */
   confidence?: number;
+  /** Provenance tier. Defaults to `principal` when omitted. */
+  source?: FactSource;
   /** turns.id the fact was extracted from, for provenance. */
   sourceTurnId?: number;
 }
@@ -108,9 +157,14 @@ export interface ExtractedFactWrite {
   fact: string;
   /** 0..1; clamped on write. */
   confidence: number;
+  /** Provenance tier of the turn this fact came from. */
+  source: FactSource;
   /** turns.id the fact was extracted from, for provenance. */
   sourceTurnId?: number;
 }
+
+/** Per-source ISO cutoff timestamps for pruning: facts with last_seen_at < cutoff retire. */
+export type FactPruneCutoffs = Record<FactSource, string>;
 
 /**
  * The result of claimEvictedForExtraction: the leased turns plus the ownership
@@ -291,25 +345,42 @@ export interface MemoryStore {
   ): Promise<void>;
   /**
    * Insert a durable fact, or — when the same normalized text already exists
-   * for this (persona, conversation) — bump its recency (`last_seen_at`),
-   * keep the higher `confidence`, and refresh its source ref. De-dupe key is
-   * the normalized fact text, so "He uses Deye inverters." and "he uses deye
-   * inverters" collapse to one row.
+   * for this PERSONA — bump its recency (`last_seen_at`), keep the higher
+   * `confidence`, promote to the higher-trust `source`, and refresh its origin
+   * refs. De-dupe key is (persona, normalized fact text), so the same fact
+   * from two conversations collapses to one persona-wide row.
    */
   upsertDurableFact(input: UpsertDurableFactInput): Promise<void>;
   /**
-   * Top durable facts for (persona, conversation), ranked by confidence then
-   * recency (`last_seen_at`). PURE SQL — the per-turn read path that injects
-   * facts into the prompt; it MUST never invoke an LLM. Empty when there are
-   * no facts at/above `minConfidence`.
+   * Candidate durable facts for a PERSONA (all conversations), ordered by
+   * confidence then recency, capped at `opts.limit`. PURE SQL — the per-turn
+   * read path; it MUST never invoke an LLM. This returns the raw candidate
+   * pool; source-weighting + time-decay ranking and the final top-N cut happen
+   * in the caller (durableFacts.ts) so ranking policy stays out of the store.
+   * Empty when there are no facts at/above `minConfidence`.
    */
   topDurableFacts(
     persona: string,
-    conversation: string,
     opts: TopDurableFactsOptions,
   ): Promise<DurableFact[]>;
-  /** Count durable facts for (persona, conversation). For tests / diagnostics. */
-  countDurableFacts(persona: string, conversation: string): Promise<number>;
+  /** Count durable facts for a PERSONA. For tests / diagnostics. */
+  countDurableFacts(persona: string): Promise<number>;
+  /**
+   * Refresh `last_seen_at` to now for the given fact ids — the recall bump.
+   * Called out of band by the read path when a fact is injected, so a fact
+   * that keeps being used never decays/retires while genuinely-unused ones
+   * age out. No-op for an empty list. Best-effort: never throws into a turn.
+   */
+  touchDurableFacts(ids: number[]): Promise<void>;
+  /**
+   * Hard-delete durable facts for a PERSONA whose `last_seen_at` predates their
+   * source tier's cutoff — the retirement floor. Runs out of band (write path).
+   * Returns the number of rows pruned.
+   */
+  pruneExpiredDurableFacts(
+    persona: string,
+    cutoffs: FactPruneCutoffs,
+  ): Promise<number>;
   /**
    * The durable-fact extractor's cursor for (persona, conversation): the
    * highest turns.id already considered for extraction. 0 when unset. Mirrors
@@ -372,7 +443,10 @@ CREATE TABLE IF NOT EXISTS turns (
   created_at   TEXT NOT NULL,
   -- 1 = indexable (default), 0 = QUARANTINED untrusted payload that must
   -- replay in history but never reach the search index. See Turn.embeddable.
-  embeddable   INTEGER NOT NULL DEFAULT 1
+  embeddable   INTEGER NOT NULL DEFAULT 1,
+  -- Provenance tier for durable-fact extraction: 'principal' | 'self' | 'other'.
+  -- Legacy rows default to 'principal'; migration backfills assistant→'self'.
+  source       TEXT NOT NULL DEFAULT 'principal'
 );
 CREATE INDEX IF NOT EXISTS idx_turns_persona_conv_time
   ON turns (persona, conversation, created_at);
@@ -389,10 +463,12 @@ CREATE TABLE IF NOT EXISTS capture_log (
 CREATE INDEX IF NOT EXISTS idx_capture_persona_conv_time
   ON capture_log (persona, conversation, created_at);
 
--- Durable facts extracted at the eviction cliff. De-duplicated within a
--- (persona, conversation) by fact_norm (normalized text); confidence is the
--- best seen, last_seen_at tracks recency. Read back per-turn with a plain
--- SELECT — no LLM on the read path.
+-- Durable facts extracted at the eviction cliff. De-duplicated PER PERSONA
+-- (not per conversation) by fact_norm (normalized text): every conversation
+-- shares one persona-wide pool. confidence is the best seen, source is the
+-- highest-trust asserter seen, last_seen_at tracks recency. The conversation
+-- column is retained as origin provenance only — NOT part of key or read scope.
+-- Read back per-turn with a plain SELECT — no LLM on the read path.
 CREATE TABLE IF NOT EXISTS durable_facts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   persona        TEXT NOT NULL,
@@ -400,13 +476,16 @@ CREATE TABLE IF NOT EXISTS durable_facts (
   fact           TEXT NOT NULL,
   fact_norm      TEXT NOT NULL,
   confidence     REAL NOT NULL DEFAULT 0.5,
+  -- Provenance tier: 'principal' | 'self' | 'other'. Drives read-path
+  -- weighting + decay and write-path retirement. Legacy rows → 'principal'.
+  source         TEXT NOT NULL DEFAULT 'principal',
   source_turn_id INTEGER,
   created_at     TEXT NOT NULL,
   last_seen_at   TEXT NOT NULL,
-  UNIQUE (persona, conversation, fact_norm)
+  UNIQUE (persona, fact_norm)
 );
 CREATE INDEX IF NOT EXISTS idx_durable_facts_rank
-  ON durable_facts (persona, conversation, confidence DESC, last_seen_at DESC);
+  ON durable_facts (persona, confidence DESC, last_seen_at DESC);
 
 -- Per-conversation cursor for the durable-fact extractor: the highest
 -- turns.id ever CLAIMED, so newly-evicted turns aren't re-claimed from the top
@@ -454,6 +533,7 @@ interface RawDisplayRow {
   text: string;
   created_at: string;
   embeddable: number;
+  source: string;
 }
 
 class SqliteMemoryStore implements MemoryStore {
@@ -476,12 +556,13 @@ class SqliteMemoryStore implements MemoryStore {
   private countDurableFactsStmt;
   private durableFactCursorStmt;
   private setDurableFactCursorStmt;
+  private touchDurableFactsBase: string;
+  private pruneDurableFactsStmt;
   private claimEvictedSelectStmt;
   private upsertPendingStmt;
   private getPendingTokenStmt;
   private commitPendingStmt;
   private releasePendingStmt;
-  private deleteDurableFactsStmt;
   private deleteDurableFactCursorStmt;
   private deleteDurableFactPendingStmt;
   private claimEvictedTxn;
@@ -505,8 +586,73 @@ class SqliteMemoryStore implements MemoryStore {
         "ALTER TABLE turns ADD COLUMN embeddable INTEGER NOT NULL DEFAULT 1",
       );
     }
+    // Idempotent migration: add turns.source (provenance tier). Existing user
+    // turns were the principal and assistant turns were the persona itself, so
+    // backfill assistant → 'self' and leave the rest at the 'principal' default.
+    const hasTurnSource = (
+      db.query("PRAGMA table_info(turns)").all() as Array<{ name: string }>
+    ).some((c) => c.name === "source");
+    if (!hasTurnSource) {
+      db.exec(
+        "ALTER TABLE turns ADD COLUMN source TEXT NOT NULL DEFAULT 'principal'",
+      );
+      db.exec("UPDATE turns SET source = 'self' WHERE role = 'assistant'");
+    }
+    // Migration: re-scope durable_facts from (persona, conversation) to
+    // (persona) + add the `source` provenance column. Changing a UNIQUE
+    // constraint needs a table rebuild in SQLite, so we detect the pre-PR shape
+    // by the absent `source` column and rebuild in one transaction: collapse
+    // duplicate (persona, fact_norm) rows keeping MAX(confidence) + latest
+    // last_seen_at, stamp legacy rows 'principal' (they predate provenance), and
+    // swap in the persona-wide unique + rank index. A fresh DB already got the
+    // new shape from SCHEMA above, so `source` is present and this is skipped.
+    const durableFactsExists = (
+      db
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='durable_facts'",
+        )
+        .all() as Array<{ name: string }>
+    ).length > 0;
+    const hasFactSource =
+      durableFactsExists &&
+      (
+        db.query("PRAGMA table_info(durable_facts)").all() as Array<{
+          name: string;
+        }>
+      ).some((c) => c.name === "source");
+    if (durableFactsExists && !hasFactSource) {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE durable_facts_new (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            persona        TEXT NOT NULL,
+            conversation   TEXT NOT NULL,
+            fact           TEXT NOT NULL,
+            fact_norm      TEXT NOT NULL,
+            confidence     REAL NOT NULL DEFAULT 0.5,
+            source         TEXT NOT NULL DEFAULT 'principal',
+            source_turn_id INTEGER,
+            created_at     TEXT NOT NULL,
+            last_seen_at   TEXT NOT NULL,
+            UNIQUE (persona, fact_norm)
+          );
+          INSERT INTO durable_facts_new
+            (persona, conversation, fact, fact_norm, confidence, source,
+             source_turn_id, created_at, last_seen_at)
+          SELECT persona, MIN(conversation), MIN(fact), fact_norm,
+                 MAX(confidence), 'principal', MIN(source_turn_id),
+                 MIN(created_at), MAX(last_seen_at)
+          FROM durable_facts
+          GROUP BY persona, fact_norm;
+          DROP TABLE durable_facts;
+          ALTER TABLE durable_facts_new RENAME TO durable_facts;
+          CREATE INDEX IF NOT EXISTS idx_durable_facts_rank
+            ON durable_facts (persona, confidence DESC, last_seen_at DESC);
+        `);
+      })();
+    }
     this.appendStmt = db.prepare(
-      "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     // Inner query gets most-recent-N descending; outer flips back to chronological.
     this.recentStmt = db.prepare(
@@ -534,8 +680,8 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.recentDisplayStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable FROM (
-         SELECT id, persona, conversation, role, text, created_at, embeddable
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source FROM (
+         SELECT id, persona, conversation, role, text, created_at, embeddable, source
          FROM turns
          WHERE persona = ?
          ORDER BY created_at DESC, id DESC
@@ -543,7 +689,7 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.turnsAfterIdStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source
        FROM turns
        WHERE persona = ? AND conversation = ? AND id > ?
        ORDER BY id ASC
@@ -584,7 +730,7 @@ class SqliteMemoryStore implements MemoryStore {
     // subquery is the live window) and sit after the extractor's cursor.
     // Oldest-first so the cursor advances monotonically.
     this.turnsEvictedStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source
        FROM turns
        WHERE persona = ? AND conversation = ? AND id > ?
          AND id NOT IN (
@@ -596,28 +742,51 @@ class SqliteMemoryStore implements MemoryStore {
        ORDER BY id ASC
        LIMIT ?`,
     );
-    // Upsert on the (persona, conversation, fact_norm) de-dupe key: a restated
-    // fact keeps the higher confidence and refreshes recency + provenance.
+    // Upsert on the PERSONA-WIDE (persona, fact_norm) de-dupe key: a restated
+    // fact keeps the higher confidence, refreshes recency + origin refs, and is
+    // PROMOTED to the higher-trust source. The source CASE compares numeric
+    // priorities (principal 3 > self 2 > other 1) so a principal restating a
+    // fact the persona first observed itself upgrades it to principal trust,
+    // but a later `other`/`self` mention never downgrades a principal fact.
     this.upsertDurableFactStmt = db.prepare(
       `INSERT INTO durable_facts
-         (persona, conversation, fact, fact_norm, confidence, source_turn_id, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (persona, conversation, fact_norm) DO UPDATE SET
+         (persona, conversation, fact, fact_norm, confidence, source, source_turn_id, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (persona, fact_norm) DO UPDATE SET
          confidence     = MAX(confidence, excluded.confidence),
          last_seen_at   = excluded.last_seen_at,
-         source_turn_id = excluded.source_turn_id`,
+         source_turn_id = excluded.source_turn_id,
+         conversation   = excluded.conversation,
+         source = CASE
+           WHEN (CASE excluded.source WHEN 'principal' THEN 3 WHEN 'self' THEN 2 ELSE 1 END)
+              >  (CASE source          WHEN 'principal' THEN 3 WHEN 'self' THEN 2 ELSE 1 END)
+           THEN excluded.source ELSE source END`,
     );
+    // Persona-wide candidate pull (no conversation filter). Returns the raw
+    // pool; decay/weight ranking + final top-N happen in durableFacts.ts.
     this.topDurableFactsStmt = db.prepare(
-      `SELECT id, persona, conversation, fact, confidence, source_turn_id,
+      `SELECT id, persona, conversation, fact, confidence, source, source_turn_id,
               created_at, last_seen_at
        FROM durable_facts
-       WHERE persona = ? AND conversation = ? AND confidence >= ?
+       WHERE persona = ? AND confidence >= ?
        ORDER BY confidence DESC, last_seen_at DESC, id DESC
        LIMIT ?`,
     );
     this.countDurableFactsStmt = db.prepare(
-      `SELECT COUNT(*) AS n FROM durable_facts
-       WHERE persona = ? AND conversation = ?`,
+      `SELECT COUNT(*) AS n FROM durable_facts WHERE persona = ?`,
+    );
+    // Recall bump: refresh last_seen_at for a set of injected facts. The id list
+    // is interpolated (ints only, built internally) rather than bound.
+    this.touchDurableFactsBase =
+      `UPDATE durable_facts SET last_seen_at = ? WHERE persona IS NOT NULL AND id IN`;
+    // Retirement floor prune: delete facts whose last_seen_at predates their
+    // source tier's cutoff. One statement, three (source, cutoff) pairs bound.
+    this.pruneDurableFactsStmt = db.prepare(
+      `DELETE FROM durable_facts
+       WHERE persona = ?
+         AND ( (source = 'principal' AND last_seen_at < ?)
+            OR (source = 'self'      AND last_seen_at < ?)
+            OR (source = 'other'     AND last_seen_at < ?) )`,
     );
     this.durableFactCursorStmt = db.prepare(
       `SELECT last_extracted_turn_id AS id FROM durable_fact_cursor
@@ -643,7 +812,7 @@ class SqliteMemoryStore implements MemoryStore {
     // Params: persona, conversation, persona, conversation, windowSize,
     //         cursor, now(stale), now(live), limit.
     this.claimEvictedSelectStmt = db.prepare(
-      `SELECT t.id, t.persona, t.conversation, t.role, t.text, t.created_at, t.embeddable
+      `SELECT t.id, t.persona, t.conversation, t.role, t.text, t.created_at, t.embeddable, t.source
        FROM turns t
        WHERE t.persona = ? AND t.conversation = ?
          AND t.id NOT IN (
@@ -701,11 +870,12 @@ class SqliteMemoryStore implements MemoryStore {
       `UPDATE durable_fact_pending SET lease_expires_at = 0, updated_at = ?
        WHERE persona = ? AND conversation = ? AND turn_id = ? AND lease_token = ?`,
     );
-    // /reset helpers — the three per-conversation durable stores wiped alongside
-    // turns in deleteConversationTxn.
-    this.deleteDurableFactsStmt = db.prepare(
-      "DELETE FROM durable_facts WHERE persona = ? AND conversation = ?",
-    );
+    // /reset helpers — the per-conversation extractor state wiped alongside
+    // turns in deleteConversationTxn. NOTE: durable_facts are NO LONGER wiped
+    // here. They are persona-wide shared knowledge now, not conversation-owned,
+    // so a /reset of one conversation must not destroy facts other
+    // conversations rely on. Only the conversation's turns, extractor cursor,
+    // and in-flight leases are cleared.
     this.deleteDurableFactCursorStmt = db.prepare(
       "DELETE FROM durable_fact_cursor WHERE persona = ? AND conversation = ?",
     );
@@ -794,6 +964,7 @@ class SqliteMemoryStore implements MemoryStore {
             f.fact,
             normalizeFact(f.fact),
             clampConfidence(f.confidence),
+            asFactSource(f.source),
             f.sourceTurnId ?? null,
             now,
             now,
@@ -803,14 +974,14 @@ class SqliteMemoryStore implements MemoryStore {
         return true;
       },
     );
-    // /reset must wipe EVERY per-conversation store, not just turns: durable
-    // facts, the extractor cursor, and any in-flight leases. One transaction so
-    // a reset can't half-clear and leak facts into the next conversation on the
-    // same key (Kai, PR #320).
+    // /reset wipes the conversation's turns and its per-conversation extractor
+    // state (cursor + in-flight leases) in one transaction. Durable FACTS are
+    // deliberately NOT wiped: they are persona-wide shared knowledge now, not
+    // conversation-owned, so resetting one conversation must not delete facts
+    // other conversations depend on (the whole point of persona-scoping).
     this.deleteConversationTxn = db.transaction(
       (persona: string, conversation: string): number => {
         const turns = this.deleteStmt.run(persona, conversation).changes;
-        this.deleteDurableFactsStmt.run(persona, conversation);
         this.deleteDurableFactCursorStmt.run(persona, conversation);
         this.deleteDurableFactPendingStmt.run(persona, conversation);
         return turns;
@@ -831,6 +1002,7 @@ class SqliteMemoryStore implements MemoryStore {
           u.text,
           ts,
           embeddableInt(u.embeddable),
+          defaultTurnSource(u),
         );
         this.appendStmt.run(
           a.persona,
@@ -839,6 +1011,7 @@ class SqliteMemoryStore implements MemoryStore {
           a.text,
           ts,
           embeddableInt(a.embeddable),
+          defaultTurnSource(a),
         );
       },
     );
@@ -852,6 +1025,7 @@ class SqliteMemoryStore implements MemoryStore {
       t.text,
       new Date().toISOString(),
       embeddableInt(t.embeddable),
+      defaultTurnSource(t),
     );
   }
 
@@ -1026,6 +1200,7 @@ class SqliteMemoryStore implements MemoryStore {
       input.fact,
       normalizeFact(input.fact),
       clampConfidence(input.confidence),
+      asFactSource(input.source),
       input.sourceTurnId ?? null,
       now,
       now,
@@ -1034,26 +1209,45 @@ class SqliteMemoryStore implements MemoryStore {
 
   async topDurableFacts(
     persona: string,
-    conversation: string,
     opts: TopDurableFactsOptions,
   ): Promise<DurableFact[]> {
     const rows = this.topDurableFactsStmt.all(
       persona,
-      conversation,
       opts.minConfidence ?? 0,
       Math.max(1, Math.floor(opts.limit)),
     ) as RawDurableFactRow[];
     return rows.map(mapDurableFactRow);
   }
 
-  async countDurableFacts(
-    persona: string,
-    conversation: string,
-  ): Promise<number> {
-    const row = this.countDurableFactsStmt.get(persona, conversation) as {
-      n: number;
-    };
+  async countDurableFacts(persona: string): Promise<number> {
+    const row = this.countDurableFactsStmt.get(persona) as { n: number };
     return row.n;
+  }
+
+  async touchDurableFacts(ids: number[]): Promise<void> {
+    const clean = ids
+      .filter((n) => Number.isFinite(n))
+      .map((n) => Math.floor(n));
+    if (clean.length === 0) return;
+    // Ints are validated above, so interpolating them into the IN list is safe
+    // (bun:sqlite can't bind a variable-length list directly).
+    const placeholders = clean.join(", ");
+    this.db
+      .prepare(`${this.touchDurableFactsBase} (${placeholders})`)
+      .run(new Date().toISOString());
+  }
+
+  async pruneExpiredDurableFacts(
+    persona: string,
+    cutoffs: FactPruneCutoffs,
+  ): Promise<number> {
+    const res = this.pruneDurableFactsStmt.run(
+      persona,
+      cutoffs.principal,
+      cutoffs.self,
+      cutoffs.other,
+    );
+    return res.changes;
   }
 
   async durableFactCursor(
@@ -1165,6 +1359,18 @@ function embeddableInt(embeddable: boolean | undefined): number {
 }
 
 /**
+ * Resolve a turn's stored provenance source. An explicit `source` wins;
+ * otherwise default by role — assistant turns are the persona's own voice
+ * (`self`), user turns default to `principal` (the pre-provenance behaviour).
+ * Callers that know the trust bit (orchestrator/turn.ts) pass `source`
+ * explicitly so a group third-party lands as `other`.
+ */
+function defaultTurnSource(t: AppendTurnInput): FactSource {
+  if (t.source) return t.source;
+  return t.role === "assistant" ? "self" : "principal";
+}
+
+/**
  * Normalized form of a fact used as the de-dupe key: lowercased, whitespace
  * collapsed, surrounding quotes and trailing sentence punctuation stripped.
  * "He uses Deye inverters." and "  he uses  deye inverters  " collapse to the
@@ -1192,6 +1398,7 @@ interface RawDurableFactRow {
   conversation: string;
   fact: string;
   confidence: number;
+  source: string;
   source_turn_id: number | null;
   created_at: string;
   last_seen_at: string;
@@ -1204,6 +1411,7 @@ function mapDurableFactRow(r: RawDurableFactRow): DurableFact {
     conversation: r.conversation,
     fact: r.fact,
     confidence: r.confidence,
+    source: asFactSource(r.source),
     sourceTurnId: r.source_turn_id ?? undefined,
     createdAt: new Date(r.created_at),
     lastSeenAt: new Date(r.last_seen_at),
@@ -1219,6 +1427,7 @@ function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
     text: r.text,
     createdAt: new Date(r.created_at),
     embeddable: r.embeddable !== 0,
+    source: asFactSource(r.source),
   }));
 }
 
