@@ -160,20 +160,38 @@ export interface TurnInput {
    * By default the user turn is stamped `principal` when `trusted`, else
    * `other` — the security-perimeter framing: the owner speaking vs. a third
    * party in a shared context. That default is right for human-authored input,
-   * but wrong for a turn the persona schedules for ITSELF: a `tick` task wake
-   * feeds its own scheduled prompt, which is neither the principal live nor an
-   * untrusted stranger. Such callers pass `userSource: "self"` so task-derived
-   * observations land in the self tier (first-hand, faster-decayed) instead of
-   * masquerading as `other` (untrusted, fast-decay, low-weight).
+   * but a `tick` task wake is neither: it feeds its OWN scheduled prompt and
+   * then, mid-turn, may ingest UNTRUSTED content (an email body, a web page, a
+   * Plane issue) via tools — content the threat judge never screened, because
+   * it arrives as tool output, not as a judged `ask` turn (see #327). If facts
+   * extracted from such a turn landed at `self` (weight 0.6), a prompt-injected
+   * email a poller summarises could poison the persona-wide fact pool one tier
+   * below the owner. So task callers pass BOTH `userSource` and
+   * `assistantSource` = `"other"`: everything a task turn produces lands in the
+   * untrusted tier (weight 0.3, 7-day half-life, injected only tagged
+   * `unverified`, never recall-bumped) and can never masquerade as first-hand
+   * `self` knowledge. Deliberately conservative — we can't tell at the turn
+   * layer which task wakes actually ingested untrusted content, so all of them
+   * are treated as if they did. #327 tracks doing this per-fact by tool input.
    *
    * Decoupled from `trusted` on purpose: provenance-tier and the
    * security-perimeter bit answer different questions and must not be conflated
-   * (a task wake is `self`-provenance but still NOT `trusted` — it does not get
-   * the principal's command authority). Undefined preserves the legacy
-   * `trusted ? "principal" : "other"` behaviour exactly. The assistant reply is
-   * always stamped `self` regardless — this only affects the user turn.
+   * (a task wake is `other`-provenance and still NOT `trusted` — it gets neither
+   * the principal's command authority nor self-tier trust). Undefined preserves
+   * the legacy `trusted ? "principal" : "other"` behaviour exactly.
    */
   userSource?: FactSource;
+  /**
+   * Optional override for the ASSISTANT-turn durable-fact provenance tier.
+   *
+   * The persona's own reply is stamped `self` by default (a first-hand
+   * observation). But an autonomous `tick` task can surface untrusted
+   * tool-ingested content INTO that reply, so task callers pass
+   * `assistantSource: "other"` to keep task-derived facts out of the self tier
+   * — see the `userSource` doc above for the full rationale. Undefined
+   * preserves the default `self` stamp exactly.
+   */
+  assistantSource?: FactSource;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
@@ -351,9 +369,12 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         conversation: input.conversation,
         role: "assistant",
         text: finalText,
-        // The persona's own reply — a first-hand observation. Trusted, but
-        // decayed faster than principal facts since self-observations go stale.
-        source: "self",
+        // The persona's own reply — normally a first-hand observation (`self`,
+        // decayed faster than principal facts since self-observations go
+        // stale). `assistantSource` lets an autonomous caller (tick task wake)
+        // down-tier to `other` when the reply may carry untrusted tool-ingested
+        // content, so nothing a poller ingests can poison self-tier memory.
+        source: input.assistantSource ?? "self",
       },
     );
 

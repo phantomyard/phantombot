@@ -238,9 +238,11 @@ describe("runTick — normal task fire", () => {
     }));
   });
 
-  test("agent-woken task stamps its user turn `self` (not `other`)", async () => {
-    // #324: a task feeds the persona its OWN scheduled prompt, so the user
-    // turn must land in the self tier — NOT `other` (untrusted stranger).
+  test("agent-woken task down-tiers BOTH turns to `other`", async () => {
+    // #324 + review: a task can ingest UNTRUSTED content mid-turn (email/web)
+    // that the threat judge never screened, so every fact it produces must land
+    // in the untrusted `other` tier — never `self`. Both the user turn and the
+    // assistant reply (the laundering vector) are stamped `other`.
     const created = store.add({
       persona: "phantom",
       description: "hourly check",
@@ -250,12 +252,18 @@ describe("runTick — normal task fire", () => {
     });
     if (!created.ok) throw new Error("setup");
 
-    const pairCalls: Array<{ user: { source?: string } }> = [];
+    const pairCalls: Array<{
+      user: { source?: string };
+      assistant: { source?: string };
+    }> = [];
     const spied = new Proxy(memory, {
       get(target, prop, receiver) {
         if (prop === "appendTurnPair") {
-          return async (user: { source?: string }, assistant: unknown) => {
-            pairCalls.push({ user });
+          return async (
+            user: { source?: string },
+            assistant: { source?: string },
+          ) => {
+            pairCalls.push({ user, assistant });
             return (
               memory.appendTurnPair as (u: unknown, a: unknown) => Promise<void>
             )(user, assistant);
@@ -276,7 +284,8 @@ describe("runTick — normal task fire", () => {
     });
 
     expect(pairCalls).toHaveLength(1);
-    expect(pairCalls[0]!.user.source).toBe("self");
+    expect(pairCalls[0]!.user.source).toBe("other");
+    expect(pairCalls[0]!.assistant.source).toBe("other");
   });
 
   test("background wake previews redact obvious secrets and cap long chunks", () => {

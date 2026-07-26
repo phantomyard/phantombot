@@ -477,7 +477,7 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
     expect(calls[0]!.user.source).toBe("principal");
   });
 
-  test("userSource overrides the user turn to `self` (task wake)", async () => {
+  test("userSource + assistantSource down-tier BOTH turns to `other` (task wake)", async () => {
     const { store, calls } = spyPair(memory);
     await collect(
       runTurn({
@@ -485,12 +485,44 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
         memory: store,
         userMessage: "scheduled work",
         harnesses: [okHarness()],
-        // A tick task wake: self-scheduled prompt, NOT trusted.
-        userSource: "self",
+        // A tick task wake: may ingest untrusted content mid-turn, so every
+        // fact it produces is pinned to the untrusted tier. NOT trusted.
+        userSource: "other",
+        assistantSource: "other",
       }),
     );
-    expect(calls[0]!.user.source).toBe("self");
-    // Assistant reply is always self regardless.
+    expect(calls[0]!.user.source).toBe("other");
+    // The assistant reply is down-tiered too — this is the laundering vector.
+    expect(calls[0]!.assistant.source).toBe("other");
+  });
+
+  test("assistantSource alone overrides only the assistant turn", async () => {
+    const { store, calls } = spyPair(memory);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        memory: store,
+        userMessage: "hi",
+        harnesses: [okHarness()],
+        assistantSource: "other",
+      }),
+    );
+    // User turn keeps its default (untrusted → other here); assistant overridden.
+    expect(calls[0]!.user.source).toBe("other");
+    expect(calls[0]!.assistant.source).toBe("other");
+  });
+
+  test("assistant turn defaults to `self` when not overridden", async () => {
+    const { store, calls } = spyPair(memory);
+    await collect(
+      runTurn({
+        ...baseInput(),
+        memory: store,
+        userMessage: "hi",
+        harnesses: [okHarness()],
+        trusted: true,
+      }),
+    );
     expect(calls[0]!.assistant.source).toBe("self");
   });
 
@@ -503,11 +535,11 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
         userMessage: "scheduled work",
         harnesses: [okHarness()],
         trusted: true,
-        userSource: "self",
+        userSource: "other",
       }),
     );
     // Explicit override beats the trusted→principal default.
-    expect(calls[0]!.user.source).toBe("self");
+    expect(calls[0]!.user.source).toBe("other");
   });
 });
 

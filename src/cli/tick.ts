@@ -217,13 +217,19 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
               harnesses,
               agentDir,
             ),
-            // Provenance: a task wake feeds the persona its OWN scheduled
-            // prompt — first-hand self-observation, not an untrusted stranger.
-            // Stamp the user turn `self` so task-derived facts don't land in the
-            // untrusted `other` tier. NOT `trusted`: a task has no principal
-            // command authority, and untrusted content it might ingest stays
-            // untrusted (see #327 for the mid-turn-fetch hardening follow-up).
-            userSource: "self",
+            // Provenance: an autonomous task wake can ingest UNTRUSTED content
+            // mid-turn (email body, web page, Plane issue) via tools — content
+            // the threat judge never screened because it arrives as tool output,
+            // not a judged `ask` turn (#327). So stamp BOTH turns `other`: every
+            // durable fact a task produces lands in the untrusted tier (weight
+            // 0.3, 7-day half-life, injected only tagged `unverified`, never
+            // recall-bumped) and can never masquerade as first-hand `self`
+            // knowledge or poison the persona-wide pool one tier below the owner.
+            // Conservative by design — we can't tell here which task wakes truly
+            // ingested untrusted content, so all are treated as if they did.
+            // NOT `trusted`: a task has no principal command authority either.
+            userSource: "other",
+            assistantSource: "other",
           })) {
             logBackgroundWakeChunk(task, conversation, chunk);
             if (chunk.type === "text") finalText += chunk.text;
