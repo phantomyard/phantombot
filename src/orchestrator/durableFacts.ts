@@ -578,11 +578,18 @@ export async function pullDurableFacts(
     // Recall bump — fire-and-forget so injection never blocks on a write.
     // Refreshing last_seen_at on the facts we actually surface is what keeps a
     // frequently-used fact fresh while unused ones decay and retire.
-    void input.memory
-      .touchDurableFacts(top.map((s) => s.fact.id))
-      .catch(() => {
+    // EXCLUDE `other`-tier facts: they inject only tagged-as-unverified and must
+    // never have their clock reset, or a third-party claim would become immortal
+    // (bump → stays in top-N → bump again → never retires). They still decay and
+    // hit the retirement floor on schedule.
+    const touchIds = top
+      .filter((s) => s.fact.source !== "other")
+      .map((s) => s.fact.id);
+    if (touchIds.length > 0) {
+      void input.memory.touchDurableFacts(touchIds).catch(() => {
         // Recall bump is best-effort; a failure must not break the read path.
       });
+    }
 
     return formatDurableFacts(top.map((s) => s.fact));
   } catch (e) {

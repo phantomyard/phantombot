@@ -556,6 +556,54 @@ describe("pullDurableFacts / formatDurableFacts", () => {
     expect(stored?.source).toBe("other");
   });
 
+  test("recall bump refreshes principal facts on inject but NEVER `other` facts", async () => {
+    // A principal fact and a third-party (`other`) fact both clear the floor and
+    // get injected. The recall bump must refresh the principal fact's clock but
+    // leave the `other` fact's alone — otherwise a third-party claim would be
+    // kept immortal (bump → stays top-N → bump again → never retires).
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "Andrew lives in Arnhem.",
+      confidence: 0.9,
+      source: "principal",
+    });
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "gateway password claim",
+      confidence: 0.9,
+      source: "other",
+    });
+    const before = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const principalBefore = before.find((f) => f.source === "principal")!;
+    const otherBefore = before.find((f) => f.source === "other")!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    const block = await pullDurableFacts({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+    });
+    // Both were injected (principal plain, other tagged unverified).
+    expect(block).toContain("- Andrew lives in Arnhem.");
+    expect(block).toContain("[unverified");
+    // Let the fire-and-forget recall bump settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    const after = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const principalAfter = after.find((f) => f.id === principalBefore.id)!;
+    const otherAfter = after.find((f) => f.id === otherBefore.id)!;
+    // Principal fact's clock advanced; the third-party fact's did not.
+    expect(principalAfter.lastSeenAt.getTime()).toBeGreaterThan(
+      principalBefore.lastSeenAt.getTime(),
+    );
+    expect(otherAfter.lastSeenAt.getTime()).toBe(
+      otherBefore.lastSeenAt.getTime(),
+    );
+  });
+
   test("formatDurableFacts returns undefined for an all-blank set", () => {
     expect(
       formatDurableFacts([
