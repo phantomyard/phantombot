@@ -460,7 +460,7 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
     );
     expect(calls).toHaveLength(1);
     expect(calls[0]!.user.source).toBe("other");
-    expect(calls[0]!.assistant.source).toBe("self");
+    expect(calls[0]!.assistant.source).toBe("unverified");
   });
 
   test("stamps `principal` for a trusted turn (no userSource)", async () => {
@@ -512,7 +512,7 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
     expect(calls[0]!.assistant.source).toBe("other");
   });
 
-  test("assistant turn defaults to `self` when not overridden", async () => {
+  test("assistant turn defaults to `unverified`, even on a trusted turn (#327)", async () => {
     const { store, calls } = spyPair(memory);
     await collect(
       runTurn({
@@ -523,7 +523,11 @@ describe("runTurn — user-turn provenance (userSource / trusted)", () => {
         trusted: true,
       }),
     );
-    expect(calls[0]!.assistant.source).toBe("self");
+    // The reply may relay untrusted tool-ingested bytes we can't separate from
+    // the persona's own reasoning, so it is NOT stamped first-hand `self` even
+    // when the principal drove the turn — trust is earned by engagement, not by
+    // the `trusted` bit. The principal's confirming turn is what promotes it.
+    expect(calls[0]!.assistant.source).toBe("unverified");
   });
 
   test("userSource wins over the trusted default", async () => {

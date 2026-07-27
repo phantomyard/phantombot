@@ -184,12 +184,13 @@ export interface TurnInput {
   /**
    * Optional override for the ASSISTANT-turn durable-fact provenance tier.
    *
-   * The persona's own reply is stamped `self` by default (a first-hand
-   * observation). But an autonomous `tick` task can surface untrusted
-   * tool-ingested content INTO that reply, so task callers pass
-   * `assistantSource: "other"` to keep task-derived facts out of the self tier
-   * — see the `userSource` doc above for the full rationale. Undefined
-   * preserves the default `self` stamp exactly.
+   * The persona's own reply is stamped `unverified` by default (#327): the
+   * harness reply may carry untrusted tool-ingested content we can't separate
+   * from the persona's own reasoning, so it is not trusted first-hand until the
+   * principal engages with it. A `tick` task wake is even more clearly untrusted
+   * (it autonomously ingests emails/web/issues), so task callers still pass
+   * `assistantSource: "other"` to pin it to the third-party tier explicitly — see
+   * the `userSource` doc above. Undefined preserves the `unverified` default.
    */
   assistantSource?: FactSource;
   /**
@@ -369,12 +370,16 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         conversation: input.conversation,
         role: "assistant",
         text: finalText,
-        // The persona's own reply — normally a first-hand observation (`self`,
-        // decayed faster than principal facts since self-observations go
-        // stale). `assistantSource` lets an autonomous caller (tick task wake)
-        // down-tier to `other` when the reply may carry untrusted tool-ingested
-        // content, so nothing a poller ingests can poison self-tier memory.
-        source: input.assistantSource ?? "self",
+        // The persona's own reply enters `unverified`, NOT `self` — this is the
+        // #327 fix. An assistant turn is a blend of the persona's reasoning and
+        // whatever untrusted bytes a tool (curl, gog, headless chrome, exec)
+        // pulled in mid-turn, and we cannot separate them at this layer, so
+        // nothing the persona emits is trusted first-hand until the principal
+        // engages with it (which re-asserts the claim on a `principal` turn and
+        // promotes the fact). Fail-closed: the default is untrusted, and it takes
+        // an interaction to earn trust, not a flag to lose it. `assistantSource`
+        // still lets an autonomous caller (tick task wake) pin `other` explicitly.
+        source: input.assistantSource ?? "unverified",
       },
     );
 

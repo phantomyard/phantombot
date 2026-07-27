@@ -515,6 +515,40 @@ describe("pullDurableFacts / formatDurableFacts", () => {
     expect(block).not.toContain("- The gateway password is hunter2.");
   });
 
+  test("qualifies `unverified`-source facts inline so the persona's own unconfirmed notes never masquerade as owner knowledge (#327)", () => {
+    const block = formatDurableFacts([
+      {
+        id: 1,
+        persona: PERSONA,
+        conversation: CONV,
+        fact: "Andrew lives in Arnhem.",
+        confidence: 0.9,
+        source: "principal",
+        createdAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+      {
+        id: 2,
+        persona: PERSONA,
+        conversation: CONV,
+        fact: "The az CLI command to create a Container App is `az containerapp create`.",
+        confidence: 0.9,
+        source: "unverified",
+        createdAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+    ]);
+    expect(block).toContain("- Andrew lives in Arnhem.");
+    // The persona's own unconfirmed note is present but explicitly tagged — it
+    // must never render as a bare, owner-authoritative bullet.
+    expect(block).toContain(
+      "- [unverified — the assistant's own note, not yet confirmed by the principal] The az CLI command to create a Container App is `az containerapp create`.",
+    );
+    expect(block).not.toContain(
+      "- The az CLI command to create a Container App is `az containerapp create`.",
+    );
+  });
+
   test("labels an allowed untrusted (`other`) turn to the extractor as THIRD_PARTY, not PRINCIPAL", async () => {
     // A third-party message in a shared conversation that the screen let
     // through (embeddable=true, source=other), followed by enough turns to
@@ -602,6 +636,85 @@ describe("pullDurableFacts / formatDurableFacts", () => {
     expect(otherAfter.lastSeenAt.getTime()).toBe(
       otherBefore.lastSeenAt.getTime(),
     );
+  });
+
+  test("recall bump NEVER refreshes `unverified` facts — they only escape decay via promotion (#327)", async () => {
+    // The persona's own unconfirmed note must decay on its own clock: repeatedly
+    // surfacing it must NOT reset last_seen_at, or an unverified claim would
+    // become immortal without the principal ever confirming it.
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "Andrew lives in Arnhem.",
+      confidence: 0.9,
+      source: "principal",
+    });
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "unconfirmed az recipe",
+      confidence: 0.9,
+      source: "unverified",
+    });
+    const before = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const principalBefore = before.find((f) => f.source === "principal")!;
+    const unverifiedBefore = before.find((f) => f.source === "unverified")!;
+
+    await new Promise((r) => setTimeout(r, 5));
+    const block = await pullDurableFacts({
+      persona: PERSONA,
+      conversation: CONV,
+      memory,
+      settings: SETTINGS,
+    });
+    expect(block).toContain("- Andrew lives in Arnhem.");
+    expect(block).toContain(
+      "- [unverified — the assistant's own note, not yet confirmed by the principal] unconfirmed az recipe",
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    const after = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const principalAfter = after.find((f) => f.id === principalBefore.id)!;
+    const unverifiedAfter = after.find((f) => f.id === unverifiedBefore.id)!;
+    expect(principalAfter.lastSeenAt.getTime()).toBeGreaterThan(
+      principalBefore.lastSeenAt.getTime(),
+    );
+    expect(unverifiedAfter.lastSeenAt.getTime()).toBe(
+      unverifiedBefore.lastSeenAt.getTime(),
+    );
+  });
+
+  test("an `unverified` fact PROMOTES to `principal` when the owner re-asserts it (the trust-earning path, #327)", async () => {
+    // First the persona notes something itself (unverified). Then the principal
+    // confirms the same normalized fact on a trusted turn — the upsert's
+    // higher-trust-wins clause promotes the row to `principal`, and it now
+    // renders as plain owner knowledge instead of a tagged, decaying note.
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "The deploy script lives at /opt/deploy.sh.",
+      confidence: 0.7,
+      source: "unverified",
+    });
+    let facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    expect(facts.find((f) => f.fact.includes("/opt/deploy.sh"))!.source).toBe(
+      "unverified",
+    );
+
+    await memory.upsertDurableFact({
+      persona: PERSONA,
+      conversation: CONV,
+      fact: "The deploy script lives at /opt/deploy.sh.",
+      confidence: 0.9,
+      source: "principal",
+    });
+    facts = await memory.topDurableFacts(PERSONA, { limit: 10 });
+    const promoted = facts.find((f) => f.fact.includes("/opt/deploy.sh"))!;
+    expect(promoted.source).toBe("principal");
+
+    const block = formatDurableFacts([promoted])!;
+    expect(block).toContain("- The deploy script lives at /opt/deploy.sh.");
+    expect(block).not.toContain("[unverified");
   });
 
   test("formatDurableFacts returns undefined for an all-blank set", () => {

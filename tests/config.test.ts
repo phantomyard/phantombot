@@ -149,12 +149,14 @@ describe("loadConfig — defaults (no file)", () => {
       minConfidence: 0.5,
       maxExtractPerTurn: 4,
       // Provenance tiers: principal (owner) is highest-trust, slowest decay,
-      // ~1yr retention; self (own observations) rots in a quarter; other
-      // (overheard) fades fastest. These make persona-wide facts safe.
+      // ~1yr retention; self (EARNED first-hand) rots in a quarter; unverified
+      // (own default output, unconfirmed) and other (overheard) fade fastest.
+      // These make persona-wide facts safe.
       tiers: {
         principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
         self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
         other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+        unverified: { weight: 0.3, halfLifeDays: 14, maxAgeDays: 60 },
       },
       injectFloor: 0.05,
       debug: false,
@@ -531,6 +533,7 @@ max_extract_per_turn = 4
         principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
         self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
         other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+        unverified: { weight: 0.3, halfLifeDays: 14, maxAgeDays: 60 },
       },
       injectFloor: 0.05,
       debug: false,

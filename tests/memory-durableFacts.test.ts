@@ -366,7 +366,7 @@ describe("touchDurableFacts (recall bump)", () => {
 describe("pruneExpiredDurableFacts (retirement floor)", () => {
   async function seed(
     fact: string,
-    source: "principal" | "self" | "other",
+    source: "principal" | "self" | "other" | "unverified",
   ): Promise<void> {
     await memory.upsertDurableFact({
       persona: PERSONA,
@@ -381,17 +381,20 @@ describe("pruneExpiredDurableFacts (retirement floor)", () => {
     await seed("fresh principal", "principal");
     await seed("fresh self", "self");
     await seed("fresh other", "other");
+    await seed("fresh unverified", "unverified");
 
-    // Cutoffs in the FUTURE for `other` (so it's expired) but in the PAST for
-    // principal/self (so they survive). ISO strings compare lexicographically.
+    // Cutoffs in the FUTURE for `other` + `unverified` (so they're expired) but
+    // in the PAST for principal/self (so they survive). ISO strings compare
+    // lexicographically.
     const now = Date.now();
     const iso = (msFromNow: number) => new Date(now + msFromNow).toISOString();
     const pruned = await memory.pruneExpiredDurableFacts(PERSONA, {
       principal: iso(-1000), // nothing older than 1s ago → survives
       self: iso(-1000),
       other: iso(60_000), // everything before 1min-from-now → other retires
+      unverified: iso(60_000), // ...and unverified retires on its own clock too
     });
-    expect(pruned).toBe(1);
+    expect(pruned).toBe(2);
     const remaining = (await memory.topDurableFacts(PERSONA, { limit: 10 })).map(
       (f) => f.fact,
     );
@@ -406,6 +409,7 @@ describe("pruneExpiredDurableFacts (retirement floor)", () => {
       principal: past,
       self: past,
       other: past,
+      unverified: past,
     });
     expect(pruned).toBe(0);
     expect(await memory.countDurableFacts(PERSONA)).toBe(1);
@@ -461,12 +465,27 @@ describe("turnsEvictedFromWindow", () => {
       persona: PERSONA,
       conversation: CONV,
       role: "assistant",
-      text: "self turn",
+      text: "assistant turn",
     });
     for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
     const evicted = await memory.turnsEvictedFromWindow(PERSONA, CONV, 1, 0, 100);
-    const self = evicted.find((t) => t.text === "self turn")!;
-    expect(self.source).toBe("self"); // assistant turn defaults to self
+    const asst = evicted.find((t) => t.text === "assistant turn")!;
+    // #327: an assistant turn is UNCONFIRMED by default — `unverified`, never
+    // first-hand `self` — until the principal engages with it.
+    expect(asst.source).toBe("unverified");
+  });
+
+  test("an explicit source override still wins over the unverified default", async () => {
+    await memory.appendTurn({
+      persona: PERSONA,
+      conversation: CONV,
+      role: "assistant",
+      text: "promoted turn",
+      source: "self",
+    });
+    for (let i = 1; i <= 3; i++) await appendTurn(`turn ${i}`);
+    const evicted = await memory.turnsEvictedFromWindow(PERSONA, CONV, 1, 0, 100);
+    expect(evicted.find((t) => t.text === "promoted turn")!.source).toBe("self");
   });
 });
 

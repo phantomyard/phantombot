@@ -291,19 +291,30 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
  * turn.ts) from the turn's role + trust bit, carried onto the fact:
  *   - `principal` — the owner said it in a trusted turn. Highest trust, slowest
  *     decay: a standing fact the owner gave us holds until they correct it.
- *   - `self`      — the persona's OWN assistant turn (a first-hand observation
- *     it made, e.g. running a task). Trust the sighting, but decay it fast:
- *     infra state churns, so a stale reading must not masquerade as current.
+ *   - `self`      — a first-hand observation the persona has EARNED trust in:
+ *     the default assistant turn no longer lands here (see `unverified`); a fact
+ *     reaches `self` only when it was promoted — e.g. re-asserted after the
+ *     principal engaged with it. Trust the sighting, but decay it fast: infra
+ *     state churns, so a stale reading must not masquerade as current.
+ *   - `unverified` — the persona's OWN assistant turn by default. The harness
+ *     reply is a mix of the persona's reasoning and whatever untrusted bytes a
+ *     tool (curl, gog, headless chrome, exec) pulled in mid-turn, and we cannot
+ *     tell them apart at the turn layer — so nothing the persona emits is
+ *     trusted first-hand until the principal engages with it. Low trust, short
+ *     life; promoted to `principal` when the owner discusses/confirms it, else
+ *     it decays and retires. This is the #327 fix: fail-closed by construction,
+ *     no allowlist, no fetch-detection, no self-declaring tools.
  *   - `other`     — anyone else in a shared/group conversation (another agent,
  *     a third party). Lowest trust, shortest life: heard in a room, not told to
  *     us one-on-one.
  */
-export type FactSource = "principal" | "self" | "other";
+export type FactSource = "principal" | "self" | "other" | "unverified";
 
 export const FACT_SOURCES: readonly FactSource[] = [
   "principal",
   "self",
   "other",
+  "unverified",
 ] as const;
 
 /**
@@ -392,6 +403,13 @@ export const DEFAULT_FACT_TIERS: FactSourceTiers = {
   principal: { weight: 1.0, halfLifeDays: 180, maxAgeDays: 365 },
   self: { weight: 0.6, halfLifeDays: 30, maxAgeDays: 90 },
   other: { weight: 0.3, halfLifeDays: 7, maxAgeDays: 30 },
+  // The persona's own default output. Weight sits at `other`'s level — untrusted
+  // until the principal engages — but with a slightly longer life (14d/60d vs
+  // 7d/30d): it is the persona's OWN work product, so a genuinely useful
+  // procedure gets a fair window to be confirmed and promoted before it retires,
+  // without ever masquerading as first-hand `self` (0.6) knowledge in the mean
+  // time. Injected tagged `unverified`, never recall-bumped (see durableFacts).
+  unverified: { weight: 0.3, halfLifeDays: 14, maxAgeDays: 60 },
 };
 
 export const DEFAULT_DURABLE_FACTS: DurableFactsSettings = {

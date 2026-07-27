@@ -32,17 +32,23 @@ export type Role = "user" | "assistant";
  * Numeric trust priority per fact source. Used both in SQL (the upsert conflict
  * clause, inlined) and in JS to decide which source wins when the same
  * normalized fact arrives from two conversations under the persona-wide key:
- * the higher-trust source is kept. principal > self > other.
+ * the higher-trust source is kept. principal > self > other > unverified. So
+ * when the SAME fact later arrives on a higher-trust turn — e.g. the principal
+ * confirms an `unverified` claim, making it `principal` — the upsert promotes
+ * it; a lower-trust re-sighting never demotes an already-earned tier.
  */
 export const FACT_SOURCE_PRIORITY: Record<FactSource, number> = {
   principal: 3,
   self: 2,
   other: 1,
+  unverified: 0,
 };
 
 /** Coerce a raw DB string to a known FactSource, defaulting to `principal`. */
 export function asFactSource(v: unknown): FactSource {
-  return v === "self" || v === "other" ? v : "principal";
+  return v === "self" || v === "other" || v === "unverified"
+    ? v
+    : "principal";
 }
 
 export interface Turn {
@@ -64,10 +70,13 @@ export interface Turn {
   embeddable: boolean;
   /**
    * Provenance of this turn's content, used by durable-fact extraction to
-   * stamp each fact's trust tier. `principal` (owner, trusted turn), `self`
-   * (the persona's own assistant turn), or `other` (a third party in a shared
+   * stamp each fact's trust tier. `principal` (owner, trusted turn),
+   * `unverified` (the persona's own assistant turn by default — unconfirmed,
+   * may carry untrusted tool-ingested bytes), `self` (a first-hand observation
+   * that has EARNED trust via promotion), or `other` (a third party in a shared
    * conversation). Legacy rows written before this column default to
-   * `principal`; the migration backfills assistant rows to `self`.
+   * `principal`; the pre-provenance migration backfilled assistant rows to
+   * `self`, but new assistant turns land `unverified`.
    */
   source: FactSource;
 }
@@ -79,8 +88,10 @@ export interface AppendTurnInput {
   text: string;
   /**
    * Provenance tier for durable-fact extraction (see Turn.source). Optional on
-   * input: when omitted it defaults to `self` for assistant turns and
-   * `principal` for user turns, matching the pre-provenance behaviour.
+   * input: when omitted it defaults to `unverified` for assistant turns and
+   * `principal` for user turns. (The assistant default was `self` before the
+   * #327 provenance tightening — an assistant turn is now untrusted until the
+   * principal engages with it.)
    */
   source?: FactSource;
   /**
@@ -444,8 +455,10 @@ CREATE TABLE IF NOT EXISTS turns (
   -- 1 = indexable (default), 0 = QUARANTINED untrusted payload that must
   -- replay in history but never reach the search index. See Turn.embeddable.
   embeddable   INTEGER NOT NULL DEFAULT 1,
-  -- Provenance tier for durable-fact extraction: 'principal' | 'self' | 'other'.
-  -- Legacy rows default to 'principal'; migration backfills assistant→'self'.
+  -- Provenance tier for durable-fact extraction:
+  -- 'principal' | 'self' | 'other' | 'unverified'. New assistant turns land
+  -- 'unverified' (own unconfirmed voice); legacy rows default to 'principal'
+  -- and the pre-provenance migration backfilled assistant rows to 'self'.
   source       TEXT NOT NULL DEFAULT 'principal'
 );
 CREATE INDEX IF NOT EXISTS idx_turns_persona_conv_time
@@ -476,8 +489,10 @@ CREATE TABLE IF NOT EXISTS durable_facts (
   fact           TEXT NOT NULL,
   fact_norm      TEXT NOT NULL,
   confidence     REAL NOT NULL DEFAULT 0.5,
-  -- Provenance tier: 'principal' | 'self' | 'other'. Drives read-path
-  -- weighting + decay and write-path retirement. Legacy rows → 'principal'.
+  -- Provenance tier: 'principal' | 'self' | 'other' | 'unverified'. Drives
+  -- read-path weighting + decay and write-path retirement. Legacy rows →
+  -- 'principal'. A fact promotes to a higher tier when re-asserted on a
+  -- higher-trust turn (unverified → principal when the owner confirms it).
   source         TEXT NOT NULL DEFAULT 'principal',
   source_turn_id INTEGER,
   created_at     TEXT NOT NULL,
@@ -758,8 +773,8 @@ class SqliteMemoryStore implements MemoryStore {
          source_turn_id = excluded.source_turn_id,
          conversation   = excluded.conversation,
          source = CASE
-           WHEN (CASE excluded.source WHEN 'principal' THEN 3 WHEN 'self' THEN 2 ELSE 1 END)
-              >  (CASE source          WHEN 'principal' THEN 3 WHEN 'self' THEN 2 ELSE 1 END)
+           WHEN (CASE excluded.source WHEN 'principal' THEN 3 WHEN 'self' THEN 2 WHEN 'other' THEN 1 ELSE 0 END)
+              >  (CASE source          WHEN 'principal' THEN 3 WHEN 'self' THEN 2 WHEN 'other' THEN 1 ELSE 0 END)
            THEN excluded.source ELSE source END`,
     );
     // Persona-wide candidate pull (no conversation filter). Returns the raw
@@ -784,9 +799,10 @@ class SqliteMemoryStore implements MemoryStore {
     this.pruneDurableFactsStmt = db.prepare(
       `DELETE FROM durable_facts
        WHERE persona = ?
-         AND ( (source = 'principal' AND last_seen_at < ?)
-            OR (source = 'self'      AND last_seen_at < ?)
-            OR (source = 'other'     AND last_seen_at < ?) )`,
+         AND ( (source = 'principal'  AND last_seen_at < ?)
+            OR (source = 'self'       AND last_seen_at < ?)
+            OR (source = 'other'      AND last_seen_at < ?)
+            OR (source = 'unverified' AND last_seen_at < ?) )`,
     );
     this.durableFactCursorStmt = db.prepare(
       `SELECT last_extracted_turn_id AS id FROM durable_fact_cursor
@@ -1246,6 +1262,7 @@ class SqliteMemoryStore implements MemoryStore {
       cutoffs.principal,
       cutoffs.self,
       cutoffs.other,
+      cutoffs.unverified,
     );
     return res.changes;
   }
@@ -1360,14 +1377,17 @@ function embeddableInt(embeddable: boolean | undefined): number {
 
 /**
  * Resolve a turn's stored provenance source. An explicit `source` wins;
- * otherwise default by role — assistant turns are the persona's own voice
- * (`self`), user turns default to `principal` (the pre-provenance behaviour).
- * Callers that know the trust bit (orchestrator/turn.ts) pass `source`
- * explicitly so a group third-party lands as `other`.
+ * otherwise default by role — assistant turns are the persona's own UNCONFIRMED
+ * voice (`unverified`: the harness reply may carry untrusted tool-ingested bytes
+ * we can't separate at this layer, so it is never first-hand `self` until the
+ * principal engages), user turns default to `principal` (the pre-provenance
+ * behaviour). Callers that know the trust bit (orchestrator/turn.ts) pass
+ * `source` explicitly so a group third-party lands as `other`. Fail-closed: a
+ * caller that forgets to stamp an assistant turn gets `unverified`, never `self`.
  */
 function defaultTurnSource(t: AppendTurnInput): FactSource {
   if (t.source) return t.source;
-  return t.role === "assistant" ? "self" : "principal";
+  return t.role === "assistant" ? "unverified" : "principal";
 }
 
 /**

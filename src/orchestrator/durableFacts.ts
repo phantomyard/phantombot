@@ -513,6 +513,7 @@ export function pruneCutoffs(
     principal: cut(tiers.principal.maxAgeDays),
     self: cut(tiers.self.maxAgeDays),
     other: cut(tiers.other.maxAgeDays),
+    unverified: cut(tiers.unverified.maxAgeDays),
   };
 }
 
@@ -578,12 +579,15 @@ export async function pullDurableFacts(
     // Recall bump — fire-and-forget so injection never blocks on a write.
     // Refreshing last_seen_at on the facts we actually surface is what keeps a
     // frequently-used fact fresh while unused ones decay and retire.
-    // EXCLUDE `other`-tier facts: they inject only tagged-as-unverified and must
-    // never have their clock reset, or a third-party claim would become immortal
-    // (bump → stays in top-N → bump again → never retires). They still decay and
-    // hit the retirement floor on schedule.
+    // Recall-bump ONLY the trusted tiers (principal, self). The untrusted tiers
+    // (`other` third-party claims, `unverified` own-unconfirmed output) inject
+    // tagged and must never have their clock reset, or an untrusted claim would
+    // become immortal (bump → stays in top-N → bump again → never retires). They
+    // still decay and hit the retirement floor on schedule — the ONLY way an
+    // `unverified` fact escapes that decay is genuine promotion to a trusted tier
+    // when the principal re-asserts it, not by being repeatedly surfaced.
     const touchIds = top
-      .filter((s) => s.fact.source !== "other")
+      .filter((s) => s.fact.source === "principal" || s.fact.source === "self")
       .map((s) => s.fact.id);
     if (touchIds.length > 0) {
       void input.memory.touchDurableFacts(touchIds).catch(() => {
@@ -620,20 +624,25 @@ export function formatDurableFacts(facts: DurableFact[]): string | undefined {
 
 /**
  * Render one fact as a bullet, QUALIFIED BY PROVENANCE. principal/self facts —
- * things the owner told us or the persona itself established — render as plain
- * background knowledge. An `other` fact came from a third party in a shared
- * conversation and only cleared the inject floor on a lower trust weight; it is
- * tagged inline as unverified so it can NEVER be presented to a principal turn
- * as the owner's own knowledge. Dropping this qualifier was the injection-side
- * half of the provenance hole PR #325 review flagged: an allowed untrusted turn
- * becoming a durable fact and then masquerading as owner knowledge. The tag is
- * per-line (not a section header) so it survives any slicing/reordering of the
- * bullet list.
+ * things the owner told us or the persona has EARNED first-hand trust in —
+ * render as plain background knowledge. The two untrusted tiers are tagged
+ * inline instead: an `other` fact came from a third party in a shared
+ * conversation, and an `unverified` fact is the persona's OWN assistant-turn
+ * note that the principal has not yet engaged with (the #327 default). Both only
+ * cleared the inject floor on a lower trust weight and are labelled so they can
+ * NEVER be presented to a principal turn as the owner's own knowledge. Dropping
+ * this qualifier was the injection-side half of the provenance hole PR #325
+ * review flagged: an untrusted claim becoming a durable fact and then
+ * masquerading as owner knowledge. The tag is per-line (not a section header) so
+ * it survives any slicing/reordering of the bullet list.
  */
 function formatFactLine(f: DurableFact): string {
   const fact = f.fact.trim();
   if (f.source === "other") {
     return `- [unverified — reported by a third party in a shared conversation] ${fact}`;
+  }
+  if (f.source === "unverified") {
+    return `- [unverified — the assistant's own note, not yet confirmed by the principal] ${fact}`;
   }
   return `- ${fact}`;
 }
