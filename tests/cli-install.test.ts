@@ -562,6 +562,9 @@ describe("runInstall (windows) logged-off prompt flow", () => {
         return "s3cret!";
       },
       whoami: async () => "MEGAN-PC\\megan",
+      readVaultWindowsPassword: async () => null,
+      validateWindowsCredential: async () => true,
+      saveVaultWindowsPassword: async () => {},
     });
     expect(code).toBe(0);
     expect(askedPassword).toBe(true);
@@ -616,6 +619,9 @@ describe("runInstall (windows) logged-off prompt flow", () => {
         prompted = true;
         return false;
       },
+      readVaultWindowsPassword: async () => null,
+      validateWindowsCredential: async () => true,
+      saveVaultWindowsPassword: async () => {},
     });
     expect(code).toBe(0);
     expect(prompted).toBe(false);
@@ -645,6 +651,7 @@ describe("runInstall (windows) logged-off prompt flow", () => {
         platform: "windows",
         runLoggedOff: true,
         whoami: async () => "MEGAN-PC\\megan",
+        readVaultWindowsPassword: async () => null,
       });
       expect(code).toBe(2);
       expect(err.text).toContain("needs the Windows password");
@@ -652,4 +659,123 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     } finally {
       if (prev !== undefined) process.env.PHANTOMBOT_WINDOWS_PASSWORD = prev;
     }
+  });
+
+  test("Enter reuses the saved vault password", async () => {
+    const st = new FakeSchtasks();
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      platform: "windows",
+      whoami: async () => "MEGAN-PC\\megan",
+      promptRunLoggedOff: async () => true,
+      // User pressed Enter (empty) at the password prompt.
+      promptPassword: async () => "",
+      readVaultWindowsPassword: async () => "vault-pw",
+      validateWindowsCredential: async () => true,
+      saveVaultWindowsPassword: async () => {},
+    });
+    expect(code).toBe(0);
+    const pwCreates = st.calls.filter(
+      (c) => c[0] === "/Create" && !c.some((a) => a.includes("login-testbot")),
+    );
+    expect(pwCreates.length).toBe(4);
+    // The reused vault password was applied via /RP.
+    for (const c of pwCreates) {
+      expect(c).toContain("/RP");
+      expect(c).toContain("vault-pw");
+    }
+  });
+
+  test("a wrong password falls back to interactive/login mode (no boot task)", async () => {
+    const st = new FakeSchtasks();
+    const out = new CaptureStream();
+    let saved = false;
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+      whoami: async () => "MEGAN-PC\\megan",
+      promptRunLoggedOff: async () => true,
+      promptPassword: async () => "wrong-pw",
+      readVaultWindowsPassword: async () => null,
+      validateWindowsCredential: async () => false,
+      saveVaultWindowsPassword: async () => {
+        saved = true;
+      },
+    });
+    expect(code).toBe(0);
+    // No password-mode registration: no /RP anywhere, and no login-fallback
+    // task is CREATED (interactive install still probes it for cleanup).
+    expect(st.calls.some((c) => c.includes("/RP"))).toBe(false);
+    expect(
+      st.calls.some(
+        (c) => c[0] === "/Create" && c.some((a) => a.includes("login-testbot")),
+      ),
+    ).toBe(false);
+    // A wrong password is never persisted to the vault.
+    expect(saved).toBe(false);
+    expect(out.text).toContain("did not validate");
+  });
+
+  test("unattended reinstall honours a persisted password mode (boot-schema migration path)", async () => {
+    const st = new FakeSchtasks();
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      platform: "windows",
+      whoami: async () => "MEGAN-PC\\megan",
+      // No prompt seam + no runLoggedOff flag = unattended. Persisted mode +
+      // saved password drive it, exactly like a silent boot-schema migration.
+      readPersistedLogonMode: async () => "password",
+      readVaultWindowsPassword: async () => "migrated-pw",
+      validateWindowsCredential: async () => true,
+      saveVaultWindowsPassword: async () => {},
+    });
+    expect(code).toBe(0);
+    const pwCreates = st.calls.filter(
+      (c) => c[0] === "/Create" && !c.some((a) => a.includes("login-testbot")),
+    );
+    expect(pwCreates.length).toBe(4);
+    for (const c of pwCreates) expect(c).toContain("migrated-pw");
+    // The interactive login-fallback twin is registered too.
+    expect(st.calls.some((c) => c.some((a) => a.includes("login-testbot")))).toBe(
+      true,
+    );
+  });
+
+  test("unattended reinstall with no saved password downgrades to interactive, loudly", async () => {
+    const st = new FakeSchtasks();
+    const out = new CaptureStream();
+    const code = await runInstall({
+      binPath: WIN_BIN2,
+      persona: "testbot",
+      sid: "S-1-5-21-1-2-3-1001",
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err: new CaptureStream(),
+      platform: "windows",
+      whoami: async () => "MEGAN-PC\\megan",
+      readPersistedLogonMode: async () => "password",
+      readVaultWindowsPassword: async () => null,
+    });
+    expect(code).toBe(0);
+    expect(st.calls.some((c) => c.includes("/RP"))).toBe(false);
+    expect(out.text).toContain("no saved password is available");
   });

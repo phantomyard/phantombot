@@ -42,10 +42,21 @@ import {
   BunSchtasksRunner,
   currentPersonaName,
   installPhantombotTasks,
+  readTaskLogon,
   type SchtasksRunner,
   type TaskLogon,
+  type TaskLogonMode,
 } from "../lib/taskScheduler.ts";
+import { openPersonaVault, vaultPath } from "../lib/vault.ts";
+import { resolveVaultPersonaDir } from "./vault.ts";
+import { existsSync } from "node:fs";
 import type { WriteSink } from "../lib/io.ts";
+
+/** Vault key under which the Windows account password is stored so a later
+ * reinstall / boot-schema migration can reuse it without re-prompting — the
+ * same "press Enter to reuse the saved value" UX the harness uses for API
+ * tokens. Per-persona, encrypted at rest with the persona's derived key. */
+export const WINDOWS_PASSWORD_VAULT_KEY = "WINDOWS_PASSWORD";
 
 /**
  * Trailing "here's how to manage it" block shown after a successful install,
@@ -118,6 +129,36 @@ export interface RunInstallInput {
   windowsPassword?: string;
   /** Directory for transient Task Scheduler XML import files (Windows tests). */
   xmlDir?: string;
+  /**
+   * Read the previously-saved Windows password from the vault (enables the
+   * "press Enter to reuse" flow). Test seam; the real impl opens the persona
+   * vault. Returns null when none is saved.
+   */
+  readVaultWindowsPassword?: () => Promise<string | null>;
+  /**
+   * Persist a validated Windows password to the vault after a successful
+   * install so future reinstalls / boot-schema migrations can reuse it. Test
+   * seam; the real impl writes the persona vault.
+   */
+  saveVaultWindowsPassword?: (password: string) => Promise<void>;
+  /**
+   * Validate that `username`+`password` actually authenticate BEFORE committing
+   * to password/boot mode. A blank or wrong password would otherwise register a
+   * boot task that fails every reboot; instead install falls back to
+   * interactive (login) mode. Test seam; the real impl runs a PowerShell
+   * ValidateCredentials probe. When absent, validation is skipped (assumed
+   * valid) — validation is a Windows-runtime concern.
+   */
+  validateWindowsCredential?: (
+    username: string,
+    password: string,
+  ) => Promise<boolean>;
+  /**
+   * The persona's persisted install-time logon mode, used to default the
+   * run-logged-off prompt to the previous choice (first-time installs default
+   * to interactive/login). Test seam; defaults to reading the logon marker.
+   */
+  readPersistedLogonMode?: () => Promise<TaskLogonMode>;
   /** Override systemd-env detection for testing. */
   ensureSystemdEnv?: () => UserSystemdEnv;
   /**
@@ -251,10 +292,13 @@ async function runInstallWindows(
 
   // Ask whether the daemon should also run when NOBODY is logged on
   // (headless VM, Windows-update reboots). That requires Task Scheduler to
-  // store the Windows password with the task; default stays the safer
-  // interactive-token mode. Prompts only run on a real TTY — scripted
-  // installs keep the default.
-  const logon = await resolveWindowsLogon(input, err);
+  // store the Windows password with the task. The prompt DEFAULT reflects the
+  // persona's previously-chosen mode (first-time installs default to the safer
+  // interactive/login mode). Prompts only run on a real TTY; an unattended
+  // reinstall honours the persisted choice (this is the boot-schema migration
+  // path). A blank or wrong password never registers a boot task — install
+  // falls back to interactive/login mode instead.
+  const logon = await resolveWindowsLogon(input, persona, out, err);
   if (!logon) return 2; // user cancelled the prompt
 
   const result = await installPhantombotTasks({
@@ -269,9 +313,26 @@ async function runInstallWindows(
   });
   if (!result.installed) return 1;
 
+  // Persist the validated password to the vault so a later reinstall or
+  // boot-schema migration can reuse it without prompting (Enter-to-reuse).
+  if (logon.mode === "password" && logon.password) {
+    const save =
+      input.saveVaultWindowsPassword ??
+      ((pw: string) => defaultSaveVaultWindowsPassword(persona, pw));
+    try {
+      await save(logon.password);
+      out.write(`saved ${WINDOWS_PASSWORD_VAULT_KEY} to the vault (press Enter to reuse it next install)\n`);
+    } catch (e) {
+      err.write(
+        `warning: could not save the Windows password to the vault: ${(e as Error).message}\n`,
+      );
+    }
+  }
+
   out.write(
     logon.mode === "password"
-      ? `\nThese tasks run as ${logon.username} whether or not anyone is logged on (starts at boot).\n` +
+      ? `\nThese tasks run as ${logon.username} whether or not anyone is logged on (starts at boot). ` +
+          `A login-fallback task also starts the agent at logon, so a later password change can't lock the agent out.\n` +
           manageHints()
       : `\nThese tasks run for the current Windows user while logged in.\n` +
           manageHints(),
@@ -283,29 +344,87 @@ type WindowsLogonChoice = TaskLogon & { password?: string };
 
 /**
  * The install-time "run when logged off?" flow. Returns the chosen logon
- * config, or null when the user cancels. Non-interactive invocations (no
- * TTY) skip the prompts and take the interactive default — a scripted
- * install must never block on a question nobody can answer.
+ * config, or null when the user cancels. Key behaviours:
+ *
+ *  - The run-logged-off prompt DEFAULTS to the persona's previously-chosen
+ *    mode; a first-time install defaults to interactive/login.
+ *  - When run-logged-off is chosen, the password can be typed OR reused from
+ *    the vault by pressing Enter (the harness API-token UX).
+ *  - The credential is VALIDATED before committing; a blank or wrong password
+ *    falls back to interactive/login mode with a loud message, rather than
+ *    registering a boot task that fails every reboot.
+ *  - An unattended invocation (no TTY, no flag) honours the persisted mode —
+ *    the path a boot-schema migration re-runs install through.
  */
 async function resolveWindowsLogon(
   input: RunInstallInput,
+  persona: string,
+  out: WriteSink,
   err: WriteSink,
 ): Promise<WindowsLogonChoice | null> {
-  // Scripted mode: flags/env decide, no prompts. Explicit false is the same
-  // interactive-token install as answering "no".
+  const readVault =
+    input.readVaultWindowsPassword ??
+    (() => defaultReadVaultWindowsPassword(persona));
+  const validate =
+    input.validateWindowsCredential ?? defaultValidateWindowsCredential;
+
+  // Validate the credential, then either commit to password mode or fall back
+  // to interactive/login with a loud message. A validation ERROR (the probe
+  // couldn't run) is not proof the password is wrong, so it proceeds as
+  // requested with a warning; only an explicit "invalid" downgrades.
+  const commitPassword = async (
+    username: string,
+    password: string,
+  ): Promise<WindowsLogonChoice> => {
+    if (!password) {
+      out.write(
+        "no Windows password provided — installing interactive/login mode instead (runs while you are logged in)\n",
+      );
+      return { mode: "interactive" };
+    }
+    let valid: boolean;
+    try {
+      valid = await validate(username, password);
+    } catch (e) {
+      out.write(
+        `warning: could not verify the Windows password (${(e as Error).message}); proceeding with run-logged-off as requested\n`,
+      );
+      return { mode: "password", username, password };
+    }
+    if (!valid) {
+      out.write(
+        `the Windows password for ${username} did not validate — installing interactive/login mode instead ` +
+          `(the agent will start when you log in, not at boot). Re-run \`phantombot install\` with the correct password to enable boot start.\n`,
+      );
+      return { mode: "interactive" };
+    }
+    return { mode: "password", username, password };
+  };
+
+  // Scripted mode: flags/env/vault decide, no prompts. Explicit false is the
+  // same interactive-token install as answering "no".
   if (input.runLoggedOff !== undefined) {
     if (!input.runLoggedOff) return { mode: "interactive" };
     const username = await (input.whoami ?? defaultWhoami)();
     const password =
-      input.windowsPassword ?? process.env.PHANTOMBOT_WINDOWS_PASSWORD;
+      input.windowsPassword ??
+      process.env.PHANTOMBOT_WINDOWS_PASSWORD ??
+      (await readVault()) ??
+      undefined;
     if (!password) {
       err.write(
-        "--run-logged-off needs the Windows password via --windows-password or PHANTOMBOT_WINDOWS_PASSWORD\n",
+        "--run-logged-off needs the Windows password via --windows-password, PHANTOMBOT_WINDOWS_PASSWORD, or a saved vault value\n",
       );
       return null;
     }
-    return { mode: "password", username, password };
+    return await commitPassword(username, password);
   }
+
+  const persistedMode = await (
+    input.readPersistedLogonMode ??
+    (async () => (await readTaskLogon(persona)).mode)
+  )();
+  const defaultLoggedOff = persistedMode === "password";
 
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const askLoggedOff =
@@ -315,13 +434,28 @@ async function resolveWindowsLogon(
           const answer = await p.confirm({
             message:
               "Run phantombot when you are logged off? (survives reboots without login; requires your Windows password)",
-            initialValue: false,
+            initialValue: defaultLoggedOff,
           });
           if (p.isCancel(answer)) return null;
           return answer;
         }
       : undefined);
-  if (!askLoggedOff) return { mode: "interactive" };
+
+  // Unattended (no TTY, no prompt seam): honour the persisted choice. This is
+  // the boot-schema migration / silent-reinstall path — it must not silently
+  // downgrade a password-mode box to interactive.
+  if (!askLoggedOff) {
+    if (!defaultLoggedOff) return { mode: "interactive" };
+    const username = await (input.whoami ?? defaultWhoami)();
+    const password = (await readVault()) ?? undefined;
+    if (!password) {
+      out.write(
+        "run-logged-off was previously configured but no saved password is available; installing interactive/login mode instead\n",
+      );
+      return { mode: "interactive" };
+    }
+    return await commitPassword(username, password);
+  }
 
   const wantsLoggedOff = await askLoggedOff();
   if (wantsLoggedOff === null) {
@@ -331,23 +465,106 @@ async function resolveWindowsLogon(
   if (!wantsLoggedOff) return { mode: "interactive" };
 
   const username = await (input.whoami ?? defaultWhoami)();
+  const saved = (await readVault()) ?? undefined;
   const askPassword =
     input.promptPassword ??
     (async () => {
       const answer = await p.password({
-        message: `Windows password for ${username} (stored encrypted with the scheduled task):`,
+        message: saved
+          ? `Windows password for ${username} (press Enter to reuse the saved password):`
+          : `Windows password for ${username} (stored encrypted with the scheduled task):`,
         validate: (v) =>
-          !v || v.length === 0 ? "password may not be empty" : undefined,
+          !v && !saved ? "password may not be empty" : undefined,
       });
       if (p.isCancel(answer)) return null;
       return answer;
     });
-  const password = await askPassword();
-  if (password === null) {
+  const typed = await askPassword();
+  if (typed === null) {
     err.write("install cancelled\n");
     return null;
   }
-  return { mode: "password", username, password };
+  // Empty input + a saved value → reuse the saved password (Enter-to-reuse).
+  const password = typed === "" && saved ? saved : typed;
+  return await commitPassword(username, password);
+}
+
+/** Read the saved Windows password from the persona vault, or null. Never
+ * creates a vault: if none exists yet there's nothing to reuse. */
+async function defaultReadVaultWindowsPassword(
+  persona: string,
+): Promise<string | null> {
+  try {
+    const dir = await resolveVaultPersonaDir(persona);
+    if (!existsSync(vaultPath(dir))) return null;
+    const vault = await openPersonaVault(dir);
+    try {
+      return vault.get(WINDOWS_PASSWORD_VAULT_KEY) ?? null;
+    } finally {
+      vault.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the Windows password into the persona vault (encrypted at rest). */
+async function defaultSaveVaultWindowsPassword(
+  persona: string,
+  password: string,
+): Promise<void> {
+  const dir = await resolveVaultPersonaDir(persona);
+  const vault = await openPersonaVault(dir);
+  try {
+    vault.set(WINDOWS_PASSWORD_VAULT_KEY, password);
+  } finally {
+    vault.close();
+  }
+}
+
+/**
+ * Validate a Windows credential via a PowerShell ValidateCredentials probe,
+ * so a blank/wrong password never registers a boot task that fails on every
+ * reboot. The password is passed through the environment (not the command
+ * line) to keep it out of process listings. Tries the local machine account
+ * store first, then the domain — returns true if either authenticates.
+ */
+async function defaultValidateWindowsCredential(
+  username: string,
+  password: string,
+): Promise<boolean> {
+  // Strip any DOMAIN\ or COMPUTER\ prefix — ValidateCredentials takes the bare
+  // account name plus a context.
+  const bare = username.includes("\\") ? username.split("\\").pop()! : username;
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+$u = $env:PB_VC_USER
+$p = $env:PB_VC_PASS
+foreach ($ctx in @('Machine','Domain')) {
+  try {
+    $pc = New-Object System.DirectoryServices.AccountManagement.PrincipalContext($ctx)
+    if ($pc.ValidateCredentials($u, $p)) { Write-Output 'VALID'; exit 0 }
+  } catch { }
+}
+Write-Output 'INVALID'
+exit 1
+`;
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
+      env: { ...process.env, PB_VC_USER: bare, PB_VC_PASS: password },
+    },
+  );
+  const [stdout, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    child.exited,
+  ]);
+  return exitCode === 0 && stdout.includes("VALID");
 }
 
 /** `COMPUTER\user` (or `DOMAIN\user`) for schtasks /RU. */
