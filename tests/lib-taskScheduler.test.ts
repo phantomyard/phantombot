@@ -307,6 +307,9 @@ describe("installPhantombotTasks", () => {
       `/Delete /TN ${LEGACY_TASK_NAMES[2]} /F`,
       `/Query /TN ${LEGACY_TASK_NAMES[3]} /XML`,
       `/Delete /TN ${LEGACY_TASK_NAMES[3]} /F`,
+      // Interactive install also sweeps a stale password-mode login-fallback
+      // task (absent here, so just the ownership probe, no delete).
+      `/Query /TN ${NAMES.login} /XML`,
     ]);
     expect(out.text).toContain("registered");
   });
@@ -441,6 +444,9 @@ describe("uninstallPhantombotTasks", () => {
     const result = await uninstallPhantombotTasks({ persona: PERSONA, sid: SID, schtasks: st, out, err });
     expect(result.removed).toBe(true);
     expect(st.calls.map((c) => c.join(" "))).toEqual([
+      // Login-fallback task is swept first; absent here (only NAMES.all is
+      // registered), so just the ownership probe.
+      `/Query /TN ${NAMES.login} /XML`,
       `/Query /TN ${NAMES.tick} /XML`,
       `/Delete /TN ${NAMES.tick} /F`,
       `/Query /TN ${NAMES.nightly} /XML`,
@@ -573,7 +579,8 @@ describe("uninstallPhantombotTasks", () => {
     const result = await uninstallPhantombotTasks({ persona: PERSONA, sid: SID, schtasks: st, out, err });
     expect(result.removed).toBe(true);
     expect(st.calls.filter((c) => c[0] === "/Delete")).toEqual([]);
-    expect(st.calls.filter((c) => c[0] === "/Query").length).toBe(8);
+    // 4 persona tasks + the login-fallback probe + 4 legacy names = 9 queries.
+    expect(st.calls.filter((c) => c[0] === "/Query").length).toBe(9);
     expect(out.text).not.toContain("removed scheduled task");
   });
 });
@@ -1132,13 +1139,20 @@ describe("password logon mode (run when logged off)", () => {
     });
     expect(result.installed).toBe(true);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    expect(creates.length).toBe(4);
-    for (const c of creates) {
+    // 4 password tasks + the interactive login-fallback twin = 5 registrations.
+    expect(creates.length).toBe(5);
+    const loginCreate = creates.find((c) => c.includes(NAMES.login))!;
+    const passwordCreates = creates.filter((c) => !c.includes(NAMES.login));
+    expect(passwordCreates.length).toBe(4);
+    for (const c of passwordCreates) {
       expect(c).toContain("/RU");
       expect(c).toContain(ACCOUNT);
       expect(c).toContain("/RP");
       expect(c).toContain("s3cret");
     }
+    // The login-fallback task is INTERACTIVE — it never carries the credential.
+    expect(loginCreate).not.toContain("/RP");
+    expect(loginCreate).not.toContain("s3cret");
     // The marker remembers the mode + account for the heal path, but the
     // password stays with Task Scheduler — never on our disk.
     expect(await readTaskLogon(PERSONA)).toEqual({
@@ -1176,6 +1190,7 @@ describe("password logon mode (run when logged off)", () => {
         username: ACCOUNT,
       }),
     };
+    const creates: string[] = [];
     const st: SchtasksRunner = {
       async run(args: readonly string[]): Promise<SchtasksResult> {
         if (args[0] === "/Query") {
@@ -1184,7 +1199,19 @@ describe("password logon mode (run when logged off)", () => {
             ? { exitCode: 1, stdout: "", stderr: "cannot find" }
             : { exitCode: 0, stdout: xml, stderr: "" };
         }
-        throw new Error("password-mode heal must NOT re-import via schtasks");
+        // The interactive login-fallback task needs no credential, so a
+        // missing one IS re-imported by the heal. Any /Create of a
+        // PASSWORD-mode task without a credential would be the bug this test
+        // guards against.
+        if (args[0] === "/Create") {
+          const tn = args[args.indexOf("/TN") + 1]!;
+          if (tn !== NAMES.login) {
+            throw new Error(`password-mode heal must NOT re-import ${tn}`);
+          }
+          creates.push(tn);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
     const patched: Array<[string, string]> = [];
@@ -1199,21 +1226,27 @@ describe("password logon mode (run when logged off)", () => {
         return { ok: true };
       },
     });
-    // Only the drifted daemon task was patched, with the new binary path in
-    // the launcher arguments.
-    expect(r.rewrote).toEqual([NAMES.main]);
+    // The drifted daemon task was patched in place (credential preserved); the
+    // absent interactive login-fallback task was re-imported (no credential).
+    expect(r.rewrote).toEqual([NAMES.main, NAMES.login]);
     expect(r.failed).toEqual([]);
     expect(patched.length).toBe(1);
     expect(patched[0]![0]).toBe(NAMES.main);
     expect(patched[0]![1]).toContain(BIN);
     expect(patched[0]![1]).not.toContain(OLD_BIN);
+    expect(creates).toEqual([NAMES.login]);
   });
 
   test("heal cannot recreate a MISSING password-mode task — it says to re-install", async () => {
     await writeTaskLogon(PERSONA, { mode: "password", username: ACCOUNT });
     const st: SchtasksRunner = {
-      async run(): Promise<SchtasksResult> {
-        return { exitCode: 1, stdout: "", stderr: "cannot find" };
+      async run(args: readonly string[]): Promise<SchtasksResult> {
+        // Every task is missing (/Query fails); /Create succeeds — but the
+        // password tasks never reach /Create without a credential.
+        if (args[0] === "/Query") {
+          return { exitCode: 1, stdout: "", stderr: "cannot find" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
     const r = await ensureTasksCurrent({
@@ -1224,7 +1257,9 @@ describe("password logon mode (run when logged off)", () => {
       schtasks: st,
       patchAction: async () => ({ ok: true }),
     });
-    expect(r.rewrote).toEqual([]);
+    // The 4 password tasks can't be recreated without the credential; the
+    // interactive login-fallback twin needs none, so it IS restored.
+    expect(r.rewrote).toEqual([NAMES.login]);
     expect(r.failed).toEqual([
       NAMES.main,
       NAMES.heartbeat,

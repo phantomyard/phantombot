@@ -566,8 +566,9 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     expect(code).toBe(0);
     expect(askedPassword).toBe(true);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    expect(creates.length).toBe(4);
-    for (const c of creates) {
+    // 4 password tasks + the interactive login-fallback twin.
+    expect(creates.length).toBe(5);
+    for (const c of creates.filter((c) => !c.some((a) => a.includes("login-testbot")))) {
       expect(c).toContain("/RU");
       expect(c).toContain("MEGAN-PC\\megan");
       expect(c).toContain("/RP");
@@ -619,8 +620,11 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     expect(code).toBe(0);
     expect(prompted).toBe(false);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    expect(creates.length).toBe(4);
-    for (const c of creates) expect(c).toContain("/RP");
+    // 4 password tasks + the interactive login-fallback twin.
+    expect(creates.length).toBe(5);
+    for (const c of creates.filter((c) => !c.some((a) => a.includes("login-testbot")))) {
+      expect(c).toContain("/RP");
+    }
     expect(out.text).toContain("whether or not anyone is logged on");
   });
 
