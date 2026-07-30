@@ -1511,3 +1511,65 @@ describe("boot-schema versioning + migration", () => {
     expect(st.created()).toEqual([]);
   });
 });
+
+describe("#309 cold-start recovery: `phantombot install` restores a fully-wiped set", () => {
+  /** Records /Create names; /Query always misses (every task deleted). */
+  class ColdStartFake implements SchtasksRunner {
+    calls: string[][] = [];
+    async run(args: readonly string[]): Promise<SchtasksResult> {
+      this.calls.push([...args]);
+      if (args[0] === "/Query") {
+        return { exitCode: 1, stdout: "", stderr: "cannot find" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    created(): string[] {
+      return this.calls
+        .filter((c) => c[0] === "/Create")
+        .map((c) => c[c.indexOf("/TN") + 1]!);
+    }
+  }
+
+  test("all tasks deleted → interactive install re-registers the four-task set", async () => {
+    const st = new ColdStartFake();
+    const result = await installPhantombotTasks({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(result.installed).toBe(true);
+    expect(st.created()).toEqual([
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
+    ]);
+  });
+
+  test("all tasks deleted → logged-off install re-registers all five (incl. login-fallback)", async () => {
+    const st = new ColdStartFake();
+    const result = await installPhantombotTasks({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      accountName: "PC\\me",
+      xmlDir: workdir,
+      logon: { mode: "password", username: "PC\\me", password: "pw" },
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(result.installed).toBe(true);
+    expect(st.created()).toEqual([
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
+      NAMES.login,
+    ]);
+  });
+});

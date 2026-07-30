@@ -259,11 +259,13 @@ phantombot install      # installs the per-user logon task and periodic tasks
 phantombot uninstall    # removes the service and tasks
 ```
 
-`install` first asks: **"Run phantombot when you are logged off?"** (default:
-**no**). It then ensures four tasks in the current user's `\Phantombot\`
-folder, named per persona so multi-persona boxes stay identifiable in
-taskschd.msc: the always-on daemon (`phantombot-<persona>`) and the periodic
-`heartbeat-<persona>`, `nightly-<persona>`, and `tick-<persona>` tasks.
+`install` first asks: **"Run phantombot when you are logged off?"** The prompt
+**defaults to whatever you chose last time** (a first-ever install defaults to
+**no** — interactive/login mode). It then ensures the tasks in the current
+user's `\Phantombot\` folder, named per persona so multi-persona boxes stay
+identifiable in taskschd.msc: the always-on daemon (`phantombot-<persona>`) and
+the periodic `heartbeat-<persona>`, `nightly-<persona>`, and `tick-<persona>`
+tasks.
 
 For example, a persona named `robbie` gets:
 
@@ -290,11 +292,46 @@ For example, a persona named `robbie` gets:
   in session 0 owned by the scheduler and is never reaped when the launching
   SSH/console session ends.
 
+  - **Password validation + reuse.** Before committing to logged-off mode the
+    entered password is validated (`ValidateCredentials`). A blank or wrong
+    password never registers a boot task that would fail on every reboot —
+    install falls back to interactive/login mode with a clear message instead.
+    A validated password is saved to the persona's encrypted **vault**
+    (`WINDOWS_PASSWORD` key), so the next `install` lets you **press Enter to
+    reuse it** — the same UX as harness API tokens.
+  - **Login-fallback task.** Logged-off mode also registers a fifth task,
+    `login-<persona>` — an interactive twin of the daemon that starts at logon.
+    If the stored password later goes stale (corporate password rotation) and
+    the boot task can no longer authenticate, this still brings the agent up
+    the next time you log in. It is a no-op when the boot task already started
+    the daemon (the single-instance run-lock dedupes them), and is removed
+    automatically if you reinstall in interactive mode.
+  - **Update-safe boot machinery.** Each install stamps a boot-schema version
+    into the marker. On every `phantombot run` startup the daemon compares it
+    against the version the running binary expects; if a self-update changed the
+    boot-task shape, it re-runs the idempotent install to migrate the tasks in
+    place — so an update that changes the boot method can't brick the box. A
+    password-mode migration reuses the saved vault password; if none is saved it
+    logs loudly and asks you to re-run `phantombot install`.
+
 For scripted installs, `--run-logged-off` / `--interactive` skip the prompt and
-`--windows-password` (or `PHANTOMBOT_WINDOWS_PASSWORD`) supplies the
-credential non-interactively. On an existing installation,
+`--windows-password` (or `PHANTOMBOT_WINDOWS_PASSWORD`, or a saved vault value)
+supplies the credential non-interactively. On an existing installation,
 `install` leaves healthy task definitions unchanged and only repairs missing
 tasks or paths pointing at an older binary.
+
+**Cold-start recovery.** `phantombot install` is idempotent and is *the*
+recovery path when the boot machinery is gone. If all of a persona's
+`\Phantombot\*` tasks disappear at once — an AV false-positive quarantining the
+launcher, a cleanup script or Windows feature update purging Task Scheduler
+entries — the box goes dark: no daemon, no heartbeat, no self-heal, nothing left
+to run. Because nothing survives to trigger an automatic repair, recovery is a
+deliberate manual step (mirroring the Linux/macOS `install` / `uninstall`
+lifecycle): log in and run `phantombot install` again. It re-registers the full
+task set from scratch, prompting for the password (Enter to reuse the saved
+vault value) only if you had logged-off mode. Partial damage — one task deleted,
+a moved binary, a deleted launcher script — is repaired automatically by the
+heartbeat self-heal without any manual step.
 
 **Self-update.** `phantombot update` and the `/update` chat command work on
 Windows. Because Windows locks a running `.exe` against overwrite, the updater
