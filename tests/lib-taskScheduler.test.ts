@@ -1510,6 +1510,71 @@ describe("boot-schema versioning + migration", () => {
     });
     expect(st.created()).toEqual([]);
   });
+
+  test("a partial registration failure does NOT advance the marker, so the next run retries", async () => {
+    // Old-schema interactive box: installed but stale, so a migration is due.
+    await writeTaskLogon(PERSONA, { mode: "interactive" }, 0);
+
+    // A runner whose main task exists (migration proceeds) but that fails the
+    // tick /Create the first time through, then heals.
+    class FlakyMigrateFake implements SchtasksRunner {
+      calls: string[][] = [];
+      failCreate = true;
+      constructor(private registry: Record<string, string | undefined>) {}
+      async run(args: readonly string[]): Promise<SchtasksResult> {
+        this.calls.push([...args]);
+        if (args[0] === "/Query") {
+          const xml = this.registry[args[args.indexOf("/TN") + 1]!];
+          return xml === undefined
+            ? { exitCode: 1, stdout: "", stderr: "cannot find" }
+            : { exitCode: 0, stdout: xml, stderr: "" };
+        }
+        if (args[0] === "/Create" && this.failCreate && args.includes(NAMES.tick)) {
+          return { exitCode: 1, stdout: "", stderr: "access denied" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    }
+
+    const st = new FlakyMigrateFake({ [NAMES.main]: principalXml(SID) });
+
+    // First attempt: the tick /Create fails → migration reports failure and the
+    // marker MUST stay at the prior schema (0), not jump to current.
+    const first = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(first).toEqual({
+      migrated: false,
+      reason: "failed",
+      from: 0,
+      to: BOOT_SCHEMA_VERSION,
+    });
+    // The critical assertion: a half-migrated box is still marked stale, so the
+    // migration is retried rather than permanently skipped.
+    expect((await readTaskLogonRecord(PERSONA)).schemaVersion).toBe(0);
+
+    // The transient fault clears; the next `phantombot run` retries and completes.
+    st.failCreate = false;
+    const second = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(second.migrated).toBe(true);
+    expect((await readTaskLogonRecord(PERSONA)).schemaVersion).toBe(
+      BOOT_SCHEMA_VERSION,
+    );
+  });
 });
 
 describe("#309 cold-start recovery: `phantombot install` restores a fully-wiped set", () => {

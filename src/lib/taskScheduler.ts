@@ -1281,9 +1281,18 @@ export async function installPhantombotTasks(
   const xmlDir = opts.xmlDir ?? tmpdir();
   const logon = opts.logon ?? { mode: "interactive" as const };
 
-  // Persist the logon choice BEFORE registering, so a later heal sees it even
-  // if a registration below fails halfway.
-  await writeTaskLogon(opts.persona, { mode: logon.mode, username: logon.username });
+  // Persist the logon MODE before registering, so a later heal sees it even if
+  // a registration below fails halfway. But do NOT advance the boot-schema
+  // version yet: keep the prior version until every task registers. Otherwise a
+  // partial `/Create` failure would leave the marker stamped current while the
+  // tasks are still the old shape, and `migrateBootSchemaIfNeeded` would see
+  // `current` and permanently skip the retry — bricking the boot path.
+  const priorSchemaVersion = (await readTaskLogonRecord(opts.persona)).schemaVersion;
+  await writeTaskLogon(
+    opts.persona,
+    { mode: logon.mode, username: logon.username },
+    priorSchemaVersion,
+  );
 
   const r = await ensureTasksCurrent({
     binPath: opts.binPath,
@@ -1302,6 +1311,16 @@ export async function installPhantombotTasks(
     opts.err.write(`could not register scheduled task(s): ${r.failed.join(", ")}\n`);
     return { installed: false };
   }
+
+  // Every task registered — only now is it safe to advance the schema marker to
+  // the current version (transactional with successful registration, so a
+  // failed install above leaves the marker at its prior version and the next
+  // `phantombot run` retries the migration instead of skipping it forever).
+  await writeTaskLogon(
+    opts.persona,
+    { mode: logon.mode, username: logon.username },
+    BOOT_SCHEMA_VERSION,
+  );
 
   // Remove pre-rename legacy task names so an upgrade never double-supervises.
   // Only tasks provably owned by THIS Windows account are touched.
