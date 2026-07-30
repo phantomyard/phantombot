@@ -490,8 +490,9 @@ async function resolveWindowsLogon(
 }
 
 /** Read the saved Windows password from the persona vault, or null. Never
- * creates a vault: if none exists yet there's nothing to reuse. */
-async function defaultReadVaultWindowsPassword(
+ * creates a vault: if none exists yet there's nothing to reuse. Exported so
+ * the boot-schema migration path (run.ts) can reuse the same reader. */
+export async function defaultReadVaultWindowsPassword(
   persona: string,
 ): Promise<string | null> {
   try {

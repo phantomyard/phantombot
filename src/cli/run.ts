@@ -55,7 +55,13 @@ import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
-import { logsCommand, statusCommand } from "../lib/platform.ts";
+import { currentPlatform, logsCommand, statusCommand } from "../lib/platform.ts";
+import {
+  BunSchtasksRunner,
+  currentPersonaName,
+  migrateBootSchemaIfNeeded,
+} from "../lib/taskScheduler.ts";
+import { defaultReadVaultWindowsPassword } from "./install.ts";
 import {
   acquireRunLock,
   defaultLockPath,
@@ -327,6 +333,36 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }
     } catch (e) {
       log.warn("run: self-update artifact cleanup threw", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  // Windows only: reconcile the installed boot machinery with the version this
+  // binary expects. If a self-update changed the boot-task shape, re-run the
+  // idempotent install to migrate the tasks in place — so an update that
+  // changes the boot method can't leave a box with stale, broken boot tasks.
+  // Best-effort: a migration failure never blocks startup (the daemon is
+  // already up; the heartbeat self-heal keeps patching drift meanwhile).
+  if (isPhantombotBinary() && currentPlatform() === "windows") {
+    try {
+      const persona = await currentPersonaName();
+      const result = await migrateBootSchemaIfNeeded({
+        binPath: process.execPath,
+        persona,
+        schtasks: new BunSchtasksRunner(),
+        out: { write: () => true },
+        err: { write: () => true },
+        readWindowsPassword: () => defaultReadVaultWindowsPassword(persona),
+      });
+      if (result.migrated) {
+        log.info("run: migrated Windows boot schema", {
+          from: result.from,
+          to: result.to,
+        });
+      }
+    } catch (e) {
+      log.warn("run: boot-schema reconcile threw", {
         error: (e as Error).message,
       });
     }

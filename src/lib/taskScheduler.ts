@@ -1344,6 +1344,97 @@ export async function installPhantombotTasks(
   return { installed: true };
 }
 
+export interface MigrateBootSchemaOptions {
+  binPath: string;
+  /** Persona whose tasks to migrate. Defaults to the current persona. */
+  persona?: string;
+  sid?: string;
+  xmlDir?: string;
+  schtasks: SchtasksRunner;
+  out: WriteSink;
+  err: WriteSink;
+  /**
+   * Supplies the saved Windows password for a password-mode migration (a
+   * schema change may add a task that needs re-registration, which schtasks
+   * can't do without the credential). Returns null when none is available —
+   * then the migration is skipped loudly rather than half-registering.
+   */
+  readWindowsPassword?: () => Promise<string | null>;
+}
+
+export interface MigrateBootSchemaResult {
+  migrated: boolean;
+  reason:
+    | "migrated"
+    | "not-installed"
+    | "current"
+    | "password-unavailable"
+    | "failed";
+  from?: number;
+  to?: number;
+}
+
+/**
+ * Reconcile the installed boot machinery with the version the running binary
+ * expects. Called once at `phantombot run` startup (Windows only): if an update
+ * changed the boot-task shape (BOOT_SCHEMA_VERSION bumped), re-run the
+ * idempotent install so the tasks are migrated in place — the thing that stops
+ * an update that changes the boot method from bricking a box whose tasks were
+ * written by the old scheme.
+ *
+ * Only an already-installed box migrates (a never-installed box has nothing to
+ * migrate, and `run` must never silently install itself). A password-mode
+ * migration needs the saved Windows password; when none is available the
+ * migration is skipped with a loud log rather than half-registering.
+ */
+export async function migrateBootSchemaIfNeeded(
+  opts: MigrateBootSchemaOptions,
+): Promise<MigrateBootSchemaResult> {
+  const persona = opts.persona ?? (await currentPersonaName());
+  const record = await readTaskLogonRecord(persona);
+
+  const mainQ = await opts.schtasks.run([
+    "/Query",
+    "/TN",
+    taskNames(persona).main,
+    "/XML",
+  ]);
+  if (mainQ.exitCode !== 0) return { migrated: false, reason: "not-installed" };
+
+  const from = record.schemaVersion;
+  const to = BOOT_SCHEMA_VERSION;
+  if (!bootSchemaNeedsMigration(from)) {
+    return { migrated: false, reason: "current", from, to };
+  }
+
+  let logon: TaskLogon & { password?: string } = record.logon;
+  if (logon.mode === "password") {
+    const pw = opts.readWindowsPassword ? await opts.readWindowsPassword() : null;
+    if (!pw) {
+      log.warn(
+        "taskScheduler: boot-schema migration needs the saved Windows password but none is available — run `phantombot install` to migrate the boot tasks",
+        { persona, from, to },
+      );
+      return { migrated: false, reason: "password-unavailable", from, to };
+    }
+    logon = { ...logon, password: pw };
+  }
+
+  const r = await installPhantombotTasks({
+    binPath: opts.binPath,
+    persona,
+    sid: opts.sid,
+    xmlDir: opts.xmlDir,
+    logon,
+    schtasks: opts.schtasks,
+    out: opts.out,
+    err: opts.err,
+  });
+  if (!r.installed) return { migrated: false, reason: "failed", from, to };
+  log.info("taskScheduler: migrated boot schema", { persona, from, to });
+  return { migrated: true, reason: "migrated", from, to };
+}
+
 export interface UninstallTaskSchedulerOptions {
   /** Persona whose tasks to remove. Defaults to the current persona. */
   persona?: string;

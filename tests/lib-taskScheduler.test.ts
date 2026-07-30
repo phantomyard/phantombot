@@ -40,8 +40,12 @@ import {
   uninstallPhantombotTasks,
   taskNames,
   readTaskLogon,
+  readTaskLogonRecord,
   writeTaskLogon,
   LEGACY_TASK_NAMES,
+  BOOT_SCHEMA_VERSION,
+  bootSchemaNeedsMigration,
+  migrateBootSchemaIfNeeded,
 } from "../src/lib/taskScheduler.ts";
 
 const SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
@@ -1358,5 +1362,152 @@ describe("per-persona logon marker", () => {
       JSON.stringify({ mode: "password", username: "PC\\old" }),
     );
     expect(await readTaskLogon("newbot")).toEqual({ mode: "interactive" });
+  });
+});
+
+describe("boot-schema versioning + migration", () => {
+  /** A schtasks fake: /Query answers from a registry (missing → exit 1),
+   * /Create + everything else succeed and are recorded. */
+  class MigrateFake implements SchtasksRunner {
+    calls: string[][] = [];
+    constructor(private registry: Record<string, string | undefined> = {}) {}
+    async run(args: readonly string[]): Promise<SchtasksResult> {
+      this.calls.push([...args]);
+      if (args[0] === "/Query") {
+        const xml = this.registry[args[args.indexOf("/TN") + 1]!];
+        return xml === undefined
+          ? { exitCode: 1, stdout: "", stderr: "cannot find" }
+          : { exitCode: 0, stdout: xml, stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    created(): string[] {
+      return this.calls
+        .filter((c) => c[0] === "/Create")
+        .map((c) => c[c.indexOf("/TN") + 1]!);
+    }
+  }
+
+  test("bootSchemaNeedsMigration: 0 (pre-versioning) needs it, current does not", () => {
+    expect(bootSchemaNeedsMigration(0)).toBe(true);
+    expect(bootSchemaNeedsMigration(BOOT_SCHEMA_VERSION)).toBe(false);
+  });
+
+  test("writeTaskLogon stamps the schema version; readTaskLogonRecord returns it", async () => {
+    await writeTaskLogon(PERSONA, { mode: "interactive" });
+    const rec = await readTaskLogonRecord(PERSONA);
+    expect(rec.logon).toEqual({ mode: "interactive" });
+    expect(rec.schemaVersion).toBe(BOOT_SCHEMA_VERSION);
+  });
+
+  test("a marker written without a version reads back as schemaVersion 0", async () => {
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    mkdirSync(join(workdir, "phantombot"), { recursive: true });
+    writeFileSync(
+      join(workdir, "phantombot", `windows-logon-${PERSONA}.json`),
+      JSON.stringify({ mode: "interactive" }), // no schemaVersion
+    );
+    expect((await readTaskLogonRecord(PERSONA)).schemaVersion).toBe(0);
+  });
+
+  test("a never-installed box does not migrate (and never self-installs)", async () => {
+    const st = new MigrateFake({}); // main task not registered
+    const r = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(r).toEqual({ migrated: false, reason: "not-installed" });
+    expect(st.created()).toEqual([]);
+  });
+
+  test("an up-to-date box does not migrate", async () => {
+    await writeTaskLogon(PERSONA, { mode: "interactive" }); // stamps current version
+    const st = new MigrateFake({ [NAMES.main]: principalXml(SID) });
+    const r = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(r.reason).toBe("current");
+    expect(r.migrated).toBe(false);
+    expect(st.created()).toEqual([]);
+  });
+
+  test("an interactive box on an old schema migrates by re-installing", async () => {
+    // Old-schema marker (version 0) + a registered main task = installed but stale.
+    await writeTaskLogon(PERSONA, { mode: "interactive" }, 0);
+    const st = new MigrateFake({ [NAMES.main]: principalXml(SID) });
+    const r = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(r.migrated).toBe(true);
+    expect(r.from).toBe(0);
+    expect(r.to).toBe(BOOT_SCHEMA_VERSION);
+    // Re-registered the four interactive tasks (no login task in interactive mode).
+    expect(st.created()).toContain(NAMES.main);
+    // The marker is stamped current, so a second start does not re-migrate.
+    expect((await readTaskLogonRecord(PERSONA)).schemaVersion).toBe(
+      BOOT_SCHEMA_VERSION,
+    );
+  });
+
+  test("a password box migrates using the saved vault password (adds the login task)", async () => {
+    await writeTaskLogon(PERSONA, { mode: "password", username: "PC\\me" }, 0);
+    const st = new MigrateFake({ [NAMES.main]: passwordPrincipalXml("PC\\me") });
+    const r = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      readWindowsPassword: async () => "saved-pw",
+    });
+    expect(r.migrated).toBe(true);
+    // The login-fallback task is now part of the set.
+    expect(st.created()).toContain(NAMES.login);
+    // The saved password was applied via /RP on the password tasks.
+    const mainCreate = st.calls.find(
+      (c) => c[0] === "/Create" && c.includes(NAMES.main),
+    )!;
+    expect(mainCreate).toContain("saved-pw");
+  });
+
+  test("a password box with no saved password is skipped loudly, not half-migrated", async () => {
+    await writeTaskLogon(PERSONA, { mode: "password", username: "PC\\me" }, 0);
+    const st = new MigrateFake({ [NAMES.main]: passwordPrincipalXml("PC\\me") });
+    const r = await migrateBootSchemaIfNeeded({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      readWindowsPassword: async () => null,
+    });
+    expect(r).toEqual({
+      migrated: false,
+      reason: "password-unavailable",
+      from: 0,
+      to: BOOT_SCHEMA_VERSION,
+    });
+    expect(st.created()).toEqual([]);
   });
 });
