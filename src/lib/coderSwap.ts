@@ -39,10 +39,12 @@
  * MANUAL OVERRIDE: `/coder` forces the coding brain on for a conversation,
  * `/nocoder` forces it off, `/coder default` clears back to scoring. The
  * override wins over the score, mirroring the `/viewcoder` store shape (see
- * viewCoder.ts) — but it DECAYS rather than latching forever (see the two
- * bounds on the store below). A month-long stuck override forcing every
- * conversational turn onto the coding model is exactly the failure this decay
- * prevents.
+ * viewCoder.ts) — but it DECAYS on a sliding idle timeout rather than latching
+ * forever (see the store below). `/coder` is a temporary escalation of the
+ * coding brain to primary; once the conversation goes idle past the TTL it
+ * releases and the per-turn scorer is back in charge. A month-long stuck
+ * override forcing every conversational turn onto the coding model is exactly
+ * the failure this decay prevents.
  */
 
 import { readFile } from "node:fs/promises";
@@ -482,31 +484,23 @@ export function normalizeCoderSwapRequest(
 }
 
 /**
- * Two decay bounds keep a manual override from latching forever (the
- * kimi-k3-forced-for-a-month failure). Both are checked lazily on read — no
- * timer, no restart, exactly like reply-mode's expiry (see replyMode.ts).
+ * A single sliding idle TTL keeps a manual override from latching forever (the
+ * kimi-k3-forced-for-a-month failure). Checked lazily on read — no timer, no
+ * restart — exactly mirroring reply-mode's expiry (see replyMode.ts).
  *
- *   IDLE_TTL   — a sliding window: the override releases after this long with no
- *                conversation activity. Each turn that consults the override
- *                refreshes `touchedAt`, so a live coding session (turns spaced
- *                out by reading diffs / running builds) survives, but an
- *                abandoned conversation drops back to the scorer. 30 min, not
- *                reply-mode's 10, because coding turns are naturally further
- *                apart than chat turns.
- *   MAX_AGE    — an absolute backstop: the override releases this long after it
- *                was SET regardless of activity. This is the real cure for the
- *                month-long latch — even a conversation kept perpetually warm
- *                cannot pin the coding brain indefinitely. 12 h anchors on
- *                `setAt`, which (unlike `touchedAt`) is never refreshed.
+ * The override releases after this long with no conversation activity. Each turn
+ * that consults the override refreshes `touchedAt`, so a live coding session
+ * survives, but the moment the conversation goes idle past the TTL it drops back
+ * to the scorer. Same 10-minute window as reply-mode: `/coder` is a temporary
+ * escalation, not a persistent mode, so once it releases the scorer decides each
+ * turn on its own (and may re-escalate on its own if the recent turns are still
+ * code-shaped).
  */
-export const DEFAULT_CODER_SWAP_IDLE_TTL_MS = 30 * 60_000;
-export const DEFAULT_CODER_SWAP_MAX_AGE_MS = 12 * 60 * 60_000;
+export const DEFAULT_CODER_SWAP_OVERRIDE_TTL_MS = 600_000;
 
 interface StoredOverride {
   mode: CoderSwapMode;
-  /** When the override was first set — the absolute MAX_AGE anchor; never refreshed. */
-  setAt: string;
-  /** Last activity — the sliding IDLE_TTL anchor; refreshed on each active read. */
+  /** Last activity — the sliding idle-TTL anchor; refreshed on each active read. */
   touchedAt: string;
 }
 
@@ -541,48 +535,37 @@ async function save(state: StoredOverrides, path = coderSwapStatePath()): Promis
   await writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
 }
 
-/**
- * Is `entry` still live under both decay bounds? Legacy entries written before
- * `setAt` existed fall back to `touchedAt` for the absolute anchor, so a
- * pre-upgrade override is bounded from its last activity rather than never.
- */
+/** Is `entry` still live within the sliding idle TTL? */
 function active(
   entry: StoredOverride | undefined,
-  idleTtlMs: number,
-  maxAgeMs: number,
+  ttlMs: number,
   now: Date,
 ): entry is StoredOverride {
   if (!entry) return false;
   const touched = Date.parse(entry.touchedAt);
-  const set = Date.parse(entry.setAt ?? entry.touchedAt);
-  if (!Number.isFinite(touched) || !Number.isFinite(set)) return false;
-  const t = now.getTime();
-  if (t - touched > idleTtlMs) return false; // idle expiry (sliding)
-  if (t - set > maxAgeMs) return false; // absolute backstop
-  return true;
+  if (!Number.isFinite(touched)) return false;
+  return now.getTime() - touched <= ttlMs;
 }
 
 /**
  * Read the override for a conversation, or undefined (defer to score). Expires
- * lazily on read under both decay bounds, and — when still live — slides the
- * IDLE_TTL window forward by refreshing `touchedAt`, so an active coding
- * session keeps the brain while an abandoned one releases it.
+ * lazily on read past the idle TTL, and — when still live — slides the window
+ * forward by refreshing `touchedAt`, so an active coding session keeps the brain
+ * while an abandoned one releases it.
  */
 export async function getCoderSwapOverride(input: {
   persona: string;
   conversation: string;
-  idleTtlMs?: number;
-  maxAgeMs?: number;
+  ttlMs?: number;
   now?: Date;
 }): Promise<CoderSwapMode | undefined> {
-  const idleTtlMs = input.idleTtlMs ?? DEFAULT_CODER_SWAP_IDLE_TTL_MS;
-  const maxAgeMs = input.maxAgeMs ?? DEFAULT_CODER_SWAP_MAX_AGE_MS;
+  const ttlMs = input.ttlMs ?? DEFAULT_CODER_SWAP_OVERRIDE_TTL_MS;
   const now = input.now ?? new Date();
   const path = coderSwapStatePath();
   const state = await load(path);
   const k = key(input.persona, input.conversation);
   const entry = state[k];
-  if (!active(entry, idleTtlMs, maxAgeMs, now)) {
+  if (!active(entry, ttlMs, now)) {
     if (entry) {
       delete state[k];
       await save(state, path);
@@ -596,9 +579,8 @@ export async function getCoderSwapOverride(input: {
 }
 
 /**
- * Force the override to "on" or "off" for a conversation. Resets both decay
- * clocks: `setAt` (absolute backstop) and `touchedAt` (idle window) start now,
- * so re-issuing `/coder` mid-session earns a fresh full window.
+ * Force the override to "on" or "off" for a conversation. Stamps `touchedAt`
+ * now, so re-issuing `/coder` mid-session earns a fresh full idle window.
  */
 export async function setCoderSwapOverride(input: {
   persona: string;
@@ -608,11 +590,9 @@ export async function setCoderSwapOverride(input: {
 }): Promise<void> {
   const path = coderSwapStatePath();
   const state = await load(path);
-  const stamp = (input.now ?? new Date()).toISOString();
   state[key(input.persona, input.conversation)] = {
     mode: input.mode,
-    setAt: stamp,
-    touchedAt: stamp,
+    touchedAt: (input.now ?? new Date()).toISOString(),
   };
   await save(state, path);
 }
