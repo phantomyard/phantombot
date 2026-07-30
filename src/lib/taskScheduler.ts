@@ -60,6 +60,7 @@
  * moved binary by inspecting the registered task XML.
  */
 
+import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1355,12 +1356,19 @@ export async function ensureTasksCurrent(
   const failed: string[] = [];
   let ensuredDirs = false;
 
+  // A registered task whose XML is healthy is still broken if the hidden
+  // launcher it invokes (wscript.exe //B "<launcher>.vbs" ...) has been
+  // deleted from disk — the task fires and immediately fails because
+  // wscript.exe can't find the script. The task XML alone can't reveal this,
+  // so probe the file too and treat a missing launcher as drift (#311).
+  const launcherPresent = existsSync(launcherVbsPath(persona));
+
   for (const spec of allTaskSpecs(sid, opts.binPath, persona, logon)) {
     const q = await opts.schtasks.run(["/Query", "/TN", spec.name, "/XML"]);
     const registered = q.exitCode === 0;
     const current =
-      registered && xmlReferencesBin(q.stdout, opts.binPath);
-    if (current && !opts.force) continue; // registered and points at this binary
+      registered && xmlReferencesBin(q.stdout, opts.binPath) && launcherPresent;
+    if (current && !opts.force) continue; // registered, points at this binary, launcher on disk
 
     // Password-mode heal without a credential: schtasks /Create would demand
     // /RP interactively, so instead patch the registered task's action
@@ -1379,6 +1387,13 @@ export async function ensureTasksCurrent(
         // branch is defensive only.
         failed.push(spec.name);
         continue;
+      }
+      // The task XML may be healthy and only the launcher file missing
+      // (#311). Patching the action alone would leave the task pointing at a
+      // .vbs that isn't there, so restore the launcher before patching.
+      if (!launcherPresent) {
+        await mkdir(logsDir(), { recursive: true });
+        await writeLauncherVbs(persona);
       }
       const { out: outLog, err: errLog } = taskLogPaths(spec.label);
       const newArgs = buildLauncherArguments(

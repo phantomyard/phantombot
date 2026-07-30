@@ -592,6 +592,16 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     };
   }
 
+  /** Model a genuinely healthy box: the hidden launcher exists on disk.
+   * Without this a "healthy" registry is still treated as drift, because a
+   * task pointing at a missing .vbs is broken (#311). */
+  async function primeLauncher(persona = PERSONA): Promise<void> {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    mkdirSync(dirname(launcherVbsPath(persona)), { recursive: true });
+    writeFileSync(launcherVbsPath(persona), LAUNCHER_VBS, "utf8");
+  }
+
   /**
    * A schtasks fake whose `/Query /XML` answers come from a per-task map
    * (undefined => task not installed, exit 1) and whose `/Create` always
@@ -621,6 +631,7 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
   }
 
   test("healthy box: every task already points at the binary → no re-import", async () => {
+    await primeLauncher();
     const st = new HealFake(registeredXml(BIN));
     const r = await ensureTasksCurrent({
       binPath: BIN,
@@ -660,6 +671,7 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
   });
 
   test("a single missing task is re-registered; the current ones are left alone", async () => {
+    await primeLauncher();
     const xml = registeredXml(BIN);
     xml[NAMES.tick] = undefined as unknown as string; // tick was deleted
     const st = new HealFake(xml);
@@ -677,6 +689,7 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
   test("path casing differences alone are not treated as drift", async () => {
     // schtasks may echo the command line back with different casing; a mere
     // case difference must not trigger a needless re-import.
+    await primeLauncher();
     const st = new HealFake(registeredXml(BIN.toUpperCase()));
     const r = await ensureTasksCurrent({
       binPath: BIN.toLowerCase(),
@@ -687,6 +700,31 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     });
     expect(r.rewrote).toEqual([]);
     expect(st.created()).toEqual([]);
+  });
+
+  test("healthy XML but launcher .vbs deleted → all tasks re-registered and launcher restored (#311)", async () => {
+    // Every task's XML is healthy and points at the current binary, but the
+    // hidden launcher the actions invoke has been deleted from disk (AV
+    // quarantine, cleanup script). The tasks are live but broken — heal must
+    // catch this even though the XML alone looks current.
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(launcherVbsPath(PERSONA))).toBe(false);
+    const st = new HealFake(registeredXml(BIN));
+    const r = await ensureTasksCurrent({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+    });
+    expect(r.rewrote).toEqual([
+      NAMES.main,
+      NAMES.heartbeat,
+      NAMES.nightly,
+      NAMES.tick,
+    ]);
+    // The launcher is written back so the re-registered tasks can actually run.
+    expect(existsSync(launcherVbsPath(PERSONA))).toBe(true);
   });
 });
 
@@ -1111,6 +1149,14 @@ describe("password logon mode (run when logged off)", () => {
 
   test("heal patches a drifted password-mode task's action in place (no credential needed)", async () => {
     await writeTaskLogon(PERSONA, { mode: "password", username: ACCOUNT });
+    // Launcher present on disk so only the binary-path drift is healed, not a
+    // launcher-missing (#311) rewrite of every task.
+    {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const { dirname } = await import("node:path");
+      mkdirSync(dirname(launcherVbsPath(PERSONA)), { recursive: true });
+      writeFileSync(launcherVbsPath(PERSONA), LAUNCHER_VBS, "utf8");
+    }
     const OLD_BIN = "C:\\old\\phantombot.exe";
     const registered: Record<string, string | undefined> = {
       [NAMES.main]: generatePhantombotTaskXml(SID, OLD_BIN, PERSONA, {
