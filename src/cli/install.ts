@@ -537,19 +537,25 @@ async function defaultValidateWindowsCredential(
   // Strip any DOMAIN\ or COMPUTER\ prefix — ValidateCredentials takes the bare
   // account name plus a context.
   const bare = username.includes("\\") ? username.split("\\").pop()! : username;
+  // Exit codes: 0 = valid, 1 = definitively invalid (a store answered "no"),
+  // 2 = couldn't verify (no store was reachable — e.g. no domain controller).
+  // Only a definitive "invalid" (exit 1) downgrades the install; an
+  // "unverifiable" result throws so the caller proceeds as requested rather
+  // than penalising a transient infrastructure outage.
   const script = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement
 $u = $env:PB_VC_USER
 $p = $env:PB_VC_PASS
+$definitive = $false
 foreach ($ctx in @('Machine','Domain')) {
   try {
     $pc = New-Object System.DirectoryServices.AccountManagement.PrincipalContext($ctx)
     if ($pc.ValidateCredentials($u, $p)) { Write-Output 'VALID'; exit 0 }
+    $definitive = $true
   } catch { }
 }
-Write-Output 'INVALID'
-exit 1
+if ($definitive) { Write-Output 'INVALID'; exit 1 } else { Write-Output 'UNKNOWN'; exit 2 }
 `;
   const child = Bun.spawn(
     ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -565,7 +571,11 @@ exit 1
     new Response(child.stdout).text(),
     child.exited,
   ]);
-  return exitCode === 0 && stdout.includes("VALID");
+  if (exitCode === 0 && stdout.includes("VALID")) return true;
+  if (exitCode === 1) return false;
+  // Couldn't verify (no reachable credential store, or powershell itself
+  // failed) — surface as an error so commitPassword proceeds with a warning.
+  throw new Error("could not verify the Windows credential (no reachable account store)");
 }
 
 /** `COMPUTER\user` (or `DOMAIN\user`) for schtasks /RU. */
