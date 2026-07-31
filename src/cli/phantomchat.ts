@@ -270,7 +270,7 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   // app, closing the loop (issue #333). The bot also greets allow-listed npubs
   // on start, but adding the contact manually works immediately and regardless.
   p.note(
-    `Copy '${persona}''s npub and add it as a contact in PhantomChat:\n\n` +
+    `Copy ${persona}'s npub and add it as a contact in PhantomChat:\n\n` +
       `  ${npub}\n\n` +
       `In the app: Contacts → Add → paste the npub above → save. You can then\n` +
       `start a DM with '${persona}'. (If your npub is on the allowlist, the bot\n` +
