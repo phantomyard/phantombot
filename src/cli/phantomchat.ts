@@ -52,6 +52,12 @@ import type { WriteSink } from "../lib/io.ts";
 import { maybePromptRestart } from "./harness.ts";
 
 /**
+ * Where users install the PhantomChat app / PWA. Surfaced in the onboarding
+ * wizard so operators can hand the link to whoever will DM the persona.
+ */
+const PHANTOMCHAT_APP_URL = "https://chat.phantomyard.ai";
+
+/**
  * Parse a comma/whitespace-separated list of npubs, keeping only entries that
  * decode to a valid pubkey. Returns the cleaned npub strings (not the hex) so
  * the human-readable form is what lands in phantomchat.json.
@@ -184,7 +190,21 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     existing?.relays ??
     [...DEFAULT_PHANTOMCHAT_RELAYS];
 
-  // 3. Allowlist (prefill from the existing file). The bot REACHES OUT to these
+  // 3. Tell the operator how to get PhantomChat on their own device and where
+  //    to find THEIR npub, so the allowlist prompt below has a sensible value to
+  //    paste. Without this the wizard silently assumed the app was already set
+  //    up and the user knew what an npub was (issue #333).
+  p.note(
+    `To message '${persona}' you need the PhantomChat app on your device.\n\n` +
+      `1. Get PhantomChat: ${PHANTOMCHAT_APP_URL}\n` +
+      `   (open in a browser, or install the PWA / mobile app from there)\n` +
+      `2. Create your identity in the app, then copy YOUR npub\n` +
+      `   (Settings → Profile → "Copy npub"). It starts with 'npub1…'.\n` +
+      `3. Paste your npub at the prompt below so '${persona}' can reach you.`,
+    "Set up PhantomChat on your device",
+  );
+
+  // 4. Allowlist (prefill from the existing file). The bot REACHES OUT to these
   //    npubs — on start it sends each one a friendly "Hello" (in the persona's
   //    voice) that lands in their PhantomChat app as a contact request to
   //    approve. No need to DM the bot first. Empty means TRUST-ON-FIRST-USE
@@ -193,7 +213,7 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const currentAllowed = existing?.allowedNpubs.join(", ") ?? "";
   const allowedRaw = await p.text({
     message:
-      "Allowed npubs (comma-separated; the bot greets each one. Empty = the first npub to DM the bot is trusted and added)",
+      "Paste YOUR npub from the PhantomChat app (comma-separate several; the bot greets each one. Empty = the first npub to DM the bot is trusted and added)",
     placeholder: "npub1…",
     defaultValue: currentAllowed,
   });
@@ -244,6 +264,18 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
       }\n` +
       `saved to ${savedPath}`,
     "Saved",
+  );
+
+  // Final step: hand the user the persona's npub to add as a contact in their
+  // app, closing the loop (issue #333). The bot also greets allow-listed npubs
+  // on start, but adding the contact manually works immediately and regardless.
+  p.note(
+    `Copy '${persona}''s npub and add it as a contact in PhantomChat:\n\n` +
+      `  ${npub}\n\n` +
+      `In the app: Contacts → Add → paste the npub above → save. You can then\n` +
+      `start a DM with '${persona}'. (If your npub is on the allowlist, the bot\n` +
+      `also sends you a "Hello" on its next start — approve it to connect.)`,
+    "Add this persona as a contact",
   );
 
   await maybePromptRestart(svc);
