@@ -63,6 +63,7 @@ import {
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
 import { ConversationBacklog } from "./backlog.ts";
+import { RecentOutbound, runReactionTurn } from "./reactions.ts";
 import {
   hasTextSubstance,
   splitIntoSegments,
@@ -327,6 +328,15 @@ export async function runTelegramServer(
   // Set of every in-flight worker promise — drained at shutdown / oneShot.
   const inFlight = new Set<Promise<void>>();
 
+  // Recent-outbound correlation map for emoji reactions: a `message_reaction`
+  // update names the reacted-to message by id only, so we remember each sent
+  // message's id→text here (populated by the transport's outbound recorder) and
+  // look it up when a reaction arrives. Best-effort, in-memory, bounded.
+  const recentOutbound = new RecentOutbound();
+  input.transport.setOutboundRecorder?.((conversationId, messageId, text) => {
+    recentOutbound.record(conversationId, messageId, text);
+  });
+
   // Per-chat group routing state (last-addressed bot + recent-message
   // buffer). Only touched for group/supergroup chats; DMs never key in.
   const groupChats = new Map<string, GroupChatState>();
@@ -397,7 +407,7 @@ export async function runTelegramServer(
     do {
       if (input.signal?.aborted) return;
 
-      const { updates, nextOffset } = await input.transport.getUpdates(
+      const { updates, reactions, nextOffset } = await input.transport.getUpdates(
         offset,
         tg.pollTimeoutS,
         input.signal,
@@ -428,6 +438,84 @@ export async function runTelegramServer(
       // Do NOT "fix" this by moving the offset advance below the loop or gating
       // it on turn completion without first re-litigating this trade-off.
       offset = nextOffset;
+
+      // EMOJI REACTIONS (wake-but-silent). A reaction is CONTEXT, not a reply
+      // trigger: it wakes a lean background turn that records what the reaction
+      // means and stays silent unless something genuinely material warrants a
+      // message (see core/reactions.ts). Runs off the per-chat serial chain —
+      // reactions are rare and low-stakes, so they don't interrupt or queue
+      // behind live message turns — but is still tracked in `inFlight` so
+      // shutdown / oneShot drains it. Gated to allow-listed PRINCIPALS only:
+      // the turn writes memory (the capture), so an unauthenticated open-bot
+      // reaction must not run it (fail closed).
+      for (const reaction of reactions) {
+        if (input.signal?.aborted) return;
+        const principalAuthenticated =
+          allowedSet.size > 0 && allowedSet.has(Number(reaction.senderId));
+        if (!principalAuthenticated) {
+          log.info("telegram: ignoring reaction from non-principal", {
+            fromUserId: reaction.senderId,
+            fromUsername: reaction.fromUsername,
+            persona: input.persona,
+          });
+          continue;
+        }
+        const conversationKey = `telegram:${reaction.conversationId}`;
+        const targetText = recentOutbound.lookup(
+          reaction.conversationId,
+          reaction.targetMessageId,
+        );
+        log.info("telegram: incoming reaction", {
+          chatId: reaction.conversationId,
+          fromUserId: reaction.senderId,
+          emoji: reaction.emoji,
+          action: reaction.action,
+          correlated: Boolean(targetText),
+          persona: input.persona,
+        });
+        const tracked = runReactionTurn({
+          reaction,
+          targetText,
+          persona: input.persona,
+          conversation: conversationKey,
+          agentDir: input.agentDir,
+          harnesses,
+          memory: input.memory,
+          idleTimeoutMs: input.config.harnessIdleTimeoutMs,
+          hardTimeoutMs: input.config.harnessHardTimeoutMs,
+          // Reaction from an allow-listed principal → trusted, so the memory
+          // capture may write. runReactionTurn skips the threat screen for it.
+          trusted: true,
+          send: (text) =>
+            input.transport.sendMessage(reaction.conversationId, text),
+          retrieve: makeRetriever(
+            input.config,
+            input.persona,
+            input.agentDir,
+            conversationKey,
+          ),
+          pullFacts: makeDurableFactPuller(
+            input.config,
+            input.persona,
+            conversationKey,
+            input.memory,
+          ),
+          signal: input.signal,
+        })
+          // runReactionTurn never rejects (it catches internally), but settle
+          // defensively either way so a stray throw can't tear down the pool.
+          .then(
+            () => {},
+            (e: unknown) =>
+              log.warn("telegram: reaction turn threw", {
+                error: (e as Error).message,
+              }),
+          )
+          .finally(() => {
+            inFlight.delete(tracked);
+          });
+        inFlight.add(tracked);
+      }
 
       for (const msg of updates) {
         if (input.signal?.aborted) return;

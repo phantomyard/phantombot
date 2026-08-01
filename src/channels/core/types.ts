@@ -138,6 +138,18 @@ export interface ChannelMessage {
      */
     servers?: string[];
   };
+  /**
+   * EMOJI REACTION (optional; currently only the phantomchat channel sets it).
+   *
+   * When present, this message is NOT a normal turn: it is an emoji reaction
+   * the user placed on one of our earlier messages, and the server routes it to
+   * the WAKE-BUT-SILENT reaction path (see core/reactions.ts) instead of a
+   * standard reply turn. `text` is empty in this case — the reaction detail
+   * lives here. Absent for every normal message, so the existing dispatch is
+   * unchanged. (Telegram carries reactions on its own channel — via
+   * `transport.getUpdates` — and never sets this field.)
+   */
+  reaction?: import("./reactions.ts").ChannelReaction;
 }
 
 /**

@@ -15,6 +15,7 @@ import { join } from "node:path";
 
 import { xdgDataHome } from "../../config.ts";
 import type { ChannelMessage } from "../core/types.ts";
+import type { ChannelReaction } from "../core/reactions.ts";
 
 /**
  * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
@@ -182,8 +183,38 @@ export interface TelegramRawReplyToMessage {
   from?: { id?: number; is_bot?: boolean; username?: string };
 }
 
+/**
+ * A single reaction entry inside a `message_reaction` update's old/new sets.
+ * Telegram sends `type:"emoji"` for standard unicode reactions (the ones we
+ * care about) and `type:"custom_emoji"` for custom sticker reactions (which
+ * carry an opaque id, not a readable emoji — we skip those).
+ */
+export interface TelegramRawReactionType {
+  type?: string;
+  emoji?: string;
+  custom_emoji_id?: string;
+}
+
+/**
+ * Telegram's `MessageReactionUpdated` payload (delivered as a
+ * `message_reaction` update when the bot subscribes to it via
+ * allowed_updates). Carries the reacted-to `message_id` plus the FULL old and
+ * new reaction sets; the DELTA between them is what actually changed. Only
+ * arrives for reactions the bot is allowed to see (in private chats: reactions
+ * to the bot's own messages; the actor is `user`).
+ */
+export interface TelegramRawMessageReaction {
+  chat?: { id?: number; type?: string };
+  message_id?: number;
+  user?: { id?: number; username?: string };
+  date?: number;
+  old_reaction?: TelegramRawReactionType[];
+  new_reaction?: TelegramRawReactionType[];
+}
+
 export interface TelegramRawUpdate {
   update_id?: number;
+  message_reaction?: TelegramRawMessageReaction;
   message?: {
     message_id?: number;
     chat?: { id?: number; type?: string };
@@ -481,18 +512,99 @@ export function stripBotMention(
 }
 
 /**
+ * Extract the set of readable unicode emojis from a Telegram reaction set,
+ * skipping custom-emoji entries (opaque ids, no readable glyph). Order-
+ * preserving, deduped.
+ */
+function emojiSet(entries: TelegramRawReactionType[] | undefined): string[] {
+  const out: string[] = [];
+  for (const e of entries ?? []) {
+    if (e?.type === "emoji" && typeof e.emoji === "string" && e.emoji.length > 0) {
+      if (!out.includes(e.emoji)) out.push(e.emoji);
+    }
+  }
+  return out;
+}
+
+/**
+ * Turn one `message_reaction` update into zero or more {@link ChannelReaction}s
+ * by diffing its old and new reaction sets: emojis present in `new` but not
+ * `old` are ADDED; emojis present in `old` but not `new` are REMOVED. Returns
+ * `[]` for updates with no usable delta (custom-emoji-only changes, or malformed
+ * payloads missing the chat/message ids). Exported for testing.
+ */
+export function parseReaction(
+  raw: TelegramRawMessageReaction | undefined,
+): ChannelReaction[] {
+  if (
+    !raw ||
+    typeof raw.chat?.id !== "number" ||
+    typeof raw.message_id !== "number"
+  ) {
+    return [];
+  }
+  const conversationId = String(raw.chat.id);
+  // The actor. `message_reaction` in a channel/anonymous context can omit
+  // `user`; without a stable sender id we can't gate the trust perimeter, so
+  // we drop it (the allowlist gate downstream would reject it anyway).
+  if (typeof raw.user?.id !== "number") return [];
+  const senderId = String(raw.user.id);
+  const fromUsername = raw.user.username;
+
+  const oldSet = emojiSet(raw.old_reaction);
+  const newSet = emojiSet(raw.new_reaction);
+  const added = newSet.filter((e) => !oldSet.includes(e));
+  const removed = oldSet.filter((e) => !newSet.includes(e));
+
+  const targetMessageId = String(raw.message_id);
+  const reactions: ChannelReaction[] = [];
+  for (const emoji of added) {
+    reactions.push({
+      conversationId,
+      senderId,
+      ...(fromUsername ? { fromUsername } : {}),
+      targetMessageId,
+      emoji,
+      action: "added",
+    });
+  }
+  for (const emoji of removed) {
+    reactions.push({
+      conversationId,
+      senderId,
+      ...(fromUsername ? { fromUsername } : {}),
+      targetMessageId,
+      emoji,
+      action: "removed",
+    });
+  }
+  return reactions;
+}
+
+/**
  * Pure parser exposed for testing. Consumes Telegram getUpdates result
- * objects and returns the messages we care about — text or voice.
+ * objects and returns the messages we care about — text or voice — plus any
+ * emoji reactions (from `message_reaction` updates), both advancing the offset.
  */
 export function parseGetUpdatesResult(
   raw: TelegramRawUpdate[],
   fallbackOffset: number,
-): { updates: TelegramMessage[]; nextOffset: number } {
+): {
+  updates: TelegramMessage[];
+  reactions: ChannelReaction[];
+  nextOffset: number;
+} {
   const updates: TelegramMessage[] = [];
+  const reactions: ChannelReaction[] = [];
   let nextOffset = fallbackOffset;
   for (const u of raw) {
     if (typeof u.update_id === "number") {
       nextOffset = Math.max(nextOffset, u.update_id + 1);
+    }
+    // Reaction updates carry no `message`; handle them first and move on.
+    if (u.message_reaction) {
+      reactions.push(...parseReaction(u.message_reaction));
+      continue;
     }
     const msg = u.message;
     if (
@@ -569,5 +681,5 @@ export function parseGetUpdatesResult(
       });
     }
   }
-  return { updates, nextOffset };
+  return { updates, reactions, nextOffset };
 }

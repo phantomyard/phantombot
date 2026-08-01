@@ -53,7 +53,9 @@ describe("phantomchat transport subscription wire shape", () => {
     expect(Array.isArray(captured)).toBe(false);
     expect(typeof captured).toBe("object");
     const f = captured as NostrFilter;
-    expect(f.kinds).toEqual([1059]);
+    // One p-tagged subscription carries gift-wraps (1059) AND plaintext emoji
+    // reactions (NIP-25 kind-7) / removals (NIP-09 kind-5).
+    expect(f.kinds).toEqual([1059, 7, 5]);
     expect(f["#p"]).toEqual([getPublicKey(sk)]);
   });
 

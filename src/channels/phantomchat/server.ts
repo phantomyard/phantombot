@@ -49,6 +49,7 @@ import {
 } from "../core/prompts.ts";
 import { getPublicKey } from "nostr-tools/pure";
 import type { Channel, ChannelMessage } from "../core/types.ts";
+import { RecentOutbound, runReactionTurn } from "../core/reactions.ts";
 import {
   decideGroupReply,
   formatGroupContext,
@@ -356,6 +357,15 @@ export async function runPhantomchatServer(
   }
 
   const harnesses: Harness[] = [...input.harnesses];
+
+  // Recent-outbound correlation map for emoji reactions (see core/reactions.ts).
+  // A kind-7 reaction names the reacted message by its rumor id only, so we
+  // remember each sent message's rumorId→text here (populated by the transport's
+  // outbound recorder) and look it up when a reaction arrives.
+  const recentOutbound = new RecentOutbound();
+  transport.setOutboundRecorder?.((recipientHex, rumorId, text) => {
+    recentOutbound.record(recipientHex, rumorId, text);
+  });
 
   // Wall-clock when the server came up, for the /status uptime line.
   const serverStartedAt = Date.now();
@@ -1210,7 +1220,55 @@ export async function runPhantomchatServer(
   // the signal; listen()'s loop drains its queue and completes, so this
   // for-await ends naturally and we fall through to draining inFlight.
   for await (const msg of channel.listen(input.signal)) {
-    if (isControlCommand(msg)) {
+    if (msg.reaction) {
+      // EMOJI REACTION (wake-but-silent). Runs off the per-peer chain — a
+      // reaction is rare, low-stakes context, so it neither interrupts nor
+      // queues behind live turns — but is tracked in inFlight so shutdown /
+      // oneShot drains it. Gated by the SAME auth gate as messages: the
+      // reaction turn writes memory (the capture), so only an allow-listed
+      // principal may run it. A non-allowed reactor is dropped silently.
+      if (!authorize(msg)) continue;
+      const reaction = msg.reaction;
+      const conversationKey = `phantomchat:${reaction.conversationId}`;
+      const targetText = recentOutbound.lookup(
+        reaction.conversationId,
+        reaction.targetMessageId,
+      );
+      const p = runReactionTurn({
+        reaction,
+        targetText,
+        persona: input.persona,
+        conversation: conversationKey,
+        agentDir: input.agentDir,
+        harnesses,
+        memory: input.memory,
+        idleTimeoutMs: input.config.harnessIdleTimeoutMs,
+        hardTimeoutMs: input.config.harnessHardTimeoutMs,
+        trusted: true,
+        send: (text) => transport.sendMessage(reaction.conversationId, text),
+        retrieve: makeRetriever(
+          input.config,
+          input.persona,
+          input.agentDir,
+          conversationKey,
+        ),
+        pullFacts: makeDurableFactPuller(
+          input.config,
+          input.persona,
+          conversationKey,
+          input.memory,
+        ),
+        signal: input.signal,
+      }).then(
+        () => {},
+        (e: unknown) =>
+          log.warn("phantomchat: reaction turn threw", {
+            error: (e as Error).message,
+          }),
+      );
+      inFlight.add(p);
+      void p.finally(() => inFlight.delete(p));
+    } else if (isControlCommand(msg)) {
       // Handle inline (off the per-peer chain) but still track it in inFlight
       // so oneShot tests and clean shutdown wait for it to settle.
       const p = runSlash(msg);

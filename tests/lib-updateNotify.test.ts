@@ -18,6 +18,7 @@ import type {
   TelegramMessage,
   TelegramTransport,
 } from "../src/channels/telegram.ts";
+import type { ChannelReaction } from "../src/channels/core/reactions.ts";
 import type { Config } from "../src/config.ts";
 import type { ServiceControl } from "../src/lib/systemd.ts";
 import {
@@ -44,9 +45,10 @@ class FakeTransport implements TelegramTransport {
   sendMessageImpl?: (chatId: string, text: string) => Promise<void>;
   async getUpdates(): Promise<{
     updates: TelegramMessage[];
+    reactions: ChannelReaction[];
     nextOffset: number;
   }> {
-    return { updates: [], nextOffset: 0 };
+    return { updates: [], reactions: [], nextOffset: 0 };
   }
   async ackUpdates(): Promise<void> {}
   async sendMessage(chatId: string, text: string): Promise<void> {

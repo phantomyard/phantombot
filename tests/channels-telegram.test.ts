@@ -33,6 +33,7 @@ import {
   decideGroupReply,
   formatGroupContext,
 } from "../src/channels/telegram.ts";
+import type { ChannelReaction } from "../src/channels/core/reactions.ts";
 import { TELEGRAM_BOT_COMMANDS } from "../src/channels/commands.ts";
 import type { Config } from "../src/config.ts";
 import type {
@@ -49,6 +50,10 @@ import {
 
 class FakeTransport implements TelegramTransport {
   pendingUpdates: TelegramMessage[] = [];
+  /** Reactions to return on the next getUpdates (drained each poll). */
+  pendingReactions: ChannelReaction[] = [];
+  /** id→text recorded via setOutboundRecorder, for reaction-correlation tests. */
+  recordedOutbound: Array<{ conversationId: string; messageId: string; text: string }> = [];
   // Core ids are channel-neutral strings (#168); the transport surface takes
   // the string conversation id and Telegram's HttpTelegramTransport converts
   // to a number at its own boundary.
@@ -71,10 +76,15 @@ class FakeTransport implements TelegramTransport {
     offset: number,
     _timeoutS: number,
     signal?: AbortSignal,
-  ): Promise<{ updates: TelegramMessage[]; nextOffset: number }> {
+  ): Promise<{
+    updates: TelegramMessage[];
+    reactions: ChannelReaction[];
+    nextOffset: number;
+  }> {
     this.receivedSignals.push(signal);
     const updates = this.pendingUpdates.splice(0);
-    if (updates.length === 0) {
+    const reactions = this.pendingReactions.splice(0);
+    if (updates.length === 0 && reactions.length === 0) {
       // Mirror real long-poll behavior so setTimeout-based AbortControllers
       // can fire between iterations.
       await new Promise((r) => setTimeout(r, 20));
@@ -83,13 +93,26 @@ class FakeTransport implements TelegramTransport {
       updates.length > 0
         ? Math.max(...updates.map((u) => u.updateId)) + 1
         : offset;
-    return { updates, nextOffset };
+    return { updates, reactions, nextOffset };
   }
+  setOutboundRecorder(
+    fn: (conversationId: string, messageId: string, text: string) => void,
+  ): void {
+    this._recorder = fn;
+  }
+  private _recorder:
+    | ((conversationId: string, messageId: string, text: string) => void)
+    | null = null;
   async ackUpdates(offset: number): Promise<void> {
     this.ackedOffsets.push(offset);
   }
   async sendMessage(chatId: string, text: string): Promise<void> {
     this.sent.push({ chatId, text });
+    // Mimic the real transport: synthesize a message id and feed the recorder
+    // so reaction-correlation tests can look outbound text up.
+    const messageId = String(1000 + this.sent.length);
+    this.recordedOutbound.push({ conversationId: chatId, messageId, text });
+    this._recorder?.(chatId, messageId, text);
   }
   async sendTyping(chatId: string): Promise<void> {
     this.typing.push(chatId);
@@ -3902,5 +3925,92 @@ describe("HttpTelegramTransport getUpdates non-JSON body", () => {
 
   test("empty body on a 200 returns empty without throwing", async () => {
     await expectEmptyReprobe(new Response("", { status: 200 }));
+  });
+});
+
+describe("runTelegramServer reaction dispatch (wake-but-silent)", () => {
+  test("a reaction wakes the harness with the reaction envelope and stays silent", async () => {
+    const transport = new FakeTransport();
+    transport.pendingReactions.push({
+      conversationId: "1001",
+      senderId: "42",
+      fromUsername: "andrew",
+      targetMessageId: "77",
+      emoji: "👍",
+      action: "added",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "SILENT" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    // Harness was woken with the reaction envelope...
+    expect(harness.invocations).toBe(1);
+    expect(harness.lastRequest?.userMessage).toContain("[reaction]");
+    expect(harness.lastRequest?.userMessage).toContain("👍");
+    // ...but the "SILENT" reply means NOTHING is sent to the chat.
+    expect(transport.sent).toEqual([]);
+  });
+
+  test("a material reaction reply IS delivered", async () => {
+    const transport = new FakeTransport();
+    transport.pendingReactions.push({
+      conversationId: "1001",
+      senderId: "42",
+      targetMessageId: "77",
+      emoji: "👎",
+      action: "added",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "Want me to revert that?" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(harness.invocations).toBe(1);
+    expect(transport.sent.map((s) => s.text)).toEqual([
+      "Want me to revert that?",
+    ]);
+  });
+
+  test("a reaction from a non-principal is dropped (harness never woken)", async () => {
+    const transport = new FakeTransport();
+    transport.pendingReactions.push({
+      conversationId: "1001",
+      senderId: "999", // not in allowedUserIds [42]
+      targetMessageId: "77",
+      emoji: "👍",
+      action: "added",
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "should never run" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+
+    expect(harness.invocations).toBe(0);
+    expect(transport.sent).toEqual([]);
   });
 });

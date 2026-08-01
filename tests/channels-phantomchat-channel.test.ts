@@ -307,7 +307,7 @@ class PollOnlyPool implements RelayPool {
   }
   subscribeMany(
     _relays: string[],
-    _filter: NostrFilter,
+    filter: NostrFilter,
     params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
   ): { close(): void } {
     this.calls++;
@@ -316,8 +316,13 @@ class PollOnlyPool implements RelayPool {
       params.oneose?.();
       return { close: () => {} };
     }
-    // Catch-up poll fetch: replay the queued wraps, then signal EOSE.
-    for (const e of this.fetchQueue) params.onevent(e);
+    // Catch-up poll fetch: replay the queued wraps that MATCH the filter's
+    // kinds (a real relay only returns kinds the REQ asked for), then EOSE. The
+    // `kinds` honouring is what makes a reaction only recover if the catch-up
+    // filter was widened past [1059] — see the "recovers a reaction" test.
+    for (const e of this.fetchQueue) {
+      if (!filter.kinds || filter.kinds.includes(e.kind)) params.onevent(e);
+    }
     params.oneose?.();
     return { close: () => {} };
   }
@@ -373,6 +378,62 @@ describe("phantomchat channel — catch-up poll", () => {
     await pump;
 
     expect(received).toContain("recovered by poll");
+  });
+
+  test("recovers a reaction the live push dropped — catch-up poll must carry kind-7", async () => {
+    // Regression for PR #336 review: the live subscription was widened to
+    // [1059, 7, 5] but fetchGiftWrapsSince still queried [1059], so a reaction
+    // missed by the live push was never recovered by the self-heal poll. This
+    // asserts a kind-7 that ONLY ever arrives via the catch-up fetch surfaces.
+    const ourSk = generateSecretKey();
+    const ourPub = getPublicKey(ourSk);
+    const pool = new PollOnlyPool(RELAYS);
+    const transport = new SimplePoolPhantomchatTransport(
+      ourSk,
+      RELAYS,
+      pool as unknown as ConstructorParameters<
+        typeof SimplePoolPhantomchatTransport
+      >[2],
+    );
+    const channel = createPhantomchatChannel({
+      secretKey: ourSk,
+      publicKeyHex: ourPub,
+      transport,
+      healCheckMs: 100_000, // keep the watchdog out of this test
+      backfillPollMs: 20, // fire the poll quickly
+    });
+
+    // A plaintext NIP-25 kind-7 reaction p-tagged to us. Queued so it ONLY ever
+    // arrives via the catch-up poll — never on the (silent) live subscription.
+    const reactorPub = getPublicKey(generateSecretKey());
+    const reaction = {
+      id: "react-poll-1",
+      pubkey: reactorPub,
+      kind: 7,
+      created_at: Math.floor(Date.now() / 1000),
+      content: "👍",
+      tags: [["e", "rumor-poll-target"], ["p", ourPub]],
+      sig: "00",
+    } as unknown as NTNostrEvent;
+    pool.fetchQueue = [reaction];
+
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+
+    // Wait past a couple of poll intervals.
+    await new Promise((r) => setTimeout(r, 80));
+    ac.abort();
+    await pump;
+
+    const r = got.find((m) => m.reaction)?.reaction;
+    expect(r).toBeDefined();
+    expect(r!.action).toBe("added");
+    expect(r!.emoji).toBe("👍");
+    expect(r!.targetMessageId).toBe("rumor-poll-target");
+    expect(r!.conversationId).toBe(reactorPub.toLowerCase());
   });
 });
 
@@ -559,5 +620,161 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
     expect(got.length).toBe(1);
     expect(got[0]!.media!.servers).toHaveLength(8);
     expect(got[0]!.media!.servers).toEqual(many.slice(0, 8));
+  });
+});
+
+describe("phantomchat channel — emoji reactions", () => {
+  // Build a plaintext NIP-25 kind-7 (or NIP-09 kind-5) event p-tagged to us.
+  function reactionEvent(opts: {
+    kind: number;
+    content: string;
+    reactorPub: string;
+    eTargets: string[];
+    toHex: string;
+    id?: string;
+  }): NTNostrEvent {
+    return {
+      id: opts.id ?? `react-${Math.random().toString(16).slice(2)}`,
+      pubkey: opts.reactorPub,
+      kind: opts.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      content: opts.content,
+      tags: [
+        ...opts.eTargets.map((e) => ["e", e]),
+        ["p", opts.toHex],
+      ],
+      sig: "00",
+    } as unknown as NTNostrEvent;
+  }
+
+  test("a live kind-7 reaction surfaces a ChannelMessage carrying the reaction", async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorSk = generateSecretKey();
+    const reactorPub = getPublicKey(reactorSk);
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "👍",
+        reactorPub,
+        eTargets: ["rumor-abc"],
+        toHex: ourPub,
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const r = got[0]!.reaction;
+    expect(r).toBeDefined();
+    expect(r!.action).toBe("added");
+    expect(r!.emoji).toBe("👍");
+    expect(r!.targetMessageId).toBe("rumor-abc");
+    expect(r!.conversationId).toBe(reactorPub.toLowerCase());
+    expect(got[0]!.text).toBe(""); // reactions carry no body text
+    expect(pool.published.length).toBe(0); // never publishes back
+  });
+
+  test('NIP-25 "+" content normalizes to 👍', async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "+",
+        reactorPub,
+        eTargets: ["rumor-1"],
+        toHex: ourPub,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got[0]!.reaction!.emoji).toBe("👍");
+  });
+
+  test("a kind-5 delete of a known reaction surfaces a removal", async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // First an add (so the channel remembers the reaction event id → emoji)...
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "❤️",
+        reactorPub,
+        eTargets: ["rumor-9"],
+        toHex: ourPub,
+        id: "reaction-evt-1",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    // ...then a NIP-09 delete naming that reaction event id.
+    pool.feed(
+      reactionEvent({
+        kind: 5,
+        content: "",
+        reactorPub,
+        eTargets: ["reaction-evt-1"],
+        toHex: ourPub,
+        id: "delete-evt-1",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(2);
+    expect(got[0]!.reaction!.action).toBe("added");
+    expect(got[1]!.reaction!.action).toBe("removed");
+    expect(got[1]!.reaction!.emoji).toBe("❤️");
+  });
+
+  test("a pre-EOSE (backlog) reaction yields nothing (live-gated)", async () => {
+    const { ourPub, pool, channel } = setup({ autoEose: false });
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "👍",
+        reactorPub,
+        eTargets: ["rumor-x"],
+        toHex: ourPub,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(0);
   });
 });

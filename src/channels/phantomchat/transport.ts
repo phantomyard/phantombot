@@ -183,11 +183,30 @@ export interface PhantomchatTransport extends ChannelTransport {
    * historical messages from live ones (see channel.listen's live-gate). Returns
    * a close handle.
    */
+  /**
+   * Subscribe for inbound events addressed to `ourPubHex`. This ONE p-tagged
+   * subscription carries kind-1059 gift-wrapped DMs AND plaintext emoji-reaction
+   * signals — NIP-25 kind-7 reactions and NIP-09 kind-5 deletions — because they
+   * all target us by `#p` and folding them into a single REQ reuses the whole
+   * self-heal / re-arm / catch-up machinery instead of duplicating it. `onWrap`
+   * fires per raw event; the caller branches on `event.kind` (7/5 = reaction,
+   * else gift-wrap) and dedups by event id.
+   */
   subscribeGiftWraps(
     ourPubHex: string,
     onWrap: (event: NTNostrEvent) => void | Promise<void>,
     onEose?: () => void,
   ): { close(): void };
+  /**
+   * Register a recorder invoked after each text message we publish with
+   * `(recipientHex, rumorId, text)`. The server wires this to its
+   * `RecentOutbound` map so an inbound kind-7 reaction — which names the
+   * reacted-to message by its rumor id in an `['e', ...]` tag — can be
+   * correlated back to the message text. Optional; in-memory test fakes omit it.
+   */
+  setOutboundRecorder?(
+    fn: (recipientHex: string, rumorId: string, text: string) => void,
+  ): void;
   /**
    * ONE-SHOT catch-up pull: query the relays for kind-1059 gift-wraps addressed
    * to `ourPubHex` with `created_at >= sinceSec`, resolving with the collected
@@ -305,6 +324,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    */
   private publishObserver: ((event: NTNostrEvent) => void) | null = null;
 
+  /**
+   * Set by the server (see setOutboundRecorder) to record each sent text
+   * message's rumor id → text into its RecentOutbound map, so an inbound emoji
+   * reaction can be correlated to the message it targets. Null until wired.
+   */
+  private outboundRecorder:
+    | ((recipientHex: string, rumorId: string, text: string) => void)
+    | null = null;
+
   constructor(
     private readonly ourSecretKey: Uint8Array,
     relays: string[],
@@ -323,13 +351,23 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     this.publishObserver = observer;
   }
 
+  setOutboundRecorder(
+    fn: (recipientHex: string, rumorId: string, text: string) => void,
+  ): void {
+    this.outboundRecorder = fn;
+  }
+
   subscribeGiftWraps(
     ourPubHex: string,
     onWrap: (event: NTNostrEvent) => void | Promise<void>,
     onEose?: () => void,
   ): { close(): void } {
     const filter: NostrFilter = {
-      kinds: [1059],
+      // 1059 = gift-wrapped DM; 7 = NIP-25 emoji reaction; 5 = NIP-09 deletion
+      // (a reaction removed). All three target us by `#p`, so one subscription
+      // carries them and the caller branches on `event.kind`. Reactions are
+      // plaintext (not wrapped) — see the channel's onWrap dispatch.
+      kinds: [1059, 7, 5],
       "#p": [ourPubHex],
       // `since` is now a TIGHT window. Gift-wraps are no longer backdated (see
       // nostrCrypto.createGiftWrap) — a wrap's `created_at` is its real send
@@ -371,7 +409,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     sinceSec: number,
   ): Promise<NTNostrEvent[]> {
     const filter: NostrFilter = {
-      kinds: [1059],
+      // Mirror subscribeGiftWraps: 1059 = gift-wrapped DM; 7 = NIP-25 emoji
+      // reaction; 5 = NIP-09 deletion (a reaction removed). The catch-up poll
+      // must carry the SAME kinds as the live subscription, otherwise a
+      // reaction/deletion missed by the live push is never recovered by the
+      // periodic self-heal. Results flow through the caller's onWrap, which
+      // branches on event.kind (reactions → handleReaction, dedup'd by id).
+      kinds: [1059, 7, 5],
       "#p": [ourPubHex],
       since: sinceSec,
     };
@@ -534,11 +578,23 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    * with stock clients and the PWA's GroupAPI still expects that shape.
    */
   async sendMessage(conversationId: string, text: string): Promise<void> {
-    const { event } = await wrapV2(
+    const { event, rumorId } = await wrapV2(
       this.ourSecretKey,
       conversationId,
       text,
     );
+    // Remember rumorId → text so an inbound kind-7 reaction (whose `['e', ...]`
+    // tag references this rumor id) can be correlated back to what we said.
+    // Best-effort: a throwing recorder must never break the send.
+    if (this.outboundRecorder) {
+      try {
+        this.outboundRecorder(conversationId, rumorId, text);
+      } catch (e) {
+        log.debug("phantomchat: outbound recorder threw", {
+          error: (e as Error).message,
+        });
+      }
+    }
     await this.publishWrap(event as unknown as NTNostrEvent);
   }
 

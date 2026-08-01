@@ -31,6 +31,7 @@ import type {
   ChannelMessage,
   OutboundMessage,
 } from "../core/types.ts";
+import type { ChannelReaction } from "../core/reactions.ts";
 import {
   GiftWrapVerificationError,
   unwrapNip17Message,
@@ -201,6 +202,13 @@ export function createPhantomchatChannel(
       // self). Bound both sets so a long-lived listener can't grow unbounded.
       const seenWrapIds = new Set<string>();
       const seenRumorIds = new Set<string>();
+      // Reaction dedup + removal correlation. `seenReactionIds` dedups relay
+      // re-delivery of the same kind-7/kind-5 event. `reactionById` remembers a
+      // kind-7 reaction's {conversationId, emoji} keyed by its event id, so when
+      // a later kind-5 deletes that id we know which emoji left and in which
+      // thread (a NIP-09 delete names only the reaction event id, not the emoji).
+      const seenReactionIds = new Set<string>();
+      const reactionById = new Map<string, { conversationId: string; emoji: string }>();
       const remember = (set: Set<string>, id: string): boolean => {
         if (set.has(id)) return false;
         set.add(id);
@@ -214,6 +222,13 @@ export function createPhantomchatChannel(
       };
 
       const onWrap = async (event: NTNostrEvent): Promise<void> => {
+        // Emoji reactions (kind 7/5) ride this same `#p` subscription but are
+        // plaintext, not gift-wraps — dispatch them and return before the
+        // unwrap path (which would try to decrypt a non-wrap and drop it).
+        if (event.kind === 7 || event.kind === 5) {
+          handleReaction(event);
+          return;
+        }
         // (1) Dedup by wrap event id — relays re-deliver the identical wrap.
         if (!remember(seenWrapIds, event.id)) return;
 
@@ -448,6 +463,73 @@ export function createPhantomchatChannel(
       const liveFallback = setTimeout(goLive, 8000);
 
       let sub = transport.subscribeGiftWraps(publicKeyHex, onWrap, goLive);
+
+      // EMOJI REACTIONS. Plaintext NIP-25 kind-7 (added) / NIP-09 kind-5
+      // (removed) events p-tagged to us, delivered on the SAME subscription as
+      // gift-wraps (see the widened filter in transport.subscribeGiftWraps) and
+      // routed here from onWrap's kind branch. Each becomes a ChannelMessage
+      // carrying a `reaction` — the server routes THOSE to the wake-but-silent
+      // reaction path instead of a normal turn. Gated on `live` like messages so
+      // a reconnect's small backlog replay doesn't wake stale reaction turns.
+      const handleReaction = (event: NTNostrEvent): void => {
+        if (closed || !live) return;
+        if (!remember(seenReactionIds, event.id)) return;
+        const tags = (event.tags ?? []) as string[][];
+        const eTargets = tags
+          .filter((t) => t[0] === "e" && typeof t[1] === "string" && t[1]!.length > 0)
+          .map((t) => t[1]!);
+
+        if (event.kind === 7) {
+          // NIP-25: content is the emoji; "+"/"" = like, "-" = dislike. The
+          // reacted event is the LAST `e` tag (NIP-25 ordering convention).
+          const targetId = eTargets[eTargets.length - 1];
+          if (!targetId) return;
+          const raw = typeof event.content === "string" ? event.content.trim() : "";
+          const emoji = raw === "" || raw === "+" ? "👍" : raw === "-" ? "👎" : raw;
+          const reactorHex = (event.pubkey ?? "").toLowerCase();
+          if (!reactorHex) return;
+          // In a DM the reactor IS the peer, so the thread key is their hex —
+          // the same key the outbound recorder used when we sent the message.
+          reactionById.set(event.id, { conversationId: reactorHex, emoji });
+          const reaction: ChannelReaction = {
+            conversationId: reactorHex,
+            senderId: reactorHex,
+            targetMessageId: targetId,
+            emoji,
+            action: "added",
+          };
+          queue.push({ conversationId: reactorHex, senderId: reactorHex, text: "", reaction });
+          wake?.();
+          return;
+        }
+
+        if (event.kind === 5) {
+          // NIP-09 delete: names the removed reaction's event id in an `e` tag.
+          // We can only interpret it when we saw the original kind-7 (so we know
+          // the emoji + thread); an unknown id is silently ignored.
+          for (const removedId of eTargets) {
+            const prior = reactionById.get(removedId);
+            if (!prior) continue;
+            const reaction: ChannelReaction = {
+              conversationId: prior.conversationId,
+              senderId: prior.conversationId,
+              // We don't retain the reacted MESSAGE id across the delete; the
+              // removal envelope leans on the emoji + history instead.
+              targetMessageId: removedId,
+              emoji: prior.emoji,
+              action: "removed",
+            };
+            queue.push({
+              conversationId: prior.conversationId,
+              senderId: prior.conversationId,
+              text: "",
+              reaction,
+            });
+            wake?.();
+          }
+          return;
+        }
+      };
 
       // P2P INBOUND. Register `onWrap` as the sink for gift-wraps that arrive
       // over the WebRTC data channel (when P2P is wired). A direct wrap then runs
