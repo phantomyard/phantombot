@@ -317,7 +317,7 @@ describe("runHeartbeat update check hook", () => {
       // Stubs to satisfy the TelegramTransport interface — none of these
       // are reached on the notify path used here.
       async getUpdates() {
-        return { updates: [], nextOffset: 0 };
+        return { updates: [], reactions: [], nextOffset: 0 };
       },
       async ackUpdates() {},
       async sendTyping() {},
@@ -351,7 +351,7 @@ describe("runHeartbeat update check hook", () => {
         sent++;
       },
       async getUpdates() {
-        return { updates: [], nextOffset: 0 };
+        return { updates: [], reactions: [], nextOffset: 0 };
       },
       async ackUpdates() {},
       async sendTyping() {},

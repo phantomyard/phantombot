@@ -12,6 +12,7 @@ import { timeoutSignal } from "../../lib/fetchTimeout.ts";
 import { telegramGetMe } from "../../lib/telegramApi.ts";
 import { markdownToTelegramHtml } from "../telegramFormat.ts";
 import type { ChannelTransport } from "../core/types.ts";
+import type { ChannelReaction } from "../core/reactions.ts";
 import {
   parseGetUpdatesResult,
   type TelegramMessage,
@@ -29,7 +30,11 @@ export interface TelegramTransport extends ChannelTransport {
     offset: number,
     timeoutS: number,
     signal?: AbortSignal,
-  ): Promise<{ updates: TelegramMessage[]; nextOffset: number }>;
+  ): Promise<{
+    updates: TelegramMessage[];
+    reactions: ChannelReaction[];
+    nextOffset: number;
+  }>;
   /**
    * Confirm to Telegram that all updates with `update_id < offset` have
    * been processed, so the next long-poll won't re-deliver them. Per the
@@ -54,6 +59,16 @@ export interface TelegramTransport extends ChannelTransport {
   sendRecording(conversationId: string): Promise<void>;
   /** Download a file by Telegram file_id; returns audio bytes + content-type. */
   downloadFile(fileId: string): Promise<{ data: Buffer; mime: string }>;
+  /**
+   * Register a recorder invoked after each successfully-sent message with
+   * `(conversationId, messageId, text)`. The engine wires this to its
+   * `RecentOutbound` map so an inbound emoji reaction — which names the
+   * reacted-to message by id only — can be correlated back to the message
+   * text. Optional so lightweight test transports can omit it.
+   */
+  setOutboundRecorder?(
+    fn: (conversationId: string, messageId: string, text: string) => void,
+  ): void;
   /**
    * Fetch the bot's own identity. Used once at startup to learn the
    * bot's @username so group messages that mention it can have the
@@ -98,12 +113,35 @@ const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 120_000;
 export class HttpTelegramTransport implements TelegramTransport {
   constructor(private readonly token: string) {}
 
+  /**
+   * Set by the engine (see setOutboundRecorder) to record every sent message
+   * into its RecentOutbound correlation map. Null until wired; sendMessage
+   * only parses the response body for a message_id when this is present, so
+   * the extra work is skipped entirely when reactions aren't being tracked.
+   */
+  private outboundRecorder:
+    | ((conversationId: string, messageId: string, text: string) => void)
+    | null = null;
+
+  setOutboundRecorder(
+    fn: (conversationId: string, messageId: string, text: string) => void,
+  ): void {
+    this.outboundRecorder = fn;
+  }
+
   async getUpdates(
     offset: number,
     timeoutS: number,
     signal?: AbortSignal,
-  ): Promise<{ updates: TelegramMessage[]; nextOffset: number }> {
-    const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=${timeoutS}&allowed_updates=%5B%22message%22%5D`;
+  ): Promise<{
+    updates: TelegramMessage[];
+    reactions: ChannelReaction[];
+    nextOffset: number;
+  }> {
+    // allowed_updates = ["message","message_reaction"]. message_reaction is
+    // NOT in Telegram's default set, so it is delivered ONLY because we opt in
+    // here. In a private chat the bot receives reactions to its OWN messages.
+    const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=${timeoutS}&allowed_updates=%5B%22message%22%2C%22message_reaction%22%5D`;
     let res: Response;
     try {
       // Long-poll: bound by Telegram's own `timeout=` plus a margin for
@@ -121,16 +159,16 @@ export class HttpTelegramTransport implements TelegramTransport {
         (e as Error).name === "AbortError" ||
         (e as Error).name === "TimeoutError"
       ) {
-        return { updates: [], nextOffset: offset };
+        return { updates: [], reactions: [], nextOffset: offset };
       }
       log.warn("telegram: getUpdates fetch failed", {
         error: (e as Error).message,
       });
-      return { updates: [], nextOffset: offset };
+      return { updates: [], reactions: [], nextOffset: offset };
     }
     if (!res.ok) {
       log.warn("telegram: getUpdates non-OK", { status: res.status });
-      return { updates: [], nextOffset: offset };
+      return { updates: [], reactions: [], nextOffset: offset };
     }
     let body: {
       ok?: boolean;
@@ -150,11 +188,11 @@ export class HttpTelegramTransport implements TelegramTransport {
       log.warn("telegram: getUpdates body not JSON", {
         error: (e as Error).message,
       });
-      return { updates: [], nextOffset: offset };
+      return { updates: [], reactions: [], nextOffset: offset };
     }
     if (!body.ok) {
       log.warn("telegram: getUpdates not ok", { description: body.description });
-      return { updates: [], nextOffset: offset };
+      return { updates: [], reactions: [], nextOffset: offset };
     }
     return parseGetUpdatesResult(body.result ?? [], offset);
   }
@@ -168,7 +206,7 @@ export class HttpTelegramTransport implements TelegramTransport {
    * in tens of milliseconds; no long-poll involved.
    */
   async ackUpdates(offset: number): Promise<void> {
-    const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=0&limit=1&allowed_updates=%5B%22message%22%5D`;
+    const url = `https://api.telegram.org/bot${this.token}/getUpdates?offset=${offset}&timeout=0&limit=1&allowed_updates=%5B%22message%22%2C%22message_reaction%22%5D`;
     try {
       const res = await fetch(url, {
         signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
@@ -215,7 +253,10 @@ export class HttpTelegramTransport implements TelegramTransport {
       }),
       signal: timeoutSignal(TELEGRAM_CONTROL_TIMEOUT_MS),
     });
-    if (res.ok) return;
+    if (res.ok) {
+      await this.recordSent(res, conversationId, safe);
+      return;
+    }
 
     if (res.status === 400) {
       log.warn(
@@ -239,6 +280,8 @@ export class HttpTelegramTransport implements TelegramTransport {
           chatId,
           status: fallback.status,
         });
+      } else {
+        await this.recordSent(fallback, conversationId, safe);
       }
       return;
     }
@@ -247,6 +290,34 @@ export class HttpTelegramTransport implements TelegramTransport {
       chatId,
       status: res.status,
     });
+  }
+
+  /**
+   * Best-effort: parse a successful sendMessage response for the returned
+   * `message_id` and hand it (with the sent text) to the outbound recorder,
+   * so a later emoji reaction on this message can be correlated back to its
+   * text. No-op — and no body read at all — when no recorder is registered,
+   * so non-reaction deployments pay nothing. Never throws into the send path.
+   */
+  private async recordSent(
+    res: Response,
+    conversationId: string,
+    text: string,
+  ): Promise<void> {
+    if (!this.outboundRecorder) return;
+    try {
+      const body = (await res.json()) as {
+        ok?: boolean;
+        result?: { message_id?: number };
+      };
+      const id = body?.result?.message_id;
+      if (typeof id === "number") {
+        this.outboundRecorder(conversationId, String(id), text);
+      }
+    } catch {
+      // A missing/odd body just means no correlation for this message —
+      // the reaction turn degrades to "id only". Never disturb the send.
+    }
   }
 
   async sendTyping(conversationId: string): Promise<void> {

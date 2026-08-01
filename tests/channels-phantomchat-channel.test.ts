@@ -561,3 +561,159 @@ describe("phantomchat channel — attachment (non-voice) intake", () => {
     expect(got[0]!.media!.servers).toEqual(many.slice(0, 8));
   });
 });
+
+describe("phantomchat channel — emoji reactions", () => {
+  // Build a plaintext NIP-25 kind-7 (or NIP-09 kind-5) event p-tagged to us.
+  function reactionEvent(opts: {
+    kind: number;
+    content: string;
+    reactorPub: string;
+    eTargets: string[];
+    toHex: string;
+    id?: string;
+  }): NTNostrEvent {
+    return {
+      id: opts.id ?? `react-${Math.random().toString(16).slice(2)}`,
+      pubkey: opts.reactorPub,
+      kind: opts.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      content: opts.content,
+      tags: [
+        ...opts.eTargets.map((e) => ["e", e]),
+        ["p", opts.toHex],
+      ],
+      sig: "00",
+    } as unknown as NTNostrEvent;
+  }
+
+  test("a live kind-7 reaction surfaces a ChannelMessage carrying the reaction", async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorSk = generateSecretKey();
+    const reactorPub = getPublicKey(reactorSk);
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "👍",
+        reactorPub,
+        eTargets: ["rumor-abc"],
+        toHex: ourPub,
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(1);
+    const r = got[0]!.reaction;
+    expect(r).toBeDefined();
+    expect(r!.action).toBe("added");
+    expect(r!.emoji).toBe("👍");
+    expect(r!.targetMessageId).toBe("rumor-abc");
+    expect(r!.conversationId).toBe(reactorPub.toLowerCase());
+    expect(got[0]!.text).toBe(""); // reactions carry no body text
+    expect(pool.published.length).toBe(0); // never publishes back
+  });
+
+  test('NIP-25 "+" content normalizes to 👍', async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "+",
+        reactorPub,
+        eTargets: ["rumor-1"],
+        toHex: ourPub,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got[0]!.reaction!.emoji).toBe("👍");
+  });
+
+  test("a kind-5 delete of a known reaction surfaces a removal", async () => {
+    const { ourPub, pool, channel } = setup();
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // First an add (so the channel remembers the reaction event id → emoji)...
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "❤️",
+        reactorPub,
+        eTargets: ["rumor-9"],
+        toHex: ourPub,
+        id: "reaction-evt-1",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    // ...then a NIP-09 delete naming that reaction event id.
+    pool.feed(
+      reactionEvent({
+        kind: 5,
+        content: "",
+        reactorPub,
+        eTargets: ["reaction-evt-1"],
+        toHex: ourPub,
+        id: "delete-evt-1",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(2);
+    expect(got[0]!.reaction!.action).toBe("added");
+    expect(got[1]!.reaction!.action).toBe("removed");
+    expect(got[1]!.reaction!.emoji).toBe("❤️");
+  });
+
+  test("a pre-EOSE (backlog) reaction yields nothing (live-gated)", async () => {
+    const { ourPub, pool, channel } = setup({ autoEose: false });
+    const reactorPub = getPublicKey(generateSecretKey());
+    const ac = new AbortController();
+    const got: ChannelMessage[] = [];
+    const pump = (async () => {
+      for await (const msg of channel.listen!(ac.signal)) got.push(msg);
+    })();
+    await new Promise((r) => setTimeout(r, 10));
+
+    pool.feed(
+      reactionEvent({
+        kind: 7,
+        content: "👍",
+        reactorPub,
+        eTargets: ["rumor-x"],
+        toHex: ourPub,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await pump;
+
+    expect(got.length).toBe(0);
+  });
+});
