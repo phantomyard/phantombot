@@ -409,7 +409,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     sinceSec: number,
   ): Promise<NTNostrEvent[]> {
     const filter: NostrFilter = {
-      kinds: [1059],
+      // Mirror subscribeGiftWraps: 1059 = gift-wrapped DM; 7 = NIP-25 emoji
+      // reaction; 5 = NIP-09 deletion (a reaction removed). The catch-up poll
+      // must carry the SAME kinds as the live subscription, otherwise a
+      // reaction/deletion missed by the live push is never recovered by the
+      // periodic self-heal. Results flow through the caller's onWrap, which
+      // branches on event.kind (reactions → handleReaction, dedup'd by id).
+      kinds: [1059, 7, 5],
       "#p": [ourPubHex],
       since: sinceSec,
     };
