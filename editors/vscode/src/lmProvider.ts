@@ -67,9 +67,14 @@ export function createLanguageModelChatProvider(
         tooltip: "phantombot — persona, memory and tools live server-side",
         capabilities: {
           imageInput: true,
-          // phantombot owns its tools server-side; we do NOT let VS Code inject
-          // or decompose tools, so the agent stays itself.
-          toolCalling: false,
+          // Must be true: VS Code's chat sessions run in agent-mode and its
+          // model picker filters on `suitableForAgentMode` (agentMode && toolCalling).
+          // With toolCalling:false our model is dropped from the session picker,
+          // userSelectedModelId stays empty, and getModelForRequest falls back to
+          // the (disabled) Copilot default → "Language model unavailable".
+          // Marking it agent-capable does NOT force VS Code to inject tools;
+          // phantombot still owns its tools server-side and the handler ignores any.
+          toolCalling: true,
         },
       };
       return [info];
