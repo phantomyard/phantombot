@@ -57,6 +57,13 @@ export function buildSystemPrompt(
   // every persona gets the same scheduling discipline.
   sections.push(SCHEDULING_TOOLS_SECTION);
 
+  // Always-on MCP toolbox hint. One line, memory_search-style: advertise that
+  // `phantombot mcp` EXISTS and should be searched on demand, WITHOUT
+  // enumerating any tool schemas (lazy discovery — eager injection bloats every
+  // prompt and degrades tool selection). Present for every persona so an agent
+  // knows external MCP tools are reachable when a task needs external data.
+  sections.push(MCP_TOOLS_SECTION);
+
   // Out-of-band notification rules. Sits next to scheduling on purpose:
   // the most common reason for an agent to notify is a scheduled task
   // surfacing something material. Kept in its own section (rather than
@@ -134,6 +141,33 @@ export function buildSystemPrompt(
  * as load-bearing and intentional, not as duplicated scaffolding to prune.
  * ─────────────────────────────────────────────────────────────────────────
  */
+/**
+ * MCP toolbox hint. Deliberately ONE short block, modelled on the standing
+ * memory_search reflex and on phantombot's own deferred-tool / ToolSearch
+ * primitive: it tells the agent the `phantombot mcp` toolbox exists and to
+ * SEARCH it lazily, without dumping any upstream tool schemas into the prompt.
+ * Eager injection of every MCP tool bloats context, burns tokens every turn,
+ * and measurably degrades tool selection as the list grows — so the default is
+ * discovery-on-demand. `phantombot mcp help` is the full guide the agent reads
+ * when it actually needs to register or configure a server.
+ */
+export const MCP_TOOLS_SECTION =
+  `# External tools (MCP)
+
+You can reach external MCP servers (Google Drive, GitHub, Linear, Home
+Assistant, ...) that this persona has registered. Tools are NOT listed up
+front — discover them lazily, only when a task needs external data:
+
+  phantombot mcp search "<query>"          # find tools across registered servers
+  phantombot mcp describe <server>         # load one server's tool schemas
+  phantombot mcp call <server> <tool> --args '{...}'   # invoke a tool
+  phantombot mcp help                      # register/configure a NEW server
+                                           # (the three auth methods; the user
+                                           #  never edits a config file)
+
+Reflex: search the MCP toolbox on demand, the same way you reach for
+memory_search — don't assume a tool exists, and don't enumerate them.`;
+
 export const MEMORY_TOOLS_SECTION =
   `# Memory tools
 

@@ -41,6 +41,7 @@ import nightlyCmd from "./nightly.ts";
 import doctorCmd from "./doctor.ts";
 import envCmd from "./env.ts";
 import vaultCmd from "./vault.ts";
+import mcpCmd from "./mcp.ts";
 import notifyCmd from "./notify.ts";
 import taskCmd from "./task.ts";
 import tickCmd from "./tick.ts";
@@ -65,6 +66,7 @@ export const mainCommand = defineCommand({
     embedding: embeddingCmd,
     env: envCmd,
     vault: vaultCmd,
+    mcp: mcpCmd,
     init: initCmd,
     install: installCmd,
     uninstall: uninstallCmd,

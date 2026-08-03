@@ -68,6 +68,10 @@ import {
   createHarnessTempDir,
   type HarnessTempDir,
 } from "../lib/harnessArgvFiles.ts";
+import {
+  buildForegroundMcpConfig,
+  EMPTY_MCP_CONFIG,
+} from "../mcp/harnessConfig.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -126,7 +130,21 @@ export class ClaudeHarness implements Harness {
     }
     try {
 
-    const args = this.buildArgs(req.systemPrompt, req.toolsMode, systemPromptFile, req.mcpMode);
+    // Foreground turns run --strict-mcp-config pointed at phantombot's OWN
+    // registry (empty until servers are registered), so account-level claude.ai
+    // connectors never inject into a phantombot prompt. Background/nightly
+    // (mcpMode "none") keep the zero-server config. Best-effort: any failure
+    // resolves to the empty config, so the isolation holds regardless.
+    const foregroundMcpConfig =
+      req.mcpMode === "none" ? undefined : await buildForegroundMcpConfig(req.persona);
+
+    const args = this.buildArgs(
+      req.systemPrompt,
+      req.toolsMode,
+      systemPromptFile,
+      req.mcpMode,
+      foregroundMcpConfig,
+    );
     log.debug("claude.invoke spawning", {
       bin: this.config.bin,
       argCount: args.length,
@@ -206,6 +224,9 @@ export class ClaudeHarness implements Harness {
     systemPromptFile?: string,
     // `"none"` runs this turn with ZERO MCP servers — see the block below.
     mcpMode?: "none",
+    // Foreground turns only: the `--mcp-config` payload pointing at phantombot's
+    // own registry/proxy. Undefined on background turns (mcpMode "none").
+    foregroundMcpConfig?: string,
   ): string[] {
     const args = [
       "--print",
@@ -237,8 +258,12 @@ export class ClaudeHarness implements Harness {
       //   --exclude-dynamic-system-prompt-sections
       //     Explicitly drops the per-machine cwd/env/git cruft. --system-prompt
       //     already drops most of it; this is the canonical belt-and-suspenders.
-      // NB: MCP connectors (Gmail / Calendar / Drive) are tools, not skills or
-      // Workflow, so they are UNAFFECTED — Andrew uses those and they stay.
+      // NB: account-level claude.ai MCP connectors (Gmail / Calendar / Drive /
+      // IBKR) are tools, not skills or Workflow, so --disallowedTools does not
+      // touch them. Their isolation is handled separately by --strict-mcp-config
+      // (see the MCP block below), which points claude at phantombot's OWN
+      // registry so those connectors don't inject into a phantombot prompt while
+      // staying available on Claude Desktop.
       "--disallowedTools", "Workflow,Task",
       "--disable-slash-commands",
       "--exclude-dynamic-system-prompt-sections",
@@ -255,19 +280,31 @@ export class ClaudeHarness implements Harness {
     if (toolsMode === "none") {
       args.push("--tools", "");
     }
-    // MCP-free mode for background turns (nightly stages). By default claude
-    // initialises EVERY configured MCP server on startup, including the user's
-    // remote claude.ai connectors. An unauthenticated remote connector blocks
-    // the init handshake waiting on an OAuth flow that can never complete in a
-    // non-interactive `--print` run, so the FIRST stage (essence) emits nothing
-    // and gets killed at the idle ceiling ("timed out with no output"). Nightly
-    // needs no MCP at all, so `--strict-mcp-config` tells claude to use ONLY the
-    // servers in `--mcp-config` (ignoring ~/.claude.json + connectors), and an
-    // empty server map means zero servers → nothing to hang on. Interactive
-    // persona turns omit mcpMode and keep their Gmail / Calendar / Drive
-    // connectors untouched.
+    // MCP isolation — EVERY claude turn runs `--strict-mcp-config`, which tells
+    // claude to use ONLY the servers in `--mcp-config` and ignore ~/.claude.json
+    // AND the account-level claude.ai connectors bound to the Claude Max OAuth
+    // login (IBKR / Gmail / Calendar / Drive). Two payloads:
+    //
+    //   - Background/nightly (mcpMode "none"): an EMPTY server map. Nightly needs
+    //     no MCP, and an unauthenticated remote connector would otherwise block
+    //     the `--print` init handshake on an OAuth flow that can never complete,
+    //     so the stage emits nothing and is killed at the idle ceiling.
+    //
+    //   - Foreground persona turns: phantombot's OWN registry, projected via the
+    //     loopback proxy (foregroundMcpConfig) — empty until the persona
+    //     registers servers with `phantombot mcp add`. This is the #338 fix: the
+    //     account connectors are wanted on Claude Desktop (account settings
+    //     untouched) but must NOT inject their tool schemas + server
+    //     instructions into every phantombot prompt, where they're noise and an
+    //     untrusted-input surface. strict-mcp-config on foreground closes that.
     if (mcpMode === "none") {
-      args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
+      args.push("--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG);
+    } else {
+      args.push(
+        "--strict-mcp-config",
+        "--mcp-config",
+        foregroundMcpConfig ?? EMPTY_MCP_CONFIG,
+      );
     }
     // Per-invocation settings injection. Layers additively on top of the user's
     // own ~/.claude/settings.json — we don't touch that file, so an operator

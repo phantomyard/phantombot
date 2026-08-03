@@ -531,7 +531,7 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).toContain('{"mcpServers":{}}');
   });
 
-  test("a normal turn (no mcpMode) keeps MCP connectors — no --strict-mcp-config", async () => {
+  test("a normal foreground turn also runs --strict-mcp-config (account-connector isolation, #338)", async () => {
     process.env.FAKE_CLAUDE_MODE = "argv";
     const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
     const chunks = await collect(h.invoke(newRequest()));
@@ -539,8 +539,14 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
       .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
       .map((c) => c.text)
       .join("");
-    expect(texts).not.toContain("--strict-mcp-config");
-    expect(texts).not.toContain("--mcp-config");
+    // Foreground turns are now ALSO strict: claude uses only phantombot's own
+    // registry, ignoring ~/.claude.json + account-level claude.ai connectors
+    // (IBKR/Gmail/Calendar/Drive). With no servers registered for the test
+    // persona the projection is the empty map, so account connectors are
+    // isolated without spawning any child MCP server.
+    expect(texts).toContain("--strict-mcp-config");
+    expect(texts).toContain("--mcp-config");
+    expect(texts).toContain('{"mcpServers":{}}');
   });
 
   test("pre-prompting trim flags ride along on every turn", async () => {
