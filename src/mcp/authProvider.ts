@@ -17,10 +17,20 @@
  *                     the registered redirect_uri.
  *
  * Vault row layout under the server's `tokenRef` stem:
- *   <tokenRef>              — OAuthTokens JSON (access + refresh)
- *   <tokenRef>__CLIENT      — OAuthClientInformationFull JSON (DCR result)
- *   <tokenRef>__VERIFIER    — PKCE code_verifier (in-flight, cleared after use)
- *   <tokenRef>__DISCOVERY   — cached OAuthDiscoveryState JSON (latency shortcut)
+ *   <tokenRef>                 — OAuthTokens JSON (access + refresh)
+ *   <tokenRef>__CLIENT         — OAuthClientInformationFull JSON (DCR result)
+ *   <tokenRef>__CLIENT_STATIC  — user-supplied pre-registered client (skip-DCR)
+ *   <tokenRef>__VERIFIER       — PKCE code_verifier (in-flight, cleared after use)
+ *   <tokenRef>__DISCOVERY      — cached OAuthDiscoveryState JSON (latency shortcut)
+ *
+ * __CLIENT vs __CLIENT_STATIC: __CLIENT holds a client REGISTERED FOR US by the
+ * server (DCR) and is disposable — invalidateCredentials() may wipe it so the
+ * SDK re-registers. __CLIENT_STATIC holds a client the USER pre-registered in a
+ * provider console (Google) and handed us via `mcp add --client-file`; it is
+ * DURABLE and never invalidated, so a token-refresh failure re-runs consent
+ * WITHOUT falling back to DCR (which the provider would reject). When present it
+ * takes precedence, and returning it from clientInformation() is what makes the
+ * SDK skip registration entirely.
  */
 
 import type {
@@ -40,9 +50,28 @@ import type { Vault } from "../lib/vault.ts";
 export const OAUTH_ROW_SUFFIX = {
   tokens: "",
   client: "__CLIENT",
+  staticClient: "__CLIENT_STATIC",
   verifier: "__VERIFIER",
   discovery: "__DISCOVERY",
 } as const;
+
+/** Vault key of the durable user-supplied client row for a given tokenRef stem. */
+export function staticClientVaultKey(tokenRef: string): string {
+  return tokenRef + OAUTH_ROW_SUFFIX.staticClient;
+}
+
+/**
+ * Persist a user-supplied pre-registered client (from `mcp add --client-file`)
+ * into the durable __CLIENT_STATIC vault row. Written once at registration;
+ * consumed by VaultOAuthClientProvider.clientInformation() at login time.
+ */
+export function writeStaticClient(
+  vault: Pick<Vault, "set">,
+  tokenRef: string,
+  info: OAuthClientInformationFull,
+): void {
+  vault.set(staticClientVaultKey(tokenRef), JSON.stringify(info));
+}
 
 export interface VaultOAuthOptions {
   /** The server's tokenRef stem (from its registry entry). */
@@ -89,9 +118,21 @@ export class VaultOAuthClientProvider implements OAuthClientProvider {
   }
 
   clientInformation(): OAuthClientInformation | undefined {
+    // Prefer a user-supplied, pre-registered client (skip-DCR). Returning a
+    // non-undefined value here is precisely what makes the SDK bypass RFC 7591
+    // dynamic client registration — the fix for providers (Google) that reject
+    // DCR. This durable row survives invalidateCredentials, so token-refresh
+    // failures re-run consent instead of attempting DCR again.
+    const staticRaw = this.vault.get(this.row("staticClient"));
+    if (staticRaw !== undefined) return JSON.parse(staticRaw) as OAuthClientInformationFull;
     const raw = this.vault.get(this.row("client"));
     if (raw === undefined) return undefined;
     return JSON.parse(raw) as OAuthClientInformationFull;
+  }
+
+  /** True when a user-supplied pre-registered client is stored (skip-DCR active). */
+  hasStaticClient(): boolean {
+    return this.vault.get(this.row("staticClient")) !== undefined;
   }
 
   saveClientInformation(info: OAuthClientInformationFull): void {

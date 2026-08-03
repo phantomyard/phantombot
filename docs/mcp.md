@@ -46,9 +46,43 @@ a pasted link — or say plainly that it isn't supported.
 | `oauth`  | http      | Remote server behind interactive OAuth 2.1: PKCE + RFC 9728 protected-resource-metadata discovery + RFC 7591 dynamic client registration, all driven by the SDK's `OAuthClientProvider`. We implement only vault token storage + loopback redirect capture. | "I'll open a login link — approve it" |
 
 **Google is an adapter under `oauth`**, not the core model — its
-`client_secret.json` is a non-DCR variant. If a discovered server needs a shape
-outside these three, the agent reports it as **unsupported** rather than
-half-configuring it.
+`client_secret.json` is a non-DCR variant (see below). If a discovered server
+needs a shape outside these three, the agent reports it as **unsupported**
+rather than half-configuring it.
+
+### `oauth` with a pre-registered client (skip-DCR)
+
+Some providers reject RFC 7591 dynamic client registration — **Google's remote
+MCP servers most notably**, where `mcp login` fails with *"Incompatible auth
+server: does not support dynamic client registration"*. For these the user
+pre-registers an OAuth client themselves and hands phantombot the credentials;
+the SDK then skips registration (it only runs DCR when
+`OAuthClientProvider.clientInformation()` returns `undefined`).
+
+Flow:
+
+1. **User creates the client once** — Google Cloud Console → APIs & Services →
+   Credentials → *Create OAuth client ID*. Prefer type **Desktop app**: it
+   allows the loopback redirect (`http://127.0.0.1:<port>`) on any port, which
+   matches our dynamic loopback listener. (A **Web app** client would need the
+   exact redirect port pre-registered.) Download the JSON.
+2. **Attach it at registration** — phantombot parses the file, stores the
+   `client_id`/`client_secret` in the vault (encrypted at rest), and the file
+   can be deleted:
+   ```
+   phantombot mcp add google-mcp --http --url https://…/mcp --oauth \
+       --client-file ./credentials.json --scopes "…"
+   # or, without a file:
+   phantombot mcp add google-mcp --http --url https://…/mcp --oauth \
+       --client-id <id> --client-secret <secret>
+   ```
+3. **Log in as usual** — `phantombot mcp login google-mcp`. Browser approve →
+   loopback captures the code → tokens land in the vault; refresh is automatic.
+
+The pre-registered client lives in a **durable** vault row
+(`<tokenRef>__CLIENT_STATIC`) that `invalidateCredentials` never wipes, so a
+token-refresh failure re-runs consent instead of falling back to DCR (which the
+provider would reject). `mcp remove --purge` cleans it up with the rest.
 
 Secrets are always referenced **by vault key** in `mcp.json`, resolved only at
 connection time. `mcp list`/`status`/`describe` never echo a secret value.
@@ -141,7 +175,8 @@ provenance obvious.
 |------|----------------|
 | `src/mcp/registry.ts` | `mcp.json` schema, validation, CRUD, secret-ref resolution |
 | `src/mcp/client.ts` | SDK client wrapper — build transport per auth method, connect/list/call |
-| `src/mcp/authProvider.ts` | vault-backed `OAuthClientProvider` (persistence only) |
+| `src/mcp/authProvider.ts` | vault-backed `OAuthClientProvider` (persistence only; DCR + skip-DCR client rows) |
+| `src/mcp/oauthClient.ts` | parse a pre-registered OAuth client (`credentials.json`) → skip-DCR client info |
 | `src/mcp/loopback.ts` | loopback HTTP listener for OAuth redirect capture |
 | `src/mcp/login.ts` | OAuth login orchestration (begin / complete) |
 | `src/mcp/hub.ts` | shared connection manager + lazy search behind both faces |
@@ -159,10 +194,13 @@ end against a real stdio MCP server (`tests/fixtures/mcp-echo-server.ts`) — th
 client connect/list/call path, env-secret injection, the hub, and the proxy
 meta-tools over an in-memory transport.
 
-Needs live verification against real endpoints (documented, not automatable in
-CI): the `oauth` flow against a real provider (Google / GitHub remote MCP), a
-`header` remote server, and the projected proxy running under a live
-`claude --print` / `codex exec` turn.
+The skip-DCR path is unit-tested here (`credentials.json` parse, the durable
+client row taking precedence over DCR, and — end to end against a fixture OAuth
+server — a real SDK `auth()` run that skips registration and exchanges a code
+using the pre-registered client). What still needs a **live** provider is the
+same as before: the `oauth` flow (with DCR *and* skip-DCR) against Google /
+GitHub remote MCP, a `header` remote server, and the projected proxy under a
+live `claude --print` / `codex exec` turn — tracked in #341.
 
 **Binary weight.** The `@modelcontextprotocol/sdk` dependency adds **~640 KB**
 to the compiled binary (arm64: 104.34 MB on `main` → 104.99 MB on this branch,

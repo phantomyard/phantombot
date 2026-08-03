@@ -313,8 +313,14 @@ export function referencedVaultKeys(entry: McpServerEntry): string[] {
     case "header":
       return [auth.valueRef];
     case "oauth":
-      // Mirror the row layout in authProvider.ts.
-      return [auth.tokenRef, `${auth.tokenRef}__CLIENT`, `${auth.tokenRef}__VERIFIER`, `${auth.tokenRef}__DISCOVERY`];
+      // Mirror the row layout in authProvider.ts (OAUTH_ROW_SUFFIX).
+      return [
+        auth.tokenRef,
+        `${auth.tokenRef}__CLIENT`,
+        `${auth.tokenRef}__CLIENT_STATIC`,
+        `${auth.tokenRef}__VERIFIER`,
+        `${auth.tokenRef}__DISCOVERY`,
+      ];
     default:
       return [];
   }

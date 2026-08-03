@@ -15,11 +15,14 @@
  */
 
 import { defineCommand } from "citty";
+import { readFile } from "node:fs/promises";
 
 import { loadConfig, personaDir } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openPersonaVault, type Vault } from "../lib/vault.ts";
+import { staticClientVaultKey, writeStaticClient } from "../mcp/authProvider.ts";
 import { discoverFromUrl } from "../mcp/discovery.ts";
+import { parseOAuthClientFile, toClientInformation, type ParsedOAuthClient } from "../mcp/oauthClient.ts";
 import { MCP_HELP } from "../mcp/help.ts";
 import { McpHub } from "../mcp/hub.ts";
 import { beginLogin, completeLogin } from "../mcp/login.ts";
@@ -82,6 +85,12 @@ export interface McpAddInput {
   oauth?: boolean;
   tokenRef?: string;
   scopes?: string;
+  /** oauth skip-DCR: path to a downloaded OAuth-client credentials.json. */
+  clientFile?: string;
+  /** oauth skip-DCR: client_id supplied directly (alternative to --client-file). */
+  clientId?: string;
+  /** oauth skip-DCR: client_secret supplied directly (paired with --client-id). */
+  clientSecret?: string;
   fromUrl?: string;
   note?: string;
   dryRun?: boolean;
@@ -126,9 +135,35 @@ export async function runMcpAdd(input: McpAddInput): Promise<number> {
   if (input.fromUrl) entry.note = input.note ?? input.fromUrl;
   else if (input.note) entry.note = input.note;
 
+  // Pre-registered OAuth client (skip-DCR): parse it now so a bad file fails
+  // before we write anything.
+  let preClient: ParsedOAuthClient | undefined;
+  if (input.clientFile || input.clientId) {
+    if (entry.auth?.type !== "oauth") {
+      err.write("--client-file/--client-id only apply to an oauth server (add --oauth too).\n");
+      return 2;
+    }
+    try {
+      preClient = input.clientFile
+        ? parseOAuthClientFile(await readFile(input.clientFile, "utf8"))
+        : { clientId: input.clientId!, clientSecret: input.clientSecret };
+    } catch (e) {
+      err.write(`${(e as Error).message}\n`);
+      return 2;
+    }
+  }
+
+  const tokenRef = entry.auth?.type === "oauth" ? entry.auth.tokenRef : undefined;
+
   if (input.dryRun) {
     out.write(JSON.stringify({ [input.id]: entry }, null, 2) + "\n");
-    printNextSteps(input.id, entry, out);
+    if (preClient && tokenRef) {
+      out.write(
+        `  would store pre-registered client ${preClient.clientId} ` +
+          `(secret: ${preClient.clientSecret ? "yes" : "no"}) in vault key ${staticClientVaultKey(tokenRef)}\n`,
+      );
+    }
+    printNextSteps(input.id, entry, out, { hasStaticClient: Boolean(preClient) });
     return 0;
   }
 
@@ -136,7 +171,21 @@ export async function runMcpAdd(input: McpAddInput): Promise<number> {
   const registry = await loadRegistry(dir);
   await saveRegistry(dir, upsertServer(registry, input.id, entry));
   out.write(`registered MCP server '${input.id}' (${transport})\n`);
-  printNextSteps(input.id, entry, out);
+
+  if (preClient && tokenRef) {
+    const vault = await openPersonaVault(dir);
+    try {
+      writeStaticClient(vault, tokenRef, toClientInformation(preClient));
+    } finally {
+      vault.close();
+    }
+    out.write(
+      `  stored pre-registered OAuth client ${preClient.clientId} in the vault ` +
+        `(DCR will be skipped for this server)\n`,
+    );
+  }
+
+  printNextSteps(input.id, entry, out, { hasStaticClient: Boolean(preClient) });
   return 0;
 }
 
@@ -178,7 +227,12 @@ function buildHttpEntry(input: McpAddInput, d?: { url?: string; auth?: string; s
   return { transport: "http", url, auth };
 }
 
-function printNextSteps(id: string, entry: McpServerEntry, out: WriteSink): void {
+function printNextSteps(
+  id: string,
+  entry: McpServerEntry,
+  out: WriteSink,
+  opts: { hasStaticClient?: boolean } = {},
+): void {
   const auth = entry.auth ?? { type: "none" };
   switch (auth.type) {
     case "env":
@@ -190,6 +244,12 @@ function printNextSteps(id: string, entry: McpServerEntry, out: WriteSink): void
       out.write(`  next: ask the user to generate a token, then  phantombot vault set ${auth.valueRef} "<token>"\n`);
       break;
     case "oauth":
+      if (!opts.hasStaticClient) {
+        out.write(
+          `  note: if 'mcp login' reports the server "does not support dynamic client registration",\n` +
+            `        the user must pre-register an OAuth client and re-run add with --client-file <credentials.json>\n`,
+        );
+      }
       out.write(`  next: run  phantombot mcp login ${id}  and have the user approve the login link\n`);
       break;
     default:
@@ -408,7 +468,23 @@ export async function runMcpLogin(input: {
     );
     return 0;
   } catch (e) {
-    err.write(`${(e as Error).message}\n`);
+    const msg = (e as Error).message;
+    err.write(`${msg}\n`);
+    // Google (and some others) reject RFC 7591 DCR. If that's the failure and
+    // no pre-registered client is stored yet, point the agent at the skip-DCR
+    // path rather than leaving a dead end.
+    if (/dynamic client registration/i.test(msg) && entry.auth?.type === "oauth") {
+      const hasStatic = vault.get(staticClientVaultKey(entry.auth.tokenRef)) !== undefined;
+      if (!hasStatic) {
+        err.write(
+          `\nThis server needs a pre-registered OAuth client. Have the user create one in the\n` +
+            `provider's console (e.g. Google Cloud Console → Credentials → OAuth client ID →\n` +
+            `Download JSON), then attach it and retry:\n` +
+            `  phantombot mcp add ${input.id} --http --url <url> --oauth --client-file <credentials.json>\n` +
+            `  phantombot mcp login ${input.id}\n`,
+        );
+      }
+    }
     return 1;
   } finally {
     vault.close();
@@ -465,6 +541,9 @@ export default defineCommand({
         oauth: { type: "boolean", description: "oauth auth: interactive OAuth 2.1 (finish with `mcp login`)." },
         "token-ref": { type: "string", description: "oauth auth: vault key stem for tokens (default derived)." },
         scopes: { type: "string", description: "oauth auth: comma-separated scopes." },
+        "client-file": { type: "string", description: "oauth auth: path to a downloaded OAuth-client credentials.json (skip-DCR; e.g. Google). Stored in the vault." },
+        "client-id": { type: "string", description: "oauth auth: OAuth client_id supplied directly (alternative to --client-file)." },
+        "client-secret": { type: "string", description: "oauth auth: OAuth client_secret (paired with --client-id)." },
         "from-url": { type: "string", description: "Infer transport+auth from a pasted 'Learn More' link and write the registration." },
         note: { type: "string", description: "Freeform note (e.g. the setup link)." },
         "dry-run": { type: "boolean", description: "Print the entry that would be written, don't save." },
@@ -485,6 +564,9 @@ export default defineCommand({
           oauth: Boolean(args.oauth),
           tokenRef: args["token-ref"] ? String(args["token-ref"]) : undefined,
           scopes: args.scopes ? String(args.scopes) : undefined,
+          clientFile: args["client-file"] ? String(args["client-file"]) : undefined,
+          clientId: args["client-id"] ? String(args["client-id"]) : undefined,
+          clientSecret: args["client-secret"] ? String(args["client-secret"]) : undefined,
           fromUrl: args["from-url"] ? String(args["from-url"]) : undefined,
           note: args.note ? String(args.note) : undefined,
           dryRun: Boolean(args["dry-run"]),

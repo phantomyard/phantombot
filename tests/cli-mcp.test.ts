@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,8 @@ import {
   runMcpList,
   runMcpRemove,
 } from "../src/cli/mcp.ts";
+import { openPersonaVault } from "../src/lib/vault.ts";
+import { staticClientVaultKey } from "../src/mcp/authProvider.ts";
 import { rmrf } from "./fixtures/rmrf.ts";
 
 class Cap {
@@ -119,5 +121,91 @@ describe("add / list / remove", () => {
     const list2 = new Cap();
     await runMcpList({ out: list2 });
     expect(list2.text).toContain("(no MCP servers registered)");
+  });
+});
+
+describe("oauth pre-registered client (skip-DCR)", () => {
+  test("--client-id/--client-file only valid with --oauth", async () => {
+    const err = new Cap();
+    const code = await runMcpAdd({
+      id: "g",
+      http: true,
+      url: "https://x/mcp",
+      clientId: "cid",
+      out: new Cap(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toMatch(/only apply to an oauth server/);
+  });
+
+  test("dry-run reports the client that would be vaulted, writes nothing", async () => {
+    const out = new Cap();
+    const code = await runMcpAdd({
+      id: "gdry",
+      http: true,
+      url: "https://x/mcp",
+      oauth: true,
+      clientId: "dry-id",
+      clientSecret: "dry-secret",
+      dryRun: true,
+      out,
+      err: out,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toMatch(/would store pre-registered client dry-id \(secret: yes\)/);
+    expect(await readFile(join(workdir, "tester", "mcp.json"), "utf8").catch(() => "MISSING")).toBe("MISSING");
+  });
+
+  test("--client-file ingests credentials.json and stores the static client in the vault", async () => {
+    const credPath = join(workdir, "credentials.json");
+    await writeFile(
+      credPath,
+      JSON.stringify({ installed: { client_id: "file-id", client_secret: "file-secret" } }),
+    );
+    const out = new Cap();
+    const code = await runMcpAdd({
+      id: "gmail",
+      http: true,
+      url: "https://example.com/mcp",
+      oauth: true,
+      tokenRef: "MCP_GMAIL_OAUTH",
+      clientFile: credPath,
+      out,
+      err: out,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toMatch(/stored pre-registered OAuth client file-id/);
+
+    // The static client row is present in the persona vault, DCR-skip ready.
+    const vault = await openPersonaVault(join(workdir, "tester"));
+    try {
+      const raw = vault.get(staticClientVaultKey("MCP_GMAIL_OAUTH"));
+      expect(raw).toBeDefined();
+      const info = JSON.parse(raw!);
+      expect(info.client_id).toBe("file-id");
+      expect(info.client_secret).toBe("file-secret");
+      expect(info.token_endpoint_auth_method).toBe("client_secret_post");
+    } finally {
+      vault.close();
+    }
+  });
+
+  test("a malformed credentials file fails before writing the registry", async () => {
+    const credPath = join(workdir, "bad.json");
+    await writeFile(credPath, "{ not json");
+    const err = new Cap();
+    const code = await runMcpAdd({
+      id: "gbad",
+      http: true,
+      url: "https://x/mcp",
+      oauth: true,
+      clientFile: credPath,
+      out: new Cap(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toMatch(/not valid JSON/);
+    expect(await readFile(join(workdir, "tester", "mcp.json"), "utf8").catch(() => "MISSING")).toBe("MISSING");
   });
 });

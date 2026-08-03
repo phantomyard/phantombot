@@ -60,6 +60,20 @@ THE THREE AUTH METHODS (this is the whole ecosystem in practice)
                   URL. Tell the user "open this link and approve"; the callback
                   is captured on a loopback listener and tokens are saved.
 
+     PRE-REGISTERED CLIENT (skip-DCR) — for providers that REJECT dynamic client
+     registration. Google's remote MCP servers are the main case: 'mcp login'
+     fails with "does not support dynamic client registration". The fix: the
+     user pre-registers an OAuth client in the provider console (Google Cloud
+     Console → APIs & Services → Credentials → OAuth client ID → prefer type
+     "Desktop app", which allows the loopback redirect on any port → Download
+     JSON) and hands you the file. Attach it once and the SDK skips DCR:
+       Register:  phantombot mcp add <id> --http --url https://.../mcp --oauth \\
+                    --client-file ./credentials.json  [--scopes "..."]
+                  (or pass --client-id/--client-secret directly). phantombot
+                  reads the file, stores the client_id/secret in the vault, and
+                  the file can be deleted.
+       You then:  run  phantombot mcp login <id>  as usual.
+
   If a discovered server needs an auth shape OUTSIDE these three (a bespoke
   handshake, mutual TLS, a transport phantombot doesn't speak), say so plainly:
   it is not supported yet. Do NOT half-configure it.

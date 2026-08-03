@@ -150,6 +150,12 @@ describe("secret resolution", () => {
 
   test("referencedVaultKeys enumerates every key an entry touches", () => {
     const oauth = validateEntry("o", { transport: "http", url: "https://x.test/mcp", auth: { type: "oauth", tokenRef: "T" } });
-    expect(referencedVaultKeys(oauth)).toEqual(["T", "T__CLIENT", "T__VERIFIER", "T__DISCOVERY"]);
+    expect(referencedVaultKeys(oauth)).toEqual([
+      "T",
+      "T__CLIENT",
+      "T__CLIENT_STATIC",
+      "T__VERIFIER",
+      "T__DISCOVERY",
+    ]);
   });
 });
