@@ -111,6 +111,14 @@ Background/nightly/threat-judge turns remain MCP-free (the pre-existing
 `--strict-mcp-config` + empty-map hang fix). Claude Desktop is unaffected — the
 account-wide connector settings are never touched.
 
+> **Release note — behavior change.** After this upgrade, interactive
+> (foreground) phantombot turns no longer see the account-level claude.ai
+> connectors (Gmail, Google Calendar, Google Drive, IBKR). This is
+> intentional — it stops those connectors injecting tool schemas and server
+> instructions into every prompt — but if a workflow silently relied on one of
+> them being present in a phantombot chat, register that server explicitly via
+> `phantombot mcp add`. Claude Desktop keeps all connectors unchanged.
+
 ## Registry shape (`<persona-dir>/mcp.json`)
 
 Written by the agent, never by the user. Secrets referenced by vault key. Tools
@@ -155,3 +163,8 @@ Needs live verification against real endpoints (documented, not automatable in
 CI): the `oauth` flow against a real provider (Google / GitHub remote MCP), a
 `header` remote server, and the projected proxy running under a live
 `claude --print` / `codex exec` turn.
+
+**Binary weight.** The `@modelcontextprotocol/sdk` dependency adds **~640 KB**
+to the compiled binary (arm64: 104.34 MB on `main` → 104.99 MB on this branch,
+a +0.6% increase). Modest and expected for a first-class MCP client; noted so
+the cost is visible.

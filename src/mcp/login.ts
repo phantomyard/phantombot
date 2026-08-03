@@ -77,7 +77,20 @@ export async function beginLogin(
     if (waitMs <= 0) {
       return { status: "pending", authorizationUrl, redirectUrl: capture.redirectUrl };
     }
-    const code = await capture.waitForCode(waitMs);
+    let code: string;
+    try {
+      code = await capture.waitForCode(waitMs);
+    } catch (e) {
+      // Loopback never received the redirect (host unreachable, slow approval,
+      // or timeout). Don't hard-fail — the manual `--code` path is still valid,
+      // because the PKCE verifier is already saved in the vault. Hand back
+      // pending so the caller can print the paste-the-code instructions.
+      const msg = (e as Error).message;
+      if (/timed out|authorization error/.test(msg)) {
+        return { status: "pending", authorizationUrl, redirectUrl: capture.redirectUrl };
+      }
+      throw e;
+    }
     const done = await auth(provider, { serverUrl: url, authorizationCode: code });
     if (done !== "AUTHORIZED") throw new Error(`oauth: token exchange returned ${done}`);
     return { status: "authorized" };
