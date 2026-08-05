@@ -229,6 +229,64 @@
             </div>
         </section>
 
+        <!-- Additive: Why phantombot — the firewall around your harness (issue #339) -->
+        <section class="why-firewall">
+            <p class="section-eyebrow">Why phantombot &middot; not a naked harness</p>
+            <h2>A firewall around your harness.</h2>
+            <p class="section-intro">A raw harness &mdash; Claude Code, Codex, or Pi on its own &mdash; is powerful and <em>exposed</em>. Whatever the model decides to do, it does, and everything it learns about you lives in the vendor's cloud. Phantombot wraps that same harness in the two things a bare CLI doesn't give you: <strong>a security perimeter in front of it, and a local-first vault around it.</strong> The model keeps all of its power &mdash; you stop handing your attack surface and your data to someone else's ecosystem.</p>
+
+            <div class="why-grid">
+                <div class="why-card">
+                    <span class="why-badge" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6l-8-3Z"/>
+                            <path d="M9 12l2 2 4-4"/>
+                        </svg>
+                    </span>
+                    <h3>A firewall in front of the model</h3>
+                    <p>A bare harness acts on whatever reaches it &mdash; including text from email, web pages, and webhooks trying to <em>instruct</em> it. Phantombot sits in front as a capability-and-trust perimeter: a <strong>two-tier trust model</strong> that judges input by origin, and a <strong>tool-less threat judge</strong> that reads every untrusted turn <em>before any memory is loaded into a prompt</em> and holds anything dangerous for you to talk through.</p>
+                </div>
+
+                <div class="why-card">
+                    <span class="why-badge" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="5" y="11" width="14" height="9" rx="2"/>
+                            <path d="M8 11V8a4 4 0 0 1 8 0v3"/>
+                            <path d="M12 15v2"/>
+                        </svg>
+                    </span>
+                    <h3>Your data stays under your control</h3>
+                    <p>With a naked proprietary harness, your memory, secrets, and context are stored inside the vendor's ecosystem. Phantombot keeps that state on the machine <em>you</em> run it on: an <strong>encrypted per-persona vault</strong> (AES-256-GCM, keyed to your identity) and a <strong>local markdown&nbsp;+&nbsp;SQLite memory store</strong> on your own disk. Prompts still go to whichever provider you configure &mdash; but your <em>storage and secrets</em> never leave the box.</p>
+                </div>
+
+                <div class="why-card">
+                    <span class="why-badge" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 2v6"/>
+                            <path d="M15 2v6"/>
+                            <path d="M6 8h12v3a6 6 0 0 1-12 0V8Z"/>
+                            <path d="M12 17v5"/>
+                        </svg>
+                    </span>
+                    <h3>One capability layer on every harness</h3>
+                    <p>Phantombot exposes external tools &mdash; MCP servers like Drive, GitHub, Linear, and Home Assistant &mdash; through a single <code>phantombot mcp</code> facade with <strong>lazy discovery</strong> (<code>search &rarr; describe &rarr; call</code>) instead of dumping every schema into the prompt. The same capabilities work on Claude Code, Codex, <em>and</em> Pi &mdash; you're never locked to one vendor's tool ecosystem.</p>
+                </div>
+
+                <div class="why-card">
+                    <span class="why-badge" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                            <path d="M21 4v5h-5"/>
+                        </svg>
+                    </span>
+                    <h3>Persistence &amp; autonomy the CLI lacks</h3>
+                    <p>One durable persona instead of a fresh, amnesiac session every time: long-term memory that <strong>compounds</strong>, durable scheduled tasks that survive restarts, a multi-persona fleet, and a sanctioned proactive channel so your Phantom can reach <em>you</em> on Telegram when something material happens &mdash; not just answer when spoken to.</p>
+                </div>
+            </div>
+
+            <p class="why-honest"><strong>Honest framing:</strong> this is defence <em>at the capability layer</em> &mdash; designed to run natively without a disposable throwaway VM, and backed by an ongoing security-audit practice. It dramatically shrinks the blast radius; it is <strong>not</strong> a claim that the agent can't be compromised. A firewall in front of the box, not an impenetrable box.</p>
+        </section>
+
         <section class="philosophy">
             <h2>Agency by Design</h2>
             <p>We don't build boxes; we build Souls. <strong>The harness can do its own tools — let it.</strong> Phantombot provides the memory, the identity, and the connection. The harness takes it from there.</p>

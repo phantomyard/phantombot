@@ -630,3 +630,78 @@ footer {
     color: var(--accent);
     transform: translateY(-1px);
 }
+
+/* Additive: Why phantombot — firewall section (issue #339) */
+.why-firewall {
+    margin-bottom: 8rem;
+}
+
+.why-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 2rem;
+    margin-top: 3rem;
+}
+
+.why-card {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.why-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+}
+
+.why-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+    background: rgba(63, 185, 80, 0.08);
+    border: 1px solid rgba(63, 185, 80, 0.35);
+    color: var(--accent);
+    margin-bottom: 1.4rem;
+}
+
+.why-badge svg {
+    width: 26px;
+    height: 26px;
+}
+
+.why-card h3 {
+    font-family: var(--font-mono);
+    font-size: 1.15rem;
+    margin-bottom: 0.9rem;
+}
+
+.why-card p {
+    color: var(--muted);
+    font-size: 1rem;
+}
+
+.why-card code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    color: var(--fg);
+}
+
+.why-honest {
+    margin-top: 3rem;
+    padding: 1.5rem 1.8rem;
+    border-left: 4px solid var(--accent);
+    background: rgba(63, 185, 80, 0.04);
+    border-radius: 0 8px 8px 0;
+    color: var(--muted);
+    font-size: 1rem;
+    max-width: 860px;
+}
+
+.why-honest strong {
+    color: var(--fg);
+}
