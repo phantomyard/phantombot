@@ -70,10 +70,14 @@ name: Release on PR merge
 # skip a release. Over-releasing is harmless (a duplicate-content binary at a
 # higher version); under-releasing ships a fix to nobody.
 #
-# NOTE on the denylist scope: it is deliberately NARROW. `**.md` is NOT here
-# because `agents/phantom/*.md` are the persona system prompts embedded into
-# the compiled binary — changing them IS a functional change and MUST release.
-# Only the pure documentation/marketing surfaces are listed:
+# NOTE on the denylist scope: it is deliberately NARROW. `**.md` is NOT here —
+# a blanket markdown ignore is too broad and would risk silently skipping a
+# release for markdown that matters. In particular `agents/phantom/*.md` are
+# persona system prompts; the binary does not embed them (they are loaded at
+# runtime from persona directories — see src/persona/loader.ts), but keeping
+# them out of the denylist is the conservative, fail-open call: at worst a
+# redundant binary at a higher version, never an under-release. Only the pure
+# documentation/marketing surfaces are listed:
 #   - README.md / AGENTS.md / LICENSE — top-level docs, not compiled in
 #   - docs/**  — the docs site markdown
 #   - www/**   — the AIRE marketing website (deployed separately by
