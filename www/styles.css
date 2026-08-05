@@ -141,11 +141,6 @@ h1 {
     margin-top: 1.5rem;
 }
 
-.cta-preview {
-    color: var(--accent);
-    font-weight: 700;
-}
-
 .cta code {
     background: var(--border);
     padding: 1rem 3.5rem 1rem 2rem;
@@ -160,27 +155,6 @@ h1 {
 .cta-command {
     position: relative;
     display: inline-block;
-}
-
-.cta-note {
-    margin-top: 1.2rem;
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    color: var(--muted);
-    max-width: 720px;
-}
-
-.cta-note code {
-    background: var(--border);
-    padding: 0.1rem 0.5rem;
-    border-radius: 3px;
-    font-size: 0.85rem;
-    color: var(--fg);
-}
-
-.cta-note a {
-    color: var(--accent);
-    text-decoration: underline;
 }
 
 .copy-button {
