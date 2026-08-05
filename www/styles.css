@@ -141,6 +141,16 @@ h1 {
     margin-top: 1.5rem;
 }
 
+.cta-note {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 1.5rem;
+}
+
+.cta-note strong {
+    color: var(--fg);
+}
+
 .cta code {
     background: var(--border);
     padding: 1rem 3.5rem 1rem 2rem;
