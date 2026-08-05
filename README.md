@@ -59,6 +59,7 @@ Supported harnesses:
 
 ## Contents
 
+- [Why Phantombot Over a Naked Harness](#why-phantombot-over-a-naked-harness)
 - [Why Phantombot Exists](#why-phantombot-exists)
 - [Install](#install)
 - [Quick Start](#quick-start)
@@ -83,6 +84,55 @@ Supported harnesses:
 - [Design Principles](#design-principles)
 - [Policies & Guidelines](#policies--guidelines)
 - [Contributing](#contributing)
+
+## Why Phantombot Over a Naked Harness
+
+A raw harness — Claude Code, Codex, or Pi on its own — is powerful and
+*exposed*. Whatever the model decides to do, it does, and everything it learns
+about you lives inside the vendor's ecosystem: their servers, their retention,
+their telemetry. Phantombot wraps that same harness in the two things a bare
+CLI doesn't give you — **a security perimeter in front of it, and a local-first
+vault around it.** The model keeps all of its power; you stop handing your
+attack surface and your data to someone else's cloud.
+
+Think of it as a **firewall on top of naked Claude Code / Codex / Pi.**
+
+**A firewall in front of the model.** A bare harness acts on whatever reaches
+it — including text from email, web pages, and webhooks that may be trying to
+*instruct* it. Phantombot sits in front of that as a
+[capability-and-trust perimeter](#security): a **two-tier trust model** (input
+is judged by *origin*, not content) and a **tool-less threat judge** that reads
+every untrusted turn — *before any of your memory is even loaded into a prompt*
+— and holds anything dangerous for you to talk through on your trusted channel.
+Same mental model as a firewall in front of an exposed box: the harness is
+still there, but nothing reaches it unfiltered.
+
+**Your data stays on your box.** With a naked proprietary harness, your memory,
+secrets, and context live in the vendor's ecosystem. Phantombot keeps them on
+the machine *you* run it on: an **encrypted per-persona vault**
+(AES-256-GCM, keyed to your identity) for secrets, and a **local markdown +
+SQLite memory store** on your own disk for decisions, lessons, people, and
+preferences. Your data doesn't leave the box, and there's no proprietary cloud
+account holding it hostage.
+
+**One capability layer on every harness.** Phantombot exposes external tools
+(MCP servers — Drive, GitHub, Linear, Home Assistant, and more) through a
+single `phantombot mcp` facade with **lazy discovery** (`search` → `describe`
+→ `call`) instead of dumping every schema into the prompt up front. The same
+capabilities work on Claude Code, Codex, *and* Pi — you aren't locked to one
+vendor's tool ecosystem.
+
+**Persistence and autonomy the CLI doesn't have.** One durable persona instead
+of a fresh, amnesiac session each time: long-term memory that *compounds*,
+durable scheduled tasks that survive restarts, a multi-persona fleet, and a
+sanctioned proactive channel so your Phantom can reach *you* on Telegram when
+something material happens — not just answer when spoken to.
+
+> **Honest framing.** This is defence *at the capability layer* — designed to
+> run natively without a disposable throwaway VM, and backed by an ongoing
+> [security-audit practice](#security). It dramatically shrinks the blast
+> radius; it is **not** a claim that the agent can't be compromised. A firewall
+> in front of the box, not an impenetrable box.
 
 ## Why Phantombot Exists
 
