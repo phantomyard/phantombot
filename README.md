@@ -107,13 +107,16 @@ every untrusted turn — *before any of your memory is even loaded into a prompt
 Same mental model as a firewall in front of an exposed box: the harness is
 still there, but nothing reaches it unfiltered.
 
-**Your data stays on your box.** With a naked proprietary harness, your memory,
-secrets, and context live in the vendor's ecosystem. Phantombot keeps them on
-the machine *you* run it on: an **encrypted per-persona vault**
-(AES-256-GCM, keyed to your identity) for secrets, and a **local markdown +
-SQLite memory store** on your own disk for decisions, lessons, people, and
-preferences. Your data doesn't leave the box, and there's no proprietary cloud
-account holding it hostage.
+**Your data stays under your control.** With a naked proprietary harness, your
+memory, secrets, and context are stored inside the vendor's ecosystem.
+Phantombot keeps that state on the machine *you* run it on: an **encrypted
+per-persona vault** (AES-256-GCM, keyed to your identity) for secrets, and a
+**local markdown + SQLite memory store** on your own disk for decisions,
+lessons, people, and preferences — no proprietary cloud account holding it
+hostage. (Prompts and tool calls still go to whichever model provider you
+configure — Claude, Codex, or Pi — so their retention and privacy terms apply
+to what's sent; Phantombot's boundary is that *storage and secrets* stay local,
+and the threat judge decides what's allowed into a prompt in the first place.)
 
 **One capability layer on every harness.** Phantombot exposes external tools
 (MCP servers — Drive, GitHub, Linear, Home Assistant, and more) through a
