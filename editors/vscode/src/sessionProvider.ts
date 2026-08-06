@@ -299,6 +299,11 @@ export function registerChatSessionProvider(
         });
         if (stopReason === "refusal") {
           stream.markdown("\n\n_(phantombot declined this turn.)_");
+        } else if (stopReason === "cancelled") {
+          // The user interrupted this turn by submitting another prompt (or hit
+          // stop). The server aborted it cleanly — mark it quietly, chat-channel
+          // style, rather than letting a half-finished turn read like an error.
+          stream.markdown("\n\n_(interrupted)_");
         }
         return {};
       } catch (e) {
