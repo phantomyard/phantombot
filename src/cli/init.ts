@@ -17,6 +17,7 @@ import { runInstall } from "./install.ts";
 import { runPersona } from "./persona.ts";
 import { runPhantomchat } from "./phantomchat.ts";
 import { runTelegram } from "./telegram.ts";
+import { runVoice } from "./voice.ts";
 
 export interface InitFlowInput {
   config: Config;
@@ -122,7 +123,8 @@ export default defineCommand({
       "  3. Connect PhantomChat (your private Nostr DM channel)\n" +
       "  4. Connect Telegram (optional — skippable)\n" +
       "  5. Enable semantic memory search (optional)\n" +
-      "  6. Install as a background service",
+      "  6. Enable voice — TTS/STT (optional)\n" +
+      "  7. Install as a background service",
       "Setup Flow"
     );
 
@@ -240,7 +242,30 @@ export default defineCommand({
       await runEmbedding({ embedded: true });
     }
 
-    // 5. Install
+    // 5. Optional: voice (TTS/STT).
+    // Same shape as the embeddings step above: a separate skippable confirm
+    // (default OFF) so it never blocks a quick install, and runVoice is called
+    // in `embedded` mode so it doesn't render its own intro/outro or prompt for
+    // a service restart (the service isn't installed until the next step). The
+    // return is intentionally non-fatal — voice is optional, so a skip or a
+    // key-validation failure must never abort the wizard before install.
+    p.log.step("Voice — TTS / STT (optional)");
+    p.note(
+      "Give your agent a voice: it can speak replies (text-to-speech) and\n" +
+      "transcribe voice notes you send it (speech-to-text). Pick from ElevenLabs\n" +
+      "or OpenAI (paid, API key), or Azure Edge (free, no key). It's optional —\n" +
+      "you can always set it up later with `phantombot voice`.",
+      "What this adds"
+    );
+    const wantVoice = await p.confirm({
+      message: "Set up voice now? (optional)",
+      initialValue: false,
+    });
+    if (!p.isCancel(wantVoice) && wantVoice) {
+      await runVoice({ embedded: true });
+    }
+
+    // 6. Install
     // Use a step marker, not a second p.intro — clack renders one
     // open / one close bracket per flow, and a second intro mid-flow
     // produces a stray opening bracket in the rendered TUI.

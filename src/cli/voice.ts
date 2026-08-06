@@ -71,16 +71,27 @@ export async function applyVoiceConfig(input: ApplyVoiceInput): Promise<void> {
 interface RunInput {
   config?: Config;
   serviceControl?: ServiceControl;
+  /**
+   * When true, this runs as a sub-step of another wizard (e.g.
+   * `phantombot init`) rather than standalone. Two effects:
+   *   - suppresses the standalone intro/outro and the "Existing config"
+   *     note (the parent owns the framing; a nested clack intro renders a
+   *     stray bracket), and
+   *   - skips the post-save restart prompt (the parent installs/starts the
+   *     service afterwards, so there is nothing running to restart yet).
+   */
+  embedded?: boolean;
 }
 
 export async function runVoice(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const svc = input.serviceControl ?? defaultServiceControl();
+  const embedded = input.embedded ?? false;
 
-  p.intro("Configure TTS / STT");
+  if (!embedded) p.intro("Configure TTS / STT");
 
   const existing = config.voice;
-  if (existing.provider !== "none") {
+  if (!embedded && existing.provider !== "none") {
     p.note(
       `provider:  ${existing.provider}\n` +
         formatExistingDetails(existing),
@@ -123,14 +134,19 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
       voice: { provider: "none" },
     });
     p.note(`provider set to "none"`, "Saved");
-    await maybePromptRestart(svc);
-    p.outro("done");
+    if (!embedded) {
+      await maybePromptRestart(svc);
+      p.outro("done");
+    }
     return 0;
   }
 
-  if (provider === "elevenlabs") return runElevenLabsFlow(config, svc, existing);
-  if (provider === "openai") return runOpenAIFlow(config, svc, existing);
-  if (provider === "azure_edge") return runAzureEdgeFlow(config, svc, existing);
+  if (provider === "elevenlabs")
+    return runElevenLabsFlow(config, svc, existing, embedded);
+  if (provider === "openai")
+    return runOpenAIFlow(config, svc, existing, embedded);
+  if (provider === "azure_edge")
+    return runAzureEdgeFlow(config, svc, existing, embedded);
   return 0;
 }
 
@@ -138,6 +154,7 @@ async function runElevenLabsFlow(
   config: Config,
   svc: ServiceControl,
   existing: VoiceConfig,
+  embedded: boolean,
 ): Promise<number> {
   const cur = existing.elevenlabs ?? ELEVENLABS_DEFAULTS;
   const key = await p.password({
@@ -200,8 +217,10 @@ async function runElevenLabsFlow(
       `key saved to ${defaultEnvFilePath()} as ${ENV_KEY_FOR_PROVIDER.elevenlabs}`,
     "Saved",
   );
-  await maybePromptRestart(svc);
-  p.outro("done");
+  if (!embedded) {
+    await maybePromptRestart(svc);
+    p.outro("done");
+  }
   return 0;
 }
 
@@ -209,6 +228,7 @@ async function runOpenAIFlow(
   config: Config,
   svc: ServiceControl,
   existing: VoiceConfig,
+  embedded: boolean,
 ): Promise<number> {
   const cur = existing.openai ?? OPENAI_DEFAULTS;
   const key = await p.password({
@@ -271,8 +291,10 @@ async function runOpenAIFlow(
       `key saved to ${defaultEnvFilePath()} as ${ENV_KEY_FOR_PROVIDER.openai}`,
     "Saved",
   );
-  await maybePromptRestart(svc);
-  p.outro("done");
+  if (!embedded) {
+    await maybePromptRestart(svc);
+    p.outro("done");
+  }
   return 0;
 }
 
@@ -280,6 +302,7 @@ async function runAzureEdgeFlow(
   config: Config,
   svc: ServiceControl,
   existing: VoiceConfig,
+  embedded: boolean,
 ): Promise<number> {
   const cur = existing.azure_edge ?? AZURE_EDGE_DEFAULTS;
   const voice = await p.select<string>({
@@ -310,8 +333,10 @@ async function runAzureEdgeFlow(
       `(no API key required)`,
     "Saved",
   );
-  await maybePromptRestart(svc);
-  p.outro("done");
+  if (!embedded) {
+    await maybePromptRestart(svc);
+    p.outro("done");
+  }
   return 0;
 }
 
