@@ -209,45 +209,6 @@ describe("AcpClient — session/prompt streaming", () => {
     t.push({ jsonrpc: "2.0", id: promptSent.id, result: { stopReason: "cancelled" } });
     expect(await p).toBe("cancelled");
   });
-
-  test("an interrupted turn does not evict the successor's stream on the same sid", async () => {
-    // Chat-channel interrupt: while turn A is still resolving, the user submits
-    // turn B on the SAME (post-#349 stable) sessionId. B's handlers replace A's.
-    // When A finally settles (cancelled), its `finally` must NOT delete B's slot
-    // — otherwise B's streamed chunks are dropped and the reply reads garbled.
-    const t = new FakeTransport();
-    const client = new AcpClient({ transport: t });
-
-    const aChunks: string[] = [];
-    const bChunks: string[] = [];
-
-    const pa = client.prompt("acp_x", "first", { onText: (txt) => aChunks.push(txt) });
-    const aSent = t.lastSent();
-
-    // User interrupts: B is submitted on the same sid before A has resolved.
-    const pb = client.prompt("acp_x", "second", { onText: (txt) => bChunks.push(txt) });
-    const bSent = t.lastSent();
-    expect(bSent.id).not.toBe(aSent.id);
-
-    // The server aborts A and settles it cancelled…
-    t.push({ jsonrpc: "2.0", id: aSent.id, result: { stopReason: "cancelled" } });
-    expect(await pa).toBe("cancelled");
-
-    // …then streams B's reply. It must still reach B's handlers.
-    t.push({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: {
-        sessionId: "acp_x",
-        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "B lives" } },
-      },
-    });
-    t.push({ jsonrpc: "2.0", id: bSent.id, result: { stopReason: "end_turn" } });
-
-    expect(await pb).toBe("end_turn");
-    expect(bChunks).toEqual(["B lives"]);
-    expect(aChunks).toEqual([]);
-  });
 });
 
 describe("AcpClient — session/load replay", () => {

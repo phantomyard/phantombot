@@ -83,21 +83,12 @@
         "title": "Open Phantombot Chat",
         "category": "phantombot",
         "icon": "$(hubot)"
-      },
-      {
-        "command": "phantombot.renameChat",
-        "title": "Rename Chat",
-        "category": "phantombot",
-        "icon": "$(edit)"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "phantombot.openSession"
-        },
-        {
-          "command": "phantombot.renameChat"
         }
       ],
       "view/title": [

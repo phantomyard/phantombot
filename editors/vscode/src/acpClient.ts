@@ -107,16 +107,7 @@ export class AcpClient {
   private readonly pending = new Map<JsonRpcId, Pending>();
   private readonly requestTimeoutMs: number;
   private readonly onDiagnostic: (text: string) => void;
-  /**
-   * sessionId → live prompt handlers, set for the duration of a prompt.
-   *
-   * Since #349 every chat has a STABLE sessionId, so two turns can briefly
-   * overlap on one sid: the user submits a new prompt while the previous turn
-   * is still resolving (chat-channel "interrupt" — the server aborts the old
-   * turn and starts the new one). The newer turn's handlers replace the older
-   * turn's entry here; the older turn's `finally` must therefore delete its
-   * slot ONLY if it still owns it (identity check), never clobber the successor.
-   */
+  /** sessionId → live prompt handlers, set for the duration of a prompt. */
   private readonly promptStreams = new Map<string, PromptHandlers>();
   /** sessionId → the slash commands the agent advertised for that session. */
   private readonly sessionCommands = new Map<string, AcpAvailableCommand[]>();
@@ -173,10 +164,7 @@ export class AcpClient {
       })) as AcpLoadSessionResult;
       return result;
     } finally {
-      // Only clear our own slot — a newer overlapping turn may have replaced it.
-      if (handlers && this.promptStreams.get(sessionId) === handlers) {
-        this.promptStreams.delete(sessionId);
-      }
+      if (handlers) this.promptStreams.delete(sessionId);
     }
   }
 
@@ -200,12 +188,7 @@ export class AcpClient {
       )) as AcpPromptResult;
       return result.stopReason;
     } finally {
-      // Only clear our own slot — if a newer overlapping turn (the user
-      // interrupting with a fresh prompt on this stable sid) already replaced
-      // it, leave the successor's handlers in place so its stream survives.
-      if (this.promptStreams.get(sessionId) === handlers) {
-        this.promptStreams.delete(sessionId);
-      }
+      this.promptStreams.delete(sessionId);
     }
   }
 

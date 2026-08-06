@@ -29,24 +29,17 @@ import { createLanguageModelChatProvider } from "./lmProvider.ts";
 import {
   registerChatSessionProvider,
   extractAttachments,
-  cwdFromSessionResource,
-  type SessionProviderHandle,
 } from "./sessionProvider.ts";
 import {
   pickOpenSessionCommand,
   promptBlocksFromRequest,
   promptTextWithCommand,
+  resolveSessionCreated,
   shouldAutoOpenSession,
   SIDEBAR_OPEN_COMMAND,
   EDITOR_OPEN_COMMAND,
   type OpenOnStartup,
 } from "./sessionBridge.ts";
-import {
-  listSessions,
-  patchSession,
-  type ChatSessionRecord,
-  type SessionKv,
-} from "./sessionStore.ts";
 
 // The participant id MUST equal the chat-session `type` (see package.json
 // contributes.chatSessions[].type). When `canDelegate: true`, VS Code registers
@@ -63,8 +56,8 @@ const OPEN_SESSION_COMMAND = "phantombot.openSession";
 /** globalState key remembering whether the phantombot session has ever been opened. */
 const STICKY_KEY = "phantombot.everOpened";
 
-/** Command id for renaming a chat in the phantombot sessions list. */
-const RENAME_CHAT_COMMAND = "phantombot.renameChat";
+/** globalState key prefix for the stable per-resource session `created` time. */
+const CREATED_KEY_PREFIX = "phantombot.sessionCreated:";
 
 /**
  * The per-type open commands (`…openNewSessionSidebar.phantombot`, etc.) only
@@ -171,44 +164,42 @@ export function activate(context: vscode.ExtensionContext): void {
   // rehydrated from phantombot's server-side memory. Uses the chatSessionsProvider
   // proposed API; registerChatSessionProvider no-ops cleanly if that proposal
   // isn't enabled for this extension (see argv.json "enable-proposed-api").
-  // Chat list + titles live in VS Code's OWN storage (workspaceState), never in
-  // the phantombot domain. This facade adapts the Memento to the pure store.
-  const kv: SessionKv = {
-    get: (k) => context.workspaceState.get(k),
-    update: (k, v) => void context.workspaceState.update(k, v),
-  };
-
-  const sessions = registerChatSessionProvider({
-    createClient: (cwd) => makeSessionClient(cwd, output),
-    currentCwd: currentWorkspaceCwd,
-    workspaceFolders: () =>
-      (vscode.workspace.workspaceFolders ?? []).map((f) => ({
-        cwd: f.uri.fsPath,
-        name: f.name,
-      })),
-    personaLabel: () =>
-      vscode.workspace
-        .getConfiguration("phantombot")
-        .get<string>("persona")
-        ?.trim() ?? "",
-    participant,
-    participantId: PARTICIPANT_ID,
-    kv,
-    // Remember that phantombot has been opened so we can re-open it on future
-    // launches (the "ifUsedBefore" sticky default).
-    onSessionOpened: () => {
-      void context.globalState.update(STICKY_KEY, true);
-    },
-    output,
-  });
-  context.subscriptions.push(sessions);
-
-  // Rename a chat in the list. All naming is client-side (VS Code storage); the
-  // rename never touches the phantombot domain.
   context.subscriptions.push(
-    vscode.commands.registerCommand(RENAME_CHAT_COMMAND, (arg?: unknown) =>
-      renameChatCommand(kv, currentWorkspaceCwd, sessions, output, arg),
-    ),
+    registerChatSessionProvider({
+      createClient: (cwd) => makeSessionClient(cwd, output),
+      currentCwd: currentWorkspaceCwd,
+      workspaceFolders: () =>
+        (vscode.workspace.workspaceFolders ?? []).map((f) => ({
+          cwd: f.uri.fsPath,
+          name: f.name,
+        })),
+      personaLabel: () =>
+        vscode.workspace
+          .getConfiguration("phantombot")
+          .get<string>("persona")
+          ?.trim() ?? "",
+      participant,
+      participantId: PARTICIPANT_ID,
+      // Stable per-resource `created` time, persisted in globalState so the
+      // session's age stays put across list refreshes (and never defaults to
+      // the epoch, which newer VS Code renders as "57 yrs ago" + auto-archives).
+      sessionCreatedAt: (key) =>
+        resolveSessionCreated(
+          key,
+          {
+            get: (k) => context.globalState.get<number>(CREATED_KEY_PREFIX + k),
+            set: (k, v) =>
+              void context.globalState.update(CREATED_KEY_PREFIX + k, v),
+          },
+          Date.now(),
+        ),
+      // Remember that phantombot has been opened so we can re-open it on future
+      // launches (the "ifUsedBefore" sticky default).
+      onSessionOpened: () => {
+        void context.globalState.update(STICKY_KEY, true);
+      },
+      output,
+    }),
   );
 
   // ── Quick-launch command: button + palette + keybinding ───────────────────
@@ -319,91 +310,6 @@ async function openPhantombotSession(
 /** Promise-based delay (avoids pulling in a timers import). */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Rename a chat in the phantombot sessions list. Invoked from the command
- * palette (→ quick pick of the workspace's chats) or a context-menu action on a
- * session item (→ that item's resource is passed as `arg`). Naming is purely
- * client-side: it edits the title in VS Code's workspaceState and re-lists.
- */
-async function renameChatCommand(
-  kv: SessionKv,
-  currentCwd: () => string,
-  sessions: SessionProviderHandle,
-  output: vscode.OutputChannel,
-  arg?: unknown,
-): Promise<void> {
-  try {
-    let target = resolveRenameTarget(arg);
-    if (!target) {
-      const cwd = currentCwd();
-      const records = listSessions(kv, cwd);
-      if (records.length === 0) {
-        void vscode.window.showInformationMessage(
-          "phantombot: no saved chats to rename yet.",
-        );
-        return;
-      }
-      const picked = await vscode.window.showQuickPick(
-        records.map((rec: ChatSessionRecord) => ({
-          label: rec.title,
-          description: new Date(rec.lastUsedAt).toLocaleString(),
-          rec,
-        })),
-        { placeHolder: "Rename which phantombot chat?" },
-      );
-      if (!picked) return;
-      target = { cwd, sessionId: picked.rec.sessionId, current: picked.rec.title };
-    }
-
-    const next = await vscode.window.showInputBox({
-      prompt: "New chat name",
-      value: target.current ?? "",
-      validateInput: (v) =>
-        v.trim().length === 0 ? "Name can't be empty" : undefined,
-    });
-    if (next === undefined) return; // cancelled
-    const title = next.trim();
-    if (!title) return;
-
-    const updated = patchSession(kv, target.cwd, target.sessionId, {
-      title,
-      titleSettled: true,
-    });
-    if (!updated) {
-      void vscode.window.showWarningMessage(
-        "phantombot: that chat is no longer in the list.",
-      );
-      return;
-    }
-    sessions.refresh();
-  } catch (e) {
-    output.appendLine(`[rename] ${(e as Error).message}`);
-  }
-}
-
-/**
- * Resolve the chat to rename from a context-menu argument (a ChatSessionItem or
- * its resource Uri). Returns undefined when there's no usable target, so the
- * caller falls back to a quick pick.
- */
-function resolveRenameTarget(
-  arg: unknown,
-): { cwd: string; sessionId: string; current?: string } | undefined {
-  const uri =
-    arg instanceof vscode.Uri
-      ? arg
-      : (arg as { resource?: unknown })?.resource;
-  if (!(uri instanceof vscode.Uri)) return undefined;
-  const sessionId = (uri.query ?? "").trim();
-  if (!sessionId) return undefined;
-  const current = (arg as { label?: unknown })?.label;
-  return {
-    cwd: cwdFromSessionResource(uri),
-    sessionId,
-    current: typeof current === "string" ? current : undefined,
-  };
 }
 
 /**
