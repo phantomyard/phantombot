@@ -27,8 +27,6 @@
  *     content-block array the agent consumes — so photos and files Just Work.
  */
 
-import { randomBytes } from "node:crypto";
-
 import type { PromptHandlers } from "./acpClient.ts";
 import type { AcpContentBlock, AcpSessionUpdate } from "./protocol.ts";
 
@@ -56,6 +54,24 @@ export function cwdFromResourcePath(path: string): string {
   return path;
 }
 
+/**
+ * A session resource URI now carries TWO things:
+ *   - `path`  → the workspace cwd (as before), and
+ *   - `query` → the opaque server thread token for THIS chat (multi-chat).
+ *
+ * A resource with an empty/absent query is a brand-new ("untitled") chat that
+ * hasn't been bound to a thread yet — the content provider mints one on open.
+ * The glue builds the real `Uri` as `{ scheme, path, query }`; these pure
+ * helpers keep the encode/decode symmetric and unit-tested off-host.
+ */
+export function decodeSessionResource(
+  path: string,
+  query: string | undefined,
+): { cwd: string; sessionId?: string } {
+  const q = (query ?? "").trim();
+  return { cwd: cwdFromResourcePath(path), sessionId: q.length > 0 ? q : undefined };
+}
+
 /** A workspace folder candidate that backs one chat-session item. */
 export interface SessionCandidate {
   cwd: string;
@@ -76,36 +92,6 @@ export function resolveSessionCandidates(
 ): SessionCandidate[] {
   if (folders.length > 0) return folders;
   return [{ cwd: fallbackCwd, name: fallbackName }];
-}
-
-/** Minimal persistent KV the timing resolver needs (backed by globalState). */
-export interface CreatedStore {
-  get(key: string): number | undefined;
-  set(key: string, value: number): void;
-}
-
-/**
- * Resolve a stable `created` timestamp (ms since epoch) for a session resource.
- *
- * VS Code's newer chat-sessions surface renders `ChatSessionItem.timing.created`
- * as the session's age. When we omit `timing`, that field defaults to 0 — the
- * Unix epoch — so the session shows as "57 yrs ago" and newer builds auto-archive
- * it out of the active SESSIONS list (older builds didn't render age at all, which
- * is why this only bit on the Mac). Populating a real `created` fixes both.
- *
- * We persist a first-seen time per resource key so the age is STABLE across list
- * refreshes (returning `Date.now()` raw would reset the age to "just now" on every
- * refresh). First sighting records `now`; later sightings return the stored value.
- */
-export function resolveSessionCreated(
-  key: string,
-  store: CreatedStore,
-  now: number,
-): number {
-  const existing = store.get(key);
-  if (typeof existing === "number" && existing > 0) return existing;
-  store.set(key, now);
-  return now;
 }
 
 /** How the extension behaves on startup re: auto-opening the phantombot session. */
@@ -287,12 +273,6 @@ export function promptTextWithCommand(
   if (!cmd) return text;
   const rest = text.trim();
   return rest.length > 0 ? `/${cmd} ${rest}` : `/${cmd}`;
-}
-
-/** Mint an opaque ACP session token (client side). The server re-derives the
- * stable conversation key from cwd regardless, so any unique token works. */
-export function mintSessionId(): string {
-  return `acp_${randomBytes(12).toString("hex")}`;
 }
 
 /** True when a guessed mime type denotes an image we can inline. */
