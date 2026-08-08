@@ -94,6 +94,93 @@ describe("createKillCoordinator — idle timer", () => {
   });
 });
 
+describe("createKillCoordinator — tool cap (issue #351)", () => {
+  test("sustained 'tool' activity past toolTimeoutMs lets the idle kill fire", async () => {
+    // A wedged-but-chattery tool: we drive touch("tool") forever. Without a
+    // cap that would reset the idle timer indefinitely and defeat the watchdog
+    // up to the hard cap. With toolTimeoutMs the tool-run's idle-reset budget
+    // runs out and the idle timer finally fires — even though tool activity
+    // never stops. That's the fix: the kill is caused by the cap, not silence.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 150,
+      toolTimeoutMs: 300,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    // Hammer tool activity the whole time — proving it's the cap, not a lull.
+    const interval = setInterval(() => killer.touch("tool"), 30);
+    try {
+      await proc.exited; // killed once the cap + idle window elapse (~450ms)
+    } finally {
+      clearInterval(interval);
+      await killer.dispose();
+    }
+    expect(killer.killCause()).toBe("idle");
+  });
+
+  test("without a tool cap, sustained 'tool' activity keeps the process alive", async () => {
+    // Legacy behaviour (toolTimeoutMs omitted): a long-but-working tool that
+    // keeps emitting activity must never be killed. Held well past what the
+    // capped test kills at.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 150,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    const interval = setInterval(() => killer.touch("tool"), 30);
+    await Bun.sleep(700);
+    clearInterval(interval);
+    await killer.dispose();
+    expect(killer.killCause()).toBeUndefined();
+  });
+
+  test("productive output resets the tool-run budget", async () => {
+    // Two tool-runs, each under the cap, separated by productive output. Total
+    // tool time exceeds toolTimeoutMs, but no SINGLE contiguous run does — so a
+    // healthy turn interleaving tools with text is never killed.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 200,
+      toolTimeoutMs: 300,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    const interval = setInterval(() => killer.touch("tool"), 30);
+    await Bun.sleep(250); // first tool-run, under the 300ms cap
+    killer.touch("productive"); // resets the budget (toolRunStart cleared)
+    await Bun.sleep(250); // second tool-run, again under the cap
+    clearInterval(interval);
+    await killer.dispose();
+    expect(killer.killCause()).toBeUndefined();
+  });
+});
+
 describe("createKillCoordinator — hard timer", () => {
   test("hard timer fires regardless of touch() activity", async () => {
     // Process keeps emitting (so idle never fires) but hard cap is short.

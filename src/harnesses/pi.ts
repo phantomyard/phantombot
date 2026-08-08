@@ -281,6 +281,21 @@ export class PiHarness implements Harness {
       // finished answer, so a narration-only mid-task exit falls through to the
       // next harness rather than being stored as the reply (issue #352).
       requireCompletion: true,
+      // Bound how long a single contiguous tool-run may keep the idle watchdog
+      // alive via tool_execution_* activity alone, with no user-facing text. pi
+      // only emits tool_execution_update on genuine new output (bash streams
+      // stdout, the coder delegate forwards its child's progress) so a healthy
+      // turn is rarely affected — but a tool that trickles output forever (a
+      // stalled auto-router, a hung network retry that keeps logging) could
+      // otherwise reset the idle timer up to the 60-min hard cap with no
+      // fallback (issue #351). This is a GENEROUS last-resort net: comfortably
+      // above any realistic tool-run yet well under the hard cap, so a
+      // wedged-but-chattery turn fails over in minutes, not an hour. Derived
+      // from the idle window, floored at 20 min, and never above the hard cap.
+      toolTimeoutMs: Math.min(
+        req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+        Math.max(req.idleTimeoutMs * 4, 1_200_000),
+      ),
     });
 
     } finally {
@@ -373,8 +388,12 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   // onUpdate) as its child makes real progress, so the PRIMARY stays visibly
   // alive while it's blocked awaiting the delegate. Surface a payload-less
   // heartbeat (no partialResult leak, no spurious bubble flush) — piActivity
-  // classifies it as in-tool activity so it RESETS the idle watchdog. Only ever
-  // emitted on genuine child output, so a wedged tool still trips the idle kill.
+  // classifies it as in-tool activity so it RESETS the idle watchdog. It is
+  // emitted on genuine new output (bash streams stdout, the coder delegate
+  // forwards its child), so a tool that goes truly silent still trips the idle
+  // kill. A tool that instead TRICKLES output forever can't defeat the watchdog
+  // indefinitely either: the shared engine caps how long tool activity alone
+  // may keep the idle timer alive (runHarnessProcess toolTimeoutMs, issue #351).
   if (obj.type === "tool_execution_update") {
     return { type: "heartbeat" };
   }

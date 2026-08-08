@@ -48,6 +48,16 @@ export interface KillCoordinatorOpts {
   idleTimeoutMs: number;
   /** Hard wall-clock cap. Never resets. Omit to disable the wall-clock SIGTERM. */
   hardTimeoutMs?: number;
+  /**
+   * Wall-clock cap on how long a SINGLE contiguous tool-run may keep resetting
+   * the idle timer via `"tool"` activity WITHOUT any productive output.
+   * Measured from the start of the tool-run; any productive output resets the
+   * budget. Past this cap, tool activity stops deferring the idle kill, so a
+   * wedged-but-chattery tool trips the idle timeout instead of surviving to the
+   * hard cap. Omit to disable (tool activity resets the idle timer for as long
+   * as it keeps arriving — the legacy behaviour). See touch() and issue #351.
+   */
+  toolTimeoutMs?: number;
   /** External abort, e.g. user typed /stop. */
   signal?: AbortSignal;
   /** For log lines only. */
@@ -86,6 +96,10 @@ export function createKillCoordinator(
   let cause: KillCause;
   let disposed = false;
   let toolRunning = false;
+  // Wall-clock start of the current contiguous tool-run (undefined when no tool
+  // is running). Used with opts.toolTimeoutMs to cap how long tool activity
+  // alone may keep deferring the idle kill. See touch().
+  let toolRunStart: number | undefined;
 
   const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
     if (cause || disposed) return;
@@ -121,9 +135,30 @@ export function createKillCoordinator(
     touch(activity: HarnessActivity = "productive"): void {
       if (cause || disposed) return;
       if (activity === "tool") {
-        toolRunning = true;
+        if (!toolRunning) {
+          toolRunning = true;
+          toolRunStart = Date.now();
+        } else if (
+          opts.toolTimeoutMs !== undefined &&
+          toolRunStart !== undefined &&
+          Date.now() - toolRunStart >= opts.toolTimeoutMs
+        ) {
+          // This contiguous tool-run has kept the idle timer alive via tool
+          // activity for longer than the tool cap WITHOUT any productive
+          // (text) output. Past the cap a tool update no longer counts as
+          // liveness: fall through WITHOUT re-arming the idle timer, so the
+          // last-armed idle window runs out and triggerKill("idle") finally
+          // fires — a wedged-but-chattery tool (e.g. a stalled router that
+          // keeps trickling tool_execution_update) fails over in minutes
+          // instead of surviving to the hard cap (issue #351). Any productive
+          // output resets the budget (the "productive" branch clears
+          // toolRunStart), so a healthy turn interleaving tools with text is
+          // never affected.
+          return;
+        }
       } else if (activity === "productive") {
         toolRunning = false;
+        toolRunStart = undefined;
       } else if (toolRunning) {
         return;
       }
@@ -289,6 +324,16 @@ export interface HarnessProcessSpec {
    */
   requireCompletion?: boolean;
   /**
+   * Wall-clock cap (ms) on how long a SINGLE contiguous tool-run may keep the
+   * idle watchdog alive via `"tool"` activity alone, with no productive output.
+   * Forwarded to the kill coordinator. Guards against a wedged-but-chattery
+   * tool (e.g. a stalled router or a hung retry that keeps trickling output)
+   * resetting the idle timer up to the hard cap with no fallback (issue #351).
+   * Omit to disable (legacy: any tool activity resets the idle timer as long as
+   * it keeps arriving).
+   */
+  toolTimeoutMs?: number;
+  /**
    * Terminal error to emit with priority over kill-cause / exit-code, e.g.
    * An adapter's mid-stream 4XX fast-fallback. Called after the loop; if it returns
    * a chunk, the engine drains the process and yields that instead.
@@ -313,6 +358,7 @@ export async function* runHarnessProcess(
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
+    toolTimeoutMs: spec.toolTimeoutMs,
     signal: req.signal,
     harnessId,
   });
