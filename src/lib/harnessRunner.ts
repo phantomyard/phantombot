@@ -274,6 +274,21 @@ export interface HarnessProcessSpec {
    /** Parse the decoder tail after stdout closes, when an adapter needs it. */
   flushTail?: boolean;
   /**
+   * Require an explicit completion signal before treating an exit-0 run as a
+   * finished answer. When true, the engine yields the terminal `done` on exit 0
+   * ONLY if the parser emitted at least one `done` chunk during the stream (the
+   * harness's "the model finished" marker); otherwise it yields a recoverable
+   * error so the orchestrator falls through to the next harness.
+   *
+   * This exists for harnesses whose stream carries no native terminal `done`
+   * and would otherwise derive completion from the exit code alone — pi, whose
+   * only completion signal is `turn_end` (issue #352). A run that exits 0
+   * mid-task (only tool narration, no turn_end) is a "no real answer" state,
+   * not a success. Omit/false ⇒ exit 0 is accepted as done (the legacy
+   * behaviour every other harness relies on).
+   */
+  requireCompletion?: boolean;
+  /**
    * Terminal error to emit with priority over kill-cause / exit-code, e.g.
    * An adapter's mid-stream 4XX fast-fallback. Called after the loop; if it returns
    * a chunk, the engine drains the process and yields that instead.
@@ -328,6 +343,10 @@ export async function* runHarnessProcess(
   let buffer = "";
   let finalText = "";
   let captured: Record<string, unknown> | undefined;
+  // Set once the parser emits a `done` chunk — the harness's "the model
+  // finished this turn" marker (pi's turn_end, codex's turn.completed). Only
+  // consulted when spec.requireCompletion is set; see the exit-0 gate below.
+  let sawCompletion = false;
   // Set when a parser returns a terminal policy error (e.g. the subagent
   // tripwire). The error chunk is yielded, the subprocess is killed NOW,
   // and every line after it — same batch or later — is dropped: nothing a
@@ -351,6 +370,7 @@ export async function* runHarnessProcess(
     if (c.type === "text") finalText += c.text;
     if (c.type === "done") {
       captured = c.meta;
+      sawCompletion = true;
       return;
     }
     yield c;
@@ -437,6 +457,23 @@ export async function* runHarnessProcess(
       // network blips, transient model errors) is recoverable so the
       // orchestrator tries the next harness.
       recoverable: code !== 127,
+    };
+    return;
+  }
+
+  // Completion gate (opt-in via spec.requireCompletion): an exit-0 run that
+  // never emitted the harness's completion marker (pi's turn_end) is a
+  // "stopped mid-turn" state, not a finished answer — the accumulated text is
+  // only partial output / tool narration. Yield a recoverable error so the
+  // orchestrator falls through to the next harness instead of storing the
+  // fragment as the reply. See issue #352. Note `finalText` may be non-empty
+  // here (narration IS text), so the existing empty-done fall-through in
+  // runWithFallback cannot catch this case — the completion marker can.
+  if (spec.requireCompletion && !sawCompletion) {
+    yield {
+      type: "error",
+      error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
+      recoverable: true,
     };
     return;
   }

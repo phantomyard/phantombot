@@ -7,6 +7,8 @@
 #
 # Modes:
 #   normal   — emit thinking + text deltas + turn_end, exit 0
+#   nofinish — emit tool-narration text deltas then exit 0 WITHOUT turn_end
+#              (the #352 "stopped mid-turn" case: must fall through, not 'done')
 #   error    — exit 1
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
@@ -45,6 +47,16 @@ case "$mode" in
     printf '%s\n' '{"type":"message_end","message":{}}'
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     printf '%s\n' '{"type":"agent_end","messages":[]}'
+    exit 0
+    ;;
+  nofinish)
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
+    printf '%s\n' '{"type":"agent_start"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    # Only tool narration — real answer never produced, and crucially NO turn_end.
+    printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Ik ga de repo ophalen...","partial":{}},"message":{}}'
+    printf '%s\n' '{"type":"tool_execution_start","toolName":"bash","args":{}}'
+    # Process exits 0 mid-task with no turn_end completion signal.
     exit 0
     ;;
   error)

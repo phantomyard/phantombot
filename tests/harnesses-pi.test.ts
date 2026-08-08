@@ -228,18 +228,32 @@ describe("parsePiEvent", () => {
     }
   });
 
-  test("ignores session / agent_start / turn_start / turn_end / agent_end / message_start / message_end", () => {
+  test("ignores session / agent_start / turn_start / agent_end / agent_settled / message_start / message_end", () => {
     for (const t of [
       "session",
       "agent_start",
       "turn_start",
-      "turn_end",
       "agent_end",
+      "agent_settled",
       "message_start",
       "message_end",
     ]) {
       expect(parsePiEvent({ type: t })).toBeUndefined();
     }
+  });
+
+  test("turn_end → done completion marker (payload-less, drives requireCompletion)", () => {
+    // turn_end is pi's only completion signal. parsePiEvent surfaces it as a
+    // `done` chunk so runHarnessProcess can tell a finished turn from an exit-0
+    // that stopped mid-task. No finalText — the reply text already streamed as
+    // text_delta chunks. See issue #352. NB agent_end is deliberately NOT a
+    // completion marker (a run that errors can still emit it).
+    expect(parsePiEvent({ type: "turn_end", message: {}, toolResults: [] })).toEqual({
+      type: "done",
+      finalText: "",
+      meta: undefined,
+    });
+    expect(parsePiEvent({ type: "agent_end", messages: [] })).toBeUndefined();
   });
 
   test("ignores empty text_delta", () => {
@@ -350,6 +364,20 @@ describe("PiHarness.invoke (subprocess)", () => {
       finalText: "hello world",
       meta: { harnessId: "pi" },
     });
+  });
+
+  test("exit 0 without turn_end → recoverable error, NOT done (issue #352)", async () => {
+    // A narration-only run that exits 0 with no completion signal must fall
+    // through to the next harness, not be stored as a finished answer.
+    process.env.FAKE_PI_MODE = "nofinish";
+    const chunks = await collect(mkHarness().invoke(newRequest()));
+    expect(chunks.some((c) => c.type === "done")).toBe(false);
+    const err = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable: boolean }
+      | undefined;
+    expect(err).toBeDefined();
+    expect(err!.recoverable).toBe(true);
+    expect(err!.error).toContain("without a completion signal");
   });
 
   test("toolsMode 'none' passes pi's native --no-tools (true zero-tools)", async () => {
