@@ -15,9 +15,13 @@
  * Stream-json events translated to phantombot HarnessChunks:
  *   message_update with text_delta  → { type: "text", text }
  *   tool_execution_start            → { type: "progress", note: "tool: <name>" }
- *   anything else (agent_start,
- *     tool_execution_end, turn_end,
- *     extension_*) → ignored        (the done chunk is emitted from process exit)
+ *   turn_end                        → { type: "done" } COMPLETION marker: the
+ *     model finished this turn. The shared engine requires it before it will
+ *     synthesize the terminal `done` on exit 0, so an exit-0 that stopped
+ *     mid-task (only tool narration, no turn_end) falls through to the next
+ *     harness instead of being stored as a finished answer (issue #352).
+ *   anything else (agent_start, agent_end, agent_settled,
+ *     tool_execution_end, extension_*) → ignored
  *
  * Auth (per-turn, with local-store fallback): when PHANTOMBOT_PI_API_KEY is
  * set, phantombot threads it onto `--api-key` per turn (the same way it threads
@@ -271,6 +275,27 @@ export class PiHarness implements Harness {
       parseEvent: parsePiEvent,
       activity: piActivity,
       buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
+      // pi is the only harness with no native terminal `done` in its stream —
+      // it derives completion from turn_end (mapped to a `done` marker in
+      // parsePiEvent). Require that marker before accepting an exit-0 run as a
+      // finished answer, so a narration-only mid-task exit falls through to the
+      // next harness rather than being stored as the reply (issue #352).
+      requireCompletion: true,
+      // Bound how long a single contiguous tool-run may keep the idle watchdog
+      // alive via tool_execution_* activity alone, with no user-facing text. pi
+      // only emits tool_execution_update on genuine new output (bash streams
+      // stdout, the coder delegate forwards its child's progress) so a healthy
+      // turn is rarely affected — but a tool that trickles output forever (a
+      // stalled auto-router, a hung network retry that keeps logging) could
+      // otherwise reset the idle timer up to the 60-min hard cap with no
+      // fallback (issue #351). This is a GENEROUS last-resort net: comfortably
+      // above any realistic tool-run yet well under the hard cap, so a
+      // wedged-but-chattery turn fails over in minutes, not an hour. Derived
+      // from the idle window, floored at 20 min, and never above the hard cap.
+      toolTimeoutMs: Math.min(
+        req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+        Math.max(req.idleTimeoutMs * 4, 1_200_000),
+      ),
     });
 
     } finally {
@@ -363,10 +388,35 @@ export function parsePiEvent(parsed: unknown): HarnessChunk | undefined {
   // onUpdate) as its child makes real progress, so the PRIMARY stays visibly
   // alive while it's blocked awaiting the delegate. Surface a payload-less
   // heartbeat (no partialResult leak, no spurious bubble flush) — piActivity
-  // classifies it as in-tool activity so it RESETS the idle watchdog. Only ever
-  // emitted on genuine child output, so a wedged tool still trips the idle kill.
+  // classifies it as in-tool activity so it RESETS the idle watchdog. It is
+  // emitted on genuine new output (bash streams stdout, the coder delegate
+  // forwards its child), so a tool that goes truly silent still trips the idle
+  // kill. A tool that instead TRICKLES output forever can't defeat the watchdog
+  // indefinitely either: the shared engine caps how long tool activity alone
+  // may keep the idle timer alive (runHarnessProcess toolTimeoutMs, issue #351).
   if (obj.type === "tool_execution_update") {
     return { type: "heartbeat" };
+  }
+
+  // turn_end is pi's end-of-turn COMPLETION signal — the model has finished
+  // this turn. Verified against pi 0.80.x: a successful run always ends
+  // turn_end → agent_end → agent_settled, in --no-tools mode too. Surface it
+  // as a `done` marker (payload-less: the reply text already streamed as
+  // text_delta chunks and is accumulated by the shared engine) so that engine
+  // can distinguish a genuinely COMPLETED turn from an exit-0 that stopped
+  // mid-task having emitted only tool narration — see runHarnessProcess's
+  // `requireCompletion` gate and issue #352. We deliberately gate on turn_end
+  // ALONE, not the later agent_end/agent_settled: a run that errors out can
+  // still emit agent_end, and treating that as "done" would accept a broken
+  // turn as complete. turn_end fires only when the turn itself finished.
+  //
+  // Version caveat: on a hypothetical pi build that does not emit turn_end,
+  // every turn would fail the gate and fall through to the next harness. That
+  // degrades safely — a recoverable fallback that still yields a real answer
+  // (double work, not a wrong answer) — whereas the pre-fix behaviour returned
+  // the trimmed narration as if it were the answer.
+  if (obj.type === "turn_end") {
+    return { type: "done", finalText: "", meta: undefined };
   }
 
   if (obj.type !== "message_update") return undefined;

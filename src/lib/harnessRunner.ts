@@ -48,6 +48,16 @@ export interface KillCoordinatorOpts {
   idleTimeoutMs: number;
   /** Hard wall-clock cap. Never resets. Omit to disable the wall-clock SIGTERM. */
   hardTimeoutMs?: number;
+  /**
+   * Wall-clock cap on how long a SINGLE contiguous tool-run may keep resetting
+   * the idle timer via `"tool"` activity WITHOUT any productive output.
+   * Measured from the start of the tool-run; any productive output resets the
+   * budget. Past this cap, tool activity stops deferring the idle kill, so a
+   * wedged-but-chattery tool trips the idle timeout instead of surviving to the
+   * hard cap. Omit to disable (tool activity resets the idle timer for as long
+   * as it keeps arriving — the legacy behaviour). See touch() and issue #351.
+   */
+  toolTimeoutMs?: number;
   /** External abort, e.g. user typed /stop. */
   signal?: AbortSignal;
   /** For log lines only. */
@@ -86,6 +96,10 @@ export function createKillCoordinator(
   let cause: KillCause;
   let disposed = false;
   let toolRunning = false;
+  // Wall-clock start of the current contiguous tool-run (undefined when no tool
+  // is running). Used with opts.toolTimeoutMs to cap how long tool activity
+  // alone may keep deferring the idle kill. See touch().
+  let toolRunStart: number | undefined;
 
   const triggerKill = (newCause: Exclude<KillCause, undefined>): void => {
     if (cause || disposed) return;
@@ -121,9 +135,30 @@ export function createKillCoordinator(
     touch(activity: HarnessActivity = "productive"): void {
       if (cause || disposed) return;
       if (activity === "tool") {
-        toolRunning = true;
+        if (!toolRunning) {
+          toolRunning = true;
+          toolRunStart = Date.now();
+        } else if (
+          opts.toolTimeoutMs !== undefined &&
+          toolRunStart !== undefined &&
+          Date.now() - toolRunStart >= opts.toolTimeoutMs
+        ) {
+          // This contiguous tool-run has kept the idle timer alive via tool
+          // activity for longer than the tool cap WITHOUT any productive
+          // (text) output. Past the cap a tool update no longer counts as
+          // liveness: fall through WITHOUT re-arming the idle timer, so the
+          // last-armed idle window runs out and triggerKill("idle") finally
+          // fires — a wedged-but-chattery tool (e.g. a stalled router that
+          // keeps trickling tool_execution_update) fails over in minutes
+          // instead of surviving to the hard cap (issue #351). Any productive
+          // output resets the budget (the "productive" branch clears
+          // toolRunStart), so a healthy turn interleaving tools with text is
+          // never affected.
+          return;
+        }
       } else if (activity === "productive") {
         toolRunning = false;
+        toolRunStart = undefined;
       } else if (toolRunning) {
         return;
       }
@@ -274,6 +309,31 @@ export interface HarnessProcessSpec {
    /** Parse the decoder tail after stdout closes, when an adapter needs it. */
   flushTail?: boolean;
   /**
+   * Require an explicit completion signal before treating an exit-0 run as a
+   * finished answer. When true, the engine yields the terminal `done` on exit 0
+   * ONLY if the parser emitted at least one `done` chunk during the stream (the
+   * harness's "the model finished" marker); otherwise it yields a recoverable
+   * error so the orchestrator falls through to the next harness.
+   *
+   * This exists for harnesses whose stream carries no native terminal `done`
+   * and would otherwise derive completion from the exit code alone — pi, whose
+   * only completion signal is `turn_end` (issue #352). A run that exits 0
+   * mid-task (only tool narration, no turn_end) is a "no real answer" state,
+   * not a success. Omit/false ⇒ exit 0 is accepted as done (the legacy
+   * behaviour every other harness relies on).
+   */
+  requireCompletion?: boolean;
+  /**
+   * Wall-clock cap (ms) on how long a SINGLE contiguous tool-run may keep the
+   * idle watchdog alive via `"tool"` activity alone, with no productive output.
+   * Forwarded to the kill coordinator. Guards against a wedged-but-chattery
+   * tool (e.g. a stalled router or a hung retry that keeps trickling output)
+   * resetting the idle timer up to the hard cap with no fallback (issue #351).
+   * Omit to disable (legacy: any tool activity resets the idle timer as long as
+   * it keeps arriving).
+   */
+  toolTimeoutMs?: number;
+  /**
    * Terminal error to emit with priority over kill-cause / exit-code, e.g.
    * An adapter's mid-stream 4XX fast-fallback. Called after the loop; if it returns
    * a chunk, the engine drains the process and yields that instead.
@@ -298,6 +358,7 @@ export async function* runHarnessProcess(
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
+    toolTimeoutMs: spec.toolTimeoutMs,
     signal: req.signal,
     harnessId,
   });
@@ -328,6 +389,10 @@ export async function* runHarnessProcess(
   let buffer = "";
   let finalText = "";
   let captured: Record<string, unknown> | undefined;
+  // Set once the parser emits a `done` chunk — the harness's "the model
+  // finished this turn" marker (pi's turn_end, codex's turn.completed). Only
+  // consulted when spec.requireCompletion is set; see the exit-0 gate below.
+  let sawCompletion = false;
   // Set when a parser returns a terminal policy error (e.g. the subagent
   // tripwire). The error chunk is yielded, the subprocess is killed NOW,
   // and every line after it — same batch or later — is dropped: nothing a
@@ -351,6 +416,7 @@ export async function* runHarnessProcess(
     if (c.type === "text") finalText += c.text;
     if (c.type === "done") {
       captured = c.meta;
+      sawCompletion = true;
       return;
     }
     yield c;
@@ -437,6 +503,23 @@ export async function* runHarnessProcess(
       // network blips, transient model errors) is recoverable so the
       // orchestrator tries the next harness.
       recoverable: code !== 127,
+    };
+    return;
+  }
+
+  // Completion gate (opt-in via spec.requireCompletion): an exit-0 run that
+  // never emitted the harness's completion marker (pi's turn_end) is a
+  // "stopped mid-turn" state, not a finished answer — the accumulated text is
+  // only partial output / tool narration. Yield a recoverable error so the
+  // orchestrator falls through to the next harness instead of storing the
+  // fragment as the reply. See issue #352. Note `finalText` may be non-empty
+  // here (narration IS text), so the existing empty-done fall-through in
+  // runWithFallback cannot catch this case — the completion marker can.
+  if (spec.requireCompletion && !sawCompletion) {
+    yield {
+      type: "error",
+      error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
+      recoverable: true,
     };
     return;
   }
