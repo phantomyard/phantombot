@@ -168,10 +168,11 @@ export async function runMcpAdd(input: McpAddInput): Promise<number> {
   }
 
   const dir = await resolvePersonaDir(input.persona);
-  const registry = await loadRegistry(dir);
-  await saveRegistry(dir, upsertServer(registry, input.id, entry));
-  out.write(`registered MCP server '${input.id}' (${transport})\n`);
 
+  // Write the vault client secret BEFORE the registry entry. The registry is
+  // what agents read to reach a server; if we registered first and the vault
+  // write then failed, we'd leave a server registered without its stored
+  // client. Ordering the vault write first keeps that invariant intact.
   if (preClient && tokenRef) {
     const vault = await openPersonaVault(dir);
     try {
@@ -184,6 +185,10 @@ export async function runMcpAdd(input: McpAddInput): Promise<number> {
         `(DCR will be skipped for this server)\n`,
     );
   }
+
+  const registry = await loadRegistry(dir);
+  await saveRegistry(dir, upsertServer(registry, input.id, entry));
+  out.write(`registered MCP server '${input.id}' (${transport})\n`);
 
   printNextSteps(input.id, entry, out, { hasStaticClient: Boolean(preClient) });
   return 0;
