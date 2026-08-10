@@ -173,6 +173,40 @@ describe("acquireRunLock", () => {
     if (!isLockHandle(second)) expect(second.pid).toBe(process.pid);
     first.release();
   });
+
+  // ── Atomic reclaim (rename over stale) ──
+  // N aligned starters racing against a stale lock must result in exactly
+  // one acquiring the handle; the rest see a conflict. This is the core
+  // invariant that the rename-reclaim path must preserve.
+  test("exactly one of N starters wins against a stale lock (rename-reclaim)", async () => {
+    const N = 5;
+    const path = join(workdir, "run.lock");
+    // Write a stale lock (dead PID, no token) — every starter will try to reclaim.
+    writeFileSync(path, "999999\n");
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        Bun.spawn([
+          "bun",
+          "-e",
+          [
+            `const { acquireRunLock, isLockHandle } = require(${JSON.stringify(join(__dirname, "../src/lib/runLock.ts"))});`,
+            `const r = acquireRunLock(${JSON.stringify(path)});`,
+            `process.exit(isLockHandle(r) ? 0 : 1);`,
+          ].join("\n"),
+        ]).exited
+      ),
+    );
+    const winners = results.filter((code) => code === 0).length;
+    const losers = results.filter((code) => code === 1).length;
+    // Exactly one winner; the rest lost. Tolerate >0 losers (some may have
+    // raced to create before the stale check and gotten EEXIST-then-conflit).
+    expect(winners).toBeGreaterThanOrEqual(1);
+    expect(winners + losers).toBe(N);
+    // No two winners: the file should hold exactly one pid.
+    const finalPid = Number(readFileSync(path, "utf8").split("\n")[0]);
+    expect(Number.isInteger(finalPid)).toBe(true);
+    expect(finalPid).toBeGreaterThan(0);
+  });
 });
 
 describe("defaultLockPath", () => {

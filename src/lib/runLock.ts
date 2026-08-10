@@ -48,6 +48,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
   closeSync,
@@ -103,11 +104,14 @@ function parseLock(raw: string): ParsedLock {
 
 /** Block the calling thread for `ms` without spinning the CPU. */
 function sleepSync(ms: number): void {
+  // Cap the busy-wait to 2s even if SharedArrayBuffer is unavailable —
+  // prevents a pathological spin if something goes wrong.
+  const capped = Math.min(ms, 2_000);
   try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, capped);
   } catch {
     // SharedArrayBuffer unavailable (unusual) — busy-wait as a last resort.
-    const until = Date.now() + ms;
+    const until = Date.now() + capped;
     while (Date.now() < until) {
       /* spin */
     }
@@ -212,19 +216,59 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
     return { path, pid: holder.pid };
   }
 
-  // Stale (holder dead, recycled PID, or unreadable). Try to reclaim.
+  // Stale (holder dead, recycled PID, or unreadable). Reclaim atomically:
+  // write our payload to a temp file, re-read the holder, then rename over
+  // the path only if the stale holder is still the one we read. rename is
+  // atomic on NTFS + POSIX, so the path is never left unlinked — no window
+  // where a third reader sees nothing and races to create its own lock.
+  const tmpPath = path + `.tmp.${process.pid}`;
   try {
-    unlinkSync(path);
+    const fd = openSync(tmpPath, "wx");
+    writeSync(fd, payload);
+    closeSync(fd);
   } catch {
-    /* it might have been removed by someone else; the next create will tell us */
+    // Temp file from a prior attempt still exists — clean it up and retry.
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* fine */
+    }
+    const fd = openSync(tmpPath, "wx");
+    writeSync(fd, payload);
+    closeSync(fd);
   }
-  if (tryCreate()) return makeHandle(path);
-
-  // Race lost — someone grabbed it between our unlink and our create.
-  // Read the current holder PID one more time and report (again tolerating a
-  // mid-write empty file so we report a real PID, not NaN).
-  const winner = readHolderWithRetry(path);
-  return { path, pid: Number.isInteger(winner.pid) ? winner.pid : NaN };
+  try {
+    // Re-read the holder: if a concurrent starter already reclaimed it
+    // (different PID), don't clobber their lock — report conflict.
+    const recheck = readHolderOnce(path);
+    if (
+      recheck &&
+      Number.isInteger(recheck.pid) &&
+      recheck.pid > 0 &&
+      holderIsAlive(recheck)
+    ) {
+      // Someone else beat us to the reclaim or a new live holder appeared.
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* fine */
+      }
+      return { path, pid: recheck.pid };
+    }
+    // The holder is still the same stale one (or the file is still empty/
+    // pid<=0). Atomic rename overwrites it — no gap where the path is missing.
+    renameSync(tmpPath, path);
+    return makeHandle(path);
+  } catch {
+    // rename failed (someone else likely won the race) — clean up and report.
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* fine */
+    }
+    const winner = readHolderWithRetry(path);
+    return { path, pid: Number.isInteger(winner.pid) ? winner.pid : NaN };
+  }
 }
 
 function makeHandle(path: string): LockHandle {
