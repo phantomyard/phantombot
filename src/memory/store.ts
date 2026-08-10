@@ -1451,6 +1451,37 @@ function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
   }));
 }
 
+/**
+ * Switch a database to WAL journal mode, retrying on SQLITE_BUSY.
+ *
+ * Converting a rollback-journal DB to WAL needs a momentary EXCLUSIVE lock,
+ * and SQLite does NOT invoke the busy handler for that conversion — so
+ * `busy_timeout` cannot wait it out. Empirically, if any other connection
+ * holds a write lock at that instant, the switch throws SQLITE_BUSY in 0ms
+ * regardless of the configured timeout. This bites a fresh install whose
+ * scheduler fires two processes at once (e.g. a Windows phantom's `run` and
+ * `tick` tasks aligned on boot) against a brand-new memory.sqlite: one wins
+ * the conversion, the other throws and crash-loops the daemon.
+ *
+ * So we retry on our own deadline instead of relying on busy_timeout. Once
+ * the file is in WAL mode (the steady state after first boot) this pragma is
+ * a lock-free no-op and the first attempt returns immediately, even while
+ * another process holds a write lock.
+ */
+async function enableWalMode(db: Database, deadlineMs = 5000): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (err) {
+      const busy = (err as { code?: string } | null)?.code === "SQLITE_BUSY";
+      if (!busy || Date.now() >= deadline) throw err;
+      await Bun.sleep(50);
+    }
+  }
+}
+
 export async function openMemoryStore(path: string): Promise<MemoryStore> {
   if (path !== ":memory:") {
     await mkdir(dirname(path), { recursive: true });
@@ -1461,8 +1492,13 @@ export async function openMemoryStore(path: string): Promise<MemoryStore> {
   // records task runs against the same DB. WAL permits one writer at a
   // time; without busy_timeout a concurrent writer gets an immediate
   // SQLITE_BUSY throw. busy_timeout makes it block-and-retry instead.
-  db.exec("PRAGMA journal_mode = WAL");
+  //
+  // Set busy_timeout FIRST so every statement below — schema DDL, the
+  // idempotent migrations, and normal writes — is covered. The WAL switch
+  // is the one thing busy_timeout can't protect (see enableWalMode), so it
+  // gets its own retry loop.
   db.exec("PRAGMA busy_timeout = 5000");
+  await enableWalMode(db);
   db.exec("PRAGMA foreign_keys = ON");
   return new SqliteMemoryStore(db);
 }

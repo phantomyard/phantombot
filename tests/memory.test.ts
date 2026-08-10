@@ -3,8 +3,21 @@
  * (":memory:") per test so there's no filesystem cleanup needed.
  */
 
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
+
+async function waitForFile(path: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    await Bun.sleep(25);
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
 
 let store: MemoryStore;
 
@@ -320,5 +333,57 @@ describe("MemoryStore — persistence to a real file", () => {
     expect(turns).toEqual([{ role: "user", text: "remember me" }]);
     await b.close();
     await Bun.file(tmp).delete?.();
+  });
+});
+
+describe("MemoryStore — concurrent open under a transient cross-process lock", () => {
+  // Regression for the crash loop that took Megan down on update: a fresh
+  // DB opened while another process (a concurrent `tick`, an aligned second
+  // `run`, or the outgoing daemon mid-restart) briefly holds the file must
+  // block-and-retry, not throw "database is locked". The failure mode was an
+  // ordering bug in openMemoryStore — `PRAGMA journal_mode = WAL` (which
+  // itself needs a momentary exclusive lock) ran BEFORE `busy_timeout` was
+  // set, so the WAL switch threw SQLITE_BUSY on the spot instead of waiting.
+  test("openMemoryStore blocks until a briefly-held lock releases, then succeeds", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-memstore-"));
+    const dbPath = join(dir, "memory.sqlite");
+    const readyPath = join(dir, "ready");
+    const lingerMs = 750;
+
+    // Separate OS process: takes a write lock on the fresh (rollback-mode)
+    // DB, signals readiness, lingers, then releases. It must be a distinct
+    // process because bun:sqlite is synchronous — a same-thread holder would
+    // deadlock the blocking open we're about to make.
+    const holder = Bun.spawn([
+      "bun",
+      "-e",
+      [
+        `const { Database } = require("bun:sqlite");`,
+        `const db = new Database(${JSON.stringify(dbPath)}, { create: true });`,
+        `db.exec("PRAGMA busy_timeout = 0");`,
+        `db.exec("CREATE TABLE IF NOT EXISTS lk(x)");`,
+        `db.exec("BEGIN IMMEDIATE");`,
+        `db.exec("INSERT INTO lk VALUES (1)");`,
+        `require("fs").writeFileSync(${JSON.stringify(readyPath)}, "1");`,
+        `setTimeout(() => { try { db.exec("COMMIT"); } catch {} process.exit(0); }, ${lingerMs});`,
+      ].join("\n"),
+    ]);
+
+    try {
+      await waitForFile(readyPath);
+      const started = Date.now();
+      // Pre-fix this rejects immediately with SQLITE_BUSY; post-fix it waits
+      // out the holder (busy_timeout armed first) and resolves.
+      const s = await openMemoryStore(dbPath);
+      const elapsed = Date.now() - started;
+      // Proves it genuinely blocked on the contended lock rather than either
+      // failing fast or never contending at all.
+      expect(elapsed).toBeGreaterThan(200);
+      await s.close();
+    } finally {
+      holder.kill();
+      await holder.exited;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
