@@ -9,6 +9,7 @@ import type {
   HarnessChunk,
   HarnessRequest,
 } from "../src/harnesses/types.ts";
+import { acquireRunLock, isLockHandle } from "../src/lib/runLock.ts";
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 
@@ -591,29 +592,36 @@ describe("runTick — review path", () => {
 
 describe("runTick — lockfile", () => {
   test("if a previous tick lock is held, this tick exits 0 and no tasks run", async () => {
-    // Pre-create a lockfile owned by the current PID — acquireRunLock
-    // sees the holder is alive (us!) and refuses.
-    await writeFile(lockPath, String(process.pid), { encoding: "utf8" });
-    store.add({
-      persona: "phantom",
-      description: "x",
-      schedule: "* * * * *",
-      prompt: "x",
-      now: new Date("2026-05-02T09:30:00Z"),
-    });
-    const harness = new ScriptedHarness("h", [
-      { type: "done", finalText: "x" },
-    ]);
-    const code = await runTick({
-      config,
-      taskStore: store,
-      memory,
-      harnesses: [harness],
-      lockPath,
-      now: new Date("2026-05-02T10:00:00Z"),
-    });
-    expect(code).toBe(0);
-    expect(harness.invocations).toBe(0);
+    // Hold a REAL OS advisory lock on the tick lock path. runTick's own
+    // acquireRunLock opens an independent fd/handle, which the kernel treats as
+    // a distinct owner, so it must see the conflict and bail — even though the
+    // holder is this same process.
+    const held = acquireRunLock(lockPath);
+    if (!isLockHandle(held)) throw new Error("setup: expected to hold the lock");
+    try {
+      store.add({
+        persona: "phantom",
+        description: "x",
+        schedule: "* * * * *",
+        prompt: "x",
+        now: new Date("2026-05-02T09:30:00Z"),
+      });
+      const harness = new ScriptedHarness("h", [
+        { type: "done", finalText: "x" },
+      ]);
+      const code = await runTick({
+        config,
+        taskStore: store,
+        memory,
+        harnesses: [harness],
+        lockPath,
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+      expect(code).toBe(0);
+      expect(harness.invocations).toBe(0);
+    } finally {
+      held.release();
+    }
   });
 });
 

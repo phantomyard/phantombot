@@ -1,57 +1,64 @@
 /**
- * Single-instance lock for `phantombot run`.
+ * Single-instance lock for `phantombot run` (and `phantombot tick`).
  *
- * Prevents two phantombot run processes from racing each other on the
- * same Telegram bot token (would cause sporadic duplicate replies and
- * missed messages — Telegram getUpdates serves whichever long-poll
- * arrives first per update).
+ * Prevents two phantombot processes from racing each other on the same
+ * Telegram bot token — two pollers on one token trigger getUpdates 409 spam and
+ * make every turn run (and every state-changing action fire) twice.
  *
- * Lock file lives at $XDG_RUNTIME_DIR/phantombot.run.lock if available
- * (tmpfs, cleaned on reboot — ideal), else /tmp/phantombot-<uid>.run.lock.
+ * ── Why this is an OS ADVISORY lock, not a PID file (2026-08-10) ──
+ * The previous implementation was a lock FILE plus a PID-liveness heuristic:
+ * write our PID, and on a pre-existing file decide whether the recorded holder
+ * is still alive (reclaim if not). Every version of that design sprouted a fresh
+ * time-of-check/time-of-use race — three in a row — because "is the holder
+ * alive?" and "reclaim the file" can never be made atomic with respect to a
+ * second starter. Aligned boot+logon starts (exactly Megan's trigger) kept
+ * ending up with two live daemons.
  *
- * Acquisition: O_EXCL create with our identity inside. On EEXIST, read the
- * existing holder and decide whether it's still alive (reclaim if not).
+ * The fix is to stop reconstructing "one holder per token" from a file and let
+ * the KERNEL enforce it. We hold an exclusive advisory lock on the lock file for
+ * the entire process lifetime:
+ *   - POSIX:   flock(fd, LOCK_EX | LOCK_NB)
+ *   - Windows: LockFileEx(handle, EXCLUSIVE | FAIL_IMMEDIATELY, …)
+ * The lock is bound to the open file description / file handle, so the OS
+ * releases it AUTOMATICALLY when the holder exits — including a hard kill
+ * (`taskkill /F`, SIGKILL, crash), which is how the daemon dies on every Windows
+ * stop / restart / self-update. There is no "stale lock" state to reclaim and no
+ * liveness heuristic to race: acquisition either succeeds (we are the sole
+ * holder) or fails immediately (someone else holds it). That collapses the whole
+ * TOCTOU class into a single kernel invariant.
  *
- * ── PID REUSE — why we record more than a bare PID (item d) ──
- * Liveness used to be a bare `process.kill(pid, 0)`. That has a nasty failure
- * mode: PIDs are recycled. If phantombot crashes holding the lock and the OS
- * later hands that same numeric PID to some UNRELATED process (a cron job, a
- * shell, anything), `kill(pid,0)` succeeds and we conclude "the lock is still
- * held" — forever. phantombot then refuses to start, with no real conflict.
+ * ── The PID in the file is INFORMATIONAL only ──
+ * After acquiring the lock we write our PID into the file purely so a conflicting
+ * starter can print "already running (pid N)". Correctness never depends on the
+ * file's contents — only on holding the OS lock. On Windows the lock lives at a
+ * high sentinel byte offset (LOCK_OFFSET_*), so a conflicting process can still
+ * read the PID bytes at offset 0 even though the file is exclusively locked.
  *
- * Fix: alongside the PID we record a process-INSTANCE token — the kernel boot
- * id plus the process start-time from /proc/<pid>/stat. PID + boot + start-time
- * uniquely identifies one process instance; a recycled PID has a DIFFERENT
- * start-time, so we can tell "the original phantombot is alive" from "a
- * stranger inherited its PID" and reclaim the stale lock in the latter case.
+ * ── We never delete the lock file ──
+ * release() drops the OS lock and closes the handle; it does NOT unlink the
+ * file. Deleting it would reintroduce a race: unlink + re-create hands out a new
+ * inode, and two starters straddling the unlink could each flock a different
+ * inode and both "win". Leaving the file in place keeps the path↔inode mapping
+ * stable so flock always coordinates on the same object. The file lives in
+ * tmpfs ($XDG_RUNTIME_DIR) or %TEMP% and is reaped on reboot; a stale PID inside
+ * it is harmless because nothing reads it for a correctness decision.
  *
- * The token is best-effort and platform-specific: /proc on Linux, CIM
- * (Win32_Process.CreationDate) on Windows. On platforms where we can't read it
- * (macOS), we degrade to the old PID-only liveness check — no worse than
- * before. The only cost of the degraded path is that a crash-then-PID-recycle
- * can make a stale lock look live until the lock file is removed.
- *
- * ── Why Windows needs this MORE than Linux (2026-07-10) ──
- * The daemon is force-killed (`taskkill /F`) on every stop/restart/self-update,
- * so `release()` never runs and the lock FILE always survives its holder. The
- * next daemon start therefore ALWAYS lands on the stale-lock path and leans
- * entirely on the liveness check. With bare PID liveness, a recycled PID makes
- * a dead holder look alive and phantombot refuses to start — permanently, until
- * someone deletes %TEMP%\phantombot.run.lock by hand. That's a wedged bot with
- * no error anyone would think to look for, which is why the degraded path is
- * no longer acceptable here.
+ * ── Multi-user ──
+ * The lock path is user-scoped ($XDG_RUNTIME_DIR / per-uid /tmp on POSIX,
+ * per-account %TEMP% on Windows), so two users starting their own phantom at
+ * boot never share a lock file and never block each other.
  */
 
-import { execFileSync } from "node:child_process";
+import { dlopen, FFIType } from "bun:ffi";
 import {
-  existsSync,
+  closeSync,
+  constants,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   unlinkSync,
   writeSync,
-  closeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -59,14 +66,14 @@ import { dirname, join } from "node:path";
 export interface LockHandle {
   /** Path to the lock file. */
   path: string;
-  /** Release the lock — removes the file. Idempotent. */
+  /** Release the lock — drops the OS lock and closes the handle. Idempotent. */
   release: () => void;
 }
 
 export interface LockConflict {
   /** Path the lock lives at. */
   path: string;
-  /** PID held in the lock file (NaN if file existed but unparseable). */
+  /** PID recorded by the holder (NaN if not yet written / unreadable). */
   pid: number;
 }
 
@@ -83,192 +90,115 @@ export function defaultLockPath(): string {
   return join("/tmp", `phantombot-${uid}.run.lock`);
 }
 
-/**
- * The lock file payload: PID on line 1, instance token on line 2.
- * The token may be empty when /proc isn't available — callers tolerate that.
- */
+/** Informational payload: our PID, so a conflicting starter can name us. */
 function lockPayload(): string {
-  return `${process.pid}\n${processInstanceToken(process.pid) ?? ""}`;
-}
-
-interface ParsedLock {
-  pid: number;
-  /** Instance token recorded at lock time, or "" if none was written. */
-  token: string;
-}
-
-function parseLock(raw: string): ParsedLock {
-  const [pidLine = "", tokenLine = ""] = raw.split("\n");
-  return { pid: Number(pidLine.trim()), token: tokenLine.trim() };
-}
-
-/** Block the calling thread for `ms` without spinning the CPU. */
-function sleepSync(ms: number): void {
-  // Cap the busy-wait to 2s even if SharedArrayBuffer is unavailable —
-  // prevents a pathological spin if something goes wrong.
-  const capped = Math.min(ms, 2_000);
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, capped);
-  } catch {
-    // SharedArrayBuffer unavailable (unusual) — busy-wait as a last resort.
-    const until = Date.now() + capped;
-    while (Date.now() < until) {
-      /* spin */
-    }
-  }
-}
-
-/** Single, non-retrying read of the lock holder; undefined if no file. */
-function readHolderOnce(path: string): ParsedLock | undefined {
-  try {
-    return parseLock(readFileSync(path, "utf8"));
-  } catch {
-    return undefined; // no file yet, or vanished under us
-  }
+  return `${process.pid}\n`;
 }
 
 /**
- * Read the lock holder, tolerating the brief window in which a concurrent
- * starter has created the file (O_EXCL winner) but not yet written its PID
- * line. An empty / pid<=0 payload on an EXISTING file almost always means
- * "someone is mid-write", not "genuinely stale" — treating it as stale would
- * unlink a live holder's lock and let a second daemon start. So we re-read a
- * few times over ~1s: a real winner writes its PID microseconds later and we
- * back off correctly; a process that crashed between create and write leaves
- * the file empty forever, so after the deadline we still return it as stale and
- * the caller reclaims it.
+ * Best-effort read of the holder's PID for the conflict message. Purely
+ * cosmetic — correctness comes from the OS lock, never from this value. Returns
+ * NaN when the file is empty (holder hasn't written its PID yet) or unreadable.
  */
-function readHolderWithRetry(path: string): ParsedLock {
-  const deadlineMs = Date.now() + 1_000;
-  let holder: ParsedLock = { pid: NaN, token: "" };
-  for (;;) {
-    try {
-      holder = parseLock(readFileSync(path, "utf8"));
-    } catch {
-      // File disappeared between our create attempt and the read — race lost;
-      // let the caller's reclaim path re-create it.
-      return { pid: NaN, token: "" };
-    }
-    if (Number.isInteger(holder.pid) && holder.pid > 0) return holder;
-    if (Date.now() >= deadlineMs) return holder;
-    sleepSync(50);
+function readHolderPid(path: string): number {
+  try {
+    const first = (readFileSync(path, "utf8").split("\n")[0] ?? "").trim();
+    const n = Number(first);
+    return Number.isInteger(n) && n > 0 ? n : NaN;
+  } catch {
+    return NaN;
   }
 }
 
 /**
- * Try to acquire the lock. Returns either a LockHandle (success) or a
- * LockConflict (another process holds it). Stale locks (holder dead, or a
- * recycled PID) are reclaimed transparently.
+ * Try to acquire the single-instance lock. Returns a LockHandle on success or a
+ * LockConflict when another process already holds it.
  */
 export function acquireRunLock(path: string): LockHandle | LockConflict {
   mkdirSync(dirname(path), { recursive: true });
+  return process.platform === "win32"
+    ? acquireWindowsLock(path)
+    : acquirePosixLock(path);
+}
 
-  // Fast path: if a genuine LIVE holder already owns the lock, report the
-  // conflict WITHOUT computing our own payload. On Windows `lockPayload()`
-  // spawns PowerShell (~300ms–5s); `tick` calls acquireRunLock every minute and
-  // conflicts by design once the daemon is up, so paying that spawn on every
-  // conflict would add ~1440 PowerShell launches/day of pure churn. A single
-  // cheap read avoids it. (An empty / pid<=0 / dead / recycled holder falls
-  // through to the create+reclaim path below.)
-  const preexisting = readHolderOnce(path);
-  if (
-    preexisting &&
-    Number.isInteger(preexisting.pid) &&
-    preexisting.pid > 0 &&
-    holderIsAlive(preexisting)
-  ) {
-    return { path, pid: preexisting.pid };
+// ─────────────────────────────── POSIX (flock) ───────────────────────────────
+
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+
+interface Libc {
+  flock: (fd: number, operation: number) => number;
+}
+
+let libc: Libc | null | undefined;
+
+function loadLibc(): Libc | null {
+  if (libc !== undefined) return libc;
+  if (process.platform === "win32") {
+    libc = null;
+    return libc;
   }
-
-  // Compute the payload BEFORE creating the file. If `lockPayload()`'s PowerShell
-  // spawn ran between `openSync` and `writeSync`, the lock file would sit EMPTY
-  // for the whole spawn duration. A second starter reading it in that window
-  // sees an empty file → pid parses as 0 → "stale" → it unlinks the live
-  // holder's lock and starts its own daemon. Two pollers on one bot token =
-  // the getUpdates 409 flood + double-fired turns. Precomputing shrinks the
-  // create→write gap to microseconds and reuses one payload across both
-  // tryCreate attempts.
-  const payload = lockPayload();
-
-  const tryCreate = (): boolean => {
+  // flock(2) lives in libc on every supported POSIX target.
+  const candidates =
+    process.platform === "darwin"
+      ? ["libSystem.B.dylib", "libc.dylib"]
+      : ["libc.so.6", "libc.so"];
+  for (const name of candidates) {
     try {
-      const fd = openSync(path, "wx"); // O_CREAT | O_EXCL
-      writeSync(fd, payload);
+      const lib = dlopen(name, {
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      });
+      libc = lib.symbols as unknown as Libc;
+      return libc;
+    } catch {
+      /* try next candidate */
+    }
+  }
+  libc = null;
+  return libc;
+}
+
+function acquirePosixLock(path: string): LockHandle | LockConflict {
+  const api = loadLibc();
+  if (!api) return fallbackAcquire(path);
+
+  // O_CLOEXEC so the lock fd never leaks into spawned children (a lingering
+  // child holding the inherited fd would keep the lock alive after the daemon
+  // dies — exactly what we must avoid).
+  let flags = constants.O_CREAT | constants.O_RDWR;
+  // O_CLOEXEC isn't in the fs constants type but exists at runtime on Linux/mac.
+  const cloexec = (constants as Record<string, number>).O_CLOEXEC;
+  if (typeof cloexec === "number") flags |= cloexec;
+  const fd = openSync(path, flags, 0o600);
+
+  // LOCK_NB means the only expected failure on a valid fd is "held". Retry a
+  // couple of times to ride out a rare EINTR; a genuinely held lock stays -1 and
+  // we fail closed (report the conflict) rather than risk a second daemon.
+  let rc = -1;
+  for (let i = 0; i < 3; i++) {
+    rc = api.flock(fd, LOCK_EX | LOCK_NB);
+    if (rc === 0) break;
+  }
+  if (rc !== 0) {
+    const pid = readHolderPid(path);
+    try {
       closeSync(fd);
-      return true;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
-      throw e;
+    } catch {
+      /* fine */
     }
-  };
-
-  if (tryCreate()) return makeHandle(path);
-
-  // Lock exists. Inspect the holder — tolerating the brief window where a
-  // concurrent starter created the file but hasn't written its PID line yet.
-  const holder = readHolderWithRetry(path);
-
-  if (
-    Number.isInteger(holder.pid) &&
-    holder.pid > 0 &&
-    holderIsAlive(holder)
-  ) {
-    return { path, pid: holder.pid };
+    return { path, pid };
   }
 
-  // Stale (holder dead, recycled PID, or unreadable). Make the EVICTION the
-  // point of mutual exclusion, not the write. Rename the stale file AWAY using
-  // the shared `path` as the FIXED rename SOURCE: the OS renames a given source
-  // path exactly once, so only ONE racer wins the eviction; every other racer's
-  // rename fails with ENOENT (the source is already gone) and adopts whoever
-  // wins. A plain rename ONTO `path` would silently overwrite and let two
-  // racers both land their own lock — renaming FROM `path` is what makes it
-  // exclusive. The subsequent O_EXCL create is a second gate, so exactly one
-  // process ever writes the fresh lock.
-  const evicted = path + `.evicting.${process.pid}`;
+  // We hold the lock. Record our PID (informational). flock is advisory, so this
+  // separate write never conflicts with a reader.
   try {
-    renameSync(path, evicted); // fixed SOURCE ⇒ exactly one racer succeeds
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-      // Another racer already evicted the stale lock — adopt the winner.
-      return adoptCurrentHolder(path);
-    }
-    throw e;
-  }
-  // We won the eviction. Drop the stale file and O_EXCL-create our fresh lock.
-  try {
-    unlinkSync(evicted);
+    ftruncateSync(fd, 0);
+    writeSync(fd, lockPayload(), 0, "utf8");
   } catch {
-    /* fine — vanished under us */
+    /* PID is cosmetic; the lock is what matters */
   }
-  if (tryCreate()) return makeHandle(path);
-  // A concurrent initial-create landed in the brief gap after we renamed the
-  // stale file away (path was momentarily absent). They hold a real O_EXCL
-  // lock now — adopt them rather than fight for it.
-  return adoptCurrentHolder(path);
-}
 
-/**
- * A concurrent starter won the eviction and is (re)creating the lock. Re-read
- * the lock until a live holder appears — the winner needs a moment to unlink the
- * evicted file and O_EXCL-create the fresh one — then report it as a conflict.
- * Bounded so a winner that dies mid-recreate can't hang us forever.
- */
-function adoptCurrentHolder(path: string): LockConflict {
-  const deadlineMs = Date.now() + 1_000;
-  for (;;) {
-    const holder = readHolderOnce(path);
-    if (holder && Number.isInteger(holder.pid) && holder.pid > 0) {
-      return { path, pid: holder.pid };
-    }
-    if (Date.now() >= deadlineMs) {
-      return { path, pid: holder ? holder.pid : NaN };
-    }
-    sleepSync(50);
-  }
-}
-
-function makeHandle(path: string): LockHandle {
   let released = false;
   return {
     path,
@@ -276,133 +206,219 @@ function makeHandle(path: string): LockHandle {
       if (released) return;
       released = true;
       try {
-        // Only remove if the file still has OUR pid; never clobber a
-        // successor's lock (rare race).
-        const { pid } = parseLock(readFileSync(path, "utf8"));
-        if (pid === process.pid) unlinkSync(path);
+        api.flock(fd, LOCK_UN);
       } catch {
-        /* fine — already gone or unreadable */
+        /* closing the fd releases it anyway */
+      }
+      try {
+        closeSync(fd);
+      } catch {
+        /* already gone */
       }
     },
   };
 }
 
-/**
- * Is the recorded holder genuinely still the process that took the lock?
- *
- * Two-part test:
- *   1. The PID must be alive (kill(pid,0)).
- *   2. If we recorded an instance token AND can compute the current token for
- *      that PID, they must MATCH. A mismatch means the PID was recycled to a
- *      different process — the original holder is gone, the lock is stale.
- *
- * When no token was recorded, or we can't read /proc (non-Linux), we fall back
- * to bare liveness — the historical behaviour.
- */
-function holderIsAlive(holder: ParsedLock): boolean {
-  if (!pidIsAlive(holder.pid)) return false;
-  if (!holder.token) return true; // no nonce recorded → can't disprove liveness
-  const current = processInstanceToken(holder.pid);
-  if (current === undefined) return true; // can't compute → don't false-positive a kill
-  return current === holder.token;
+// ────────────────────────────── Windows (LockFileEx) ─────────────────────────
+
+const GENERIC_READ = 0x8000_0000;
+const GENERIC_WRITE = 0x4000_0000;
+const FILE_SHARE_READ = 0x0000_0001;
+const FILE_SHARE_WRITE = 0x0000_0002;
+const OPEN_ALWAYS = 4;
+const FILE_ATTRIBUTE_NORMAL = 0x0000_0080;
+const LOCKFILE_FAIL_IMMEDIATELY = 0x0000_0001;
+const LOCKFILE_EXCLUSIVE_LOCK = 0x0000_0002;
+const INVALID_HANDLE_VALUE = 0xffff_ffff_ffff_ffffn;
+
+// Lock a single byte at a high sentinel offset (well beyond any real file size).
+// Locking beyond EOF is legal on Windows and keeps offset 0 — where we store the
+// informational PID — readable by a conflicting starter.
+const LOCK_OFFSET_LOW = 0x4000_0000;
+const LOCK_OFFSET_HIGH = 0;
+
+interface Kernel32 {
+  CreateFileW: (
+    name: Uint8Array,
+    access: number,
+    share: number,
+    security: null,
+    disposition: number,
+    flags: number,
+    template: null,
+  ) => bigint;
+  LockFileEx: (
+    handle: bigint,
+    flags: number,
+    reserved: number,
+    bytesLow: number,
+    bytesHigh: number,
+    overlapped: Uint8Array,
+  ) => number;
+  WriteFile: (
+    handle: bigint,
+    buffer: Uint8Array,
+    bytes: number,
+    written: Uint8Array,
+    overlapped: null,
+  ) => number;
+  SetEndOfFile: (handle: bigint) => number;
+  CloseHandle: (handle: bigint) => number;
 }
 
-function pidIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    return code === "EPERM"; // exists but not ours; still alive
+let kernel32: Kernel32 | null | undefined;
+
+function loadKernel32(): Kernel32 | null {
+  if (kernel32 !== undefined) return kernel32;
+  if (process.platform !== "win32") {
+    kernel32 = null;
+    return kernel32;
   }
-}
-
-/** Kernel boot id, read once. Distinguishes process instances across reboots. */
-let cachedBootId: string | undefined | null = null;
-function bootId(): string | undefined {
-  if (cachedBootId !== null) return cachedBootId ?? undefined;
   try {
-    cachedBootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-  } catch {
-    cachedBootId = undefined;
-  }
-  return cachedBootId ?? undefined;
-}
-
-/**
- * Windows instance token: the process's creation time, which the kernel stamps
- * per process instance. A recycled PID belongs to a process created later, so
- * its CreationDate differs and the token changes — exactly the property we need.
- *
- * Costs one PowerShell spawn (~300ms). That's tolerable because this runs at
- * most twice per `phantombot run` startup (once to write our own token, once to
- * check the previous holder's) and never on a hot path. Bounded by `timeout` so
- * a wedged PowerShell can't hang daemon startup; on any failure we return
- * undefined and fall back to bare PID liveness.
- *
- * Exported for testing.
- */
-export function _windowsInstanceToken(pid: number): string | undefined {
-  // The PID is read back out of the lock file; never interpolate it into the
-  // CIM filter without proving it's a plain positive integer.
-  if (!Number.isInteger(pid) || pid <= 0) return undefined;
-  try {
-    const out = execFileSync(
-      "powershell",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}")` +
-          `.CreationDate.ToUniversalTime().ToString('o')`,
-      ],
-      {
-        encoding: "utf8",
-        timeout: 5_000,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "ignore"],
+    const lib = dlopen("kernel32.dll", {
+      CreateFileW: {
+        args: [
+          FFIType.ptr,
+          FFIType.u32,
+          FFIType.u32,
+          FFIType.ptr,
+          FFIType.u32,
+          FFIType.u32,
+          FFIType.ptr,
+        ],
+        returns: FFIType.u64,
       },
-    ).trim();
-    return out ? `win:${out}` : undefined;
+      LockFileEx: {
+        args: [
+          FFIType.u64,
+          FFIType.u32,
+          FFIType.u32,
+          FFIType.u32,
+          FFIType.u32,
+          FFIType.ptr,
+        ],
+        returns: FFIType.i32,
+      },
+      WriteFile: {
+        args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
+      SetEndOfFile: { args: [FFIType.u64], returns: FFIType.i32 },
+      CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
+    });
+    kernel32 = lib.symbols as unknown as Kernel32;
   } catch {
-    // PowerShell missing, timed out, or the PID vanished mid-query.
-    return undefined;
+    kernel32 = null;
   }
+  return kernel32;
 }
 
-/**
- * A token that uniquely identifies a running process instance: boot id +
- * the process start-time (field 22 of /proc/<pid>/stat, in clock ticks since
- * boot). Recycled PIDs get a different start-time, so the token changes.
- *
- * On Windows we use the CIM creation-time token instead. Returns undefined when
- * neither is available (e.g. macOS) — callers treat that as "fall back to bare
- * PID liveness".
- */
-function processInstanceToken(pid: number): string | undefined {
-  if (process.platform === "win32") return _windowsInstanceToken(pid);
-  const boot = bootId();
-  if (boot === undefined) return undefined;
-  try {
-    // The comm field (in parens) can contain spaces/parens, so anchor parsing
-    // on the LAST ')' and split the remainder; starttime is field 22 overall,
-    // i.e. index 19 of the post-')' fields (state is field 3 / index 0).
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const after = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
-    const starttime = after[19];
-    if (!starttime) return undefined;
-    return `${boot}:${starttime}`;
-  } catch {
-    return undefined;
+function acquireWindowsLock(path: string): LockHandle | LockConflict {
+  const api = loadKernel32();
+  if (!api) return fallbackAcquire(path);
+
+  const name = Buffer.from(`${path}\0`, "utf16le");
+  const handle = api.CreateFileW(
+    name,
+    GENERIC_READ | GENERIC_WRITE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE,
+    null,
+    OPEN_ALWAYS,
+    FILE_ATTRIBUTE_NORMAL,
+    null,
+  );
+  if (handle === 0n || handle === INVALID_HANDLE_VALUE) {
+    // Couldn't even open the file — degrade rather than wedge startup.
+    return fallbackAcquire(path);
   }
+
+  const overlapped = new Uint8Array(32); // OVERLAPPED (x64): 32 bytes
+  const dv = new DataView(overlapped.buffer);
+  dv.setUint32(16, LOCK_OFFSET_LOW, true); // OVERLAPPED.Offset
+  dv.setUint32(20, LOCK_OFFSET_HIGH, true); // OVERLAPPED.OffsetHigh
+
+  const locked = api.LockFileEx(
+    handle,
+    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+    0,
+    1,
+    0,
+    overlapped,
+  );
+  if (!locked) {
+    // Held by someone else (FAIL_IMMEDIATELY ⇒ ERROR_LOCK_VIOLATION). Read the
+    // informational PID at offset 0 for the conflict message, then let go.
+    const pid = readHolderPid(path);
+    api.CloseHandle(handle);
+    return { path, pid };
+  }
+
+  // We hold the lock. Write our PID at offset 0 (outside the locked region) so a
+  // conflicting starter can name us, and truncate any stale bytes.
+  try {
+    const payload = Buffer.from(lockPayload(), "utf8");
+    const written = new Uint8Array(4);
+    api.WriteFile(handle, payload, payload.byteLength, written, null);
+    api.SetEndOfFile(handle);
+  } catch {
+    /* PID is cosmetic */
+  }
+
+  let released = false;
+  return {
+    path,
+    release: () => {
+      if (released) return;
+      released = true;
+      // Closing the handle releases every lock held on it.
+      try {
+        api.CloseHandle(handle);
+      } catch {
+        /* already closed */
+      }
+    },
+  };
+}
+
+// ─────────────────────────────── Degraded fallback ───────────────────────────
+
+/**
+ * Only reached when neither libc (POSIX) nor kernel32 (Windows) can be loaded —
+ * i.e. essentially never on our real targets. Falls back to an O_EXCL create
+ * with no kernel-backed lock. This DOES unlink on release (unlike the advisory
+ * path) because there is no OS lock to inherit, so the classic unlink race
+ * doesn't apply and a leftover file would otherwise wedge startup permanently.
+ */
+function fallbackAcquire(path: string): LockHandle | LockConflict {
+  try {
+    const fd = openSync(path, "wx"); // O_CREAT | O_EXCL
+    writeSync(fd, lockPayload());
+    closeSync(fd);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      return { path, pid: readHolderPid(path) };
+    }
+    throw e;
+  }
+  let released = false;
+  return {
+    path,
+    release: () => {
+      if (released) return;
+      released = true;
+      try {
+        if (readHolderPid(path) === process.pid) unlinkSync(path);
+      } catch {
+        /* already gone */
+      }
+    },
+  };
 }
 
 /** Type guard. */
-export function isLockHandle(
-  r: LockHandle | LockConflict,
-): r is LockHandle {
+export function isLockHandle(r: LockHandle | LockConflict): r is LockHandle {
   return typeof (r as LockHandle).release === "function";
 }
 
 /** Used by tests to check if a file is locked without actually creating it. */
-export { existsSync as _lockFileExists };
+export { existsSync as _lockFileExists } from "node:fs";
