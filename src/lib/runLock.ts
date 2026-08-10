@@ -216,58 +216,55 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
     return { path, pid: holder.pid };
   }
 
-  // Stale (holder dead, recycled PID, or unreadable). Reclaim atomically:
-  // write our payload to a temp file, re-read the holder, then rename over
-  // the path only if the stale holder is still the one we read. rename is
-  // atomic on NTFS + POSIX, so the path is never left unlinked — no window
-  // where a third reader sees nothing and races to create its own lock.
-  const tmpPath = path + `.tmp.${process.pid}`;
+  // Stale (holder dead, recycled PID, or unreadable). Make the EVICTION the
+  // point of mutual exclusion, not the write. Rename the stale file AWAY using
+  // the shared `path` as the FIXED rename SOURCE: the OS renames a given source
+  // path exactly once, so only ONE racer wins the eviction; every other racer's
+  // rename fails with ENOENT (the source is already gone) and adopts whoever
+  // wins. A plain rename ONTO `path` would silently overwrite and let two
+  // racers both land their own lock — renaming FROM `path` is what makes it
+  // exclusive. The subsequent O_EXCL create is a second gate, so exactly one
+  // process ever writes the fresh lock.
+  const evicted = path + `.evicting.${process.pid}`;
   try {
-    const fd = openSync(tmpPath, "wx");
-    writeSync(fd, payload);
-    closeSync(fd);
-  } catch {
-    // Temp file from a prior attempt still exists — clean it up and retry.
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      /* fine */
+    renameSync(path, evicted); // fixed SOURCE ⇒ exactly one racer succeeds
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      // Another racer already evicted the stale lock — adopt the winner.
+      return adoptCurrentHolder(path);
     }
-    const fd = openSync(tmpPath, "wx");
-    writeSync(fd, payload);
-    closeSync(fd);
+    throw e;
   }
+  // We won the eviction. Drop the stale file and O_EXCL-create our fresh lock.
   try {
-    // Re-read the holder: if a concurrent starter already reclaimed it
-    // (different PID), don't clobber their lock — report conflict.
-    const recheck = readHolderOnce(path);
-    if (
-      recheck &&
-      Number.isInteger(recheck.pid) &&
-      recheck.pid > 0 &&
-      holderIsAlive(recheck)
-    ) {
-      // Someone else beat us to the reclaim or a new live holder appeared.
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        /* fine */
-      }
-      return { path, pid: recheck.pid };
-    }
-    // The holder is still the same stale one (or the file is still empty/
-    // pid<=0). Atomic rename overwrites it — no gap where the path is missing.
-    renameSync(tmpPath, path);
-    return makeHandle(path);
+    unlinkSync(evicted);
   } catch {
-    // rename failed (someone else likely won the race) — clean up and report.
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      /* fine */
+    /* fine — vanished under us */
+  }
+  if (tryCreate()) return makeHandle(path);
+  // A concurrent initial-create landed in the brief gap after we renamed the
+  // stale file away (path was momentarily absent). They hold a real O_EXCL
+  // lock now — adopt them rather than fight for it.
+  return adoptCurrentHolder(path);
+}
+
+/**
+ * A concurrent starter won the eviction and is (re)creating the lock. Re-read
+ * the lock until a live holder appears — the winner needs a moment to unlink the
+ * evicted file and O_EXCL-create the fresh one — then report it as a conflict.
+ * Bounded so a winner that dies mid-recreate can't hang us forever.
+ */
+function adoptCurrentHolder(path: string): LockConflict {
+  const deadlineMs = Date.now() + 1_000;
+  for (;;) {
+    const holder = readHolderOnce(path);
+    if (holder && Number.isInteger(holder.pid) && holder.pid > 0) {
+      return { path, pid: holder.pid };
     }
-    const winner = readHolderWithRetry(path);
-    return { path, pid: Number.isInteger(winner.pid) ? winner.pid : NaN };
+    if (Date.now() >= deadlineMs) {
+      return { path, pid: holder ? holder.pid : NaN };
+    }
+    sleepSync(50);
   }
 }
 

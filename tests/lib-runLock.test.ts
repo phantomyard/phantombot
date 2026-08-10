@@ -29,6 +29,10 @@ afterEach(async () => {
 });
 
 describe("acquireRunLock", () => {
+  // Windows-appropriate timeout: the fresh-create path calls lockPayload(),
+  // which on Windows spawns PowerShell to read the process creation time. A
+  // cold PowerShell start legitimately approaches the 5s default and was
+  // flaking test-windows at ~5.2s — give it generous headroom.
   test("creates a fresh lock with our pid", () => {
     const path = join(workdir, "run.lock");
     const r = acquireRunLock(path);
@@ -37,7 +41,7 @@ describe("acquireRunLock", () => {
     expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
     r.release();
     expect(existsSync(path)).toBe(false);
-  });
+  }, 20_000);
 
   test("conflicts when another live PID holds it", () => {
     const path = join(workdir, "run.lock");
@@ -179,7 +183,7 @@ describe("acquireRunLock", () => {
   // one acquiring the handle; the rest see a conflict. This is the core
   // invariant that the rename-reclaim path must preserve.
   test("exactly one of N starters wins against a stale lock (rename-reclaim)", async () => {
-    const N = 5;
+    const N = 8;
     const path = join(workdir, "run.lock");
     // Write a stale lock (dead PID, no token) — every starter will try to reclaim.
     writeFileSync(path, "999999\n");
@@ -191,21 +195,23 @@ describe("acquireRunLock", () => {
           [
             `const { acquireRunLock, isLockHandle } = require(${JSON.stringify(join(__dirname, "../src/lib/runLock.ts"))});`,
             `const r = acquireRunLock(${JSON.stringify(path)});`,
-            `process.exit(isLockHandle(r) ? 0 : 1);`,
+            // A winner must LINGER holding the lock (as a real daemon does) so
+            // every loser sees a genuinely LIVE holder and conflicts. Winners
+            // that exit instantly would each free the lock in turn, letting the
+            // next starter legitimately reclaim it — that's sequential reclaim,
+            // not exclusivity, and it's exactly how the old `>= 1` assertion hid
+            // the two-daemon bug. Lingering makes `=== 1` provable.
+            `if (isLockHandle(r)) { setTimeout(() => process.exit(0), 1500); }`,
+            `else { process.exit(1); }`,
           ].join("\n"),
         ]).exited
       ),
     );
     const winners = results.filter((code) => code === 0).length;
     const losers = results.filter((code) => code === 1).length;
-    // Exactly one winner; the rest lost. Tolerate >0 losers (some may have
-    // raced to create before the stale check and gotten EEXIST-then-conflit).
-    expect(winners).toBeGreaterThanOrEqual(1);
-    expect(winners + losers).toBe(N);
-    // No two winners: the file should hold exactly one pid.
-    const finalPid = Number(readFileSync(path, "utf8").split("\n")[0]);
-    expect(Number.isInteger(finalPid)).toBe(true);
-    expect(finalPid).toBeGreaterThan(0);
+    // The core invariant: EXACTLY one daemon may hold the lock at a time.
+    expect(winners).toBe(1);
+    expect(losers).toBe(N - 1);
   });
 });
 
