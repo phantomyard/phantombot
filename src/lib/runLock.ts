@@ -320,7 +320,11 @@ function acquireWindowsLock(path: string): LockHandle | LockConflict {
   const name = Buffer.from(`${path}\0`, "utf16le");
   const handle = api.CreateFileW(
     name,
-    GENERIC_READ | GENERIC_WRITE,
+    // JS bitwise-OR yields a SIGNED int32; 0x80000000|0x40000000 is negative
+    // and Bun's FFI drops a negative value when marshaling to a u32 arg, which
+    // opens the handle with dwDesiredAccess=0 (no write/lock rights → WriteFile
+    // and LockFileEx fail with ERROR_ACCESS_DENIED). `>>> 0` coerces to unsigned.
+    (GENERIC_READ | GENERIC_WRITE) >>> 0,
     FILE_SHARE_READ | FILE_SHARE_WRITE,
     null,
     OPEN_ALWAYS,
