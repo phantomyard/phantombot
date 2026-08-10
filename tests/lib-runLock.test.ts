@@ -104,6 +104,64 @@ describe("acquireRunLock", () => {
     r.release();
   });
 
+  // ── Empty-file (mid-write) race ──
+  // The O_EXCL winner creates the file empty, then writes its PID a moment
+  // later (on Windows that gap is a whole PowerShell spawn). A second starter
+  // that reads the file in that window must NOT treat the empty file as stale
+  // and unlink the live holder — that's what spawned two daemons on one bot
+  // token. It must wait for the PID to appear and then back off as a conflict.
+  test("waits for a concurrent starter mid-write instead of stealing its lock", async () => {
+    const path = join(workdir, "run.lock");
+    // Simulate the O_EXCL winner: the file exists but is momentarily EMPTY.
+    writeFileSync(path, "");
+    // A real, live, separate process writes its PID shortly after — while our
+    // acquire is inside the retry window — then stays alive.
+    const child = Bun.spawn([
+      "bun",
+      "-e",
+      `await Bun.sleep(120);` +
+        `require("fs").writeFileSync(${JSON.stringify(path)}, String(process.pid)+"\\n");` +
+        `await Bun.sleep(3000);`,
+    ]);
+    try {
+      // Give the child a beat to start before we begin the (synchronous) wait.
+      await Bun.sleep(20);
+      const r = acquireRunLock(path);
+      // Must be a conflict naming the child's PID — not a stolen handle.
+      expect(isLockHandle(r)).toBe(false);
+      if (!isLockHandle(r)) expect(r.pid).toBe(child.pid);
+    } finally {
+      child.kill();
+    }
+  });
+
+  // A process that crashed BETWEEN create and write leaves the file empty
+  // forever. After the retry window elapses we must still reclaim it, not hang.
+  test("reclaims a lock that stays empty past the retry window (crashed mid-write)", () => {
+    const path = join(workdir, "run.lock");
+    writeFileSync(path, ""); // empty and it never gets filled
+    const started = Date.now();
+    const r = acquireRunLock(path);
+    const elapsed = Date.now() - started;
+    if (!isLockHandle(r)) throw new Error("expected reclaim of empty orphan lock");
+    // We should have waited out the retry window before reclaiming — proof the
+    // retry ran rather than instantly declaring the empty file stale.
+    expect(elapsed).toBeGreaterThanOrEqual(800);
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
+    r.release();
+  });
+
+  // pid=0 is what `Number("")`/a zeroed payload parses to; it must be treated
+  // as "not yet written", i.e. retried, never as a live holder.
+  test("treats a pid=0 payload as mid-write, not a live holder", () => {
+    const path = join(workdir, "run.lock");
+    writeFileSync(path, "0\n");
+    const r = acquireRunLock(path);
+    if (!isLockHandle(r)) throw new Error("expected reclaim of pid=0 lock");
+    expect(Number(readFileSync(path, "utf8").split("\n")[0])).toBe(process.pid);
+    r.release();
+  });
+
   test("still conflicts when PID is live and token matches (genuine holder)", () => {
     const path = join(workdir, "run.lock");
     // First acquire writes our real pid + our real token, then a second

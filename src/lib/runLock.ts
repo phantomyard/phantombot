@@ -101,6 +101,56 @@ function parseLock(raw: string): ParsedLock {
   return { pid: Number(pidLine.trim()), token: tokenLine.trim() };
 }
 
+/** Block the calling thread for `ms` without spinning the CPU. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // SharedArrayBuffer unavailable (unusual) — busy-wait as a last resort.
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* spin */
+    }
+  }
+}
+
+/** Single, non-retrying read of the lock holder; undefined if no file. */
+function readHolderOnce(path: string): ParsedLock | undefined {
+  try {
+    return parseLock(readFileSync(path, "utf8"));
+  } catch {
+    return undefined; // no file yet, or vanished under us
+  }
+}
+
+/**
+ * Read the lock holder, tolerating the brief window in which a concurrent
+ * starter has created the file (O_EXCL winner) but not yet written its PID
+ * line. An empty / pid<=0 payload on an EXISTING file almost always means
+ * "someone is mid-write", not "genuinely stale" — treating it as stale would
+ * unlink a live holder's lock and let a second daemon start. So we re-read a
+ * few times over ~1s: a real winner writes its PID microseconds later and we
+ * back off correctly; a process that crashed between create and write leaves
+ * the file empty forever, so after the deadline we still return it as stale and
+ * the caller reclaims it.
+ */
+function readHolderWithRetry(path: string): ParsedLock {
+  const deadlineMs = Date.now() + 1_000;
+  let holder: ParsedLock = { pid: NaN, token: "" };
+  for (;;) {
+    try {
+      holder = parseLock(readFileSync(path, "utf8"));
+    } catch {
+      // File disappeared between our create attempt and the read — race lost;
+      // let the caller's reclaim path re-create it.
+      return { pid: NaN, token: "" };
+    }
+    if (Number.isInteger(holder.pid) && holder.pid > 0) return holder;
+    if (Date.now() >= deadlineMs) return holder;
+    sleepSync(50);
+  }
+}
+
 /**
  * Try to acquire the lock. Returns either a LockHandle (success) or a
  * LockConflict (another process holds it). Stale locks (holder dead, or a
@@ -109,10 +159,37 @@ function parseLock(raw: string): ParsedLock {
 export function acquireRunLock(path: string): LockHandle | LockConflict {
   mkdirSync(dirname(path), { recursive: true });
 
+  // Fast path: if a genuine LIVE holder already owns the lock, report the
+  // conflict WITHOUT computing our own payload. On Windows `lockPayload()`
+  // spawns PowerShell (~300ms–5s); `tick` calls acquireRunLock every minute and
+  // conflicts by design once the daemon is up, so paying that spawn on every
+  // conflict would add ~1440 PowerShell launches/day of pure churn. A single
+  // cheap read avoids it. (An empty / pid<=0 / dead / recycled holder falls
+  // through to the create+reclaim path below.)
+  const preexisting = readHolderOnce(path);
+  if (
+    preexisting &&
+    Number.isInteger(preexisting.pid) &&
+    preexisting.pid > 0 &&
+    holderIsAlive(preexisting)
+  ) {
+    return { path, pid: preexisting.pid };
+  }
+
+  // Compute the payload BEFORE creating the file. If `lockPayload()`'s PowerShell
+  // spawn ran between `openSync` and `writeSync`, the lock file would sit EMPTY
+  // for the whole spawn duration. A second starter reading it in that window
+  // sees an empty file → pid parses as 0 → "stale" → it unlinks the live
+  // holder's lock and starts its own daemon. Two pollers on one bot token =
+  // the getUpdates 409 flood + double-fired turns. Precomputing shrinks the
+  // create→write gap to microseconds and reuses one payload across both
+  // tryCreate attempts.
+  const payload = lockPayload();
+
   const tryCreate = (): boolean => {
     try {
       const fd = openSync(path, "wx"); // O_CREAT | O_EXCL
-      writeSync(fd, lockPayload());
+      writeSync(fd, payload);
       closeSync(fd);
       return true;
     } catch (e) {
@@ -123,13 +200,9 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
 
   if (tryCreate()) return makeHandle(path);
 
-  // Lock exists. Inspect the holder.
-  let holder: ParsedLock = { pid: NaN, token: "" };
-  try {
-    holder = parseLock(readFileSync(path, "utf8"));
-  } catch {
-    // File disappeared between our create attempt and the read — race.
-  }
+  // Lock exists. Inspect the holder — tolerating the brief window where a
+  // concurrent starter created the file but hasn't written its PID line yet.
+  const holder = readHolderWithRetry(path);
 
   if (
     Number.isInteger(holder.pid) &&
@@ -148,13 +221,10 @@ export function acquireRunLock(path: string): LockHandle | LockConflict {
   if (tryCreate()) return makeHandle(path);
 
   // Race lost — someone grabbed it between our unlink and our create.
-  // Read the current holder PID one more time and report.
-  try {
-    holder = parseLock(readFileSync(path, "utf8"));
-  } catch {
-    holder = { pid: NaN, token: "" };
-  }
-  return { path, pid: Number.isInteger(holder.pid) ? holder.pid : NaN };
+  // Read the current holder PID one more time and report (again tolerating a
+  // mid-write empty file so we report a real PID, not NaN).
+  const winner = readHolderWithRetry(path);
+  return { path, pid: Number.isInteger(winner.pid) ? winner.pid : NaN };
 }
 
 function makeHandle(path: string): LockHandle {
