@@ -23,6 +23,10 @@
  *     the vault. The user's LOGIN keychain — the one with the password nobody
  *     remembers — is NEVER touched. codesign can therefore run fully headless;
  *     the OS never has a reason to pop the dreaded "keychain password" dialog.
+ *     The dedicated keychain IS added to the USER keychain search list (never
+ *     the login keychain, and never the system domain) because codesign
+ *     resolves the signing identity by name through that list rather than the
+ *     `--keychain` argument; on any failure the prior search list is restored.
  *
  *   - Every mutating operation is TRANSACTIONAL. `fixSigning` backs up the
  *     binary before signing and rolls it back on any failure; if it created
@@ -161,6 +165,58 @@ export async function isSigningConfigured(
   return r.exitCode === 0;
 }
 
+/**
+ * Parse `security list-keychains` output into bare paths. Each line is a
+ * whitespace-indented, double-quoted path; strip both.
+ */
+export function parseKeychainSearchList(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((l) => l.replace(/^"(.*)"$/, "$1"));
+}
+
+/**
+ * Ensure the dedicated signing keychain is on the USER keychain search list, so
+ * `codesign --sign <name>` can resolve the identity (it searches the list, not
+ * the `--keychain` path). Idempotent: no-op if already present; otherwise
+ * appends and returns the prior list so a failed run can restore it exactly.
+ *
+ * Matching tolerates macOS's `-db` suffix: `create-keychain foo.keychain`
+ * materialises `foo.keychain-db` on disk and the search list reports the real
+ * path, so a naive exact compare would re-append a duplicate every run.
+ */
+export async function ensureKeychainInSearchList(args: {
+  run: (cmd: string, a: readonly string[]) => Promise<CommandResult>;
+  keychainPath: string;
+}): Promise<
+  | { ok: true; added: false }
+  | { ok: true; added: true; priorList: string[] }
+  | { ok: false; failedStep: string }
+> {
+  const { run, keychainPath } = args;
+  const read = await run("security", ["list-keychains", "-d", "user"]);
+  if (read.exitCode !== 0)
+    return { ok: false, failedStep: "list-keychains-read" };
+  const priorList = parseKeychainSearchList(read.stdout);
+  const norm = (p: string) => p.replace(/-db$/, "");
+  const target = norm(keychainPath);
+  if (priorList.some((p) => norm(p) === target))
+    return { ok: true, added: false };
+  const set = await run("security", [
+    "list-keychains",
+    "-d",
+    "user",
+    "-s",
+    ...priorList,
+    keychainPath,
+  ]);
+  if (set.exitCode !== 0)
+    return { ok: false, failedStep: "list-keychains-set" };
+  return { ok: true, added: true, priorList };
+}
+
 export interface FixSigningOptions {
   runner: CommandRunner;
   vault: SigningSecretStore;
@@ -204,6 +260,9 @@ export async function fixSigning(
   let createdKeychain = false;
   let wroteVaultPassword = false;
   let backedUp = false;
+  // If we add our keychain to the user search list this run, remember the prior
+  // list so rollback restores it exactly (roll back everything, or nothing).
+  let priorSearchList: string[] | null = null;
 
   const rollback = async (): Promise<void> => {
     // Restore the binary first — it's the thing that must never end up broken.
@@ -213,6 +272,17 @@ export async function fixSigning(
       } catch {
         /* best-effort: the backup is still on disk for manual restore */
       }
+    }
+    // Restore the user keychain search list if we changed it this run, before
+    // deleting the keychain (so we never leave a dangling search-list entry).
+    if (priorSearchList) {
+      await run("security", [
+        "list-keychains",
+        "-d",
+        "user",
+        "-s",
+        ...priorSearchList,
+      ]);
     }
     // Only tear down keychain/cert + vault password if we created them here.
     // Tearing down a pre-existing identity would break a working install.
@@ -264,7 +334,24 @@ export async function fixSigning(
       await run("security", ["unlock-keychain", "-p", password, keychainPath]);
     }
 
-    // 3. Back up the binary, then sign it.
+    // 3. Make the identity resolvable by codesign. codesign looks up
+    //    `--sign <name>` through the USER keychain search list; the
+    //    `--keychain <path>` argument does NOT scope that lookup. A dedicated
+    //    keychain that isn't in the search list yields "no identity found",
+    //    which stalls headless and rolls back. Add ours if absent (idempotent).
+    const searchList = await ensureKeychainInSearchList({ run, keychainPath });
+    if (!searchList.ok) {
+      await rollback();
+      return {
+        ok: false,
+        message: `Couldn't register the signing keychain (${searchList.failedStep}). ` +
+          `Rolled back — phantombot still works as before.`,
+        failedStep: searchList.failedStep,
+      };
+    }
+    if (searchList.added) priorSearchList = searchList.priorList;
+
+    // 4. Back up the binary, then sign it.
     await copyFile(binPath, backupPath);
     backedUp = true;
 
@@ -289,7 +376,7 @@ export async function fixSigning(
       };
     }
 
-    // 4. Verify: signature is valid AND the binary still executes.
+    // 5. Verify: signature is valid AND the binary still executes.
     const verified = await verifySignedBinary({ run, binPath });
     if (!verified.ok) {
       await rollback();
