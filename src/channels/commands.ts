@@ -47,6 +47,7 @@ import { listPiModels } from "../lib/piModels.ts";
 import type { MemoryStore } from "../memory/store.ts";
 import { DEFAULT_HISTORY_LIMIT } from "../orchestrator/turn.ts";
 import { VERSION } from "../version.ts";
+import { gatherStatusProbes } from "./statusProbes.ts";
 
 export interface ActiveTurnHandle {
   controller: AbortController;
@@ -697,6 +698,16 @@ async function handleStatus(
     ? `phantomchat: ${ctx.phantomchatNpub}\n`
     : "";
 
+  // Live subsystem health probes — fresh on every /status (it's a
+  // troubleshooting tool). Each line is omitted when its subsystem isn't
+  // configured. See statusProbes.ts.
+  const probes = await gatherStatusProbes(ctx.config, ctx.persona);
+  const probeLines =
+    (probes.telegram ? `telegram: ${probes.telegram}\n` : "") +
+    (probes.acp ? `acp:     ${probes.acp}\n` : "") +
+    (probes.memory ? `memory:  ${probes.memory}\n` : "") +
+    (probes.voice ? `voice:   ${probes.voice}\n` : "");
+
   return {
     reply:
       `phantom: ${ctx.persona} (pid ${process.pid}, v${VERSION})\n` +
@@ -706,6 +717,7 @@ async function handleStatus(
       modelsLine +
       `uptime:  ${formatElapsedSeconds(uptimeS)}\n` +
       `context: ~${pct}% (≈${approxTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens, last ${DEFAULT_HISTORY_LIMIT} turns)\n` +
+      probeLines +
       `active:  ${active}` +
       runningLine,
   };
