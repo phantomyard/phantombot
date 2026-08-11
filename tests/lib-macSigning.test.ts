@@ -6,11 +6,12 @@
  *   - isSigningConfigured reflects `security find-certificate`'s exit code
  *   - fixSigning happy path signs + verifies + persists the vault password
  *   - fixSigning rolls BACK fully on failure it caused this run (keychain torn
- *     down, vault password cleared) — the opt-in marker is never left half-made
- *   - fixSigning that only RE-SIGNS a pre-existing opt-in never tears down the
+ *     down, vault password cleared) — a half-made identity is never left behind
+ *   - fixSigning that only RE-SIGNS a pre-existing identity never tears down the
  *     working keychain on failure
- *   - resignAfterUpdate is a no-op ("skipped") unless the marker exists
- *   - resignAfterUpdate re-signs on the happy path and fails-safe otherwise
+ *   - resignAfterUpdate runs automatically for everyone: it creates the identity
+ *     on the first update when absent, re-signs when present, and fails-safe
+ *     (restoring the binary) on any error
  */
 
 import { describe, expect, test } from "bun:test";
@@ -168,30 +169,37 @@ describe("fixSigning", () => {
   });
 });
 
-describe("resignAfterUpdate", () => {
-  test("skipped when not opted in — no codesign runs", async () => {
+describe("resignAfterUpdate (automatic for everyone — no opt-in)", () => {
+  test("creates the identity on the first update when absent, then signs", async () => {
     const { home, binPath } = await tempBinary();
     const { runner, keys } = fakeRunner({
-      "security find-certificate": { exitCode: 1 },
+      "security find-certificate": { exitCode: 1 }, // no identity yet
     });
     const vault = fakeVault();
 
     const r = await resignAfterUpdate({ runner, vault, binPath, home });
 
-    expect(r.status).toBe("skipped");
-    expect(keys()).not.toContain("codesign --force");
+    expect(r.status).toBe("resigned");
+    // The identity was created automatically — no prior fix-signing needed.
+    expect(keys()).toContain("security create-keychain");
+    expect(keys()).toContain("codesign --force");
+    // Password persisted so future headless updates can re-sign silently.
+    expect(vault.store.get(SIGNING_PASSWORD_VAULT_KEY)).toBeTruthy();
+    expect(await Bun.file(`${binPath}.presign.bak`).exists()).toBe(false);
   });
 
-  test("resigns on the happy path when opted in", async () => {
+  test("re-signs against the existing identity on subsequent updates", async () => {
     const { home, binPath } = await tempBinary();
     const { runner, keys } = fakeRunner({
-      "security find-certificate": { exitCode: 0 },
+      "security find-certificate": { exitCode: 0 }, // identity already present
     });
     const vault = fakeVault({ [SIGNING_PASSWORD_VAULT_KEY]: "pw" });
 
     const r = await resignAfterUpdate({ runner, vault, binPath, home });
 
     expect(r.status).toBe("resigned");
+    // Doesn't recreate the keychain when one already exists.
+    expect(keys()).not.toContain("security create-keychain");
     expect(keys()).toContain("codesign --force");
     expect(await Bun.file(`${binPath}.presign.bak`).exists()).toBe(false);
   });
@@ -207,20 +215,7 @@ describe("resignAfterUpdate", () => {
     const r = await resignAfterUpdate({ runner, vault, binPath, home });
 
     expect(r.status).toBe("failed");
+    // The swapped binary is left working (ad-hoc), never broken.
     expect(await readFile(binPath, "utf8")).toBe("ORIGINAL-BINARY");
-  });
-
-  test("fails when opted in but password is missing from the vault", async () => {
-    const { home, binPath } = await tempBinary();
-    const { runner, keys } = fakeRunner({
-      "security find-certificate": { exitCode: 0 },
-    });
-    const vault = fakeVault(); // marker exists but no password
-
-    const r = await resignAfterUpdate({ runner, vault, binPath, home });
-
-    expect(r.status).toBe("failed");
-    // Never attempted to unlock/sign without the password.
-    expect(keys()).not.toContain("codesign --force");
   });
 });

@@ -11,10 +11,12 @@
  * See src/lib/macSigning.ts for the safety model (transactional, headless,
  * rollback-on-failure).
  *
- * OPT-IN. Running this command IS the opt-in. It creates the marker (the
- * signing keychain) that the /update path keys off to keep the signature fresh
- * on subsequent updates. Users who never run it are completely untouched — the
- * update path runs zero new code for them.
+ * NOT AN OPT-IN. `phantombot update` already applies this identity
+ * automatically on every macOS update, so most users never need this command.
+ * It exists as a MANUAL trigger: apply the identity to the current binary right
+ * now (without waiting for the next update), or repair it if an update's
+ * automatic re-sign failed and left an ad-hoc signature behind. It calls the
+ * same idempotent, transactional `fixSigning` the update path uses.
  *
  * NON-macOS. On Linux/Windows this is a friendly no-op (exit 0): there is no
  * TCC and nothing to fix.

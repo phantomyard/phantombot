@@ -103,7 +103,7 @@ export interface RunUpdateInput {
    * Test seam — override the post-swap macOS re-sign step. Pass `false` to skip
    * entirely (the common case for tests that don't exercise signing). In
    * production this is undefined and runUpdate uses `defaultResignBinary`, which
-   * is a no-op unless the user opted into stable signing via `fix-signing`.
+   * automatically applies the stable signing identity on every macOS update.
    */
   resignBinary?:
     | false
@@ -262,15 +262,17 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     }
   }
 
-  // 7.55. macOS only: re-apply the stable code-signing identity to the freshly
-  // swapped binary. GATED on the user having opted in via `phantombot
-  // fix-signing` (the signing keychain must already exist) — this is the
-  // trademark "updates never break" guarantee in action. For everyone who
-  // hasn't opted in (the vast majority, including installs we don't know
-  // about), resignAfterUpdate returns `skipped` immediately and NO new code
-  // runs: the update path is byte-for-byte its old self. For opt-in users, it
-  // re-signs and, on any failure, restores the pre-sign binary and degrades to
-  // exactly today's behaviour. It can never leave a broken binary. Non-fatal.
+  // 7.55. macOS only: give the freshly-swapped binary a STABLE code-signing
+  // identity so TCC stops re-prompting for home / Documents / Full Disk Access
+  // after every auto-update. This runs AUTOMATICALLY for everyone on macOS —
+  // no opt-in — because the whole point is to stop the OS scaring external
+  // users we never hear from, not just the people who know to ask. The safety
+  // comes from the step being fail-safe, not from gating it: resignAfterUpdate
+  // ensures the identity (creating it on the first update), re-signs, verifies,
+  // and on ANY failure restores the pre-sign binary and tears down anything it
+  // created this run — degrading to exactly today's behaviour (working binary,
+  // still nags). It can never leave a broken binary and never hangs (every
+  // command runs under a timeout). Non-fatal.
   if (input.resignBinary !== false && procPlatform === "darwin") {
     try {
       const r = input.resignBinary
@@ -280,12 +282,11 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
         out.write("re-applied stable code signature.\n");
       } else if (r.status === "failed") {
         err.write(
-          `warning: could not re-apply stable code signature: ${r.reason} — ` +
+          `warning: could not apply stable code signature: ${r.reason} — ` +
             `phantombot still works; macOS may re-prompt for permissions once. ` +
             `Run 'phantombot fix-signing' to repair.\n`,
         );
       }
-      // status === "skipped" → not opted in; stay silent.
     } catch (e) {
       err.write(
         `warning: stable-signing step errored: ${(e as Error).message} — ` +
@@ -409,11 +410,12 @@ async function defaultInstallEditorExtensions(
 
 /**
  * Production wiring for the post-swap macOS re-sign step. Opens the active
- * persona's vault (to read the signing keychain password) and delegates to
- * resignAfterUpdate, which is itself gated on the opt-in marker existing. Never
- * throws — resignAfterUpdate catches internally, and vault-open failure is
- * caught here and reported as a benign skip so a swap can never be undone by a
- * signing hiccup.
+ * persona's vault (where the dedicated signing keychain's generated password is
+ * stored so re-signs stay headless) and delegates to resignAfterUpdate, which
+ * ensures the stable identity and re-signs fail-safely. Never throws —
+ * resignAfterUpdate catches internally, and a vault-open failure is caught here
+ * and reported as a `failed` (not a crash) so a swap can never be undone by a
+ * signing hiccup; the update path only warns.
  */
 async function defaultResignBinary(
   binPath: string,
@@ -430,7 +432,7 @@ async function defaultResignBinary(
       binPath,
     });
   } catch (e) {
-    return { status: "skipped", reason: `vault unavailable: ${(e as Error).message}` };
+    return { status: "failed", reason: `vault unavailable: ${(e as Error).message}` };
   } finally {
     vault?.close();
   }

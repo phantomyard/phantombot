@@ -390,7 +390,7 @@ describe("runUpdate on darwin-arm64", () => {
       resignBinary: async () => ({ status: "failed", reason: "codesign failed" }),
     });
     expect(code).toBe(0);
-    expect(err.text).toContain("could not re-apply stable code signature");
+    expect(err.text).toContain("could not apply stable code signature");
     expect(err.text).toContain("fix-signing");
   });
 });

@@ -27,20 +27,24 @@
  *   - Every mutating operation is TRANSACTIONAL. `fixSigning` backs up the
  *     binary before signing and rolls it back on any failure; if it created
  *     the keychain/cert this run and then failed, it tears BOTH down and clears
- *     the vault password, because the keychain's existence is the opt-in marker
- *     the update path keys off — a half-created marker would make the next
- *     update try to maintain a broken identity. Roll back everything this run
- *     created, or nothing.
+ *     the vault password, so a half-created identity is never left behind for
+ *     the next update to trip over. Roll back everything this run created, or
+ *     nothing.
  *
  *   - Every external command runs under a TIMEOUT, so codesign can never hang a
  *     headless update waiting on a prompt; a timeout is treated as failure and
  *     triggers rollback.
  *
- *   - `resignAfterUpdate` (called from /update) is GATED on the opt-in marker
- *     already existing and is best-effort: on any failure it restores the
- *     pre-sign binary and returns quietly, degrading to EXACTLY today's
- *     behaviour (working binary, ad-hoc signature, still nags) — never worse.
- *     Users who never opted in run zero new code.
+ *   - `resignAfterUpdate` (called from /update) runs AUTOMATICALLY on every
+ *     macOS update — there is NO opt-in. So the fix reaches everyone, including
+ *     the installs we never hear about: those are exactly the scared external
+ *     users the nagging frightens most. It ensures the stable identity exists
+ *     (creating it on the first update if absent), then re-signs the freshly
+ *     swapped binary. It is best-effort: on ANY failure it restores the
+ *     pre-sign binary (tearing down anything it created this run) and returns
+ *     quietly, degrading to EXACTLY today's behaviour (working binary, ad-hoc
+ *     signature, still nags) — never worse. The FAIL-SAFE, not gating, is what
+ *     guarantees an update can never break.
  *
  * This module is macOS-only in effect; callers guard on platform. It shells out
  * to `security`, `codesign`, `openssl`, and `spctl` through an injectable
@@ -139,9 +143,10 @@ export function signingKeychainPath(home: string = homedir()): string {
 }
 
 /**
- * True when the opt-in marker exists: the dedicated keychain holds our
- * code-signing certificate. This is the single gate the /update path checks —
- * absent, and the update path runs zero new code.
+ * True when the stable signing identity already exists: the dedicated keychain
+ * holds our code-signing certificate. `fixSigning` uses this to decide whether
+ * to CREATE the identity (first update on a machine) or just re-sign against an
+ * existing one — not as an opt-in gate; signing runs for everyone.
  */
 export async function isSigningConfigured(
   runner: CommandRunner,
@@ -194,7 +199,7 @@ export async function fixSigning(
     runner.run(cmd, args, { timeoutMs });
 
   // Track what THIS invocation creates, so rollback only tears down our own
-  // work and never a keychain the user already opted into on a prior run.
+  // work and never a keychain a prior successful run already established.
   const alreadyConfigured = await isSigningConfigured(runner, keychainPath);
   let createdKeychain = false;
   let wroteVaultPassword = false;
@@ -210,7 +215,7 @@ export async function fixSigning(
       }
     }
     // Only tear down keychain/cert + vault password if we created them here.
-    // Tearing down a pre-existing opt-in would break a working install.
+    // Tearing down a pre-existing identity would break a working install.
     if (createdKeychain) {
       await run("security", ["delete-keychain", keychainPath]);
     }
@@ -250,8 +255,8 @@ export async function fixSigning(
       }
       createdKeychain = true;
     } else {
-      // Keychain exists from a prior opt-in — just make sure it's unlocked so
-      // codesign can read the key headlessly.
+      // Keychain exists from a prior update/run — just make sure it's unlocked
+      // so codesign can read the key headlessly.
       await run("security", ["unlock-keychain", "-p", password, keychainPath]);
     }
 
@@ -322,89 +327,37 @@ export interface ResignAfterUpdateOptions {
 }
 
 export type ResignAfterUpdateResult =
-  | { status: "skipped"; reason: string }
   | { status: "resigned" }
   | { status: "failed"; reason: string };
 
 /**
- * Best-effort re-sign after a binary swap, for the /update path.
+ * Automatic re-sign after a binary swap, for the /update path — runs for
+ * EVERYONE on macOS, with no opt-in.
  *
- * GATED on the opt-in marker: if the signing keychain/cert isn't present, this
- * is a no-op (`skipped`) — users who never opted in are untouched. When opted
- * in, it backs up the freshly-swapped binary, re-signs with the stable
- * identity, verifies, and on ANY failure restores the backup and returns
- * `failed` — degrading to exactly today's behaviour (working binary, no stable
- * signature). Never throws.
+ * This is a thin adapter over `fixSigning`, which already does the complete
+ * job idempotently and fail-safely: ensure the stable identity exists (create
+ * it on the first update if absent), back up the freshly-swapped binary,
+ * re-sign it with the stable identity, verify signature + exec, and on ANY
+ * failure roll everything this run created back — leaving a working binary with
+ * exactly today's behaviour (ad-hoc signature, still nags). Never throws.
+ *
+ * The result is flattened to `resigned` / `failed` so the update path can keep
+ * its reporting terse; the rich, secret-free message from `fixSigning` is
+ * carried through on failure for the warning line.
  */
 export async function resignAfterUpdate(
   opts: ResignAfterUpdateOptions,
 ): Promise<ResignAfterUpdateResult> {
-  const { runner, vault } = opts;
-  const home = opts.home ?? homedir();
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const keychainPath = signingKeychainPath(home);
-  const binPath = opts.binPath;
-  const backupPath = `${binPath}.presign.bak`;
-  const run = (cmd: string, args: readonly string[]) =>
-    runner.run(cmd, args, { timeoutMs });
-
-  try {
-    if (!(await isSigningConfigured(runner, keychainPath))) {
-      return { status: "skipped", reason: "no stable signing identity configured" };
-    }
-    const password = vault.get(SIGNING_PASSWORD_VAULT_KEY);
-    if (!password) {
-      // Marker exists but password is gone — we can't unlock headlessly. Don't
-      // guess or prompt in a headless update; leave the swapped binary as-is.
-      return {
-        status: "failed",
-        reason: "signing keychain password missing from vault; run 'phantombot fix-signing'",
-      };
-    }
-
-    const unlock = await run("security", [
-      "unlock-keychain",
-      "-p",
-      password,
-      keychainPath,
-    ]);
-    if (unlock.exitCode !== 0) {
-      return { status: "failed", reason: `could not unlock signing keychain: ${firstLine(unlock.stderr)}` };
-    }
-
-    await copyFile(binPath, backupPath);
-    const sign = await run("codesign", [
-      "--force",
-      "--sign",
-      SIGNING_CERT_CN,
-      "--identifier",
-      SIGNING_BUNDLE_ID,
-      "--keychain",
-      keychainPath,
-      "--timestamp=none",
-      binPath,
-    ]);
-    if (sign.exitCode !== 0) {
-      await restore(backupPath, binPath);
-      return {
-        status: "failed",
-        reason: `codesign failed${sign.timedOut ? " (timed out)" : ""}: ${firstLine(sign.stderr)}`,
-      };
-    }
-
-    const verified = await verifySignedBinary({ run, binPath });
-    if (!verified.ok) {
-      await restore(backupPath, binPath);
-      return { status: "failed", reason: `verification failed (${verified.failedStep})` };
-    }
-
-    await rm(backupPath, { force: true });
-    return { status: "resigned" };
-  } catch (e) {
-    // Try to leave a working binary behind even on an unexpected throw.
-    await restore(backupPath, binPath);
-    return { status: "failed", reason: (e as Error).message };
-  }
+  const res = await fixSigning({
+    runner: opts.runner,
+    vault: opts.vault,
+    binPath: opts.binPath,
+    home: opts.home,
+    timeoutMs: opts.timeoutMs,
+  });
+  return res.ok
+    ? { status: "resigned" }
+    : { status: "failed", reason: res.message };
 }
 
 /**
@@ -531,15 +484,6 @@ async function verifySignedBinary(args: {
   const exec = await run(binPath, ["--version"]);
   if (exec.exitCode !== 0) return { ok: false, failedStep: "exec-check" };
   return { ok: true };
-}
-
-async function restore(backupPath: string, binPath: string): Promise<void> {
-  try {
-    await copyFile(backupPath, binPath);
-    await rm(backupPath, { force: true });
-  } catch {
-    /* best-effort: backup remains on disk for manual restore */
-  }
 }
 
 function firstLine(s: string): string {
