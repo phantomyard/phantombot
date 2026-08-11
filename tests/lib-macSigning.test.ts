@@ -131,6 +131,32 @@ describe("fixSigning", () => {
     expect(await readFile(binPath, "utf8")).toBe("ORIGINAL-BINARY");
   });
 
+  test("rollback on a post-create identity step failure tears down the partial keychain", async () => {
+    // create-keychain succeeds but a LATER step (set-key-partition-list) fails.
+    // The keychain now exists on disk, so rollback MUST delete it — otherwise a
+    // cert-bearing keychain would survive next to a cleared vault password and
+    // permanently break automatic repair on every subsequent update.
+    const { home, binPath } = await tempBinary();
+    const { runner, keys } = fakeRunner({
+      "security find-certificate": { exitCode: 1 }, // not yet configured
+      "security set-key-partition-list": { exitCode: 1, stderr: "partition boom" },
+    });
+    const vault = fakeVault();
+
+    const r = await fixSigning({ runner, vault, binPath, home });
+
+    expect(r.ok).toBe(false);
+    expect(r.failedStep).toBe("set-key-partition-list");
+    // The partially-created keychain was torn down during rollback (the initial
+    // idempotent delete + the rollback delete → at least two delete calls).
+    expect(keys().filter((k) => k === "security delete-keychain").length).toBeGreaterThanOrEqual(2);
+    // Vault password we wrote this run was cleared — never leave a password
+    // stranded against an orphaned keychain.
+    expect(vault.store.has(SIGNING_PASSWORD_VAULT_KEY)).toBe(false);
+    // Never signed the binary since identity creation failed → bytes untouched.
+    expect(await readFile(binPath, "utf8")).toBe("ORIGINAL-BINARY");
+  });
+
   test("re-sign of a pre-existing opt-in: failure does NOT tear down the keychain", async () => {
     const { home, binPath } = await tempBinary();
     const { runner, keys } = fakeRunner({

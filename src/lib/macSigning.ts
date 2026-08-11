@@ -244,6 +244,11 @@ export async function fixSigning(
         keychainPath,
         password,
       });
+      // Mark the keychain for teardown the moment `create-keychain` succeeded,
+      // even if a later identity step failed — otherwise rollback would leave a
+      // partial keychain behind while clearing the vault password, which breaks
+      // automatic repair on every subsequent update.
+      createdKeychain = created.keychainCreated;
       if (!created.ok) {
         await rollback();
         return {
@@ -253,7 +258,6 @@ export async function fixSigning(
           failedStep: created.failedStep,
         };
       }
-      createdKeychain = true;
     } else {
       // Keychain exists from a prior update/run — just make sure it's unlocked
       // so codesign can read the key headlessly.
@@ -372,7 +376,10 @@ async function createSigningIdentity(args: {
   run: (cmd: string, a: readonly string[]) => Promise<CommandResult>;
   keychainPath: string;
   password: string;
-}): Promise<{ ok: true } | { ok: false; failedStep: string }> {
+}): Promise<
+  | { ok: true; keychainCreated: boolean }
+  | { ok: false; failedStep: string; keychainCreated: boolean }
+> {
   const { run, keychainPath, password } = args;
 
   // Fresh keychain. Deleting first makes create idempotent if a stale,
@@ -384,12 +391,19 @@ async function createSigningIdentity(args: {
     password,
     keychainPath,
   ]);
-  if (create.exitCode !== 0) return { ok: false, failedStep: "create-keychain" };
+  if (create.exitCode !== 0)
+    return { ok: false, failedStep: "create-keychain", keychainCreated: false };
+
+  // From here on the keychain exists on disk — every exit path must report it
+  // as created so the caller's rollback tears down this partial keychain and we
+  // never leave a cert-bearing keychain paired with a cleared vault password.
+  const keychainCreated = true;
 
   // No auto-lock / no lock-on-sleep so a long-lived service can always re-sign.
   await run("security", ["set-keychain-settings", keychainPath]);
   const unlock = await run("security", ["unlock-keychain", "-p", password, keychainPath]);
-  if (unlock.exitCode !== 0) return { ok: false, failedStep: "unlock-keychain" };
+  if (unlock.exitCode !== 0)
+    return { ok: false, failedStep: "unlock-keychain", keychainCreated };
 
   // Generate key + self-signed codesigning cert + p12 in a temp dir we scrub.
   const workdir = await mkdtemp(join(tmpdir(), "phantombot-signing-"));
@@ -418,7 +432,8 @@ async function createSigningIdentity(args: {
       "-addext",
       "extendedKeyUsage=critical,codeSigning",
     ]);
-    if (req.exitCode !== 0) return { ok: false, failedStep: "openssl-req" };
+    if (req.exitCode !== 0)
+      return { ok: false, failedStep: "openssl-req", keychainCreated };
 
     const pk = await run("openssl", [
       "pkcs12",
@@ -434,7 +449,8 @@ async function createSigningIdentity(args: {
       "-name",
       SIGNING_CERT_CN,
     ]);
-    if (pk.exitCode !== 0) return { ok: false, failedStep: "openssl-pkcs12" };
+    if (pk.exitCode !== 0)
+      return { ok: false, failedStep: "openssl-pkcs12", keychainCreated };
 
     // Import, granting codesign non-prompting access to the private key.
     const imp = await run("security", [
@@ -448,7 +464,8 @@ async function createSigningIdentity(args: {
       "/usr/bin/codesign",
       "-A",
     ]);
-    if (imp.exitCode !== 0) return { ok: false, failedStep: "import" };
+    if (imp.exitCode !== 0)
+      return { ok: false, failedStep: "import", keychainCreated };
 
     // Partition list is the crucial headless step: without it, the first
     // codesign against this key pops the "codesign wants to use a key" dialog
@@ -462,9 +479,10 @@ async function createSigningIdentity(args: {
       password,
       keychainPath,
     ]);
-    if (part.exitCode !== 0) return { ok: false, failedStep: "set-key-partition-list" };
+    if (part.exitCode !== 0)
+      return { ok: false, failedStep: "set-key-partition-list", keychainCreated };
 
-    return { ok: true };
+    return { ok: true, keychainCreated };
   } finally {
     // Scrub the private key material regardless of outcome.
     await rm(workdir, { recursive: true, force: true });
