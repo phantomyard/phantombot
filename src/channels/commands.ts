@@ -29,6 +29,8 @@ import { MemoryIndex } from "../lib/memoryIndex.ts";
 import { defaultServiceControl, selfRestart } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
+import { runFixSigning } from "../cli/fix-signing.ts";
+import type { WriteSink } from "../lib/io.ts";
 import {
   applyCoderSwapRequest,
   normalizeCoderSwapRequest,
@@ -169,7 +171,11 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
   { command: "reset", description: "Clear this chat's history" },
   { command: "status", description: "Show harness, uptime, context usage" },
   { command: "harness", description: "List or switch the active harness" },
-  { command: "update", description: "Install the latest phantombot release" },
+  {
+    command: "update",
+    description:
+      "Install the latest phantombot release (resign — macOS-only: re-sign the current binary in place, no update/restart)",
+  },
   { command: "restart", description: "Restart the phantombot service" },
   {
     command: "coder",
@@ -260,6 +266,13 @@ export async function handleSlashCommand(
     case "/harness":
       return await handleHarness(arg, ctx);
     case "/update":
+      // `/update resign` re-signs the CURRENT on-disk binary in place — no
+      // download, no reinstall, no restart, no version change. It runs the
+      // exact same signing routine /update applies post-swap, so it's a
+      // faithful dogfood of the re-sign path and doubles as a manual repair
+      // button when a macOS update breaks the signature. macOS-only; a no-op
+      // elsewhere. Bare `/update` is the full self-update.
+      if (arg.toLowerCase() === "resign") return await handleUpdateResign(ctx);
       return await handleUpdate(ctx);
     case "/restart":
       return handleRestart(ctx);
@@ -319,6 +332,46 @@ async function handleUpdate(
     persona: ctx.persona,
   });
   return { reply: r.reply, afterSend: r.restart };
+}
+
+/**
+ * /update resign — re-sign the current binary in place, nothing else.
+ *
+ * This is deliberately NOT part of the self-update: it does NOT fetch a
+ * release, reinstall, restart, or change the version. It re-runs the SAME
+ * signing routine `/update` applies automatically after a binary swap
+ * (`runFixSigning` → `fixSigning`), against the binary already on disk. Two
+ * uses: (1) dogfooding the re-sign path without the fetch/install/restart
+ * dance — the devloop that motivated it — and (2) a manual repair button when
+ * a macOS update invalidates the signature and Andrew wants to re-sign without
+ * a full update.
+ *
+ * macOS-only in effect. On Linux/Windows `runFixSigning` returns its friendly
+ * "nothing to do" no-op (exit 0) — there's no TCC nagging to fix. We reuse
+ * that command's exact platform guard, binary check, and user-facing prose by
+ * capturing its output sinks into the chat reply, so the message the user sees
+ * is identical to `phantombot fix-signing`.
+ */
+async function handleUpdateResign(
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  log.info("commands: /update resign invoked", {
+    chatId: ctx.chatId,
+    persona: ctx.persona,
+    platform: process.platform,
+  });
+  const chunks: string[] = [];
+  const sink: WriteSink = {
+    write: (chunk: string | Uint8Array): boolean => {
+      chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+      return true;
+    },
+  };
+  const code = await runFixSigning({ persona: ctx.persona, out: sink, err: sink });
+  const reply =
+    chunks.join("").trim() ||
+    (code === 0 ? "resign complete" : "resign failed");
+  return { reply };
 }
 
 /**

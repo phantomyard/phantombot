@@ -494,6 +494,45 @@ describe("/update", () => {
   });
 });
 
+describe("/update resign", () => {
+  test("non-macOS: friendly no-op reply, exit 0, no config required, no restart", async () => {
+    // The test runner is Linux. resign must NOT touch the vault, self-update,
+    // or restart — it reuses fix-signing's platform guard and just reports
+    // "nothing to do". Crucially, it takes the resign branch even without a
+    // config in context (bare /update would refuse with "update unavailable").
+    const r = await handleSlashCommand("/update resign", ctx());
+    expect(r).not.toBeNull();
+    expect(r!.reply.toLowerCase()).toContain("macos-only");
+    expect(r!.reply.toLowerCase()).toContain("nothing to do");
+    expect(r!.reply).not.toContain("update unavailable");
+    expect(r!.afterSend).toBeUndefined();
+  });
+
+  test("subcommand match is case-insensitive", async () => {
+    const r = await handleSlashCommand("/update RESIGN", ctx());
+    expect(r).not.toBeNull();
+    expect(r!.reply.toLowerCase()).toContain("nothing to do");
+  });
+
+  test("on macOS: reaches the signing routine (guards on the running binary)", async () => {
+    // Swap platform to darwin so resign passes the platform guard and reaches
+    // runFixSigning's real logic. The test process's execPath is `bun`, not a
+    // phantombot binary, so the routine stops at its binary-identity guard —
+    // proving the resign path invokes the same fix-signing routine /update
+    // applies post-swap, with no self-update or restart.
+    const origPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    try {
+      const r = await handleSlashCommand("/update resign", ctx());
+      expect(r).not.toBeNull();
+      expect(r!.reply).toContain("phantombot binary");
+      expect(r!.afterSend).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "platform", { value: origPlatform });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // /restart
 // ---------------------------------------------------------------------------

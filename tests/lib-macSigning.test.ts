@@ -23,6 +23,7 @@ import {
   ensureKeychainInSearchList,
   fixSigning,
   isSigningConfigured,
+  OPENSSL_BIN,
   parseKeychainSearchList,
   resignAfterUpdate,
   SIGNING_PASSWORD_VAULT_KEY,
@@ -102,7 +103,7 @@ describe("fixSigning", () => {
     expect(r.ok).toBe(true);
     // Identity creation happened.
     expect(keys()).toContain("security create-keychain");
-    expect(keys()).toContain("openssl req");
+    expect(keys()).toContain(`${OPENSSL_BIN} req`);
     expect(keys()).toContain("security set-key-partition-list");
     // Keychain registered on the user search list so codesign can resolve the
     // identity by name (the crux of the #363 fix).
@@ -114,6 +115,28 @@ describe("fixSigning", () => {
     expect(vault.store.get(SIGNING_PASSWORD_VAULT_KEY)).toBeTruthy();
     // Backup cleaned up on success.
     expect(await Bun.file(`${binPath}.presign.bak`).exists()).toBe(false);
+  });
+
+  test("openssl is pinned to /usr/bin/openssl, never bare (avoids Homebrew OpenSSL 3.x)", async () => {
+    // The launchd PATH puts /opt/homebrew/bin ahead of /usr/bin, so a bare
+    // `openssl` resolves to Homebrew's OpenSSL 3.x, whose `pkcs12 -export`
+    // writes a MAC/PBE that Apple's `security import` (LibreSSL) rejects
+    // ("MAC verification failed") — the real failure behind every macOS
+    // /update re-sign. Pin both openssl calls to the system LibreSSL.
+    const { home, binPath } = await tempBinary();
+    const { runner, calls } = fakeRunner({
+      "security find-certificate": { exitCode: 1 },
+    });
+    const vault = fakeVault();
+
+    await fixSigning({ runner, vault, binPath, home });
+
+    const opensslCalls = calls.filter((c) => c.args[0] && /openssl/.test(c.cmd));
+    // Both the cert (`req`) and the p12 (`pkcs12`) steps shell out to openssl.
+    expect(opensslCalls.map((c) => c.args[0])).toEqual(["req", "pkcs12"]);
+    // Every one uses the absolute LibreSSL path, not a PATH-resolved `openssl`.
+    for (const c of opensslCalls) expect(c.cmd).toBe(OPENSSL_BIN);
+    expect(calls.some((c) => c.cmd === "openssl")).toBe(false);
   });
 
   test("rollback on codesign failure it caused this run: tears down marker", async () => {

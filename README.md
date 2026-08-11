@@ -605,7 +605,7 @@ overwrites stale BotFather commands. The supported commands are:
 | `/reset` | Clear this chat's history |
 | `/status` | Show phantom name, PID, version, harness chain with availability, per-harness models, uptime, context usage, the persona's own PhantomChat address (`phantomchat: npub…`), and live subsystem health probes (Telegram, editor connectors, memory/embeddings, voice) |
 | `/harness` | List or switch the active harness |
-| `/update` | Install the latest phantombot release |
+| `/update` | Install the latest phantombot release. `/update resign` (macOS-only) re-signs the current binary in place — no download, reinstall, restart, or version change — to dogfood the re-sign path or repair a signature a macOS update invalidated; a no-op on other platforms |
 | `/restart` | Restart the phantombot service |
 | `/coder` | Force the coding brain on for this chat (`off` / `default` to revert) |
 | `/chattiness` | Show or hide progress bubbles in this chat (`on` / `off` / `<on\|off> default`) |

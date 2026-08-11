@@ -79,6 +79,19 @@ export const SIGNING_KEYCHAIN_BASENAME = "phantombot-signing.keychain";
  */
 export const SIGNING_PASSWORD_VAULT_KEY = "MACOS_SIGNING_KEYCHAIN_PASSWORD";
 
+/**
+ * Absolute path to macOS's system OpenSSL (LibreSSL). We MUST pin this rather
+ * than PATH-resolve bare `openssl`: phantombot's launchd PATH puts
+ * `/opt/homebrew/bin` ahead of `/usr/bin`, so a bare `openssl` resolves to
+ * Homebrew's OpenSSL 3.x. Its `pkcs12 -export` writes the PKCS#12 MAC/PBE with
+ * modern algorithms that Apple's `security import` (LibreSSL-era) rejects with
+ * `MAC verification failed during PKCS12 import` — which failed EVERY macOS
+ * /update re-sign at the import step. `/usr/bin/openssl` is always present on
+ * macOS and produces import-compatible p12s. (`-legacy` is NOT the fix: that
+ * flag is an OpenSSL-3-ism and breaks on LibreSSL.)
+ */
+export const OPENSSL_BIN = "/usr/bin/openssl";
+
 /** Default per-command timeout. codesign/security are fast; a stall is a bug. */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -498,7 +511,7 @@ async function createSigningIdentity(args: {
   const certPem = join(workdir, "cert.pem");
   const p12 = join(workdir, "identity.p12");
   try {
-    const req = await run("openssl", [
+    const req = await run(OPENSSL_BIN, [
       "req",
       "-x509",
       "-newkey",
@@ -522,7 +535,7 @@ async function createSigningIdentity(args: {
     if (req.exitCode !== 0)
       return { ok: false, failedStep: "openssl-req", keychainCreated };
 
-    const pk = await run("openssl", [
+    const pk = await run(OPENSSL_BIN, [
       "pkcs12",
       "-export",
       "-inkey",
