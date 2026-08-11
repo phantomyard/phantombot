@@ -46,6 +46,7 @@ import notifyCmd from "./notify.ts";
 import taskCmd from "./task.ts";
 import tickCmd from "./tick.ts";
 import updateCmd from "./update.ts";
+import fixSigningCmd from "./fix-signing.ts";
 import voiceCmd from "./voice.ts";
 import replyModeCmd from "./replyMode.ts";
 import p2pCmd from "./p2p.ts";
@@ -85,6 +86,7 @@ export const mainCommand = defineCommand({
     task: taskCmd,
     tick: tickCmd,
     update: updateCmd,
+    "fix-signing": fixSigningCmd,
     voice: voiceCmd,
     "reply-mode": replyModeCmd,
     p2p: p2pCmd,

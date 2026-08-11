@@ -27,6 +27,11 @@ import {
 } from "../lib/binaryUpdate.ts";
 import { installCompletions } from "../lib/completionInstall.ts";
 import {
+  BunCommandRunner,
+  resignAfterUpdate,
+  type ResignAfterUpdateResult,
+} from "../lib/macSigning.ts";
+import {
   detectSupportedTarget,
   findLatestRelease,
   type LatestRelease,
@@ -94,6 +99,15 @@ export interface RunUpdateInput {
   installEditorExtensions?:
     | false
     | ((binPath: string) => Promise<EditorExtensionInstallResult>);
+  /**
+   * Test seam — override the post-swap macOS re-sign step. Pass `false` to skip
+   * entirely (the common case for tests that don't exercise signing). In
+   * production this is undefined and runUpdate uses `defaultResignBinary`, which
+   * is a no-op unless the user opted into stable signing via `fix-signing`.
+   */
+  resignBinary?:
+    | false
+    | ((binPath: string) => Promise<ResignAfterUpdateResult>);
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -248,6 +262,39 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
     }
   }
 
+  // 7.55. macOS only: re-apply the stable code-signing identity to the freshly
+  // swapped binary. GATED on the user having opted in via `phantombot
+  // fix-signing` (the signing keychain must already exist) — this is the
+  // trademark "updates never break" guarantee in action. For everyone who
+  // hasn't opted in (the vast majority, including installs we don't know
+  // about), resignAfterUpdate returns `skipped` immediately and NO new code
+  // runs: the update path is byte-for-byte its old self. For opt-in users, it
+  // re-signs and, on any failure, restores the pre-sign binary and degrades to
+  // exactly today's behaviour. It can never leave a broken binary. Non-fatal.
+  if (input.resignBinary !== false && procPlatform === "darwin") {
+    try {
+      const r = input.resignBinary
+        ? await input.resignBinary(binPath)
+        : await defaultResignBinary(binPath);
+      if (r.status === "resigned") {
+        out.write("re-applied stable code signature.\n");
+      } else if (r.status === "failed") {
+        err.write(
+          `warning: could not re-apply stable code signature: ${r.reason} — ` +
+            `phantombot still works; macOS may re-prompt for permissions once. ` +
+            `Run 'phantombot fix-signing' to repair.\n`,
+        );
+      }
+      // status === "skipped" → not opted in; stay silent.
+    } catch (e) {
+      err.write(
+        `warning: stable-signing step errored: ${(e as Error).message} — ` +
+          `update itself is fine; run 'phantombot fix-signing' if macOS nags.\n`,
+      );
+      // Non-fatal — fall through.
+    }
+  }
+
   // 7.6. Refresh shell tab-completion for the freshly-installed binary. This
   // runs only after a real swap (never on --check or an up-to-date exit), so it
   // also back-fills completion for anyone who installed an older build.
@@ -358,6 +405,35 @@ async function defaultInstallEditorExtensions(
   // user-facing prose, and it carries the "restart VS Code" hint on its
   // second line when an install actually happened.
   return { ok: code === 0, message: (stdout.trim() || stderr.trim()).trim() };
+}
+
+/**
+ * Production wiring for the post-swap macOS re-sign step. Opens the active
+ * persona's vault (to read the signing keychain password) and delegates to
+ * resignAfterUpdate, which is itself gated on the opt-in marker existing. Never
+ * throws — resignAfterUpdate catches internally, and vault-open failure is
+ * caught here and reported as a benign skip so a swap can never be undone by a
+ * signing hiccup.
+ */
+async function defaultResignBinary(
+  binPath: string,
+): Promise<ResignAfterUpdateResult> {
+  const { openPersonaVault } = await import("../lib/vault.ts");
+  const { resolveVaultPersonaDir } = await import("./vault.ts");
+  let vault: Awaited<ReturnType<typeof openPersonaVault>> | undefined;
+  try {
+    const dir = await resolveVaultPersonaDir();
+    vault = await openPersonaVault(dir);
+    return await resignAfterUpdate({
+      runner: new BunCommandRunner(),
+      vault,
+      binPath,
+    });
+  } catch (e) {
+    return { status: "skipped", reason: `vault unavailable: ${(e as Error).message}` };
+  } finally {
+    vault?.close();
+  }
 }
 
 /**

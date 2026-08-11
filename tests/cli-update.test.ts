@@ -339,11 +339,59 @@ describe("runUpdate on darwin-arm64", () => {
       force: true,
       healSystemdUnits: false,
       refreshCompletions: false,
+      installEditorExtensions: false,
+      resignBinary: false,
     });
     expect(code).toBe(0);
     expect(out.text).toContain("phantombot-v1.0.99-darwin-arm64");
     // Binary on disk is the darwin one.
     expect((await readFile(binPath)).equals(DARWIN_BYTES)).toBe(true);
+  });
+
+  test("invokes the re-sign seam on darwin and reports a re-sign", async () => {
+    const out = new CaptureStream();
+    let seenBin: string | undefined;
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "arm64",
+      currentVersion: "1.0.42",
+      fetchImpl: darwinFetch(),
+      out,
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: false,
+      resignBinary: async (bp) => {
+        seenBin = bp;
+        return { status: "resigned" };
+      },
+    });
+    expect(code).toBe(0);
+    expect(seenBin).toBe(binPath);
+    expect(out.text).toContain("re-applied stable code signature");
+  });
+
+  test("a re-sign failure is non-fatal (update still exits 0, warns)", async () => {
+    const err = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procPlatform: "darwin",
+      procArch: "arm64",
+      currentVersion: "1.0.42",
+      fetchImpl: darwinFetch(),
+      out: new CaptureStream(),
+      err,
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: false,
+      resignBinary: async () => ({ status: "failed", reason: "codesign failed" }),
+    });
+    expect(code).toBe(0);
+    expect(err.text).toContain("could not re-apply stable code signature");
+    expect(err.text).toContain("fix-signing");
   });
 });
 
