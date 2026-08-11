@@ -201,6 +201,15 @@ export function vscodeResultToConnector(
         action: repair ? "updated" : "stale",
         settingsPath,
       };
+    case "reinstalled":
+      // A forced re-lay over an already-current version (orphan heal). In
+      // repair mode that's work done → surface as "updated"; report-only can't
+      // produce it (checkVscode never forces), but map it defensively.
+      return {
+        editor: "vscode",
+        action: repair ? "updated" : "stale",
+        settingsPath,
+      };
     case "error":
       return {
         editor: "vscode",

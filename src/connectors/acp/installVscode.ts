@@ -78,6 +78,14 @@ export type VscodeInstallAction =
   | "installed"
   /** An older version was installed; we upgraded it. */
   | "updated"
+  /**
+   * A version >= bundled was already registered, but a forced install
+   * re-laid the .vsix anyway. Self-heals an orphaned/ghosted install where
+   * VS Code's registry (`extensions.json`) still lists the extension but its
+   * on-disk folder was pruned — the version gate would otherwise no-op and
+   * leave the ACP surface dead. Only reachable when `force` is set.
+   */
+  | "reinstalled"
   /** `code --install-extension` failed (surfaced, not thrown). */
   | "error";
 
@@ -237,6 +245,16 @@ export interface InstallVscodeOptions {
   bundledVersion?: string;
   /** Override the extension id (tests). Default: the embedded constant. */
   extensionId?: string;
+  /**
+   * Bypass the version gate and re-lay the bundled .vsix even when the
+   * reported installed version is already >= bundled. This is the fix for the
+   * orphaned-install failure mode: `code --list-extensions` reads VS Code's
+   * registry, not disk, so a GC'd extension folder still reports "current" and
+   * the gate no-ops forever. The explicit `phantombot acp install vscode`
+   * command sets this by default; the automatic reconcile loop leaves it off
+   * to avoid reinstalling on every startup. Default: false.
+   */
+  force?: boolean;
 }
 
 /**
@@ -315,6 +333,7 @@ export function installVscode(
   const deps = options.deps ?? defaultVscodeDeps();
   const bundledVersion = options.bundledVersion ?? VSCODE_EXTENSION_VERSION;
   const extensionId = options.extensionId ?? VSCODE_EXTENSION_ID;
+  const force = options.force ?? false;
 
   try {
     // ── Detection gate: no usable `code` CLI ⇒ do nothing, say so clearly. ──
@@ -339,11 +358,16 @@ export function installVscode(
     const installedVersion = list
       ? findInstalledVersion(list.stdout, extensionId)
       : undefined;
-
-    if (
+    const alreadyCurrent =
       installedVersion !== undefined &&
-      compareVersions(installedVersion, bundledVersion) >= 0
-    ) {
+      compareVersions(installedVersion, bundledVersion) >= 0;
+
+    // The version gate only short-circuits when NOT forcing. `--list-extensions`
+    // reads VS Code's registry, not disk, so a "current" report can be a lie
+    // when the extension folder was GC'd out from under it (orphaned install).
+    // Forcing re-lays the .vsix via `code --install-extension --force`, which
+    // rewrites the folder and heals the ghost.
+    if (alreadyCurrent && !force) {
       return {
         code: 0,
         action: "current",
@@ -381,16 +405,27 @@ export function installVscode(
       deps.cleanup(vsixPath);
     }
 
-    const wasUpgrade = installedVersion !== undefined;
+    // Distinguish a forced re-lay over an already-current version (the
+    // orphan-heal path) from a genuine upgrade or first install, so the output
+    // line is honest rather than claiming an "upgrade" from X → X.
+    const action: VscodeInstallAction = alreadyCurrent
+      ? "reinstalled"
+      : installedVersion !== undefined
+        ? "updated"
+        : "installed";
+    const message =
+      action === "reinstalled"
+        ? `Reinstalled VS Code extension ${extensionId}@${bundledVersion} (forced; was reported ${installedVersion}).`
+        : action === "updated"
+          ? `Upgraded VS Code extension ${extensionId} ${installedVersion} → ${bundledVersion}.`
+          : `Installed VS Code extension ${extensionId}@${bundledVersion}.`;
     return {
       code: 0,
-      action: wasUpgrade ? "updated" : "installed",
+      action,
       bundledVersion,
       installedVersion,
       codeCommand,
-      message: wasUpgrade
-        ? `Upgraded VS Code extension ${extensionId} ${installedVersion} → ${bundledVersion}.`
-        : `Installed VS Code extension ${extensionId}@${bundledVersion}.`,
+      message,
     };
   } catch (e) {
     // Belt-and-suspenders: the entry point never throws.

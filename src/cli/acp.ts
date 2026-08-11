@@ -59,10 +59,21 @@ const installVscodeCmd = defineCommand({
   meta: {
     name: "vscode",
     description:
-      "Install phantombot's first-party VS Code extension (bundled .vsix) via the `code` CLI — idempotent + version-aware. Skips cleanly if VS Code isn't installed.",
+      "Install phantombot's first-party VS Code extension (bundled .vsix) via the `code` CLI — idempotent + version-aware. Forces a reinstall by default so an orphaned/ghosted install self-heals; pass --no-force to keep the version gate. Skips cleanly if VS Code isn't installed.",
   },
-  async run() {
-    const result = installVscode();
+  args: {
+    force: {
+      type: "boolean",
+      description:
+        "Re-lay the bundled extension even when the reported version is already current. This heals an orphaned install where VS Code's registry still lists the extension but its on-disk folder was pruned (the version gate alone reads the registry and would no-op forever). Default: true; pass --no-force to only install when missing or older.",
+      default: true,
+    },
+  },
+  async run({ args }) {
+    // Explicit `acp install vscode` forces by default — a user running it by
+    // hand almost always wants a real reinstall (the ghost-install fix). The
+    // automatic reconcile loop stays version-gated and never sets force.
+    const result = installVscode({ force: args.force !== false });
     // Unlike Zed (a settings merge), VS Code installs OUR extension via the
     // `code` CLI; print the human-readable outcome line for both success and
     // the "code CLI not found" / failure cases.
@@ -73,7 +84,11 @@ const installVscodeCmd = defineCommand({
     // otherwise the user updates, sees the old broken behaviour, and
     // reasonably concludes the update did nothing. Only worth saying when we
     // actually changed something ("current" / "not-detected" need no action).
-    if (result.action === "installed" || result.action === "updated") {
+    if (
+      result.action === "installed" ||
+      result.action === "updated" ||
+      result.action === "reinstalled"
+    ) {
       sink.write(
         "  restart VS Code (or run “Developer: Reload Window”) to load it.\n",
       );

@@ -198,6 +198,67 @@ describe("installVscode idempotency + actions", () => {
     expect(r.action).toBe("current");
   });
 
+  test("force: already-current is reinstalled anyway (heals an orphaned install)", () => {
+    const { deps, writes, cleaned, runs } = makeDeps({
+      platform: "linux",
+      responses: {
+        "code --version": OK("1.90.0"),
+        // Registry reports current, but (in the real bug) the on-disk folder is
+        // gone. --force must re-lay the .vsix regardless of this "current" lie.
+        "code --list-extensions --show-versions": OK(`${ID}@1.0.0\n`),
+      },
+    });
+    const r = installVscode({
+      deps,
+      bundledVersion: "1.0.0",
+      extensionId: ID,
+      force: true,
+    });
+    expect(r.action).toBe("reinstalled");
+    expect(r.code).toBe(0);
+    expect(r.installedVersion).toBe("1.0.0");
+    // Actually re-laid the vsix with --force, then cleaned up.
+    expect(
+      runs.some(
+        (x) => x.args[0] === "--install-extension" && x.args.includes("--force"),
+      ),
+    ).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.path).toBe(STAGED_VSIX_POSIX);
+    expect(cleaned).toContain(STAGED_VSIX_POSIX);
+  });
+
+  test("force is off by default → already-current still short-circuits (no write)", () => {
+    const { deps, writes, runs } = makeDeps({
+      platform: "linux",
+      responses: {
+        "code --version": OK("1.90.0"),
+        "code --list-extensions --show-versions": OK(`${ID}@1.0.0\n`),
+      },
+    });
+    const r = installVscode({ deps, bundledVersion: "1.0.0", extensionId: ID });
+    expect(r.action).toBe("current");
+    expect(writes).toHaveLength(0);
+    expect(runs.some((x) => x.args.includes("--install-extension"))).toBe(false);
+  });
+
+  test("force on a missing extension → plain install (not reinstalled)", () => {
+    const { deps } = makeDeps({
+      platform: "linux",
+      responses: {
+        "code --version": OK("1.90.0"),
+        "code --list-extensions --show-versions": OK("other.ext@1.0.0\n"),
+      },
+    });
+    const r = installVscode({
+      deps,
+      bundledVersion: "0.1.0",
+      extensionId: ID,
+      force: true,
+    });
+    expect(r.action).toBe("installed");
+  });
+
   test("missing extension → installs (writes vsix, runs --install-extension --force, cleans up)", () => {
     const { deps, writes, cleaned, runs } = makeDeps({
       platform: "linux",
