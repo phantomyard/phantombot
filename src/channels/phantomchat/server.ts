@@ -48,6 +48,7 @@ import {
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
 import { getPublicKey } from "nostr-tools/pure";
+import { npubEncode } from "../../lib/nostrIdentity.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
 import { RecentOutbound, runReactionTurn } from "../core/reactions.ts";
 import {
@@ -247,6 +248,8 @@ export async function runPhantomchatServer(
   // Our own hex pubkey — excluded from the roster and always treated as a bot
   // (so the bot never replies to its own self-wrapped group echo).
   const ourHex = getPublicKey(input.secretKey).toLowerCase();
+  // Shareable form of our own identity, shown on /status (see handleStatus).
+  const ourNpub = npubEncode(ourHex);
   // OPTIONAL config seeds (pre-auto-resolve overrides). The roster always
   // contains our own name; sibling names/hexes are MERGED with what we resolve
   // from members' kind-0 profiles at decision time.
@@ -1131,6 +1134,8 @@ export async function runPhantomchatServer(
       serviceControl: input.serviceControl,
       // /stop flushes the same per-conversation backlog an interrupt does.
       flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
+      // Our own PhantomChat address, for the /status `phantomchat:` line.
+      phantomchatNpub: ourNpub,
       // No @username concept on Nostr, and slash handling is DM-only, so there
       // is nothing to disambiguate — leave botUsername undefined.
     }).catch((e: unknown) => {

@@ -112,6 +112,17 @@ export interface SlashCommandContext {
    * degrades to its historical behaviour of aborting only the active turn.
    */
   flushBacklog?: () => number;
+  /**
+   * This persona's PhantomChat identity as an `npub…` (bech32 public key) —
+   * the shareable address a user pastes into the PWA to DM this bot. Shown on
+   * a `phantomchat:` line in /status so the operator can read the bot's own
+   * npub without digging through phantomchat.json.
+   *
+   * Optional: undefined when the persona has no PhantomChat identity
+   * configured (no phantomchat.json / nsec), or in tests that don't set it —
+   * the /status line is simply omitted in that case.
+   */
+  phantomchatNpub?: string;
 }
 
 export interface SlashCommandResult {
@@ -680,9 +691,16 @@ async function handleStatus(
       ? `\nrunning: ${truncateLine(ctx.activeTurn.lastProgressNote, 120)}`
       : "";
 
+  // The persona's own PhantomChat address (npub…), when it has one. Kept on
+  // its own line so it's easy to copy into the PWA / an allowlist.
+  const npubLine = ctx.phantomchatNpub
+    ? `phantomchat: ${ctx.phantomchatNpub}\n`
+    : "";
+
   return {
     reply:
       `phantom: ${ctx.persona} (pid ${process.pid}, v${VERSION})\n` +
+      npubLine +
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
       modelsLine +

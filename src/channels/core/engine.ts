@@ -63,6 +63,7 @@ import {
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
 import { ConversationBacklog } from "./backlog.ts";
+import { loadPhantomchatPersonaConfig } from "../phantomchat/personaStore.ts";
 import { RecentOutbound, runReactionTurn } from "./reactions.ts";
 import {
   hasTextSubstance,
@@ -296,6 +297,12 @@ export async function runTelegramServer(
   input: RunTelegramServerInput,
 ): Promise<void> {
   const serverStartedAt = Date.now();
+  // This persona's PhantomChat npub (its shareable address), if it has one, so
+  // /status can show it on Telegram too. Resolved once at startup — the identity
+  // is long-lived and per-persona. Side-effect-free: returns undefined when the
+  // persona has no phantomchat.json / nsec, and never creates a key.
+  const phantomchatNpub = loadPhantomchatPersonaConfig(input.agentDir)?.identity
+    .npub;
   // Prefer the explicit per-listener account passed by runRun(); fall
   // back to the legacy single-bot field for older callers (tests, and
   // anyone embedding runTelegramServer directly).
@@ -606,6 +613,7 @@ export async function runTelegramServer(
             config: input.config,
             serviceControl: input.serviceControl,
             botUsername,
+            phantomchatNpub,
             // /stop flushes the same per-chat backlog an interrupt does, and
             // reports the count back to the user.
             flushBacklog: () => backlog.flush(msg.conversationId, "stop"),

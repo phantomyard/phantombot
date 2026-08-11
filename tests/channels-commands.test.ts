@@ -266,6 +266,19 @@ describe("/status", () => {
     expect(r!.reply).toMatch(/uptime:\s+1m \d+s/);
     expect(r!.reply).toContain("context:");
     expect(r!.reply).toContain("active:  no");
+    // Version is always shown on the `phantom:` line.
+    expect(r!.reply).toMatch(/phantom: phantom \(pid \d+, v\d/);
+  });
+
+  test("shows a phantomchat: line with the persona npub when one is set", async () => {
+    const npub = "npub1exampleaddressthatthebotwouldadvertise00000000000000000";
+    const r = await handleSlashCommand("/status", ctx({ phantomchatNpub: npub }));
+    expect(r!.reply).toContain(`phantomchat: ${npub}`);
+  });
+
+  test("omits the phantomchat: line when no npub is configured", async () => {
+    const r = await handleSlashCommand("/status", ctx());
+    expect(r!.reply).not.toContain("phantomchat:");
   });
 
   test("shows active turn elapsed time when one is running", async () => {
