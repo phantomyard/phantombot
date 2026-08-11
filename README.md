@@ -603,7 +603,7 @@ overwrites stale BotFather commands. The supported commands are:
 |---|---|
 | `/stop` | Abort the current turn |
 | `/reset` | Clear this chat's history |
-| `/status` | Show phantom name, PID, version, harness chain with availability, per-harness models, uptime, and context usage |
+| `/status` | Show phantom name, PID, version, harness chain with availability, per-harness models, uptime, context usage, the persona's own PhantomChat address (`phantomchat: npub…`), and live subsystem health probes (Telegram, editor connectors, memory/embeddings, voice) |
 | `/harness` | List or switch the active harness |
 | `/update` | Install the latest phantombot release |
 | `/restart` | Restart the phantombot service |
@@ -890,7 +890,7 @@ Slash commands are advertised to the editor, so they appear in its `/`-menu:
 |---|---|
 | `/stop` | Abort the turn that's currently running |
 | `/reset` | Clear this thread's history |
-| `/status` | Show harness, uptime, and context usage |
+| `/status` | Show harness, uptime, context usage, the persona's PhantomChat address (`phantomchat: npub…`), and live subsystem health probes |
 | `/harness` | List or switch the active harness |
 | `/help` | Show the available commands |
 
@@ -978,6 +978,16 @@ every conversation that harness serves. `/status` always shows the result: a
 `models:` line with each harness's configured model (and provider, for Pi),
 next to the phantom name, PID, version, and the availability-annotated
 harness chain.
+
+`/status` also reports the persona's own PhantomChat address on its own line
+(`phantomchat: npub…`, when the persona has one — easy to copy into the PWA or
+an allowlist), plus a block of **live subsystem health probes** run fresh on
+every invocation: Telegram (`getMe`), editor connectors (ACP), memory /
+embeddings backend, and voice provider + key validation. Each line is omitted
+when its subsystem isn't configured. Because `/status` is a troubleshooting
+tool, the whole probe fan-out is bounded by a single short wall-clock deadline
+(~5s): a stalled or dead provider drops its own line rather than hanging the
+command, so `/status` stays usable precisely when something is broken.
 
 ## Group Chats
 

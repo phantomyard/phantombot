@@ -118,11 +118,12 @@ export const AZURE_EDGE_DEFAULTS: AzureEdgeVoice = {
 export async function validateElevenLabsKey(
   apiKey: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; voiceCount: number } | { ok: false; error: string }> {
   try {
     const res = await fetchImpl(
       "https://api.elevenlabs.io/v1/voices?show_legacy=false",
-      { headers: { "xi-api-key": apiKey } },
+      { headers: { "xi-api-key": apiKey }, signal },
     );
     if (res.status === 401) return { ok: false, error: "401 Unauthorized — wrong key" };
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
@@ -139,10 +140,12 @@ export async function validateElevenLabsKey(
 export async function validateOpenAIKey(
   apiKey: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; modelCount: number } | { ok: false; error: string }> {
   try {
     const res = await fetchImpl("https://api.openai.com/v1/models", {
       headers: { authorization: `Bearer ${apiKey}` },
+      signal,
     });
     if (res.status === 401) return { ok: false, error: "401 Unauthorized — wrong key" };
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };

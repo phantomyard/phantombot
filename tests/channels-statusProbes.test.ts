@@ -293,4 +293,56 @@ describe("gatherStatusProbes — resilience", () => {
     );
     expect(r.telegram).toBeUndefined();
   });
+
+  test("a probe that never resolves is capped by the shared deadline", async () => {
+    // A provider that hangs forever must not hang /status. With a tiny
+    // deadline the probe yields undefined and the others still report.
+    const started = Date.now();
+    const r = await gatherStatusProbes(
+      cfg({
+        telegram: { token: "T" },
+        embeddings: {
+          provider: "gemini",
+          gemini: { apiKey: "k", model: "m", dims: 1 },
+        } as unknown as Config["embeddings"],
+      }),
+      "phantom",
+      stubDeps({
+        deadlineMs: 20,
+        // Hangs well past the deadline; never settles on its own.
+        geminiEmbed: () => new Promise(() => {}) as never,
+        telegramGetMe: async () => ({
+          ok: true,
+          username: "robbie_bot",
+          id: 1,
+        }),
+      }),
+    );
+    expect(r.memory).toBeUndefined();
+    // The healthy probe still comes back...
+    expect(r.telegram).toBe("@robbie_bot OK");
+    // ...and the whole call returned promptly rather than hanging.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  test("a probe that resolves before the deadline still reports normally", async () => {
+    const r = await gatherStatusProbes(
+      cfg({
+        embeddings: {
+          provider: "gemini",
+          gemini: { apiKey: "k", model: "m", dims: 1 },
+        } as unknown as Config["embeddings"],
+      }),
+      "phantom",
+      stubDeps({
+        deadlineMs: 500,
+        geminiEmbed: async () => ({
+          ok: true,
+          values: new Float32Array([0.1]),
+          dims: 1,
+        }),
+      }),
+    );
+    expect(r.memory).toBe("gemini embeddings OK");
+  });
 });

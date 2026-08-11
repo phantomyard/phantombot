@@ -7,9 +7,13 @@
  * the local editor-connector registrations) and returns a short one-line
  * summary of "what is it, and is it working right now".
  *
- * Every probe is best-effort and self-contained: a thrown error or a missing
- * config surface yields `undefined` (the line is simply omitted) rather than
- * breaking `/status`. Real network egress happens on each call — that is the
+ * Every probe is best-effort and self-contained: a thrown error, a missing
+ * config surface, or a probe that exceeds the shared deadline yields
+ * `undefined` (the line is simply omitted) rather than breaking `/status`. The
+ * whole fan-out is bounded by a single wall-clock deadline (PROBE_DEADLINE_MS)
+ * threaded into every client that accepts an AbortSignal and enforced again as
+ * a race in gatherStatusProbes, so a dead or stalled provider can never hang
+ * the command. Real network egress happens on each call — that is the
  * deliberate tradeoff for fresh diagnostics (see the PR discussion). The LLM
  * health line is intentionally NOT here; it needs its own design (timeout, cost
  * guard, 429-vs-down semantics) and lands in a follow-up.
@@ -21,6 +25,7 @@
 
 import type { Config } from "../config.ts";
 import { truncateLine } from "../lib/format.ts";
+import { timeoutSignal } from "../lib/fetchTimeout.ts";
 import { telegramGetMe as realTelegramGetMe } from "../lib/telegramApi.ts";
 import {
   validateElevenLabsKey as realValidateElevenLabsKey,
@@ -36,6 +41,19 @@ import { isPhantombotBinary as realIsPhantombotBinary } from "../lib/binaryIdent
 
 /** Cap probe error detail so one bad line can't blow up the /status reply. */
 const ERR_MAX = 60;
+
+/**
+ * Hard wall-clock cap for the whole live-probe fan-out. `/status` is a
+ * troubleshooting command, so a stalled or dead provider must never make it
+ * hang. Two layers enforce this:
+ *   1. a single shared AbortSignal.timeout is threaded into every client that
+ *      accepts a signal (telegram getMe, gemini embed, the voice validators),
+ *      so the underlying socket is actually cancelled — no #135-class leak; and
+ *   2. gatherStatusProbes races each probe against the same deadline as a
+ *      belt-and-suspenders cap, in case a client stalls before its fetch or
+ *      ignores the signal entirely.
+ */
+const PROBE_DEADLINE_MS = 5000;
 
 export interface StatusProbeLines {
   /** e.g. "@robbie_bot OK" or "ERR (401 Unauthorized)" */
@@ -60,6 +78,9 @@ export interface StatusProbeDeps {
   reconcileEditorConnectors?: typeof realReconcileEditorConnectors;
   isPhantombotBinary?: typeof realIsPhantombotBinary;
   env?: Record<string, string | undefined>;
+  /** Override the shared probe deadline (ms). Production omits it; tests use
+   *  a tiny value to exercise the cap without waiting the real 5s. */
+  deadlineMs?: number;
 }
 
 function shortErr(e: string): string {
@@ -71,12 +92,13 @@ async function probeTelegram(
   config: Config | undefined,
   persona: string,
   getMe: typeof realTelegramGetMe,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const token =
     config?.channels.telegramPersonas?.[persona]?.token ??
     config?.channels.telegram?.token;
   if (!token) return undefined;
-  const r = await getMe(token);
+  const r = await getMe(token, fetch, signal);
   return r.ok ? `@${r.username} OK` : `ERR (${shortErr(r.error)})`;
 }
 
@@ -105,6 +127,7 @@ function probeAcp(
 async function probeMemory(
   config: Config | undefined,
   embed: typeof realGeminiEmbed,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const provider = config?.embeddings.provider;
   if (!provider) return undefined;
@@ -119,6 +142,7 @@ async function probeMemory(
   const r = await embed(g.apiKey, "phantombot status probe", {
     model: g.model,
     dims: g.dims,
+    signal,
   });
   return r.ok ? "gemini embeddings OK" : `gemini embeddings ERR (${shortErr(r.error)})`;
 }
@@ -130,6 +154,7 @@ async function probeVoice(
     validateElevenLabsKey: typeof realValidateElevenLabsKey;
     validateOpenAIKey: typeof realValidateOpenAIKey;
     env: Record<string, string | undefined>;
+    signal?: AbortSignal;
   },
 ): Promise<string | undefined> {
   const v = config?.voice;
@@ -150,8 +175,8 @@ async function probeVoice(
 
   const r =
     v.provider === "elevenlabs"
-      ? await deps.validateElevenLabsKey(key)
-      : await deps.validateOpenAIKey(key);
+      ? await deps.validateElevenLabsKey(key, fetch, deps.signal)
+      : await deps.validateOpenAIKey(key, fetch, deps.signal);
   return r.ok
     ? `${v.provider} ${voiceName} OK`
     : `${v.provider} ${voiceName} ERR (${shortErr(r.error)})`;
@@ -175,24 +200,36 @@ export async function gatherStatusProbes(
   const validateEl = deps.validateElevenLabsKey ?? realValidateElevenLabsKey;
   const validateOa = deps.validateOpenAIKey ?? realValidateOpenAIKey;
 
+  // One shared deadline for the whole fan-out. Threaded into every client that
+  // accepts a signal (cancels the socket) AND raced in settle() below (hard cap
+  // even if a client ignores the signal). See PROBE_DEADLINE_MS.
+  const deadline = timeoutSignal(deps.deadlineMs ?? PROBE_DEADLINE_MS);
+
   const settle = async (
     p: Promise<string | undefined>,
   ): Promise<string | undefined> => {
+    const capped = new Promise<undefined>((resolve) => {
+      if (deadline.aborted) return resolve(undefined);
+      deadline.addEventListener("abort", () => resolve(undefined), {
+        once: true,
+      });
+    });
     try {
-      return await p;
+      return await Promise.race([p, capped]);
     } catch {
       return undefined;
     }
   };
 
   const [telegram, memory, voice] = await Promise.all([
-    settle(probeTelegram(config, persona, getMe)),
-    settle(probeMemory(config, embed)),
+    settle(probeTelegram(config, persona, getMe, deadline)),
+    settle(probeMemory(config, embed, deadline)),
     settle(
       probeVoice(config, {
         validateElevenLabsKey: validateEl,
         validateOpenAIKey: validateOa,
         env,
+        signal: deadline,
       }),
     ),
   ]);

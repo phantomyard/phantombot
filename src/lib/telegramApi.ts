@@ -15,11 +15,12 @@ export type GetMeResult =
 export async function telegramGetMe(
   token: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<GetMeResult> {
   let res: Response;
   try {
     res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`, {
-      signal: timeoutSignal(GETME_TIMEOUT_MS),
+      signal: timeoutSignal(GETME_TIMEOUT_MS, signal),
     });
   } catch (e) {
     return { ok: false, error: `network: ${(e as Error).message}` };
