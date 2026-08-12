@@ -44,7 +44,7 @@ import type {
   HarnessModelInfo,
   HarnessRequest,
 } from "./types.ts";
-import { ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
+import { ENV_PHANTOMBOT_TMP_DIR, ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
 import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -119,7 +119,7 @@ export class PiHarness implements Harness {
     // `--system-prompt <file>` as the system prompt and includes an `@<file>`
     // positional's contents in the message (verified against pi 0.80.3). See
     // harnessArgvFiles.
-    const temp = await createHarnessTempDir();
+    const temp = await createHarnessTempDir(req.tmpBaseDir);
     const systemPromptArg = await temp.file("system-prompt.md", req.systemPrompt);
     const payloadArg = `@${await temp.file("payload.md", payload)}`;
     try {
@@ -258,6 +258,12 @@ export class PiHarness implements Harness {
     const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation) };
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
+    // Route the pi capability-routing extension's `phantombot-route-*` temp
+    // files into the persona tmp dir too (issue #365). We pass our OWN var, not
+    // a process-wide TMPDIR — that would leak across personas / unrelated child
+    // processes (Kai's review point). spawnPi.ts falls back to os.tmpdir() when
+    // it's unset (degraded/no-persona paths).
+    if (req.tmpBaseDir) childEnv[ENV_PHANTOMBOT_TMP_DIR] = req.tmpBaseDir;
     const proc = spawnInNewSession([this.config.bin, ...args], {
       cwd: req.workingDir,
       env: childEnv,

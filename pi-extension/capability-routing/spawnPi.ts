@@ -193,7 +193,12 @@ function unrefTimer(t: ReturnType<typeof setTimeout>): void {
 
 /** Write the appended system prompt to a temp file; pi reads it by path. */
 function writePromptTempFile(prompt: string): { dir: string; filePath: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "phantombot-route-"));
+  // Prefer the persona-owned tmp dir the pi harness passes down (issue #365) so
+  // route temp files leave the shared system /tmp; fall back to os.tmpdir() when
+  // unset (degraded/no-persona paths). Ensure the base exists before mkdtemp.
+  const base = process.env.PHANTOMBOT_TMP_DIR || os.tmpdir();
+  fs.mkdirSync(base, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(base, "phantombot-route-"));
   const filePath = path.join(dir, "system.md");
   fs.writeFileSync(filePath, prompt, "utf-8");
   return { dir, filePath };

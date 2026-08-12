@@ -22,6 +22,7 @@
  */
 
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
@@ -334,6 +335,9 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       persona: input.persona,
       conversation: input.conversation,
       workingDir: input.workingDir ?? homedir(),
+      // Harness temp files land under the persona's own dir, not the shared
+      // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
+      tmpBaseDir: join(input.agentDir, "tmp"),
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,

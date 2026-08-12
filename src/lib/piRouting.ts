@@ -77,6 +77,15 @@ export const ENV_PI_PROVIDER = "PHANTOMBOT_PI_PROVIDER";
  * it's collected separately by the wizard and read directly in harnesses/pi.ts.
  */
 export const ENV_PI_API_KEY = "PHANTOMBOT_PI_API_KEY";
+/**
+ * Base dir for the pi capability-routing extension's `phantombot-route-*` temp
+ * files (issue #365). The pi harness sets this per-child to the persona's own
+ * tmp dir so route temp files leave the shared system `/tmp`. The extension
+ * (pi-extension/capability-routing/spawnPi.ts) reads it and falls back to
+ * `os.tmpdir()` when unset. Deliberately our OWN var, not `TMPDIR` — a
+ * process-wide TMPDIR could leak across personas / unrelated child processes.
+ */
+export const ENV_PHANTOMBOT_TMP_DIR = "PHANTOMBOT_TMP_DIR";
 
 /**
  * The resolved routing config. All model fields are optional: undefined means

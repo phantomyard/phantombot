@@ -24,7 +24,8 @@
  * unchanged - the temp-file path is gated to Windows only.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,12 +51,70 @@ export interface HarnessTempDir {
 }
 
 /**
+ * Resolve a persona-owned temp directory (`<personaDir>/tmp`), creating it if
+ * needed. Harness temp files land HERE instead of the shared system `/tmp`
+ * (issue #365) — which keeps writes on real disk, gives full per-persona
+ * isolation (ownership, perms, AND free space all follow the persona), and
+ * means one persona can never starve another's tmpfs. It also lets phantombot
+ * still write when the system `/tmp` is full.
+ */
+export function personaTmpDir(personaDirPath: string): string {
+  const dir = join(personaDirPath, "tmp");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Aggressive startup sweep of a persona's temp dir: delete any entry older
+ * than `maxAgeMs` (default 1h). Age-gated so a concurrent in-flight turn's
+ * harness dir (younger than the max turn duration) is never nuked mid-spawn.
+ *
+ * Only phantombot's own residue lives here — harness/route dirs from crashed or
+ * SIGKILL'd turns that never ran their `finally` cleanup. The run lock is NOT
+ * in this dir (it lives in `$XDG_RUNTIME_DIR` / `~/.cache`, see runLock.ts), so
+ * this sweep can never touch it. Best-effort: a missing dir, or an entry that
+ * vanishes mid-sweep, is ignored — cleanup must never break startup.
+ */
+export function cleanupPersonaTmpDir(
+  personaDirPath: string,
+  maxAgeMs = 3_600_000,
+): void {
+  const dir = join(personaDirPath, "tmp");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return; // dir doesn't exist yet — nothing to sweep
+  }
+  const now = Date.now();
+  for (const name of names) {
+    const full = join(dir, name);
+    try {
+      if (now - statSync(full).mtimeMs > maxAgeMs) {
+        rmSync(full, { recursive: true, force: true });
+      }
+    } catch {
+      // race: entry vanished between readdir and stat/rm — ignore
+    }
+  }
+}
+
+/**
  * Create a private temp directory for a single harness invocation. The caller
  * MUST call `cleanup()` in a `finally` once the child process has exited, so a
  * thrown error or an early generator return still removes the files.
+ *
+ * `baseDir` (issue #365) is the persona-owned tmp root; when omitted we fall
+ * back to the system `os.tmpdir()` for tests and degraded/no-persona paths.
  */
-export async function createHarnessTempDir(): Promise<HarnessTempDir> {
-  const dir = await mkdtemp(join(tmpdir(), "phantombot-harness-"));
+export async function createHarnessTempDir(
+  baseDir?: string,
+): Promise<HarnessTempDir> {
+  const base = baseDir ?? tmpdir();
+  // Ensure the persona tmp root exists before mkdtemp (first use on a fresh
+  // box). Harmless for the os.tmpdir() fallback, which always exists.
+  if (baseDir) await mkdir(base, { recursive: true });
+  const dir = await mkdtemp(join(base, "phantombot-harness-"));
   return {
     dir,
     async file(name: string, content: string): Promise<string> {

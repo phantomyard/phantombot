@@ -125,7 +125,7 @@ export class ClaudeHarness implements Harness {
     let temp: HarnessTempDir | undefined;
     let systemPromptFile: string | undefined;
     if (useTempFiles) {
-      temp = await createHarnessTempDir();
+      temp = await createHarnessTempDir(req.tmpBaseDir);
       systemPromptFile = await temp.file("system-prompt.md", req.systemPrompt);
     }
     try {

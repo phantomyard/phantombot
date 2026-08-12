@@ -38,6 +38,17 @@ export interface HarnessRequest {
   /** Subprocess working directory. Defaults to the agent dir. */
   workingDir?: string;
   /**
+   * Base dir for this turn's harness temp files (issue #365). Harnesses create
+   * their `phantombot-harness-*` subdir HERE via `createHarnessTempDir`, and the
+   * pi route extension inherits it as `PHANTOMBOT_TMP_DIR`, instead of writing
+   * to the shared system `/tmp`. Set by the orchestrator to `<agentDir>/tmp` so
+   * temp writes stay on real disk, are isolated per persona (ownership, perms,
+   * and free space), and keep working when `/tmp` is full. Optional — degraded
+   * paths (e.g. the no-tools recovery reply) may omit it and fall back to
+   * `os.tmpdir()`.
+   */
+  tmpBaseDir?: string;
+  /**
    * Idle timeout: kill the subprocess if no chunk lands on stdout for this
    * long. Resets on every emitted chunk. This is the right knob for
    * "subprocess is wedged" (e.g. a tool call hanging on a TCP read) —

@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireRunLock,
@@ -192,7 +192,7 @@ describe("defaultLockPath", () => {
     }
   });
 
-  test("falls back to a per-user temp path when XDG_RUNTIME_DIR is unset", () => {
+  test("falls back to a per-user $HOME/.cache path when XDG_RUNTIME_DIR is unset (issue #365)", () => {
     const saved = process.env.XDG_RUNTIME_DIR;
     delete process.env.XDG_RUNTIME_DIR;
     try {
@@ -200,8 +200,12 @@ describe("defaultLockPath", () => {
         // Windows has no uid and no /tmp — the lock lives in per-user %TEMP%.
         expect(defaultLockPath()).toBe(join(tmpdir(), "phantombot.run.lock"));
       } else {
+        // POSIX fallback is now under $HOME/.cache (never /tmp) so a full tmpfs
+        // can't block the lock. Still per-user (keyed on uid).
         const uid = process.getuid?.() ?? 0;
-        expect(defaultLockPath()).toBe(`/tmp/phantombot-${uid}.run.lock`);
+        expect(defaultLockPath()).toBe(
+          join(homedir(), ".cache", "phantombot", "run", `phantombot-${uid}.run.lock`),
+        );
       }
     } finally {
       if (saved !== undefined) process.env.XDG_RUNTIME_DIR = saved;

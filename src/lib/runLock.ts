@@ -60,7 +60,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface LockHandle {
@@ -86,8 +86,14 @@ export function defaultLockPath(): string {
   if (process.platform === "win32") {
     return join(tmpdir(), "phantombot.run.lock");
   }
+  // No XDG_RUNTIME_DIR (e.g. a non-systemd login): fall back to a user-scoped
+  // dir under $HOME, NOT /tmp (issue #365) — a full/quota'd tmpfs must never be
+  // able to block the lock. Still per-user (not per-persona), so two personas
+  // sharing one OS user can't spawn two daemons on the same token.
   const uid = process.getuid?.() ?? 0;
-  return join("/tmp", `phantombot-${uid}.run.lock`);
+  const runDir = join(homedir(), ".cache", "phantombot", "run");
+  mkdirSync(runDir, { recursive: true });
+  return join(runDir, `phantombot-${uid}.run.lock`);
 }
 
 /** Informational payload: our PID, so a conflicting starter can name us. */

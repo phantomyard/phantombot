@@ -28,6 +28,7 @@ import { runMain } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
+import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
 import { preloadEnvFiles } from "./lib/envBootstrap.ts";
 import { log } from "./lib/logger.ts";
@@ -53,7 +54,19 @@ if (!isReadOnlyInvocation(process.argv)) {
     const config = await loadConfig();
     await migratePlaintextToVault(config);
     const activePersona = process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
-    await loadVaultIntoEnv(personaDir(config, activePersona));
+    const activePersonaDir = personaDir(config, activePersona);
+    await loadVaultIntoEnv(activePersonaDir);
+    // Aggressive startup sweep of the persona's tmp dir (issue #365): reap
+    // harness/route residue older than 1h left by crashed/SIGKILL'd turns that
+    // never ran their `finally`. Age-gated so a live in-flight turn survives;
+    // best-effort so it never wedges startup. The run lock is NOT in this dir.
+    try {
+      cleanupPersonaTmpDir(activePersonaDir);
+    } catch (e) {
+      log.warn("startup: persona tmp cleanup failed", {
+        error: (e as Error).message,
+      });
+    }
   } catch (e) {
     // Never let credential bootstrap wedge the CLI — log and carry on. The
     // subcommand may still work (e.g. `phantombot persona` on a fresh box).
