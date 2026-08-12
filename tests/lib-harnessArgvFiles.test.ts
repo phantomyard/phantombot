@@ -112,7 +112,7 @@ describe("cleanupPersonaTmpDir", () => {
     for (const d of created.splice(0)) await rm(d, { recursive: true, force: true });
   });
 
-  test("removes entries older than maxAge, keeps fresh ones", () => {
+  test("removes owned entries older than maxAge, keeps fresh ones", () => {
     const personaDir = join(tmpdir(), `pb-persona-${Date.now()}-${Math.random()}`);
     created.push(personaDir);
     const tmp = personaTmpDir(personaDir);
@@ -123,14 +123,69 @@ describe("cleanupPersonaTmpDir", () => {
     mkdirSync(fresh, { recursive: true });
     writeFileSync(join(stale, "f"), "x");
     writeFileSync(join(fresh, "f"), "x");
-    // Backdate the stale dir two hours.
-    const old = new Date(Date.now() - 2 * 3_600_000);
+    // Backdate the stale dir 25h — past the fat 24h default gate.
+    const old = new Date(Date.now() - 25 * 3_600_000);
     utimesSync(stale, old, old);
 
-    cleanupPersonaTmpDir(personaDir); // default 1h gate
+    cleanupPersonaTmpDir(personaDir); // default 24h gate
 
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
+  });
+
+  test("also sweeps stale phantombot-route-* dirs", () => {
+    const personaDir = join(tmpdir(), `pb-persona-${Date.now()}-${Math.random()}`);
+    created.push(personaDir);
+    const tmp = personaTmpDir(personaDir);
+
+    const staleRoute = join(tmp, "phantombot-route-stale");
+    mkdirSync(staleRoute, { recursive: true });
+    writeFileSync(join(staleRoute, "system.md"), "x");
+    const old = new Date(Date.now() - 25 * 3_600_000);
+    utimesSync(staleRoute, old, old);
+
+    cleanupPersonaTmpDir(personaDir);
+
+    expect(existsSync(staleRoute)).toBe(false);
+  });
+
+  // Regression for the Kai/Lena blocker (#367): the sweep must NOT delete
+  // anything it didn't create, no matter how old — <personaDir>/tmp is the
+  // persona's own space and an agent or operator may drop scratch data there.
+  test("never deletes non-phantombot entries, even when ancient", () => {
+    const personaDir = join(tmpdir(), `pb-persona-${Date.now()}-${Math.random()}`);
+    created.push(personaDir);
+    const tmp = personaTmpDir(personaDir);
+
+    const userDir = join(tmp, "my-scratch-data");
+    const userFile = join(tmp, "notes.txt");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, "keep"), "important");
+    writeFileSync(userFile, "important");
+    // Backdate both a full week — far past the gate.
+    const ancient = new Date(Date.now() - 7 * 24 * 3_600_000);
+    utimesSync(userDir, ancient, ancient);
+    utimesSync(userFile, ancient, ancient);
+
+    cleanupPersonaTmpDir(personaDir);
+
+    expect(existsSync(userDir)).toBe(true);
+    expect(existsSync(userFile)).toBe(true);
+  });
+
+  test("honours an explicit maxAgeMs override", () => {
+    const personaDir = join(tmpdir(), `pb-persona-${Date.now()}-${Math.random()}`);
+    created.push(personaDir);
+    const tmp = personaTmpDir(personaDir);
+
+    const stale = join(tmp, "phantombot-harness-old");
+    mkdirSync(stale, { recursive: true });
+    const old = new Date(Date.now() - 2 * 3_600_000); // 2h old
+    utimesSync(stale, old, old);
+
+    cleanupPersonaTmpDir(personaDir, 3_600_000); // explicit 1h gate → reap
+
+    expect(existsSync(stale)).toBe(false);
   });
 
   test("never throws when the tmp dir does not exist", () => {
