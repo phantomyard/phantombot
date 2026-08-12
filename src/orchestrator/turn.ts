@@ -64,6 +64,8 @@ export interface TurnInput {
   idleTimeoutMs: number;
   /** Hard wall-clock ceiling regardless of activity. */
   hardTimeoutMs?: number;
+  /** Kill subprocess if it emits no output at all within this long (startup/init wedge guard). Omit to disable. */
+  startupTimeoutMs?: number;
   /** Number of prior turns to load. Default 30. */
   historyLimit?: number;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
@@ -334,6 +336,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       workingDir: input.workingDir ?? homedir(),
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      startupTimeoutMs: input.startupTimeoutMs,
       mcpMode: input.mcpMode,
       signal: input.signal,
     },

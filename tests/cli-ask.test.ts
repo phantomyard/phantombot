@@ -54,7 +54,7 @@ beforeEach(async () => {
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 5000,
-    harnessHardTimeoutMs: 5000,
+    harnessHardTimeoutMs: 5000, harnessStartupTimeoutMs: 5000,
     personasDir: join(workdir, "personas"),
     memoryDbPath: join(workdir, "memory.sqlite"),
     configPath: join(workdir, "config.toml"),

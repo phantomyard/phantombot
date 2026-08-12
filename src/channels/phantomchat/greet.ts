@@ -59,6 +59,7 @@ export async function resolvePersonaGreeting(input: {
   harnesses: Harness[];
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  startupTimeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<string> {
   try {
@@ -78,6 +79,7 @@ export async function resolvePersonaGreeting(input: {
       workingDir: input.agentDir,
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      startupTimeoutMs: input.startupTimeoutMs,
       signal: input.signal,
     })) {
       if (chunk.type === "text") text += chunk.text;

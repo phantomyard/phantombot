@@ -39,7 +39,13 @@ type HarnessSubprocess = Subprocess<
   SpawnOptions.Readable
 >;
 
-export type KillCause = "timeout" | "idle" | "aborted" | "policy" | undefined;
+export type KillCause =
+  | "timeout"
+  | "idle"
+  | "startup"
+  | "aborted"
+  | "policy"
+  | undefined;
 export type HarnessActivity = "model" | "tool" | "productive";
 
 export interface KillCoordinatorOpts {
@@ -48,6 +54,19 @@ export interface KillCoordinatorOpts {
   idleTimeoutMs: number;
   /** Hard wall-clock cap. Never resets. Omit to disable the wall-clock SIGTERM. */
   hardTimeoutMs?: number;
+  /**
+   * Cap on time-to-FIRST-stdout-byte. Distinct from idleTimeoutMs, which only
+   * starts biting once output has begun and then resets on every chunk — a
+   * subprocess that emits NOTHING at all still had to wait the full idle window
+   * (default 300s) before the idle timer fired. This bounds that startup phase
+   * separately so a harness wedged BEFORE it produces any output (the classic
+   * case: `claude --print` blocking its MCP `initialize` handshake on a proxy
+   * that never answers — e.g. under Windows SQLite lock contention) fails over
+   * to the next harness in seconds, not minutes. Cleared on the first stdout
+   * byte via firstOutput(); after that, only idle/hard/tool timers apply. Omit
+   * to disable (legacy behaviour: only the idle window bounds startup silence).
+   */
+  startupTimeoutMs?: number;
   /**
    * Wall-clock cap on how long a SINGLE contiguous tool-run may keep resetting
    * the idle timer via `"tool"` activity WITHOUT any productive output.
@@ -76,6 +95,13 @@ export interface KillCoordinator {
    *   the idle window until productive output arrives
    */
   touch(activity?: HarnessActivity): void;
+  /**
+   * Signal that the subprocess has produced its first stdout byte, cancelling
+   * the startup timer (see startupTimeoutMs). Idempotent and cheap — the runner
+   * calls it on every stdout chunk; only the first call does anything. A no-op
+   * when startupTimeoutMs was not set or the coordinator already fired/disposed.
+   */
+  firstOutput(): void;
   /** Stop all timers and detach signal listener. Idempotent. */
   dispose(): Promise<void>;
   /**
@@ -121,6 +147,13 @@ export function createKillCoordinator(
     opts.hardTimeoutMs === undefined
       ? undefined
       : setTimeout(() => triggerKill("timeout"), opts.hardTimeoutMs);
+  // Startup timer: fires only if the subprocess emits NO stdout at all before
+  // it elapses. Cancelled by firstOutput() on the first stdout byte. See
+  // KillCoordinatorOpts.startupTimeoutMs.
+  let startupTimer: ReturnType<typeof setTimeout> | undefined =
+    opts.startupTimeoutMs === undefined
+      ? undefined
+      : setTimeout(() => triggerKill("startup"), opts.startupTimeoutMs);
 
   const onAbort = (): void => triggerKill("aborted");
   if (opts.signal) {
@@ -168,6 +201,13 @@ export function createKillCoordinator(
         opts.idleTimeoutMs,
       );
     },
+    firstOutput(): void {
+      if (cause || disposed) return;
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+    },
     terminate(): void {
       triggerKill("policy");
     },
@@ -176,6 +216,7 @@ export function createKillCoordinator(
       disposed = true;
       clearTimeout(idleTimer);
       if (hardTimer) clearTimeout(hardTimer);
+      if (startupTimer) clearTimeout(startupTimer);
       if (opts.signal && !opts.signal.aborted) {
         opts.signal.removeEventListener("abort", onAbort);
       }
@@ -192,6 +233,8 @@ export function createKillCoordinator(
  *
  *   - "timeout"  → recoverable (orchestrator advances to next harness)
  *   - "idle"     → recoverable (same — wedged subprocess, try a different one)
+ *   - "startup"  → recoverable (never produced output — likely wedged on init;
+ *     orchestrator falls through fast instead of eating the full idle window)
  *   - "aborted"  → non-recoverable (user said /stop and meant it)
  *   - "policy"   → recoverable (terminal tripwire; normally unreachable here
  *     because the tripwire's own error chunk was already yielded and the
@@ -202,6 +245,7 @@ export function killCauseToErrorChunk(
   harnessId: string,
   hardTimeoutMs: number | undefined,
   idleTimeoutMs: number,
+  startupTimeoutMs?: number,
 ):
   | { type: "error"; error: string; recoverable: boolean }
   | undefined {
@@ -216,6 +260,13 @@ export function killCauseToErrorChunk(
     return {
       type: "error",
       error: `${harnessId} timed out after ${idleTimeoutMs}ms with no output (likely wedged on a tool call)`,
+      recoverable: true,
+    };
+  }
+  if (cause === "startup") {
+    return {
+      type: "error",
+      error: `${harnessId} produced no output within ${startupTimeoutMs ?? "unknown"}ms of startup (likely wedged on the MCP/init handshake)`,
       recoverable: true,
     };
   }
@@ -358,6 +409,7 @@ export async function* runHarnessProcess(
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
+    startupTimeoutMs: req.startupTimeoutMs,
     toolTimeoutMs: spec.toolTimeoutMs,
     signal: req.signal,
     harnessId,
@@ -424,9 +476,15 @@ export async function* runHarnessProcess(
 
   try {
     for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-      // NB: do NOT touch() here. The idle timer must measure time since last
-      // *productive* output, not since last raw chunk — otherwise synthetic
-      // heartbeats keep postponing the idle kill on a wedged turn. See #123.
+      // First stdout byte means the subprocess got past its startup/init
+      // handshake and is alive — cancel the startup timer. Idempotent, so
+      // calling it every iteration is cheap. NB: this is deliberately distinct
+      // from touch(): startup measures "any output at all", while the idle
+      // timer below measures "productive output". We do NOT touch() here — the
+      // idle timer must measure time since last *productive* output, not since
+      // last raw chunk, or synthetic heartbeats keep postponing the idle kill
+      // on a wedged turn. See #123.
+      killer.firstOutput();
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -488,6 +546,7 @@ export async function* runHarnessProcess(
     harnessId,
     req.hardTimeoutMs,
     req.idleTimeoutMs,
+    req.startupTimeoutMs,
   );
   if (errChunk) {
     yield errChunk;

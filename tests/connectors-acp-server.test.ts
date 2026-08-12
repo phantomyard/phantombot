@@ -91,7 +91,7 @@ beforeEach(async () => {
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 5000,
-    harnessHardTimeoutMs: 5000,
+    harnessHardTimeoutMs: 5000, harnessStartupTimeoutMs: 5000,
     personasDir: join(workdir, "personas"),
     memoryDbPath: join(workdir, "memory.sqlite"),
     configPath: join(workdir, "config.toml"),
@@ -1076,7 +1076,7 @@ describe("ACP server — persona resolution & self-heal", () => {
     healConfig = {
       defaultPersona: "phantom", // built-in default whose dir is NOT created
       harnessIdleTimeoutMs: 5000,
-      harnessHardTimeoutMs: 5000,
+      harnessHardTimeoutMs: 5000, harnessStartupTimeoutMs: 5000,
       personasDir: join(pdir, "personas"),
       memoryDbPath: join(pdir, "memory.sqlite"),
       configPath: join(pdir, "config.toml"),

@@ -406,6 +406,13 @@ export function makeExtractionComplete(
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       toolsMode: "none",
+      // Persona-less, tool-less extraction NEVER needs MCP. Without this the
+      // claude harness falls into the foreground branch, spawns the loopback
+      // MCP proxy, and blocks the `--print` initialize handshake on it — which
+      // can wedge for the full idle window under load (e.g. Windows SQLite lock
+      // contention on the proxy's store). mcpMode:"none" runs zero MCP servers,
+      // matching the intended "no MCP" contract (toolsMode alone did not).
+      mcpMode: "none",
       signal,
     })) {
       const c: HarnessChunk = chunk;

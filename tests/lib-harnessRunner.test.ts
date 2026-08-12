@@ -94,6 +94,91 @@ describe("createKillCoordinator — idle timer", () => {
   });
 });
 
+describe("createKillCoordinator — startup timer", () => {
+  test("startup timer fires when the subprocess emits NO output before startupTimeoutMs", async () => {
+    // Process is silent for 30s (mimics `claude --print` wedged on its MCP
+    // init handshake — nothing ever reaches stdout). firstOutput() is never
+    // called, so the startup timer must fire and kill the group.
+    const proc = spawnInNewSession(["sh", "-c", "sleep 30"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 10_000, // long; would NOT fire in this window
+      hardTimeoutMs: 10_000,
+      startupTimeoutMs: 150,
+      harnessId: "test",
+    });
+
+    await proc.exited;
+    await killer.dispose();
+
+    expect(killer.killCause()).toBe("startup");
+  });
+
+  test("firstOutput() cancels the startup timer so a slow-but-alive turn survives", async () => {
+    // Emits one line immediately, then goes quiet for 300ms — longer than the
+    // 100ms startup window but well under the 5s idle window. firstOutput() on
+    // the first byte must cancel the startup timer; the idle timer governs from
+    // there, so the process runs to completion uncancelled.
+    const proc = spawnInNewSession(["sh", "-c", "echo hi; sleep 0.3"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 5000,
+      hardTimeoutMs: 10_000,
+      startupTimeoutMs: 100,
+      harnessId: "test",
+    });
+
+    const decoder = new TextDecoder();
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const { value } = await reader.read();
+    killer.firstOutput(); // first byte: cancels the startup timer
+    if (value) killer.touch();
+    expect(decoder.decode(value)).toContain("hi");
+    reader.releaseLock();
+
+    await proc.exited;
+    await killer.dispose();
+
+    // Startup timer was cancelled; idle window (5s) never elapsed → clean exit.
+    expect(killer.killCause()).toBeUndefined();
+  });
+
+  test("no startupTimeoutMs → startup timer disabled (legacy behaviour)", async () => {
+    // Silent process, but startupTimeoutMs omitted: only the idle window bounds
+    // startup silence. With a long idle window the process is NOT startup-killed.
+    const proc = spawnInNewSession(["sh", "-c", "sleep 0.3"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+
+    const killer = createKillCoordinator({
+      proc,
+      idleTimeoutMs: 5000,
+      hardTimeoutMs: 10_000,
+      harnessId: "test",
+    });
+
+    await proc.exited;
+    await killer.dispose();
+
+    expect(killer.killCause()).toBeUndefined();
+  });
+});
+
 describe("createKillCoordinator — tool cap (issue #351)", () => {
   test("sustained 'tool' activity past toolTimeoutMs lets the idle kill fire", async () => {
     // A wedged-but-chattery tool: we drive touch("tool") forever. Without a
@@ -285,6 +370,17 @@ describe("killCauseToErrorChunk", () => {
     expect(c?.error).toContain("no output");
   });
 
+  test("startup cause → recoverable error mentioning the startup window", () => {
+    const c = killCauseToErrorChunk("startup", "claude", 60_000, 300_000, 45_000);
+    expect(c).toMatchObject({
+      type: "error",
+      recoverable: true,
+    });
+    expect(c?.error).toContain("45000ms");
+    expect(c?.error).toContain("no output");
+    expect(c?.error).toContain("handshake");
+  });
+
   test("aborted cause → non-recoverable 'stopped'", () => {
     const c = killCauseToErrorChunk("aborted", "pi", 1000, 100);
     expect(c).toMatchObject({
@@ -350,6 +446,51 @@ describe("runHarnessProcess — regression: stdin blocking hang", () => {
     const errorChunk = chunks.find(c => c.type === "error");
     expect(errorChunk).toBeDefined();
     expect(errorChunk.error).toContain("hard wall-clock");
+    expect(errorChunk.recoverable).toBe(true);
+  });
+});
+
+describe("runHarnessProcess — startup wedge", () => {
+  test("a silent subprocess yields a recoverable 'startup' error fast", async () => {
+    // Mimics a foreground harness wedged before any output (blocked MCP init).
+    // startupTimeoutMs is short; the runner must surface a recoverable error
+    // WELL before the (long) idle window would have fired.
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+
+    const startTime = Date.now();
+    const chunks: any[] = [];
+    const generator = runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000, // would NOT fire in the test window
+        hardTimeoutMs: 10_000,
+        startupTimeoutMs: 200,
+        workingDir: process.cwd(),
+        persona: "test",
+        trusted: true,
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      stdinPayload: "hi",
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    });
+
+    for await (const chunk of generator) {
+      chunks.push(chunk);
+    }
+
+    expect(Date.now() - startTime).toBeLessThan(5000);
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.error).toContain("no output");
     expect(errorChunk.recoverable).toBe(true);
   });
 });

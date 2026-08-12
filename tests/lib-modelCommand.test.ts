@@ -58,7 +58,7 @@ function makeConfig(overrides: Partial<Config["harnesses"]> = {}): Config {
   return {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 1000,
-    harnessHardTimeoutMs: 1000,
+    harnessHardTimeoutMs: 1000, harnessStartupTimeoutMs: 1000,
     personasDir: dir,
     memoryDbPath: ":memory:",
     configPath,

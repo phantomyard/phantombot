@@ -28,7 +28,7 @@ class CaptureStream {
 function makeConfig(personasDir: string, defaultPersona = "phantom"): Config {
   return {
     defaultPersona,
-    harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000,
+    harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000, harnessStartupTimeoutMs: 600_000,
     personasDir,
     memoryDbPath: join(personasDir, "..", "memory.sqlite"),
     configPath: join(personasDir, "..", "config.toml"),

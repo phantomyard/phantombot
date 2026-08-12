@@ -50,6 +50,19 @@ export interface HarnessRequest {
    * fed but never converge on a final reply.
    */
   hardTimeoutMs?: number;
+  /**
+   * Startup timeout: kill the subprocess if it produces NO stdout at all
+   * within this window. Distinct from idleTimeoutMs, which only bounds silence
+   * AFTER output has begun — a subprocess that emits nothing still had to wait
+   * the full idle window before the idle timer fired. This bounds the
+   * pre-first-output phase so a harness wedged on startup (classically
+   * `claude --print` blocking its MCP `initialize` handshake on a proxy that
+   * never answers) fails over in seconds, not minutes. Omit to disable (only
+   * the idle window bounds startup silence). Foreground persona turns set this;
+   * tool-less background transports (threat judge, durable-facts) omit it
+   * because they run with `mcpMode: "none"` and cannot wedge on the handshake.
+   */
+  startupTimeoutMs?: number;
   /** External abort signal (e.g. /stop command). When fired, the harness should kill the subprocess and yield a non-recoverable "stopped" error. */
   signal?: AbortSignal;
   /**

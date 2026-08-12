@@ -31,7 +31,7 @@ beforeEach(async () => {
   store = await openTaskStore(join(workdir, "tasks.sqlite"));
   config = {
     defaultPersona: "phantom",
-    harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 1000,
+    harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 1000, harnessStartupTimeoutMs: 1000,
     personasDir: join(workdir, "personas"),
     memoryDbPath: join(workdir, "tasks.sqlite"),
     configPath: join(workdir, "config.toml"),

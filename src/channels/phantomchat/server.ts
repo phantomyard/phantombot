@@ -879,6 +879,7 @@ export async function runPhantomchatServer(
         memory: input.memory,
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
+        startupTimeoutMs: input.config.harnessStartupTimeoutMs,
         signal: turnSignal,
         // The trust grant — see the auth gate above. Always true here because
         // we already dropped non-allowlisted senders.
@@ -1249,6 +1250,7 @@ export async function runPhantomchatServer(
         memory: input.memory,
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
+        startupTimeoutMs: input.config.harnessStartupTimeoutMs,
         trusted: true,
         send: (text) => transport.sendMessage(reaction.conversationId, text),
         retrieve: makeRetriever(

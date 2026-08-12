@@ -692,7 +692,7 @@ const baseConfig = (
   overrides: Partial<NonNullable<Config["channels"]["telegram"]>> = {},
 ): Config => ({
   defaultPersona: "phantom",
-  harnessIdleTimeoutMs: 5_000, harnessHardTimeoutMs: 5_000,
+  harnessIdleTimeoutMs: 5_000, harnessHardTimeoutMs: 5_000, harnessStartupTimeoutMs: 5_000,
   personasDir: join(workdir, "personas"),
   memoryDbPath: join(workdir, "memory.sqlite"),
   configPath: join(workdir, "config.toml"),

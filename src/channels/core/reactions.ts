@@ -240,6 +240,7 @@ export interface RunReactionTurnInput {
   memory: MemoryStore;
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  startupTimeoutMs?: number;
   /**
    * Trust provenance — true only when the reactor is an allow-listed principal.
    * A reaction from the principal is trusted (so the capture can write memory);
@@ -287,6 +288,7 @@ export async function runReactionTurn(
       memory: input.memory,
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
+      startupTimeoutMs: input.startupTimeoutMs,
       signal: input.signal,
       trusted: input.trusted,
       // Reactions from the principal are trusted, so no threat screen. Pass

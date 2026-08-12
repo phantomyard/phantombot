@@ -820,6 +820,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
               harnesses,
               idleTimeoutMs: config.harnessIdleTimeoutMs,
               hardTimeoutMs: config.harnessHardTimeoutMs,
+              startupTimeoutMs: config.harnessStartupTimeoutMs,
               signal: ac.signal,
             });
             await greetPendingNpubs({

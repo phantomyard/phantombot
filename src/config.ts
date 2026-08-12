@@ -474,6 +474,16 @@ export interface Config {
    * Caps runaway agents that legitimately keep emitting but never finish.
    */
   harnessHardTimeoutMs: number;
+  /**
+   * Cap on time-to-first-output for a foreground harness turn. A subprocess
+   * that emits nothing at all (classically `claude --print` wedged on its MCP
+   * `initialize` handshake) would otherwise idle for the full
+   * harnessIdleTimeoutMs before failing over. This bounds the startup phase
+   * separately so the orchestrator advances to the next harness in seconds.
+   * Set generously (default 60s) so a healthy-but-slow cold start under load —
+   * the same contention that triggers the wedge — is never false-killed.
+   */
+  harnessStartupTimeoutMs: number;
   /** Directory holding `<persona>/` subdirs. */
   personasDir: string;
   /** Path to the SQLite memory store file. */
@@ -723,6 +733,20 @@ export async function loadConfig(): Promise<Config> {
         : undefined) ??
       legacyTurnTimeoutMs(toml) ??
       300_000,
+
+    // Time-to-first-output cap for foreground turns. Default 60s: a healthy
+    // `claude --print` emits its `system init` line within ~1s once the MCP
+    // handshake completes (a live proxy answers `initialize` in well under a
+    // second), so 60s is a wide margin over even a loaded cold start while
+    // still cutting a genuine startup wedge from the 300s idle window down to
+    // one minute. Env/toml overridable; the idle timer still runs concurrently,
+    // so whichever ceiling is lower fires first.
+    harnessStartupTimeoutMs:
+      asInt(process.env.PHANTOMBOT_HARNESS_STARTUP_TIMEOUT_MS) ??
+      (asInt(toml.harness_startup_timeout_s) !== undefined
+        ? asInt(toml.harness_startup_timeout_s)! * 1000
+        : undefined) ??
+      60_000,
 
     harnessHardTimeoutMs,
 

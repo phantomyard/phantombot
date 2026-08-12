@@ -441,7 +441,7 @@ describe("/update", () => {
     const minimalConfig = {
       defaultPersona: "phantom",
       harnessIdleTimeoutMs: 1000,
-      harnessHardTimeoutMs: 1000,
+      harnessHardTimeoutMs: 1000, harnessStartupTimeoutMs: 1000,
       personasDir: "/tmp",
       memoryDbPath: ":memory:",
       configPath: "/tmp/c.toml",

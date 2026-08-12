@@ -453,6 +453,13 @@ export function makeHarnessJudgeComplete(
       idleTimeoutMs,
       hardTimeoutMs,
       toolsMode: "none",
+      // The judge is a tool-less classifier that never needs MCP. Without this
+      // the claude harness takes the foreground branch and spawns the loopback
+      // MCP proxy, blocking the `--print` initialize handshake on it — which can
+      // wedge for the full idle window under load. mcpMode:"none" runs zero MCP
+      // servers, matching the intended contract (toolsMode alone did not) and
+      // keeping every untrusted-input screen off the proxy-spawn path.
+      mcpMode: "none",
       signal,
     })) {
       const c: HarnessChunk = chunk;

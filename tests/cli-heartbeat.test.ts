@@ -36,7 +36,7 @@ beforeEach(async () => {
   process.env.XDG_STATE_HOME = workdir;
   config = {
     defaultPersona: "phantom",
-    harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000,
+    harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000, harnessStartupTimeoutMs: 600_000,
     personasDir: join(workdir, "personas"),
     memoryDbPath: join(workdir, "memory.sqlite"),
     configPath: join(workdir, "config.toml"),
