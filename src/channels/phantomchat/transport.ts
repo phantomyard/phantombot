@@ -28,6 +28,10 @@ import {
 import { encryptFileBytes } from "./fileEncrypt.ts";
 import { uploadToBlossom } from "./blossomUpload.ts";
 import {
+  makeRelayAuthSigner,
+  type RelayAuthSigner,
+} from "./relayAuth.ts";
+import {
   oggOpusDurationSeconds,
   oggOpusWaveformBase64,
 } from "./oggOpusDuration.ts";
@@ -100,6 +104,23 @@ const FETCH_GIFTWRAPS_TIMEOUT_MS = 4000;
 const FETCH_PROFILES_TIMEOUT_MS = 3000;
 
 /**
+ * Publish read-back verification (issue #368). A relay can answer a publish
+ * with `OK:true` and still never store the event — observed in production on
+ * nostr-rs-relay with `nip42_auth = true`, where the unauthenticated publish
+ * was acknowledged and silently dropped. After each publish of a STORABLE
+ * event we therefore re-query each relay for the event id; a relay that
+ * doesn't return it gets named in a warning instead of failing silently.
+ *
+ * `PUBLISH_READBACK_SETTLE_MS` gives the relay a beat to index before we ask
+ * (avoids false positives on relays that store asynchronously);
+ * `PUBLISH_READBACK_TIMEOUT_MS` caps the per-relay query so a dead relay
+ * can't stall the check. The whole verification runs detached — it only ever
+ * logs, never blocks or rejects the send path.
+ */
+export const PUBLISH_READBACK_SETTLE_MS = 750;
+export const PUBLISH_READBACK_TIMEOUT_MS = 2500;
+
+/**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
  * tagged to our pubkey, from roughly now. We deliberately set `since` to a
  * SMALL window (or omit it) because a gift-wrap's `created_at` is randomized up
@@ -107,11 +128,13 @@ const FETCH_PROFILES_TIMEOUT_MS = 3000;
  * messages. Dedup (by wrap id, then rumor id) is the real guard, not `since`.
  */
 export interface NostrFilter {
-  kinds: number[];
+  kinds?: number[];
   /** Recipient p-tag filter (gift-wrap subscriptions). Omitted for `authors`. */
   "#p"?: string[];
   /** Author filter — used by the kind-0 profile pull (`fetchProfiles`). */
   authors?: string[];
+  /** Event-id filter — used by the publish read-back check (issue #368). */
+  ids?: string[];
   since?: number;
 }
 
@@ -150,10 +173,29 @@ export interface RelayPool {
   subscribeMany(
     relays: string[],
     filter: NostrFilter,
-    params: { onevent: (event: NTNostrEvent) => void; oneose?: () => void },
+    params: {
+      onevent: (event: NTNostrEvent) => void;
+      oneose?: () => void;
+      /**
+       * NIP-42 signer for relays that close the subscription demanding AUTH
+       * (`auth-required:`). nostr-tools authenticates and re-subscribes. Optional
+       * so in-memory test fakes don't have to implement it; the real SimplePool
+       * passes it straight through.
+       */
+      onauth?: RelayAuthSigner;
+    },
   ): { close(): void };
-  /** Publish `event` to every relay. Returns one promise per relay. */
-  publish(relays: string[], event: NTNostrEvent): Promise<string>[];
+  /**
+   * Publish `event` to every relay. Returns one promise per relay. `onauth`
+   * is the NIP-42 signer used when a relay rejects the publish with
+   * `auth-required:` — nostr-tools then authenticates and retries the publish
+   * once. Optional for test fakes; the real SimplePool honours it.
+   */
+  publish(
+    relays: string[],
+    event: NTNostrEvent,
+    params?: { onauth?: RelayAuthSigner },
+  ): Promise<string>[];
   /**
    * Per-relay connection status: a Map of relay-url → connected?. nostr-tools'
    * SimplePool exposes this as `listConnectionStatus()`; a relay that has hard-
@@ -333,6 +375,16 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     | ((recipientHex: string, rumorId: string, text: string) => void)
     | null = null;
 
+  /**
+   * The NIP-42 signer for this persona (issue #368). Handed to the pool on
+   * every publish and subscription so a relay that demands AUTH — whether by
+   * rejecting the publish with `auth-required:` or by closing the REQ — gets
+   * a signed kind-22242 response and the operation is retried authenticated.
+   * Without this a `nip42_auth = true` relay silently drops everything we
+   * publish (it answers `OK:true` and never stores the event).
+   */
+  private readonly authSigner: RelayAuthSigner;
+
   constructor(
     private readonly ourSecretKey: Uint8Array,
     relays: string[],
@@ -340,6 +392,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   ) {
     this.relays = [...relays];
     this.ourPubHex = getPublicKey(ourSecretKey);
+    this.authSigner = makeRelayAuthSigner(ourSecretKey);
   }
 
   /**
@@ -383,6 +436,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // doc: nostr-tools wraps it into the per-relay filters array itself, and
     // double-wrapping produces a malformed REQ that delivers nothing.
     return this.pool.subscribeMany(this.relays, filter, {
+      // NIP-42: relays that gate reads behind AUTH close the REQ with
+      // `auth-required:` — the signer lets nostr-tools authenticate and
+      // re-subscribe instead of silently delivering nothing.
+      onauth: this.authSigner,
       onevent: (event) => {
         try {
           const result = onWrap(event);
@@ -438,6 +495,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       // timeout, whichever comes first.
       const timer = setTimeout(finish, FETCH_GIFTWRAPS_TIMEOUT_MS);
       sub = this.pool.subscribeMany(this.relays, filter, {
+        onauth: this.authSigner,
         onevent: (event) => {
           events.push(event);
         },
@@ -472,6 +530,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       };
       const timer = setTimeout(finish, FETCH_PROFILES_TIMEOUT_MS);
       sub = this.pool.subscribeMany(this.relays, filter, {
+        onauth: this.authSigner,
         onevent: (event) => {
           const author = (event.pubkey ?? "").toLowerCase();
           if (!author) return;
@@ -515,8 +574,13 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // SimplePool.publish returns one promise per relay; a publish that fails on
     // some relays but lands on others is still a success from our side. We wait
     // on all of them (allSettled) so a single dead relay can't reject the send,
-    // and log if EVERY relay rejected.
-    const results = await Promise.allSettled(this.pool.publish(this.relays, event));
+    // and log if EVERY relay rejected. `onauth` is the NIP-42 signer: when a
+    // relay rejects the publish with `auth-required:`, nostr-tools signs a
+    // kind-22242 auth event and retries the publish once, authenticated
+    // (issue #368 — without this, AUTH-requiring relays drop everything).
+    const results = await Promise.allSettled(
+      this.pool.publish(this.relays, event, { onauth: this.authSigner }),
+    );
     const ok = results.some((r) => r.status === "fulfilled");
     if (!ok) {
       log.warn("phantomchat: publish failed on all relays", {
@@ -524,6 +588,95 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
         eventId: event.id,
       });
     }
+    // Read-back verification (issue #368): even an `OK:true` publish may never
+    // be stored — observed on nostr-rs-relay with nip42_auth, which ACKs and
+    // silently drops. Re-query each relay for the event id and warn loudly,
+    // naming the relays, when it isn't there. Detached: never blocks the send.
+    void this.verifyStored(event);
+  }
+
+  /**
+   * Read-back check for a freshly published event (issue #368). For every
+   * relay, query `{ids: [event.id]}` after a short settle delay; a relay that
+   * doesn't return the event within the timeout never stored it — warn and
+   * name it. Returns the list of relays where the event was NOT confirmed, so
+   * tests can assert directly. Never throws; a failed read-back is itself just
+   * a debug log (the relay may simply be slow, and the periodic catch-up poll
+   * remains the delivery backstop).
+   *
+   * Skipped for EPHEMERAL events (kinds 20000–29999, NIP-16 — typing ticks):
+   * relays don't store those by design, so a read-back would always "fail".
+   *
+   * `timing` overrides the settle delay / query timeout — tests only.
+   */
+  async verifyStored(
+    event: NTNostrEvent,
+    timing?: { settleMs?: number; timeoutMs?: number },
+  ): Promise<string[]> {
+    if (event.kind >= 20000 && event.kind < 30000) return [];
+    const missing: string[] = [];
+    await new Promise((r) =>
+      setTimeout(r, timing?.settleMs ?? PUBLISH_READBACK_SETTLE_MS),
+    );
+    await Promise.all(
+      this.relays.map(async (relay) => {
+        const found = await this.readBackOne(relay, event.id, timing?.timeoutMs);
+        if (!found) missing.push(relay);
+      }),
+    );
+    if (missing.length > 0) {
+      log.warn(
+        "phantomchat: publish NOT confirmed stored — relay(s) dropped the event",
+        { eventId: event.id, kind: event.kind, missing, relays: this.relays.length },
+      );
+    }
+    return missing;
+  }
+
+  /**
+   * One-shot `{ids: [id]}` query against a SINGLE relay for the read-back
+   * check. Resolves true the moment the relay returns the event; false on the
+   * hard timeout or any error. Querying per-relay (instead of one pooled REQ)
+   * is what lets the warning NAME the relay that dropped the event.
+   */
+  private readBackOne(
+    relay: string,
+    eventId: string,
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let sub: { close(): void } | undefined;
+      const finish = (found: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          sub?.close();
+        } catch {
+          // already torn down — nothing to do.
+        }
+        resolve(found);
+      };
+      const timer = setTimeout(
+        () => finish(false),
+        timeoutMs ?? PUBLISH_READBACK_TIMEOUT_MS,
+      );
+      try {
+        sub = this.pool.subscribeMany([relay], { ids: [eventId] }, {
+          onauth: this.authSigner,
+          onevent: () => finish(true),
+          oneose: () => finish(false),
+        });
+      } catch (e) {
+        log.debug("phantomchat: read-back query failed", {
+          relay,
+          eventId,
+          error: (e as Error).message,
+        });
+        finish(false);
+      }
+    });
   }
 
   /**

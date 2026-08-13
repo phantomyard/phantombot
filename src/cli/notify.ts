@@ -44,6 +44,7 @@ import {
   loadConfig,
 } from "../config.ts";
 import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
+import { automaticallyAuthWith } from "../channels/phantomchat/relayAuth.ts";
 import { synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -77,6 +78,12 @@ const defaultPhantomchatSend: PhantomchatNotifySend = async ({
     "../channels/phantomchat/transport.ts"
   );
   const pool = new SimplePool();
+  // NIP-42 (issue #368): answer AUTH challenges so a notify to an
+  // auth-requiring relay isn't silently dropped. `automaticallyAuth` is a
+  // public AbstractSimplePool field read at relay-connect time — assigning it
+  // before the first publish is the supported path (the SimplePool constructor
+  // type only exposes enablePing/enableReconnect).
+  pool.automaticallyAuth = automaticallyAuthWith(secretKey);
   const transport = new SimplePoolPhantomchatTransport(
     secretKey,
     relays,

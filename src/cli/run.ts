@@ -17,6 +17,7 @@ import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
+import { automaticallyAuthWith } from "../channels/phantomchat/relayAuth.ts";
 import {
   listPhantomchatPersonas,
   cacheRelaysForPersona,
@@ -684,7 +685,17 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         // created_at is backdated up to 48h (NIP-59). Hard-drop recovery is
         // handled instead by the channel-layer self-heal watchdog, which re-arms
         // the subscription with our own correct wide `since`.
+        //
+        // automaticallyAuth: NIP-42 (issue #368). A relay that sends an AUTH
+        // challenge — on connect or mid-subscription — gets a signed kind-22242
+        // response from the persona's key. Without it, a `nip42_auth = true`
+        // relay silently drops every event we publish. (SimplePool's
+        // constructor type only exposes enablePing/enableReconnect, but
+        // `automaticallyAuth` is a public AbstractSimplePool field read at
+        // relay-connect time — assigning it here, before any ensureRelay call,
+        // is the supported path.)
         const pool = new SimplePool({ enablePing: true });
+        pool.automaticallyAuth = automaticallyAuthWith(identity.secretKey);
         const transport = new SimplePoolPhantomchatTransport(
           identity.secretKey,
           relays,
