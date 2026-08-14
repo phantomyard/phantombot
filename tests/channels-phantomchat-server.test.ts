@@ -1928,4 +1928,32 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     await srv.stop();
     expect(harness.invocations).toBe(1);
   });
+
+  test("interrupt scoping: handoff-then-unaddressed-follow-up must not kill the active turn", async () => {
+    const c = cast();
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+    await groupSleep(150);
+    expect(harness.invocations).toBe(1);
+
+    // Andrew hands off to Kai, then follows up WITHOUT re-naming him —
+    // which is exactly what lastAddressed exists to support.
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "kai, you take Y", "HQ");
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "and also Z", "HQ");
+    await groupSleep(400);
+    expect(harness.aborted).toBe(0);
+
+    harness.releaseAll();
+    await groupSleep(250);
+    await srv.stop();
+    expect(harness.invocations).toBe(1);
+  });
 });

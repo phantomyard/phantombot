@@ -1182,8 +1182,21 @@ export async function runPhantomchatServer(
     // addressed to a SIBLING abort THIS bot's in-flight work. The interrupt
     // must therefore pass the same two gates handle() applies before it runs a
     // turn: (1) bot senders are always ignored (cascade kill), and (2) when
-    // another bot shares the group, the addressing gate must say this message
-    // is for us. Both checks here are READ-ONLY — no profile fetch, no
+    // another bot shares the group, the message must EXPLICITLY name this bot.
+    //
+    // Why explicit-name-only instead of the full decideGroupReply gate: the
+    // follow-up arm of decideGroupReply reads lastAddressed, which is only
+    // written in handle(). While a turn is active, later messages from the
+    // same peer are queued BEHIND that turn, so handle() hasn't run for them
+    // and lastAddressed is stale — a handoff ("kai, you take Y") followed by
+    // a bare follow-up ("and also Z") would read lastAddressed=["lena"] and
+    // abort Lena's in-flight turn, AND the backlog flush would silently drop
+    // the queued handoff. Net: work killed, replacement lost. Requiring an
+    // explicit name match keeps the enqueue check stateless: an unaddressed
+    // follow-up just queues behind the running turn (mild UX cost — "stop,
+    // do Y instead" must name the bot — but strictly safe), while handle()
+    // still applies the full lastAddressed logic when the message runs.
+    // Both checks here are READ-ONLY — no profile fetch, no
     // lastAddressed/buffer mutation; handle() re-decides authoritatively when
     // the message actually runs. A cold profile cache degrades to the old
     // behaviour (interrupt fires), never to a lost interrupt.
@@ -1195,14 +1208,9 @@ export async function runPhantomchatServer(
         roster.length > 1 ||
         memberHexes.some((h) => h.toLowerCase() !== ourHex && isBot(h));
       if (otherBotPresent) {
-        const state =
-          groupChats.get(msg.conversationId) ?? { lastAddressed: [], buffer: [] };
-        const decision = decideGroupReply({
-          self: selfName,
-          matched: matchPersonaNames(msg.text ?? "", roster),
-          lastAddressed: state.lastAddressed,
-        });
-        interrupt = decision.reply;
+        interrupt = matchPersonaNames(msg.text ?? "", roster).some(
+          (n) => n.toLowerCase() === selfName.toLowerCase(),
+        );
       }
     }
     const active = interrupt ? activeTurns.get(msg.conversationId) : undefined;
