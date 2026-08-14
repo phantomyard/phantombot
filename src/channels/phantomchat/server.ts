@@ -1176,7 +1176,36 @@ export async function runPhantomchatServer(
     // through instructions the user has already superseded. Silent by design:
     // only `/stop` tells the user what it threw away. Gated on an active turn
     // so that a burst of messages sent while idle is still answered in full.
-    const active = activeTurns.get(msg.conversationId);
+    //
+    // GROUP SCOPING: in a multi-bot group every bot's instance sees every
+    // message over the shared relay, so an unscoped interrupt lets a message
+    // addressed to a SIBLING abort THIS bot's in-flight work. The interrupt
+    // must therefore pass the same two gates handle() applies before it runs a
+    // turn: (1) bot senders are always ignored (cascade kill), and (2) when
+    // another bot shares the group, the addressing gate must say this message
+    // is for us. Both checks here are READ-ONLY — no profile fetch, no
+    // lastAddressed/buffer mutation; handle() re-decides authoritatively when
+    // the message actually runs. A cold profile cache degrades to the old
+    // behaviour (interrupt fires), never to a lost interrupt.
+    let interrupt = !isBot(msg.senderId);
+    if (interrupt && msg.groupId) {
+      const memberHexes = msg.groupMemberHexes ?? [];
+      const roster = buildRoster(memberHexes);
+      const otherBotPresent =
+        roster.length > 1 ||
+        memberHexes.some((h) => h.toLowerCase() !== ourHex && isBot(h));
+      if (otherBotPresent) {
+        const state =
+          groupChats.get(msg.conversationId) ?? { lastAddressed: [], buffer: [] };
+        const decision = decideGroupReply({
+          self: selfName,
+          matched: matchPersonaNames(msg.text ?? "", roster),
+          lastAddressed: state.lastAddressed,
+        });
+        interrupt = decision.reply;
+      }
+    }
+    const active = interrupt ? activeTurns.get(msg.conversationId) : undefined;
     if (active) {
       const dropped = backlog.flush(msg.conversationId, "interrupt");
       log.info("phantomchat: new message — interrupting active turn", {

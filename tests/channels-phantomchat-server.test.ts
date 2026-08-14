@@ -1802,4 +1802,130 @@ describe("phantomchat group addressing gate (multi-bot)", () => {
     expect(harness.invocations).toBe(1);
     expect(replyWraps(srv.pool).length).toBeGreaterThan(0);
   });
+
+  // ===== interrupt scoping (#301 follow-up) =====
+  // The enqueue-time interrupt originally fired for ANY group message visible
+  // on the shared relay — including ones addressed to a sibling bot — aborting
+  // this bot's in-flight work. The interrupt must pass the same gates handle()
+  // applies: bot senders never interrupt, and in a multi-bot group only a
+  // message the addressing gate says is OURS does.
+
+  /** A turn that blocks until aborted (interrupt) or released by the test, so
+   *  the interrupt decision at enqueue time can be observed. */
+  class GateHarness implements Harness {
+    invocations = 0;
+    aborted = 0;
+    private releasers: Array<() => void> = [];
+    constructor(public readonly id: string) {}
+    releaseAll(): void {
+      for (const r of this.releasers.splice(0)) r();
+    }
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.invocations++;
+      yield { type: "text", text: "working" };
+      await new Promise<void>((resolve) => {
+        if (req.signal?.aborted) return resolve();
+        const onAbort = () => resolve();
+        req.signal?.addEventListener("abort", onAbort, { once: true });
+        this.releasers.push(() => {
+          req.signal?.removeEventListener("abort", onAbort);
+          resolve();
+        });
+      });
+      if (req.signal?.aborted) {
+        this.aborted++;
+        return;
+      }
+      yield { type: "done", finalText: "done" };
+    }
+  }
+
+  test("interrupt scoping: a message addressed to a sibling does NOT interrupt this bot's active turn", async () => {
+    const c = cast();
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    // Lena is mid-turn...
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+    await groupSleep(150);
+    expect(harness.invocations).toBe(1);
+
+    // ...when Andrew addresses Kai. Old behaviour aborted Lena's turn here.
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "kai, you take Y", "HQ");
+    await groupSleep(150);
+    expect(harness.aborted).toBe(0); // turn survived
+
+    harness.releaseAll();
+    await groupSleep(250);
+    await srv.stop();
+    // Kai's message never ran a turn on Lena's instance either.
+    expect(harness.invocations).toBe(1);
+  });
+
+  test("interrupt scoping: a message addressed to THIS bot still interrupts the active turn", async () => {
+    const c = cast();
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+    await groupSleep(150);
+    expect(harness.invocations).toBe(1);
+
+    // A message naming Lena is a genuine interrupt: abort + run the new one.
+    srv.feedGroup(
+      c.andrewSk,
+      [c.lenaHex, c.kaiHex],
+      "lena, stop — do Z instead",
+      "HQ",
+    );
+    await groupSleep(250);
+    expect(harness.aborted).toBe(1);
+    expect(harness.invocations).toBe(2);
+
+    harness.releaseAll();
+    await groupSleep(250);
+    await srv.stop();
+  });
+
+  test("interrupt scoping: a sibling bot's message never interrupts (bot-gate)", async () => {
+    const c = cast();
+    const harness = new GateHarness("fake");
+    const srv = makeGroupServer({
+      botSk: c.lenaSk,
+      persona: "lena",
+      allowedHex: [c.andrewHex, c.kaiHex],
+      groupPersonaNames: ["lena", "kai"],
+      siblingBotHex: [c.kaiHex],
+      harness,
+    });
+    srv.feedGroup(c.andrewSk, [c.lenaHex, c.kaiHex], "lena, research X", "HQ");
+    await groupSleep(150);
+    expect(harness.invocations).toBe(1);
+
+    // Kai chimes in naming Lena. handle() drops bot messages (option a) —
+    // the enqueue interrupt must not fire for them either.
+    srv.feedGroup(c.kaiSk, [c.lenaHex, c.andrewHex], "good point, lena!", "HQ");
+    await groupSleep(150);
+    expect(harness.aborted).toBe(0);
+
+    harness.releaseAll();
+    await groupSleep(250);
+    await srv.stop();
+    expect(harness.invocations).toBe(1);
+  });
 });
