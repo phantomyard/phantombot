@@ -174,12 +174,19 @@ export async function retrieveContext(
       // can never be meaningfully compared against a tier-1 score — and
       // with minScore = 0 (the default) a derived bar collapses to 0,
       // injecting any turn that matched FTS at all exactly when tier 2
-      // matters (empty tier 1). Both sub-scores are absolute: BM25 for
-      // lexical hits, raw cosine for vector-only hits.
-      const minScore = Math.max(
-        0,
-        cross?.minScore ?? DEFAULT_CROSS_CONVERSATION.minScore,
-      );
+      // matters (empty tier 1). See selectCrossConversationHits for the
+      // two-leg gate (BM25 floor; cosine floor WITH lexical support).
+      const minScoreRaw =
+        cross?.minScore ?? DEFAULT_CROSS_CONVERSATION.minScore;
+      // A non-positive floor re-opens "inject anything that matched at
+      // all" — refuse it rather than honouring a footgun config.
+      const minScore =
+        minScoreRaw > 0 ? minScoreRaw : DEFAULT_CROSS_CONVERSATION.minScore;
+      if (minScoreRaw <= 0)
+        log.warn(
+          "retrieval: crossConversation.minScore <= 0 would disable the tier-2 floor; using default",
+          { configured: minScoreRaw, used: minScore },
+        );
       const minVecScore =
         cross?.minVecScore ?? DEFAULT_CROSS_CONVERSATION.minVecScore;
       // The audience boundary is a RETRIEVAL filter, not a prompt rule: a
@@ -198,19 +205,20 @@ export async function retrieveContext(
         exclude: crossExclude,
         allowedAudiences,
       };
-      const candidates = queryVec
-        ? ix.hybridSearch(query, queryVec, {
-            scope: "turns",
-            limit: crossLimit,
-            decay,
-            turnFilter,
-          })
-        : ix.search(query, {
-            scope: "turns",
-            limit: crossLimit,
-            decay,
-            turnFilter,
-          });
+      // hybridSearch with no query vector is the FTS-only fallback, and it
+      // keeps ftsScore RAW on both branches (decay re-ranks but never
+      // scales the score), so minScore is a pure relevance floor on both
+      // paths. Routing the no-embedder config through ix.search with decay
+      // instead would scale ftsScore by the decay factor — with the
+      // defaults, a genuine ≈4 BM25 match stops clearing the 2.0 floor
+      // past ~30 days and tier 2 goes permanently silent for exactly the
+      // aged cross-chat memory #377 exists to surface.
+      const candidates = ix.hybridSearch(query, queryVec, {
+        scope: "turns",
+        limit: crossLimit,
+        decay,
+        turnFilter,
+      });
       crossHits = selectCrossConversationHits(candidates, {
         currentConversation: opts.conversation!,
         exclude: crossExclude,
@@ -386,9 +394,12 @@ export function selectCrossConversationHits(
     exclude: readonly string[];
     /** Audience classes eligible to surface in the current room. */
     allowedAudiences: readonly TurnAudience[];
-    /** Absolute BM25 floor (rank-fused scores are positional — never used). */
+    /** Absolute raw-BM25 floor (rank-fused scores are positional — never used). */
     minScore: number;
-    /** Absolute cosine floor for vector-only matches. */
+    /**
+     * Absolute cosine floor for the vector leg — sufficient only WITH
+     * lexical support (raw BM25 > 0); cosine alone never admits a hit.
+     */
     minVecScore: number;
     limit: number;
   },
@@ -400,12 +411,28 @@ export function selectCrossConversationHits(
     if (!conv) continue; // only conversation turns participate in tier 2
     if (conv === opts.currentConversation) continue;
     if (isConversationExcluded(conv, opts.exclude)) continue;
-    if (h.audience !== undefined && !opts.allowedAudiences.includes(h.audience))
+    // Fail CLOSED on audience: a caller that bypassed the SQL filter is
+    // exactly the caller most likely to produce unclassified hits, so an
+    // undefined audience cannot sail through. (The SQL side already never
+    // matches NULL; this matches it. Every legitimate turn hit carries an
+    // audience — upsertTurn always writes one.)
+    if (h.audience === undefined || !opts.allowedAudiences.includes(h.audience))
       continue;
-    // Absolute floor: a hit clears it on EITHER absolute sub-score. RRF is
-    // deliberately ignored — it encodes rank within this result set, not
-    // relevance, so it cannot serve as a cross-search bar.
-    if ((h.ftsScore ?? 0) < opts.minScore && (h.vecScore ?? 0) < opts.minVecScore)
+    // Absolute floor, two legs:
+    //  - Lexical: raw BM25 clears minScore.
+    //  - Vector: cosine clears minVecScore AND the turn shares at least one
+    //    query term (raw BM25 > 0). Cosine ALONE is never a bar: the gate
+    //    is applied to the MAXIMUM over the whole persona index, and
+    //    anisotropic embeddings score register/boilerplate similarity — on
+    //    a live 4k-turn index 79% of arbitrary queries had a
+    //    cross-conversation hit above 0.85 on cosine alone, and the hits
+    //    were shared phrasing, not knowledge (PR #378 review). Requiring
+    //    lexical support kills the boilerplate class outright. RRF is
+    //    deliberately ignored — it encodes rank within this result set,
+    //    not relevance, so it cannot serve as a cross-search bar.
+    const fts = h.ftsScore ?? 0;
+    const vec = h.vecScore ?? 0;
+    if (fts < opts.minScore && !(vec >= opts.minVecScore && fts > 0))
       continue;
     out.push({ ...h, crossConversation: conv });
   }

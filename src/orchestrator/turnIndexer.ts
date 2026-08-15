@@ -47,6 +47,8 @@ export interface IndexConversationTurnsResult {
   triggered: boolean;
   indexed: number;
   embedded: number;
+  /** Embeddings reused unchanged (text_sha match) — no API call made. */
+  reused: number;
   embeddingFailures: number;
   userTurns: number;
   previousUserTurnsIndexed: number;
@@ -104,6 +106,7 @@ export async function indexConversationTurnsIfDue(
         triggered: false,
         indexed: 0,
         embedded: 0,
+        reused: 0,
         embeddingFailures: 0,
         userTurns,
         previousUserTurnsIndexed,
@@ -115,6 +118,7 @@ export async function indexConversationTurnsIfDue(
     let afterId = state?.lastTurnId ?? 0;
     let indexed = 0;
     let embedded = 0;
+    let reused = 0;
     let embeddingFailures = 0;
 
     while (true) {
@@ -153,6 +157,11 @@ export async function indexConversationTurnsIfDue(
             : undefined;
         if (vec) embedded++;
         else if (embedder && haveSha !== textSha) embeddingFailures++;
+        // sha match → the surviving embedding was reused. Counted
+        // separately so a turn-schema rebuild (thousands of turns, zero
+        // API calls) doesn't log embedded: 0 and look like the embedder
+        // is down.
+        else if (embedder && haveSha === textSha) reused++;
         ix.upsertTurn(turn, vec, vec ? textSha : undefined);
         indexed++;
         afterId = turn.id;
@@ -173,6 +182,7 @@ export async function indexConversationTurnsIfDue(
       conversation: input.conversation,
       indexed,
       embedded,
+      reused,
       embeddingFailures,
       userTurns,
     });
@@ -181,6 +191,7 @@ export async function indexConversationTurnsIfDue(
       triggered: true,
       indexed,
       embedded,
+      reused,
       embeddingFailures,
       userTurns,
       previousUserTurnsIndexed,

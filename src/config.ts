@@ -310,11 +310,17 @@ export interface CrossConversationRetrievalSettings {
    */
   minScore: number;
   /**
-   * Absolute tier-2 floor on the cosine similarity, for cross hits that
-   * matched the vector side only (no lexical overlap). Default 0.85:
-   * gemini-embedding-001 vectors are highly anisotropic — sampled random
-   * turn pairs sit at p50 ≈ 0.65 / p90 ≈ 0.75 / p99 ≈ 0.89, so anything
-   * lower admits noise.
+   * Cosine floor for the vector leg of the tier-2 gate. NOTE: cosine is
+   * never sufficient on its own — a vector hit must ALSO share at least
+   * one query term (raw BM25 > 0). The gate is applied to the MAXIMUM
+   * over the whole persona index, whose distribution is dominated by
+   * register/boilerplate similarity: on a live 4k-turn
+   * gemini-embedding-001 index, 79% of arbitrary queries had a
+   * cross-conversation turn above 0.85 on cosine alone, and the hits were
+   * shared phrasing, not knowledge (PR #378 review). No absolute value
+   * calibrated against random-pair marginals (p50 0.65 / p90 0.75 /
+   * p99 0.89) is safe as a standalone bar; 0.85 WITH lexical support
+   * keeps genuine paraphrase matches while rejecting shared phrasing.
    */
   minVecScore: number;
   /**

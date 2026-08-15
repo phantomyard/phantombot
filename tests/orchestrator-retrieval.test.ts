@@ -183,12 +183,14 @@ describe("retrieveContext", () => {
     conversation = "cli:filler",
   ): void => {
     for (let i = 1; i <= count; i++) {
+      // Every filler contains "the" so the floor-regression test's common
+      // token is genuinely low-IDF (raw BM25 ≈ 0), not merely decayed low.
       ix.upsertTurn({
         id: 10_000 + i,
         persona: "phantom",
         conversation,
         role: "assistant",
-        text: `fillerturn${i} notion${i} widget${i} gizmo${i}`,
+        text: `the fillerturn${i} notion${i} widget${i} gizmo${i}`,
         createdAt: new Date("2026-05-20T06:00:00Z"),
         embeddable: true,
         source: "unverified",
@@ -520,7 +522,9 @@ describe("retrieveContext", () => {
     // Robert's PR #378 blocking review: with minScore = 0 the old derived
     // bar collapsed to 0 exactly when tier 1 had no hits, so ANY turn that
     // matched FTS at all was injected. Seed a cross turn whose only overlap
-    // with the query is a common token (BM25 ≈ 0) — it must NOT surface.
+    // with the query is a token that is common ACROSS THE INDEX ("the" is
+    // in every filler turn → IDF ≈ 0 → raw BM25 ≈ 0) — it must NOT
+    // surface. (The floor applies to the RAW score; decay only re-ranks.)
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
     seedFillerTurns(ix);
@@ -837,12 +841,44 @@ describe("selectCrossConversationHits", () => {
     expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
   });
 
-  test("a vector-only hit clears the floor on cosine alone", () => {
+  test("rejects a vector-only hit with no lexical support (boilerplate class)", () => {
+    // Regression for the PR #378 blocking review: the gate is applied to
+    // the maximum over the whole index, where anisotropic embeddings score
+    // register/boilerplate similarity — on a live 4k-turn index 79% of
+    // arbitrary queries had a cross-conversation hit above 0.85 on cosine
+    // alone. Cosine without any shared query term must never admit.
     const out = selectCrossConversationHits(
-      [hit("telegram:BBB", 0, { ftsScore: undefined, vecScore: 0.9, rrfScore: 0.016 })],
+      [
+        // No FTS match at all (vector-only candidate).
+        hit("telegram:BBB", 0, { ftsScore: undefined, vecScore: 0.97, rrfScore: 0.016 }),
+        // High cosine, zero lexical overlap.
+        hit("telegram:CCC", 0, { vecScore: 0.93 }),
+      ],
+      { ...base, minScore: 2, minVecScore: 0.85 },
+    );
+    expect(out).toEqual([]);
+  });
+
+  test("admits a vector hit with lexical support below the BM25 floor", () => {
+    // A paraphrase match: cosine clears the floor and the turn shares at
+    // least one query term (raw BM25 > 0) but not enough for the lexical
+    // leg. The vector leg exists for exactly this case.
+    const out = selectCrossConversationHits(
+      [hit("telegram:BBB", 0.4, { vecScore: 0.9, rrfScore: 0.016 })],
       { ...base, minScore: 2, minVecScore: 0.85 },
     );
     expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
+  });
+
+  test("fails closed when a candidate carries no audience", () => {
+    // Defence in depth: a caller that bypassed the SQL audience filter is
+    // the one most likely to produce unclassified hits — undefined must
+    // not sail through.
+    const out = selectCrossConversationHits(
+      [hit("telegram:BBB", 10, { audience: undefined })],
+      { ...base },
+    );
+    expect(out).toEqual([]);
   });
 
   test("drops candidates whose audience is too private for the room", () => {
