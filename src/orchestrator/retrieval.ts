@@ -430,6 +430,11 @@ export function selectCrossConversationHits(
     //    lexical support kills the boilerplate class outright. RRF is
     //    deliberately ignored — it encodes rank within this result set,
     //    not relevance, so it cannot serve as a cross-search bar.
+    //
+    //    The BM25 score for every turn hit — including those outside the
+    //    FTS top-25 candidate pool — is fetched via a per-path lookup in
+    //    hybridSearch, so "fts > 0" is the real lexical gate, not a proxy
+    //    for "ranked in the top-25 BM25 pool".
     const fts = h.ftsScore ?? 0;
     const vec = h.vecScore ?? 0;
     if (fts < opts.minScore && !(vec >= opts.minVecScore && fts > 0))

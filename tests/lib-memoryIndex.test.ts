@@ -871,3 +871,64 @@ describe("turn-schema self-heal", () => {
     }
   });
 });
+
+describe("per-path BM25 lookup for vector-only hits (#378)", () => {
+  test("vector hit outside FTS top-25 gets its real BM25 score", () => {
+    // Seed 30 turns in conversation AAA that all match the FTS query —
+    // enough to push a 31st turn (in BBB) below the top-25 BM25 pool.
+    // The BBB turn has a high cosine similarity but ranks 26th+ in BM25,
+    // so without the per-path lookup its ftsScore would be undefined.
+    const query = "relay auth token";
+    const vec = new Float32Array([1, 0, 0]);
+
+    // 30 filler turns in AAA — all lexically competitive.
+    for (let i = 1; i <= 30; i++) {
+      ix.upsertTurn(
+        {
+          id: i,
+          persona: "phantom",
+          conversation: "phantomchat:group:AAA",
+          role: "user",
+          text: `relay auth token filler number ${i} in chat AAA`,
+          createdAt: new Date("2026-05-28T06:00:00Z"),
+          embeddable: true,
+          source: "principal",
+        },
+        // Give fillers orthogonal vectors so they don't compete on cosine.
+        new Float32Array([0, i / 30, 0]),
+        `sha-aaa-${i}`,
+      );
+    }
+
+    // The cross-conversation turn: high cosine, lexically relevant but
+    // ranked below the 30 AAA turns in the BM25 pool.
+    ix.upsertTurn(
+      {
+        id: 100,
+        persona: "phantom",
+        conversation: "telegram:-100BBB",
+        role: "user",
+        text: "relay auth token fix used kind 22242",
+        createdAt: new Date("2026-05-28T06:01:00Z"),
+        embeddable: true,
+        source: "principal",
+      },
+      vec,
+      "sha-bbb",
+    );
+
+    // Search across ALL conversations (no scope filter) so the BBB turn
+    // is in the vector candidate pool.
+    const hits = ix.hybridSearch(query, vec, {
+      scope: "all",
+      limit: 10,
+    });
+
+    // The BBB turn must be in the results (its cosine is the highest).
+    const bbbHit = hits.find((h) => h.path.includes("BBB"));
+    expect(bbbHit).toBeDefined();
+    // Its ftsScore must NOT be undefined — the per-path lookup filled it.
+    expect(bbbHit!.ftsScore).toBeDefined();
+    expect(bbbHit!.ftsScore!).toBeGreaterThan(0);
+  });
+});

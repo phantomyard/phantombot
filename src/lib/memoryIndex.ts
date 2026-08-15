@@ -1342,6 +1342,44 @@ export class MemoryIndex {
           snippet: ftsHit?.snippet ?? this.snippetForPath(path),
         };
       });
+    // Per-path BM25 lookup: vector-only turn hits (those not in the FTS
+    // top-25 pool) have ftsScore === undefined. Fetch their actual BM25
+    // score directly so the tier-2 dual-gate (cosine ≥ minVecScore AND
+    // fts > 0) works as documented — without this, a vector hit ranked
+    // 26th+ lexically is silently dropped by pool truncation, not by the
+    // score rule, quietly degrading tier 2 to cosine-only on busy indexes.
+    // (Robbie's non-blocking finding on #378, resolved.)
+    const vecOnlyTurnPaths = merged
+      .filter((h) => h.ftsScore === undefined && h.path.startsWith("turns/"))
+      .map((h) => h.path);
+    if (vecOnlyTurnPaths.length > 0) {
+      const ftsQuery2 = sanitizeFtsQuery(query);
+      const ph = vecOnlyTurnPaths.map(() => "?").join(", ");
+      const tf2 = this.turnFilterSql(opts.turnFilter);
+      const rows2 = this.db
+        .query(
+          "SELECT path, bm25(turn_docs) AS rank FROM turn_docs " +
+            "WHERE content MATCH ? AND path IN (" + ph + ") " +
+            tf2.where +
+            " ORDER BY rank",
+        )
+        .all(ftsQuery2, ...vecOnlyTurnPaths, ...tf2.params) as Array<{
+        path: string;
+        rank: number;
+      }>;
+      for (const r of rows2) {
+        const hit = merged.find((h) => h.path === r.path);
+        if (hit) {
+          // bm25() is "lower is better"; flip sign. Apply decay if active
+          // to match the ftsScore convention from search().
+          const raw = -r.rank;
+          hit.ftsScore = decayFactors
+            ? raw * (decayFactors.get(r.path) ?? 1)
+            : raw;
+        }
+      }
+    }
+
     return merged;
   }
 
