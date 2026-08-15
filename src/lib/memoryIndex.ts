@@ -1370,12 +1370,11 @@ export class MemoryIndex {
       for (const r of rows2) {
         const hit = merged.find((h) => h.path === r.path);
         if (hit) {
-          // bm25() is "lower is better"; flip sign. Apply decay if active
-          // to match the ftsScore convention from search().
-          const raw = -r.rank;
-          hit.ftsScore = decayFactors
-            ? raw * (decayFactors.get(r.path) ?? 1)
-            : raw;
+          // bm25() is "lower is better"; flip sign. Keep raw — pool hits
+          // from search() carry undecayed ftsScore, and the tier-2 floor
+          // (minScore: 2.0) is calibrated on raw BM25. Decaying here would
+          // inflate the threshold for aged content, narrowing tier 2.
+          hit.ftsScore = -r.rank;
         }
       }
     }

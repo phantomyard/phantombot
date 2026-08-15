@@ -931,4 +931,70 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
     expect(bbbHit!.ftsScore).toBeDefined();
     expect(bbbHit!.ftsScore!).toBeGreaterThan(0);
   });
+
+  test("per-path BM25 score is raw (undecayed) even when decay is active", () => {
+    // Same scenario as above, but with decay enabled. The per-path
+    // lookup must fill ftsScore with the RAW BM25 rank — not decayed —
+    // so the tier-2 floor (minScore: 2.0, calibrated on raw BM25)
+    // applies uniformly to pool hits and per-path hits alike.
+    const query = "relay auth token";
+    const vec = new Float32Array([1, 0, 0]);
+
+    for (let i = 1; i <= 30; i++) {
+      ix.upsertTurn(
+        {
+          id: i,
+          persona: "phantom",
+          conversation: "phantomchat:group:AAA",
+          role: "user",
+          text: `relay auth token filler number ${i} in chat AAA`,
+          createdAt: new Date("2026-05-28T06:00:00Z"),
+          embeddable: true,
+          source: "principal",
+        },
+        new Float32Array([0, i / 30, 0]),
+        `sha-aaa-${i}`,
+      );
+    }
+
+    // Same turn as the first test — high cosine, below BM25 top-25.
+    ix.upsertTurn(
+      {
+        id: 300,
+        persona: "phantom",
+        conversation: "telegram:-100BBB",
+        role: "user",
+        text: "relay auth token fix used kind 22242",
+        createdAt: new Date("2026-05-28T06:01:00Z"),
+        embeddable: true,
+        source: "principal",
+      },
+      vec,
+      "sha-bbb-decay",
+    );
+
+    // Search WITH decay — inject nowMs 60 days later so all turns
+    // are aged equally (1-minute spread doesn't change ranking).
+    const hits = ix.hybridSearch(query, vec, {
+      scope: "all",
+      limit: 10,
+      decay: { halfLifeDays: 30, floor: 0.1, nowMs: Date.parse("2026-07-28T06:00:00Z") },
+    });
+
+    const bbbHit = hits.find((h) => h.path.includes("BBB"));
+    expect(bbbHit).toBeDefined();
+    expect(bbbHit!.ftsScore).toBeDefined();
+
+    // The raw score without decay — same query, same turn, no decay.
+    const rawHits = ix.hybridSearch(query, vec, {
+      scope: "all",
+      limit: 10,
+    });
+    const rawBbb = rawHits.find((h) => h.path.includes("BBB"));
+    expect(rawBbb).toBeDefined();
+    expect(rawBbb!.ftsScore).toBeDefined();
+
+    // Per-path ftsScore must equal the undecayed value.
+    expect(bbbHit!.ftsScore).toBe(rawBbb!.ftsScore);
+  });
 });
