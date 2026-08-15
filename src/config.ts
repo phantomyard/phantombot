@@ -213,6 +213,11 @@ export interface RetrievalSettings {
    * bumping it on recall would keep it alive — the opposite of the goal.
    */
   decay: RetrievalDecaySettings;
+  /**
+   * Tier-2 cross-conversation (persona-scoped) retrieval. Defaults ON —
+   * see CrossConversationRetrievalSettings.
+   */
+  crossConversation: CrossConversationRetrievalSettings;
 }
 
 /** Time-decay knobs for raw conversation-turn hits (curated notes are immune). */
@@ -259,6 +264,67 @@ export const DEFAULT_RETRIEVAL_DECAY: RetrievalDecaySettings = {
   floor: 0.02,
 };
 
+/**
+ * Cross-conversation (persona-scoped) retrieval — tier 2 of auto-retrieval.
+ *
+ * The problem it solves: auto-retrieval was scoped to the CURRENT
+ * conversation only (PR #132, leak fix), so knowledge earned in one chat
+ * (say, a tricky fix worked out in a Telegram DM) never surfaced when a
+ * similar problem came up days later in another chat (PhantomChat, an ACP
+ * session). The persona had the memory; retrieval couldn't reach it without
+ * a conscious `memory search` — and you can't search for what you don't
+ * remember exists.
+ *
+ * Tier 2 widens the net to the whole persona, with guardrails that keep it
+ * a supplement, never a flood: a higher relevance bar than in-conversation
+ * hits, a hard per-turn cap, source attribution on every hit, and a
+ * prompt-level disclosure rule (inform the reply, never quote the excerpt
+ * or name the chat it came from). See orchestrator/retrieval.ts.
+ *
+ * DEFAULTS TO ON when the flag is absent — deliberate anti-config-fatigue
+ * choice: the right behaviour out of the box, no knob to babysit. The flag
+ * exists purely as an escape hatch for genuinely sensitive setups.
+ */
+export interface CrossConversationRetrievalSettings {
+  /**
+   * Master switch for tier-2 (cross-conversation) hits. DEFAULT true —
+   * including when the whole [retrieval.cross_conversation] table is absent.
+   * Set false to restore strict per-conversation retrieval (PR #132
+   * behaviour).
+   */
+  enabled: boolean;
+  /**
+   * Hard cap on cross-conversation hits injected per turn, appended AFTER
+   * in-conversation hits so they can never displace tier 1. 0 disables
+   * tier 2 without touching the flag.
+   */
+  limit: number;
+  /**
+   * Tier-2 relevance bar: the configured minScore is multiplied by this for
+   * cross-conversation hits (>= 1). Independently, a cross hit must also
+   * match or beat the weakest in-conversation hit of the turn — cross-chat
+   * context only earns prompt space when it is at least as relevant as what
+   * we'd already show.
+   */
+  minScoreMultiplier: number;
+  /**
+   * Channels/conversations excluded from tier 2 in BOTH directions: their
+   * turns never surface in other chats, and no cross-conversation hits are
+   * injected when they are the current conversation. Entries match a full
+   * conversation key ("phantomchat:group:abc123") or a channel prefix
+   * ("telegram" matches every telegram:* conversation). The sensitive-DM
+   * escape hatch.
+   */
+  exclude: string[];
+}
+
+export const DEFAULT_CROSS_CONVERSATION: CrossConversationRetrievalSettings = {
+  enabled: true,
+  limit: 3,
+  minScoreMultiplier: 1.5,
+  exclude: [],
+};
+
 export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   enabled: true,
   limit: 5,
@@ -267,6 +333,7 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   turnIndexing: DEFAULT_TURN_INDEXING,
   graphExpansion: DEFAULT_GRAPH_EXPANSION,
   decay: DEFAULT_RETRIEVAL_DECAY,
+  crossConversation: DEFAULT_CROSS_CONVERSATION,
 };
 
 /**
@@ -949,6 +1016,49 @@ function buildRetrievalConfig(
     decay: buildRetrievalDecayConfig(
       (tomlRetrieval.decay ?? {}) as Record<string, unknown>,
     ),
+    crossConversation: buildCrossConversationConfig(
+      (tomlRetrieval.cross_conversation ?? {}) as Record<string, unknown>,
+    ),
+  };
+}
+
+function buildCrossConversationConfig(
+  toml: Record<string, unknown>,
+): CrossConversationRetrievalSettings {
+  // Absent flag → DEFAULT ON. This is the anti-config-fatigue contract:
+  // nobody should have to discover or set this knob to get the right
+  // behaviour; it exists so a sensitive setup can opt OUT.
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_CROSS_ENABLED) ??
+    asBool(toml.enabled) ??
+    DEFAULT_CROSS_CONVERSATION.enabled;
+  const limit =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_CROSS_LIMIT) ??
+    asInt(toml.limit) ??
+    DEFAULT_CROSS_CONVERSATION.limit;
+  const minScoreMultiplier =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE_MULTIPLIER) ??
+    asNumber(toml.min_score_multiplier) ??
+    DEFAULT_CROSS_CONVERSATION.minScoreMultiplier;
+  // Env form is comma-separated ("telegram,phantomchat:group:abc"); TOML is
+  // a native string array.
+  const envExclude = process.env.PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const exclude =
+    envExclude ??
+    asStringArray(toml.exclude) ??
+    DEFAULT_CROSS_CONVERSATION.exclude;
+  return {
+    enabled,
+    // 0 disables tier 2 without touching the flag; cap keeps the per-turn
+    // prompt cost bounded even for a fat-fingered value.
+    limit: Math.max(0, Math.min(10, limit)),
+    // Below 1 the tier-2 bar would be LOWER than tier 1's — inverted.
+    minScoreMultiplier: Math.max(1, minScoreMultiplier),
+    // Drop blanks so "a,,b" can't accidentally match every conversation.
+    exclude: exclude.map((e) => e.trim()).filter((e) => e.length > 0),
   };
 }
 

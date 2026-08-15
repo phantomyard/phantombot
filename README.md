@@ -1435,6 +1435,46 @@ dims = 1536
 Without embeddings, search degrades cleanly to OKF field-weighted BM25 with
 link-graph expansion — never to plain keyword.
 
+### Cross-conversation retrieval
+
+Auto-retrieval is **persona-scoped by default**: when a turn runs, relevant
+excerpts from your *other* chats can surface alongside the current
+conversation's. The fix you worked out in a Telegram DM on Monday is
+available when the same problem comes up in PhantomChat on Thursday — no
+manual `memory search` required.
+
+Guardrails keep it a supplement, never a flood:
+
+- Current-conversation hits always rank first; cross-conversation hits are
+  appended after them and hard-capped (default 3 per turn).
+- A cross-chat excerpt must clear a higher relevance bar — it never earns
+  prompt space over something more relevant from the current chat.
+- Every cross-conversation hit is labelled with its source channel and date
+  (`cross-conversation: Telegram, May 27`), and the injected prompt
+  instructs the persona to let it inform the reply without quoting it
+  verbatim or naming the chat it came from.
+
+**No configuration is needed — it is on by default.** The flag exists only
+as an escape hatch for sensitive setups:
+
+```toml
+[retrieval.cross_conversation]
+enabled = false            # restore strict per-conversation retrieval
+limit = 3                  # max cross-conversation hits per turn (0 disables)
+min_score_multiplier = 1.5 # tier-2 relevance bar = min_score × this
+exclude = ["telegram"]     # channels that neither contribute nor receive
+```
+
+`exclude` entries match a full conversation key
+(`phantomchat:group:abc123`) or a channel prefix (`telegram` matches every
+Telegram conversation). An excluded chat's turns never surface in other
+chats, and no cross-conversation context is injected into it.
+
+Environment overrides: `PHANTOMBOT_RETRIEVAL_CROSS_ENABLED`,
+`PHANTOMBOT_RETRIEVAL_CROSS_LIMIT`,
+`PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE_MULTIPLIER`, and
+`PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE` (comma-separated).
+
 ### Nightly and Doctor
 
 The nightly distillation is checkpointed in five stages:

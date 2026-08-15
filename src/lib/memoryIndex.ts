@@ -113,6 +113,14 @@ export interface SearchHit {
    * callers label or down-weight expanded neighbours.
    */
   expanded?: boolean;
+  /**
+   * Set by the auto-retrieval layer (orchestrator/retrieval.ts) when this
+   * hit was surfaced from a DIFFERENT conversation than the current one
+   * (tier-2 cross-conversation retrieval). Carries the decoded source
+   * conversation key so the formatter can attribute it. Never set by the
+   * index itself.
+   */
+  crossConversation?: string;
   snippet: string;
 }
 
