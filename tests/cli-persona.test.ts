@@ -15,7 +15,7 @@
  * positional <name>.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +61,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.PHANTOMBOT_STATE;
+  mock.restore();
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -225,6 +226,152 @@ describe("runSwitchPersona", () => {
     } finally {
       delete process.env.PHANTOMBOT_PERSONA;
     }
+  });
+
+  test("agent context + --yes + different target → still refused, no state write", async () => {
+    await mkdir(join(personasDir, "alma"), { recursive: true });
+    await mkdir(join(personasDir, "paco"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    process.env.PHANTOMBOT_PERSONA = "alma";
+    try {
+      const err = new CaptureStream();
+      // Adversarial case: agent `alma` tries to re-point default to a
+      // DIFFERENT persona (`paco`), even with --yes — the scope check must
+      // win over --yes (default is `phantom`, so this is a real switch).
+      const code = await runSwitchPersona({
+        name: "paco",
+        yes: true,
+        config: makeConfig(),
+        serviceControl: svcInactive,
+        out: new CaptureStream(),
+        err,
+      });
+      expect(code).toBe(2);
+      expect(err.text).toContain("PHANTOMBOT_PERSONA");
+      const state = JSON.parse(
+        await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+      );
+      expect(state.default_persona).toBe("phantom");
+    } finally {
+      delete process.env.PHANTOMBOT_PERSONA;
+    }
+  });
+
+  test("interactive TTY confirm=true → prompts via defaultConfirm and persists", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    // Drive the REAL defaultConfirm through an @clack mock: proves the
+    // interactive branch calls it and persists on true.
+    let promptedMessage = "";
+    mock.module("@clack/prompts", () => ({
+      confirm: async ({ message }: { message: string }) => {
+        promptedMessage = message;
+        return true;
+      },
+      isCancel: () => false,
+      intro: () => {},
+      note: () => {},
+      outro: () => {},
+      select: async () => undefined,
+      cancel: () => {},
+    }));
+    const code = await runSwitchPersona({
+      name: "robbie",
+      isInteractive: true,
+      config: makeConfig(),
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(promptedMessage).toContain("robbie");
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("robbie");
+  });
+
+  test("interactive TTY confirm=false → cancelled, no state write", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    mock.module("@clack/prompts", () => ({
+      confirm: async () => false,
+      isCancel: () => false,
+      intro: () => {},
+      note: () => {},
+      outro: () => {},
+      select: async () => undefined,
+      cancel: () => {},
+    }));
+    const code = await runSwitchPersona({
+      name: "robbie",
+      isInteractive: true,
+      config: makeConfig(),
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("cancelled");
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("phantom");
+  });
+
+  test("concurrent writer during confirmation → other fields preserved (lost-update regression)", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({
+        default_persona: "phantom",
+        harness_bins: { claude: "/usr/bin/claude" },
+      }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    // Simulate another process writing state (harness_bins discovery) while
+    // this switch waits on the injected confirm.
+    const code = await runSwitchPersona({
+      name: "robbie",
+      confirm: async () => {
+        await writeFile(
+          process.env.PHANTOMBOT_STATE!,
+          JSON.stringify({
+            default_persona: "phantom",
+            harness_bins: { claude: "/opt/new/claude" },
+          }),
+          "utf8",
+        );
+        return true;
+      },
+      config: makeConfig(),
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("robbie");
+    // The concurrent write must survive: re-loading fresh state before the
+    // commit preserves fields we didn't touch.
+    expect(state.harness_bins).toEqual({ claude: "/opt/new/claude" });
   });
 
   test("already-current → no-op exit 0, no state write", async () => {

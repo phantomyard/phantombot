@@ -117,6 +117,12 @@ export interface RunSwitchPersonaInput {
    * are refused instead of prompting (see `runSwitchPersona`).
    */
   confirm?: ConfirmFn;
+  /**
+   * Injected TTY detection for tests; defaults to
+   * `process.stdin.isTTY && process.stdout.isTTY`. Lets tests drive the
+   * interactive prompt branch without a real TTY.
+   */
+  isInteractive?: boolean;
   config?: Config;
   serviceControl?: ServiceControl;
   out?: WriteSink;
@@ -167,7 +173,9 @@ export async function runSwitchPersona(
 
   // Confirm before persisting. In a non-TTY context (agent Bash, cron, CI)
   // the @clack prompt can't be answered, so require an explicit --yes.
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const interactive =
+    input.isInteractive ??
+    Boolean(process.stdin.isTTY && process.stdout.isTTY);
   let confirmed: boolean;
   if (input.yes) {
     confirmed = true;
@@ -192,9 +200,21 @@ export async function runSwitchPersona(
     return 0;
   }
 
-  // Persist only after confirmation (the #371 ordering fix).
-  state.default_persona = input.name;
-  await saveState(state);
+  // Re-validate the persona dir right before committing: the confirmation
+  // wait may have raced with a concurrent remove, and we must not point the
+  // default at a persona that no longer exists.
+  if (!existsSync(targetDir)) {
+    err.write(`persona '${input.name}' no longer exists at ${targetDir}\n`);
+    return 1;
+  }
+
+  // Persist only after confirmation (the #371 ordering fix). Re-load the
+  // state fresh instead of reusing the snapshot captured above: the
+  // confirmation wait can overlap another writer (e.g. harness_bins
+  // discovery), and writing the stale snapshot would clobber its fields.
+  const latestState = await loadState();
+  latestState.default_persona = input.name;
+  await saveState(latestState);
   out.write(
     `default_persona: '${previous ?? "(unset)"}' → '${input.name}'\n`,
   );
