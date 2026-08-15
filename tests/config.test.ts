@@ -42,6 +42,10 @@ const ENV_KEYS = [
   "PHANTOMBOT_CODING_MODEL",
   "PHANTOMBOT_CODEX_BIN",
   "PHANTOMBOT_CODEX_MODEL",
+  // buildEmbeddingsConfig() prefers this over the TOML [embeddings.gemini]
+  // api_key, so a real key in a developer's shell silently overrides the
+  // fixture and breaks the embedding assertions below.
+  "PHANTOMBOT_GEMINI_API_KEY",
   "PHANTOMBOT_RETRIEVAL_ENABLED",
   "PHANTOMBOT_RETRIEVAL_LIMIT",
   "PHANTOMBOT_RETRIEVAL_MAX_TOKENS",
