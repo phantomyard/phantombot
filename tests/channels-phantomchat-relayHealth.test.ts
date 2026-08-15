@@ -329,3 +329,48 @@ describe("transport wiring", () => {
     expect(transport.relays.length).toBe(SEVEN.length);
   });
 });
+
+describe("setRelays — surviving a relay-config change", () => {
+  test("relays that survive the change KEEP their health and quarantine", () => {
+    const t = tracker();
+    const now = Date.now();
+    strikeOut(t, "wss://r1.example", now);
+    expect(t.isQuarantined("wss://r1.example", now)).toBe(true);
+
+    t.setRelays(SEVEN.slice(0, 5));
+    // Same relay, same url, same verdict — a config reload is not an amnesty.
+    expect(t.isQuarantined("wss://r1.example", now)).toBe(true);
+    expect(t.publishTargets(now)).not.toContain("wss://r1.example");
+  });
+
+  test("records for relays dropped from the config are forgotten", () => {
+    const t = tracker();
+    const now = Date.now();
+    strikeOut(t, "wss://r7.example", now);
+    expect(t.isQuarantined("wss://r7.example", now)).toBe(true);
+
+    // Removed from the config, then added back: it returns as a STRANGER, not
+    // as a convict. Dropping the record is what keeps a process that rotates
+    // its relay list from accumulating dead entries forever.
+    t.setRelays(SEVEN.slice(0, 3));
+    t.setRelays(SEVEN);
+    expect(t.isQuarantined("wss://r7.example", now)).toBe(false);
+    const row = t.report(now).find((r) => r.relay === "wss://r7.example");
+    expect(row?.dropped).toBe(0);
+    expect(row?.strikes).toBe(0);
+  });
+
+  test("newly-added relays are usable immediately (optimistic score)", () => {
+    const t = tracker(SEVEN.slice(0, 3));
+    const now = Date.now();
+    t.setRelays([...SEVEN.slice(0, 3), "wss://r8.example"]);
+    expect(t.publishTargets(now)).toContain("wss://r8.example");
+  });
+
+  test("ranking follows the new list, not the constructor's", () => {
+    const t = tracker();
+    const next = ["wss://r2.example", "wss://r3.example", "wss://r4.example"];
+    t.setRelays(next);
+    expect(t.publishTargets(Date.now()).sort()).toEqual([...next].sort());
+  });
+});

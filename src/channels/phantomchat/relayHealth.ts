@@ -43,6 +43,13 @@
  *    MIN_PUBLISH_RELAYS. A quarantine is an OPINION about relay quality; the
  *    floor is a HARD CONSTRAINT and wins.
  *
+ *    Say this precisely, because it will be quoted: the floor is NOT a proof of
+ *    intersection. Two 3-subsets of a 7-relay list can be disjoint. What makes
+ *    disjointness unlikely is the floor TOGETHER WITH property 4 — both ends
+ *    rank by the same pure function, so they only diverge to the extent their
+ *    observations diverge. If we ever need a real guarantee it has to come from
+ *    a pinned, shared write set, not from a larger floor.
+ *
  * 4. DETERMINISTIC RANKING. `rankRelays` is a pure total order over (score,
  *    url). Given the same observations, phantombot and the PWA sort the same
  *    way — so the two ends converge on the same subset instead of drifting
@@ -149,7 +156,7 @@ export class RelayHealthTracker {
   private readonly announced = new Set<string>();
 
   constructor(
-    private readonly relays: readonly string[],
+    private relays: readonly string[],
     private readonly log: {
       info: (msg: string, meta?: unknown) => void;
       debug: (msg: string, meta?: unknown) => void;
@@ -158,6 +165,28 @@ export class RelayHealthTracker {
     private readonly jitter: () => number = () =>
       1 + (Math.random() * 2 - 1) * QUARANTINE_JITTER,
   ) {}
+
+  /**
+   * Replace the relay list this tracker ranks over.
+   *
+   * The tracker is constructed with the relay list, which would go stale the
+   * day relay config becomes hot-reloadable. Rather than leave that as a
+   * comment-shaped trap, the seam exists now: call this whenever the transport
+   * re-reads its relay set. Health is keyed by URL, so relays that survive the
+   * change KEEP their observations and their in-flight quarantines; records for
+   * relays that are gone are dropped, so a long-lived process that rotates its
+   * relay list does not accumulate them forever.
+   */
+  setRelays(relays: readonly string[]): void {
+    this.relays = [...relays];
+    const live = new Set(relays);
+    for (const url of [...this.health.keys()]) {
+      if (!live.has(url)) {
+        this.health.delete(url);
+        this.announced.delete(url);
+      }
+    }
+  }
 
   private rec(url: string): RelayHealthRecord {
     let r = this.health.get(url);
