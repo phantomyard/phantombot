@@ -112,7 +112,7 @@ describe("buildNightlyPrompt", () => {
 
   test("references the phantombot memory tools the harness must call", () => {
     const p = buildNightlyPrompt("x", "2026-01-01");
-    expect(p).toContain("phantombot memory today");
+    expect(p).toContain("phantombot memory get memory/2026-01-01.md");
     expect(p).toContain("phantombot memory search");
     expect(p).toContain("phantombot memory get");
     expect(p).toContain("phantombot memory index --rebuild");

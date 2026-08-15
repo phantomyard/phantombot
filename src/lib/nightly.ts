@@ -252,7 +252,7 @@ This conversation is ISOLATED (conversation key system:nightly:${today}); nothin
 
 You have access to phantombot's memory tools via Bash:
 
-  phantombot memory today                       # path to today's daily file
+  phantombot memory get memory/${today}.md            # read the daily file being processed (do NOT use 'memory today' — resolves to actual current day, not ${today})
   phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir
@@ -313,7 +313,7 @@ This conversation is ISOLATED (conversation key system:nightly:${today}); nothin
 
 You have access to phantombot's memory tools via Bash:
 
-  phantombot memory today                       # path to today's daily file
+  phantombot memory get memory/${today}.md            # read the daily file being processed (do NOT use 'memory today' — resolves to actual current day, not ${today})
   phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir
