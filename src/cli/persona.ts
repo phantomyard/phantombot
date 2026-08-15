@@ -213,10 +213,12 @@ export async function runSwitchPersona(
   // confirmation wait can overlap another writer (e.g. harness_bins
   // discovery), and writing the stale snapshot would clobber its fields.
   const latestState = await loadState();
+  const latestPrevious =
+    latestState.default_persona ?? config.defaultPersona;
   latestState.default_persona = input.name;
   await saveState(latestState);
   out.write(
-    `default_persona: '${previous ?? "(unset)"}' → '${input.name}'\n`,
+    `default_persona: '${latestPrevious ?? "(unset)"}' → '${input.name}'\n`,
   );
 
   const svc = input.serviceControl ?? defaultServiceControl();

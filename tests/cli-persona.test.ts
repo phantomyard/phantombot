@@ -344,15 +344,16 @@ describe("runSwitchPersona", () => {
       "utf8",
     );
     const out = new CaptureStream();
-    // Simulate another process writing state (harness_bins discovery) while
-    // this switch waits on the injected confirm.
+    // Simulate another process writing state (harness_bins discovery AND a
+    // concurrent default_persona switch) while this switch waits on the
+    // injected confirm.
     const code = await runSwitchPersona({
       name: "robbie",
       confirm: async () => {
         await writeFile(
           process.env.PHANTOMBOT_STATE!,
           JSON.stringify({
-            default_persona: "phantom",
+            default_persona: "alma",
             harness_bins: { claude: "/opt/new/claude" },
           }),
           "utf8",
@@ -372,6 +373,10 @@ describe("runSwitchPersona", () => {
     // The concurrent write must survive: re-loading fresh state before the
     // commit preserves fields we didn't touch.
     expect(state.harness_bins).toEqual({ claude: "/opt/new/claude" });
+    // The success message must reflect the freshest `previous`, not the
+    // stale snapshot captured before confirmation ('alma' was committed by
+    // the concurrent writer while we were confirming).
+    expect(out.text).toContain("'alma' → 'robbie'");
   });
 
   test("already-current → no-op exit 0, no state write", async () => {
