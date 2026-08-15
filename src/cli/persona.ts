@@ -37,7 +37,7 @@ import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { loadState, saveState } from "../state.ts";
 import { runCreatePersona } from "./create-persona.ts";
 import { runImportPersona } from "./import-persona.ts";
-import { maybePromptRestart } from "./harness.ts";
+import { defaultConfirm, maybePromptRestart, type ConfirmFn } from "./harness.ts";
 
 export interface RunPersonaInput {
   /** Positional <name> — switch default. Mutually exclusive with `import`. */
@@ -48,6 +48,8 @@ export interface RunPersonaInput {
   as?: string;
   /** Skip the OpenClaw Telegram sniff during import. */
   noTelegram?: boolean;
+  /** Confirm a default-persona switch non-interactively (switch path only). */
+  yes?: boolean;
   config?: Config;
   serviceControl?: ServiceControl;
   out?: WriteSink;
@@ -81,6 +83,7 @@ export async function runPersona(input: RunPersonaInput = {}): Promise<number> {
   if (input.name) {
     return runSwitchPersona({
       name: input.name,
+      yes: input.yes,
       config: input.config,
       serviceControl: input.serviceControl,
       out,
@@ -99,10 +102,21 @@ export async function runPersona(input: RunPersonaInput = {}): Promise<number> {
 /**
  * Switch the default persona to `name`. Validates that the persona dir
  * exists; refuses with a clear error if it doesn't, listing available
- * personas. Prompts for a phantombot restart if the service is running.
+ * personas. Persists the switch only after an explicit confirmation
+ * (`--yes`, a confirm prompt, or an injected `confirm` in tests), and
+ * refuses agent-scoped switches that would re-point the daemon-wide
+ * default persona (see #371).
  */
 export interface RunSwitchPersonaInput {
   name: string;
+  /** Skip the interactive confirm (already consented non-interactively). */
+  yes?: boolean;
+  /**
+   * Injected confirm for tests; defaults to the @clack-backed
+   * `defaultConfirm`. When omitted, non-TTY invocations without `yes`
+   * are refused instead of prompting (see `runSwitchPersona`).
+   */
+  confirm?: ConfirmFn;
   config?: Config;
   serviceControl?: ServiceControl;
   out?: WriteSink;
@@ -134,6 +148,51 @@ export async function runSwitchPersona(
     out.write(`'${input.name}' is already the default.\n`);
     return 0;
   }
+
+  // Scope check: a persona agent (harness sets PHANTOMBOT_PERSONA) must not
+  // re-point the daemon-wide default. Its `phantombot persona <name>` is a
+  // read/self-intent mistake, not a switch instruction — refuse it. (The
+  // "already the default" no-op above already returned for previous === name,
+  // so reaching here means the agent is about to change the global default.)
+  const agentPersona = process.env.PHANTOMBOT_PERSONA?.trim();
+  if (agentPersona) {
+    err.write(
+      `refusing to switch default_persona to '${input.name}': running as ` +
+        `persona '${agentPersona}' (PHANTOMBOT_PERSONA). Persona agents can't ` +
+        `re-point the daemon-wide default; use --persona for per-invocation ` +
+        `scope instead.\n`,
+    );
+    return 2;
+  }
+
+  // Confirm before persisting. In a non-TTY context (agent Bash, cron, CI)
+  // the @clack prompt can't be answered, so require an explicit --yes.
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  let confirmed: boolean;
+  if (input.yes) {
+    confirmed = true;
+  } else if (input.confirm) {
+    confirmed = await input.confirm(
+      `Switch default persona to '${input.name}'?`,
+    );
+  } else if (interactive) {
+    confirmed = await defaultConfirm(
+      `Switch default persona to '${input.name}'?`,
+    );
+  } else {
+    err.write(
+      `not switching: default_persona change needs confirmation. ` +
+        `Re-run with --yes to switch '${previous ?? "(unset)"}' → '${input.name}'.\n`,
+    );
+    return 2;
+  }
+
+  if (!confirmed) {
+    out.write("switch cancelled.\n");
+    return 0;
+  }
+
+  // Persist only after confirmation (the #371 ordering fix).
   state.default_persona = input.name;
   await saveState(state);
   out.write(
@@ -311,6 +370,12 @@ export default defineCommand({
         "Skip the OpenClaw Telegram config sniff at ~/.openclaw/openclaw.json.",
       default: false,
     },
+    yes: {
+      type: "boolean",
+      description:
+        "Confirm a default-persona switch without prompting (non-interactive consent).",
+      default: false,
+    },
   },
   async run({ args }) {
     process.exitCode = await runPersona({
@@ -318,6 +383,7 @@ export default defineCommand({
       import: args.import ? String(args.import) : undefined,
       as: args.as ? String(args.as) : undefined,
       noTelegram: Boolean(args["no-telegram"]),
+      yes: Boolean(args.yes),
     });
   },
 });

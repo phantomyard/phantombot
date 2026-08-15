@@ -772,7 +772,7 @@ async function pickModel(
  */
 export type ConfirmFn = (message: string) => Promise<boolean>;
 
-const defaultConfirm: ConfirmFn = async (message) => {
+export const defaultConfirm: ConfirmFn = async (message) => {
   const r = await p.confirm({ message, initialValue: true });
   return !p.isCancel(r) && r === true;
 };

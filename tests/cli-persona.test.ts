@@ -134,6 +134,7 @@ describe("runSwitchPersona", () => {
     const out = new CaptureStream();
     const code = await runSwitchPersona({
       name: "robbie",
+      yes: true,
       config: makeConfig(),
       serviceControl: svcInactive,
       out,
@@ -145,6 +146,85 @@ describe("runSwitchPersona", () => {
       await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
     );
     expect(state.default_persona).toBe("robbie");
+  });
+
+  test("non-TTY without --yes → refuses, no state write (regression #371)", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const err = new CaptureStream();
+    const code = await runSwitchPersona({
+      name: "robbie",
+      config: makeConfig(),
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("--yes");
+    // The persisted default must be untouched.
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("phantom");
+  });
+
+  test("confirm=false → cancelled, no state write", async () => {
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runSwitchPersona({
+      name: "robbie",
+      confirm: async () => false,
+      config: makeConfig(),
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("cancelled");
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("phantom");
+  });
+
+  test("agent context (PHANTOMBOT_PERSONA set) → refuse, no state write", async () => {
+    await mkdir(join(personasDir, "alma"), { recursive: true });
+    await writeFile(
+      process.env.PHANTOMBOT_STATE!,
+      JSON.stringify({ default_persona: "paco" }),
+      "utf8",
+    );
+    process.env.PHANTOMBOT_PERSONA = "alma";
+    try {
+      const err = new CaptureStream();
+      // The real #371 incident: agent `alma` runs `phantombot persona alma`,
+      // unaware it re-points the daemon-wide default (paco → alma).
+      const code = await runSwitchPersona({
+        name: "alma",
+        yes: true,
+        config: makeConfig(),
+        serviceControl: svcInactive,
+        out: new CaptureStream(),
+        err,
+      });
+      expect(code).toBe(2);
+      expect(err.text).toContain("PHANTOMBOT_PERSONA");
+      const state = JSON.parse(
+        await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+      );
+      expect(state.default_persona).toBe("paco");
+    } finally {
+      delete process.env.PHANTOMBOT_PERSONA;
+    }
   });
 
   test("already-current → no-op exit 0, no state write", async () => {
@@ -174,6 +254,7 @@ describe("runPersona dispatch", () => {
     const out = new CaptureStream();
     const code = await runPersona({
       name: "robbie",
+      yes: true,
       config: makeConfig(),
       serviceControl: svcInactive,
       out,
