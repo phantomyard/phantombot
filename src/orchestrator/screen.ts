@@ -330,6 +330,27 @@ export function makeScreener(
           // reasoning, not attacker text), so it stays embeddable.
           text: episode.notifyText,
           embeddable: true,
+          // ...but it is machine-generated, so without an explicit origin it
+          // defaults to `channel` and retrieval later weights/labels the
+          // judge's own reasoning like a real chat turn. The migration cannot
+          // retro-tag it either: this row is written into the PRINCIPAL's
+          // conversation (usually `telegram:<id>`), which matches none of the
+          // origin markers.
+          //
+          // `notification`, NOT `internal`: this exact string was just sent
+          // through runNotify (see the `notify` call in the HOLD branch), and
+          // runNotify persists it to `telegram:<chatId>` — the same key
+          // principalConversations() grounds into — stamped `notification`.
+          // So the same text lands twice in one conversation. Tagging this
+          // copy `internal` would give identical content two weights (0.6 vs
+          // 0.8) and two contradictory labels, one of which ("my own
+          // maintenance pass") is simply untrue: this is a notification the
+          // persona sent, not a nightly/heartbeat write.
+          //
+          // The quarantined user row above is left at the default — it is
+          // never indexed (embeddable: false) and is purged once a trusted
+          // turn rules.
+          origin: "notification",
         },
       );
     });
