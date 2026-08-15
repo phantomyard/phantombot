@@ -873,15 +873,20 @@ describe("turn-schema self-heal", () => {
 });
 
 describe("per-path BM25 lookup for vector-only hits (#378)", () => {
-  test("vector hit outside FTS top-25 gets its real BM25 score", () => {
-    // Seed 30 turns in conversation AAA that all match the FTS query —
-    // enough to push a 31st turn (in BBB) below the top-25 BM25 pool.
-    // The BBB turn has a high cosine similarity but ranks 26th+ in BM25,
-    // so without the per-path lookup its ftsScore would be undefined.
-    const query = "relay auth token";
-    const vec = new Float32Array([1, 0, 0]);
+  // Fixture strategy (per Robbie's review): the BBB turn must rank BELOW
+  // the FTS top-25 pool. BM25 favours short documents, so we invert the
+  // length relationship — dense short fillers that each contain the query
+  // terms, and one long BBB turn where the query terms appear once buried
+  // in padding. This pushes BBB to 26th+ lexically while its cosine keeps
+  // it in the final slice. Without the per-path lookup, ftsScore stays
+  // undefined and the tier-2 dual-gate silently drops it.
+  const query = "relay auth token";
+  const vec = new Float32Array([1, 0, 0]);
+  const pad = Array.from({ length: 120 }, (_, k) => `padding${k}`).join(" ");
 
-    // 30 filler turns in AAA — all lexically competitive.
+  // Shared seeding helper so both tests use the same fixture.
+  function seed(): void {
+    // 30 short filler turns in AAA — all lexically competitive.
     for (let i = 1; i <= 30; i++) {
       ix.upsertTurn(
         {
@@ -889,26 +894,25 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
           persona: "phantom",
           conversation: "phantomchat:group:AAA",
           role: "user",
-          text: `relay auth token filler number ${i} in chat AAA`,
+          text: "relay auth token relay auth token",
           createdAt: new Date("2026-05-28T06:00:00Z"),
           embeddable: true,
           source: "principal",
         },
-        // Give fillers orthogonal vectors so they don't compete on cosine.
+        // Orthogonal vectors so fillers don't compete on cosine.
         new Float32Array([0, i / 30, 0]),
         `sha-aaa-${i}`,
       );
     }
-
-    // The cross-conversation turn: high cosine, lexically relevant but
-    // ranked below the 30 AAA turns in the BM25 pool.
+    // One long BBB turn: high cosine, query terms appear once in a sea of padding.
+    // BM25 penalises long documents → ranks below the 30 short fillers.
     ix.upsertTurn(
       {
-        id: 100,
+        id: 300,
         persona: "phantom",
         conversation: "telegram:-100BBB",
         role: "user",
-        text: "relay auth token fix used kind 22242",
+        text: `${pad} relay auth token ${pad}`,
         createdAt: new Date("2026-05-28T06:01:00Z"),
         embeddable: true,
         source: "principal",
@@ -916,12 +920,15 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
       vec,
       "sha-bbb",
     );
+  }
 
-    // Search across ALL conversations (no scope filter) so the BBB turn
-    // is in the vector candidate pool.
+  test("vector hit outside FTS top-25 gets its real BM25 score", () => {
+    seed();
+
+    // limit: 40 so BBB survives the slice despite low lexical rank.
     const hits = ix.hybridSearch(query, vec, {
       scope: "all",
-      limit: 10,
+      limit: 40,
     });
 
     // The BBB turn must be in the results (its cosine is the highest).
@@ -933,68 +940,30 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
   });
 
   test("per-path BM25 score is raw (undecayed) even when decay is active", () => {
-    // Same scenario as above, but with decay enabled. The per-path
-    // lookup must fill ftsScore with the RAW BM25 rank — not decayed —
-    // so the tier-2 floor (minScore: 2.0, calibrated on raw BM25)
-    // applies uniformly to pool hits and per-path hits alike.
-    const query = "relay auth token";
-    const vec = new Float32Array([1, 0, 0]);
+    seed();
 
-    for (let i = 1; i <= 30; i++) {
-      ix.upsertTurn(
-        {
-          id: i,
-          persona: "phantom",
-          conversation: "phantomchat:group:AAA",
-          role: "user",
-          text: `relay auth token filler number ${i} in chat AAA`,
-          createdAt: new Date("2026-05-28T06:00:00Z"),
-          embeddable: true,
-          source: "principal",
-        },
-        new Float32Array([0, i / 30, 0]),
-        `sha-aaa-${i}`,
-      );
-    }
-
-    // Same turn as the first test — high cosine, below BM25 top-25.
-    ix.upsertTurn(
-      {
-        id: 300,
-        persona: "phantom",
-        conversation: "telegram:-100BBB",
-        role: "user",
-        text: "relay auth token fix used kind 22242",
-        createdAt: new Date("2026-05-28T06:01:00Z"),
-        embeddable: true,
-        source: "principal",
-      },
-      vec,
-      "sha-bbb-decay",
-    );
-
-    // Search WITH decay — inject nowMs 60 days later so all turns
-    // are aged equally (1-minute spread doesn't change ranking).
-    const hits = ix.hybridSearch(query, vec, {
+    // Search WITH decay — inject nowMs 60 days later so all turns age
+    // equally (1-minute spread doesn't change ranking).
+    const decayed = ix.hybridSearch(query, vec, {
       scope: "all",
-      limit: 10,
-      decay: { halfLifeDays: 30, floor: 0.1, nowMs: Date.parse("2026-07-28T06:00:00Z") },
+      limit: 40,
+      decay: { halfLifeDays: 30, floor: 0.02, nowMs: Date.parse("2026-11-28T06:00:00Z") },
     });
 
-    const bbbHit = hits.find((h) => h.path.includes("BBB"));
+    const bbbHit = decayed.find((h) => h.path.includes("BBB"));
     expect(bbbHit).toBeDefined();
     expect(bbbHit!.ftsScore).toBeDefined();
 
     // The raw score without decay — same query, same turn, no decay.
     const rawHits = ix.hybridSearch(query, vec, {
       scope: "all",
-      limit: 10,
+      limit: 40,
     });
     const rawBbb = rawHits.find((h) => h.path.includes("BBB"));
     expect(rawBbb).toBeDefined();
     expect(rawBbb!.ftsScore).toBeDefined();
 
-    // Per-path ftsScore must equal the undecayed value.
+    // Per-path ftsScore must equal the undecayed value, not decayed.
     expect(bbbHit!.ftsScore).toBe(rawBbb!.ftsScore);
   });
 });
