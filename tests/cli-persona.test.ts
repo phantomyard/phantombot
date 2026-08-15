@@ -159,6 +159,10 @@ describe("runSwitchPersona", () => {
     const err = new CaptureStream();
     const code = await runSwitchPersona({
       name: "robbie",
+      // Force the non-TTY path deterministically: the real TTY detection
+      // (process.stdin.isTTY && process.stdout.isTTY) is environment-
+      // dependent and would hang in an interactive test runner.
+      isInteractive: false,
       config: makeConfig(),
       serviceControl: svcInactive,
       out: new CaptureStream(),
