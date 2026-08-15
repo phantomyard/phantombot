@@ -169,6 +169,33 @@ describe("retrieveContext", () => {
 
   const noEmbeddings: Config["embeddings"] = { provider: "none" };
 
+  /**
+   * Seed filler turns with a disjoint vocabulary so the test index has a
+   * realistic document count. BM25's idf is corpus-relative: in a 2-doc
+   * index every term is in ~every doc, idf ≈ 0, and NO score can clear the
+   * absolute tier-2 floor (minScore 2.0) — tests for tier-2 behaviour
+   * would silently test the floor instead. 25 fillers put idf in the same
+   * range as a real multi-thousand-turn index for rare terms.
+   */
+  const seedFillerTurns = (
+    ix: MemoryIndex,
+    count = 25,
+    conversation = "cli:filler",
+  ): void => {
+    for (let i = 1; i <= count; i++) {
+      ix.upsertTurn({
+        id: 10_000 + i,
+        persona: "phantom",
+        conversation,
+        role: "assistant",
+        text: `fillerturn${i} notion${i} widget${i} gizmo${i}`,
+        createdAt: new Date("2026-05-20T06:00:00Z"),
+        embeddable: true,
+        source: "unverified",
+      });
+    }
+  };
+
   test("FTS-only: returns a block naming the matching files", async () => {
     const out = await retrieveContext({
       query: "deye inverter",
@@ -311,26 +338,29 @@ describe("retrieveContext", () => {
   test("default ON: cross-conversation turn surfaces with attribution, tier 1 first", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
-    // The cross-conversation turn is the NEWER one: with identical content
-    // its decayed score clears the tier-2 bar (must match or beat the
-    // weakest tier-1 hit), where an older near-tie would not.
+    seedFillerTurns(ix);
+    // Both conversations are GROUPS (multi-party → multi-party is allowed
+    // by the audience boundary). Dates are RECENT so the default 30-day
+    // decay barely damps the scores — the distinctive content then clears
+    // the absolute tier-2 floor on BM25 alone.
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
       conversation: "phantomchat:group:AAA",
       role: "user",
       text: "The relay auth fix we discussed in chat AAA used kind 22242.",
-      createdAt: new Date("2026-05-27T06:00:00Z"),
+      createdAt: daysAgo(3),
       embeddable: true,
       source: "principal",
     });
     ix.upsertTurn({
       id: 2,
       persona: "phantom",
-      conversation: "telegram:BBB",
+      conversation: "telegram:-100BBB",
       role: "user",
       text: "The relay auth fix we discussed in chat BBB used kind 22242.",
-      createdAt: new Date("2026-05-28T06:00:00Z"),
+      createdAt: daysAgo(2),
       embeddable: true,
       source: "principal",
     });
@@ -348,20 +378,25 @@ describe("retrieveContext", () => {
     // Tier 1 first: the current conversation's hit precedes the cross hit.
     expect(out!.indexOf("AAA")).toBeLessThan(out!.indexOf("BBB"));
     // Attribution: channel + date, and the disclosure rule rides the header.
-    expect(out!).toContain("(cross-conversation: Telegram, May 28)");
+    const d = daysAgo(2);
+    const month = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[d.getUTCMonth()];
+    expect(out!).toContain(
+      `(cross-conversation: Telegram, ${month} ${d.getUTCDate()})`,
+    );
     expect(out!).toContain("never quote them verbatim");
   });
 
   test("ad-hoc settings without a crossConversation block still default to ON", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
       conversation: "telegram:BBB",
       role: "user",
       text: "The flux capacitor calibration constant is 42.",
-      createdAt: new Date("2026-05-27T06:00:00Z"),
+      createdAt: new Date(Date.now() - 2 * 86_400_000),
       embeddable: true,
       source: "principal",
     });
@@ -375,7 +410,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: settings as RetrievalSettings,
-      conversation: "phantomchat:group:AAA",
+      conversation: "telegram:AAA", // private → private is allowed
     });
     expect(out).toBeDefined();
     expect(out!).toContain("(cross-conversation: Telegram");
@@ -384,14 +419,15 @@ describe("retrieveContext", () => {
   test("cross-conversation hits are hard-capped at the configured limit", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
     for (let i = 1; i <= 5; i++) {
       ix.upsertTurn({
         id: i,
         persona: "phantom",
-        conversation: "telegram:CCC",
+        conversation: "phantomchat:group:CCC",
         role: "user",
         text: `Zebra crossing anecdote number ${i} about striped equines.`,
-        createdAt: new Date(`2026-05-2${i}T06:00:00Z`),
+        createdAt: new Date(Date.now() - i * 86_400_000),
         embeddable: true,
         source: "principal",
       });
@@ -441,7 +477,9 @@ describe("retrieveContext", () => {
           exclude: ["telegram"], // channel prefix excludes ALL telegram:*
         },
       },
-      conversation: "phantomchat:group:AAA",
+      // Private destination so the EXCLUDE — not the audience boundary —
+      // is what blocks the (private) source.
+      conversation: "cli:local",
     });
     expect(out).toBeUndefined(); // only candidate was excluded → no block
   });
@@ -476,6 +514,154 @@ describe("retrieveContext", () => {
       conversation: "telegram:PRIVATE", // excluded as destination
     });
     expect(out).toBeUndefined();
+  });
+
+  test("floor regression: an empty tier 1 does not inject weak cross hits (bar is absolute, not 0)", async () => {
+    // Robert's PR #378 blocking review: with minScore = 0 the old derived
+    // bar collapsed to 0 exactly when tier 1 had no hits, so ANY turn that
+    // matched FTS at all was injected. Seed a cross turn whose only overlap
+    // with the query is a common token (BM25 ≈ 0) — it must NOT surface.
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "telegram:BBB",
+      role: "user",
+      text: "the plan is basically fine, we should just ship it",
+      createdAt: new Date("2026-05-28T06:00:00Z"),
+      embeddable: true,
+      source: "principal",
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      query: "the", // common token: matches, but BM25 ≈ 0 < default floor 2.0
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "telegram:AAA", // no in-conversation hits → empty tier 1
+    });
+    // Notes may or may not match; the invariant is that NO cross hit did.
+    expect(out?.includes("cross-conversation") ?? false).toBe(false);
+  });
+
+  test("pool regression: 15 in-conversation turns cannot starve the cross hit (Kai)", async () => {
+    // Old code fetched an unscoped pool of 12 and filtered in JS: when the
+    // current conversation occupied all 12 slots, tier 2 yielded nothing.
+    // Exclusions now happen in SQL before LIMIT, so the eligible cross hit
+    // always gets a pool slot.
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    for (let i = 1; i <= 15; i++) {
+      ix.upsertTurn({
+        id: i,
+        persona: "phantom",
+        conversation: "telegram:AAA",
+        role: "user",
+        text: `zephyr maintenance note ${i} about the current chat topic`,
+        createdAt: new Date(Date.now() - i * 86_400_000),
+        embeddable: true,
+        source: "principal",
+      });
+    }
+    ix.upsertTurn({
+      id: 100,
+      persona: "phantom",
+      conversation: "telegram:BBB",
+      role: "user",
+      text: "the zephyr quill calibration trick from the other chat",
+      createdAt: new Date(Date.now() - 86_400_000),
+      embeddable: true,
+      source: "principal",
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      // "quill" appears ONLY in the cross turn → idf high, floor cleared.
+      query: "zephyr quill",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "telegram:AAA",
+    });
+    expect(out).toBeDefined();
+    expect(out!).toContain("cross-conversation");
+    expect(out!).toContain("quill");
+  });
+
+  test("audience boundary: a private-DM turn never surfaces in a group room (Robert)", async () => {
+    // The negative test that actually guards containment: private source,
+    // multi-party destination → no cross hit, content cannot leak.
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "telegram:DM-ANDREW",
+      role: "user",
+      text: "the mortgage overpayment figure we settled on was 418.60",
+      createdAt: new Date(Date.now() - 2 * 86_400_000),
+      embeddable: true,
+      source: "principal",
+    });
+    ix.close();
+
+    const inGroup = await retrieveContext({
+      query: "mortgage overpayment figure",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "phantomchat:group:TEAM", // multi-party room
+    });
+    expect(inGroup?.includes("418.60") ?? false).toBe(false);
+    expect(inGroup?.includes("cross-conversation") ?? false).toBe(false);
+
+    // Positive control: the SAME turn surfaces in a private room — proving
+    // the group miss above is the audience boundary, not the floor.
+    const inPrivate = await retrieveContext({
+      query: "mortgage overpayment figure",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "telegram:DM-OTHER", // private room
+    });
+    expect(inPrivate).toBeDefined();
+    expect(inPrivate!).toContain("cross-conversation");
+  });
+
+  test("audience boundary: a group turn MAY surface in a private room", async () => {
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "phantomchat:group:TEAM",
+      role: "user",
+      text: "the staging runbook overhaul checklist we agreed in the group",
+      createdAt: new Date(Date.now() - 2 * 86_400_000),
+      embeddable: true,
+      source: "principal",
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      query: "staging runbook overhaul checklist",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: { ...DEFAULT_RETRIEVAL },
+      conversation: "telegram:DM-ANDREW", // private room, group source ✅
+    });
+    expect(out).toBeDefined();
+    expect(out!).toContain("cross-conversation");
   });
 
   test("hybrid falls back to FTS when the embed call fails", async () => {
@@ -603,17 +789,28 @@ describe("selectCrossConversationHits", () => {
   const hit = (
     conversation: string,
     ftsScore: number,
+    extra: Partial<import("../src/lib/memoryIndex.ts").SearchHit> = {},
   ): import("../src/lib/memoryIndex.ts").SearchHit => ({
     path: `turns/phantom/${encodeURIComponent(conversation)}/1`,
     scope: "turns",
     ftsScore,
+    audience: "private",
     snippet: "s",
+    ...extra,
   });
+  const base = {
+    currentConversation: "telegram:AAA",
+    exclude: [] as string[],
+    allowedAudiences: ["private", "multi-party", "public"] as const,
+    minScore: 0,
+    minVecScore: 1,
+    limit: 3,
+  };
 
   test("drops the current conversation, tags survivors with their source", () => {
     const out = selectCrossConversationHits(
       [hit("telegram:AAA", 10), hit("telegram:BBB", 9)],
-      { currentConversation: "telegram:AAA", exclude: [], bar: 0, limit: 3 },
+      { ...base },
     );
     expect(out.length).toBe(1);
     expect(out[0]!.crossConversation).toBe("telegram:BBB");
@@ -626,24 +823,40 @@ describe("selectCrossConversationHits", () => {
         { path: "kb/x.md", scope: "kb", ftsScore: 9, snippet: "s" },
         hit("phantomchat:group:OK", 8),
       ],
-      { currentConversation: "telegram:AAA", exclude: ["telegram:SECRET"], bar: 0, limit: 3 },
+      { ...base, exclude: ["telegram:SECRET"] },
     );
     expect(out.length).toBe(1);
     expect(out[0]!.crossConversation).toBe("phantomchat:group:OK");
   });
 
-  test("enforces the tier-2 bar", () => {
+  test("enforces the absolute floor on BM25 — RRF rank is never a bar", () => {
     const out = selectCrossConversationHits(
       [hit("telegram:BBB", 5), hit("telegram:CCC", 2)],
-      { currentConversation: "telegram:AAA", exclude: [], bar: 3, limit: 3 },
+      { ...base, minScore: 3 },
     );
     expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
+  });
+
+  test("a vector-only hit clears the floor on cosine alone", () => {
+    const out = selectCrossConversationHits(
+      [hit("telegram:BBB", 0, { ftsScore: undefined, vecScore: 0.9, rrfScore: 0.016 })],
+      { ...base, minScore: 2, minVecScore: 0.85 },
+    );
+    expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
+  });
+
+  test("drops candidates whose audience is too private for the room", () => {
+    const out = selectCrossConversationHits(
+      [hit("telegram:DM", 10), hit("phantomchat:group:G", 9, { audience: "multi-party" })],
+      { ...base, allowedAudiences: ["multi-party", "public"] },
+    );
+    expect(out.map((h) => h.crossConversation)).toEqual(["phantomchat:group:G"]);
   });
 
   test("caps at the limit, best-first order preserved", () => {
     const out = selectCrossConversationHits(
       [hit("telegram:B", 10), hit("telegram:C", 9), hit("telegram:D", 8)],
-      { currentConversation: "telegram:AAA", exclude: [], bar: 0, limit: 2 },
+      { ...base, limit: 2 },
     );
     expect(out.map((h) => h.crossConversation)).toEqual([
       "telegram:B",

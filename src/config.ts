@@ -300,13 +300,23 @@ export interface CrossConversationRetrievalSettings {
    */
   limit: number;
   /**
-   * Tier-2 relevance bar: the configured minScore is multiplied by this for
-   * cross-conversation hits (>= 1). Independently, a cross hit must also
-   * match or beat the weakest in-conversation hit of the turn — cross-chat
-   * context only earns prompt space when it is at least as relevant as what
-   * we'd already show.
+   * Absolute tier-2 relevance floor on the BM25 score. Rank-fused scores
+   * (RRF) encode position within a result set, not relevance, so the bar
+   * must be absolute — and it must be non-zero by default, or an empty
+   * tier 1 would inject any cross-conversation turn that matched FTS at
+   * all (Robert's PR #378 review). Default 2.0: sampled against a live
+   * 4,353-turn index, incidental single-common-token matches score ≈ 0
+   * while genuine single-term matches score ≈ 4+.
    */
-  minScoreMultiplier: number;
+  minScore: number;
+  /**
+   * Absolute tier-2 floor on the cosine similarity, for cross hits that
+   * matched the vector side only (no lexical overlap). Default 0.85:
+   * gemini-embedding-001 vectors are highly anisotropic — sampled random
+   * turn pairs sit at p50 ≈ 0.65 / p90 ≈ 0.75 / p99 ≈ 0.89, so anything
+   * lower admits noise.
+   */
+  minVecScore: number;
   /**
    * Channels/conversations excluded from tier 2 in BOTH directions: their
    * turns never surface in other chats, and no cross-conversation hits are
@@ -321,7 +331,8 @@ export interface CrossConversationRetrievalSettings {
 export const DEFAULT_CROSS_CONVERSATION: CrossConversationRetrievalSettings = {
   enabled: true,
   limit: 3,
-  minScoreMultiplier: 1.5,
+  minScore: 2.0,
+  minVecScore: 0.85,
   exclude: [],
 };
 
@@ -1036,10 +1047,14 @@ function buildCrossConversationConfig(
     asInt(process.env.PHANTOMBOT_RETRIEVAL_CROSS_LIMIT) ??
     asInt(toml.limit) ??
     DEFAULT_CROSS_CONVERSATION.limit;
-  const minScoreMultiplier =
-    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE_MULTIPLIER) ??
-    asNumber(toml.min_score_multiplier) ??
-    DEFAULT_CROSS_CONVERSATION.minScoreMultiplier;
+  const minScore =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE) ??
+    asNumber(toml.min_score) ??
+    DEFAULT_CROSS_CONVERSATION.minScore;
+  const minVecScore =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE) ??
+    asNumber(toml.min_vec_score) ??
+    DEFAULT_CROSS_CONVERSATION.minVecScore;
   // Env form is comma-separated ("telegram,phantomchat:group:abc"); TOML is
   // a native string array.
   const envExclude = process.env.PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE
@@ -1055,8 +1070,10 @@ function buildCrossConversationConfig(
     // 0 disables tier 2 without touching the flag; cap keeps the per-turn
     // prompt cost bounded even for a fat-fingered value.
     limit: Math.max(0, Math.min(10, limit)),
-    // Below 1 the tier-2 bar would be LOWER than tier 1's — inverted.
-    minScoreMultiplier: Math.max(1, minScoreMultiplier),
+    // Absolute floors; a negative floor would re-open the "inject anything
+    // that matched at all" hole, and cosine lives in [-1, 1].
+    minScore: Math.max(0, minScore),
+    minVecScore: Math.max(-1, Math.min(1, minVecScore)),
     // Drop blanks so "a,,b" can't accidentally match every conversation.
     exclude: exclude.map((e) => e.trim()).filter((e) => e.length > 0),
   };

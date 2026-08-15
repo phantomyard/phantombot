@@ -20,6 +20,7 @@ import { log } from "../lib/logger.ts";
 import {
   MemoryIndex,
   renderTurnForIndex,
+  turnPath,
 } from "../lib/memoryIndex.ts";
 import type { MemoryStore, Turn } from "../memory/store.ts";
 
@@ -139,9 +140,19 @@ export async function indexConversationTurnsIfDue(
         }
         const text = renderTurnForIndex(turn);
         const textSha = sha256(text);
-        const vec = embedder ? await embedTurn(embedder, turn, text) : undefined;
+        // Reuse a surviving embedding when the indexed text is unchanged.
+        // Turn paths are id-keyed and text is immutable, so a sha match is
+        // proof the stored vector already describes this exact content —
+        // this is what makes a turn-schema rebuild (turn_docs dropped,
+        // turn_embeddings kept) cost zero embed API calls.
+        const path = turnPath(turn);
+        const haveSha = ix.turnEmbeddingSha(path);
+        const vec =
+          embedder && haveSha !== textSha
+            ? await embedTurn(embedder, turn, text)
+            : undefined;
         if (vec) embedded++;
-        else if (embedder) embeddingFailures++;
+        else if (embedder && haveSha !== textSha) embeddingFailures++;
         ix.upsertTurn(turn, vec, vec ? textSha : undefined);
         indexed++;
         afterId = turn.id;

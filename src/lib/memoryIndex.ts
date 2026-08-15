@@ -25,10 +25,71 @@ import { readFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { posix } from "node:path";
+import type { FactSource } from "../config.ts";
 import type { Turn } from "../memory/store.ts";
 import { parseOkf } from "./okf.ts";
 
 export type Scope = "memory" | "kb" | "turns";
+
+/**
+ * Audience class of a conversation turn — who was in the room when the
+ * content was produced. Indexed with every turn so the retrieval layer can
+ * enforce the confidentiality boundary IN SQL, not in prompt text:
+ *
+ *   a memory may surface only in a room at least as wide as the audience
+ *   it was originally spoken to.
+ *
+ * private → private ✅ · multi-party → private ✅ · private → multi-party ❌
+ * ("public" is reserved for future channels with an open audience.)
+ */
+export type TurnAudience = "private" | "multi-party" | "public";
+
+/** Higher = more private. A candidate may surface in a room whose rank is
+ * >= the candidate's own (see TurnAudience). */
+export function audienceRank(a: TurnAudience): number {
+  return a === "private" ? 2 : a === "multi-party" ? 1 : 0;
+}
+
+/** Audience classes eligible to surface in a room of `room` class. */
+export function allowedAudiencesForRoom(room: TurnAudience): TurnAudience[] {
+  const r = audienceRank(room);
+  return (["private", "multi-party", "public"] as const).filter(
+    (a) => audienceRank(a) <= r,
+  );
+}
+
+/**
+ * Derive a conversation's audience class from its key shape. Group keys
+ * carry a `:group:` segment (`phantomchat:group:<id>`); Telegram group and
+ * supergroup chat ids are negative (`telegram:-100…`). Everything else —
+ * DMs, CLI, tick/system contexts — is private. Deriving from the key keeps
+ * this free at index time (no LLM, no config), and the classification is
+ * stable for the life of the conversation.
+ */
+export function conversationAudience(conversation: string): TurnAudience {
+  if (conversation.includes(":group:")) return "multi-party";
+  if (/^telegram:-/.test(conversation)) return "multi-party";
+  return "private";
+}
+
+/**
+ * SQL-side filter for conversation-turn candidate queries. Lets callers
+ * exclude the current conversation and the tier-2 exclude list BEFORE the
+ * LIMIT is applied (post-filtering a capped pool starves exactly the chats
+ * tier 2 exists for), and restrict which audience classes may surface in
+ * the current room.
+ */
+export interface TurnFilter {
+  /** Exclude this exact conversation key (typically the current one). */
+  excludeConversation?: string;
+  /**
+   * Tier-2 exclude list: an entry matches the full conversation key or a
+   * channel prefix ("telegram" → every "telegram:*" conversation).
+   */
+  exclude?: readonly string[];
+  /** Audience classes eligible to surface in the current room. */
+  allowedAudiences?: readonly TurnAudience[];
+}
 
 /**
  * Time-decay parameters for raw conversation-turn ranking. Passed down from the
@@ -121,6 +182,18 @@ export interface SearchHit {
    * index itself.
    */
   crossConversation?: string;
+  /**
+   * Provenance tier of a turn hit (who produced the content), carried from
+   * the turn_docs.source column so the retrieval layer can weigh where a
+   * memory came from. Only set for conversation-turn hits.
+   */
+  source?: FactSource;
+  /**
+   * Audience class of a turn hit (who was in the room), carried from the
+   * turn_docs.audience column so retrieval can enforce the cross-room
+   * confidentiality boundary. Only set for conversation-turn hits.
+   */
+  audience?: TurnAudience;
   snippet: string;
 }
 
@@ -188,6 +261,20 @@ export function rrfMerge(
  */
 export const NOTES_SCHEMA_VERSION = 3;
 
+/**
+ * Version of the turn_docs schema. Unlike the notes tables, turn rows are
+ * derived from the turns STORE (not from files on disk), so a schema bump
+ * drops turn_docs and clears turn_index_state — the next turn-indexer run
+ * re-walks the store and repopulates. turn_embeddings SURVIVES: the
+ * indexer reuses any embedding whose text_sha still matches, so a rebuild
+ * costs no embed API calls.
+ *
+ * v1 → v2: `source` (provenance tier) and `audience` (room class) columns
+ * added so cross-conversation retrieval can enforce the audience boundary
+ * and weigh provenance in SQL instead of prompt text (PR #378 review).
+ */
+export const TURN_SCHEMA_VERSION = 2;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -241,6 +328,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS turn_docs USING fts5(
   conversation UNINDEXED,
   role UNINDEXED,
   turn_id UNINDEXED,
+  source UNINDEXED,
+  audience UNINDEXED,
   content,
   tokenize = 'porter unicode61'
 );
@@ -271,6 +360,7 @@ export class MemoryIndex {
     // process touches the index DB concurrently.
     db.exec(SCHEMA);
     this.selfHealNotesSchema();
+    this.selfHealTurnSchema();
   }
 
   /**
@@ -313,6 +403,48 @@ export class MemoryIndex {
           "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       )
       .run(String(NOTES_SCHEMA_VERSION));
+  }
+
+  /**
+   * If the persisted turn-schema version is older than TURN_SCHEMA_VERSION
+   * (or absent while turn_docs holds rows, i.e. a pre-versioning index),
+   * drop turn_docs and clear turn_index_state: the next turn-indexer run
+   * re-walks the turns store and repopulates with the new columns.
+   * turn_embeddings is deliberately NOT dropped — the indexer reuses any
+   * embedding whose text_sha still matches, so the rebuild costs no embed
+   * API calls. Cheap and idempotent.
+   */
+  private selfHealTurnSchema(): void {
+    const row = this.db
+      .query("SELECT value FROM meta WHERE key = 'turn_schema_version'")
+      .get() as { value?: string } | null;
+    const have = row?.value ? Number(row.value) : 0;
+    if (have >= TURN_SCHEMA_VERSION) return;
+    // Meta rows are only written by versions that already self-heal, so a
+    // missing/low stamp alone isn't proof of an old layout — an old EMPTY
+    // index has no meta row either. The authoritative check is the column
+    // set itself: if `source` is present the table is already v2-shaped
+    // (fresh DBs land here) and only needs the stamp.
+    const cols = this.db
+      .query("PRAGMA table_info(turn_docs)")
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === "source")) {
+      this.stampTurnSchemaVersion();
+      return;
+    }
+    this.db.exec("DROP TABLE IF EXISTS turn_docs;");
+    this.db.exec(SCHEMA);
+    this.db.exec("DELETE FROM turn_index_state;");
+    this.stampTurnSchemaVersion();
+  }
+
+  private stampTurnSchemaVersion(): void {
+    this.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES ('turn_schema_version', ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(String(TURN_SCHEMA_VERSION));
   }
 
   static async open(indexPath: string): Promise<MemoryIndex> {
@@ -512,11 +644,17 @@ export class MemoryIndex {
 
   upsertTurn(turn: Turn, vec?: Float32Array, textSha?: string): void {
     const path = turnPath(turn);
-    this.deleteTurnPath(path);
+    // Delete ONLY the turn_docs row. Turn paths are id-keyed and turn text
+    // is immutable, so a surviving turn_embeddings row for this path always
+    // matches the content being (re-)inserted — keeping it is what makes a
+    // turn-schema rebuild cost zero embed API calls. A stale embedding can
+    // only be orphaned if the embed call fails on a genuinely changed text,
+    // which the id-keyed path makes impossible.
+    this.db.prepare("DELETE FROM turn_docs WHERE path = ?").run(path);
     this.db
       .prepare(
-        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, content) " +
-          "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, source, audience, content) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         path,
@@ -524,6 +662,8 @@ export class MemoryIndex {
         turn.conversation,
         turn.role,
         turn.id,
+        turn.source,
+        conversationAudience(turn.conversation),
         renderTurnForIndex(turn),
       );
 
@@ -728,6 +868,43 @@ export class MemoryIndex {
   // Search
   // -------------------------------------------------------------
 
+  /**
+   * Compile a TurnFilter into SQL AND-clauses (with bound params) for the
+   * turn_docs queries. Filtering in SQL — before ORDER BY … LIMIT — means
+   * every slot in the candidate pool is an ELIGIBLE hit; post-filtering a
+   * capped pool in JS starves tier 2 exactly when the current chat matches
+   * its own query best (Kai's PR #378 review).
+   */
+  private turnFilterSql(filter: TurnFilter | undefined): {
+    where: string;
+    params: string[];
+  } {
+    if (!filter) return { where: "", params: [] };
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (filter.excludeConversation !== undefined) {
+      clauses.push("conversation != ?");
+      params.push(filter.excludeConversation);
+    }
+    for (const e of filter.exclude ?? []) {
+      // Full-key match OR channel-prefix match, mirroring
+      // isConversationExcluded. substr() instead of LIKE so `_`/`%` in a
+      // key can never act as wildcards.
+      clauses.push("conversation != ? AND substr(conversation, 1, ?) != ?");
+      params.push(e, String(e.length + 1), `${e}:`);
+    }
+    if (filter.allowedAudiences && filter.allowedAudiences.length > 0) {
+      clauses.push(
+        `audience IN (${filter.allowedAudiences.map(() => "?").join(", ")})`,
+      );
+      params.push(...filter.allowedAudiences);
+    }
+    return {
+      where: clauses.length > 0 ? ` AND ${clauses.join(" AND ")}` : "",
+      params,
+    };
+  }
+
   search(
     query: string,
     opts: {
@@ -748,6 +925,12 @@ export class MemoryIndex {
        * ghost. Omitted → relevance-only ranking (CLI `memory search`).
        */
       decay?: TurnDecay;
+      /**
+       * SQL-side candidate filter for turn rows (see TurnFilter). Applied
+       * before LIMIT so the pool contains only eligible hits. Combinable
+       * with `conversation` (both clauses apply).
+       */
+      turnFilter?: TurnFilter;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -794,30 +977,37 @@ export class MemoryIndex {
             snip: string;
           }>);
 
+    const tf = this.turnFilterSql(opts.turnFilter);
     const turnRows =
       scope === "all" || scope === "turns"
         ? opts.conversation !== undefined
           ? (this.db
               .query(
-                "SELECT path, bm25(turn_docs) AS rank, " +
-                  "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
+                "SELECT path, source, audience, bm25(turn_docs) AS rank, " +
+                  "snippet(turn_docs, 7, '«', '»', ' … ', 16) AS snip " +
                   "FROM turn_docs WHERE content MATCH ? AND conversation = ? " +
-                  "ORDER BY rank LIMIT ?",
+                  tf.where +
+                  " ORDER BY rank LIMIT ?",
               )
-              .all(ftsQuery, opts.conversation, turnLimit) as Array<{
+              .all(ftsQuery, opts.conversation, ...tf.params, turnLimit) as Array<{
               path: string;
+              source: FactSource;
+              audience: TurnAudience;
               rank: number;
               snip: string;
             }>)
           : (this.db
               .query(
-                "SELECT path, bm25(turn_docs) AS rank, " +
-                  "snippet(turn_docs, 5, '«', '»', ' … ', 16) AS snip " +
+                "SELECT path, source, audience, bm25(turn_docs) AS rank, " +
+                  "snippet(turn_docs, 7, '«', '»', ' … ', 16) AS snip " +
                   "FROM turn_docs WHERE content MATCH ? " +
-                  "ORDER BY rank LIMIT ?",
+                  tf.where +
+                  " ORDER BY rank LIMIT ?",
               )
-              .all(ftsQuery, turnLimit) as Array<{
+              .all(ftsQuery, ...tf.params, turnLimit) as Array<{
               path: string;
+              source: FactSource;
+              audience: TurnAudience;
               rank: number;
               snip: string;
             }>)
@@ -847,6 +1037,8 @@ export class MemoryIndex {
         // Decay damps stale turns (factor in [floor,1]); default 1 when decay
         // is off or the turn's age couldn't be parsed.
         ftsScore: -r.rank * (decayFactors?.get(r.path) ?? 1),
+        source: r.source ?? undefined,
+        audience: r.audience ?? undefined,
         snippet: r.snip,
       })),
     ]
@@ -880,6 +1072,8 @@ export class MemoryIndex {
       maxAdd?: number;
       /** Time-decay for turn hits (see TurnDecay); forwarded to search(). */
       decay?: TurnDecay;
+      /** SQL-side turn candidate filter; forwarded to search(). */
+      turnFilter?: TurnFilter;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -888,6 +1082,7 @@ export class MemoryIndex {
       limit,
       conversation: opts.conversation,
       decay: opts.decay,
+      turnFilter: opts.turnFilter,
     });
     const maxAdd = Math.max(0, opts.maxAdd ?? 3);
     if (maxAdd === 0) return hits;
@@ -1008,6 +1203,12 @@ export class MemoryIndex {
        * and decay isn't double-counted.
        */
       decay?: TurnDecay;
+      /**
+       * SQL-side turn candidate filter (see TurnFilter). Applied to BOTH the
+       * inner FTS search and the vector allowed-paths set, so ineligible
+       * turns never occupy a candidate slot on either ranking.
+       */
+      turnFilter?: TurnFilter;
     } = {},
   ): SearchHit[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 5, 50));
@@ -1015,6 +1216,7 @@ export class MemoryIndex {
       scope: opts.scope,
       limit: 25,
       conversation: opts.conversation,
+      turnFilter: opts.turnFilter,
     });
 
     // No vector → FTS-only fallback. Still honour decay here (the inner search
@@ -1053,7 +1255,11 @@ export class MemoryIndex {
     // mirrors the FTS scoping in search(). (Kai's review on PR #132.)
     const searchScope = opts.scope ?? "all";
     const conversation = opts.conversation;
-    if (searchScope !== "all" || conversation !== undefined) {
+    if (
+      searchScope !== "all" ||
+      conversation !== undefined ||
+      opts.turnFilter !== undefined
+    ) {
       const allowedPaths = new Set<string>();
       // Notes (memory/kb): allowed by scope, never filtered by conversation.
       if (searchScope === "all") {
@@ -1067,16 +1273,22 @@ export class MemoryIndex {
           .all(searchScope) as Array<{ path: string }>)
           allowedPaths.add(r.path);
       }
-      // Conversation turns: scoped to the current conversation when provided.
+      // Conversation turns: scoped to the current conversation when provided,
+      // and always through the SQL turn filter (audience/exclusions).
       if (searchScope === "all" || searchScope === "turns") {
+        const tf = this.turnFilterSql(opts.turnFilter);
         const turnRows =
           conversation !== undefined
             ? (this.db
-                .query("SELECT path FROM turn_docs WHERE conversation = ?")
-                .all(conversation) as Array<{ path: string }>)
+                .query(
+                  "SELECT path FROM turn_docs WHERE conversation = ?" + tf.where,
+                )
+                .all(conversation, ...tf.params) as Array<{ path: string }>)
             : (this.db
-                .query("SELECT path FROM turn_docs")
-                .all() as Array<{ path: string }>);
+                .query(
+                  "SELECT path FROM turn_docs WHERE 1 = 1" + tf.where,
+                )
+                .all(...tf.params) as Array<{ path: string }>);
         for (const r of turnRows) allowedPaths.add(r.path);
       }
       for (const path of [...vecScores.keys()]) {
@@ -1116,16 +1328,37 @@ export class MemoryIndex {
           ftsHit?.scope ??
           this.lookupScope(path) ??
           (path.startsWith("turns/") ? "turns" : ("kb" as Scope)); // best guess
+        const turnMeta =
+          ftsHit?.source !== undefined
+            ? { source: ftsHit.source, audience: ftsHit.audience }
+            : this.turnMetaForPath(path);
         return {
           path,
           scope,
           ftsScore: ftsHit?.ftsScore,
           vecScore: vecScores.get(path),
           rrfScore,
+          ...turnMeta,
           snippet: ftsHit?.snippet ?? this.snippetForPath(path),
         };
       });
     return merged;
+  }
+
+  /** Provenance/audience for a turn path (undefined for non-turn paths). */
+  private turnMetaForPath(
+    path: string,
+  ): { source?: FactSource; audience?: TurnAudience } {
+    if (!path.startsWith("turns/")) return {};
+    const row = this.db
+      .query("SELECT source, audience FROM turn_docs WHERE path = ? LIMIT 1")
+      .get(path) as
+      | { source?: FactSource | null; audience?: TurnAudience | null }
+      | null;
+    return {
+      source: row?.source ?? undefined,
+      audience: row?.audience ?? undefined,
+    };
   }
 
   /**

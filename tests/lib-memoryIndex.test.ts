@@ -12,6 +12,7 @@ import {
   parseTurnCreatedAtMs,
   resolveMdLink,
   sanitizeFtsQuery,
+  TURN_SCHEMA_VERSION,
   turnDecayFactor,
   turnPath,
   walkMarkdown,
@@ -687,5 +688,186 @@ describe("turn-hit time decay (search / hybridSearch)", () => {
     const without = ix.search("kw-openclaw", { scope: "turns" });
     // Unparseable age → factor 1 → identical score.
     expect(withDecay[0]?.ftsScore).toBe(without[0]?.ftsScore);
+  });
+});
+
+describe("turn provenance + audience columns", () => {
+  const turn = (
+    id: number,
+    conversation: string,
+    text: string,
+    source: Turn["source"] = "principal",
+  ): Turn => ({
+    id,
+    persona: "phantom",
+    conversation,
+    role: "user",
+    text,
+    createdAt: new Date("2026-05-28T06:00:00Z"),
+    embeddable: true,
+    source,
+  });
+
+  test("turn hits carry source and audience derived at index time", () => {
+    ix.upsertTurn(turn(1, "phantomchat:group:TEAM", "quixotic beam alignment", "other"));
+    ix.upsertTurn(turn(2, "telegram:DM", "quixotic beam alignment", "principal"));
+    ix.upsertTurn(turn(3, "telegram:-100123", "quixotic beam alignment", "principal"));
+
+    const byConv = new Map(
+      ix
+        .search("quixotic beam", { scope: "turns", limit: 10 })
+        .map((h) => [turnPathConversationOf(h.path), h]),
+    );
+    expect(byConv.get("phantomchat:group:TEAM")?.source).toBe("other");
+    expect(byConv.get("phantomchat:group:TEAM")?.audience).toBe("multi-party");
+    expect(byConv.get("telegram:DM")?.audience).toBe("private");
+    // Telegram group/supergroup ids are negative → multi-party.
+    expect(byConv.get("telegram:-100123")?.audience).toBe("multi-party");
+  });
+
+  test("turnFilter excludes conversations and audiences in SQL, before LIMIT", () => {
+    // 15 current-conversation turns + 1 eligible cross turn. With a limit
+    // BELOW 15, the cross turn still surfaces — the current conversation
+    // never occupies a pool slot. (Kai's pool-starvation review on #378.)
+    for (let i = 1; i <= 15; i++) {
+      ix.upsertTurn(turn(i, "telegram:AAA", `zephyr shared token ${i}`));
+    }
+    ix.upsertTurn(turn(100, "telegram:BBB", "zephyr shared token cross"));
+
+    const hits = ix.search("zephyr shared token", {
+      scope: "turns",
+      limit: 5,
+      turnFilter: { excludeConversation: "telegram:AAA" },
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.path).toContain("BBB");
+  });
+
+  test("turnFilter prefix-excludes channels and restricts audiences", () => {
+    ix.upsertTurn(turn(1, "telegram:SECRET", "zephyr channel secret"));
+    ix.upsertTurn(turn(2, "telegram:DM", "zephyr channel private"));
+    ix.upsertTurn(turn(3, "phantomchat:group:G", "zephyr channel group"));
+
+    // Prefix exclude drops ALL telegram:* sources.
+    const noTelegram = ix.search("zephyr channel", {
+      scope: "turns",
+      limit: 10,
+      turnFilter: { exclude: ["telegram"] },
+    });
+    expect(noTelegram.map((h) => h.path).join()).not.toContain("telegram");
+
+    // A multi-party room admits only multi-party/public candidates.
+    const groupRoom = ix.search("zephyr channel", {
+      scope: "turns",
+      limit: 10,
+      turnFilter: { allowedAudiences: ["multi-party", "public"] },
+    });
+    expect(groupRoom).toHaveLength(1);
+    expect(groupRoom[0]!.path).toContain("group");
+  });
+
+  test("re-inserting a turn keeps its surviving embedding (sha reuse)", () => {
+    const t = turn(1, "telegram:AAA", "zephyr embedding reuse");
+    const vec = new Float32Array([1, 0, 0]);
+    ix.upsertTurn(t, vec, "sha-1");
+    expect(ix.embeddingCount()).toBe(1);
+    // Re-insert WITHOUT a vector (the turn-schema rebuild path): the FTS
+    // row is rewritten, the embedding must survive untouched.
+    ix.upsertTurn(t);
+    expect(ix.embeddingCount()).toBe(1);
+    expect(ix.turnEmbeddingSha(turnPath(t))).toBe("sha-1");
+    expect(ix.search("zephyr embedding", { scope: "turns" })).toHaveLength(1);
+  });
+});
+
+/** Decode the conversation segment of a turns/ path (test helper). */
+function turnPathConversationOf(path: string): string {
+  return decodeURIComponent(path.split("/")[2]!);
+}
+
+describe("turn-schema self-heal", () => {
+  test("a v1 turn_docs (no source/audience) is dropped and rebuilt on open", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-mi-turnheal-"));
+    const idxPath = join(dir, "index.sqlite");
+
+    // Hand-build a pre-v2 index: old 6-column turn_docs with a row, a
+    // turn_index_state cursor, and a surviving embedding.
+    const raw = new Database(idxPath, { create: true });
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec(
+      "CREATE VIRTUAL TABLE turn_docs USING fts5(path UNINDEXED, persona UNINDEXED, conversation UNINDEXED, role UNINDEXED, turn_id UNINDEXED, content, tokenize = 'porter unicode61');",
+    );
+    raw.exec(
+      "CREATE TABLE turn_embeddings (path TEXT PRIMARY KEY, vec BLOB NOT NULL, text_sha TEXT NOT NULL, embedded_at TEXT NOT NULL);",
+    );
+    raw.exec(
+      "CREATE TABLE turn_index_state (persona TEXT NOT NULL, conversation TEXT NOT NULL, last_turn_id INTEGER NOT NULL, user_turns_indexed INTEGER NOT NULL, indexed_at TEXT NOT NULL, PRIMARY KEY (persona, conversation));",
+    );
+    raw.exec(
+      "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    );
+    raw
+      .prepare(
+        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, content) VALUES (?,?,?,?,?,?)",
+      )
+      .run(
+        "turns/phantom/telegram%3A1001/1",
+        "phantom",
+        "telegram:1001",
+        "user",
+        1,
+        "[user 2026-05-28T06:00:00Z]\nzephyr legacy row",
+      );
+    raw
+      .prepare(
+        "INSERT INTO turn_embeddings (path, vec, text_sha, embedded_at) VALUES (?,?,?,?)",
+      )
+      .run(
+        "turns/phantom/telegram%3A1001/1",
+        Buffer.from(new Float32Array([1, 0, 0]).buffer),
+        "sha-legacy",
+        new Date().toISOString(),
+      );
+    raw
+      .prepare(
+        "INSERT INTO turn_index_state (persona, conversation, last_turn_id, user_turns_indexed, indexed_at) VALUES (?,?,?,?,?)",
+      )
+      .run("phantom", "telegram:1001", 1, 1, new Date().toISOString());
+    raw.close();
+
+    const healed = await MemoryIndex.open(idxPath);
+    try {
+      const db = (
+        healed as unknown as {
+          db: {
+            query: (s: string) => {
+              all: () => Array<Record<string, unknown>>;
+              get: () => Record<string, unknown> | null;
+            };
+          };
+        }
+      ).db;
+      // New columns exist...
+      const cols = db.query("PRAGMA table_info(turn_docs)").all();
+      expect(cols.some((c) => c.name === "source")).toBe(true);
+      expect(cols.some((c) => c.name === "audience")).toBe(true);
+      // ...old rows and the stale cursor are gone (the indexer re-walks)...
+      expect(db.query("SELECT COUNT(*) AS c FROM turn_docs").get()!.c).toBe(0);
+      expect(
+        db.query("SELECT COUNT(*) AS c FROM turn_index_state").get()!.c,
+      ).toBe(0);
+      // ...but the embedding SURVIVED (rebuild costs no embed API calls).
+      expect(healed.turnEmbeddingSha("turns/phantom/telegram%3A1001/1")).toBe(
+        "sha-legacy",
+      );
+      // Version stamped.
+      const ver = db
+        .query("SELECT value FROM meta WHERE key = 'turn_schema_version'")
+        .get();
+      expect(Number(ver?.value)).toBe(TURN_SCHEMA_VERSION);
+    } finally {
+      healed.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

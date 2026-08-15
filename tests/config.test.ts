@@ -61,7 +61,8 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_DECAY_FLOOR",
   "PHANTOMBOT_RETRIEVAL_CROSS_ENABLED",
   "PHANTOMBOT_RETRIEVAL_CROSS_LIMIT",
-  "PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE_MULTIPLIER",
+  "PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE",
+  "PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE",
   "PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE",
   "PHANTOMBOT_DURABLE_FACTS_ENABLED",
   "PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED",
@@ -869,14 +870,16 @@ half_life_days = 0.5
 [retrieval.cross_conversation]
 enabled = false
 limit = 5
-min_score_multiplier = 2
+min_score = 4.5
+min_vec_score = 0.9
 exclude = ["telegram", "phantomchat:group:secret"]
 `);
     const c = await loadConfig();
     expect(c.retrieval!.crossConversation).toEqual({
       enabled: false,
       limit: 5,
-      minScoreMultiplier: 2,
+      minScore: 4.5,
+      minVecScore: 0.9,
       exclude: ["telegram", "phantomchat:group:secret"],
     });
   });
@@ -889,13 +892,15 @@ limit = 5
 `);
     process.env.PHANTOMBOT_RETRIEVAL_CROSS_ENABLED = "false";
     process.env.PHANTOMBOT_RETRIEVAL_CROSS_LIMIT = "7";
-    process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE_MULTIPLIER = "3";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE = "3.5";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE = "0.7";
     process.env.PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE = "telegram, phantomchat:group:x";
     const c = await loadConfig();
     expect(c.retrieval!.crossConversation).toEqual({
       enabled: false,
       limit: 7,
-      minScoreMultiplier: 3,
+      minScore: 3.5,
+      minVecScore: 0.7,
       exclude: ["telegram", "phantomchat:group:x"],
     });
   });
@@ -904,12 +909,14 @@ limit = 5
     await writeToml(`
 [retrieval.cross_conversation]
 limit = 999
-min_score_multiplier = 0.5
+min_score = -1
+min_vec_score = 2
 exclude = ["telegram", "", "  "]
 `);
     const c = await loadConfig();
     expect(c.retrieval!.crossConversation.limit).toBe(10); // capped
-    expect(c.retrieval!.crossConversation.minScoreMultiplier).toBe(1); // floored
+    expect(c.retrieval!.crossConversation.minScore).toBe(0); // floored at 0
+    expect(c.retrieval!.crossConversation.minVecScore).toBe(1); // cosine ∈ [-1,1]
     expect(c.retrieval!.crossConversation.exclude).toEqual(["telegram"]);
   });
 

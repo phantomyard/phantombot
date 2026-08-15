@@ -25,7 +25,7 @@
  *
  * Two tiers for conversation turns (issue #377): tier 1 is scoped to the
  * current conversation (PR #132); tier 2 — ON BY DEFAULT — can surface a
- * small number of hard-capped, higher-bar, source-attributed hits from the
+ * small number of hard-capped, absolute-floored, audience-filtered, source-attributed hits from the
  * persona's OTHER conversations, so knowledge earned in one chat is
  * reachable in another. Tier-2 hits carry a disclosure rule in the header:
  * inform the reply, never quote or name the source chat.
@@ -39,7 +39,13 @@ import {
 } from "../config.ts";
 import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import { log } from "../lib/logger.ts";
-import { MemoryIndex, type SearchHit } from "../lib/memoryIndex.ts";
+import {
+  allowedAudiencesForRoom,
+  conversationAudience,
+  MemoryIndex,
+  type SearchHit,
+  type TurnAudience,
+} from "../lib/memoryIndex.ts";
 
 /** A retriever bound to a persona — call per turn with the user message. */
 export type Retriever = (
@@ -150,9 +156,9 @@ export async function retrieveContext(
     // an absent crossConversation block means enabled (the flag is an
     // opt-out escape hatch, not a setup step — Andrew's anti-config-fatigue
     // rule). In-conversation hits stay tier 1: cross hits are appended
-    // after them, hard-capped, must clear a higher relevance bar, and get
-    // source attribution in formatRetrieved. Tier-1 scoping (PR #132) is
-    // untouched — this extends it, it does not revert it.
+    // after them, hard-capped, must clear an ABSOLUTE relevance floor, and
+    // get source attribution in formatRetrieved. Tier-1 scoping (PR #132)
+    // is untouched — this extends it, it does not revert it.
     const cross = opts.settings.crossConversation;
     const crossLimit = cross?.limit ?? DEFAULT_CROSS_CONVERSATION.limit;
     const crossExclude = cross?.exclude ?? DEFAULT_CROSS_CONVERSATION.exclude;
@@ -163,27 +169,54 @@ export async function retrieveContext(
       !isConversationExcluded(opts.conversation, crossExclude);
     let crossHits: SearchHit[] = [];
     if (crossEnabled) {
-      const multiplier = Math.max(
-        1,
-        cross?.minScoreMultiplier ??
-          DEFAULT_CROSS_CONVERSATION.minScoreMultiplier,
+      // The tier-2 floor is ABSOLUTE, not derived from the tier-1 ranking:
+      // RRF scores encode rank within a result set, so a cross-search score
+      // can never be meaningfully compared against a tier-1 score — and
+      // with minScore = 0 (the default) a derived bar collapses to 0,
+      // injecting any turn that matched FTS at all exactly when tier 2
+      // matters (empty tier 1). Both sub-scores are absolute: BM25 for
+      // lexical hits, raw cosine for vector-only hits.
+      const minScore = Math.max(
+        0,
+        cross?.minScore ?? DEFAULT_CROSS_CONVERSATION.minScore,
       );
-      // The tier-2 bar: max(minScore × multiplier, weakest tier-1 hit).
-      // With no in-conversation hits the bar collapses to minScore ×
-      // multiplier (0 by default) — exactly the "solved it on Telegram last
-      // week, asking from PhantomChat today" case tier 2 exists for.
-      const tier1Weakest = hits.length ? Math.min(...hits.map(scoreOf)) : 0;
-      const bar = Math.max(opts.settings.minScore * multiplier, tier1Weakest);
-      // Fetch a wider pool than the cap: current-conversation and excluded
-      // candidates are filtered out below.
-      const pool = Math.min(50, crossLimit * 4);
+      const minVecScore =
+        cross?.minVecScore ?? DEFAULT_CROSS_CONVERSATION.minVecScore;
+      // The audience boundary is a RETRIEVAL filter, not a prompt rule: a
+      // turn spoken in a private room may never surface in a wider one,
+      // however it is paraphrased. Enforced in SQL (and re-checked in
+      // selectCrossConversationHits as defence in depth).
+      const allowedAudiences = allowedAudiencesForRoom(
+        conversationAudience(opts.conversation!),
+      );
+      // Exclusions (current conversation, exclude list, audience) are
+      // applied IN SQL, before LIMIT: every pool slot is an eligible hit,
+      // so a current chat that matches its own query best can no longer
+      // starve tier 2 by occupying the whole candidate pool.
+      const turnFilter = {
+        excludeConversation: opts.conversation!,
+        exclude: crossExclude,
+        allowedAudiences,
+      };
       const candidates = queryVec
-        ? ix.hybridSearch(query, queryVec, { scope: "turns", limit: pool, decay })
-        : ix.search(query, { scope: "turns", limit: pool, decay });
+        ? ix.hybridSearch(query, queryVec, {
+            scope: "turns",
+            limit: crossLimit,
+            decay,
+            turnFilter,
+          })
+        : ix.search(query, {
+            scope: "turns",
+            limit: crossLimit,
+            decay,
+            turnFilter,
+          });
       crossHits = selectCrossConversationHits(candidates, {
         currentConversation: opts.conversation!,
         exclude: crossExclude,
-        bar,
+        allowedAudiences,
+        minScore,
+        minVecScore,
         limit: crossLimit,
       });
     }
@@ -333,20 +366,30 @@ export function crossAttribution(conversation: string, snippet: string): string 
 }
 
 /**
- * Pick the tier-2 cross-conversation hits from an UNSCOPED turns search:
- * drop the current conversation's own turns (already covered by tier 1),
- * drop excluded sources, drop anything below the tier-2 bar, tag survivors
- * with their source conversation for attribution, and cap at `limit`.
- * Candidates are assumed best-first; order is preserved. Pure — exported
- * for testing.
+ * Pick the tier-2 cross-conversation hits from a turns search: drop the
+ * current conversation's own turns (already covered by tier 1), drop
+ * excluded sources, drop turns whose audience is too private for the
+ * current room, drop anything below the ABSOLUTE tier-2 floor, tag
+ * survivors with their source conversation for attribution, and cap at
+ * `limit`. Candidates are assumed best-first; order is preserved.
+ *
+ * The SQL turn filter already applies the conversation/exclude/audience
+ * clauses before LIMIT (that is what keeps the candidate pool eligible);
+ * the checks here are defence in depth so a caller that bypasses the
+ * filter still cannot leak across the boundary. Pure — exported for
+ * testing.
  */
 export function selectCrossConversationHits(
   candidates: SearchHit[],
   opts: {
     currentConversation: string;
     exclude: readonly string[];
-    /** Score floor: max(minScore × multiplier, weakest tier-1 hit). */
-    bar: number;
+    /** Audience classes eligible to surface in the current room. */
+    allowedAudiences: readonly TurnAudience[];
+    /** Absolute BM25 floor (rank-fused scores are positional — never used). */
+    minScore: number;
+    /** Absolute cosine floor for vector-only matches. */
+    minVecScore: number;
     limit: number;
   },
 ): SearchHit[] {
@@ -357,7 +400,13 @@ export function selectCrossConversationHits(
     if (!conv) continue; // only conversation turns participate in tier 2
     if (conv === opts.currentConversation) continue;
     if (isConversationExcluded(conv, opts.exclude)) continue;
-    if (scoreOf(h) < opts.bar) continue;
+    if (h.audience !== undefined && !opts.allowedAudiences.includes(h.audience))
+      continue;
+    // Absolute floor: a hit clears it on EITHER absolute sub-score. RRF is
+    // deliberately ignored — it encodes rank within this result set, not
+    // relevance, so it cannot serve as a cross-search bar.
+    if ((h.ftsScore ?? 0) < opts.minScore && (h.vecScore ?? 0) < opts.minVecScore)
+      continue;
     out.push({ ...h, crossConversation: conv });
   }
   return out;
