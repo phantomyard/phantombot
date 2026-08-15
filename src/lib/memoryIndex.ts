@@ -26,7 +26,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { posix } from "node:path";
 import type { FactSource } from "../config.ts";
-import type { Turn } from "../memory/store.ts";
+import type { Turn, TurnOrigin } from "../memory/store.ts";
+import { log } from "./logger.ts";
 import { parseOkf } from "./okf.ts";
 
 export type Scope = "memory" | "kb" | "turns";
@@ -59,18 +60,81 @@ export function allowedAudiencesForRoom(room: TurnAudience): TurnAudience[] {
 }
 
 /**
- * Derive a conversation's audience class from its key shape. Group keys
- * carry a `:group:` segment (`phantomchat:group:<id>`); Telegram group and
- * supergroup chat ids are negative (`telegram:-100…`). Everything else —
- * DMs, CLI, tick/system contexts — is private. Deriving from the key keeps
- * this free at index time (no LLM, no config), and the classification is
- * stable for the life of the conversation.
+ * Classify a conversation's audience from its key shape, or `undefined` when
+ * the shape is not one we recognise.
+ *
+ * Returning `undefined` rather than guessing is the point. The old single
+ * `conversationAudience()` defaulted unknown shapes to `private`, which is
+ * fail-CLOSED when classifying a stored turn but fail-OPEN when classifying
+ * the ROOM being spoken into: a future multi-party channel with an
+ * unrecognised key shape would be treated as a private room and every
+ * private memory in the persona would become eligible to surface in it,
+ * silently, with no test failing. The two call sites need opposite defaults,
+ * so the defaulting decision belongs to them (`turnAudience` /
+ * `roomAudience`), not here.
+ *
+ * Recognised shapes:
+ *   `*:group:*`          → multi-party (phantomchat groups)
+ *   `telegram:-<id>`     → multi-party (group/supergroup chat ids are negative)
+ *   `telegram:<id>`      → private (DM)
+ *   `phantomchat:<hex>`  → private (DM)
+ *   `cli` / `cli:*`      → private (operator terminal)
+ *   `acp` / `acp:*`      → private (editor/agent client, principal-driven)
+ *   `tick:*`             → private (scheduled task wake)
+ *   `system:*`           → private (heartbeat / nightly)
  */
-export function conversationAudience(conversation: string): TurnAudience {
+export function classifyConversationAudience(
+  conversation: string,
+): TurnAudience | undefined {
   if (conversation.includes(":group:")) return "multi-party";
-  if (/^telegram:-/.test(conversation)) return "multi-party";
-  return "private";
+  // Telegram chat ids are signed: negative = group/supergroup, positive =
+  // DM. Matched on the id segment alone rather than the whole key, so a
+  // suffixed variant (forum topics arrive as `telegram:<id>:topic:<n>`)
+  // still classifies instead of falling through to the unknown default.
+  const tg = /^telegram:(-?\d+)(?::|$)/.exec(conversation);
+  if (tg) return tg[1]!.startsWith("-") ? "multi-party" : "private";
+  if (/^phantomchat:[0-9a-f]+(?::|$)/i.test(conversation)) return "private";
+  if (/^(cli|acp)(?::|$)/.test(conversation)) return "private";
+  if (/^(tick|system):/.test(conversation)) return "private";
+  return undefined;
 }
+
+/**
+ * Audience to STAMP on a turn at index time. Unknown shape → `private`: the
+ * narrowest classification, so an unclassifiable turn is the least likely to
+ * surface somewhere it should not.
+ */
+export function turnAudience(conversation: string): TurnAudience {
+  return classifyConversationAudience(conversation) ?? "private";
+}
+
+/**
+ * Audience of the ROOM currently being spoken into, used to compute which
+ * stored audiences may surface. Unknown shape → `multi-party`: assume other
+ * people can read this room, so private memories stay out of it.
+ *
+ * This is the deliberate asymmetry with `turnAudience`. Both defaults are
+ * restrictive; they just point in opposite directions because the two
+ * questions are different ("who heard this?" vs "who is listening now?").
+ * The unknown case is logged so a new channel shows up as a line in the log
+ * rather than as a silent behaviour change — add it to
+ * `classifyConversationAudience` when it does.
+ */
+export function roomAudience(conversation: string): TurnAudience {
+  const known = classifyConversationAudience(conversation);
+  if (known) return known;
+  if (!warnedUnknownRooms.has(conversation)) {
+    warnedUnknownRooms.add(conversation);
+    log.warn(
+      "retrieval: unrecognised conversation key shape; treating room as multi-party",
+      { conversation },
+    );
+  }
+  return "multi-party";
+}
+
+/** One warn per conversation key per process — this sits on the hot path. */
+const warnedUnknownRooms = new Set<string>();
 
 /**
  * SQL-side filter for conversation-turn candidate queries. Lets callers
@@ -189,6 +253,14 @@ export interface SearchHit {
    */
   source?: FactSource;
   /**
+   * ORIGIN of a turn hit (how it was produced — channel / task /
+   * notification / internal), carried from the turn_docs.origin column.
+   * Distinct from `source`, which is a trust tier: this is what lets tier 2
+   * tell the persona's own unreviewed task output apart from a message a
+   * human actually sent. Only set for conversation-turn hits.
+   */
+  origin?: TurnOrigin;
+  /**
    * Audience class of a turn hit (who was in the room), carried from the
    * turn_docs.audience column so retrieval can enforce the cross-room
    * confidentiality boundary. Only set for conversation-turn hits.
@@ -272,8 +344,23 @@ export const NOTES_SCHEMA_VERSION = 3;
  * v1 → v2: `source` (provenance tier) and `audience` (room class) columns
  * added so cross-conversation retrieval can enforce the audience boundary
  * and weigh provenance in SQL instead of prompt text (PR #378 review).
+ *
+ * v2 → v3: `origin` (how the turn was produced — channel / task /
+ * notification / internal) added so tier-2 can down-weight and label the
+ * persona's own unreviewed output instead of surfacing it with the same
+ * standing as something the principal actually said.
  */
-export const TURN_SCHEMA_VERSION = 2;
+export const TURN_SCHEMA_VERSION = 3;
+
+/**
+ * 0-based ordinal of `content` in the turn_docs column list, for
+ * `snippet(turn_docs, <col>, …)`. FTS5 takes a bare integer here and does
+ * NOT validate it against the column name — point it at an UNINDEXED
+ * column and every snippet silently comes back empty, which reads as "no
+ * results" rather than as an error. Adding a column before `content` shifts
+ * this; keep it adjacent to the DDL so the two move together.
+ */
+const TURN_DOCS_CONTENT_COL = 8;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -330,6 +417,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS turn_docs USING fts5(
   turn_id UNINDEXED,
   source UNINDEXED,
   audience UNINDEXED,
+  origin UNINDEXED,
   content,
   tokenize = 'porter unicode61'
 );
@@ -423,15 +511,30 @@ export class MemoryIndex {
     // Meta rows are only written by versions that already self-heal, so a
     // missing/low stamp alone isn't proof of an old layout — an old EMPTY
     // index has no meta row either. The authoritative check is the column
-    // set itself: if `source` is present the table is already v2-shaped
+    // set itself: if `origin` is present the table is already v3-shaped
     // (fresh DBs land here) and only needs the stamp.
     const cols = this.db
       .query("PRAGMA table_info(turn_docs)")
       .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === "source")) {
+    if (cols.some((c) => c.name === "origin")) {
       this.stampTurnSchemaVersion();
       return;
     }
+    // FTS5 cannot ALTER, so a schema bump means DROP + recreate: turn_docs
+    // comes back EMPTY and the lexical half of turn search is briefly blind.
+    //
+    // This self-heals, and the mechanism is worth spelling out because it is
+    // not obvious and it has been misread once already. Clearing
+    // turn_index_state resets every conversation's cursor to 0, which makes
+    // the entire store look like an unindexed tail. The next ordinary
+    // flushDueConversationTurns sweep therefore finds every conversation due
+    // on its NORMAL triggers and re-indexes the lot — no force flag, no
+    // operator step, no embed cost (turn_embeddings survives the rebuild and
+    // every vector is reused on a text_sha match).
+    //
+    // Worst-case blindness is one heartbeat interval (30 min). Do NOT
+    // "fix" this with a forced backfill: the cursor reset already is the
+    // backfill, and a force flag on top only duplicates it.
     this.db.exec("DROP TABLE IF EXISTS turn_docs;");
     this.db.exec(SCHEMA);
     this.db.exec("DELETE FROM turn_index_state;");
@@ -653,8 +756,8 @@ export class MemoryIndex {
     this.db.prepare("DELETE FROM turn_docs WHERE path = ?").run(path);
     this.db
       .prepare(
-        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, source, audience, content) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, source, audience, origin, content) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         path,
@@ -663,7 +766,8 @@ export class MemoryIndex {
         turn.role,
         turn.id,
         turn.source,
-        conversationAudience(turn.conversation),
+        turnAudience(turn.conversation),
+        turn.origin,
         renderTurnForIndex(turn),
       );
 
@@ -983,8 +1087,8 @@ export class MemoryIndex {
         ? opts.conversation !== undefined
           ? (this.db
               .query(
-                "SELECT path, source, audience, bm25(turn_docs) AS rank, " +
-                  "snippet(turn_docs, 7, '«', '»', ' … ', 16) AS snip " +
+                "SELECT path, source, audience, origin, bm25(turn_docs) AS rank, " +
+                  `snippet(turn_docs, ${TURN_DOCS_CONTENT_COL}, '«', '»', ' … ', 16) AS snip ` +
                   "FROM turn_docs WHERE content MATCH ? AND conversation = ? " +
                   tf.where +
                   " ORDER BY rank LIMIT ?",
@@ -993,13 +1097,14 @@ export class MemoryIndex {
               path: string;
               source: FactSource;
               audience: TurnAudience;
+              origin: TurnOrigin;
               rank: number;
               snip: string;
             }>)
           : (this.db
               .query(
-                "SELECT path, source, audience, bm25(turn_docs) AS rank, " +
-                  "snippet(turn_docs, 7, '«', '»', ' … ', 16) AS snip " +
+                "SELECT path, source, audience, origin, bm25(turn_docs) AS rank, " +
+                  `snippet(turn_docs, ${TURN_DOCS_CONTENT_COL}, '«', '»', ' … ', 16) AS snip ` +
                   "FROM turn_docs WHERE content MATCH ? " +
                   tf.where +
                   " ORDER BY rank LIMIT ?",
@@ -1008,6 +1113,7 @@ export class MemoryIndex {
               path: string;
               source: FactSource;
               audience: TurnAudience;
+              origin: TurnOrigin;
               rank: number;
               snip: string;
             }>)
@@ -1039,6 +1145,7 @@ export class MemoryIndex {
         ftsScore: -r.rank * (decayFactors?.get(r.path) ?? 1),
         source: r.source ?? undefined,
         audience: r.audience ?? undefined,
+        origin: r.origin ?? undefined,
         snippet: r.snip,
       })),
     ]
@@ -1330,7 +1437,11 @@ export class MemoryIndex {
           (path.startsWith("turns/") ? "turns" : ("kb" as Scope)); // best guess
         const turnMeta =
           ftsHit?.source !== undefined
-            ? { source: ftsHit.source, audience: ftsHit.audience }
+            ? {
+                source: ftsHit.source,
+                audience: ftsHit.audience,
+                origin: ftsHit.origin,
+              }
             : this.turnMetaForPath(path);
         return {
           path,
@@ -1385,16 +1496,23 @@ export class MemoryIndex {
   /** Provenance/audience for a turn path (undefined for non-turn paths). */
   private turnMetaForPath(
     path: string,
-  ): { source?: FactSource; audience?: TurnAudience } {
+  ): { source?: FactSource; audience?: TurnAudience; origin?: TurnOrigin } {
     if (!path.startsWith("turns/")) return {};
     const row = this.db
-      .query("SELECT source, audience FROM turn_docs WHERE path = ? LIMIT 1")
+      .query(
+        "SELECT source, audience, origin FROM turn_docs WHERE path = ? LIMIT 1",
+      )
       .get(path) as
-      | { source?: FactSource | null; audience?: TurnAudience | null }
+      | {
+          source?: FactSource | null;
+          audience?: TurnAudience | null;
+          origin?: TurnOrigin | null;
+        }
       | null;
     return {
       source: row?.source ?? undefined,
       audience: row?.audience ?? undefined,
+      origin: row?.origin ?? undefined,
     };
   }
 

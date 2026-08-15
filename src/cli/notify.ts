@@ -224,6 +224,9 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
         conversation,
         role: "assistant",
         text: `[notification] ${text}`,
+        // Machine-produced: a notify payload is the persona speaking
+        // unprompted, never reviewed by the principal at write time.
+        origin: "notification",
       });
     } catch (e) {
       log.warn("notify: failed to persist notification turn", {

@@ -230,6 +230,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             // NOT `trusted`: a task has no principal command authority either.
             userSource: "other",
             assistantSource: "other",
+            // ORIGIN, not trust: `other` above says "do not trust this like
+            // the principal", which a stranger in a group chat also gets.
+            // This says "a scheduled task produced it" — the distinction
+            // that lets tier-2 retrieval avoid replaying my own unreviewed
+            // speculation back to me as though someone had said it.
+            origin: "task",
           })) {
             logBackgroundWakeChunk(task, conversation, chunk);
             if (chunk.type === "text") finalText += chunk.text;

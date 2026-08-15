@@ -719,3 +719,129 @@ describe("repairMissingTurnEmbeddings", () => {
     expect(r.failures).toBe(0);
   });
 });
+
+/**
+ * Turn-schema rebuild recovery.
+ *
+ * FTS5 cannot ALTER, so bumping TURN_SCHEMA_VERSION means DROP + recreate and
+ * turn_docs comes back empty. That looks like data loss requiring an operator
+ * `memory index --turns`, and was originally reported as such — wrongly. The
+ * rebuild also clears turn_index_state, which rewinds every conversation's
+ * cursor to 0, so the whole store reads as an unindexed tail and the next
+ * ORDINARY sweep re-indexes it on its normal triggers.
+ *
+ * These tests pin that mechanism, because it is the entire reason no forced
+ * backfill is needed. If someone later "optimises" the rebuild by preserving
+ * turn_index_state, recovery silently stops happening and these go red.
+ */
+describe("turn-schema rebuild recovery", () => {
+  /** Rows currently in the lexical (FTS) turn index. */
+  function docCount(): number {
+    const db = new Database(memoryIndexPath("phantom"));
+    try {
+      return (
+        db.query("SELECT count(*) AS n FROM turn_docs").get() as { n: number }
+      ).n;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Rewind the on-disk index to the previous turn schema: drop turn_docs,
+   * recreate it WITHOUT the `origin` column, and stamp the old version. This
+   * reproduces what an upgrading box actually looks like on first open rather
+   * than simulating the rebuild by calling the private method.
+   */
+  function downgradeToV2(rows: number): void {
+    const db = new Database(memoryIndexPath("phantom"));
+    try {
+      db.exec("DROP TABLE IF EXISTS turn_docs");
+      db.exec(
+        "CREATE VIRTUAL TABLE turn_docs USING fts5(" +
+          "path UNINDEXED, persona UNINDEXED, conversation UNINDEXED, " +
+          "role UNINDEXED, turn_id UNINDEXED, source UNINDEXED, " +
+          "audience UNINDEXED, content, tokenize = 'porter unicode61')",
+      );
+      for (let i = 0; i < rows; i++) {
+        db.prepare(
+          "INSERT INTO turn_docs (path, persona, conversation, role, turn_id, " +
+            "source, audience, content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          `turns/phantom/telegram%3A1001/${i}`,
+          "phantom",
+          "telegram:1001",
+          "user",
+          i,
+          "principal",
+          "private",
+          `legacy row ${i}`,
+        );
+      }
+      db.prepare(
+        "INSERT INTO meta (key, value) VALUES ('turn_schema_version', '2') " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ).run();
+    } finally {
+      db.close();
+    }
+  }
+
+  test("an ordinary sweep refills the index after a rebuild empties it", async () => {
+    const config = baseConfig();
+    const settings = DEFAULT_RETRIEVAL.turnIndexing;
+
+    for (let i = 0; i < 6; i++) await appendPair(i);
+    await flushDueConversationTurns({
+      config,
+      persona: "phantom",
+      memory,
+      settings,
+      force: true,
+    });
+    const before = docCount();
+    expect(before).toBe(12);
+
+    // Look like a box mid-upgrade; opening the index performs the rebuild.
+    downgradeToV2(before);
+    const ix = await MemoryIndex.open(memoryIndexPath("phantom"));
+    ix.close();
+    expect(docCount()).toBe(0);
+
+    // The ordinary heartbeat sweep. force is deliberately NOT passed: the
+    // cursor reset alone must be enough to make every conversation due.
+    const summary = await flushDueConversationTurns({
+      config,
+      persona: "phantom",
+      memory,
+      settings,
+    });
+
+    expect(summary.triggered).toBe(1);
+    expect(docCount()).toBe(before);
+  });
+
+  test("the rebuild is what rewinds the cursors, not the sweep", async () => {
+    // Positive control for the test above. Without an intervening rebuild the
+    // same unforced sweep is a no-op, which proves recovery came from the
+    // cursor reset rather than from the sweep being indiscriminate.
+    const config = baseConfig();
+    const settings = DEFAULT_RETRIEVAL.turnIndexing;
+    for (let i = 0; i < 6; i++) await appendPair(i);
+    await flushDueConversationTurns({
+      config,
+      persona: "phantom",
+      memory,
+      settings,
+      force: true,
+    });
+
+    const summary = await flushDueConversationTurns({
+      config,
+      persona: "phantom",
+      memory,
+      settings,
+    });
+    expect(summary.triggered).toBe(0);
+  });
+});

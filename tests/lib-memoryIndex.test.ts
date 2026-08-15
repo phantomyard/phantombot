@@ -196,6 +196,7 @@ describe("MemoryIndex.search", () => {
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     };
     ix.upsertTurn(turn);
 
@@ -217,6 +218,7 @@ describe("MemoryIndex.search", () => {
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
 
     const hits = ix.search("Vesuvius", { scope: "turns" });
@@ -235,6 +237,7 @@ describe("MemoryIndex.search", () => {
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     };
     const vec = new Float32Array([1, 0, 0]);
     ix.upsertTurn(turn, vec, "sha");
@@ -260,6 +263,7 @@ describe("MemoryIndex.search", () => {
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.upsertTurn({
       id: 2,
@@ -270,6 +274,7 @@ describe("MemoryIndex.search", () => {
       createdAt: new Date("2026-05-28T06:01:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
 
     const paths = ix
@@ -295,6 +300,7 @@ describe("MemoryIndex.search", () => {
         createdAt: new Date("2026-05-28T06:00:00Z"),
         embeddable: true,
         source: "principal",
+        origin: "channel",
       },
       vec,
       "sha-aaa",
@@ -309,6 +315,7 @@ describe("MemoryIndex.search", () => {
         createdAt: new Date("2026-05-28T06:01:00Z"),
         embeddable: true,
         source: "principal",
+        origin: "channel",
       },
       vec,
       "sha-bbb",
@@ -614,6 +621,7 @@ describe("turn-hit time decay (search / hybridSearch)", () => {
       createdAt: daysAgo(300),
       embeddable: true,
       source: "self",
+      origin: "channel",
     });
     ix.upsertTurn({
       id: 2,
@@ -624,6 +632,7 @@ describe("turn-hit time decay (search / hybridSearch)", () => {
       createdAt: daysAgo(0),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
   }
 
@@ -697,6 +706,7 @@ describe("turn provenance + audience columns", () => {
     conversation: string,
     text: string,
     source: Turn["source"] = "principal",
+    origin: Turn["origin"] = "channel",
   ): Turn => ({
     id,
     persona: "phantom",
@@ -706,6 +716,7 @@ describe("turn provenance + audience columns", () => {
     createdAt: new Date("2026-05-28T06:00:00Z"),
     embeddable: true,
     source,
+    origin,
   });
 
   test("turn hits carry source and audience derived at index time", () => {
@@ -898,6 +909,7 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
           createdAt: new Date("2026-05-28T06:00:00Z"),
           embeddable: true,
           source: "principal",
+          origin: "channel",
         },
         // Orthogonal vectors so fillers don't compete on cosine.
         new Float32Array([0, i / 30, 0]),
@@ -916,6 +928,7 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
         createdAt: new Date("2026-05-28T06:01:00Z"),
         embeddable: true,
         source: "principal",
+        origin: "channel",
       },
       vec,
       "sha-bbb",

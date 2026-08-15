@@ -34,6 +34,7 @@
 import {
   type Config,
   DEFAULT_CROSS_CONVERSATION,
+  type FactSource,
   memoryIndexPath,
   type RetrievalSettings,
 } from "../config.ts";
@@ -41,11 +42,12 @@ import { geminiEmbed } from "../lib/geminiEmbed.ts";
 import { log } from "../lib/logger.ts";
 import {
   allowedAudiencesForRoom,
-  conversationAudience,
   MemoryIndex,
+  roomAudience,
   type SearchHit,
   type TurnAudience,
 } from "../lib/memoryIndex.ts";
+import type { TurnOrigin } from "../memory/store.ts";
 
 /** A retriever bound to a persona — call per turn with the user message. */
 export type Retriever = (
@@ -193,8 +195,12 @@ export async function retrieveContext(
       // turn spoken in a private room may never surface in a wider one,
       // however it is paraphrased. Enforced in SQL (and re-checked in
       // selectCrossConversationHits as defence in depth).
+      // roomAudience — NOT the index-time classifier. An unrecognised key
+      // shape reads as `multi-party` here (assume someone else is
+      // listening) where it reads as `private` when stamping a turn. Same
+      // question, opposite safe default; see memoryIndex.ts.
       const allowedAudiences = allowedAudiencesForRoom(
-        conversationAudience(opts.conversation!),
+        roomAudience(opts.conversation!),
       );
       // Exclusions (current conversation, exclude list, audience) are
       // applied IN SQL, before LIMIT: every pool slot is an eligible hit,
@@ -297,7 +303,7 @@ export function formatRetrieved(
   let included = 0;
   for (const h of usable) {
     const label = h.crossConversation
-      ? ` ${h.path} (cross-conversation: ${crossAttribution(h.crossConversation, h.snippet)})`
+      ? ` ${h.path} (cross-conversation: ${crossAttribution(h.crossConversation, h.snippet, h)})`
       : h.expanded
         ? ` ${h.path} (linked concept)`
         : ` ${h.path}`;
@@ -364,13 +370,90 @@ const MONTHS = [
  * `[role ISO-timestamp]`, so the date is usually in the snippet). Falls
  * back to channel-only when no date is parseable.
  */
-export function crossAttribution(conversation: string, snippet: string): string {
+export function crossAttribution(
+  conversation: string,
+  snippet: string,
+  provenance?: { source?: FactSource; origin?: TurnOrigin },
+): string {
   const channel = conversationChannel(conversation);
   const m = /(\d{4})-(\d{2})-(\d{2})/.exec(snippet);
-  if (!m) return channel;
-  const month = MONTHS[Number(m[2]) - 1];
-  if (!month) return channel;
-  return `${channel}, ${month} ${Number(m[3])}`;
+  const month = m ? MONTHS[Number(m[2]) - 1] : undefined;
+  const where =
+    m && month ? `${channel}, ${month} ${Number(m[3])}` : channel;
+  // The LABEL half of "weight + label". Weighting alone only reorders; the
+  // model still needs to know it is reading its own unreviewed output
+  // rather than something a human said.
+  const note = crossProvenanceNote(provenance?.source, provenance?.origin);
+  return note ? `${where} — ${note}` : where;
+}
+
+/**
+ * Tier-2 TRUST weights, by `source` (who asserted the content).
+ *
+ * Weight, do not filter — the principal's call on #377. A low-provenance
+ * memory is still a memory; the failure we are guarding is a weak claim
+ * OUTRANKING a strong one, not a weak claim existing. So provenance moves a
+ * hit's position among survivors and never decides admission: the floor
+ * (`minScore` / `minVecScore`) still runs on RAW relevance, untouched.
+ */
+export const CROSS_SOURCE_WEIGHT: Record<FactSource, number> = {
+  principal: 1,
+  self: 0.9,
+  other: 0.75,
+  unverified: 0.7,
+};
+
+/**
+ * Tier-2 ORIGIN weights, by how the turn was produced.
+ *
+ * This is the axis the principal asked for that `source` could not express.
+ * A scheduled task's prompt and reply both land `source: "other"` (see
+ * cli/tick.ts) — identical to a stranger's message in a group chat, despite
+ * being the persona talking to itself. Left unweighted, my own week-old
+ * speculation resurfaces with the same standing as something a human
+ * actually said, and reads as established fact.
+ *
+ * `channel` is the neutral 1: content that reached a chat surface had a
+ * human on one end. Everything below it is machine-driven output nobody has
+ * reviewed.
+ */
+export const CROSS_ORIGIN_WEIGHT: Record<TurnOrigin, number> = {
+  channel: 1,
+  notification: 0.8,
+  task: 0.7,
+  internal: 0.6,
+};
+
+/**
+ * Combined provenance multiplier for a tier-2 hit. Missing metadata scores
+ * as neutral (1) rather than as a penalty: an unclassified hit is a gap in
+ * our bookkeeping, not evidence against the content. Exported for testing.
+ */
+export function crossProvenanceWeight(h: SearchHit): number {
+  const sw = h.source ? CROSS_SOURCE_WEIGHT[h.source] : 1;
+  const ow = h.origin ? CROSS_ORIGIN_WEIGHT[h.origin] : 1;
+  return sw * ow;
+}
+
+/**
+ * Human-readable provenance note for a cross-conversation hit, or undefined
+ * when there is nothing worth saying.
+ *
+ * Deliberately silent on the common case. Every assistant turn defaults to
+ * `source: "unverified"` (the #327 tightening), so labelling that would put
+ * a caveat on nearly every hit and train the reader to skip all of them. A
+ * note is emitted only where it changes how the excerpt should be read:
+ * machine-produced content, or a third party speaking.
+ */
+export function crossProvenanceNote(
+  source?: FactSource,
+  origin?: TurnOrigin,
+): string | undefined {
+  if (origin === "task") return "my own scheduled-task output, unreviewed";
+  if (origin === "internal") return "my own maintenance pass, unreviewed";
+  if (origin === "notification") return "a notification I sent";
+  if (source === "other") return "said by someone other than you";
+  return undefined;
 }
 
 /**
@@ -406,7 +489,6 @@ export function selectCrossConversationHits(
 ): SearchHit[] {
   const out: SearchHit[] = [];
   for (const h of candidates) {
-    if (out.length >= opts.limit) break;
     const conv = turnPathConversation(h.path);
     if (!conv) continue; // only conversation turns participate in tier 2
     if (conv === opts.currentConversation) continue;
@@ -441,7 +523,20 @@ export function selectCrossConversationHits(
       continue;
     out.push({ ...h, crossConversation: conv });
   }
-  return out;
+  // Provenance re-ranks the SURVIVORS, it does not gate admission — the
+  // floor above already ran on raw relevance. The cap is applied after the
+  // re-rank (not inside the loop) so that when more candidates clear the
+  // floor than we have slots for, the slots go to the better-attested ones
+  // rather than to whoever happened to rank higher lexically.
+  //
+  // Ordering only: the weighted value is never written back onto the hit,
+  // so nothing downstream can mistake it for a relevance score. Array.sort
+  // is stable, so equal weights preserve the incoming best-first order.
+  const ranked = out
+    .map((h, i) => ({ h, i, w: crossProvenanceWeight(h) }))
+    .sort((a, b) => scoreOf(b.h) * b.w - scoreOf(a.h) * a.w || a.i - b.i)
+    .map((r) => r.h);
+  return ranked.slice(0, opts.limit);
 }
 
 /**

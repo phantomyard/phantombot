@@ -94,6 +94,12 @@ async function runNightlyTurn(opts: {
       idleTimeoutMs: STAGE_IDLE_TIMEOUT_MS,
       hardTimeoutMs: STAGE_HARD_TIMEOUT_MS,
       systemPromptSuffix: NIGHTLY_SUFFIX,
+      // Machine-driven, not a chat surface: the "user" message is one the
+      // nightly wrote itself. Without this, new nightly rows would land
+      // `channel` while the migration retro-tags historical `system:%` rows
+      // `internal` — the same column disagreeing with itself either side of
+      // an upgrade.
+      origin: "internal",
       // Nightly needs no MCP; running MCP-free stops an unauthenticated remote
       // connector from wedging the --print startup and killing a stage on the
       // idle timeout (essence "timed out with no output"). See HarnessRequest.mcpMode.

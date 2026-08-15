@@ -32,7 +32,7 @@ import {
 } from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
-import type { MemoryStore } from "../memory/store.ts";
+import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
 import type { FactSource } from "../config.ts";
 import type { ScreenVerdict } from "./screen.ts";
 
@@ -196,6 +196,15 @@ export interface TurnInput {
    * the `userSource` doc above. Undefined preserves the `unverified` default.
    */
   assistantSource?: FactSource;
+  /**
+   * ORIGIN axis for both turns of this exchange (see Turn.origin) —
+   * separate from the trust axis above. Defaults to `channel`, which is
+   * right for every chat surface; scheduled task wakes pass `task` so their
+   * output is distinguishable later from a human's message. Both turns of a
+   * wake share one origin: the prompt and the reply were produced by the
+   * same mechanism.
+   */
+  origin?: TurnOrigin;
   /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
@@ -371,6 +380,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         // self-scheduled caller (tick task wake) override this to `self` so its
         // own prompt isn't stamped as an untrusted stranger — see the field doc.
         source: input.userSource ?? (input.trusted === true ? "principal" : "other"),
+        origin: input.origin ?? "channel",
       },
       {
         persona: input.persona,
@@ -387,6 +397,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
         // an interaction to earn trust, not a flag to lose it. `assistantSource`
         // still lets an autonomous caller (tick task wake) pin `other` explicitly.
         source: input.assistantSource ?? "unverified",
+        origin: input.origin ?? "channel",
       },
     );
 

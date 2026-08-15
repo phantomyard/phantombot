@@ -107,7 +107,7 @@ describe("formatRetrieved", () => {
           scope: "turns",
           ftsScore: 4,
           snippet: "[user 2026-05-27T06:00:00Z] solved it there",
-          crossConversation: "telegram:BBB",
+          crossConversation: "telegram:2002",
         },
       ],
       settings,
@@ -194,6 +194,7 @@ describe("retrieveContext", () => {
         createdAt: new Date("2026-05-20T06:00:00Z"),
         embeddable: true,
         source: "unverified",
+        origin: "channel",
       });
     }
   };
@@ -298,22 +299,24 @@ describe("retrieveContext", () => {
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
-      conversation: "telegram:AAA",
+      conversation: "telegram:1001",
       role: "user",
       text: "The private figure we discussed in chat AAA was 12345.",
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.upsertTurn({
       id: 2,
       persona: "phantom",
-      conversation: "telegram:BBB",
+      conversation: "telegram:2002",
       role: "user",
       text: "The private figure we discussed in chat BBB was 67890.",
       createdAt: new Date("2026-05-28T06:01:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -326,7 +329,7 @@ describe("retrieveContext", () => {
         ...DEFAULT_RETRIEVAL,
         crossConversation: { ...DEFAULT_CROSS_CONVERSATION, enabled: false },
       },
-      conversation: "telegram:AAA",
+      conversation: "telegram:1001",
     });
     expect(out).toBeDefined();
     // The current conversation's turn surfaces (path encodes "AAA")...
@@ -355,16 +358,18 @@ describe("retrieveContext", () => {
       createdAt: daysAgo(3),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.upsertTurn({
       id: 2,
       persona: "phantom",
-      conversation: "telegram:-100BBB",
+      conversation: "telegram:-1002002",
       role: "user",
       text: "The relay auth fix we discussed in chat BBB used kind 22242.",
       createdAt: daysAgo(2),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -378,7 +383,7 @@ describe("retrieveContext", () => {
     });
     expect(out).toBeDefined();
     // Tier 1 first: the current conversation's hit precedes the cross hit.
-    expect(out!.indexOf("AAA")).toBeLessThan(out!.indexOf("BBB"));
+    expect(out!.indexOf("AAA")).toBeLessThan(out!.indexOf("1002002"));
     // Attribution: channel + date, and the disclosure rule rides the header.
     const d = daysAgo(2);
     const month = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[d.getUTCMonth()];
@@ -395,12 +400,13 @@ describe("retrieveContext", () => {
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
-      conversation: "telegram:BBB",
+      conversation: "telegram:2002",
       role: "user",
       text: "The flux capacitor calibration constant is 42.",
       createdAt: new Date(Date.now() - 2 * 86_400_000),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -412,7 +418,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: settings as RetrievalSettings,
-      conversation: "telegram:AAA", // private → private is allowed
+      conversation: "telegram:1001", // private → private is allowed
     });
     expect(out).toBeDefined();
     expect(out!).toContain("(cross-conversation: Telegram");
@@ -432,6 +438,7 @@ describe("retrieveContext", () => {
         createdAt: new Date(Date.now() - i * 86_400_000),
         embeddable: true,
         source: "principal",
+        origin: "channel",
       });
     }
     ix.close();
@@ -464,6 +471,7 @@ describe("retrieveContext", () => {
       createdAt: new Date("2026-05-27T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -498,6 +506,7 @@ describe("retrieveContext", () => {
       createdAt: new Date("2026-05-27T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -531,12 +540,13 @@ describe("retrieveContext", () => {
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
-      conversation: "telegram:BBB",
+      conversation: "telegram:2002",
       role: "user",
       text: "the plan is basically fine, we should just ship it",
       createdAt: new Date("2026-05-28T06:00:00Z"),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -546,7 +556,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: { ...DEFAULT_RETRIEVAL },
-      conversation: "telegram:AAA", // no in-conversation hits → empty tier 1
+      conversation: "telegram:1001", // no in-conversation hits → empty tier 1
     });
     // Notes may or may not match; the invariant is that NO cross hit did.
     expect(out?.includes("cross-conversation") ?? false).toBe(false);
@@ -563,23 +573,25 @@ describe("retrieveContext", () => {
       ix.upsertTurn({
         id: i,
         persona: "phantom",
-        conversation: "telegram:AAA",
+        conversation: "telegram:1001",
         role: "user",
         text: `zephyr maintenance note ${i} about the current chat topic`,
         createdAt: new Date(Date.now() - i * 86_400_000),
         embeddable: true,
         source: "principal",
+        origin: "channel",
       });
     }
     ix.upsertTurn({
       id: 100,
       persona: "phantom",
-      conversation: "telegram:BBB",
+      conversation: "telegram:2002",
       role: "user",
       text: "the zephyr quill calibration trick from the other chat",
       createdAt: new Date(Date.now() - 86_400_000),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -590,7 +602,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: { ...DEFAULT_RETRIEVAL },
-      conversation: "telegram:AAA",
+      conversation: "telegram:1001",
     });
     expect(out).toBeDefined();
     expect(out!).toContain("cross-conversation");
@@ -606,12 +618,13 @@ describe("retrieveContext", () => {
     ix.upsertTurn({
       id: 1,
       persona: "phantom",
-      conversation: "telegram:DM-ANDREW",
+      conversation: "telegram:7001",
       role: "user",
       text: "the mortgage overpayment figure we settled on was 418.60",
       createdAt: new Date(Date.now() - 2 * 86_400_000),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -634,7 +647,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: { ...DEFAULT_RETRIEVAL },
-      conversation: "telegram:DM-OTHER", // private room
+      conversation: "telegram:7002", // private room
     });
     expect(inPrivate).toBeDefined();
     expect(inPrivate!).toContain("cross-conversation");
@@ -653,6 +666,7 @@ describe("retrieveContext", () => {
       createdAt: new Date(Date.now() - 2 * 86_400_000),
       embeddable: true,
       source: "principal",
+      origin: "channel",
     });
     ix.close();
 
@@ -662,7 +676,7 @@ describe("retrieveContext", () => {
       indexPath,
       embeddings: noEmbeddings,
       settings: { ...DEFAULT_RETRIEVAL },
-      conversation: "telegram:DM-ANDREW", // private room, group source ✅
+      conversation: "telegram:7001", // private room, group source ✅
     });
     expect(out).toBeDefined();
     expect(out!).toContain("cross-conversation");
@@ -803,7 +817,7 @@ describe("selectCrossConversationHits", () => {
     ...extra,
   });
   const base = {
-    currentConversation: "telegram:AAA",
+    currentConversation: "telegram:1001",
     exclude: [] as string[],
     allowedAudiences: ["private", "multi-party", "public"] as const,
     minScore: 0,
@@ -813,11 +827,11 @@ describe("selectCrossConversationHits", () => {
 
   test("drops the current conversation, tags survivors with their source", () => {
     const out = selectCrossConversationHits(
-      [hit("telegram:AAA", 10), hit("telegram:BBB", 9)],
+      [hit("telegram:1001", 10), hit("telegram:2002", 9)],
       { ...base },
     );
     expect(out.length).toBe(1);
-    expect(out[0]!.crossConversation).toBe("telegram:BBB");
+    expect(out[0]!.crossConversation).toBe("telegram:2002");
   });
 
   test("drops excluded sources and non-turn candidates", () => {
@@ -835,10 +849,10 @@ describe("selectCrossConversationHits", () => {
 
   test("enforces the absolute floor on BM25 — RRF rank is never a bar", () => {
     const out = selectCrossConversationHits(
-      [hit("telegram:BBB", 5), hit("telegram:CCC", 2)],
+      [hit("telegram:2002", 5), hit("telegram:3003", 2)],
       { ...base, minScore: 3 },
     );
-    expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
+    expect(out.map((h) => h.crossConversation)).toEqual(["telegram:2002"]);
   });
 
   test("rejects a vector-only hit with no lexical support (boilerplate class)", () => {
@@ -850,9 +864,9 @@ describe("selectCrossConversationHits", () => {
     const out = selectCrossConversationHits(
       [
         // No FTS match at all (vector-only candidate).
-        hit("telegram:BBB", 0, { ftsScore: undefined, vecScore: 0.97, rrfScore: 0.016 }),
+        hit("telegram:2002", 0, { ftsScore: undefined, vecScore: 0.97, rrfScore: 0.016 }),
         // High cosine, zero lexical overlap.
-        hit("telegram:CCC", 0, { vecScore: 0.93 }),
+        hit("telegram:3003", 0, { vecScore: 0.93 }),
       ],
       { ...base, minScore: 2, minVecScore: 0.85 },
     );
@@ -864,10 +878,10 @@ describe("selectCrossConversationHits", () => {
     // least one query term (raw BM25 > 0) but not enough for the lexical
     // leg. The vector leg exists for exactly this case.
     const out = selectCrossConversationHits(
-      [hit("telegram:BBB", 0.4, { vecScore: 0.9, rrfScore: 0.016 })],
+      [hit("telegram:2002", 0.4, { vecScore: 0.9, rrfScore: 0.016 })],
       { ...base, minScore: 2, minVecScore: 0.85 },
     );
-    expect(out.map((h) => h.crossConversation)).toEqual(["telegram:BBB"]);
+    expect(out.map((h) => h.crossConversation)).toEqual(["telegram:2002"]);
   });
 
   test("fails closed when a candidate carries no audience", () => {
@@ -875,7 +889,7 @@ describe("selectCrossConversationHits", () => {
     // the one most likely to produce unclassified hits — undefined must
     // not sail through.
     const out = selectCrossConversationHits(
-      [hit("telegram:BBB", 10, { audience: undefined })],
+      [hit("telegram:2002", 10, { audience: undefined })],
       { ...base },
     );
     expect(out).toEqual([]);

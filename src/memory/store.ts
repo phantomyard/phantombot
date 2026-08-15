@@ -51,6 +51,11 @@ export function asFactSource(v: unknown): FactSource {
     : "principal";
 }
 
+/** Coerce a stored origin string; anything unrecognised reads as `channel`. */
+export function asTurnOrigin(v: unknown): TurnOrigin {
+  return isTurnOrigin(v) ? v : "channel";
+}
+
 export interface Turn {
   id: number;
   persona: string;
@@ -79,6 +84,45 @@ export interface Turn {
    * `self`, but new assistant turns land `unverified`.
    */
   source: FactSource;
+  /**
+   * ORIGIN of this turn — the mechanism that produced it. Orthogonal to
+   * `source`, which is a TRUST tier: the two answer different questions and
+   * conflating them is what made scheduled-task output indistinguishable
+   * from a stranger's message in a group chat (both land `source: "other"`,
+   * see cli/tick.ts).
+   *
+   *   `channel`      — arrived over a chat surface (Telegram, phantomchat,
+   *                    CLI, ACP): a human wrote it, or we replied to one.
+   *   `task`         — a scheduled task wake. The prompt is one WE wrote and
+   *                    the reply is our own reasoning, unreviewed by anyone.
+   *   `notification` — a `phantombot notify` payload persisted for continuity.
+   *   `internal`     — heartbeat / nightly / other machine-driven writes.
+   *
+   * Why it matters for retrieval: `task` and `internal` content is the
+   * persona talking to itself. Surfaced later it reads as established fact
+   * when it was never checked by anyone, so it is down-weighted and labelled
+   * rather than filtered (weight + label, not a gate).
+   *
+   * Rows written before this column default to `channel`.
+   */
+  origin: TurnOrigin;
+}
+
+/**
+ * How a turn came into existence. See `Turn.origin` — this is the ORIGIN
+ * axis, deliberately separate from the `FactSource` TRUST axis.
+ */
+export type TurnOrigin = "channel" | "task" | "notification" | "internal";
+
+export const TURN_ORIGINS: readonly TurnOrigin[] = [
+  "channel",
+  "task",
+  "notification",
+  "internal",
+];
+
+export function isTurnOrigin(v: unknown): v is TurnOrigin {
+  return typeof v === "string" && TURN_ORIGINS.includes(v as TurnOrigin);
 }
 
 export interface AppendTurnInput {
@@ -94,6 +138,12 @@ export interface AppendTurnInput {
    * principal engages with it.)
    */
   source?: FactSource;
+  /**
+   * Origin axis (see Turn.origin). Optional on input; defaults to `channel`,
+   * which is correct for every chat-surface write. Non-channel writers
+   * (tick task wakes, notify, heartbeat/nightly) pass theirs explicitly.
+   */
+  origin?: TurnOrigin;
   /**
    * Index-eligibility flag. Defaults to true. Set false to QUARANTINE the
    * row — it persists and replays in history, but the turn indexer skips it
@@ -472,7 +522,11 @@ CREATE TABLE IF NOT EXISTS turns (
   -- 'principal' | 'self' | 'other' | 'unverified'. New assistant turns land
   -- 'unverified' (own unconfirmed voice); legacy rows default to 'principal'
   -- and the pre-provenance migration backfilled assistant rows to 'self'.
-  source       TEXT NOT NULL DEFAULT 'principal'
+  source       TEXT NOT NULL DEFAULT 'principal',
+  -- ORIGIN axis (how the turn was produced), orthogonal to the source
+  -- TRUST axis: 'channel' | 'task' | 'notification' | 'internal'.
+  -- Legacy rows default to 'channel'. See Turn.origin.
+  origin       TEXT NOT NULL DEFAULT 'channel'
 );
 CREATE INDEX IF NOT EXISTS idx_turns_persona_conv_time
   ON turns (persona, conversation, created_at);
@@ -576,6 +630,7 @@ interface RawDisplayRow {
   created_at: string;
   embeddable: number;
   source: string;
+  origin: string;
 }
 
 class SqliteMemoryStore implements MemoryStore {
@@ -645,6 +700,32 @@ class SqliteMemoryStore implements MemoryStore {
       );
       db.exec("UPDATE turns SET source = 'self' WHERE role = 'assistant'");
     }
+    // Idempotent migration: add turns.origin (origin axis — see Turn.origin).
+    // Existing rows default to 'channel'. Two deterministic retro-tags are
+    // applied, both keyed on markers the writers emit verbatim rather than on
+    // any fuzzy guess:
+    //   - notify.ts prefixes every persisted notification with
+    //     "[notification] ", so an assistant row with that exact prefix is a
+    //     notification and nothing else can be.
+    //   - tick task wakes run in a conversation keyed "tick:<id>"; heartbeat
+    //     and nightly run under "system:<...>".
+    // Anything unmatched stays 'channel', which is the pre-column behaviour.
+    const hasTurnOrigin = (
+      db.query("PRAGMA table_info(turns)").all() as Array<{ name: string }>
+    ).some((c) => c.name === "origin");
+    if (!hasTurnOrigin) {
+      db.exec(
+        "ALTER TABLE turns ADD COLUMN origin TEXT NOT NULL DEFAULT 'channel'",
+      );
+      db.exec("UPDATE turns SET origin = 'task' WHERE conversation LIKE 'tick:%'");
+      db.exec(
+        "UPDATE turns SET origin = 'internal' WHERE conversation LIKE 'system:%'",
+      );
+      db.exec(
+        "UPDATE turns SET origin = 'notification' " +
+          "WHERE role = 'assistant' AND text LIKE '[notification] %'",
+      );
+    }
     // Migration: re-scope durable_facts from (persona, conversation) to
     // (persona) + add the `source` provenance column. Changing a UNIQUE
     // constraint needs a table rebuild in SQLite, so we detect the pre-PR shape
@@ -699,7 +780,8 @@ class SqliteMemoryStore implements MemoryStore {
       })();
     }
     this.appendStmt = db.prepare(
-      "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable, source, origin) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     // Inner query gets most-recent-N descending; outer flips back to chronological.
     // The live-history window, floored at the /reset watermark: turns at or
@@ -740,8 +822,8 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.recentDisplayStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable, source FROM (
-         SELECT id, persona, conversation, role, text, created_at, embeddable, source
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source, origin FROM (
+         SELECT id, persona, conversation, role, text, created_at, embeddable, source, origin
          FROM turns
          WHERE persona = ?
          ORDER BY created_at DESC, id DESC
@@ -749,7 +831,7 @@ class SqliteMemoryStore implements MemoryStore {
        ) ORDER BY created_at ASC, id ASC`,
     );
     this.turnsAfterIdStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable, source
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source, origin
        FROM turns
        WHERE persona = ? AND conversation = ? AND id > ?
        ORDER BY id ASC
@@ -790,7 +872,7 @@ class SqliteMemoryStore implements MemoryStore {
     // subquery is the live window) and sit after the extractor's cursor.
     // Oldest-first so the cursor advances monotonically.
     this.turnsEvictedStmt = db.prepare(
-      `SELECT id, persona, conversation, role, text, created_at, embeddable, source
+      `SELECT id, persona, conversation, role, text, created_at, embeddable, source, origin
        FROM turns
        WHERE persona = ? AND conversation = ? AND id > ?
          AND id NOT IN (
@@ -1117,6 +1199,7 @@ class SqliteMemoryStore implements MemoryStore {
           ts,
           embeddableInt(u.embeddable),
           defaultTurnSource(u),
+          u.origin ?? "channel",
         );
         this.appendStmt.run(
           a.persona,
@@ -1126,6 +1209,7 @@ class SqliteMemoryStore implements MemoryStore {
           ts,
           embeddableInt(a.embeddable),
           defaultTurnSource(a),
+          a.origin ?? "channel",
         );
       },
     );
@@ -1140,6 +1224,7 @@ class SqliteMemoryStore implements MemoryStore {
       new Date().toISOString(),
       embeddableInt(t.embeddable),
       defaultTurnSource(t),
+      t.origin ?? "channel",
     );
   }
 
@@ -1563,6 +1648,7 @@ function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
     createdAt: new Date(r.created_at),
     embeddable: r.embeddable !== 0,
     source: asFactSource(r.source),
+    origin: asTurnOrigin(r.origin),
   }));
 }
 
