@@ -21,11 +21,10 @@
  */
 
 import { stopNoteText } from "./core/backlog.ts";
-import { memoryIndexPath, type Config } from "../config.ts";
+import { type Config } from "../config.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
-import { MemoryIndex } from "../lib/memoryIndex.ts";
 import { defaultServiceControl, selfRestart } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
@@ -70,7 +69,7 @@ export interface SlashCommandContext {
   persona: string;
   /** Conversation key, e.g. "telegram:42". Used by /reset. */
   conversation: string;
-  /** Memory store for /reset's deleteConversation call. */
+  /** Memory store for /reset's context-watermark advance and /stop's note. */
   memory: MemoryStore;
   /**
    * The harness chain — mutable. /harness reorders this in place so the
@@ -168,7 +167,11 @@ export const TELEGRAM_BOT_COMMANDS: Array<{
     command: "stop",
     description: "Abort the current turn and drop anything queued behind it",
   },
-  { command: "reset", description: "Clear this chat's history" },
+  {
+    command: "reset",
+    description:
+      "Start a fresh context window here (history is kept and stays searchable)",
+  },
   { command: "status", description: "Show harness, uptime, context usage" },
   { command: "harness", description: "List or switch the active harness" },
   {
@@ -644,39 +647,27 @@ async function handleReset(
     stoppedNote = ` (and stopped an in-flight turn that was ${elapsedS}s in)`;
   }
 
-  const removed = await ctx.memory.deleteConversation(
+  // /reset clears the LIVE CONTEXT WINDOW — it does not destroy the record.
+  // It used to delete the turn rows AND their embeddings, which made a
+  // routine "clear this chat" command silently unrecoverable: one /reset on a
+  // long-running DM took 4,009 turns and every vector with it, and nothing
+  // else in the system had a durable copy. Now it advances a per-conversation
+  // watermark: nothing is replayed into the prompt, while the turns, the
+  // index, and durable facts all survive and stay retrievable.
+  const dropped = await ctx.memory.resetConversationContext(
     ctx.persona,
     ctx.conversation,
   );
-  let removedIndexedTurns = false;
-  if (ctx.config?.retrieval?.turnIndexing.enabled) {
-    let ix: MemoryIndex | undefined;
-    try {
-      ix = await MemoryIndex.open(memoryIndexPath(ctx.persona));
-      ix.deleteConversationTurns(ctx.persona, ctx.conversation);
-      removedIndexedTurns = true;
-    } catch (e) {
-      log.warn("commands: /reset failed to clear turn index", {
-        chatId: ctx.chatId,
-        persona: ctx.persona,
-        conversation: ctx.conversation,
-        error: (e as Error).message,
-      });
-    } finally {
-      ix?.close();
-    }
-  }
   log.info("commands: /reset", {
     chatId: ctx.chatId,
     persona: ctx.persona,
     conversation: ctx.conversation,
-    deletedTurns: removed,
-    removedIndexedTurns,
+    droppedFromWindow: dropped,
     abortedActiveTurn: Boolean(ctx.activeTurn),
   });
-  const noun = removed === 1 ? "turn" : "turns";
+  const noun = dropped === 1 ? "turn" : "turns";
   return {
-    reply: `reset: cleared ${removed} ${noun} from this chat${stoppedNote}`,
+    reply: `reset: cleared ${dropped} ${noun} from this chat's context — history kept, still searchable${stoppedNote}`,
   };
 }
 

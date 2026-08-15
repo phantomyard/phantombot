@@ -387,3 +387,71 @@ describe("MemoryStore — concurrent open under a transient cross-process lock",
     }
   });
 });
+
+describe("MemoryStore.resetConversationContext (non-destructive /reset)", () => {
+  test("empties the live window but keeps every turn on disk", async () => {
+    await append("phantom", "c1", "user", "one");
+    await append("phantom", "c1", "assistant", "two");
+
+    const dropped = await store.resetConversationContext("phantom", "c1");
+    expect(dropped).toBe(2);
+
+    expect(await store.recentTurns("phantom", "c1", 10)).toEqual([]);
+    const rows = await store.turnsAfterId("phantom", "c1", 0);
+    expect(rows.map((r) => r.text)).toEqual(["one", "two"]);
+  });
+
+  test("only the reset conversation is affected", async () => {
+    await append("phantom", "c1", "user", "mine");
+    await append("phantom", "c2", "user", "theirs");
+
+    await store.resetConversationContext("phantom", "c1");
+
+    expect(await store.recentTurns("phantom", "c1", 10)).toEqual([]);
+    expect(await store.recentTurns("phantom", "c2", 10)).toEqual([
+      { role: "user", text: "theirs" },
+    ]);
+  });
+
+  test("turns appended after the reset replay normally", async () => {
+    await append("phantom", "c1", "user", "old");
+    await store.resetConversationContext("phantom", "c1");
+    await append("phantom", "c1", "user", "new");
+
+    expect(await store.recentTurns("phantom", "c1", 10)).toEqual([
+      { role: "user", text: "new" },
+    ]);
+  });
+
+  test("the watermark is monotonic — a later reset never un-hides earlier turns", async () => {
+    await append("phantom", "c1", "user", "a");
+    await store.resetConversationContext("phantom", "c1");
+    await append("phantom", "c1", "user", "b");
+    // Second reset hides "b" too; "a" must stay hidden, not come back.
+    expect(await store.resetConversationContext("phantom", "c1")).toBe(1);
+    expect(await store.recentTurns("phantom", "c1", 10)).toEqual([]);
+
+    await append("phantom", "c1", "user", "c");
+    expect(await store.recentTurns("phantom", "c1", 10)).toEqual([
+      { role: "user", text: "c" },
+    ]);
+  });
+
+  test("resetting an empty conversation reports 0 and is safe", async () => {
+    expect(await store.resetConversationContext("phantom", "nope")).toBe(0);
+    expect(await store.recentTurns("phantom", "nope", 10)).toEqual([]);
+  });
+
+  test("a reset sibling doesn't leak pre-reset turns into the prefix window", async () => {
+    await append("phantom", "phantomchat:group:a", "user", "hidden");
+    await append("phantom", "phantomchat:group:b", "user", "visible");
+    await store.resetConversationContext("phantom", "phantomchat:group:a");
+
+    const rows = await store.recentTurnsForConversationPrefix(
+      "phantom",
+      "phantomchat:group:",
+      10,
+    );
+    expect(rows.map((r) => r.text)).toEqual(["visible"]);
+  });
+});

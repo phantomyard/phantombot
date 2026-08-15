@@ -181,7 +181,7 @@ describe("/stop", () => {
 // ---------------------------------------------------------------------------
 
 describe("/reset", () => {
-  test("deletes turns for the active conversation only", async () => {
+  test("clears the context window for the active conversation only", async () => {
     // Seed two conversations under the same persona.
     await memory.appendTurn({
       persona: "phantom",
@@ -214,6 +214,66 @@ describe("/reset", () => {
   test("reports zero gracefully when there's nothing to clear", async () => {
     const r = await handleSlashCommand("/reset", ctx());
     expect(r!.reply).toContain("0 turns");
+  });
+
+  // The regression this whole change exists for. /reset used to delete the
+  // turn rows AND their embeddings, so a routine "clear this chat" silently
+  // destroyed history nothing else held a durable copy of. It must now clear
+  // only the replayed window.
+  test("does NOT delete the underlying turns — history survives a reset", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "user",
+      text: "remember me",
+    });
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "assistant",
+      text: "I will",
+    });
+
+    await handleSlashCommand("/reset", ctx());
+
+    // Live window: empty, as the user asked for.
+    expect(await memory.recentTurns("phantom", "telegram:42", 10)).toEqual([]);
+    // Durable record: fully intact, still retrievable.
+    const survivors = await memory.turnsAfterId("phantom", "telegram:42", 0);
+    expect(survivors.map((t) => t.text)).toEqual(["remember me", "I will"]);
+  });
+
+  test("turns after a reset are replayed again — the window refills", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "user",
+      text: "before",
+    });
+    await handleSlashCommand("/reset", ctx());
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "user",
+      text: "after",
+    });
+
+    expect(await memory.recentTurns("phantom", "telegram:42", 10)).toEqual([
+      { role: "user", text: "after" },
+    ]);
+  });
+
+  test("a second reset with no new turns is a no-op, not a re-clear", async () => {
+    await memory.appendTurn({
+      persona: "phantom",
+      conversation: "telegram:42",
+      role: "user",
+      text: "once",
+    });
+    const first = await handleSlashCommand("/reset", ctx());
+    expect(first!.reply).toContain("1 turn ");
+    const second = await handleSlashCommand("/reset", ctx());
+    expect(second!.reply).toContain("0 turns");
   });
 
   test("singular noun for exactly one turn deleted", async () => {

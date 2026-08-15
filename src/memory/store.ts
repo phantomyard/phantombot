@@ -256,6 +256,19 @@ export interface MemoryStore {
    */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /**
+   * NON-DESTRUCTIVE /reset: advance this conversation's live-context
+   * watermark to its newest turn, so `recentTurns` replays nothing until new
+   * turns arrive. Turns, their embeddings, durable facts and extractor state
+   * all SURVIVE — only the replayed window is cleared, which is what /reset
+   * is actually for. Returns the number of turns dropped out of the window
+   * (those above the previous watermark). Idempotent: a second reset with no
+   * new turns drops 0. The watermark is monotonic and never lowered.
+   */
+  resetConversationContext(
+    persona: string,
+    conversation: string,
+  ): Promise<number>;
+  /**
    * Delete the quarantined (embeddable=0) turns for a (persona,
    * conversation) pair; returns rows deleted. Called after a TRUSTED turn
    * succeeds (orchestrator/turn.ts): by then the held untrusted payload has
@@ -538,6 +551,20 @@ CREATE TABLE IF NOT EXISTS durable_fact_pending (
 );
 CREATE INDEX IF NOT EXISTS idx_durable_fact_pending_conv
   ON durable_fact_pending (persona, conversation, turn_id);
+
+-- Live-context watermark for /reset. A row means "replay only turns with
+-- id > reset_turn_id in this conversation's live history window". The turns
+-- themselves are NEVER deleted — /reset draws a line, it does not destroy the
+-- record, so retrieval, the turn index, and durable-fact extraction keep
+-- seeing the full history. Monotonic: the watermark only ever
+-- rises, so a reset can't un-hide turns an earlier reset already hid.
+CREATE TABLE IF NOT EXISTS conversation_reset (
+  persona       TEXT NOT NULL,
+  conversation  TEXT NOT NULL,
+  reset_turn_id INTEGER NOT NULL DEFAULT 0,
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (persona, conversation)
+);
 `;
 
 interface RawDisplayRow {
@@ -583,6 +610,11 @@ class SqliteMemoryStore implements MemoryStore {
   private claimEvictedTxn;
   private commitExtractionTxn;
   private deleteConversationTxn;
+  private maxTurnIdStmt;
+  private getResetWatermarkStmt;
+  private countTurnsAboveWatermarkStmt;
+  private upsertResetWatermarkStmt;
+  private resetConversationContextTxn;
   private appendPairTxn;
   private closed = false;
 
@@ -670,11 +702,17 @@ class SqliteMemoryStore implements MemoryStore {
       "INSERT INTO turns (persona, conversation, role, text, created_at, embeddable, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     // Inner query gets most-recent-N descending; outer flips back to chronological.
+    // The live-history window, floored at the /reset watermark: turns at or
+    // below it stay in the DB (and in the index, and in durable facts) but are
+    // no longer replayed into the prompt. COALESCE covers the common case of a
+    // conversation that has never been reset (no row → 0 → everything shows).
     this.recentStmt = db.prepare(
       `SELECT role, text FROM (
          SELECT id, role, text, created_at
          FROM turns
          WHERE persona = ? AND conversation = ?
+           AND id > COALESCE((SELECT reset_turn_id FROM conversation_reset
+                              WHERE persona = ? AND conversation = ?), 0)
          ORDER BY created_at DESC, id DESC
          LIMIT ?
        ) ORDER BY created_at ASC, id ASC`,
@@ -690,6 +728,13 @@ class SqliteMemoryStore implements MemoryStore {
          WHERE persona = ?
            AND conversation LIKE ? || '%'
            AND conversation IS NOT ?
+           -- Correlated (not bound): this spans MANY sibling conversations,
+           -- each with its own watermark. Without it, a sibling that was
+           -- /reset would leak its pre-reset turns back in through the
+           -- cross-conversation briefing window.
+           AND id > COALESCE((SELECT r.reset_turn_id FROM conversation_reset r
+                              WHERE r.persona = turns.persona
+                                AND r.conversation = turns.conversation), 0)
          ORDER BY created_at DESC, id DESC
          LIMIT ?
        ) ORDER BY created_at ASC, id ASC`,
@@ -1003,6 +1048,59 @@ class SqliteMemoryStore implements MemoryStore {
         return turns;
       },
     );
+    this.maxTurnIdStmt = db.prepare(
+      "SELECT COALESCE(MAX(id), 0) AS maxId FROM turns WHERE persona = ? AND conversation = ?",
+    );
+    this.getResetWatermarkStmt = db.prepare(
+      "SELECT reset_turn_id AS mark FROM conversation_reset WHERE persona = ? AND conversation = ?",
+    );
+    this.countTurnsAboveWatermarkStmt = db.prepare(
+      "SELECT COUNT(*) AS n FROM turns WHERE persona = ? AND conversation = ? AND id > ?",
+    );
+    // MAX(existing, new) keeps the watermark monotonic. Belt-and-braces: the
+    // txn already refuses to lower it, but a concurrent writer that inserted
+    // turns between our read and write must not be able to rewind it either.
+    this.upsertResetWatermarkStmt = db.prepare(
+      `INSERT INTO conversation_reset (persona, conversation, reset_turn_id, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (persona, conversation) DO UPDATE SET
+         reset_turn_id = MAX(conversation_reset.reset_turn_id, excluded.reset_turn_id),
+         updated_at    = excluded.updated_at`,
+    );
+    // Non-destructive /reset. Deliberately touches NOTHING but the watermark:
+    // no turn deletes, no index deletes, and the durable-fact cursor/leases
+    // are left alone precisely BECAUSE the turns survive — wiping the cursor
+    // here would re-extract the entire history from the top on the next pass.
+    this.resetConversationContextTxn = db.transaction(
+      (persona: string, conversation: string, ts: string): number => {
+        const prev =
+          (
+            this.getResetWatermarkStmt.get(persona, conversation) as
+              | { mark: number }
+              | undefined
+          )?.mark ?? 0;
+        const max =
+          (
+            this.maxTurnIdStmt.get(persona, conversation) as {
+              maxId: number;
+            }
+          ).maxId;
+        const hidden = (
+          this.countTurnsAboveWatermarkStmt.get(
+            persona,
+            conversation,
+            prev,
+          ) as { n: number }
+        ).n;
+        this.upsertResetWatermarkStmt.run(
+          persona,
+          conversation,
+          Math.max(prev, max),
+          ts,
+        );
+        return hidden;
+      },
+    );
     // Atomic user+assistant pair insert. Both rows share the same
     // created_at; ordering tiebreaks on the autoincrement id, so the
     // user turn (inserted first) always sorts before the assistant turn.
@@ -1065,7 +1163,13 @@ class SqliteMemoryStore implements MemoryStore {
     conversation: string,
     n: number,
   ): Promise<Array<{ role: Role; text: string }>> {
-    return this.recentStmt.all(persona, conversation, n) as Array<{
+    return this.recentStmt.all(
+      persona,
+      conversation,
+      persona,
+      conversation,
+      n,
+    ) as Array<{
       role: Role;
       text: string;
     }>;
@@ -1359,6 +1463,17 @@ class SqliteMemoryStore implements MemoryStore {
     // transaction so a reset never leaks facts into the next conversation on the
     // same key. Returns the turn count for back-compat.
     return this.deleteConversationTxn(persona, conversation) as number;
+  }
+
+  async resetConversationContext(
+    persona: string,
+    conversation: string,
+  ): Promise<number> {
+    return this.resetConversationContextTxn(
+      persona,
+      conversation,
+      new Date().toISOString(),
+    ) as number;
   }
 
   async purgeQuarantined(
