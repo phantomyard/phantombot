@@ -72,6 +72,21 @@ interface TurnResult {
 }
 
 /** Run one harness turn for the nightly conversation. */
+/**
+ * Default processing date for a nightly run: yesterday, in UTC calendar
+ * arithmetic (UTC date minus one calendar day). The timer fires at 02:00
+ * local, so "today" at fire time is the day just beginning — the file to
+ * process is the one that closed at midnight. Subtracting a calendar day
+ * (not 86400s) stays correct across leap seconds / calendar boundaries.
+ */
+export function defaultNightlyDate(now: Date = new Date()): string {
+  const d = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 async function runNightlyTurn(opts: {
   persona: string;
   conversation: string;
@@ -139,7 +154,11 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     return 2;
   }
 
-  const today = input.today ?? new Date().toISOString().slice(0, 10);
+  // The nightly timer fires at 02:00 to process the day that just CLOSED —
+  // default to yesterday, not the day that has barely begun. Without this
+  // every unattended run looks for a daily file that doesn't exist yet and
+  // silently no-ops. `input.today` (--date) stays the override for backfill.
+  const today = input.today ?? defaultNightlyDate();
   const conversation = nightlyConversationKey(today);
   const memory = await openMemoryStore(config.memoryDbPath);
   const runStartedAt = Date.now();

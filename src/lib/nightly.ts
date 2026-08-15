@@ -246,7 +246,7 @@ export function buildNightlyPrompt(
   personaName: string,
   today: string,
 ): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
+  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Processing date: ${today} (the day that just closed).
 
 This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
 
@@ -307,7 +307,7 @@ When you're done, your final reply (which won't go anywhere user-facing) should 
  * and the isolation note, shared by all five stage prompts.
  */
 function nightlyStagePreamble(personaName: string, today: string): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
+  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Processing date: ${today} (the day that just closed).
 
 This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
 
