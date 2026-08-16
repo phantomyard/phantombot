@@ -183,14 +183,19 @@ If you add a new untrusted entry point (a new inbound channel, a new `ask`-style
 
 Phantombot ships on **Linux (systemd --user)**, **macOS (launchd, per-user LaunchAgents)**, and **Windows (per-user Task Scheduler logon task plus three periodic tasks)**. `lib/platform.ts` is the single router that decides which backend to talk to; each backend sits behind a common `ServiceControl` surface with an injectable runner so tests never touch the real service manager. Windows uses `InteractiveToken` and the current user's SID, so installation needs no password or elevation; installation preserves healthy existing task definitions and only repairs missing/stale entries. Windows `start`/`restart` re-enable the task and use a hidden native detached launch for SSH/terminal control because Task Scheduler cannot `/Run` an interactive-token task from a non-interactive session. `windowsJob.ts` assigns harness children to kill-on-close Job Objects.
 
-On Linux, `phantombot install` creates **four** systemd-user units:
+On Linux, `phantombot install` creates **three** systemd-user units:
 
 | Unit | Cadence | What it does |
 |---|---|---|
 | `phantombot.service` | always-on | `phantombot run` — Telegram listener |
 | `phantombot-heartbeat.timer` → `.service` | every 30 min | mechanical maintenance, no LLM |
-| `phantombot-nightly.timer` → `.service` | daily 02:00 | cognitive distillation, LLM |
 | `phantombot-tick.timer` → `.service` | every 1 min | fires due scheduled tasks |
+
+There is deliberately no nightly unit. The cognitive pass is event-driven —
+`run` fires a sweep at startup, and the heartbeat fires one when it notices the
+calendar day changed since its last fire. A clock would miss the day entirely on
+any box that sleeps at 02:00. Installs that predate this have their
+`phantombot-nightly.timer` stopped, disabled and deleted on the next heartbeat.
 
 Every service has **two `EnvironmentFile=` lines**:
 

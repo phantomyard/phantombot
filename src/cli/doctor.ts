@@ -58,9 +58,6 @@ import {
   HEARTBEAT_TIMER_NAME,
   heartbeatServicePath,
   heartbeatTimerPath,
-  NIGHTLY_TIMER_NAME,
-  nightlyServicePath,
-  nightlyTimerPath,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
   type SystemctlRunner,
@@ -786,8 +783,6 @@ async function defaultCheckSystemd(
       name: basename(heartbeatServicePath()),
     },
     { path: heartbeatTimerPath(), name: basename(heartbeatTimerPath()) },
-    { path: nightlyServicePath(), name: basename(nightlyServicePath()) },
-    { path: nightlyTimerPath(), name: basename(nightlyTimerPath()) },
     { path: tickServicePath(), name: basename(tickServicePath()) },
     { path: tickTimerPath(), name: basename(tickTimerPath()) },
   ];
@@ -819,7 +814,9 @@ async function defaultCheckSystemd(
         forceRearmTimers: staleTimers,
       });
       repaired =
-        heal.rewrote.length > 0 || heal.repairedTimers.length > 0;
+        heal.rewrote.length > 0 ||
+        heal.repairedTimers.length > 0 ||
+        heal.removedRetired.length > 0;
     } catch (e) {
       log.warn("doctor: systemd heal failed", {
         error: (e as Error).message,
@@ -874,11 +871,10 @@ async function listInactiveTimers(
   systemctl: SystemctlRunner,
 ): Promise<string[]> {
   const out: string[] = [];
-  for (const t of [
-    HEARTBEAT_TIMER_NAME,
-    NIGHTLY_TIMER_NAME,
-    TICK_TIMER_NAME,
-  ]) {
+  // Two timers, not three: the nightly timer is retired (the sweep runs on
+  // startup and on the heartbeat's day-rollover check), so an absent one is
+  // correct rather than a fault to repair.
+  for (const t of [HEARTBEAT_TIMER_NAME, TICK_TIMER_NAME]) {
     const r = await systemctl.run(["--user", "is-active", t]);
     if (r.exitCode !== 0 || r.stdout.trim() !== "active") {
       out.push(t);

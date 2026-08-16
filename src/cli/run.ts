@@ -75,7 +75,7 @@ import {
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
-import { spawn } from "node:child_process";
+import { spawnNightlySweep } from "../lib/nightlyTrigger.ts";
 import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
 import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
@@ -465,7 +465,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       }),
   );
 
-  // Startup nightly sweep — the whole story for boxes that are off at 02:00.
+  // Startup nightly sweep — one of the two triggers that replaced the timer.
   // The nightly is idempotent (it processes whatever the ledger says is
   // unprocessed or changed, and no-ops when nothing is), so this is safe to
   // fire on every start: an always-on server finds nothing pending and exits
@@ -931,31 +931,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
 }
 
 /**
- * Fire a detached `phantombot nightly` for the given persona.
+ * Fire a detached `phantombot nightly` for the given persona at startup.
  *
- * Detached + unref'd on purpose: a first sweep over a long backlog can run for
- * many minutes, and it must not hold the daemon's event loop or die with a
- * restart. The nightly holds its own in-flight marker, so a start-restart-start
- * cycle cannot stack two sweeps on the same dates.
+ * Thin alias over the shared trigger (see src/lib/nightlyTrigger.ts) — startup
+ * is one of the two events that replace the retired 02:00 timer; the heartbeat's
+ * day-rollover check is the other. The nightly holds its own in-flight marker,
+ * so a start-restart-start cycle cannot stack two sweeps on the same dates.
  */
 export function spawnStartupNightly(persona: string): void {
-  const entry = process.argv[1] ?? "";
-  const dev = entry.endsWith(".ts") || entry.endsWith(".js");
-  const args = dev
-    ? [entry, "nightly", "--persona", persona]
-    : ["nightly", "--persona", persona];
-  try {
-    const child = spawn(process.execPath, args, {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-    log.info("run: spawned startup nightly sweep", { persona });
-  } catch (e) {
-    log.warn("run: could not spawn startup nightly sweep", {
-      error: (e as Error).message,
-    });
-  }
+  spawnNightlySweep(persona, "startup");
 }
 
 export default defineCommand({

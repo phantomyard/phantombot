@@ -1512,17 +1512,22 @@ the ledger's hash stable. Once both join, phantombot refreshes the search index
 itself (incremental FTS + embeddings), so a new KB note is searchable without
 the model having to remember to ask.
 
-Because the ledger decides what to process, the pass is idempotent: re-running
-it with nothing pending costs nothing, and a machine that was asleep at 02:00
-just sweeps a longer backlog on its next run (the `run` daemon fires one at
-startup). There is no `--resume` and no catch-up mode. Useful flags:
+The sweep has **no timer**. It is triggered by two events instead: `run` fires
+one at startup, and the heartbeat fires one the first time it runs on a new
+calendar day (the previous day's file has closed by then). Rollover *detection*
+rather than a file-creation watch, because a daily file is created lazily on the
+first capture — on a quiet day it may never exist, and a creation hook would
+starve. Because the ledger decides what to process, both triggers are safe to
+fire redundantly: re-running with nothing pending costs nothing, and a machine
+that was off for a week sweeps the backlog when it comes back. There is no
+`--resume` and no catch-up mode. Useful flags:
 `--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to change the
 per-run cap (default 10), `--force` to take over a stuck in-flight marker.
 
 `/status` shows a `dreaming:` line — `OK (nothing pending)`,
 `RUNNING (2/5 dates, on 2026-06-02)`, `WARN (2 dates pending …)` or `ERR`.
-Health is backlog-driven, not schedule-driven: a missed 02:00 with nothing
-pending is still OK. `phantombot doctor` reports the same signal (plus capture
+Health is backlog-driven, not schedule-driven: nothing pending is OK no matter
+when the last sweep ran. `phantombot doctor` reports the same signal (plus capture
 health, timers and connectors) but never runs the nightly itself.
 
 ## Maintenance
@@ -1539,8 +1544,7 @@ Installed user units:
 |---|---|---|
 | `phantombot.service` | Always on | Telegram listener |
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
-| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance |
-| `phantombot-nightly.timer` | Daily | LLM-backed memory distillation |
+| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance + fires the nightly sweep on day rollover |
 
 Update commands:
 

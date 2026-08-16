@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -192,8 +193,6 @@ describe("installPhantombotUnit", () => {
       ["--user", "start", "phantombot.service"],
       ["--user", "enable", "phantombot-heartbeat.timer"],
       ["--user", "start", "phantombot-heartbeat.timer"],
-      ["--user", "enable", "phantombot-nightly.timer"],
-      ["--user", "start", "phantombot-nightly.timer"],
       ["--user", "enable", "phantombot-tick.timer"],
       ["--user", "start", "phantombot-tick.timer"],
     ]);
@@ -278,13 +277,11 @@ describe("ensureSystemdUnitsCurrent", () => {
     expect(r.rewrote).toEqual([]);
     expect(r.backups).toEqual([]);
     expect(r.repairedTimers).toEqual([]);
-    // No daemon-reload, no enable, no start — only the 6 inspect calls
-    // (is-enabled + is-active for each of the 3 timers).
+    // No daemon-reload, no enable, no start — only the 4 inspect calls
+    // (is-enabled + is-active for each of the 2 timers).
     expect(sys.calls).toEqual([
       ["--user", "is-enabled", "phantombot-heartbeat.timer"],
       ["--user", "is-active", "phantombot-heartbeat.timer"],
-      ["--user", "is-enabled", "phantombot-nightly.timer"],
-      ["--user", "is-active", "phantombot-nightly.timer"],
       ["--user", "is-enabled", "phantombot-tick.timer"],
       ["--user", "is-active", "phantombot-tick.timer"],
     ]);
@@ -302,10 +299,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       { exitCode: 1, stdout: "disabled\n", stderr: "" },
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
-      // nightly
-      { exitCode: 1, stdout: "disabled\n", stderr: "" },
-      { exitCode: 3, stdout: "inactive\n", stderr: "" },
-      { exitCode: 0, stdout: "", stderr: "" },
       // tick
       { exitCode: 1, stdout: "disabled\n", stderr: "" },
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
@@ -320,8 +313,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       [
         "phantombot-heartbeat.service",
         "phantombot-heartbeat.timer",
-        "phantombot-nightly.service",
-        "phantombot-nightly.timer",
         "phantombot-tick.service",
         "phantombot-tick.timer",
         "phantombot.service",
@@ -330,7 +321,6 @@ describe("ensureSystemdUnitsCurrent", () => {
     expect(r.backups).toEqual([]); // nothing pre-existing to back up
     expect(r.repairedTimers).toEqual([
       "phantombot-heartbeat.timer",
-      "phantombot-nightly.timer",
       "phantombot-tick.timer",
     ]);
     // Verify each canonical body landed on disk.
@@ -388,9 +378,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       isEnabledActive(),
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
-      // nightly OK
-      isEnabledActive(),
-      isActiveActive(),
       // tick OK
       isEnabledActive(),
       isActiveActive(),
@@ -431,9 +418,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" }, // restart
-      // nightly OK, not in the force set → left alone
-      isEnabledActive(),
-      isActiveActive(),
       // tick OK, not in the force set → left alone
       isEnabledActive(),
       isActiveActive(),
@@ -485,9 +469,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" }, // restart
-      // nightly: unchanged, enabled + active → left alone
-      isEnabledActive(),
-      isActiveActive(),
       // tick: unchanged, enabled + active → left alone
       isEnabledActive(),
       isActiveActive(),
@@ -505,11 +486,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       "--user",
       "restart",
       "phantombot-heartbeat.timer",
-    ]);
-    expect(sys.calls).not.toContainEqual([
-      "--user",
-      "restart",
-      "phantombot-nightly.timer",
     ]);
     expect(sys.calls).not.toContainEqual([
       "--user",
@@ -534,9 +510,6 @@ describe("ensureSystemdUnitsCurrent", () => {
       isEnabledActive(),
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" }, // enable --now
-      // nightly OK
-      isEnabledActive(),
-      isActiveActive(),
       // tick OK
       isEnabledActive(),
       isActiveActive(),
@@ -559,6 +532,68 @@ describe("ensureSystemdUnitsCurrent", () => {
       "restart",
       "phantombot-heartbeat.timer",
     ]);
+  });
+
+  test("never generates the retired nightly units", () => {
+    const targets = phantombotUnitTargets("/usr/local/bin/phantombot");
+    expect(targets.map((t) => t.unit)).toEqual([
+      "phantombot.service",
+      "phantombot-heartbeat.service",
+      "phantombot-heartbeat.timer",
+      "phantombot-tick.service",
+      "phantombot-tick.timer",
+    ]);
+  });
+
+  test("tears down a nightly timer left behind by an older install", async () => {
+    // The upgrade case: unit files from a pre-retirement install are on disk
+    // and the timer is armed at 02:00. The heal must stop + disable + delete
+    // it, or the box keeps firing a redundant sweep forever.
+    const bin = "/usr/local/bin/phantombot";
+    await writeFile(ngServicePath, "[Service]\nExecStart=old nightly\n", "utf8");
+    await writeFile(ngTimerPath, "[Timer]\nOnCalendar=*-*-* 02:00:00\n", "utf8");
+    const sys = new FakeSystemctl();
+
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+    });
+
+    expect(r.removedRetired.sort()).toEqual([
+      "phantombot-nightly.service",
+      "phantombot-nightly.timer",
+    ]);
+    expect(existsSync(ngTimerPath)).toBe(false);
+    expect(existsSync(ngServicePath)).toBe(false);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "stop",
+      "phantombot-nightly.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "disable",
+      "phantombot-nightly.timer",
+    ]);
+    // The removal itself justifies a daemon-reload even if no unit drifted.
+    expect(sys.calls).toContainEqual(["--user", "daemon-reload"]);
+  });
+
+  test("costs zero systemctl calls when no retired unit is on disk", async () => {
+    // This runs on EVERY heartbeat, so the common case (nothing to clean up)
+    // must not talk to systemd at all.
+    const bin = "/usr/local/bin/phantombot";
+    const sys = new FakeSystemctl();
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+    });
+    expect(r.removedRetired).toEqual([]);
+    expect(
+      sys.calls.filter((c) => c.some((a) => a.includes("nightly"))),
+    ).toEqual([]);
   });
 });
 

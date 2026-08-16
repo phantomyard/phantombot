@@ -5,7 +5,7 @@
  * against the ledger in `memory/.nightly-state.json` (mtime, then content
  * hash), and processes every date that is new, that grew since it was
  * processed, or whose last pass didn't finish. Running it twice in a row
- * costs nothing; a box that slept through 02:00 just sweeps a longer backlog
+ * costs nothing; a box that was off for a week just sweeps a longer backlog
  * on the next run. That is why there is no `--resume`, no `--catch-up` and no
  * repair path in `doctor` — one owner, one code path.
  *

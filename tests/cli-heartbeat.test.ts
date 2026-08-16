@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 import { runHeartbeatCli } from "../src/cli/heartbeat.ts";
 import type { Config } from "../src/config.ts";
@@ -54,6 +54,17 @@ beforeEach(async () => {
 afterEach(async () => {
   await rmrf(workdir);
 });
+
+/**
+ * Write the heartbeat's last-fired marker with an explicit timestamp, so a
+ * test can model "the previous fire was yesterday" without waiting a day.
+ * Same format `recordHeartbeatFired` writes.
+ */
+async function writeMarker(at: Date): Promise<void> {
+  const p = heartbeatMarkerPath();
+  await mkdir(dirname(p), { recursive: true });
+  await writeFile(p, `ISO=${at.toISOString()} runs=1\n`, "utf8");
+}
 
 describe("runHeartbeatCli", () => {
   test("happy path returns 0 and prints summary", async () => {
@@ -128,6 +139,75 @@ describe("runHeartbeatCli", () => {
       },
     });
     // Primary work still completes and exit is 0; the heal failure is logged but swallowed.
+    expect(code).toBe(0);
+    expect(out.text).toContain("heartbeat ok");
+  });
+
+  test("a day boundary since the last fire spawns the nightly sweep", async () => {
+    // This is the replacement for the 02:00 timer: the heartbeat sees that the
+    // previous fire was recorded on an earlier calendar day, which means
+    // yesterday's daily file has closed, and fires a detached sweep.
+    await writeMarker(new Date(Date.now() - 36 * 3_600_000));
+    const spawned: Array<[string, string]> = [];
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: (persona, reason) => spawned.push([persona, reason]),
+    });
+    expect(code).toBe(0);
+    expect(spawned).toEqual([["phantom", "rollover"]]);
+    expect(out.text).toContain("day rolled over");
+  });
+
+  test("a fire earlier the same day does not spawn a sweep", async () => {
+    await writeMarker(new Date());
+    const spawned: string[] = [];
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: (persona) => spawned.push(persona),
+    });
+    expect(code).toBe(0);
+    expect(spawned).toEqual([]);
+    expect(out.text).not.toContain("day rolled over");
+  });
+
+  test("first-ever heartbeat (no marker) does not spawn a sweep", async () => {
+    // `run` already fires a startup sweep; guessing here would double up.
+    const spawned: string[] = [];
+    const code = await runHeartbeatCli({
+      config,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: (persona) => spawned.push(persona),
+    });
+    expect(code).toBe(0);
+    expect(spawned).toEqual([]);
+  });
+
+  test("a spawn failure does not break the heartbeat", async () => {
+    await writeMarker(new Date(Date.now() - 36 * 3_600_000));
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: () => {
+        throw new Error("fork failed");
+      },
+    });
     expect(code).toBe(0);
     expect(out.text).toContain("heartbeat ok");
   });

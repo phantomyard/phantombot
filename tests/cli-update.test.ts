@@ -575,7 +575,12 @@ describe("runUpdate post-swap systemd heal", () => {
       refreshCompletions: false,
       healSystemdUnits: async (bin) => {
         called.push(bin);
-        return { rewrote: [], backups: [], repairedTimers: [] };
+        return {
+          rewrote: [],
+          backups: [],
+          repairedTimers: [],
+          removedRetired: [],
+        };
       },
     });
     expect(code).toBe(0);
@@ -601,6 +606,7 @@ describe("runUpdate post-swap systemd heal", () => {
         rewrote: ["phantombot-tick.timer", "phantombot.service"],
         backups: [],
         repairedTimers: ["phantombot-tick.timer"],
+        removedRetired: [],
       }),
     });
     expect(code).toBe(0);

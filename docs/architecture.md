@@ -36,6 +36,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |
 | `src/memory/store.ts` | bun:sqlite wrapper. `turns` table (`appendTurn`, `recentTurns`, …) + `capture_log` table (`appendCapture`, `lastCaptureAt`, `countCapturesSince`, turn counters for the nudge/doctor). | `bun:sqlite` |
 | `src/lib/nightly.ts` | Two-stage model + prompt bodies, the `.nightly-state.json` ledger (`sweepDailyFiles`, `dateRecord`), and `nightlyHealth` for `/status` + doctor. | filesystem |
+| `src/lib/nightlyTrigger.ts` | When the sweep runs: `dayRolledOver` (heartbeat trigger) + `spawnNightlySweep` (detached fire, also used by `run` at startup). | `node:child_process` |
 | `src/lib/indexRefresh.ts` | `refreshPersonaIndex`: incremental FTS + embedding refresh, called in code by the nightly after both stages join. | `lib/memoryIndex`, `lib/embedJob` |
 | `src/cli/doctor.ts` | `phantombot doctor`: reports the nightly ledger (read-only) + `capture_log`, repairs units/timers/connectors. | `memory/store`, `lib/nightly` |
 | `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
@@ -128,15 +129,16 @@ Three properties worth knowing when touching this code:
 3. **The nightly is a sweep, and the sweep is the idempotency mechanism.** Each
    run diffs the daily files against a ledger in `.nightly-state.json`
    (mtime + size, then content hash) and processes whatever is new, grew, or
-   half-finished. Per date it runs exactly two harness turns — `distill`
+   half-finished. It is triggered by startup and by the heartbeat detecting a
+   calendar-day rollover — there is no nightly timer. Per date it runs exactly
+   two harness turns — `distill`
    (drawers + MEMORY.md) and `kb` — **concurrently**, because their write
    targets are disjoint; neither may write back to the daily file, or the hash
    would change and the date would reprocess forever. The index refresh that
    used to live in the KB prompt now runs in code after both stages join
    (`refreshPersonaIndex`), which both guarantees it and orders it after the
    writes. There is no `--resume` and no catch-up mode: a half-done date is just
-   a date the ledger doesn't call done, and `run` fires a sweep at startup for
-   machines that are off at 02:00. `doctor` reports this state; it no longer
+   a date the ledger doesn't call done. `doctor` reports this state; it no longer
    repairs it, so the job has one owner.
 
 ## Open design questions

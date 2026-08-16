@@ -17,7 +17,6 @@ import {
   defaultTaskSchedulerServiceControl,
   ensureTasksCurrent,
   generateHeartbeatTaskXml,
-  generateNightlyTaskXml,
   generatePhantombotTaskXml,
   generateTickTaskXml,
   daemonKillOrder,
@@ -247,15 +246,6 @@ describe("companion task schedules", () => {
     expect(xml).not.toContain("<RestartOnFailure>");
   });
 
-  test("nightly fires daily at 02:00 (calendar trigger)", () => {
-    const xml = generateNightlyTaskXml(SID, BIN, PERSONA);
-    expect(xml).toContain(`<URI>${NAMES.nightly}</URI>`);
-    expect(xml).toContain("<CalendarTrigger>");
-    expect(xml).toContain("<ScheduleByDay>");
-    expect(xml).toContain("<DaysInterval>1</DaysInterval>");
-    expect(xml).toContain("2020-01-01T02:00:00");
-  });
-
   test("tick repeats every minute", () => {
     const xml = generateTickTaskXml(SID, BIN, PERSONA);
     expect(xml).toContain(`<URI>${NAMES.tick}</URI>`);
@@ -272,7 +262,7 @@ describe("XML escaping", () => {
 });
 
 describe("installPhantombotTasks", () => {
-  test("imports all four tasks with /F, in main→companions order", async () => {
+  test("imports the three live tasks with /F, in main→companions order", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const st = new FakeSchtasks();
@@ -296,10 +286,11 @@ describe("installPhantombotTasks", () => {
       `/Create /TN ${NAMES.main} /XML ${join(workdir, "phantombot-task-phantombot.xml")} /F`,
       `/Query /TN ${NAMES.heartbeat} /XML`,
       `/Create /TN ${NAMES.heartbeat} /XML ${join(workdir, "phantombot-task-heartbeat.xml")} /F`,
-      `/Query /TN ${NAMES.nightly} /XML`,
-      `/Create /TN ${NAMES.nightly} /XML ${join(workdir, "phantombot-task-nightly.xml")} /F`,
       `/Query /TN ${NAMES.tick} /XML`,
       `/Create /TN ${NAMES.tick} /XML ${join(workdir, "phantombot-task-tick.xml")} /F`,
+      // The retired 02:00 nightly task is swept on every register pass, so an
+      // upgrade can't leave a duplicate sweep armed. Absent here → probe only.
+      `/Query /TN ${NAMES.nightly} /XML`,
       // Pre-rename legacy tasks are cleaned up so an upgrade never
       // double-supervises the daemon — each is ownership-checked via its
       // exported XML before the delete.
@@ -431,7 +422,6 @@ describe("installPhantombotTasks", () => {
     expect(created).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
     ]);
   });
@@ -442,7 +432,9 @@ describe("uninstallPhantombotTasks", () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const st = new FakeSchtasks();
-    for (const name of [...NAMES.all, ...LEGACY_TASK_NAMES]) {
+    // NAMES.nightly is seeded explicitly: it is no longer part of NAMES.all
+    // (retired), but uninstall must still remove one an older install left.
+    for (const name of [...NAMES.all, NAMES.nightly, ...LEGACY_TASK_NAMES]) {
       st.registry[name] = principalXml(SID);
     }
     const result = await uninstallPhantombotTasks({ persona: PERSONA, sid: SID, schtasks: st, out, err });
@@ -560,7 +552,7 @@ describe("uninstallPhantombotTasks", () => {
     // deleting the persona marker.
     const out = new CaptureStream();
     const st = new FakeSchtasks();
-    for (const name of NAMES.all) {
+    for (const name of [...NAMES.all, NAMES.nightly]) {
       st.registry[name] = passwordPrincipalXml("MEGAN\\megan");
     }
     const result = await uninstallPhantombotTasks({
@@ -573,7 +565,9 @@ describe("uninstallPhantombotTasks", () => {
     });
     expect(result.removed).toBe(true);
     expect(st.calls.filter((c) => c[0] === "/Delete").length).toBe(4);
-    for (const name of NAMES.all) expect(st.registry[name]).toBeUndefined();
+    for (const name of [...NAMES.all, NAMES.nightly]) {
+      expect(st.registry[name]).toBeUndefined();
+    }
   });
 
   test("missing tasks are skipped quietly — no deletes, not fatal", async () => {
@@ -598,7 +592,6 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     return {
       [NAMES.main]: generatePhantombotTaskXml(SID, bin, PERSONA),
       [NAMES.heartbeat]: generateHeartbeatTaskXml(SID, bin, PERSONA),
-      [NAMES.nightly]: generateNightlyTaskXml(SID, bin, PERSONA),
       [NAMES.tick]: generateTickTaskXml(SID, bin, PERSONA),
     };
   }
@@ -670,13 +663,11 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     expect(r.rewrote).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
     ]);
     expect(st.created()).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
     ]);
   });
@@ -731,7 +722,6 @@ describe("ensureTasksCurrent (heartbeat self-heal)", () => {
     expect(r.rewrote).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
     ]);
     // The launcher is written back so the re-registered tasks can actually run.
@@ -1143,11 +1133,11 @@ describe("password logon mode (run when logged off)", () => {
     });
     expect(result.installed).toBe(true);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    // 4 password tasks + the interactive login-fallback twin = 5 registrations.
-    expect(creates.length).toBe(5);
+    // 3 password tasks + the interactive login-fallback twin = 4 registrations.
+    expect(creates.length).toBe(4);
     const loginCreate = creates.find((c) => c.includes(NAMES.login))!;
     const passwordCreates = creates.filter((c) => !c.includes(NAMES.login));
-    expect(passwordCreates.length).toBe(4);
+    expect(passwordCreates.length).toBe(3);
     for (const c of passwordCreates) {
       expect(c).toContain("/RU");
       expect(c).toContain(ACCOUNT);
@@ -1182,10 +1172,6 @@ describe("password logon mode (run when logged off)", () => {
         username: ACCOUNT,
       }),
       [NAMES.heartbeat]: generateHeartbeatTaskXml(SID, BIN, PERSONA, {
-        mode: "password",
-        username: ACCOUNT,
-      }),
-      [NAMES.nightly]: generateNightlyTaskXml(SID, BIN, PERSONA, {
         mode: "password",
         username: ACCOUNT,
       }),
@@ -1261,15 +1247,10 @@ describe("password logon mode (run when logged off)", () => {
       schtasks: st,
       patchAction: async () => ({ ok: true }),
     });
-    // The 4 password tasks can't be recreated without the credential; the
+    // The 3 password tasks can't be recreated without the credential; the
     // interactive login-fallback twin needs none, so it IS restored.
     expect(r.rewrote).toEqual([NAMES.login]);
-    expect(r.failed).toEqual([
-      NAMES.main,
-      NAMES.heartbeat,
-      NAMES.nightly,
-      NAMES.tick,
-    ]);
+    expect(r.failed).toEqual([NAMES.main, NAMES.heartbeat, NAMES.tick]);
   });
 
   test("legacy (pre persona-rename) tasks are removed on install", async () => {
@@ -1595,7 +1576,7 @@ describe("#309 cold-start recovery: `phantombot install` restores a fully-wiped 
     }
   }
 
-  test("all tasks deleted → interactive install re-registers the four-task set", async () => {
+  test("all tasks deleted → interactive install re-registers the three-task set", async () => {
     const st = new ColdStartFake();
     const result = await installPhantombotTasks({
       binPath: BIN,
@@ -1610,7 +1591,6 @@ describe("#309 cold-start recovery: `phantombot install` restores a fully-wiped 
     expect(st.created()).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
     ]);
   });
@@ -1632,7 +1612,6 @@ describe("#309 cold-start recovery: `phantombot install` restores a fully-wiped 
     expect(st.created()).toEqual([
       NAMES.main,
       NAMES.heartbeat,
-      NAMES.nightly,
       NAMES.tick,
       NAMES.login,
     ]);
