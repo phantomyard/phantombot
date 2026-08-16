@@ -1459,8 +1459,13 @@ prompt from that constant:
 
 Adopting the vocabulary is **not a migration**. An alias map folds legacy
 values (`troubleshooting` → `runbook`, `home` → `index`) onto canonical ones
-at query time, so every note ever written stays valid and only newly-authored
-notes converge. Nothing on disk is renamed.
+**at index time**, and each note is indexed under both spellings — the
+canonical type *and* the one its frontmatter actually carries — so it stays
+findable either way. Bumping the notes-schema version rebuilds an existing
+index from disk on next open, so notes written long before the vocabulary
+existed converge too, not just newly-authored ones. Nothing on disk is
+renamed: the folding lives in the index, and your frontmatter is left exactly
+as you wrote it.
 
 > `kb/` is **private to the persona** — not published, not shared between
 > agents, not a document store for the operator. It is the agent's own recall.
