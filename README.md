@@ -1521,13 +1521,21 @@ starve. Because the ledger decides what to process, both triggers are safe to
 fire redundantly: re-running with nothing pending costs nothing, and a machine
 that was off for a week sweeps the backlog when it comes back. There is no
 `--resume` and no catch-up mode. Useful flags:
-`--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to change the
-per-run cap (default 10), `--force` to take over a stuck in-flight marker.
+`--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to bound a manual
+run, `--force` to take over a stuck in-flight marker.
+
+A sweep is **uncapped by default**: it drains the entire backlog in one pass,
+so a first run after months of history is one long night rather than a queue
+that reappears every morning. The in-flight marker stops the rollover trigger
+from starting a second sweep on top of a running one.
 
 `/status` shows a `dreaming:` line — `OK (nothing pending)`,
 `RUNNING (2/5 dates, on 2026-06-02)`, `WARN (2 dates pending …)` or `ERR`.
 Health is backlog-driven, not schedule-driven: nothing pending is OK no matter
-when the last sweep ran. `phantombot doctor` reports the same signal (plus capture
+when the last sweep ran, and a backlog of *any* depth is only a WARN while it
+drains. It turns into ERR when a sweep errored, when the in-flight marker went
+stale, or when dates are pending and no sweep has run for over 24h — a backlog
+nobody is picking up. `phantombot doctor` reports the same signal (plus capture
 health, timers and connectors) but never runs the nightly itself.
 
 ## Maintenance

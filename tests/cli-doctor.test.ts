@@ -112,10 +112,29 @@ describe("runDoctor", () => {
     expect(out.text).toContain("2 date(s) pending");
   });
 
-  test("a large backlog → ERR and exit 1", async () => {
+  // Depth alone never fails doctor — a backfill is queued work, and one sweep
+  // takes the whole queue.
+  test("a large backlog is still WARN and exit 0", async () => {
     for (const d of ["01", "02", "03", "04", "05"]) {
       await writeDaily(`2026-05-${d}`);
     }
+    await writeState({
+      last_run: new Date(Date.now() - 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out });
+    expect(code).toBe(0);
+    expect(out.text).toMatch(/nightly: WARN/);
+    expect(out.text).toContain("5 date(s) pending");
+  });
+
+  test("a backlog with no sweep for over a day → ERR and exit 1", async () => {
+    await writeDaily("2026-05-01");
+    await writeState({
+      last_run: new Date(Date.now() - 30 * 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
     const out = new CaptureStream();
     const code = await runDoctor({ config, out });
     expect(code).toBe(1);

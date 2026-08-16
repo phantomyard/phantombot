@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildNightlyPrompt,
   buildNightlyPromptForPersona,
+  BACKLOG_STAGNANT_MS,
   buildNightlyStagePrompt,
   dailyFilePath,
   dateRecord,
@@ -283,7 +284,7 @@ describe("nightlyHealth", () => {
     expect((await nightlyHealth(workdir, { now })).status).toBe("ok");
   });
 
-  test("1–3 pending dates → warning", async () => {
+  test("pending dates → warning", async () => {
     await daily("2026-05-01");
     await daily("2026-05-02");
     const h = await nightlyHealth(workdir, { now });
@@ -293,11 +294,41 @@ describe("nightlyHealth", () => {
     expect(h.detail).toContain("2 dates pending");
   });
 
-  test("more than 3 pending dates → error", async () => {
-    for (const d of ["01", "02", "03", "04"]) await daily(`2026-05-${d}`);
+  // Depth is not a fault: one sweep drains the whole queue, so a months-deep
+  // backfill reads as work-in-progress, not as a broken nightly.
+  test("a deep backlog is still only a warning while sweeps are running", async () => {
+    for (let d = 1; d <= 20; d++) {
+      await daily(`2026-04-${String(d).padStart(2, "0")}`);
+    }
+    await saveNightlyState(workdir, {
+      last_run: new Date(now.getTime() - 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("warning");
+    expect(h.backlog).toBe(20);
+  });
+
+  // The real fault is a backlog nobody is picking up — the trigger is dead.
+  test("pending dates with no sweep for over a day → error", async () => {
+    await daily("2026-05-01");
+    await saveNightlyState(workdir, {
+      last_run: new Date(now.getTime() - BACKLOG_STAGNANT_MS - 60_000).toISOString(),
+      last_status: "ok",
+    });
     const h = await nightlyHealth(workdir, { now });
     expect(h.status).toBe("error");
-    expect(h.detail).toContain("4 dates unprocessed");
+    expect(h.detail).toContain("no sweep since");
+  });
+
+  // A fresh install has a backlog and no last_run; that is queued work, not a
+  // stuck trigger — `run` stamps last_run within a minute of starting.
+  test("a never-swept ledger with a backlog → warning, not error", async () => {
+    for (let d = 1; d <= 12; d++) {
+      await daily(`2026-04-${String(d).padStart(2, "0")}`);
+    }
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("warning");
   });
 
   test("an in-flight sweep with a fresh beat → running with progress", async () => {

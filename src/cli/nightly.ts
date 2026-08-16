@@ -61,20 +61,18 @@ const NIGHTLY_SUFFIX =
 const STAGE_IDLE_TIMEOUT_MS = 5 * 60_000;
 const STAGE_HARD_TIMEOUT_MS = 20 * 60_000;
 
-/**
- * Dates processed per invocation. A first sweep on a persona with months of
- * unprocessed history would otherwise run for hours and overlap the next
- * night's run; capping keeps each pass bounded and lets the backlog drain
- * over consecutive runs (and stay visible in `/status`).
- */
-export const MAX_DATES_PER_RUN = 10;
-
 export interface RunNightlyInput {
   config?: Config;
   persona?: string;
   /** Process ONE specific date (YYYY-MM-DD), ledger state ignored. */
   today?: string;
-  /** Cap dates processed this run. Default {@link MAX_DATES_PER_RUN}. */
+  /**
+   * Cap dates processed this run. Unset means NO cap: a sweep drains the whole
+   * backlog in one pass. A months-deep first sweep is a long run, but it is a
+   * one-off, the in-flight marker keeps the rollover trigger from starting a
+   * second one on top of it, and a half-drained backlog that reappears every
+   * night is worse than one long night. Set it only to bound a manual run.
+   */
   maxDates?: number;
   /** Run even if another sweep holds the in-flight marker. */
   force?: boolean;
@@ -220,8 +218,11 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     queue = sweep.pending;
   }
 
-  const cap = input.maxDates ?? MAX_DATES_PER_RUN;
-  const deferred = Math.max(0, queue.length - cap);
+  // No cap by default — the sweep drains the whole backlog. `--max-dates`
+  // bounds a manual run; anything it leaves behind stays pending in the ledger.
+  const cap = input.maxDates;
+  const deferred =
+    cap !== undefined && cap > 0 ? Math.max(0, queue.length - cap) : 0;
   if (deferred > 0) queue = queue.slice(0, cap);
 
   if (queue.length === 0) {
@@ -390,7 +391,8 @@ export default defineCommand({
     },
     "max-dates": {
       type: "string",
-      description: `Cap dates processed this run (default ${MAX_DATES_PER_RUN}).`,
+      description:
+        "Cap dates processed this run (default: no cap — drain the backlog).",
     },
     force: {
       type: "boolean",

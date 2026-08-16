@@ -9,8 +9,8 @@
  * The nightly section is READ-ONLY. Doctor used to spawn its own
  * `nightly --resume` when the last run looked stale, which meant two owners
  * for the same job. The nightly is now idempotent — every run sweeps whatever
- * is unprocessed — so there is exactly one owner (the timer, plus the startup
- * sweep in `run`) and doctor just reports what the ledger says.
+ * is unprocessed — so the sweep owns itself, triggered by day rollover from
+ * the heartbeat and by `run` at startup, and doctor just reports the ledger.
  *
  * Invoked manually, at startup from `run`, and safe to wire into any
  * mechanical scheduler — it never runs an LLM.

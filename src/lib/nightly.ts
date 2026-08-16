@@ -49,10 +49,12 @@ const DAILY_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.md$/;
 export const STALE_RUN_MS = 45 * 60_000;
 
 /**
- * Backlog above this many unprocessed dates is an error, not a warning —
- * something has been swallowing runs, not just a night missed.
+ * A backlog is work queued, not a fault — however deep it is, it reads as a
+ * warning while it drains. It only turns into an error once it is STAGNANT:
+ * dates are pending and no sweep has run in this long, which means the thing
+ * that triggers sweeps is broken rather than merely behind.
  */
-export const BACKLOG_WARN_MAX = 3;
+export const BACKLOG_STAGNANT_MS = 24 * 60 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Stage model
@@ -397,13 +399,6 @@ export async function nightlyHealth(
     .map(([d]) => d)
     .sort();
 
-  if (backlog > BACKLOG_WARN_MAX) {
-    return {
-      ...base,
-      status: "error",
-      detail: `${backlog} dates unprocessed (oldest ${oldest})`,
-    };
-  }
   if (state.last_status === "error") {
     return {
       ...base,
@@ -412,6 +407,20 @@ export async function nightlyHealth(
     };
   }
   if (backlog > 0) {
+    // Deep backlog is not itself a fault — a sweep drains it whole, so it is
+    // simply work in the queue. The fault case is a backlog nobody is picking
+    // up: pending dates and no sweep within BACKLOG_STAGNANT_MS.
+    // A ledger with no `last_run` is a fresh install, not a stuck one — the
+    // startup trigger stamps it within a minute of the process coming up, so
+    // "never swept" is a warning and only an OLD sweep is an error.
+    const last = state.last_run ? Date.parse(state.last_run) : NaN;
+    if (!Number.isNaN(last) && now.getTime() - last > BACKLOG_STAGNANT_MS) {
+      return {
+        ...base,
+        status: "error",
+        detail: `${backlog} date${backlog === 1 ? "" : "s"} pending, no sweep since ${state.last_run}`,
+      };
+    }
     return {
       ...base,
       status: "warning",

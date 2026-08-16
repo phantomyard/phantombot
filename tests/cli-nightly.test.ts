@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_DATES_PER_RUN, runNightly } from "../src/cli/nightly.ts";
+import { runNightly } from "../src/cli/nightly.ts";
 import {
   loadNightlyState,
   NIGHTLY_STAGES,
@@ -276,7 +276,7 @@ describe("runNightly — ledger", () => {
 });
 
 describe("runNightly — bounds and locking", () => {
-  test("caps dates per run and defers the rest to the next sweep", async () => {
+  test("--max-dates bounds a manual run and defers the rest", async () => {
     for (let d = 1; d <= 5; d++) {
       await daily(`2026-05-0${d}`);
     }
@@ -292,16 +292,20 @@ describe("runNightly — bounds and locking", () => {
     expect(out.text).toContain("+3 deferred");
   });
 
-  test("the default cap is MAX_DATES_PER_RUN", async () => {
-    for (let d = 1; d <= MAX_DATES_PER_RUN + 2; d++) {
+  // No default cap: a backlog left half-drained comes back every night and
+  // keeps /status yellow, so one pass takes the whole queue.
+  test("with no --max-dates the sweep drains the entire backlog", async () => {
+    for (let d = 1; d <= 25; d++) {
       await daily(`2026-04-${String(d).padStart(2, "0")}`);
     }
     const h = harness();
+    const out = new CaptureStream();
     await runNightly({
-      config, now, out: new CaptureStream(),
+      config, now, out,
       runStage: h.runStage, refreshIndex: async () => {},
     });
-    expect(new Set(h.calls.map((c) => c.date)).size).toBe(MAX_DATES_PER_RUN);
+    expect(new Set(h.calls.map((c) => c.date)).size).toBe(25);
+    expect(out.text).not.toContain("deferred");
   });
 
   // Two overlapping sweeps would double-file the same drawers.
