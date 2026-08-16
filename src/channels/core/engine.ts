@@ -17,6 +17,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import {
@@ -1264,6 +1265,10 @@ async function processChatMessage(
       conversation: conversationKey,
       userMessage: msg.text,
       agentDir: input.agentDir,
+      // Interactive surface: the owner asks for work on repos all over their
+      // home dir, so home stays the cwd. Explicit since #387 removed the
+      // silent homedir() default in runTurn.
+      workingDir: homedir(),
       harnesses,
       memory: input.memory,
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,

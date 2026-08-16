@@ -22,6 +22,7 @@
  *     surfaced as `senderId`), never on the envelope `from` field.
  */
 
+import { homedir } from "node:os";
 import type { Config } from "../../config.ts";
 import { DEFAULT_CHATTINESS, DEFAULT_TELEGRAM_STREAMING } from "../../config.ts";
 import type { Harness } from "../../harnesses/types.ts";
@@ -875,6 +876,10 @@ export async function runPhantomchatServer(
         conversation: conversationKey,
         userMessage,
         agentDir: input.agentDir,
+        // Interactive surface: the owner asks for work on repos all over their
+        // home dir, so home stays the cwd. Explicit since #387 removed the
+        // silent homedir() default in runTurn.
+        workingDir: homedir(),
         harnesses,
         memory: input.memory,
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,

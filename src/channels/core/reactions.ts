@@ -37,6 +37,7 @@
  * history. See {@link RecentOutbound}.
  */
 
+import { homedir } from "node:os";
 import type { Harness } from "../../harnesses/types.ts";
 import { log } from "../../lib/logger.ts";
 import type { MemoryStore } from "../../memory/store.ts";
@@ -284,6 +285,10 @@ export async function runReactionTurn(
       conversation: input.conversation,
       userMessage: envelope,
       agentDir: input.agentDir,
+      // Interactive surface: the owner asks for work on repos all over their
+      // home dir, so home stays the cwd. Explicit since #387 removed the
+      // silent homedir() default in runTurn.
+      workingDir: homedir(),
       harnesses: input.harnesses,
       memory: input.memory,
       idleTimeoutMs: input.idleTimeoutMs,

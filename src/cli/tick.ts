@@ -34,6 +34,7 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
 import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
@@ -189,6 +190,10 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             conversation,
             userMessage: promptText,
             agentDir,
+            // Interactive surface: the owner asks for work on repos all over their
+            // home dir, so home stays the cwd. Explicit since #387 removed the
+            // silent homedir() default in runTurn.
+            workingDir: homedir(),
             harnesses,
             memory,
             idleTimeoutMs: config.harnessIdleTimeoutMs,

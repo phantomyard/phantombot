@@ -92,7 +92,7 @@ export class CodexHarness implements Harness {
     });
   }
 
-  private buildArgs(toolsMode?: "none"): string[] {
+  private buildArgs(toolsMode?: "none" | { allow: string[] }): string[] {
     const args = [
       "exec",
       "--json",

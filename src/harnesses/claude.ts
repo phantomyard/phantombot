@@ -217,7 +217,7 @@ export class ClaudeHarness implements Harness {
 
   private buildArgs(
     systemPrompt: string,
-    toolsMode?: "none",
+    toolsMode?: "none" | { allow: string[] },
     // When set (Windows), the persona system prompt is passed by FILE
     // (`--system-prompt-file`) instead of inline (`--system-prompt <text>`)
     // to stay under the command-line length limit.
@@ -279,6 +279,16 @@ export class ClaudeHarness implements Harness {
     // is moot when there are no tools to permit — belt and suspenders.)
     if (toolsMode === "none") {
       args.push("--tools", "");
+    } else if (toolsMode && toolsMode.allow.length > 0) {
+      // Positive tool grant for background turns with a known job (#387).
+      // `--tools "Bash,Edit,Read"` replaces the built-in set with exactly
+      // these — same positive-grant shape as `--tools ""`, so it doesn't rot
+      // as new tools ship. Nightly uses it to drop Glob/Grep: claude's native
+      // search tools fan out across parallel workers and walk the tree from
+      // cwd, which is what turned one confused stage into a barrage of macOS
+      // TCC prompts. The stage has `phantombot memory search` (FTS +
+      // semantic) and knows its own paths, so it never needed a tree walk.
+      args.push("--tools", toolsMode.allow.join(","));
     }
     // MCP isolation — EVERY claude turn runs `--strict-mcp-config`, which tells
     // claude to use ONLY the servers in `--mcp-config` and ignore ~/.claude.json

@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { runNightly } from "../src/cli/nightly.ts";
+import { NIGHTLY_TOOLS, runNightly, runNightlyTurn } from "../src/cli/nightly.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessRequest,
+} from "../src/harnesses/types.ts";
+import { openMemoryStore } from "../src/memory/store.ts";
 import {
   loadNightlyState,
   NIGHTLY_STAGES,
@@ -400,5 +406,70 @@ describe("runNightly — persona override prompt", () => {
     expect(h.calls.length).toBe(1);
     expect(h.calls[0]!.stage).toBe("override");
     expect(h.calls[0]!.prompt).toBe("custom phantom 2026-05-01");
+  });
+});
+
+// #387 — the macOS TCC re-prompt loop.
+//
+// A nightly stage's whole job lives in the persona dir, but runTurn used to
+// default the harness cwd to homedir() and every background caller took the
+// default. So stages woke up in $HOME, couldn't see their own memory/ from
+// cwd, and went looking: 79 `find` invocations in a single sweep on Matt's
+// box, 7 of them rooted at `/`, alongside claude's own parallel Glob walk.
+// On macOS those walks cross ~/Library/Containers, which trips the TCC
+// kTCCServiceSystemPolicyAppData prompt ("phantombot would like to access
+// data from other apps") — once per spawned date, so a 110-date backlog
+// became a barrage.
+//
+// These pin the two halves of the fix at the point they're wired, because
+// the runStage seam used by the sweep tests bypasses runTurn entirely and so
+// can never observe either.
+describe("runNightlyTurn — harness scoping (#387)", () => {
+  class CaptureHarness implements Harness {
+    readonly id = "capture";
+    seen: HarnessRequest | undefined;
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.seen = req;
+      yield { type: "done", finalText: "ok" };
+    }
+  }
+
+  async function runOnce(): Promise<CaptureHarness> {
+    await writeFile(join(personaDir, "BOOT.md"), "# persona", "utf8");
+    const memory = await openMemoryStore(":memory:");
+    const harness = new CaptureHarness();
+    try {
+      await runNightlyTurn({
+        persona: "phantom",
+        conversation: "system:nightly:2026-05-10",
+        userMessage: "distill",
+        agentDir: personaDir,
+        harnesses: [harness],
+        memory,
+      });
+    } finally {
+      await memory.close();
+    }
+    return harness;
+  }
+
+  test("spawns the stage in the persona dir, never the user's home", async () => {
+    const harness = await runOnce();
+    expect(harness.seen?.workingDir).toBe(personaDir);
+    expect(harness.seen?.workingDir).not.toBe(homedir());
+  });
+
+  test("grants only the tools a stage needs — no tree-walking search tools", async () => {
+    const harness = await runOnce();
+    expect(harness.seen?.toolsMode).toEqual({ allow: NIGHTLY_TOOLS });
+    const allowed = NIGHTLY_TOOLS;
+    // Bash stays: the stage drives `phantombot memory …` through it.
+    expect(allowed).toContain("Bash");
+    // Glob/Grep are the walkers that trip TCC. They must not be granted.
+    expect(allowed).not.toContain("Glob");
+    expect(allowed).not.toContain("Grep");
   });
 });

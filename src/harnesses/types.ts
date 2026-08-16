@@ -100,8 +100,16 @@ export interface HarnessRequest {
    * PRIMARY in the turn's chain — it never assumes a specific binary (e.g.
    * claude) is installed. A user who installs only one of the four supported
    * harnesses still gets screening on that one. Optional; normal turns omit.
+   *
+   * `{ allow: [...] }` is the narrower sibling: a POSITIVE grant of exactly
+   * the named built-in tools, for background turns whose job is known up
+   * front (nightly). Unlike `"none"` this has no cross-harness equivalent —
+   * only claude exposes a positive tool grant (`--tools "Bash,Edit,Read"`),
+   * so pi/codex IGNORE the allowlist and run their normal surface. It is
+   * therefore defence-in-depth, never a security boundary; never rely on it
+   * to contain untrusted input (that's what `"none"` is for).
    */
-  toolsMode?: "none";
+  toolsMode?: "none" | { allow: string[] };
   /**
    * MCP capability mode. Omitted = the harness's normal turn, which loads
    * every MCP server the CLI is configured with (including the user's remote

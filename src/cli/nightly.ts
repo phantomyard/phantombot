@@ -52,6 +52,23 @@ import {
 import { openMemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
+/**
+ * Positive tool grant for nightly stages (#387).
+ *
+ * A stage reads and writes files under `memory/` and `kb/` and shells out to
+ * `phantombot memory …`; that is the whole job. Granting exactly those four
+ * drops claude's native Glob/Grep, whose parallel workers recursively walk
+ * the tree from cwd — the mechanism that turned one mis-rooted stage into a
+ * barrage of macOS TCC "access data from other apps" prompts. Search is still
+ * available, but through `phantombot memory search` (FTS5 + semantic), which
+ * queries an index instead of stat-ing the filesystem.
+ *
+ * Defence-in-depth on top of the cwd fix, not a substitute for it: claude
+ * honours this, pi/codex ignore it (no positive-grant flag), and Bash remains
+ * unconstrained because the memory CLI needs it.
+ */
+export const NIGHTLY_TOOLS = ["Bash", "Read", "Write", "Edit"];
+
 const NIGHTLY_SUFFIX =
   "You are operating in NIGHTLY MAINTENANCE MODE. " +
   "Skip pleasantries. Do work, write files, report briefly.";
@@ -98,7 +115,7 @@ export interface TurnResult {
 }
 
 /** Run one harness turn for the nightly conversation. */
-async function runNightlyTurn(opts: {
+export async function runNightlyTurn(opts: {
   persona: string;
   conversation: string;
   userMessage: string;
@@ -115,6 +132,15 @@ async function runNightlyTurn(opts: {
       conversation: opts.conversation,
       userMessage: opts.userMessage,
       agentDir: opts.agentDir,
+      // Spawn the stage INSIDE the persona dir, not the user's home (#387).
+      // A stage's whole job is `memory/` and `kb/`; waking it up in $HOME
+      // meant those were invisible from cwd, so the agent went looking for
+      // them — 79 `find` calls in one sweep, 7 of them rooted at `/`, plus
+      // claude's own parallel Glob walk. On macOS that walk crosses
+      // ~/Library/Containers and re-triggers the TCC "access data from other
+      // apps" prompt on every spawned date. Correct cwd removes the reason
+      // to search at all.
+      workingDir: opts.agentDir,
       harnesses: opts.harnesses,
       memory: opts.memory,
       idleTimeoutMs: STAGE_IDLE_TIMEOUT_MS,
@@ -130,6 +156,7 @@ async function runNightlyTurn(opts: {
       // connector from wedging the --print startup and killing a stage on the
       // idle timeout. See HarnessRequest.mcpMode.
       mcpMode: "none",
+      toolsMode: { allow: NIGHTLY_TOOLS },
     })) {
       if (chunk.type === "text") finalReply += chunk.text;
       if (chunk.type === "done") finalReply = chunk.finalText;

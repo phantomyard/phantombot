@@ -1524,6 +1524,17 @@ that was off for a week sweeps the backlog when it comes back. There is no
 `--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to bound a manual
 run, `--force` to take over a stuck in-flight marker.
 
+A stage runs **scoped to the persona directory**. Its working directory is the
+persona dir (not your home dir), it runs with no MCP servers, and it is granted
+exactly four tools — `Bash`, `Read`, `Write`, `Edit`. That is the whole job: read
+the day's file, write `memory/` and `kb/`, and search through
+`phantombot memory search`. It never needs to walk your filesystem, and it is no
+longer able to. Before this, stages ran from `$HOME` and would go looking for
+their own `memory/` directory; on macOS that search crossed
+`~/Library/Containers` and made the system ask *"phantombot would like to access
+data from other apps"* over and over — once for every date in the backlog. If
+you see that prompt, you are on a build older than #387.
+
 A sweep is **uncapped by default**: it drains the entire backlog in one pass,
 so a first run after months of history is one long night rather than a queue
 that reappears every morning. The in-flight marker stops the rollover trigger
