@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isCanonicalOkfType, parseOkf } from "../src/lib/okf.ts";
 import { ensurePersonaScaffold } from "../src/lib/personaScaffold.ts";
 
 let workdir: string;
@@ -35,7 +36,7 @@ describe("ensurePersonaScaffold", () => {
     // KB seeds
     for (const f of [
       "kb/Home.md",
-      "kb/templates/atomic-note.md",
+      "kb/templates/concept.md",
       "kb/templates/runbook.md",
       "kb/templates/decision.md",
       "kb/templates/postmortem.md",
@@ -88,9 +89,42 @@ describe("ensurePersonaScaffold", () => {
     await ensurePersonaScaffold(workdir);
     const home = await readFile(join(workdir, "kb", "Home.md"), "utf8");
     expect(home).toMatch(/^---/);
-    expect(home).toContain("type: home");
+    // `home` was folded into the shared `index` type when the OKF vocabulary
+    // was declared; `normaliseOkfType` still maps the legacy value.
+    expect(home).toContain("type: index");
     expect(home).toContain("[[concepts/]]");
     const today = new Date().toISOString().slice(0, 10);
     expect(home).toContain(`created: ${today}`);
+  });
+});
+
+describe("scaffolded templates carry full OKF frontmatter", () => {
+  test("every template declares a canonical type and the weighted fields", async () => {
+    await ensurePersonaScaffold(workdir);
+    for (const f of [
+      "kb/templates/concept.md",
+      "kb/templates/runbook.md",
+      "kb/templates/decision.md",
+      "kb/templates/postmortem.md",
+      "kb/Home.md",
+    ]) {
+      const raw = await readFile(join(workdir, f), "utf8");
+      // The type a template declares must be one an agent is allowed to
+      // author — a template scaffolding an off-vocabulary type teaches drift
+      // on every note created from it.
+      expect(isCanonicalOkfType(parseOkf(raw).type)).toBe(true);
+      for (const field of ["title:", "description:", "tags:", "aliases:"]) {
+        expect(raw).toContain(field);
+      }
+    }
+  });
+
+  test("the concept template's filename matches the type it declares", async () => {
+    // Regression: the old `atomic-note.md` declared `type: concept`, so the
+    // scaffold contradicted itself about what the vocabulary actually was.
+    await ensurePersonaScaffold(workdir);
+    const raw = await readFile(join(workdir, "kb/templates/concept.md"), "utf8");
+    expect(parseOkf(raw).type).toBe("concept");
+    expect(existsSync(join(workdir, "kb/templates/atomic-note.md"))).toBe(false);
   });
 });

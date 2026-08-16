@@ -5,6 +5,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractLinks,
+  isCanonicalOkfType,
+  normaliseOkfType,
+  OKF_AGENT_TYPES,
+  OKF_CORE_TYPES,
+  OKF_TYPE_ALIASES,
+  OKF_TYPES,
   parseFrontmatter,
   parseOkf,
   splitFrontmatter,
@@ -115,5 +121,59 @@ describe("parseOkf", () => {
     const doc = parseOkf("");
     expect(doc.title).toBe("");
     expect(doc.links).toEqual([]);
+  });
+});
+
+describe("controlled type vocabulary", () => {
+  test("core and agent types are disjoint and non-empty", () => {
+    expect(OKF_CORE_TYPES.length).toBeGreaterThan(0);
+    expect(OKF_AGENT_TYPES.length).toBeGreaterThan(0);
+    const overlap = OKF_CORE_TYPES.filter((t) =>
+      (OKF_AGENT_TYPES as readonly string[]).includes(t),
+    );
+    expect(overlap).toEqual([]);
+  });
+
+  test("OKF_TYPES has no duplicates", () => {
+    expect(new Set(OKF_TYPES).size).toBe(OKF_TYPES.length);
+  });
+
+  test("every alias resolves to a canonical type", () => {
+    // Guards the drift map against pointing at a type that was later renamed
+    // or removed — an alias to a non-existent type silently normalises to "".
+    for (const [alias, target] of Object.entries(OKF_TYPE_ALIASES)) {
+      expect((OKF_TYPES as readonly string[]).includes(target)).toBe(true);
+      // An alias must not shadow a canonical value.
+      expect((OKF_TYPES as readonly string[]).includes(alias)).toBe(false);
+    }
+  });
+
+  test("canonical types normalise to themselves", () => {
+    for (const t of OKF_TYPES) {
+      expect(normaliseOkfType(t)).toBe(t);
+      expect(isCanonicalOkfType(t)).toBe(true);
+    }
+  });
+
+  test("folds the drift observed in real KBs", () => {
+    expect(normaliseOkfType("atomic-note")).toBe("concept");
+    expect(normaliseOkfType("troubleshooting")).toBe("runbook");
+    expect(normaliseOkfType("incident-handover")).toBe("postmortem");
+    expect(normaliseOkfType("home")).toBe("index");
+    expect(normaliseOkfType("model-research")).toBe("reference");
+  });
+
+  test("normalisation is case- and separator-insensitive", () => {
+    expect(normaliseOkfType("  Atomic_Note ")).toBe("concept");
+    expect(normaliseOkfType("PROJECT PLAN")).toBe("project");
+    expect(normaliseOkfType("Runbook")).toBe("runbook");
+  });
+
+  test("unknown types report as unknown rather than guessing", () => {
+    // Deliberate: silently bucketing an unrecognised type as `concept` would
+    // hide vocabulary drift instead of surfacing it.
+    expect(normaliseOkfType("wibble")).toBe("");
+    expect(normaliseOkfType("")).toBe("");
+    expect(isCanonicalOkfType("wibble")).toBe(false);
   });
 });

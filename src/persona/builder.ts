@@ -6,6 +6,7 @@
  * the Anthropic side stays warm for the persona-and-memory prefix.
  */
 
+import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "../lib/okf.js";
 import type { PersonaFiles } from "./loader.js";
 
 export interface ChannelContext {
@@ -127,7 +128,7 @@ export function buildSystemPrompt(
  * per-project memory blob. Phantombot deliberately does NOT rely on that. We
  * inject THIS four-layer system via --system-prompt instead: daily journal →
  * structured drawers (decisions/lessons/people/commitments/norms) → an
- * Obsidian-shaped KB → a hybrid FTS+vector index over all of it. It is
+ * OKF-formatted KB → a hybrid FTS+vector index over all of it. It is
  * persona-scoped, searchable, self-distilling (heartbeat + nightly), and it
  * feeds the threat judge (the `norms` drawer). The harness's auto-memory is a
  * single undifferentiated file with no recall, no decay, no provenance — a
@@ -197,10 +198,41 @@ Layout (relative to your working dir):
   memory/norms.md            — structured drawer (what's ROUTINE in your owner's
                                world; briefs the threat judge so it doesn't
                                cry wolf on normal operations)
-  kb/                        — Obsidian-shaped second brain (atomic notes)
+  kb/                        — your PRIVATE knowledge base: atomic notes in
+                               Open Knowledge Format, linked into a graph
   kb/inbox/                  — quick capture; nightly cycle files or discards
-  kb/templates/              — frontmatter skeletons (atomic / runbook /
+  kb/templates/              — frontmatter skeletons (concept / runbook /
                                decision / postmortem)
+
+kb/ is private to this persona. It is not published, not shared with other
+agents, and not a document store for your owner — it is your own recall.
+When your owner refers to "the vault" or "the wiki" they mean something
+else, somewhere else; never write there unless they point you at it.
+
+OKF FRONTMATTER — every kb/ note carries these fields:
+
+  type:         one of the controlled vocabulary below (OKF's required field)
+  title:        what this note is
+  description:  one sentence on the question this note answers
+  tags:         [lowercase-hyphenated]
+  aliases:      [other names this thing goes by]
+  created:      YYYY-MM-DD
+  updated:      YYYY-MM-DD
+
+  type is one of: ${OKF_CORE_TYPES.join(" | ")}
+                  ${OKF_AGENT_TYPES.join(" | ")}
+
+  Pick the closest one — do NOT invent a new type. A near-synonym
+  ("troubleshooting" for a runbook) fragments the index and makes both
+  notes harder to find.
+
+\`description\` and \`aliases\` are load-bearing, not decoration. Search weights
+frontmatter above body text, so aliases are what let a LATER query find this
+note using different words than the ones you happen to write today. List the
+names you might search for in six months, including the wrong-but-plausible
+ones. Likewise \`[[wikilinks]]\`: link every new note to its nearest existing
+neighbours — recall walks that graph outward from a match, so an unlinked
+note is one only an exact-wording query will ever reach.
 
 Two hard rules — apply on every nontrivial task:
 

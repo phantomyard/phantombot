@@ -6,9 +6,9 @@
  * (`type`, `title`, `description`, `tags`, …) and a body, where concepts link
  * to each other with plain markdown links to form a graph.
  *
- * Phantombot's kb/ second brain is already this shape (Obsidian-style atomic
- * notes with frontmatter + links). This parser extracts the structured parts
- * so the FTS5 index can:
+ * Phantombot's kb/ second brain IS this shape: atomic markdown notes with
+ * frontmatter, linked into a concept graph. This parser extracts the structured
+ * parts so the FTS5 index can:
  *   - weight frontmatter fields above body text (BM25F),
  *   - index tags + aliases as controlled vocabulary (synonym fix), and
  *   - follow links between concepts for graph-walk recall expansion.
@@ -43,6 +43,104 @@ export interface OkfLink {
   target: string;
   /** "md" for [text](path), "wiki" for [[Wikilink]]. */
   kind: "md" | "wiki";
+}
+
+/**
+ * ── Controlled vocabulary for `type:` ───────────────────────────────────────
+ *
+ * OKF makes `type` its one required frontmatter field, and the FTS index gives
+ * it its own BM25F column — but a field is only worth weighting if its values
+ * are predictable. Left unstated, `type` drifts: real phantom KBs in the wild
+ * accumulate a dozen-plus near-synonyms ("note"/"atomic-note"/"concept",
+ * "troubleshooting"/"runbook") that fragment the very column meant to sharpen
+ * recall.
+ *
+ * So the vocabulary is declared HERE, once, and the persona prompt and nightly
+ * prompt are generated from it — a prompt that hardcoded its own list would
+ * silently diverge from the parser the first time either changed.
+ *
+ * CORE is deliberately interoperable: these types carry the same meaning in a
+ * human-curated OKF vault as they do here, so notes can move between an
+ * operator's vault and a phantom's KB without a translation step.
+ */
+export const OKF_CORE_TYPES = [
+  "concept",
+  "runbook",
+  "procedure",
+  "reference",
+  "postmortem",
+  "project",
+  "person",
+  "infrastructure",
+  "index",
+] as const;
+
+/**
+ * Types with no equivalent in a human-curated vault, because they are derived
+ * from the structured drawers — a phantom's *experience* rather than an
+ * operator's *authority*. A vault records what was decided to be true; these
+ * record what this agent learned the hard way.
+ */
+export const OKF_AGENT_TYPES = [
+  "lesson",
+  "decision",
+  "norm",
+  "account",
+] as const;
+
+/** Every `type:` value a phantom should author. */
+export const OKF_TYPES = [
+  ...OKF_CORE_TYPES,
+  ...OKF_AGENT_TYPES,
+] as const;
+
+export type OkfType = (typeof OKF_TYPES)[number];
+
+/**
+ * Drift map: values observed in existing KBs → the canonical type they mean.
+ *
+ * This exists so adopting the vocabulary is NOT a migration. Every note ever
+ * written stays valid; `normaliseOkfType` folds legacy values at query time so
+ * old and new notes land in the same bucket, and only newly-authored notes
+ * converge on the canonical spelling. Nothing renames a file on disk — the
+ * no-auto-heal rule applies to knowledge as much as to infrastructure.
+ */
+export const OKF_TYPE_ALIASES: Readonly<Record<string, OkfType>> = {
+  note: "concept",
+  "atomic-note": "concept",
+  atomic: "concept",
+  home: "index",
+  moc: "index",
+  plan: "project",
+  "project-plan": "project",
+  "project-note": "project",
+  troubleshooting: "runbook",
+  playbook: "runbook",
+  "incident-handover": "postmortem",
+  incident: "postmortem",
+  "model-research": "reference",
+  research: "reference",
+  infra: "infrastructure",
+  people: "person",
+  contact: "person",
+};
+
+/**
+ * Fold a raw `type:` onto the controlled vocabulary. Returns "" for a missing
+ * or unrecognised type — callers decide whether that is worth reporting. Never
+ * throws, and never guesses beyond the explicit alias table: an unknown type is
+ * reported as unknown, not silently mapped to `concept`.
+ */
+export function normaliseOkfType(raw: string): OkfType | "" {
+  const t = raw.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (!t) return "";
+  if ((OKF_TYPES as readonly string[]).includes(t)) return t as OkfType;
+  return OKF_TYPE_ALIASES[t] ?? "";
+}
+
+/** True when `raw` is already canonical (no aliasing needed). */
+export function isCanonicalOkfType(raw: string): boolean {
+  return (OKF_TYPES as readonly string[]).includes(raw.trim().toLowerCase());
 }
 
 const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/;
@@ -85,7 +183,7 @@ export function splitFrontmatter(raw: string): {
 
 /**
  * Tiny YAML-subset parser: flat `key: value` pairs plus block/flow lists.
- * Handles the shapes OKF/Obsidian frontmatter actually uses:
+ * Handles the shapes OKF frontmatter actually uses:
  *
  *   title: My Concept
  *   tags: [infra, dns, networking]

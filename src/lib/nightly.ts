@@ -35,6 +35,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { log } from "./logger.ts";
+import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "./okf.ts";
 
 const NIGHTLY_PROMPT_OVERRIDE = "nightly-prompt.md";
 
@@ -531,7 +532,14 @@ touch memory/ files.
 
 Read the daily file (memory/${today}.md) for durable knowledge (procedures,
 configs, runbooks, concepts, decisions worth keeping). For each candidate:
-  a) \`phantombot memory search "<topic>"\` to check for existing coverage.
+  a) Search for existing coverage — and search it from MORE THAN ONE ANGLE.
+     Run \`phantombot memory search\` two or three times per candidate, varying
+     the vocabulary: the symptom as you'd describe it today, the component or
+     service name, and the literal error string or command. Today's wording and
+     the existing note's wording are often disjoint ("CI agents refusing jobs"
+     vs "runner version deprecated"), and a single-phrase search will miss the
+     note you are about to duplicate. A duplicate is worse than a long search:
+     it splits one truth across two notes and dilutes every future query.
   b) If a note already covers the area, open it and RECONCILE — don't just append:
      - ADDS (new case, edge case, link): update in place.
      - CONTRADICTS / INVALIDATES it (a fact changed, something was decommissioned,
@@ -542,8 +550,22 @@ configs, runbooks, concepts, decisions worth keeping). For each candidate:
      - Whole subject DECOMMISSIONED: set frontmatter \`status: obsolete\` with a
        dated one-line reason (+ [[wikilink]] to any replacement) instead of deleting.
   c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a
-     kb/templates/ scaffold. Frontmatter required: type, tags, created, updated.
-     Link related notes with [[wikilinks]].
+     kb/templates/ scaffold. OKF frontmatter, all of it required:
+       type         — one of: ${OKF_CORE_TYPES.join(" | ")}
+                              ${OKF_AGENT_TYPES.join(" | ")}
+                      Pick the closest. Never invent a new type.
+       title        — what the note is
+       description  — one sentence: the question this note answers
+       tags         — [lowercase-hyphenated]
+       aliases      — [other names for this thing, including the wrong-but-
+                      plausible ones someone might search for later]
+       created / updated — YYYY-MM-DD
+     Then LINK IT: every new note gets [[wikilinks]] to its nearest existing
+     neighbours, and where a neighbour should point back, add the return link
+     too. Recall expands outward along this graph from a lexical match, so an
+     unlinked note is reachable only by exact wording — you are not decorating
+     the note, you are wiring it into the index. A note with no links is a note
+     you will fail to find.
 Then sweep kb/inbox/: file each stub into the right category, or delete it if it
 is no longer relevant.
 Finish with a one-line summary of notes created / updated.`,

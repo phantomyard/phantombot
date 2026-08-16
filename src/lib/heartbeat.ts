@@ -9,8 +9,11 @@
  *      whose embedded date is older than 48h. Logs warnings; does not
  *      mutate.
  *   3. Refresh the FTS5 index so newly-written notes are searchable
- *      without waiting for the next manual `memory index`. Does NOT
- *      run the embedding pass (that's the nightly cycle's job).
+ *      without waiting for the next manual `memory index`. The caller
+ *      (`cli/heartbeat.ts`) then runs an incremental embed pass over
+ *      chunks whose text_sha changed, so fresh notes are semantically
+ *      searchable within 30 minutes rather than at the next nightly.
+ *      No-ops cleanly when no embedder is configured.
  *
  * The harness never sees this — heartbeat runs as its own short-lived
  * process. Per the OpenClaw spec: "Heartbeat is mechanical, nightly is

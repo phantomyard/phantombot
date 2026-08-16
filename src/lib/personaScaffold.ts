@@ -23,7 +23,7 @@
  *       ├── projects/
  *       ├── postmortems/
  *       └── templates/
- *           ├── atomic-note.md
+ *           ├── concept.md
  *           ├── runbook.md
  *           ├── decision.md
  *           └── postmortem.md
@@ -100,7 +100,7 @@ function seedFiles(today: string): Array<[string, string]> {
 
     ["kb/Home.md", kbHome(today)],
 
-    ["kb/templates/atomic-note.md", atomicTemplate()],
+    ["kb/templates/concept.md", conceptTemplate()],
     ["kb/templates/runbook.md", runbookTemplate()],
     ["kb/templates/decision.md", decisionTemplate()],
     ["kb/templates/postmortem.md", postmortemTemplate()],
@@ -113,16 +113,21 @@ function drawer(title: string, intro: string): string {
 
 function kbHome(today: string): string {
   return `---
-type: home
+type: index
+title: Knowledge Base
+description: Entry point and category map for this persona's private KB.
 tags: [navigation]
+aliases: [KB Home, Knowledge Base Index]
 created: ${today}
 updated: ${today}
 ---
 
 # Home
 
-Atomic notes — one idea per file, linked with [[wikilinks]]. Every
-note carries YAML frontmatter (\`type\`, \`tags\`, \`created\`, \`updated\`).
+Private to this persona. Atomic notes in Open Knowledge Format — one idea
+per file, linked with [[wikilinks]] into a concept graph. Every note carries
+YAML frontmatter: \`type\`, \`title\`, \`description\`, \`tags\`, \`aliases\`,
+\`created\`, \`updated\`. See [[templates/]] for the skeletons.
 
 ## Categories
 
@@ -135,7 +140,7 @@ note carries YAML frontmatter (\`type\`, \`tags\`, \`created\`, \`updated\`).
 - [[projects/]] — current work
 - [[postmortems/]] — incident writeups
 - [[inbox/]] — quick captures pending nightly filing
-- [[templates/]] — note skeletons (atomic-note, runbook, decision, postmortem)
+- [[templates/]] — note skeletons (concept, runbook, decision, postmortem)
 
 ## How to use the KB
 
@@ -143,17 +148,24 @@ note carries YAML frontmatter (\`type\`, \`tags\`, \`created\`, \`updated\`).
   to avoid duplicating an existing note.
 - **One idea per file.** Atomic notes are easier to link, search, and
   refactor than mega-notes.
-- **Link freely.** \`[[wikilinks]]\` build the graph. The nightly cycle
-  adds links between newly-related notes.
+- **Link every note.** \`[[wikilinks]]\` are the graph, and recall expands
+  outward along it from a lexical match — an unlinked note is reachable only
+  by exact wording. The nightly cycle adds links between newly-related notes.
+- **Fill \`description\` and \`aliases\`.** Search weights frontmatter above
+  body text, so aliases are what let a later query find a note using words
+  you didn't happen to write.
 - **Capture in inbox/.** If you're mid-task and have a half-thought,
   drop a one-liner into \`inbox/\`. The nightly cycle files or discards it.
 `;
 }
 
-function atomicTemplate(): string {
+function conceptTemplate(): string {
   return `---
 type: concept
+title: <what this is>
+description: <one sentence: the question this note answers>
 tags: []
+aliases: []
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 ---
@@ -176,7 +188,10 @@ One idea per note. Link related notes with [[wikilinks]].
 function runbookTemplate(): string {
   return `---
 type: runbook
+title: <the action this performs>
+description: <one sentence: when you reach for this>
 tags: [ops]
+aliases: []
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 ---
@@ -209,7 +224,10 @@ What to do if a step fails.
 function decisionTemplate(): string {
   return `---
 type: decision
+title: <the choice made>
+description: <one sentence: what was decided and why>
 tags: []
+aliases: []
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 ---
@@ -241,7 +259,10 @@ We chose X because Y.
 function postmortemTemplate(): string {
   return `---
 type: postmortem
+title: <the incident>
+description: <one sentence: what broke and what fixed it>
 tags: [incident]
+aliases: []
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 ---

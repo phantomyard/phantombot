@@ -20,6 +20,7 @@ import {
   STALE_RUN_MS,
   sweepDailyFiles,
 } from "../src/lib/nightly.ts";
+import { OKF_TYPES } from "../src/lib/okf.ts";
 
 let workdir: string;
 
@@ -455,6 +456,49 @@ describe("buildNightlyStagePrompt", () => {
     expect(p).toContain("## Changelog");
     expect(p).toContain("status: obsolete");
     expect(p).toContain("2026-05-18: was X → now Y");
+  });
+
+  // Without embeddings, recall is BM25 only: it can match a note only on words
+  // the note literally contains. A single-phrase dedup search therefore misses
+  // paraphrased coverage and the stage creates a duplicate — the one failure
+  // mode that compounds, since each duplicate dilutes every later query.
+  test("kb stage requires multi-angle dedup search", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    expect(p).toContain("MORE THAN ONE ANGLE");
+    expect(p).toMatch(/two or three times/);
+  });
+
+  test("kb stage requires the full OKF frontmatter set", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    for (const field of [
+      "type",
+      "title",
+      "description",
+      "aliases",
+      "tags",
+      "created",
+      "updated",
+    ]) {
+      expect(p).toContain(field);
+    }
+  });
+
+  test("kb stage lists the controlled vocabulary from okf.ts", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    for (const t of OKF_TYPES) {
+      expect(p).toContain(t);
+    }
+    expect(p).toContain("Never invent a new type");
+  });
+
+  // On a no-embeddings install the link graph IS the semantic index: recall
+  // expands outward from a lexical hit along [[wikilinks]]. An unlinked note
+  // is reachable only by exact wording, so linking is a retrieval requirement
+  // rather than a tidiness preference.
+  test("kb stage requires new notes to be linked in", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    expect(p).toContain("[[wikilinks]]");
+    expect(p).toContain("nearest existing");
   });
 
   test("no stage mentions the removed day-essence header", () => {

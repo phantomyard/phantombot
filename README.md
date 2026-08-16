@@ -1421,6 +1421,51 @@ path is much stronger than plain keyword matching:
 
 This is the default. Every phantom gets it for free, no setup.
 
+#### The frontmatter that makes it work
+
+Those three superpowers are only as good as the frontmatter agents actually
+write, so the vocabulary is part of the spec rather than a style preference.
+Every `kb/` note carries:
+
+| Field | Why the index cares |
+|---|---|
+| `type` | Controlled vocabulary (below) — its own BM25F column |
+| `title` | Highest-weighted field |
+| `description` | One sentence: the question the note answers |
+| `tags` | Lowercase, hyphenated; weighted above body text |
+| `aliases` | **The synonym fix** — the other names this thing goes by |
+| `created` / `updated` | Recency signals; `updated` is bumped on reconcile |
+
+`aliases` is the field that earns its keep on the no-key path. BM25 can only
+match words that are actually present, so a note titled "Secret Rotation"
+is invisible to a search for "credential cycling" *unless the note says so
+itself*. Aliases are how a note declares the wrong-but-plausible names a
+future query might use.
+
+**Controlled `type` vocabulary.** Left unstated, this field drifts into a
+dozen near-synonyms (`note` / `atomic-note` / `concept`) that fragment the
+very column meant to sharpen recall. Phantombot declares it once, in
+`src/lib/okf.ts`, and generates both the persona prompt and the nightly
+prompt from that constant:
+
+- **Core** — `concept`, `runbook`, `procedure`, `reference`, `postmortem`,
+  `project`, `person`, `infrastructure`, `index`. These mean the same thing
+  in a human-curated OKF vault as they do in a phantom's KB, so notes move
+  between the two without translation.
+- **Agent-side** — `lesson`, `decision`, `norm`, `account`. Derived from the
+  structured drawers; they have no equivalent in a curated vault, because a
+  vault records what someone decided was true and these record what the agent
+  learned the hard way.
+
+Adopting the vocabulary is **not a migration**. An alias map folds legacy
+values (`troubleshooting` → `runbook`, `home` → `index`) onto canonical ones
+at query time, so every note ever written stays valid and only newly-authored
+notes converge. Nothing on disk is renamed.
+
+> `kb/` is **private to the persona** — not published, not shared between
+> agents, not a document store for the operator. It is the agent's own recall.
+> OKF is the *format*; where a human-facing vault lives is a separate question.
+
 **Add Gemini embeddings** (optional, recommended for production) to layer true
 **semantic** retrieval on top — matching by *meaning*, not just words. With a
 key, search becomes **hybrid**: OKF field-weighted BM25 *and* vector similarity,
