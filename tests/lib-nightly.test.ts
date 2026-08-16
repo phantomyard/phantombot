@@ -90,7 +90,7 @@ describe("buildNightlyPrompt", () => {
   test("embeds the persona name + today + isolation note", () => {
     const p = buildNightlyPrompt("kai", "2026-05-02");
     expect(p).toContain("persona 'kai'");
-    expect(p).toContain("Today is 2026-05-02");
+    expect(p).toContain("Processing date: 2026-05-02");
     expect(p).toContain("system:nightly:2026-05-02");
     expect(p).toContain("ISOLATED");
     expect(p).toContain("PHASE 1");
@@ -112,7 +112,7 @@ describe("buildNightlyPrompt", () => {
 
   test("references the phantombot memory tools the harness must call", () => {
     const p = buildNightlyPrompt("x", "2026-01-01");
-    expect(p).toContain("phantombot memory today");
+    expect(p).toContain("phantombot memory get memory/2026-01-01.md");
     expect(p).toContain("phantombot memory search");
     expect(p).toContain("phantombot memory get");
     expect(p).toContain("phantombot memory index --rebuild");

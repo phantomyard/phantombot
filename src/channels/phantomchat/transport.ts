@@ -31,6 +31,7 @@ import {
   makeRelayAuthSigner,
   type RelayAuthSigner,
 } from "./relayAuth.ts";
+import { RelayHealthTracker } from "./relayHealth.ts";
 import {
   oggOpusDurationSeconds,
   oggOpusWaveformBase64,
@@ -118,7 +119,14 @@ const FETCH_PROFILES_TIMEOUT_MS = 3000;
  * logs, never blocks or rejects the send path.
  */
 export const PUBLISH_READBACK_SETTLE_MS = 750;
-export const PUBLISH_READBACK_TIMEOUT_MS = 2500;
+/**
+ * Raised 2500 → 5000 with issue #359. The read-back result is no longer just a
+ * log line — it now drives quarantine — so a false negative has a real cost (a
+ * merely SLOW relay could be scored as a DROPPING one). 5s is well clear of
+ * observed p99 index+query latency on the healthy relays, and the check is
+ * detached, so the extra patience costs the send path nothing.
+ */
+export const PUBLISH_READBACK_TIMEOUT_MS = 5000;
 
 /**
  * The Nostr filter shape we subscribe with. Kept minimal: kind-1059 gift-wraps
@@ -385,6 +393,15 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
    */
   private readonly authSigner: RelayAuthSigner;
 
+  /**
+   * Per-relay read-back health (issue #359). Consulted on every publish to pick
+   * the target set, and fed by the read-back pass that already runs after each
+   * publish. Quarantine is PUBLISH-ONLY: `this.relays` — the subscription set —
+   * is never narrowed, so a quarantined relay keeps its socket and its reads,
+   * and promoting it back later costs nothing. See relayHealth.ts.
+   */
+  readonly relayHealth: RelayHealthTracker;
+
   constructor(
     private readonly ourSecretKey: Uint8Array,
     relays: string[],
@@ -393,6 +410,10 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     this.relays = [...relays];
     this.ourPubHex = getPublicKey(ourSecretKey);
     this.authSigner = makeRelayAuthSigner(ourSecretKey);
+    this.relayHealth = new RelayHealthTracker(this.relays, {
+      info: (msg, meta) => log.info(msg, meta as Record<string, unknown>),
+      debug: (msg, meta) => log.debug(msg, meta as Record<string, unknown>),
+    });
   }
 
   /**
@@ -578,13 +599,19 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // relay rejects the publish with `auth-required:`, nostr-tools signs a
     // kind-22242 auth event and retries the publish once, authenticated
     // (issue #368 — without this, AUTH-requiring relays drop everything).
+    // Publish only to relays that are currently trusted to STORE what we send
+    // (issue #359). Quarantined relays are skipped here and here only — they
+    // keep their read subscription, so this costs no connection churn and the
+    // set can widen again the instant health recovers. Never fewer than
+    // MIN_PUBLISH_RELAYS: the floor outranks the quarantine.
+    const targets = this.relayHealth.publishTargets();
     const results = await Promise.allSettled(
-      this.pool.publish(this.relays, event, { onauth: this.authSigner }),
+      this.pool.publish(targets, event, { onauth: this.authSigner }),
     );
     const ok = results.some((r) => r.status === "fulfilled");
     if (!ok) {
       log.warn("phantomchat: publish failed on all relays", {
-        relays: this.relays.length,
+        relays: targets.length,
         eventId: event.id,
       });
     }
@@ -592,7 +619,9 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     // be stored — observed on nostr-rs-relay with nip42_auth, which ACKs and
     // silently drops. Re-query each relay for the event id and warn loudly,
     // naming the relays, when it isn't there. Detached: never blocks the send.
-    void this.verifyStored(event);
+    // Its per-relay results are what feed the health tracker above, which is
+    // why health costs no extra traffic — this pass was already running.
+    void this.verifyStored(event, undefined, targets);
   }
 
   /**
@@ -612,6 +641,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   async verifyStored(
     event: NTNostrEvent,
     timing?: { settleMs?: number; timeoutMs?: number },
+    targets: readonly string[] = this.relays,
   ): Promise<string[]> {
     if (event.kind >= 20000 && event.kind < 30000) return [];
     const missing: string[] = [];
@@ -619,15 +649,19 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
       setTimeout(r, timing?.settleMs ?? PUBLISH_READBACK_SETTLE_MS),
     );
     await Promise.all(
-      this.relays.map(async (relay) => {
+      targets.map(async (relay) => {
         const found = await this.readBackOne(relay, event.id, timing?.timeoutMs);
         if (!found) missing.push(relay);
+        // Feed the quarantine tracker (issue #359). This is the ONLY health
+        // signal in the system — derived from traffic we were already sending,
+        // so relay health costs zero additional requests.
+        this.relayHealth.record(relay, found);
       }),
     );
     if (missing.length > 0) {
       log.warn(
         "phantomchat: publish NOT confirmed stored — relay(s) dropped the event",
-        { eventId: event.id, kind: event.kind, missing, relays: this.relays.length },
+        { eventId: event.id, kind: event.kind, missing, relays: targets.length },
       );
     }
     return missing;

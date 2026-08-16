@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 import {
+  DEFAULT_CROSS_CONVERSATION,
   DEFAULT_DURABLE_FACTS,
   DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
@@ -58,6 +59,11 @@ const ENV_KEYS = [
   "PHANTOMBOT_RETRIEVAL_DECAY_ENABLED",
   "PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS",
   "PHANTOMBOT_RETRIEVAL_DECAY_FLOOR",
+  "PHANTOMBOT_RETRIEVAL_CROSS_ENABLED",
+  "PHANTOMBOT_RETRIEVAL_CROSS_LIMIT",
+  "PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE",
+  "PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE",
+  "PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE",
   "PHANTOMBOT_DURABLE_FACTS_ENABLED",
   "PHANTOMBOT_DURABLE_FACTS_MAX_INJECTED",
   "PHANTOMBOT_DURABLE_FACTS_MIN_CONFIDENCE",
@@ -782,6 +788,7 @@ min_score = 0.25
       turnIndexing: DEFAULT_TURN_INDEXING,
       graphExpansion: DEFAULT_GRAPH_EXPANSION,
       decay: DEFAULT_RETRIEVAL_DECAY,
+      crossConversation: DEFAULT_CROSS_CONVERSATION,
     });
   });
 
@@ -804,6 +811,7 @@ limit = 5
       turnIndexing: DEFAULT_TURN_INDEXING,
       graphExpansion: DEFAULT_GRAPH_EXPANSION,
       decay: DEFAULT_RETRIEVAL_DECAY,
+      crossConversation: DEFAULT_CROSS_CONVERSATION,
     });
   });
 
@@ -849,6 +857,67 @@ half_life_days = 0.5
 
     process.env.PHANTOMBOT_RETRIEVAL_DECAY_HALF_LIFE_DAYS = "-3";
     expect((await loadConfig()).retrieval!.decay.halfLifeDays).toBe(0);
+  });
+
+  test("cross-conversation defaults ON when the flag is absent", async () => {
+    const c = await loadConfig();
+    expect(c.retrieval!.crossConversation).toEqual(DEFAULT_CROSS_CONVERSATION);
+    expect(c.retrieval!.crossConversation.enabled).toBe(true);
+  });
+
+  test("TOML [retrieval.cross_conversation] overrides defaults", async () => {
+    await writeToml(`
+[retrieval.cross_conversation]
+enabled = false
+limit = 5
+min_score = 4.5
+min_vec_score = 0.9
+exclude = ["telegram", "phantomchat:group:secret"]
+`);
+    const c = await loadConfig();
+    expect(c.retrieval!.crossConversation).toEqual({
+      enabled: false,
+      limit: 5,
+      minScore: 4.5,
+      minVecScore: 0.9,
+      exclude: ["telegram", "phantomchat:group:secret"],
+    });
+  });
+
+  test("cross-conversation env vars override TOML; exclude is comma-separated", async () => {
+    await writeToml(`
+[retrieval.cross_conversation]
+enabled = true
+limit = 5
+`);
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_ENABLED = "false";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_LIMIT = "7";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE = "3.5";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE = "0.7";
+    process.env.PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE = "telegram, phantomchat:group:x";
+    const c = await loadConfig();
+    expect(c.retrieval!.crossConversation).toEqual({
+      enabled: false,
+      limit: 7,
+      minScore: 3.5,
+      minVecScore: 0.7,
+      exclude: ["telegram", "phantomchat:group:x"],
+    });
+  });
+
+  test("cross-conversation values are clamped to sane ranges", async () => {
+    await writeToml(`
+[retrieval.cross_conversation]
+limit = 999
+min_score = -1
+min_vec_score = 2
+exclude = ["telegram", "", "  "]
+`);
+    const c = await loadConfig();
+    expect(c.retrieval!.crossConversation.limit).toBe(10); // capped
+    expect(c.retrieval!.crossConversation.minScore).toBe(0); // floored at 0
+    expect(c.retrieval!.crossConversation.minVecScore).toBe(1); // cosine ∈ [-1,1]
+    expect(c.retrieval!.crossConversation.exclude).toEqual(["telegram"]);
   });
 
   test("TOML [retrieval.turn_indexing] overrides defaults", async () => {

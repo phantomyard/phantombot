@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runNightly } from "../src/cli/nightly.ts";
+import { defaultNightlyDate, runNightly } from "../src/cli/nightly.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -41,6 +41,29 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
+});
+
+describe("defaultNightlyDate", () => {
+  // The nightly timer fires at 02:00 for the day that just CLOSED. The
+  // default date must be yesterday — otherwise the run looks for a daily
+  // file that doesn't exist yet and silently no-ops (reported 2026-08-15).
+  test("fires 02:00 → returns the day that just closed", () => {
+    expect(defaultNightlyDate(new Date(Date.UTC(2026, 7, 15, 2, 0, 0)))).toBe(
+      "2026-08-14",
+    );
+  });
+
+  test("month boundary — Aug 1 → Jul 31", () => {
+    expect(defaultNightlyDate(new Date(Date.UTC(2026, 7, 1, 2, 0, 0)))).toBe(
+      "2026-07-31",
+    );
+  });
+
+  test("year boundary — Jan 1 → Dec 31 of prior year", () => {
+    expect(defaultNightlyDate(new Date(Date.UTC(2026, 0, 1, 2, 0, 0)))).toBe(
+      "2025-12-31",
+    );
+  });
 });
 
 describe("runNightly — early exits", () => {

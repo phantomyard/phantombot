@@ -20,6 +20,7 @@ import { log } from "../lib/logger.ts";
 import {
   MemoryIndex,
   renderTurnForIndex,
+  turnPath,
 } from "../lib/memoryIndex.ts";
 import type { MemoryStore, Turn } from "../memory/store.ts";
 
@@ -46,6 +47,8 @@ export interface IndexConversationTurnsResult {
   triggered: boolean;
   indexed: number;
   embedded: number;
+  /** Embeddings reused unchanged (text_sha match) — no API call made. */
+  reused: number;
   embeddingFailures: number;
   userTurns: number;
   previousUserTurnsIndexed: number;
@@ -103,6 +106,7 @@ export async function indexConversationTurnsIfDue(
         triggered: false,
         indexed: 0,
         embedded: 0,
+        reused: 0,
         embeddingFailures: 0,
         userTurns,
         previousUserTurnsIndexed,
@@ -114,6 +118,7 @@ export async function indexConversationTurnsIfDue(
     let afterId = state?.lastTurnId ?? 0;
     let indexed = 0;
     let embedded = 0;
+    let reused = 0;
     let embeddingFailures = 0;
 
     while (true) {
@@ -139,9 +144,24 @@ export async function indexConversationTurnsIfDue(
         }
         const text = renderTurnForIndex(turn);
         const textSha = sha256(text);
-        const vec = embedder ? await embedTurn(embedder, turn, text) : undefined;
+        // Reuse a surviving embedding when the indexed text is unchanged.
+        // Turn paths are id-keyed and text is immutable, so a sha match is
+        // proof the stored vector already describes this exact content —
+        // this is what makes a turn-schema rebuild (turn_docs dropped,
+        // turn_embeddings kept) cost zero embed API calls.
+        const path = turnPath(turn);
+        const haveSha = ix.turnEmbeddingSha(path);
+        const vec =
+          embedder && haveSha !== textSha
+            ? await embedTurn(embedder, turn, text)
+            : undefined;
         if (vec) embedded++;
-        else if (embedder) embeddingFailures++;
+        else if (embedder && haveSha !== textSha) embeddingFailures++;
+        // sha match → the surviving embedding was reused. Counted
+        // separately so a turn-schema rebuild (thousands of turns, zero
+        // API calls) doesn't log embedded: 0 and look like the embedder
+        // is down.
+        else if (embedder && haveSha === textSha) reused++;
         ix.upsertTurn(turn, vec, vec ? textSha : undefined);
         indexed++;
         afterId = turn.id;
@@ -162,6 +182,7 @@ export async function indexConversationTurnsIfDue(
       conversation: input.conversation,
       indexed,
       embedded,
+      reused,
       embeddingFailures,
       userTurns,
     });
@@ -170,6 +191,7 @@ export async function indexConversationTurnsIfDue(
       triggered: true,
       indexed,
       embedded,
+      reused,
       embeddingFailures,
       userTurns,
       previousUserTurnsIndexed,

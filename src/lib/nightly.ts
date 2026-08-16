@@ -246,13 +246,13 @@ export function buildNightlyPrompt(
   personaName: string,
   today: string,
 ): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
+  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Processing date: ${today} (the day that just closed).
 
 This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
 
 You have access to phantombot's memory tools via Bash:
 
-  phantombot memory today                       # path to today's daily file
+  phantombot memory get memory/${today}.md            # read the daily file being processed (do NOT use 'memory today' — resolves to actual current day, not ${today})
   phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir
@@ -307,13 +307,13 @@ When you're done, your final reply (which won't go anywhere user-facing) should 
  * and the isolation note, shared by all five stage prompts.
  */
 function nightlyStagePreamble(personaName: string, today: string): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
+  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Processing date: ${today} (the day that just closed).
 
 This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
 
 You have access to phantombot's memory tools via Bash:
 
-  phantombot memory today                       # path to today's daily file
+  phantombot memory get memory/${today}.md            # read the daily file being processed (do NOT use 'memory today' — resolves to actual current day, not ${today})
   phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir

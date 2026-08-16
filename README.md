@@ -1435,6 +1435,62 @@ dims = 1536
 Without embeddings, search degrades cleanly to OKF field-weighted BM25 with
 link-graph expansion — never to plain keyword.
 
+### Cross-conversation retrieval
+
+Auto-retrieval is **persona-scoped by default**: when a turn runs, relevant
+excerpts from your *other* chats can surface alongside the current
+conversation's. The fix you worked out in a Telegram DM on Monday is
+available when the same problem comes up in PhantomChat on Thursday — no
+manual `memory search` required.
+
+Guardrails keep it a supplement, never a flood:
+
+- Current-conversation hits always rank first; cross-conversation hits are
+  appended after them and hard-capped (default 3 per turn).
+- A cross-chat excerpt must clear an **absolute relevance floor** — BM25
+  for lexical matches (default 2.0), cosine similarity for vector-only
+  matches (default 0.85). Rank-fused scores are positional, so they are
+  never used as the bar; the defaults are calibrated against a live
+  4,000+-turn index (incidental single-token matches score ≈ 0, genuine
+  matches ≈ 4+; random embedding pairs sit at p90 ≈ 0.75).
+- **The audience boundary is a retrieval filter, not a prompt rule.** Every
+  turn is stamped at index time with an audience class derived from its
+  conversation key (`private` for DMs/CLI, `multi-party` for group chats),
+  and a memory may only surface in a room at least as wide as the audience
+  it was spoken to: private → private ✅, group → private ✅, private →
+  group ❌. Enforced in SQL before ranking, so a private-DM turn can never
+  reach a group chat however it is paraphrased.
+- Every turn is also stamped with its **provenance** (`principal`, `self`,
+  `other`, `unverified` — the same tiers durable facts use), carried on
+  each hit so retrieval can weigh where a memory came from.
+- Every cross-conversation hit is labelled with its source channel and date
+  (`cross-conversation: Telegram, May 27`), and the injected prompt
+  instructs the persona to let it inform the reply without quoting it
+  verbatim or naming the chat it came from — belt-and-braces on top of the
+  SQL audience filter.
+
+**No configuration is needed — it is on by default.** The flag exists only
+as an escape hatch for sensitive setups:
+
+```toml
+[retrieval.cross_conversation]
+enabled = false            # restore strict per-conversation retrieval
+limit = 3                  # max cross-conversation hits per turn (0 disables)
+min_score = 2.0            # absolute BM25 floor for cross hits
+min_vec_score = 0.85       # absolute cosine floor for vector-only cross hits
+exclude = ["telegram"]     # channels that neither contribute nor receive
+```
+
+`exclude` entries match a full conversation key
+(`phantomchat:group:abc123`) or a channel prefix (`telegram` matches every
+Telegram conversation). An excluded chat's turns never surface in other
+chats, and no cross-conversation context is injected into it.
+
+Environment overrides: `PHANTOMBOT_RETRIEVAL_CROSS_ENABLED`,
+`PHANTOMBOT_RETRIEVAL_CROSS_LIMIT`, `PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE`,
+`PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE`, and
+`PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE` (comma-separated).
+
 ### Nightly and Doctor
 
 The nightly distillation is checkpointed in five stages:

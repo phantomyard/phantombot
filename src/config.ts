@@ -213,6 +213,11 @@ export interface RetrievalSettings {
    * bumping it on recall would keep it alive — the opposite of the goal.
    */
   decay: RetrievalDecaySettings;
+  /**
+   * Tier-2 cross-conversation (persona-scoped) retrieval. Defaults ON —
+   * see CrossConversationRetrievalSettings.
+   */
+  crossConversation: CrossConversationRetrievalSettings;
 }
 
 /** Time-decay knobs for raw conversation-turn hits (curated notes are immune). */
@@ -259,6 +264,84 @@ export const DEFAULT_RETRIEVAL_DECAY: RetrievalDecaySettings = {
   floor: 0.02,
 };
 
+/**
+ * Cross-conversation (persona-scoped) retrieval — tier 2 of auto-retrieval.
+ *
+ * The problem it solves: auto-retrieval was scoped to the CURRENT
+ * conversation only (PR #132, leak fix), so knowledge earned in one chat
+ * (say, a tricky fix worked out in a Telegram DM) never surfaced when a
+ * similar problem came up days later in another chat (PhantomChat, an ACP
+ * session). The persona had the memory; retrieval couldn't reach it without
+ * a conscious `memory search` — and you can't search for what you don't
+ * remember exists.
+ *
+ * Tier 2 widens the net to the whole persona, with guardrails that keep it
+ * a supplement, never a flood: a higher relevance bar than in-conversation
+ * hits, a hard per-turn cap, source attribution on every hit, and a
+ * prompt-level disclosure rule (inform the reply, never quote the excerpt
+ * or name the chat it came from). See orchestrator/retrieval.ts.
+ *
+ * DEFAULTS TO ON when the flag is absent — deliberate anti-config-fatigue
+ * choice: the right behaviour out of the box, no knob to babysit. The flag
+ * exists purely as an escape hatch for genuinely sensitive setups.
+ */
+export interface CrossConversationRetrievalSettings {
+  /**
+   * Master switch for tier-2 (cross-conversation) hits. DEFAULT true —
+   * including when the whole [retrieval.cross_conversation] table is absent.
+   * Set false to restore strict per-conversation retrieval (PR #132
+   * behaviour).
+   */
+  enabled: boolean;
+  /**
+   * Hard cap on cross-conversation hits injected per turn, appended AFTER
+   * in-conversation hits so they can never displace tier 1. 0 disables
+   * tier 2 without touching the flag.
+   */
+  limit: number;
+  /**
+   * Absolute tier-2 relevance floor on the BM25 score. Rank-fused scores
+   * (RRF) encode position within a result set, not relevance, so the bar
+   * must be absolute — and it must be non-zero by default, or an empty
+   * tier 1 would inject any cross-conversation turn that matched FTS at
+   * all (Robert's PR #378 review). Default 2.0: sampled against a live
+   * 4,353-turn index, incidental single-common-token matches score ≈ 0
+   * while genuine single-term matches score ≈ 4+.
+   */
+  minScore: number;
+  /**
+   * Cosine floor for the vector leg of the tier-2 gate. NOTE: cosine is
+   * never sufficient on its own — a vector hit must ALSO share at least
+   * one query term (raw BM25 > 0). The gate is applied to the MAXIMUM
+   * over the whole persona index, whose distribution is dominated by
+   * register/boilerplate similarity: on a live 4k-turn
+   * gemini-embedding-001 index, 79% of arbitrary queries had a
+   * cross-conversation turn above 0.85 on cosine alone, and the hits were
+   * shared phrasing, not knowledge (PR #378 review). No absolute value
+   * calibrated against random-pair marginals (p50 0.65 / p90 0.75 /
+   * p99 0.89) is safe as a standalone bar; 0.85 WITH lexical support
+   * keeps genuine paraphrase matches while rejecting shared phrasing.
+   */
+  minVecScore: number;
+  /**
+   * Channels/conversations excluded from tier 2 in BOTH directions: their
+   * turns never surface in other chats, and no cross-conversation hits are
+   * injected when they are the current conversation. Entries match a full
+   * conversation key ("phantomchat:group:abc123") or a channel prefix
+   * ("telegram" matches every telegram:* conversation). The sensitive-DM
+   * escape hatch.
+   */
+  exclude: string[];
+}
+
+export const DEFAULT_CROSS_CONVERSATION: CrossConversationRetrievalSettings = {
+  enabled: true,
+  limit: 3,
+  minScore: 2.0,
+  minVecScore: 0.85,
+  exclude: [],
+};
+
 export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   enabled: true,
   limit: 5,
@@ -267,6 +350,7 @@ export const DEFAULT_RETRIEVAL: RetrievalSettings = {
   turnIndexing: DEFAULT_TURN_INDEXING,
   graphExpansion: DEFAULT_GRAPH_EXPANSION,
   decay: DEFAULT_RETRIEVAL_DECAY,
+  crossConversation: DEFAULT_CROSS_CONVERSATION,
 };
 
 /**
@@ -949,6 +1033,55 @@ function buildRetrievalConfig(
     decay: buildRetrievalDecayConfig(
       (tomlRetrieval.decay ?? {}) as Record<string, unknown>,
     ),
+    crossConversation: buildCrossConversationConfig(
+      (tomlRetrieval.cross_conversation ?? {}) as Record<string, unknown>,
+    ),
+  };
+}
+
+function buildCrossConversationConfig(
+  toml: Record<string, unknown>,
+): CrossConversationRetrievalSettings {
+  // Absent flag → DEFAULT ON. This is the anti-config-fatigue contract:
+  // nobody should have to discover or set this knob to get the right
+  // behaviour; it exists so a sensitive setup can opt OUT.
+  const enabled =
+    asBool(process.env.PHANTOMBOT_RETRIEVAL_CROSS_ENABLED) ??
+    asBool(toml.enabled) ??
+    DEFAULT_CROSS_CONVERSATION.enabled;
+  const limit =
+    asInt(process.env.PHANTOMBOT_RETRIEVAL_CROSS_LIMIT) ??
+    asInt(toml.limit) ??
+    DEFAULT_CROSS_CONVERSATION.limit;
+  const minScore =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_SCORE) ??
+    asNumber(toml.min_score) ??
+    DEFAULT_CROSS_CONVERSATION.minScore;
+  const minVecScore =
+    asNumber(process.env.PHANTOMBOT_RETRIEVAL_CROSS_MIN_VEC_SCORE) ??
+    asNumber(toml.min_vec_score) ??
+    DEFAULT_CROSS_CONVERSATION.minVecScore;
+  // Env form is comma-separated ("telegram,phantomchat:group:abc"); TOML is
+  // a native string array.
+  const envExclude = process.env.PHANTOMBOT_RETRIEVAL_CROSS_EXCLUDE
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const exclude =
+    envExclude ??
+    asStringArray(toml.exclude) ??
+    DEFAULT_CROSS_CONVERSATION.exclude;
+  return {
+    enabled,
+    // 0 disables tier 2 without touching the flag; cap keeps the per-turn
+    // prompt cost bounded even for a fat-fingered value.
+    limit: Math.max(0, Math.min(10, limit)),
+    // Absolute floors; a negative floor would re-open the "inject anything
+    // that matched at all" hole, and cosine lives in [-1, 1].
+    minScore: Math.max(0, minScore),
+    minVecScore: Math.max(-1, Math.min(1, minVecScore)),
+    // Drop blanks so "a,,b" can't accidentally match every conversation.
+    exclude: exclude.map((e) => e.trim()).filter((e) => e.length > 0),
   };
 }
 
