@@ -28,7 +28,7 @@ import { posix } from "node:path";
 import type { FactSource } from "../config.ts";
 import type { Turn, TurnOrigin } from "../memory/store.ts";
 import { log } from "./logger.ts";
-import { parseOkf } from "./okf.ts";
+import { normaliseOkfType, parseOkf } from "./okf.ts";
 
 export type Scope = "memory" | "kb" | "turns";
 
@@ -200,13 +200,45 @@ export function parseTurnCreatedAtMs(content: string): number | undefined {
  * tags, or aliases is worth far more than the same term buried in the body —
  * this is the lexical-precision half of the OKF superpowers, and it makes the
  * frontmatter the index actually leans on. Positionally these map to the
- * `notes` columns: [path, scope, title, tags, aliases, headings, body]. The
- * two UNINDEXED columns get weight 0 (ignored by bm25 anyway).
+ * `notes` columns: [path, scope, type, title, tags, aliases, headings, body].
+ * The two UNINDEXED columns get weight 0 (ignored by bm25 anyway).
+ *
+ * `type` sits below tags/aliases deliberately: it is a CLOSED vocabulary of a
+ * dozen values, so it is a coarse filter rather than a distinguishing term —
+ * matching "runbook" should promote a note among its peers, never outrank a
+ * note whose actual title is the thing you searched for.
  */
-export const NOTE_FIELD_WEIGHTS = [0, 0, 8.0, 6.0, 6.0, 3.0, 1.0] as const;
+export const NOTE_FIELD_WEIGHTS = [0, 0, 4.0, 8.0, 6.0, 6.0, 3.0, 1.0] as const;
 
-/** Column index of `body` in `notes` (for snippet()). */
-const NOTES_BODY_COL = 6;
+/**
+ * Column index of `body` in `notes` (for snippet()). FTS5 takes a bare integer
+ * and does NOT validate it against the column name — point it at the wrong
+ * column and snippets silently come back empty. Adding a column before `body`
+ * shifts this; keep it in step with the DDL and NOTE_FIELD_WEIGHTS.
+ */
+const NOTES_BODY_COL = 7;
+
+/**
+ * What actually goes in the `type` column: the canonical type PLUS the raw
+ * value when the two differ.
+ *
+ * Storing both is what makes the vocabulary a recall win instead of a rename.
+ * Canonical alone would make a note typed `atomic-note` findable as "concept"
+ * but NOT as "atomic-note" — punishing the notes that predate the vocabulary,
+ * which is exactly the migration this design set out to avoid. Raw alone would
+ * fragment the column into the near-synonyms the vocabulary exists to merge.
+ *
+ * An unrecognised type still gets indexed on its own (normalised) spelling:
+ * `normaliseOkfType` returns "" for unknowns, and dropping them would make
+ * drift invisible to the very search you would use to find it.
+ */
+export function indexedNoteType(raw: string): string {
+  const slug = raw.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (!slug) return "";
+  const canonical = normaliseOkfType(slug);
+  if (!canonical) return slug;
+  return canonical === slug ? canonical : `${canonical} ${slug}`;
+}
 
 /**
  * How many raw-BM25 turn candidates to pull before decay re-ranks them (per
@@ -330,8 +362,14 @@ export function rrfMerge(
  * v1 → v2: `notes` went from a single `content` column to OKF field columns
  * (title / tags / aliases / headings / body) for BM25F, and `note_links` was
  * added for graph-walk expansion.
+ *
+ * v3 → v4: `type` added as its own BM25F column, holding the canonical OKF
+ * type with legacy aliases folded in at index time (see `indexedNoteType`).
+ * Existing databases carry rows written without it, so the bump is what makes
+ * the controlled vocabulary reach retrieval rather than just the prompts —
+ * the drop-and-rebuild below repopulates every note from disk on next open.
  */
-export const NOTES_SCHEMA_VERSION = 3;
+export const NOTES_SCHEMA_VERSION = 4;
 
 /**
  * Version of the turn_docs schema. Unlike the notes tables, turn rows are
@@ -371,6 +409,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE VIRTUAL TABLE IF NOT EXISTS notes USING fts5(
   path UNINDEXED,
   scope UNINDEXED,
+  type,
   title,
   tags,
   aliases,
@@ -615,12 +654,13 @@ export class MemoryIndex {
       this.deletePath(f.path);
       this.db
         .prepare(
-          "INSERT INTO notes (path, scope, title, tags, aliases, headings, body) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           f.path,
           f.scope,
+          indexedNoteType(doc.type),
           doc.title,
           doc.tags.join(" "),
           doc.aliases.join(" "),

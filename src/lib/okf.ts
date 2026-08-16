@@ -9,8 +9,9 @@
  * Phantombot's kb/ second brain IS this shape: atomic markdown notes with
  * frontmatter, linked into a concept graph. This parser extracts the structured
  * parts so the FTS5 index can:
- *   - weight frontmatter fields above body text (BM25F),
- *   - index tags + aliases as controlled vocabulary (synonym fix), and
+ *   - weight frontmatter fields (type / title / tags / aliases) above body
+ *     text (BM25F),
+ *   - index type + tags + aliases as controlled vocabulary (synonym fix), and
  *   - follow links between concepts for graph-walk recall expansion.
  *
  * It is deliberately dependency-free and forgiving: a note with no frontmatter,
@@ -100,10 +101,13 @@ export type OkfType = (typeof OKF_TYPES)[number];
  * Drift map: values observed in existing KBs → the canonical type they mean.
  *
  * This exists so adopting the vocabulary is NOT a migration. Every note ever
- * written stays valid; `normaliseOkfType` folds legacy values at query time so
- * old and new notes land in the same bucket, and only newly-authored notes
- * converge on the canonical spelling. Nothing renames a file on disk — the
- * no-auto-heal rule applies to knowledge as much as to infrastructure.
+ * written stays valid: the indexer folds legacy values onto their canonical
+ * type as it writes the `type` column (`indexedNoteType` in memoryIndex.ts,
+ * which keeps the raw spelling alongside the canonical one), so old and new
+ * notes land in the same bucket without either becoming unfindable. Only
+ * newly-authored notes converge on the canonical spelling. Nothing renames a
+ * file on disk — the no-auto-heal rule applies to knowledge as much as to
+ * infrastructure.
  */
 export const OKF_TYPE_ALIASES: Readonly<Record<string, OkfType>> = {
   note: "concept",

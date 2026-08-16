@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  indexedNoteType,
   MemoryIndex,
   NOTES_SCHEMA_VERSION,
   parseTurnCreatedAtMs,
@@ -394,6 +395,99 @@ describe("BM25F field weighting", () => {
   });
 });
 
+describe("indexedNoteType", () => {
+  test("passes a canonical type through unchanged", () => {
+    expect(indexedNoteType("runbook")).toBe("runbook");
+  });
+
+  test("keeps the raw spelling alongside the canonical one", () => {
+    // Both must be searchable: canonical so legacy notes join their peers,
+    // raw so adopting the vocabulary never makes an old note unfindable.
+    expect(indexedNoteType("atomic-note")).toBe("concept atomic-note");
+    expect(indexedNoteType("troubleshooting")).toBe("runbook troubleshooting");
+  });
+
+  test("normalises case and separators before folding", () => {
+    expect(indexedNoteType("  Atomic_Note ")).toBe("concept atomic-note");
+    expect(indexedNoteType("Runbook")).toBe("runbook");
+  });
+
+  test("keeps an unknown type on its own spelling so drift stays findable", () => {
+    expect(indexedNoteType("wibble")).toBe("wibble");
+  });
+
+  test("yields empty for a missing type", () => {
+    expect(indexedNoteType("")).toBe("");
+    expect(indexedNoteType("   ")).toBe("");
+  });
+});
+
+describe("OKF type column (BM25F)", () => {
+  test("a note is retrievable by its declared type", async () => {
+    await note(
+      "kb/infra/deploy.md",
+      "---\ntitle: Deploying the gateway\ntype: runbook\n---\n" +
+        "# Deploying the gateway\nsteps here.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const hits = ix.search("runbook", { scope: "kb" });
+    expect(hits.map((h) => h.path)).toContain("kb/infra/deploy.md");
+  });
+
+  test("a legacy type is retrievable by its canonical name", async () => {
+    // The whole point of the alias map: this note predates the vocabulary and
+    // was never edited, but searching the canonical type still finds it.
+    await note(
+      "kb/concepts/old.md",
+      "---\ntitle: Backpressure\ntype: atomic-note\n---\n" +
+        "# Backpressure\nnotes.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    expect(ix.search("concept", { scope: "kb" }).map((h) => h.path)).toContain(
+      "kb/concepts/old.md",
+    );
+    // ...and by the spelling actually on disk.
+    expect(
+      ix.search("atomic-note", { scope: "kb" }).map((h) => h.path),
+    ).toContain("kb/concepts/old.md");
+  });
+
+  test("a type match does not outrank a title match", async () => {
+    // `type` is a closed vocabulary, so it must stay a tiebreaker: the note
+    // genuinely ABOUT runbooks should beat one merely typed as a runbook.
+    await note(
+      "kb/infra/typed.md",
+      "---\ntitle: Rotating certificates\ntype: runbook\n---\n" +
+        "# Rotating certificates\nsteps.\n",
+    );
+    await note(
+      "kb/concepts/about.md",
+      "---\ntitle: Runbook\ntags: [runbook]\n---\n" +
+        "# Runbook\nwhat a runbook is.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const hits = ix.search("runbook", { scope: "kb", limit: 5 });
+    expect(hits[0]?.path).toBe("kb/concepts/about.md");
+  });
+
+  test("snippets still come back non-empty after the column shift", async () => {
+    // Guards NOTES_BODY_COL: FTS5 doesn't validate the column ordinal, so a
+    // stale index silently returns empty snippets rather than erroring.
+    await note(
+      "kb/concepts/snip.md",
+      "---\ntitle: Widget\ntype: concept\n---\n" +
+        "# Widget\nthe quick brown fox jumps over the lazy dog.\n",
+    );
+    await ix.refreshStale(personaDir);
+
+    const hits = ix.search("brown fox", { scope: "kb" });
+    expect(hits[0]?.snippet).toContain("fox");
+  });
+});
+
 describe("MemoryIndex.searchExpanded (OKF link-graph)", () => {
   test("pulls in a linked neighbour that did not match lexically", async () => {
     // Seed matches "postgres"; neighbour is about backups and links nowhere
@@ -554,6 +648,64 @@ describe("notes-schema self-heal", () => {
       await healed.refreshStale(pdir);
       const hits = healed.search("widget", { scope: "kb" });
       expect(hits.map((h) => h.path)).toContain("kb/x.md");
+      const ver = (
+        healed as unknown as {
+          db: { query: (s: string) => { get: () => { value: string } | null } };
+        }
+      ).db
+        .query("SELECT value FROM meta WHERE key = 'notes_schema_version'")
+        .get();
+      expect(Number(ver?.value)).toBe(NOTES_SCHEMA_VERSION);
+    } finally {
+      healed.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a v3 index (no type column) is rebuilt so type becomes searchable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-mi-heal4-"));
+    const idxPath = join(dir, "index.sqlite");
+    const pdir = join(dir, "persona");
+    await mkdir(join(pdir, "kb"), { recursive: true });
+    await writeFile(
+      join(pdir, "kb", "y.md"),
+      "---\ntitle: Gateway recovery\ntype: troubleshooting\n---\n" +
+        "# Gateway recovery\nthe steps.\n",
+    );
+
+    // Hand-build a v3 index: correct-for-its-day fielded columns, but no
+    // `type`. This is what every already-deployed install looks like.
+    const raw = new Database(idxPath, { create: true });
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec(
+      "CREATE VIRTUAL TABLE notes USING fts5(path UNINDEXED, scope UNINDEXED, " +
+        "title, tags, aliases, headings, body, tokenize = 'porter unicode61');",
+    );
+    raw.exec(
+      "CREATE TABLE files (path TEXT PRIMARY KEY, scope TEXT, mtime_ms INTEGER, " +
+        "size INTEGER, title TEXT DEFAULT '', aliases TEXT DEFAULT '', indexed_at TEXT);",
+    );
+    raw.exec(
+      "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    );
+    raw
+      .prepare("INSERT INTO meta (key, value) VALUES ('notes_schema_version', '3')")
+      .run();
+    raw
+      .prepare(
+        "INSERT INTO files (path, scope, mtime_ms, size, indexed_at) VALUES (?,?,?,?,?)",
+      )
+      .run("kb/y.md", "kb", 1, 1, new Date().toISOString());
+    raw.close();
+
+    const healed = await MemoryIndex.open(idxPath);
+    try {
+      await healed.refreshStale(pdir);
+      // The canonical type resolves even though the note says "troubleshooting"
+      // and the old index had nowhere to put it.
+      expect(healed.search("runbook", { scope: "kb" }).map((h) => h.path)).toContain(
+        "kb/y.md",
+      );
       const ver = (
         healed as unknown as {
           db: { query: (s: string) => { get: () => { value: string } | null } };
