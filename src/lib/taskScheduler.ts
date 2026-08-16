@@ -617,7 +617,9 @@ export function generateNightlyTaskXml(
     binPath,
     args: ["nightly"],
     triggersXml: triggers,
-    executionTimeLimit: "PT1H",
+    // Matches the systemd unit's TimeoutStartSec: a sweep can process up to
+    // MAX_DATES_PER_RUN days in one run.
+    executionTimeLimit: "PT1H30M",
     logon,
   });
 }

@@ -23,7 +23,10 @@
  * production callers omit `deps` and get the real implementations.
  */
 
-import type { Config } from "../config.ts";
+import { existsSync } from "node:fs";
+
+import { type Config, personaDir } from "../config.ts";
+import { nightlyHealth as realNightlyHealth } from "../lib/nightly.ts";
 import { truncateLine } from "../lib/format.ts";
 import { timeoutSignal } from "../lib/fetchTimeout.ts";
 import { telegramGetMe as realTelegramGetMe } from "../lib/telegramApi.ts";
@@ -64,6 +67,11 @@ export interface StatusProbeLines {
   memory?: string;
   /** e.g. "elevenlabs onwK…03F9 OK" or "openai nova ERR (…)" */
   voice?: string;
+  /**
+   * Nightly distillation health, e.g. "OK (nothing pending)",
+   * "RUNNING (2/5 dates, on 2026-06-02)" or "WARN (2 dates pending, …)".
+   */
+  dreaming?: string;
 }
 
 /**
@@ -77,6 +85,7 @@ export interface StatusProbeDeps {
   geminiEmbed?: typeof realGeminiEmbed;
   reconcileEditorConnectors?: typeof realReconcileEditorConnectors;
   isPhantombotBinary?: typeof realIsPhantombotBinary;
+  nightlyHealth?: typeof realNightlyHealth;
   env?: Record<string, string | undefined>;
   /** Override the shared probe deadline (ms). Production omits it; tests use
    *  a tiny value to exercise the cap without waiting the real 5s. */
@@ -183,7 +192,36 @@ async function probeVoice(
 }
 
 /**
- * Run all four live probes concurrently and return their one-line summaries.
+ * Nightly ("dreaming") health, read straight off the ledger + the daily files
+ * on disk. No LLM, no network, and it never does any of the nightly's work —
+ * it only reports what the last sweep left behind and what is still pending.
+ *
+ * Deliberately schedule-blind: a laptop that sweeps at 09:15 on boot is just
+ * as healthy as a server that sweeps at 02:00, provided nothing is pending.
+ */
+async function probeDreaming(
+  config: Config | undefined,
+  persona: string,
+  health: typeof realNightlyHealth,
+): Promise<string | undefined> {
+  if (!config) return undefined;
+  const dir = personaDir(config, persona);
+  if (!existsSync(dir)) return undefined;
+  const h = await health(dir);
+  switch (h.status) {
+    case "running":
+      return `RUNNING (${h.detail})`;
+    case "warning":
+      return `WARN (${h.detail})`;
+    case "error":
+      return `ERR (${h.detail})`;
+    default:
+      return `OK (${h.detail})`;
+  }
+}
+
+/**
+ * Run all live probes concurrently and return their one-line summaries.
  * Any probe that throws or has no config surface is omitted (undefined).
  */
 export async function gatherStatusProbes(
@@ -199,6 +237,7 @@ export async function gatherStatusProbes(
   const env = deps.env ?? process.env;
   const validateEl = deps.validateElevenLabsKey ?? realValidateElevenLabsKey;
   const validateOa = deps.validateOpenAIKey ?? realValidateOpenAIKey;
+  const nightly = deps.nightlyHealth ?? realNightlyHealth;
 
   // One shared deadline for the whole fan-out. Threaded into every client that
   // accepts a signal (cancels the socket) AND raced in settle() below (hard cap
@@ -221,7 +260,7 @@ export async function gatherStatusProbes(
     }
   };
 
-  const [telegram, memory, voice] = await Promise.all([
+  const [telegram, memory, voice, dreaming] = await Promise.all([
     settle(probeTelegram(config, persona, getMe, deadline)),
     settle(probeMemory(config, embed, deadline)),
     settle(
@@ -232,6 +271,7 @@ export async function gatherStatusProbes(
         signal: deadline,
       }),
     ),
+    settle(probeDreaming(config, persona, nightly)),
   ]);
   // ACP probe is synchronous local file reads — no need to race it.
   let acp: string | undefined;
@@ -241,5 +281,5 @@ export async function gatherStatusProbes(
     acp = undefined;
   }
 
-  return { telegram, acp, memory, voice };
+  return { telegram, acp, memory, voice, dreaming };
 }

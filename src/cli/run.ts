@@ -75,6 +75,7 @@ import {
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
+import { spawn } from "node:child_process";
 import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
 import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
@@ -449,11 +450,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
   out.write("Ctrl-C to stop.\n");
 
-  // Startup catch-up: `doctor` checks for a stale, failed, or partially
-  // checkpointed nightly and, if found, spawns a detached
-  // `nightly --resume` that picks up from the last good stage. This
-  // covers machines powered off during the 02:00 window. Don't await —
-  // doctor's repair is a detached child, so this returns immediately.
+  // Startup health check — read-only for the nightly (it repairs itself by
+  // sweeping); still repairs drifted units/timers/connectors. Don't await.
   // Runs against the admin persona for the same reason as notify above.
   const doctorPersona =
     adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
@@ -466,6 +464,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         error: (e as Error).message,
       }),
   );
+
+  // Startup nightly sweep — the whole story for boxes that are off at 02:00.
+  // The nightly is idempotent (it processes whatever the ledger says is
+  // unprocessed or changed, and no-ops when nothing is), so this is safe to
+  // fire on every start: an always-on server finds nothing pending and exits
+  // in milliseconds; a laptop booted at 09:15 distils the days it missed.
+  // Detached, so a long backlog sweep outlives neither this promise nor the
+  // daemon's own lifecycle concerns, and a crash there can never take the
+  // channel loop with it.
+  spawnStartupNightly(doctorPersona);
 
   // Self-provision the managed Pi capability-routing extension: when a routable
   // capability (image and/or coding model) is configured, stamp the embedded
@@ -920,6 +928,34 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     lock.release();
   }
   return 0;
+}
+
+/**
+ * Fire a detached `phantombot nightly` for the given persona.
+ *
+ * Detached + unref'd on purpose: a first sweep over a long backlog can run for
+ * many minutes, and it must not hold the daemon's event loop or die with a
+ * restart. The nightly holds its own in-flight marker, so a start-restart-start
+ * cycle cannot stack two sweeps on the same dates.
+ */
+export function spawnStartupNightly(persona: string): void {
+  const entry = process.argv[1] ?? "";
+  const dev = entry.endsWith(".ts") || entry.endsWith(".js");
+  const args = dev
+    ? [entry, "nightly", "--persona", persona]
+    : ["nightly", "--persona", persona];
+  try {
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    log.info("run: spawned startup nightly sweep", { persona });
+  } catch (e) {
+    log.warn("run: could not spawn startup nightly sweep", {
+      error: (e as Error).message,
+    });
+  }
 }
 
 export default defineCommand({

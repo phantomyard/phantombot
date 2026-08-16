@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultNightlyDate, runNightly } from "../src/cli/nightly.ts";
+import { MAX_DATES_PER_RUN, runNightly } from "../src/cli/nightly.ts";
+import {
+  loadNightlyState,
+  NIGHTLY_STAGES,
+  type NightlyStage,
+} from "../src/lib/nightly.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -17,11 +22,13 @@ class CaptureStream {
 }
 
 let workdir: string;
+let personaDir: string;
 let config: Config;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-ngcli-"));
-  await mkdir(join(workdir, "personas", "phantom"), { recursive: true });
+  personaDir = join(workdir, "personas", "phantom");
+  await mkdir(join(personaDir, "memory"), { recursive: true });
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000, harnessStartupTimeoutMs: 600_000,
@@ -43,28 +50,42 @@ afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
 });
 
-describe("defaultNightlyDate", () => {
-  // The nightly timer fires at 02:00 for the day that just CLOSED. The
-  // default date must be yesterday — otherwise the run looks for a daily
-  // file that doesn't exist yet and silently no-ops (reported 2026-08-15).
-  test("fires 02:00 → returns the day that just closed", () => {
-    expect(defaultNightlyDate(new Date(Date.UTC(2026, 7, 15, 2, 0, 0)))).toBe(
-      "2026-08-14",
-    );
-  });
+async function daily(date: string, body = `notes for ${date}`): Promise<void> {
+  await writeFile(join(personaDir, "memory", `${date}.md`), body, "utf8");
+}
 
-  test("month boundary — Aug 1 → Jul 31", () => {
-    expect(defaultNightlyDate(new Date(Date.UTC(2026, 7, 1, 2, 0, 0)))).toBe(
-      "2026-07-31",
-    );
-  });
+interface StageCall {
+  date: string;
+  stage: NightlyStage | "override";
+  prompt: string;
+  startedAt: number;
+  endedAt: number;
+}
 
-  test("year boundary — Jan 1 → Dec 31 of prior year", () => {
-    expect(defaultNightlyDate(new Date(Date.UTC(2026, 0, 1, 2, 0, 0)))).toBe(
-      "2025-12-31",
-    );
-  });
-});
+/**
+ * Drive runNightly with fake stages. `fail` marks stage/date pairs that should
+ * report an error; `delayMs` keeps a stage in flight long enough to observe
+ * concurrency.
+ */
+function harness(opts: { fail?: string[]; delayMs?: number } = {}) {
+  const calls: StageCall[] = [];
+  const runStage = async (a: {
+    date: string;
+    stage: NightlyStage | "override";
+    prompt: string;
+  }) => {
+    const startedAt = Date.now();
+    if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+    calls.push({ ...a, startedAt, endedAt: Date.now() });
+    const key = `${a.date}:${a.stage}`;
+    return opts.fail?.includes(key)
+      ? { finalReply: "", errored: "boom", durationMs: 1 }
+      : { finalReply: "done", durationMs: 1 };
+  };
+  return { calls, runStage };
+}
+
+const now = new Date("2026-05-10T02:00:00Z");
 
 describe("runNightly — early exits", () => {
   test("missing persona → exit 2", async () => {
@@ -88,5 +109,292 @@ describe("runNightly — early exits", () => {
     });
     expect(code).toBe(2);
     expect(err.text).toContain("no harnesses");
+  });
+});
+
+describe("runNightly — the sweep", () => {
+  test("processes every pending date, oldest first, two stages each", async () => {
+    await daily("2026-05-01");
+    await daily("2026-05-02");
+    const h = harness();
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config,
+      now,
+      out,
+      runStage: h.runStage,
+      refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(h.calls.length).toBe(4);
+    expect(h.calls.map((c) => c.date)).toEqual([
+      "2026-05-01",
+      "2026-05-01",
+      "2026-05-02",
+      "2026-05-02",
+    ]);
+    expect(new Set(h.calls.map((c) => c.stage))).toEqual(
+      new Set(NIGHTLY_STAGES),
+    );
+  });
+
+  // The whole point of the ledger: no flags, no catch-up mode — a second run
+  // with nothing new spends zero turns.
+  test("a second run with nothing changed does no work", async () => {
+    await daily("2026-05-01");
+    const first = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: first.runStage, refreshIndex: async () => {},
+    });
+    const second = harness();
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: second.runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(second.calls).toEqual([]);
+    expect(out.text).toContain("nothing pending");
+  });
+
+  // A day keeps receiving captures after its pass; growth must re-queue it.
+  test("a daily file that grew after processing is swept again", async () => {
+    await daily("2026-05-01");
+    const first = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: first.runStage, refreshIndex: async () => {},
+    });
+    await daily("2026-05-01", "notes for 2026-05-01 plus a late capture");
+    const second = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: second.runStage, refreshIndex: async () => {},
+    });
+    expect(second.calls.map((c) => c.date)).toEqual([
+      "2026-05-01",
+      "2026-05-01",
+    ]);
+  });
+
+  // Disjoint write targets (drawers+MEMORY.md vs kb/) is what licenses this.
+  test("the two stages for a date run concurrently, not in sequence", async () => {
+    await daily("2026-05-01");
+    const h = harness({ delayMs: 60 });
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(h.calls.length).toBe(2);
+    const [a, b] = h.calls;
+    // Overlap: the second stage started before the first one finished.
+    expect(Math.max(a!.startedAt, b!.startedAt)).toBeLessThan(
+      Math.min(a!.endedAt, b!.endedAt),
+    );
+  });
+
+  test("the index refresh runs in code once per date, after both stages", async () => {
+    await daily("2026-05-01");
+    const h = harness();
+    const refreshes: number[] = [];
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage,
+      refreshIndex: async () => {
+        refreshes.push(Date.now());
+      },
+    });
+    expect(refreshes.length).toBe(1);
+    expect(refreshes[0]!).toBeGreaterThanOrEqual(
+      Math.max(...h.calls.map((c) => c.endedAt)),
+    );
+  });
+
+  test("today is never swept — only days that have closed", async () => {
+    await daily("2026-05-09");
+    await daily("2026-05-10"); // == `now`
+    const h = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(new Set(h.calls.map((c) => c.date))).toEqual(
+      new Set(["2026-05-09"]),
+    );
+  });
+});
+
+describe("runNightly — ledger", () => {
+  test("records mtime, size, hash and stages per processed date", async () => {
+    await daily("2026-05-01");
+    const h = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    const rec = (await loadNightlyState(personaDir)).processed?.["2026-05-01"];
+    expect(rec?.status).toBe("ok");
+    expect(rec?.stages_done.sort()).toEqual([...NIGHTLY_STAGES].sort());
+    expect(rec?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(rec?.size).toBeGreaterThan(0);
+  });
+
+  test("clears the in-flight marker when the sweep finishes", async () => {
+    await daily("2026-05-01");
+    const h = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect((await loadNightlyState(personaDir)).current).toBeUndefined();
+  });
+
+  // One stage failing must not throw away the other's work, and must leave the
+  // date pending so the next sweep retries it — resume with no resume flag.
+  test("a failed stage → partial record, exit 1, and the date stays pending", async () => {
+    await daily("2026-05-01");
+    const h = harness({ fail: ["2026-05-01:kb"] });
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(1);
+    const rec = (await loadNightlyState(personaDir)).processed?.["2026-05-01"];
+    expect(rec?.status).toBe("partial");
+    expect(rec?.stages_done).toEqual(["distill"]);
+    expect(out.text).toContain("PARTIAL");
+
+    const retry = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: retry.runStage, refreshIndex: async () => {},
+    });
+    expect(retry.calls.length).toBe(2);
+  });
+});
+
+describe("runNightly — bounds and locking", () => {
+  test("caps dates per run and defers the rest to the next sweep", async () => {
+    for (let d = 1; d <= 5; d++) {
+      await daily(`2026-05-0${d}`);
+    }
+    const h = harness();
+    const out = new CaptureStream();
+    await runNightly({
+      config, now, out, maxDates: 2,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(new Set(h.calls.map((c) => c.date))).toEqual(
+      new Set(["2026-05-01", "2026-05-02"]),
+    );
+    expect(out.text).toContain("+3 deferred");
+  });
+
+  test("the default cap is MAX_DATES_PER_RUN", async () => {
+    for (let d = 1; d <= MAX_DATES_PER_RUN + 2; d++) {
+      await daily(`2026-04-${String(d).padStart(2, "0")}`);
+    }
+    const h = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(new Set(h.calls.map((c) => c.date)).size).toBe(MAX_DATES_PER_RUN);
+  });
+
+  // Two overlapping sweeps would double-file the same drawers.
+  test("a live in-flight marker makes the run skip", async () => {
+    await daily("2026-05-01");
+    const { saveNightlyState } = await import("../src/lib/nightly.ts");
+    await saveNightlyState(personaDir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      },
+    });
+    const h = harness();
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(h.calls).toEqual([]);
+    expect(out.text).toContain("already in flight");
+  });
+
+  // …but a marker left by a crashed process must not block the sweep forever.
+  test("a stale in-flight marker is taken over", async () => {
+    await daily("2026-05-01");
+    const { saveNightlyState } = await import("../src/lib/nightly.ts");
+    await saveNightlyState(personaDir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: "2026-05-09T02:00:00Z",
+        updated_at: "2026-05-09T02:00:00Z",
+      },
+    });
+    const h = harness();
+    const out = new CaptureStream();
+    await runNightly({
+      config, now, out,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(h.calls.length).toBe(2);
+    expect(out.text).toContain("stalled sweep");
+  });
+});
+
+describe("runNightly — --date override", () => {
+  test("reprocesses one date regardless of the ledger", async () => {
+    await daily("2026-05-01");
+    const first = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: first.runStage, refreshIndex: async () => {},
+    });
+    const again = harness();
+    const code = await runNightly({
+      config, now, today: "2026-05-01", out: new CaptureStream(),
+      runStage: again.runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(again.calls.length).toBe(2);
+  });
+
+  test("a date with no daily file → exit 2", async () => {
+    const err = new CaptureStream();
+    const code = await runNightly({
+      config, now, today: "2026-05-01", out: new CaptureStream(), err,
+      runStage: harness().runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("no daily file");
+  });
+});
+
+describe("runNightly — persona override prompt", () => {
+  test("nightly-prompt.md runs as one monolithic turn per date", async () => {
+    await daily("2026-05-01");
+    await writeFile(
+      join(personaDir, "nightly-prompt.md"),
+      "custom {{persona}} {{today}}",
+      "utf8",
+    );
+    const h = harness();
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(h.calls.length).toBe(1);
+    expect(h.calls[0]!.stage).toBe("override");
+    expect(h.calls[0]!.prompt).toBe("custom phantom 2026-05-01");
   });
 });

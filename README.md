@@ -1493,17 +1493,37 @@ Environment overrides: `PHANTOMBOT_RETRIEVAL_CROSS_ENABLED`,
 
 ### Nightly and Doctor
 
-The nightly distillation is checkpointed in five stages:
+Every `phantombot nightly` run is a **sweep**. It lists the daily files, diffs
+them against the ledger in `memory/.nightly-state.json` (mtime + size, then
+content hash) and processes every date that is new, that grew since it was
+processed, or whose last pass didn't finish:
 
 ```text
-essence -> promote -> kb -> compress -> state
+sweep (code) -> per date: distill ‖ kb -> index refresh (code) -> ledger (code)
 ```
 
-If it times out or the machine restarts, `phantombot nightly --resume`
-continues from the checkpoint.
+* `distill` files the day's captures into the drawers (people / decisions /
+  lessons / commitments / norms) and maintains MEMORY.md's `## Recent`.
+* `kb` extracts durable knowledge into `kb/` — reconcile, create, sweep inbox.
 
-`phantombot doctor` checks memory health and can auto-repair stale, failed, or
-partial nightly runs.
+The two stages run **concurrently**: they read the same daily file and write
+disjoint targets. Neither writes back to the daily file, which is what keeps
+the ledger's hash stable. Once both join, phantombot refreshes the search index
+itself (incremental FTS + embeddings), so a new KB note is searchable without
+the model having to remember to ask.
+
+Because the ledger decides what to process, the pass is idempotent: re-running
+it with nothing pending costs nothing, and a machine that was asleep at 02:00
+just sweeps a longer backlog on its next run (the `run` daemon fires one at
+startup). There is no `--resume` and no catch-up mode. Useful flags:
+`--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to change the
+per-run cap (default 10), `--force` to take over a stuck in-flight marker.
+
+`/status` shows a `dreaming:` line — `OK (nothing pending)`,
+`RUNNING (2/5 dates, on 2026-06-02)`, `WARN (2 dates pending …)` or `ERR`.
+Health is backlog-driven, not schedule-driven: a missed 02:00 with nothing
+pending is still OK. `phantombot doctor` reports the same signal (plus capture
+health, timers and connectors) but never runs the nightly itself.
 
 ## Maintenance
 

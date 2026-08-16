@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   gatherStatusProbes,
   type StatusProbeDeps,
@@ -13,6 +16,7 @@ function cfg(partial: {
   telegramPersonas?: Record<string, { token: string }>;
   embeddings?: Config["embeddings"];
   voice?: Config["voice"];
+  personasDir?: string;
 }): Config {
   return {
     channels: {
@@ -21,6 +25,7 @@ function cfg(partial: {
     },
     embeddings: partial.embeddings ?? { provider: "none" },
     voice: partial.voice ?? { provider: "none" },
+    personasDir: partial.personasDir,
   } as unknown as Config;
 }
 
@@ -38,6 +43,11 @@ function stubDeps(over: Partial<StatusProbeDeps> = {}): StatusProbeDeps {
     }),
     reconcileEditorConnectors: () => [],
     isPhantombotBinary: () => false,
+    nightlyHealth: async () => ({
+      status: "ok" as const,
+      detail: "nothing pending",
+      backlog: 0,
+    }),
     env: {},
     ...over,
   };
@@ -344,5 +354,68 @@ describe("gatherStatusProbes — resilience", () => {
       }),
     );
     expect(r.memory).toBe("gemini embeddings OK");
+  });
+});
+
+// The "dreaming" line reports the nightly sweep's health off its ledger — no
+// LLM, no network, and it never does any of the nightly's work. It exists so a
+// silently-skipped or stalled distillation is visible from /status instead of
+// only from `doctor`.
+describe("gatherStatusProbes — dreaming", () => {
+  let personas: string;
+
+  beforeEach(async () => {
+    personas = await mkdtemp(join(tmpdir(), "phantombot-probe-"));
+    await mkdir(join(personas, "phantom", "memory"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(personas, { recursive: true, force: true });
+  });
+
+  const cases: Array<[string, "ok" | "running" | "warning" | "error", string]> = [
+    ["ok", "ok", "OK (nothing pending)"],
+    ["running", "running", "RUNNING (2/5 dates, on 2026-06-02)"],
+    ["warning", "warning", "WARN (2 dates pending, oldest 2026-06-02)"],
+    ["error", "error", "ERR (sweep stalled on 2026-06-02)"],
+  ];
+
+  for (const [name, status, expected] of cases) {
+    test(`renders ${name} as "${expected}"`, async () => {
+      const detail = expected.replace(/^[A-Z]+ \(/, "").replace(/\)$/, "");
+      const r = await gatherStatusProbes(
+        cfg({ personasDir: personas }),
+        "phantom",
+        stubDeps({
+          nightlyHealth: async () => ({ status, detail, backlog: 0 }),
+        }),
+      );
+      expect(r.dreaming).toBe(expected);
+    });
+  }
+
+  test("omits the line when the persona dir does not exist", async () => {
+    const r = await gatherStatusProbes(
+      cfg({ personasDir: join(personas, "nope") }),
+      "phantom",
+      stubDeps(),
+    );
+    expect(r.dreaming).toBeUndefined();
+  });
+
+  // Same contract as every other probe: a throwing subsystem drops its line,
+  // it never breaks /status.
+  test("a throwing health read drops the line instead of failing /status", async () => {
+    const r = await gatherStatusProbes(
+      cfg({ personasDir: personas, telegram: { token: "T" } }),
+      "phantom",
+      stubDeps({
+        nightlyHealth: async () => {
+          throw new Error("ledger on fire");
+        },
+      }),
+    );
+    expect(r.dreaming).toBeUndefined();
+    expect(r.telegram).toBeDefined();
   });
 });

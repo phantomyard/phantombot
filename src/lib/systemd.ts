@@ -186,7 +186,12 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${exec}
-TimeoutStartSec=2700
+# A sweep processes up to MAX_DATES_PER_RUN (10) days per run, each two
+# concurrent harness turns, so the cap has to clear a full backlog pass.
+# Being killed mid-sweep is survivable (unfinished dates stay pending) but it
+# leaves a stale in-flight marker that /status reports as ERR until the next
+# run takes over — so give it room.
+TimeoutStartSec=5400
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
 ${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
