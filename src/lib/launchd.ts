@@ -11,7 +11,6 @@
  *
  *   ~/Library/LaunchAgents/dev.phantombot.phantombot.plist
  *   ~/Library/LaunchAgents/dev.phantombot.heartbeat.plist
- *   ~/Library/LaunchAgents/dev.phantombot.nightly.plist
  *   ~/Library/LaunchAgents/dev.phantombot.tick.plist
  *
  * Logs go to ~/Library/Logs/phantombot/<unit>.{out,err}.log (no journald
@@ -34,6 +33,12 @@ import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_PLIST_LABEL = "dev.phantombot.phantombot";
 export const HEARTBEAT_PLIST_LABEL = "dev.phantombot.heartbeat";
+/**
+ * RETIRED label. The nightly no longer runs on a clock (startup + the
+ * heartbeat's day-rollover check trigger it now — see nightlyTrigger.ts), so
+ * this plist is never generated. The label survives only so an upgrade can
+ * bootout and delete what an older install left in the gui domain.
+ */
 export const NIGHTLY_PLIST_LABEL = "dev.phantombot.nightly";
 export const TICK_PLIST_LABEL = "dev.phantombot.tick";
 
@@ -64,6 +69,7 @@ export function heartbeatPlistPath(): string {
   return join(launchAgentsDir(), `${HEARTBEAT_PLIST_LABEL}.plist`);
 }
 
+/** Path of the retired nightly plist (kept for cleanup only). */
 export function nightlyPlistPath(): string {
   return join(launchAgentsDir(), `${NIGHTLY_PLIST_LABEL}.plist`);
 }
@@ -211,16 +217,6 @@ export function generateHeartbeatPlist(binPath: string): string {
   });
 }
 
-/** Generate the nightly plist — fires daily at 02:00. */
-export function generateNightlyPlist(binPath: string): string {
-  return generatePlist({
-    label: NIGHTLY_PLIST_LABEL,
-    binPath,
-    args: ["nightly"],
-    startCalendar: { Hour: 2, Minute: 0 },
-  });
-}
-
 /**
  * Generate the tick plist — fires every 60 seconds.
  *
@@ -291,7 +287,7 @@ export interface InstallLaunchdOptions {
 }
 
 /**
- * Write the four plists, then bootstrap each into the user's gui domain.
+ * Write the three plists, then bootstrap each into the user's gui domain.
  *
  * `bootstrap` is the modern install verb (replaces `load`). It both loads
  * the unit and starts it (for KeepAlive=true) or schedules it (for
@@ -318,11 +314,6 @@ export async function installPhantombotPlists(
       path: hbPath,
       label: HEARTBEAT_PLIST_LABEL,
       body: generateHeartbeatPlist(opts.binPath),
-    },
-    {
-      path: ngPath,
-      label: NIGHTLY_PLIST_LABEL,
-      body: generateNightlyPlist(opts.binPath),
     },
     {
       path: tkPath,
@@ -357,8 +348,18 @@ export async function installPhantombotPlists(
       return { installed: false };
     }
   }
+
+  // Upgrade cleanup: an install from before the nightly timer was retired
+  // still has the 02:00 agent loaded. Bootout + delete it so it can't fire a
+  // duplicate sweep. Guarded on the plist existing, so a fresh Mac issues no
+  // extra launchctl call at all.
+  if (existsSync(ngPath)) {
+    await opts.launchctl.run(["bootout", `${domain}/${NIGHTLY_PLIST_LABEL}`]);
+    await unlink(ngPath);
+    opts.out.write(`removed retired plist: ${ngPath}\n`);
+  }
   opts.out.write(
-    `bootstrapped ${PHANTOMBOT_PLIST_LABEL} + heartbeat + nightly + tick into ${domain}\n`,
+    `bootstrapped ${PHANTOMBOT_PLIST_LABEL} + heartbeat + tick into ${domain}\n`,
   );
   return { installed: true };
 }

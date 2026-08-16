@@ -1,23 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildNightlyPrompt,
   buildNightlyPromptForPersona,
+  BACKLOG_STAGNANT_MS,
   buildNightlyStagePrompt,
-  CATCHUP_WINDOW_MS,
-  clearNightlyProgress,
-  loadNightlyProgress,
+  dailyFilePath,
+  dateRecord,
   loadNightlyState,
   NIGHTLY_STAGES,
-  type NightlyProgress,
+  type NightlyState,
   nightlyConversationKey,
+  nightlyHealth,
   nightlyStatePath,
-  pendingNightlyStages,
-  saveNightlyProgress,
+  pendingForDate,
   saveNightlyState,
-  shouldRunCatchupNightly,
+  STALE_RUN_MS,
+  sweepDailyFiles,
 } from "../src/lib/nightly.ts";
 
 let workdir: string;
@@ -31,6 +32,21 @@ afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
 });
 
+/** Write a daily file and return its recorded mtime (ms, floored). */
+async function daily(date: string, body = `notes for ${date}`): Promise<void> {
+  await writeFile(dailyFilePath(workdir, date), body, "utf8");
+}
+
+/** Mark a date as fully processed in the ledger, matching what's on disk. */
+async function markProcessed(date: string): Promise<void> {
+  const sweep = await sweepDailyFiles(workdir, await loadNightlyState(workdir), "9999-12-31");
+  const p = sweep.pending.find((x) => x.date === date);
+  if (!p) throw new Error(`no pending entry for ${date}`);
+  await saveNightlyState(workdir, {
+    processed: { [date]: dateRecord(p, [...NIGHTLY_STAGES]) },
+  });
+}
+
 describe("nightlyConversationKey", () => {
   test("uses system:nightly:<date> namespace", () => {
     expect(nightlyConversationKey("2026-05-02")).toBe(
@@ -39,10 +55,20 @@ describe("nightlyConversationKey", () => {
   });
 });
 
-describe("nightlyStatePath", () => {
-  test("returns memory/.nightly-state.json under the persona dir", () => {
+describe("nightlyStatePath / dailyFilePath", () => {
+  test("state lives at memory/.nightly-state.json", () => {
     expect(nightlyStatePath("/tmp/persona")).toBe(
       "/tmp/persona/memory/.nightly-state.json",
+    );
+  });
+
+  // The filename IS the primary key: six call sites build it from the date,
+  // and index paths + [[memory/…]] wikilinks point at it. Nothing may rename
+  // a daily file (e.g. to a "_processed_" prefix) — captures written after a
+  // pass would recreate the un-prefixed name and orphan the processed half.
+  test("daily files are memory/<date>.md, never renamed", () => {
+    expect(dailyFilePath("/tmp/persona", "2026-08-16")).toBe(
+      "/tmp/persona/memory/2026-08-16.md",
     );
   });
 });
@@ -64,122 +90,392 @@ describe("loadNightlyState / saveNightlyState", () => {
     expect(r.items_promoted).toBe(5);
   });
 
-  test("save merges into existing state", async () => {
+  // The ledger is the whole idempotency mechanism: a patch carrying one date
+  // must never clobber the rest of history, or every prior date reprocesses.
+  test("processed entries merge key-by-key instead of replacing", async () => {
     await saveNightlyState(workdir, {
-      last_run: "2026-05-01T02:00:00Z",
-      items_promoted: 3,
+      processed: {
+        "2026-05-01": {
+          mtime_ms: 1,
+          size: 1,
+          hash: "a",
+          stages_done: [...NIGHTLY_STAGES],
+          completed_at: "x",
+          status: "ok",
+        },
+      },
     });
     await saveNightlyState(workdir, {
-      last_run: "2026-05-02T02:00:00Z",
-      last_status: "ok",
+      processed: {
+        "2026-05-02": {
+          mtime_ms: 2,
+          size: 1,
+          hash: "b",
+          stages_done: [...NIGHTLY_STAGES],
+          completed_at: "y",
+          status: "ok",
+        },
+      },
     });
     const r = await loadNightlyState(workdir);
-    expect(r.last_run).toBe("2026-05-02T02:00:00Z");
-    expect(r.last_status).toBe("ok");
-    // items_promoted from the first save is preserved.
-    expect(r.items_promoted).toBe(3);
+    expect(Object.keys(r.processed ?? {}).sort()).toEqual([
+      "2026-05-01",
+      "2026-05-02",
+    ]);
   });
 
-  test("malformed JSON falls back to {} (logs warn but doesn't throw)", async () => {
-    await writeFile(nightlyStatePath(workdir), "not json", "utf8");
-    expect(await loadNightlyState(workdir)).toEqual({});
+  test("current: null clears the in-flight marker", async () => {
+    await saveNightlyState(workdir, {
+      current: {
+        date: "2026-05-02",
+        index: 1,
+        total: 1,
+        started_at: "x",
+        updated_at: "x",
+      },
+    });
+    await saveNightlyState(workdir, { current: null });
+    expect((await loadNightlyState(workdir)).current).toBeUndefined();
   });
 });
 
-describe("buildNightlyPrompt", () => {
-  test("embeds the persona name + today + isolation note", () => {
-    const p = buildNightlyPrompt("kai", "2026-05-02");
-    expect(p).toContain("persona 'kai'");
-    expect(p).toContain("Today is 2026-05-02");
-    expect(p).toContain("system:nightly:2026-05-02");
-    expect(p).toContain("ISOLATED");
-    expect(p).toContain("PHASE 1");
-    expect(p).toContain("PHASE 5");
+describe("sweepDailyFiles", () => {
+  test("every daily file is pending on a virgin ledger, oldest first", async () => {
+    await daily("2026-05-01");
+    await daily("2026-05-03");
+    await daily("2026-05-02");
+    const r = await sweepDailyFiles(workdir, {}, "2026-06-01");
+    expect(r.pending.map((p) => p.date)).toEqual([
+      "2026-05-01",
+      "2026-05-02",
+      "2026-05-03",
+    ]);
+    expect(r.pending.every((p) => p.reason === "new")).toBe(true);
   });
 
-  test("references all five phases in order", () => {
-    const p = buildNightlyPrompt("x", "2026-01-01");
-    const phase1 = p.indexOf("PHASE 1");
-    const phase5 = p.indexOf("PHASE 5");
-    expect(phase1).toBeGreaterThan(0);
-    expect(phase5).toBeGreaterThan(phase1);
-    for (let i = 2; i <= 4; i++) {
-      const idx = p.indexOf(`PHASE ${i}`);
-      expect(idx).toBeGreaterThan(phase1);
-      expect(idx).toBeLessThan(phase5);
+  // The point of the ledger: a second sweep with nothing new does no work.
+  test("a processed, unchanged date is skipped", async () => {
+    await daily("2026-05-01");
+    await markProcessed("2026-05-01");
+    const r = await sweepDailyFiles(workdir, await loadNightlyState(workdir), "2026-06-01");
+    expect(r.pending).toEqual([]);
+    expect(r.seen).toEqual(["2026-05-01"]);
+  });
+
+  // A day can keep receiving captures AFTER its pass (the heartbeat and
+  // `memory capture` both append). Content growth must re-queue it — this is
+  // the case a "rename to _processed_" scheme could never see.
+  test("a date whose content grew after processing is pending again", async () => {
+    await daily("2026-05-01");
+    await markProcessed("2026-05-01");
+    await writeFile(dailyFilePath(workdir, "2026-05-01"), "more content", "utf8");
+    const r = await sweepDailyFiles(workdir, await loadNightlyState(workdir), "2026-06-01");
+    expect(r.pending.map((p) => p.date)).toEqual(["2026-05-01"]);
+    expect(r.pending[0]!.reason).toBe("changed");
+  });
+
+  // mtime moved but bytes identical (a touch, a restore, a copy): no turn is
+  // spent, the ledger's mtime is just refreshed so the cheap path resumes.
+  test("a touched-but-identical file is 'touched', not pending", async () => {
+    await daily("2026-05-01");
+    await markProcessed("2026-05-01");
+    const future = new Date(Date.now() + 10_000);
+    await utimes(dailyFilePath(workdir, "2026-05-01"), future, future);
+    const r = await sweepDailyFiles(workdir, await loadNightlyState(workdir), "2026-06-01");
+    expect(r.pending).toEqual([]);
+    expect(r.touched.map((t) => t.date)).toEqual(["2026-05-01"]);
+  });
+
+  // Today is still being written to. Distilling it would file drawers from a
+  // half-finished file, and its hash would change minutes later anyway.
+  test("the boundary date is exclusive — today is never swept", async () => {
+    await daily("2026-05-01");
+    await daily("2026-05-02");
+    const r = await sweepDailyFiles(workdir, {}, "2026-05-02");
+    expect(r.pending.map((p) => p.date)).toEqual(["2026-05-01"]);
+  });
+
+  test("non-daily files in memory/ are ignored", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(workdir, "memory", "decisions.md"), "x", "utf8");
+    await writeFile(join(workdir, "memory", "2026-05.md"), "x", "utf8");
+    const r = await sweepDailyFiles(workdir, {}, "2026-06-01");
+    expect(r.pending.map((p) => p.date)).toEqual(["2026-05-01"]);
+  });
+
+  // A pass that half-finished (one stage errored) is recorded as partial, so
+  // resume is automatic — it is simply a date the ledger doesn't call done.
+  test("a partially processed date is pending with reason 'incomplete'", async () => {
+    await daily("2026-05-01");
+    const sweep = await sweepDailyFiles(workdir, {}, "2026-06-01");
+    await saveNightlyState(workdir, {
+      processed: {
+        "2026-05-01": dateRecord(sweep.pending[0]!, ["distill"], "kb blew up"),
+      },
+    });
+    const r = await sweepDailyFiles(workdir, await loadNightlyState(workdir), "2026-06-01");
+    expect(r.pending.map((p) => p.reason)).toEqual(["incomplete"]);
+  });
+
+  test("missing memory dir yields an empty sweep", async () => {
+    const empty = await mkdtemp(join(tmpdir(), "phantombot-nightly-empty-"));
+    try {
+      expect(await sweepDailyFiles(empty, {}, "2026-06-01")).toEqual({
+        pending: [],
+        touched: [],
+        seen: [],
+      });
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("pendingForDate", () => {
+  test("returns an entry for an existing daily file, ledger ignored", async () => {
+    await daily("2026-05-01");
+    await markProcessed("2026-05-01");
+    const p = await pendingForDate(workdir, "2026-05-01");
+    expect(p?.date).toBe("2026-05-01");
+    expect(p?.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("returns null when there is no daily file", async () => {
+    expect(await pendingForDate(workdir, "2026-05-09")).toBeNull();
+  });
+});
+
+describe("dateRecord", () => {
+  test("all stages, no error → ok", async () => {
+    await daily("2026-05-01");
+    const p = (await sweepDailyFiles(workdir, {}, "2026-06-01")).pending[0]!;
+    const rec = dateRecord(p, [...NIGHTLY_STAGES]);
+    expect(rec.status).toBe("ok");
+    expect(rec.hash).toBe(p.hash);
+    expect(rec.mtime_ms).toBe(p.mtime_ms);
+  });
+
+  test("some stages + error → partial; no stages + error → error", async () => {
+    await daily("2026-05-01");
+    const p = (await sweepDailyFiles(workdir, {}, "2026-06-01")).pending[0]!;
+    expect(dateRecord(p, ["distill"], "boom").status).toBe("partial");
+    expect(dateRecord(p, [], "boom").status).toBe("error");
+  });
+});
+
+describe("nightlyHealth", () => {
+  const now = new Date("2026-05-10T09:00:00Z");
+
+  test("nothing pending → ok", async () => {
+    await daily("2026-05-01");
+    await markProcessed("2026-05-01");
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("ok");
+    expect(h.backlog).toBe(0);
+  });
+
+  // Explicitly schedule-blind: a laptop asleep at 02:00 that swept on boot is
+  // just as healthy as a server that swept on the timer. Backlog is the truth.
+  test("a long-idle ledger with nothing pending is still ok", async () => {
+    await saveNightlyState(workdir, {
+      last_run: "2026-01-01T02:00:00Z",
+      last_status: "ok",
+    });
+    expect((await nightlyHealth(workdir, { now })).status).toBe("ok");
+  });
+
+  test("pending dates → warning", async () => {
+    await daily("2026-05-01");
+    await daily("2026-05-02");
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("warning");
+    expect(h.backlog).toBe(2);
+    expect(h.oldest_pending).toBe("2026-05-01");
+    expect(h.detail).toContain("2 dates pending");
+  });
+
+  // Depth is not a fault: one sweep drains the whole queue, so a months-deep
+  // backfill reads as work-in-progress, not as a broken nightly.
+  test("a deep backlog is still only a warning while sweeps are running", async () => {
+    for (let d = 1; d <= 20; d++) {
+      await daily(`2026-04-${String(d).padStart(2, "0")}`);
+    }
+    await saveNightlyState(workdir, {
+      last_run: new Date(now.getTime() - 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("warning");
+    expect(h.backlog).toBe(20);
+  });
+
+  // The real fault is a backlog nobody is picking up — the trigger is dead.
+  test("pending dates with no sweep for over a day → error", async () => {
+    await daily("2026-05-01");
+    await saveNightlyState(workdir, {
+      last_run: new Date(now.getTime() - BACKLOG_STAGNANT_MS - 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("error");
+    expect(h.detail).toContain("no sweep since");
+  });
+
+  // A fresh install has a backlog and no last_run; that is queued work, not a
+  // stuck trigger — `run` stamps last_run within a minute of starting.
+  test("a never-swept ledger with a backlog → warning, not error", async () => {
+    for (let d = 1; d <= 12; d++) {
+      await daily(`2026-04-${String(d).padStart(2, "0")}`);
+    }
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("warning");
+  });
+
+  test("an in-flight sweep with a fresh beat → running with progress", async () => {
+    await daily("2026-05-01");
+    await saveNightlyState(workdir, {
+      current: {
+        date: "2026-05-01",
+        index: 2,
+        total: 5,
+        started_at: "2026-05-10T08:55:00Z",
+        updated_at: "2026-05-10T08:59:00Z",
+      },
+    });
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("running");
+    expect(h.detail).toBe("2/5 dates, on 2026-05-01");
+  });
+
+  // A crashed sweep leaves its marker behind. Without staleness detection
+  // /status would report RUNNING forever and the backlog would look attended.
+  test("an in-flight marker older than STALE_RUN_MS → error", async () => {
+    await daily("2026-05-01");
+    await saveNightlyState(workdir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: "2026-05-10T07:00:00Z",
+        updated_at: new Date(now.getTime() - STALE_RUN_MS - 1000).toISOString(),
+      },
+    });
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("error");
+    expect(h.detail).toContain("stalled");
+  });
+
+  test("last sweep errored → error even with an empty backlog", async () => {
+    const state: NightlyState = {
+      last_run: "2026-05-10T02:00:00Z",
+      last_status: "error",
+      errors: ["stage 'kb' (2026-05-01): timed out"],
+    };
+    await saveNightlyState(workdir, state);
+    const h = await nightlyHealth(workdir, { now });
+    expect(h.status).toBe("error");
+    expect(h.detail).toContain("timed out");
+  });
+
+  test("a date recorded partial → warning once its backlog is drained", async () => {
+    // File processed with one stage failing, then reprocessed successfully is
+    // the happy path; a lingering partial record with no pending work is the
+    // "it finished, but not cleanly" state.
+    await saveNightlyState(workdir, {
+      last_status: "ok",
+      processed: {
+        "2026-05-01": {
+          mtime_ms: 1,
+          size: 1,
+          hash: "a",
+          stages_done: ["distill"],
+          completed_at: "2026-05-02T02:00:00Z",
+          status: "partial",
+          error: "kb blew up",
+        },
+      },
+    });
+    expect((await nightlyHealth(workdir, { now })).status).toBe("warning");
+  });
+});
+
+describe("buildNightlyStagePrompt", () => {
+  test("there are exactly two stages: distill and kb", () => {
+    expect([...NIGHTLY_STAGES]).toEqual(["distill", "kb"]);
+  });
+
+  test("embeds persona, date and the isolation note", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "distill");
+    expect(p).toContain("persona 'robbie'");
+    expect(p).toContain("system:nightly:2026-05-18");
+  });
+
+  // The daily file is the ledger's hash input. A stage that writes to it (the
+  // old "day essence" header did) makes the date look changed forever, so the
+  // pass would re-run that day on every single sweep.
+  test("every stage is told never to write to the daily file", () => {
+    for (const s of NIGHTLY_STAGES) {
+      const p = buildNightlyStagePrompt("robbie", "2026-05-18", s);
+      expect(p).toContain("NEVER write to memory/2026-05-18.md");
     }
   });
 
-  test("references the phantombot memory tools the harness must call", () => {
-    const p = buildNightlyPrompt("x", "2026-01-01");
-    expect(p).toContain("phantombot memory today");
-    expect(p).toContain("phantombot memory search");
-    expect(p).toContain("phantombot memory get");
-    expect(p).toContain("phantombot memory index --rebuild");
-  });
-});
-
-describe("shouldRunCatchupNightly", () => {
-  test("returns true when no state file exists", async () => {
-    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  // Index refresh is deterministic work; it now runs in code after the join.
+  // Leaving it in the prompt would race the sibling stage's writes.
+  test("no stage asks the model to run the index", () => {
+    for (const s of NIGHTLY_STAGES) {
+      const p = buildNightlyStagePrompt("robbie", "2026-05-18", s);
+      expect(p).not.toContain("memory index --rebuild");
+      expect(p).toContain("Do NOT run `phantombot memory index`");
+    }
   });
 
-  test("returns true when last_run is more than 24h ago", async () => {
-    const old = new Date(Date.now() - CATCHUP_WINDOW_MS - 60_000);
-    await saveNightlyState(workdir, {
-      last_run: old.toISOString(),
-    });
-    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  test("the stages declare disjoint write targets so they can run concurrently", () => {
+    const distill = buildNightlyStagePrompt("robbie", "2026-05-18", "distill");
+    const kb = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    expect(distill).toContain("do not touch kb/");
+    expect(kb).toContain("do not\ntouch memory/ files");
   });
 
-  test("returns false when last_run is within the last 24h", async () => {
-    const recent = new Date(Date.now() - 60_000); // 1 minute ago
-    await saveNightlyState(workdir, {
-      last_run: recent.toISOString(),
-    });
-    expect(await shouldRunCatchupNightly(workdir)).toBe(false);
+  test("distill fills AND trims MEMORY.md, and files the drawers", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "distill");
+    expect(p).toContain("memory/decisions.md");
+    expect(p).toContain("memory/commitments.md");
+    expect(p).toContain("FILL");
+    expect(p).toContain("TRIM");
+    expect(p).toContain("## Recent");
   });
 
-  test("returns true when last_run is unparseable", async () => {
-    // Write malformed last_run directly (bypass saveNightlyState which uses Date.toISOString)
-    await writeFile(
-      nightlyStatePath(workdir),
-      JSON.stringify({ last_run: "not-a-date" }, null, 2) + "\n",
-      "utf8",
-    );
-    expect(await shouldRunCatchupNightly(workdir)).toBe(true);
+  // The KB stage must RECONCILE, not append: a note that became wrong has to
+  // stop being served as current truth while surviving as changelog history.
+  test("kb instructs supersession, not just append", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
+    expect(p).toContain("RECONCILE");
+    expect(p).toMatch(/CONTRADICTS|INVALIDATES/);
+    expect(p).toContain("## Changelog");
+    expect(p).toContain("status: obsolete");
+    expect(p).toContain("2026-05-18: was X → now Y");
   });
 
-  test("returns false exactly at the window boundary", async () => {
-    // Pin Date.now() so the boundary check is deterministic — without this,
-    // elapsed time between the two Date.now() calls (here vs inside
-    // shouldRunCatchupNightly) pushes `now - lastRun` past CATCHUP_WINDOW_MS
-    // and the strict `>` comparison flips true.
-    const fixedNow = Date.now();
-    const origNow = Date.now;
-    Date.now = () => fixedNow;
-    try {
-      const atBoundary = new Date(fixedNow - CATCHUP_WINDOW_MS);
-      await saveNightlyState(workdir, {
-        last_run: atBoundary.toISOString(),
-      });
-      // Exactly at boundary: still within window (strictly greater than)
-      expect(await shouldRunCatchupNightly(workdir)).toBe(false);
-    } finally {
-      Date.now = origNow;
+  test("no stage mentions the removed day-essence header", () => {
+    for (const s of NIGHTLY_STAGES) {
+      expect(
+        buildNightlyStagePrompt("robbie", "2026-05-18", s),
+      ).not.toContain("Day essence");
     }
   });
 });
 
 describe("buildNightlyPromptForPersona — override", () => {
-  test("returns the built-in prompt when no override file exists", async () => {
+  test("falls back to the built-in monolithic prompt with both stages", async () => {
     const built = await buildNightlyPromptForPersona(
       workdir,
       "kai",
       "2026-05-02",
     );
-    expect(built).toContain("PHASE 5");
     expect(built).toContain("persona 'kai'");
+    expect(built).toContain("STAGE: DISTILL");
+    expect(built).toContain("STAGE: KB");
   });
 
   test("uses the override file with {{persona}} / {{today}} substitution", async () => {
@@ -188,135 +484,13 @@ describe("buildNightlyPromptForPersona — override", () => {
       "Hey {{persona}}, today is {{today}}. Do the thing.",
       "utf8",
     );
-    const built = await buildNightlyPromptForPersona(
-      workdir,
-      "robbie",
-      "2026-05-02",
-    );
-    expect(built).toBe("Hey robbie, today is 2026-05-02. Do the thing.");
-  });
-});
-
-describe("nightly checkpoint — progress file", () => {
-  test("loadNightlyProgress returns null when no file exists", async () => {
-    expect(await loadNightlyProgress(workdir)).toBeNull();
+    expect(
+      await buildNightlyPromptForPersona(workdir, "robbie", "2026-05-02"),
+    ).toBe("Hey robbie, today is 2026-05-02. Do the thing.");
   });
 
-  test("save then load round-trips", async () => {
-    const progress: NightlyProgress = {
-      date: "2026-05-18",
-      started_at: "2026-05-18T02:00:00.000Z",
-      updated_at: "2026-05-18T02:03:00.000Z",
-      completed_stages: ["essence", "promote"],
-      status: "in_progress",
-    };
-    await saveNightlyProgress(workdir, progress);
-    expect(await loadNightlyProgress(workdir)).toEqual(progress);
-  });
-
-  test("clearNightlyProgress removes the file", async () => {
-    await saveNightlyProgress(workdir, {
-      date: "2026-05-18",
-      started_at: "x",
-      updated_at: "x",
-      completed_stages: [],
-      status: "in_progress",
-    });
-    await clearNightlyProgress(workdir);
-    expect(await loadNightlyProgress(workdir)).toBeNull();
-  });
-
-  test("clearNightlyProgress is a no-op when there is no file", async () => {
-    await clearNightlyProgress(workdir); // must not throw
-    expect(await loadNightlyProgress(workdir)).toBeNull();
-  });
-});
-
-describe("pendingNightlyStages", () => {
-  test("returns every stage when resume is false", async () => {
-    expect(await pendingNightlyStages(workdir, "2026-05-18", false)).toEqual([
-      ...NIGHTLY_STAGES,
-    ]);
-  });
-
-  test("returns every stage when resume is true but no checkpoint", async () => {
-    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
-      ...NIGHTLY_STAGES,
-    ]);
-  });
-
-  test("skips completed stages when checkpoint matches today", async () => {
-    await saveNightlyProgress(workdir, {
-      date: "2026-05-18",
-      started_at: "x",
-      updated_at: "x",
-      completed_stages: ["essence", "promote"],
-      status: "partial",
-    });
-    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
-      "kb",
-      "compress",
-      "state",
-    ]);
-  });
-
-  test("ignores a stale checkpoint from a different date", async () => {
-    await saveNightlyProgress(workdir, {
-      date: "2026-05-17",
-      started_at: "x",
-      updated_at: "x",
-      completed_stages: ["essence", "promote", "kb"],
-      status: "partial",
-    });
-    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
-      ...NIGHTLY_STAGES,
-    ]);
-  });
-});
-
-describe("buildNightlyStagePrompt", () => {
-  test("embeds persona, date and the isolation/checkpoint notes", () => {
-    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "essence");
-    expect(p).toContain("persona 'robbie'");
-    expect(p).toContain("2026-05-18");
-    expect(p).toContain("CHECKPOINTED");
-    expect(p).toContain("system:nightly:2026-05-18");
-  });
-
-  test("each stage carries its own distinct instruction body", () => {
-    const bodies = NIGHTLY_STAGES.map((s) =>
-      buildNightlyStagePrompt("robbie", "2026-05-18", s),
-    );
-    expect(bodies[0]).toContain("DAY ESSENCE");
-    expect(bodies[1]).toContain("PROMOTE TO DRAWERS");
-    expect(bodies[2]).toContain("FEED THE KB");
-    expect(bodies[3]).toContain("MAINTAIN MEMORY.md");
-    expect(bodies[4]).toContain("STATE REPORT");
-  });
-
-  // Issue #181 §4: MEMORY.md was never populated because the old stage only
-  // ever TRIMMED. The maintain stage must also instruct the agent to FILL the
-  // "## Recent" orientation section, otherwise MEMORY.md stays at template.
-  test("the MEMORY.md stage instructs filling, not only trimming", () => {
-    const body = buildNightlyStagePrompt("robbie", "2026-05-18", "compress");
-    expect(body).toContain("FILL");
-    expect(body).toContain("## Recent");
-    expect(body).toMatch(/maintain/i);
-    // and still keeps the trim half
-    expect(body).toContain("TRIM");
-  });
-
-  // The KB stage used to be purely additive ("open and update it"), so a note
-  // that became WRONG (subject decommissioned / assumption invalidated) kept the
-  // stale claim standing next to the new one. It must now RECONCILE: rewrite to
-  // current truth, leave a dated changelog trail, and mark dead subjects obsolete.
-  test("the KB stage instructs supersession, not just append", () => {
-    const body = buildNightlyStagePrompt("robbie", "2026-05-18", "kb");
-    expect(body).toContain("RECONCILE");
-    expect(body).toMatch(/CONTRADICTS|INVALIDATES/);
-    expect(body).toContain("## Changelog");
-    expect(body).toContain("status: obsolete");
-    // the changelog instruction is dated with the run's date (today binding)
-    expect(body).toContain("2026-05-18: was X → now Y");
+  test("buildNightlyPrompt runs both stages in one turn", () => {
+    const p = buildNightlyPrompt("robbie", "2026-05-18");
+    expect(p).toContain("Run BOTH stages below");
   });
 });

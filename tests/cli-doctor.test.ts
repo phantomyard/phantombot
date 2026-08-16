@@ -53,10 +53,11 @@ async function writeState(obj: unknown): Promise<void> {
     "utf8",
   );
 }
-async function writeProgress(obj: unknown): Promise<void> {
+/** Write a daily file the sweep will see as unprocessed. */
+async function writeDaily(date: string): Promise<void> {
   await writeFile(
-    join(personaMemoryDir, ".nightly-progress.json"),
-    JSON.stringify(obj),
+    join(personaMemoryDir, `${date}.md`),
+    `notes for ${date}`,
     "utf8",
   );
 }
@@ -74,123 +75,134 @@ describe("runDoctor", () => {
     expect(err.text).toContain("not found");
   });
 
-  test("no nightly record → repair needed and spawned", async () => {
-    const spawned: string[] = [];
-    const out = new CaptureStream();
-    const code = await runDoctor({
-      config,
-      out,
-      spawnRepair: (p) => spawned.push(p),
-    });
-    expect(spawned).toEqual(["phantom"]);
-    expect(out.text).toContain("never run");
-    expect(code).toBe(0); // repair was triggered
-  });
-
-  test("fresh ok nightly → repair not needed", async () => {
+  // Doctor no longer owns nightly repair: the nightly is idempotent and
+  // sweeps whatever is pending on its own schedule (plus on startup). Doctor
+  // reads the ledger and reports — one owner for the job, not two.
+  test("nothing pending → nightly ok, exit 0", async () => {
     await writeState({
       last_run: new Date().toISOString(),
       last_status: "ok",
     });
-    const spawned: string[] = [];
     const out = new CaptureStream();
-    const code = await runDoctor({
-      config,
-      out,
-      spawnRepair: (p) => spawned.push(p),
-    });
-    expect(spawned).toEqual([]);
+    const code = await runDoctor({ config, out });
     expect(code).toBe(0);
-    expect(out.text).toContain("repair: not needed");
+    expect(out.text).toMatch(/nightly: ok/);
+    expect(out.text).toContain("nothing pending");
   });
 
-  test("stale nightly (>24h) → repair needed", async () => {
+  // Backlog is the only truth — a box that slept through 02:00 and swept on
+  // boot is healthy, however long ago that was.
+  test("a long-idle sweep with an empty backlog is still ok", async () => {
     await writeState({
-      last_run: new Date(Date.now() - 30 * 3_600_000).toISOString(),
+      last_run: new Date(Date.now() - 30 * 24 * 3_600_000).toISOString(),
       last_status: "ok",
     });
-    const spawned: string[] = [];
-    await runDoctor({ config, out: new CaptureStream(), spawnRepair: (p) => spawned.push(p) });
-    expect(spawned).toEqual(["phantom"]);
-  });
-
-  test("partial checkpoint → repair needed, reason names the checkpoint", async () => {
-    await writeState({
-      last_run: new Date().toISOString(),
-      last_status: "partial",
-    });
-    await writeProgress({
-      date: "2026-05-18",
-      started_at: "x",
-      updated_at: "x",
-      completed_stages: ["essence", "promote"],
-      status: "partial",
-    });
-    const spawned: string[] = [];
     const out = new CaptureStream();
-    await runDoctor({ config, out, spawnRepair: (p) => spawned.push(p) });
-    expect(spawned).toEqual(["phantom"]);
-    expect(out.text).toContain("checkpoint");
-    expect(out.text).toContain("2026-05-18");
+    expect(await runDoctor({ config, out })).toBe(0);
+    expect(out.text).toMatch(/nightly: ok/);
   });
 
-  test("no-repair mode reports but never spawns; exits 1 when repair needed", async () => {
-    const spawned: string[] = [];
-    const code = await runDoctor({
-      config,
-      repair: false,
-      out: new CaptureStream(),
-      spawnRepair: (p) => spawned.push(p),
-    });
-    expect(spawned).toEqual([]);
-    expect(code).toBe(1);
-  });
-
-  test("surfaces the nightly errors array (human + json) and flags WARN on non-ok status", async () => {
-    // A fresh run (not stale) that still recorded a failing stage. Status
-    // is non-ok and errors is populated — both must reach the operator.
-    await writeState({
-      last_run: new Date().toISOString(),
-      last_status: "partial",
-      errors: ["stage 'essence': pi exited with code 127"],
-    });
+  test("a small backlog → WARN, exit 0, and points at the next sweep", async () => {
+    await writeDaily("2026-05-01");
+    await writeDaily("2026-05-02");
     const out = new CaptureStream();
-    await runDoctor({ config, out, spawnRepair: () => {} });
-    expect(out.text).toContain("pi exited with code 127");
-    // Non-ok status downgrades the nightly line to WARN even when recent.
+    const code = await runDoctor({ config, out });
+    expect(code).toBe(0);
     expect(out.text).toMatch(/nightly: WARN/);
+    expect(out.text).toContain("2 date(s) pending");
+  });
+
+  // Depth alone never fails doctor — a backfill is queued work, and one sweep
+  // takes the whole queue.
+  test("a large backlog is still WARN and exit 0", async () => {
+    for (const d of ["01", "02", "03", "04", "05"]) {
+      await writeDaily(`2026-05-${d}`);
+    }
+    await writeState({
+      last_run: new Date(Date.now() - 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out });
+    expect(code).toBe(0);
+    expect(out.text).toMatch(/nightly: WARN/);
+    expect(out.text).toContain("5 date(s) pending");
+  });
+
+  test("a backlog with no sweep for over a day → ERR and exit 1", async () => {
+    await writeDaily("2026-05-01");
+    await writeState({
+      last_run: new Date(Date.now() - 30 * 60 * 60_000).toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({ config, out });
+    expect(code).toBe(1);
+    expect(out.text).toMatch(/nightly: ERR/);
+  });
+
+  test("an in-flight sweep is reported as RUNNING with progress", async () => {
+    const now = new Date().toISOString();
+    await writeState({
+      last_run: now,
+      last_status: "ok",
+      current: {
+        date: "2026-05-02",
+        index: 2,
+        total: 5,
+        started_at: now,
+        updated_at: now,
+      },
+    });
+    const out = new CaptureStream();
+    expect(await runDoctor({ config, out })).toBe(0);
+    expect(out.text).toContain("nightly: RUNNING — 2/5 dates, on 2026-05-02");
+  });
+
+  test("surfaces the nightly errors array (human + json)", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "error",
+      errors: ["stage 'kb' (2026-05-01): pi exited with code 127"],
+    });
+    const out = new CaptureStream();
+    await runDoctor({ config, out });
+    expect(out.text).toContain("pi exited with code 127");
+    expect(out.text).toMatch(/nightly: ERR/);
 
     const jsonOut = new CaptureStream();
-    await runDoctor({ config, json: true, out: jsonOut, spawnRepair: () => {} });
+    await runDoctor({ config, json: true, out: jsonOut });
     const report = JSON.parse(jsonOut.text);
     expect(report.nightly.errors).toEqual([
-      "stage 'essence': pi exited with code 127",
+      "stage 'kb' (2026-05-01): pi exited with code 127",
     ]);
+    expect(report.nightly.health).toBe("error");
   });
 
-  test("omits the errors field when the last run was clean", async () => {
+  test("omits the errors field when the last sweep was clean", async () => {
     await writeState({
       last_run: new Date().toISOString(),
       last_status: "ok",
     });
     const out = new CaptureStream();
-    await runDoctor({ config, json: true, out, spawnRepair: () => {} });
-    const report = JSON.parse(out.text);
-    expect(report.nightly.errors).toBeUndefined();
+    await runDoctor({ config, json: true, out });
+    expect(JSON.parse(out.text).nightly.errors).toBeUndefined();
   });
 
-  test("json mode emits a parseable report", async () => {
+  test("json mode emits a parseable report with ledger-derived health", async () => {
+    await writeDaily("2026-05-01");
     await writeState({
       last_run: new Date().toISOString(),
       last_status: "ok",
     });
     const out = new CaptureStream();
-    await runDoctor({ config, json: true, out, spawnRepair: () => {} });
+    await runDoctor({ config, json: true, out });
     const report = JSON.parse(out.text);
     expect(report.persona).toBe("phantom");
-    expect(report.repair_needed).toBe(false);
     expect(report.capture).toBeDefined();
-    expect(report.nightly.last_status).toBe("ok");
+    expect(report.nightly.health).toBe("warning");
+    expect(report.nightly.backlog).toBe(1);
+    expect(report.nightly.oldest_pending).toBe("2026-05-01");
   });
 });
 

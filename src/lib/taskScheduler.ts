@@ -29,7 +29,6 @@
  *
  *   \Phantombot\phantombot-<persona>   — always-on `phantombot run`   (keep-alive)
  *   \Phantombot\heartbeat-<persona>    — `phantombot heartbeat`       (every 30 min)
- *   \Phantombot\nightly-<persona>      — `phantombot nightly`         (daily 02:00)
  *   \Phantombot\tick-<persona>         — `phantombot tick`            (every 60 s)
  *
  * Keep-alive without a supervisor: Task Scheduler has no true "restart on
@@ -115,6 +114,12 @@ export const LEGACY_TASK_NAMES = [
 export interface TaskNames {
   main: string;
   heartbeat: string;
+  /**
+   * RETIRED. No longer registered — the nightly is triggered by startup and by
+   * the heartbeat's day-rollover check (see src/lib/nightlyTrigger.ts). The
+   * name is still resolved so install/heal/uninstall can delete the 02:00 task
+   * an older install left behind.
+   */
   nightly: string;
   tick: string;
   /**
@@ -144,7 +149,9 @@ export function taskNames(persona: string): TaskNames {
     // `all` intentionally omits the login task: it is conditionally
     // registered (password mode only), so heal/ownership sweeps address it
     // explicitly rather than assuming it always exists.
-    all: [main, heartbeat, nightly, tick],
+    // `nightly` is absent on purpose: it is retired, and everything that
+    // consumes `all` is describing the set we actively register and heal.
+    all: [main, heartbeat, tick],
   };
 }
 
@@ -268,7 +275,7 @@ export function bootSchemaNeedsMigration(installedVersion: number): boolean {
 }
 
 /** Short label used for the per-task log filenames. */
-type TaskLabel = "phantombot" | "heartbeat" | "nightly" | "tick" | "login";
+type TaskLabel = "phantombot" | "heartbeat" | "tick" | "login";
 
 function logsDir(): string {
   return join(xdgDataHome(), "phantombot", "logs");
@@ -481,7 +488,6 @@ function generateTaskXml(opts: TaskXmlOptions): string {
  * "active immediately" and the repetition interval takes over from there.
  */
 const START_BOUNDARY = "2020-01-01T00:00:00";
-const NIGHTLY_BOUNDARY = "2020-01-01T02:00:00";
 
 function repeatingTimeTrigger(interval: string): string {
   return (
@@ -588,35 +594,6 @@ export function generateHeartbeatTaskXml(
     binPath,
     args: ["heartbeat"],
     triggersXml: repeatingTimeTrigger("PT30M"),
-    executionTimeLimit: "PT1H",
-    logon,
-  });
-}
-
-/** Generate the nightly task XML — fires daily at 02:00. */
-export function generateNightlyTaskXml(
-  sid: string,
-  binPath: string,
-  persona: string,
-  logon: TaskLogon = { mode: "interactive" },
-): string {
-  const triggers =
-    "    <CalendarTrigger>\n" +
-    "      <Enabled>true</Enabled>\n" +
-    `      <StartBoundary>${NIGHTLY_BOUNDARY}</StartBoundary>\n` +
-    "      <ScheduleByDay>\n" +
-    "        <DaysInterval>1</DaysInterval>\n" +
-    "      </ScheduleByDay>\n" +
-    "    </CalendarTrigger>\n";
-  return generateTaskXml({
-    uri: taskNames(persona).nightly,
-    description: `phantombot nightly (daily at 02:00) [${persona}]`,
-    sid,
-    persona,
-    label: "nightly",
-    binPath,
-    args: ["nightly"],
-    triggersXml: triggers,
     executionTimeLimit: "PT1H",
     logon,
   });
@@ -1129,12 +1106,6 @@ function allTaskSpecs(
       logon,
     },
     {
-      name: taskNames(persona).nightly,
-      label: "nightly",
-      xml: generateNightlyTaskXml(sid, binPath, persona, logon),
-      logon,
-    },
-    {
       name: taskNames(persona).tick,
       label: "tick",
       xml: generateTickTaskXml(sid, binPath, persona, logon),
@@ -1294,10 +1265,13 @@ export async function installPhantombotTasks(
     priorSchemaVersion,
   );
 
+  // Note: this also sweeps the retired 02:00 nightly task, since install
+  // delegates the whole register/heal step to ensureTasksCurrent.
   const r = await ensureTasksCurrent({
     binPath: opts.binPath,
     persona: opts.persona,
     sid,
+    accountName: opts.accountName,
     xmlDir,
     schtasks: opts.schtasks,
     // A (re)install must apply the chosen mode + credential even when the
@@ -1357,8 +1331,8 @@ export async function installPhantombotTasks(
 
   opts.out.write(
     logon.mode === "password"
-      ? `registered ${taskNames(opts.persona).main} + heartbeat + nightly + tick + login-fallback\n`
-      : `registered ${taskNames(opts.persona).main} + heartbeat + nightly + tick\n`,
+      ? `registered ${taskNames(opts.persona).main} + heartbeat + tick + login-fallback\n`
+      : `registered ${taskNames(opts.persona).main} + heartbeat + tick\n`,
   );
   return { installed: true };
 }
@@ -1556,6 +1530,11 @@ export interface EnsureTasksCurrentOptions {
   schtasks: SchtasksRunner;
   /** Test seam for the password-mode action patcher. */
   patchAction?: PatchActionFn;
+  /**
+   * Override the current `COMPUTER\\user` account name (tests). Used only to
+   * prove ownership before deleting the retired nightly task.
+   */
+  accountName?: string;
 }
 
 /**
@@ -1718,6 +1697,19 @@ export async function ensureTasksCurrent(
         stderr: r.stderr.trim() || r.stdout.trim(),
       });
     }
+  }
+
+  // Retired 02:00 nightly task: delete it if an older install registered one.
+  // Unconditional and cheap (`/Query` on an absent task is a fast non-zero),
+  // and it means a Windows box heals itself on the next heartbeat rather than
+  // firing a duplicate sweep until someone reinstalls.
+  const retired = taskNames(persona).nightly;
+  const owner: TaskOwner = {
+    sid,
+    username: opts.accountName ?? currentUserName(),
+  };
+  if ((await deleteTaskIfOwned(opts.schtasks, retired, owner)) === "deleted") {
+    log.info("taskScheduler: removed retired nightly task", { task: retired });
   }
 
   return { rewrote, failed };

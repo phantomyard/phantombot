@@ -75,6 +75,7 @@ import {
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
 import { runDoctor } from "./doctor.ts";
+import { spawnNightlySweep } from "../lib/nightlyTrigger.ts";
 import { ensureRoutingExtension } from "../lib/piExtensionProvision.ts";
 import { reconcileEditorConnectors } from "../connectors/acp/autoInstall.ts";
 
@@ -449,11 +450,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
   out.write("Ctrl-C to stop.\n");
 
-  // Startup catch-up: `doctor` checks for a stale, failed, or partially
-  // checkpointed nightly and, if found, spawns a detached
-  // `nightly --resume` that picks up from the last good stage. This
-  // covers machines powered off during the 02:00 window. Don't await —
-  // doctor's repair is a detached child, so this returns immediately.
+  // Startup health check — read-only for the nightly (it repairs itself by
+  // sweeping); still repairs drifted units/timers/connectors. Don't await.
   // Runs against the admin persona for the same reason as notify above.
   const doctorPersona =
     adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
@@ -466,6 +464,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         error: (e as Error).message,
       }),
   );
+
+  // Startup nightly sweep — one of the two triggers that replaced the timer.
+  // The nightly is idempotent (it processes whatever the ledger says is
+  // unprocessed or changed, and no-ops when nothing is), so this is safe to
+  // fire on every start: an always-on server finds nothing pending and exits
+  // in milliseconds; a laptop booted at 09:15 distils the days it missed.
+  // Detached, so a long backlog sweep outlives neither this promise nor the
+  // daemon's own lifecycle concerns, and a crash there can never take the
+  // channel loop with it.
+  spawnStartupNightly(doctorPersona);
 
   // Self-provision the managed Pi capability-routing extension: when a routable
   // capability (image and/or coding model) is configured, stamp the embedded
@@ -920,6 +928,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     lock.release();
   }
   return 0;
+}
+
+/**
+ * Fire a detached `phantombot nightly` for the given persona at startup.
+ *
+ * Thin alias over the shared trigger (see src/lib/nightlyTrigger.ts) — startup
+ * is one of the two events that replace the retired 02:00 timer; the heartbeat's
+ * day-rollover check is the other. The nightly holds its own in-flight marker,
+ * so a start-restart-start cycle cannot stack two sweeps on the same dates.
+ */
+export function spawnStartupNightly(persona: string): void {
+  spawnNightlySweep(persona, "startup");
 }
 
 export default defineCommand({

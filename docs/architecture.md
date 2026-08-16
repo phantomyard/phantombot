@@ -35,8 +35,10 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/persona/loader.ts` | Reads BOOT.md / SOUL.md / IDENTITY.md (required) + MEMORY.md / tools.md / AGENTS.md (optional). | filesystem |
 | `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |
 | `src/memory/store.ts` | bun:sqlite wrapper. `turns` table (`appendTurn`, `recentTurns`, …) + `capture_log` table (`appendCapture`, `lastCaptureAt`, `countCapturesSince`, turn counters for the nudge/doctor). | `bun:sqlite` |
-| `src/lib/nightly.ts` | Nightly stage list, per-stage prompt bodies, `.nightly-progress.json` checkpoint read/write, `pendingNightlyStages`. | filesystem |
-| `src/cli/doctor.ts` | `phantombot doctor`: reads nightly state/progress + `capture_log`, decides if repair is needed, spawns detached `nightly --resume`. | `memory/store`, `lib/nightly` |
+| `src/lib/nightly.ts` | Two-stage model + prompt bodies, the `.nightly-state.json` ledger (`sweepDailyFiles`, `dateRecord`), and `nightlyHealth` for `/status` + doctor. | filesystem |
+| `src/lib/nightlyTrigger.ts` | When the sweep runs: `dayRolledOver` (heartbeat trigger) + `spawnNightlySweep` (detached fire, also used by `run` at startup). | `node:child_process` |
+| `src/lib/indexRefresh.ts` | `refreshPersonaIndex`: incremental FTS + embedding refresh, called in code by the nightly after both stages join. | `lib/memoryIndex`, `lib/embedJob` |
+| `src/cli/doctor.ts` | `phantombot doctor`: reports the nightly ledger (read-only) + `capture_log`, repairs units/timers/connectors. | `memory/store`, `lib/nightly` |
 | `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
 | `src/orchestrator/turn.ts` | `runTurn`: persona → memory → harness chain → persist. The one function every entry point calls. | `loader`, `builder`, `memory`, `fallback` |
 | `src/orchestrator/fallback.ts` | `runWithFallback`: tries each harness in order, advances on recoverable error, terminates on success or terminal error. Pre-spawn skip when `maxPayloadBytes` is too small. | `harnesses/*` |
@@ -124,12 +126,20 @@ Three properties worth knowing when touching this code:
 2. **The 30-turn nudge is mechanical.** `src/channels/telegram.ts` counts user turns
    since the last `capture_log` row; at every multiple of `CAPTURE_NUDGE_INTERVAL`
    (30) it stacks a fixed reminder onto the next system prompt. No LLM decides this.
-3. **The nightly is checkpointed and resumable.** It is decomposed into five
-   idempotent stages (`essence` → `promote` → `kb` → `compress` → `state`), each a
-   bounded harness turn. `.nightly-progress.json` is written after every stage;
-   `--resume` skips completed stages. A stage timeout costs one stage, not the night.
-   `phantombot doctor` (also wired into the `run` startup catch-up) detects a
-   missed/failed/partial nightly and repairs it by spawning a detached `nightly --resume`.
+3. **The nightly is a sweep, and the sweep is the idempotency mechanism.** Each
+   run diffs the daily files against a ledger in `.nightly-state.json`
+   (mtime + size, then content hash) and processes whatever is new, grew, or
+   half-finished. It is triggered by startup and by the heartbeat detecting a
+   calendar-day rollover — there is no nightly timer. Per date it runs exactly
+   two harness turns — `distill`
+   (drawers + MEMORY.md) and `kb` — **concurrently**, because their write
+   targets are disjoint; neither may write back to the daily file, or the hash
+   would change and the date would reprocess forever. The index refresh that
+   used to live in the KB prompt now runs in code after both stages join
+   (`refreshPersonaIndex`), which both guarantees it and orders it after the
+   writes. There is no `--resume` and no catch-up mode: a half-done date is just
+   a date the ledger doesn't call done. `doctor` reports this state; it no longer
+   repairs it, so the job has one owner.
 
 ## Open design questions
 

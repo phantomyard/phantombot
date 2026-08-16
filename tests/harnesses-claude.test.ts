@@ -515,6 +515,42 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
     expect(texts).not.toContain("--tools");
   });
 
+  // #387: nightly stages get a POSITIVE tool grant so claude's native
+  // Glob/Grep — whose parallel workers recursively walk the tree from cwd,
+  // tripping the macOS TCC AppData prompt once per spawn — are simply not on
+  // the menu. Search still exists for the stage, via `phantombot memory
+  // search` (an index query) rather than a filesystem walk.
+  test("toolsMode allowlist passes --tools with exactly the named tools", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(
+      h.invoke(newRequest({ toolsMode: { allow: ["Bash", "Read", "Write", "Edit"] } })),
+    );
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(texts).toContain("--tools");
+    expect(texts).toContain("Bash,Read,Write,Edit");
+    // The whole point: the tree-walking search tools are absent from the grant.
+    expect(texts).not.toContain("Glob");
+    expect(texts).not.toContain("Grep");
+  });
+
+  test("an EMPTY toolsMode allowlist is ignored rather than silently disabling every tool", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });
+    const chunks = await collect(h.invoke(newRequest({ toolsMode: { allow: [] } })));
+    const texts = chunks
+      .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    // `--tools ""` means ZERO tools. An empty allowlist almost certainly means
+    // a caller built the list wrong, and silently running a tool-less nightly
+    // would look like a hang, so fall through to the normal surface instead.
+    expect(texts).not.toContain("--tools");
+  });
+
   test("mcpMode 'none' (background/nightly) runs MCP-free via --strict-mcp-config + empty --mcp-config", async () => {
     process.env.FAKE_CLAUDE_MODE = "argv";
     const h = new ClaudeHarness({ bin: FAKE_CLAUDE, model: "test", fallbackModel: "" });

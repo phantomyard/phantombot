@@ -17,6 +17,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import {
@@ -1264,6 +1265,10 @@ async function processChatMessage(
       conversation: conversationKey,
       userMessage: msg.text,
       agentDir: input.agentDir,
+      // Interactive surface: the owner asks for work on repos all over their
+      // home dir, so home stays the cwd. Explicit since #387 removed the
+      // silent homedir() default in runTurn.
+      workingDir: homedir(),
       harnesses,
       memory: input.memory,
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
@@ -1433,7 +1438,7 @@ async function processChatMessage(
 
   // The controller was aborted from outside. Causes:
   //   - "stop"      — /stop slash command (slash handler already replied).
-  //   - "reset"     — /reset slash command (handler replied; history wiped).
+  //   - "reset"     — /reset slash command (handler replied; context window cleared).
   //   - "interrupt" — a new message arrived for this chat; the new
   //                   turn supersedes us. Stay silent so only the new
   //                   reply lands.
@@ -1450,8 +1455,9 @@ async function processChatMessage(
     // Without this, follow-ups like "actually use blue instead" land
     // with no referent in history and the model is surprised. Skip
     // when:
-    //   - reason === "reset"  → /reset just wiped this conversation;
-    //                           writing here would un-wipe it.
+    //   - reason === "reset"  → /reset just cleared the live context window;
+    //                           a turn written now lands above the reset
+    //                           watermark and would reappear immediately.
     //   - msg.text.length === 0 → voice message aborted before STT
     //                             completed; nothing meaningful to log.
     if (reason !== "reset" && msg.text.length > 0) {

@@ -300,9 +300,13 @@ export interface MemoryStore {
    */
   listConversations(persona: string): Promise<string[]>;
   /**
-   * Delete ALL per-conversation state for a (persona, conversation) pair —
-   * turns AND the durable-fact stores (facts, extractor cursor, in-flight
-   * leases) — in one transaction. Used by /reset; returns the turn count.
+   * Hard-delete a conversation's turns plus its per-conversation extractor
+   * state (cursor + in-flight leases) in one transaction; returns the turn
+   * count. Persona-wide durable FACTS are deliberately left alone.
+   *
+   * NOT wired to /reset — that only moves the conversation's reset watermark
+   * (`resetConversationContext`) so history survives. This is genuine
+   * destruction, reserved for explicit administrative deletion.
    */
   deleteConversation(persona: string, conversation: string): Promise<number>;
   /**
@@ -377,7 +381,7 @@ export interface MemoryStore {
    * holds THIS pass's lease (pending row present AND lease_token === token),
    * write its facts, and drop the lease. Returns true when it committed, false
    * when it wrote NOTHING because the lease was gone or owned by another pass —
-   * a concurrent /reset wiped it (so the facts belong to a conversation that no
+   * a concurrent hard delete wiped it (so the facts belong to a conversation that no
    * longer exists and must not be repopulated) or the lease expired and another
    * pass re-claimed the turn (so that pass owns the write). Guarding the fact
    * write behind the live lease is what closes the reset-repopulation and
@@ -592,7 +596,7 @@ CREATE TABLE IF NOT EXISTS durable_fact_cursor (
 -- never dropped just because the cursor advanced past it (Kai, PR #320).
 -- lease_token: a per-claim ownership token (see claimEvictedTxn). Every
 -- commit/release is gated on it, so a write from a pass that no longer holds
--- the lease — because a /reset wiped the row, or the lease expired and another
+-- the lease — because deleteConversation wiped the row, or the lease expired and another
 -- pass re-stamped it — is discarded instead of corrupting the store (Kai, #320).
 CREATE TABLE IF NOT EXISTS durable_fact_pending (
   persona          TEXT NOT NULL,
@@ -999,7 +1003,7 @@ class SqliteMemoryStore implements MemoryStore {
        WHERE persona = ? AND conversation = ? AND turn_id = ?`,
     );
     // Commit a turn: drop its pending row IFF it still carries this pass's token.
-    // Gating on the token means a row wiped by /reset (gone) or re-stamped by a
+    // Gating on the token means a row wiped by a conversation delete (gone) or re-stamped by a
     // newer pass (different token) is left untouched. It now sits below the
     // cursor with no pending row, so the claim SELECT will never return it again.
     this.commitPendingStmt = db.prepare(
@@ -1013,12 +1017,12 @@ class SqliteMemoryStore implements MemoryStore {
       `UPDATE durable_fact_pending SET lease_expires_at = 0, updated_at = ?
        WHERE persona = ? AND conversation = ? AND turn_id = ? AND lease_token = ?`,
     );
-    // /reset helpers — the per-conversation extractor state wiped alongside
-    // turns in deleteConversationTxn. NOTE: durable_facts are NO LONGER wiped
-    // here. They are persona-wide shared knowledge now, not conversation-owned,
-    // so a /reset of one conversation must not destroy facts other
-    // conversations rely on. Only the conversation's turns, extractor cursor,
-    // and in-flight leases are cleared.
+    // Hard-delete helpers — the per-conversation extractor state wiped
+    // alongside turns in deleteConversationTxn. NOTE: durable_facts are NO
+    // LONGER wiped here. They are persona-wide shared knowledge now, not
+    // conversation-owned, so deleting one conversation must not destroy facts
+    // other conversations rely on. Only the conversation's turns, extractor
+    // cursor, and in-flight leases are cleared.
     this.deleteDurableFactCursorStmt = db.prepare(
       "DELETE FROM durable_fact_cursor WHERE persona = ? AND conversation = ?",
     );
@@ -1117,8 +1121,9 @@ class SqliteMemoryStore implements MemoryStore {
         return true;
       },
     );
-    // /reset wipes the conversation's turns and its per-conversation extractor
-    // state (cursor + in-flight leases) in one transaction. Durable FACTS are
+    // Hard delete: wipes the conversation's turns and its per-conversation
+    // extractor state (cursor + in-flight leases) in one transaction. This is
+    // NOT the /reset path — /reset only advances the reset watermark. Facts are
     // deliberately NOT wiped: they are persona-wide shared knowledge now, not
     // conversation-owned, so resetting one conversation must not delete facts
     // other conversations depend on (the whole point of persona-scoping).
@@ -1544,9 +1549,9 @@ class SqliteMemoryStore implements MemoryStore {
     persona: string,
     conversation: string,
   ): Promise<number> {
-    // Wipes turns AND the durable-fact stores (facts, cursor, leases) in one
-    // transaction so a reset never leaks facts into the next conversation on the
-    // same key. Returns the turn count for back-compat.
+    // Wipes turns plus the conversation's extractor cursor and in-flight
+    // leases in one transaction; persona-wide durable facts survive. Returns
+    // the turn count. Not called by /reset — see resetConversationContext.
     return this.deleteConversationTxn(persona, conversation) as number;
   }
 

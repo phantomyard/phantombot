@@ -2,23 +2,20 @@
  * `phantombot doctor` — memory-subsystem health check + auto-repair.
  *
  * Reads signals that already exist on disk and in `memory.sqlite`:
- *   - `.nightly-state.json`    — last run timestamp + status
- *   - `.nightly-progress.json` — an in-flight / partial checkpoint
- *   - `capture_log`            — was anything captured in the last 24h?
+ *   - `.nightly-state.json` — the sweep ledger: which dates are distilled,
+ *     which are pending, and whether a sweep is in flight right now
+ *   - `capture_log`         — was anything captured in the last 24h?
  *
- * It answers the three questions the issue author could only guess at:
- * did the last nightly run, did it succeed, and is capture actually
- * firing. When the nightly is stale, failed, or left a partial
- * checkpoint, doctor spawns `phantombot nightly --resume` as a detached
- * background process — which, thanks to the checkpointed nightly, picks
- * up exactly where the last run stopped.
+ * The nightly section is READ-ONLY. Doctor used to spawn its own
+ * `nightly --resume` when the last run looked stale, which meant two owners
+ * for the same job. The nightly is now idempotent — every run sweeps whatever
+ * is unprocessed — so the sweep owns itself, triggered by day rollover from
+ * the heartbeat and by `run` at startup, and doctor just reports the ledger.
  *
- * Invoked manually, from the startup catch-up in `run`, and safe to
- * wire into any mechanical scheduler (it never runs an LLM in-process —
- * repair is a detached child).
+ * Invoked manually, at startup from `run`, and safe to wire into any
+ * mechanical scheduler — it never runs an LLM.
  */
 
-import { spawn } from "node:child_process";
 import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -34,11 +31,9 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
-  CATCHUP_WINDOW_MS,
-  loadNightlyProgress,
   loadNightlyState,
-  type NightlyProgress,
-  type NightlyState,
+  type NightlyHealth,
+  nightlyHealth,
 } from "../lib/nightly.ts";
 import {
   ensureRoutingExtension,
@@ -63,9 +58,6 @@ import {
   HEARTBEAT_TIMER_NAME,
   heartbeatServicePath,
   heartbeatTimerPath,
-  NIGHTLY_TIMER_NAME,
-  nightlyServicePath,
-  nightlyTimerPath,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
   type SystemctlRunner,
@@ -96,21 +88,22 @@ export interface DoctorReport {
     last_run?: string;
     last_status?: string;
     /**
-     * Error messages from the last run, if any. Persisted in
+     * Error messages from the last sweep, if any. Persisted in
      * `.nightly-state.json` but historically dropped here, so a failing
      * stage was invisible to `doctor` (it only showed `last_status`).
      */
     errors?: string[];
-    /** Hours since the last run, or null if it never ran. */
+    /** Hours since the last sweep, or null if it never ran. */
     age_hours: number | null;
-    stale: boolean;
-    /** A partial/in-progress checkpoint, if one is parked on disk. */
-    checkpoint?: {
-      date: string;
-      status: NightlyProgress["status"];
-      completed_stages: string[];
-      last_error?: string;
-    };
+    /**
+     * Ledger-derived health: ok / running / warning / error. Backlog is the
+     * only truth here — a missed 02:00 with nothing pending is still `ok`.
+     */
+    health: NightlyHealth["status"];
+    detail: string;
+    /** Daily files still awaiting a pass. */
+    backlog: number;
+    oldest_pending?: string;
   };
   capture: {
     window_hours: number;
@@ -121,7 +114,7 @@ export interface DoctorReport {
   };
   /**
    * Embeddings / semantic-search status. Purely INFORMATIONAL — this never
-   * feeds `repair_needed` or the exit code. Embeddings are optional: with no
+   * feeds the exit code. Embeddings are optional: with no
    * provider, memory search still works on keyword (FTS5/BM25) matching. We
    * surface the easy-to-miss "running keyword-only" state so an operator can
    * SEE that vector search is off (and how to turn it on) without it ever
@@ -211,22 +204,23 @@ export interface DoctorReport {
    * settings.
    */
   editorConnectors?: EditorConnectorResult[];
-  repair_needed: boolean;
-  repair_reason?: string;
-  repair_triggered: boolean;
 }
 
 export interface RunDoctorInput {
   config?: Config;
   persona?: string;
-  /** Spawn `nightly --resume` when repair is warranted. Default true. */
+  /**
+   * Perform the repairs doctor still owns (systemd units/timers, the managed
+   * Pi extension, editor connectors). Default true. The nightly is NOT among
+   * them any more — it repairs itself by sweeping.
+   */
   repair?: boolean;
   /** Emit machine-readable JSON instead of the human summary. */
   json?: boolean;
   out?: WriteSink;
   err?: WriteSink;
-  /** Test seam — override the repair spawn. */
-  spawnRepair?: (persona: string) => void;
+  /** Test seam — override the nightly health read. */
+  nightlyHealth?: typeof nightlyHealth;
   /**
    * Test seam for the systemd check. Pass `false` to skip the check
    * (the default outside Linux). Pass a function to substitute a fake —
@@ -276,56 +270,6 @@ export interface RunDoctorInput {
     | ((repair: boolean) => DoctorReport["editorConnectors"]);
 }
 
-function decideRepair(
-  state: NightlyState,
-  progress: NightlyProgress | null,
-  ageHours: number | null,
-): { needed: boolean; reason?: string } {
-  if (progress && progress.status !== "complete") {
-    return {
-      needed: true,
-      reason:
-        `partial nightly checkpoint for ${progress.date} ` +
-        `(${progress.completed_stages.length} stage(s) done` +
-        (progress.last_error ? `; last error: ${progress.last_error}` : "") +
-        ")",
-    };
-  }
-  if (!state.last_run || ageHours === null) {
-    return { needed: true, reason: "no record of any nightly run" };
-  }
-  if (state.last_status === "error" || state.last_status === "partial") {
-    return {
-      needed: true,
-      reason: `last nightly status was '${state.last_status}'`,
-    };
-  }
-  if (ageHours * 3_600_000 > CATCHUP_WINDOW_MS) {
-    return {
-      needed: true,
-      reason: `last nightly ran ${Math.round(ageHours)}h ago (>${
-        CATCHUP_WINDOW_MS / 3_600_000
-      }h)`,
-    };
-  }
-  return { needed: false };
-}
-
-/** Spawn a detached `phantombot nightly --resume` that outlives this process. */
-function defaultSpawnRepair(persona: string): void {
-  const entry = process.argv[1] ?? "";
-  const dev = entry.endsWith(".ts") || entry.endsWith(".js");
-  const args = dev
-    ? [entry, "nightly", "--resume", "--persona", persona]
-    : ["nightly", "--resume", "--persona", persona];
-  const child = spawn(process.execPath, args, {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
-  log.info("doctor: spawned background nightly --resume", { persona });
-}
-
 export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -340,7 +284,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
 
   const state = await loadNightlyState(dir);
-  const progress = await loadNightlyProgress(dir);
+  const health = await (input.nightlyHealth ?? nightlyHealth)(dir, { state });
 
   const lastRunMs = state.last_run ? Date.parse(state.last_run) : NaN;
   const ageHours = Number.isNaN(lastRunMs)
@@ -370,14 +314,6 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const embProvider = config.embeddings.provider;
   const semanticSearch =
     embProvider === "gemini" && !!config.embeddings.gemini?.apiKey;
-
-  const { needed, reason } = decideRepair(state, progress, ageHours);
-
-  let repairTriggered = false;
-  if (needed && repair) {
-    (input.spawnRepair ?? defaultSpawnRepair)(persona);
-    repairTriggered = true;
-  }
 
   // Timer "last fired" check — catches the long-uptime failure mode
   // where systemd thinks a timer is active but it hasn't fired in
@@ -510,18 +446,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         ? { errors: state.errors }
         : {}),
       age_hours: ageHours === null ? null : Math.round(ageHours * 10) / 10,
-      stale: needed,
-      ...(progress
-        ? {
-            checkpoint: {
-              date: progress.date,
-              status: progress.status,
-              completed_stages: progress.completed_stages,
-              ...(progress.last_error
-                ? { last_error: progress.last_error }
-                : {}),
-            },
-          }
+      health: health.status,
+      detail: health.detail,
+      backlog: health.backlog,
+      ...(health.oldest_pending
+        ? { oldest_pending: health.oldest_pending }
         : {}),
     },
     capture: {
@@ -539,9 +468,6 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ...(harnessReport ? { harnesses: harnessReport } : {}),
     ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
     ...(editorConnectors ? { editorConnectors } : {}),
-    repair_needed: needed,
-    repair_reason: reason,
-    repair_triggered: repairTriggered,
   };
 
   const systemdBroken =
@@ -578,7 +504,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const editorConnectorsBroken =
     !!editorConnectors && editorConnectors.some(editorConnectorBroken);
   const exitCode =
-    needed && !repairTriggered
+    health.status === "error"
       ? 1
       : systemdBroken
         ? 1
@@ -600,32 +526,27 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Human summary.
   const tick = (ok: boolean) => (ok ? "ok" : "WARN");
   out.write(`phantombot doctor — persona '${persona}'\n`);
-  // A non-ok status is a warning even when the run isn't stale: a stage
-  // can fail today yet still be "recent", which previously slipped past
-  // the staleness-only marker.
-  const statusBad =
-    state.last_status === "error" || state.last_status === "partial";
+  // Health comes off the ledger, not the clock: a box that slept through
+  // 02:00 but has nothing pending is healthy.
+  const marker =
+    health.status === "ok"
+      ? "ok"
+      : health.status === "running"
+        ? "RUNNING"
+        : health.status === "warning"
+          ? "WARN"
+          : "ERR";
   out.write(
-    `  nightly: ${tick(!needed && !statusBad)} — ` +
+    `  nightly: ${marker} — ${health.detail}` +
       (state.last_run
-        ? `last run ${state.last_run} (${report.nightly.age_hours}h ago), status '${
-            state.last_status ?? "unknown"
-          }'`
-        : "never run") +
+        ? ` (last sweep ${state.last_run}, ${report.nightly.age_hours}h ago)`
+        : "") +
       "\n",
   );
   if (state.errors && state.errors.length > 0) {
     for (const e of state.errors) {
       out.write(`    error: ${e}\n`);
     }
-  }
-  if (progress) {
-    out.write(
-      `  checkpoint: ${progress.status} for ${progress.date} — ` +
-        `done [${progress.completed_stages.join(", ") || "none"}]` +
-        (progress.last_error ? ` — ${progress.last_error}` : "") +
-        "\n",
-    );
   }
   out.write(
     `  capture: ${tick(!dryDay)} — ${captures} capture(s), ${userTurns} ` +
@@ -642,15 +563,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       : "  embeddings: semantic (vector) search off — OKF field-weighted BM25 " +
         "+ link-graph expansion active. Optional: add Gemini with `phantombot embedding`\n",
   );
-  if (needed) {
-    out.write(`  repair: ${reason}\n`);
+  if (health.backlog > 0) {
     out.write(
-      repairTriggered
-        ? "  → spawned background `nightly --resume`\n"
-        : "  → run `phantombot nightly --resume` to repair\n",
+      `  → ${health.backlog} date(s) pending; the next \`phantombot nightly\` ` +
+        "sweep picks them up automatically\n",
     );
-  } else {
-    out.write("  repair: not needed\n");
   }
 
   if (systemdReport) {
@@ -866,8 +783,6 @@ async function defaultCheckSystemd(
       name: basename(heartbeatServicePath()),
     },
     { path: heartbeatTimerPath(), name: basename(heartbeatTimerPath()) },
-    { path: nightlyServicePath(), name: basename(nightlyServicePath()) },
-    { path: nightlyTimerPath(), name: basename(nightlyTimerPath()) },
     { path: tickServicePath(), name: basename(tickServicePath()) },
     { path: tickTimerPath(), name: basename(tickTimerPath()) },
   ];
@@ -899,7 +814,9 @@ async function defaultCheckSystemd(
         forceRearmTimers: staleTimers,
       });
       repaired =
-        heal.rewrote.length > 0 || heal.repairedTimers.length > 0;
+        heal.rewrote.length > 0 ||
+        heal.repairedTimers.length > 0 ||
+        heal.removedRetired.length > 0;
     } catch (e) {
       log.warn("doctor: systemd heal failed", {
         error: (e as Error).message,
@@ -954,11 +871,10 @@ async function listInactiveTimers(
   systemctl: SystemctlRunner,
 ): Promise<string[]> {
   const out: string[] = [];
-  for (const t of [
-    HEARTBEAT_TIMER_NAME,
-    NIGHTLY_TIMER_NAME,
-    TICK_TIMER_NAME,
-  ]) {
+  // Two timers, not three: the nightly timer is retired (the sweep runs on
+  // startup and on the heartbeat's day-rollover check), so an absent one is
+  // correct rather than a fault to repair.
+  for (const t of [HEARTBEAT_TIMER_NAME, TICK_TIMER_NAME]) {
     const r = await systemctl.run(["--user", "is-active", t]);
     if (r.exitCode !== 0 || r.stdout.trim() !== "active") {
       out.push(t);
@@ -971,7 +887,7 @@ export default defineCommand({
   meta: {
     name: "doctor",
     description:
-      "Memory health check — reports nightly/capture status and auto-repairs a stale or partial nightly by resuming it in the background.",
+      "Memory health check — reports nightly sweep backlog, capture health, timers and connectors. The nightly repairs itself by sweeping; doctor only reports it.",
   },
   args: {
     persona: {
@@ -981,8 +897,8 @@ export default defineCommand({
     repair: {
       type: "boolean",
       description:
-        "Spawn a background `nightly --resume` when repair is warranted. " +
-        "Pass --no-repair to only report.",
+        "Repair drifted systemd units, timers, the Pi extension and editor " +
+        "connectors. Pass --no-repair to only report.",
       default: true,
     },
     json: {

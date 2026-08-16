@@ -5,13 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   generateHeartbeatPlist,
-  generateNightlyPlist,
   generatePhantombotPlist,
   generateTickPlist,
   installPhantombotPlists,
@@ -130,17 +130,6 @@ describe("companion plists carry the right schedule", () => {
     expect(plist).not.toContain("<key>KeepAlive</key>");
   });
 
-  test("nightly fires daily at 02:00 (calendar-based)", () => {
-    const plist = generateNightlyPlist("/usr/local/bin/phantombot");
-    expect(plist).toContain(`<string>${NIGHTLY_PLIST_LABEL}</string>`);
-    expect(plist).toContain("<string>nightly</string>");
-    expect(plist).toContain("<key>StartCalendarInterval</key>");
-    expect(plist).toContain("<key>Hour</key>");
-    expect(plist).toContain("<integer>2</integer>");
-    expect(plist).toContain("<key>Minute</key>");
-    expect(plist).toContain("<integer>0</integer>");
-  });
-
   test("tick fires every 60 seconds", () => {
     const plist = generateTickPlist("/usr/local/bin/phantombot");
     expect(plist).toContain(`<string>${TICK_PLIST_LABEL}</string>`);
@@ -151,7 +140,7 @@ describe("companion plists carry the right schedule", () => {
 });
 
 describe("installPhantombotPlists", () => {
-  test("writes all four plists then bootstraps each into the gui domain", async () => {
+  test("writes the three live plists then bootstraps each into the gui domain", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const lc = new FakeLaunchctl();
@@ -168,36 +157,63 @@ describe("installPhantombotPlists", () => {
     });
     expect(result.installed).toBe(true);
 
-    // All four files exist on disk with sane bodies.
-    for (const path of [mainPath, hbPath, ngPath, tkPath]) {
+    // The retired nightly plist is never written.
+    expect(existsSync(ngPath)).toBe(false);
+    // Every live plist exists on disk with a sane body.
+    for (const path of [mainPath, hbPath, tkPath]) {
       const body = await readFile(path, "utf8");
       expect(body).toContain('<?xml version="1.0"');
       expect(body).toContain("<key>Label</key>");
     }
 
-    // The launchctl call sequence is: bootout(label) × 4 (idempotent
-    // pre-cleanup), then bootstrap(plist) × 4.
+    // The launchctl call sequence is: bootout(label) × 3 (idempotent
+    // pre-cleanup), then bootstrap(plist) × 3. Nothing for the retired
+    // nightly agent, because its plist isn't on disk.
     const sequence = lc.calls.map((c) => c.join(" "));
     expect(sequence).toEqual([
       `bootout gui/501/${PHANTOMBOT_PLIST_LABEL}`,
       `bootout gui/501/${HEARTBEAT_PLIST_LABEL}`,
-      `bootout gui/501/${NIGHTLY_PLIST_LABEL}`,
       `bootout gui/501/${TICK_PLIST_LABEL}`,
       `bootstrap gui/501 ${mainPath}`,
       `bootstrap gui/501 ${hbPath}`,
-      `bootstrap gui/501 ${ngPath}`,
       `bootstrap gui/501 ${tkPath}`,
     ]);
     expect(out.text).toContain("bootstrapped");
+  });
+
+  test("boots out and deletes a nightly plist left by an older install", async () => {
+    // Upgrade path: the retired 02:00 agent is still loaded and on disk.
+    // Install must unload and delete it, or macOS keeps firing a duplicate
+    // sweep every night.
+    await Bun.write(ngPath, "<plist>old nightly</plist>");
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lc = new FakeLaunchctl();
+    const result = await installPhantombotPlists({
+      binPath: "/Users/andrew/.local/bin/phantombot",
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      domain: "gui/501",
+      launchctl: lc,
+      out,
+      err,
+    });
+    expect(result.installed).toBe(true);
+    expect(existsSync(ngPath)).toBe(false);
+    expect(lc.calls.map((c) => c.join(" "))).toContain(
+      `bootout gui/501/${NIGHTLY_PLIST_LABEL}`,
+    );
+    expect(out.text).toContain("removed retired plist");
   });
 
   test("fails install (and reports) when bootstrap returns non-zero", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     const lc = new FakeLaunchctl();
-    // 4 bootouts succeed; first bootstrap fails.
+    // 3 bootouts succeed; first bootstrap fails.
     lc.responses = [
-      { exitCode: 0, stdout: "", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
@@ -250,7 +266,6 @@ describe("uninstallPhantombotPlists", () => {
       `bootout gui/501/${PHANTOMBOT_PLIST_LABEL}`,
     ]);
     // All plists removed.
-    const { existsSync } = await import("node:fs");
     expect(existsSync(mainPath)).toBe(false);
     expect(existsSync(hbPath)).toBe(false);
     expect(existsSync(ngPath)).toBe(false);

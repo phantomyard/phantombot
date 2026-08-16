@@ -151,6 +151,7 @@ phantombot/
 - **Env bootstrap** (`lib/envBootstrap.ts`) self-sources the `.env` files at startup (required on macOS, no-op on Linux) and re-sources before each harness spawn so `phantombot env set` takes effect mid-session.
 - **Tick fires scheduled tasks** (`src/cli/tick.ts`); 1-minute systemd timer; lockfile prevents overlap; missed runs are skipped, not piled up.
 - **Heartbeat is mechanical** (no LLM); **nightly is cognitive** (LLM-driven distillation).
+- **`workingDir` is REQUIRED on every `runTurn` call** (#387) — the harness subprocess cwd, deliberately with no default. Interactive surfaces (telegram, phantomchat, ask, tick, reactions) pass `homedir()`, because the owner asks for work on repos all over their home dir. Machine-driven background turns (nightly) pass the **persona dir**. This used to silently default to `homedir()` and every background caller took the default, so nightly stages woke up in `$HOME` unable to see their own `memory/` from cwd — and went hunting for it. On macOS those recursive walks cross `~/Library/Containers`, tripping the TCC `kTCCServiceSystemPolicyAppData` prompt ("phantombot would like to access data from other apps") once per spawned date. If you add a `runTurn` caller, decide which tree it may treat as home and say so explicitly.
 
 ## Channel layer (core + adapters)
 
@@ -183,14 +184,29 @@ If you add a new untrusted entry point (a new inbound channel, a new `ask`-style
 
 Phantombot ships on **Linux (systemd --user)**, **macOS (launchd, per-user LaunchAgents)**, and **Windows (per-user Task Scheduler logon task plus three periodic tasks)**. `lib/platform.ts` is the single router that decides which backend to talk to; each backend sits behind a common `ServiceControl` surface with an injectable runner so tests never touch the real service manager. Windows uses `InteractiveToken` and the current user's SID, so installation needs no password or elevation; installation preserves healthy existing task definitions and only repairs missing/stale entries. Windows `start`/`restart` re-enable the task and use a hidden native detached launch for SSH/terminal control because Task Scheduler cannot `/Run` an interactive-token task from a non-interactive session. `windowsJob.ts` assigns harness children to kill-on-close Job Objects.
 
-On Linux, `phantombot install` creates **four** systemd-user units:
+On Linux, `phantombot install` creates **three** systemd-user units:
 
 | Unit | Cadence | What it does |
 |---|---|---|
 | `phantombot.service` | always-on | `phantombot run` — Telegram listener |
 | `phantombot-heartbeat.timer` → `.service` | every 30 min | mechanical maintenance, no LLM |
-| `phantombot-nightly.timer` → `.service` | daily 02:00 | cognitive distillation, LLM |
 | `phantombot-tick.timer` → `.service` | every 1 min | fires due scheduled tasks |
+
+There is deliberately no nightly unit. The cognitive pass is event-driven —
+`run` fires a sweep at startup, and the heartbeat fires one when it notices the
+calendar day changed since its last fire. A clock would miss the day entirely on
+any box that sleeps at 02:00. Installs that predate this have their
+`phantombot-nightly.timer` stopped, disabled and deleted on the next heartbeat.
+
+A nightly stage is deliberately the **narrowest turn phantombot runs**: no MCP
+(`mcpMode: "none"`), cwd pinned to the persona dir, and a positive tool grant of
+`NIGHTLY_TOOLS` = `Bash,Read,Write,Edit` (`toolsMode: { allow }`, #387). The
+allowlist exists to drop claude's native `Glob`/`Grep`, whose parallel workers
+recursively walk the tree from cwd; a stage searches through
+`phantombot memory search` (an index query), never a filesystem walk. Note the
+grant is claude-only — pi and codex have no positive-grant flag and ignore it —
+so treat it as defence-in-depth, **not** a trust boundary. `toolsMode: "none"`
+is the real boundary, and it's reserved for the threat judge.
 
 Every service has **two `EnvironmentFile=` lines**:
 

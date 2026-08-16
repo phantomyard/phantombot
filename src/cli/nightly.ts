@@ -1,78 +1,121 @@
 /**
- * `phantombot nightly` — runs the cognitive distillation pass.
+ * `phantombot nightly` — the cognitive distillation pass.
  *
- * The pass is CHECKPOINTED: it is decomposed into five idempotent stages
- * (essence → promote → kb → compress → state), each run as its own
- * harness turn. After every completed stage phantombot writes
- * `.nightly-progress.json`. If a stage times out — or the box powers off
- * mid-run — the next invocation with `--resume` (or the startup catch-up,
- * or `phantombot doctor`) skips the finished stages and continues. A
- * timeout therefore costs at most one stage, never the whole night.
+ * Every invocation is a SWEEP. Phantombot lists the daily files, diffs them
+ * against the ledger in `memory/.nightly-state.json` (mtime, then content
+ * hash), and processes every date that is new, that grew since it was
+ * processed, or whose last pass didn't finish. Running it twice in a row
+ * costs nothing; a box that was off for a week just sweeps a longer backlog
+ * on the next run. That is why there is no `--resume`, no `--catch-up` and no
+ * repair path in `doctor` — one owner, one code path.
  *
- * Conversation key is `system:nightly:<YYYY-MM-DD>` so every stage is
- * isolated from Telegram chats and shares context across stages.
+ * Per date: TWO harness turns run CONCURRENTLY (`distill` → drawers +
+ * MEMORY.md, `kb` → kb/). They read the same daily file and write disjoint
+ * targets, so there is no shared writer and no lock. Neither writes back to
+ * the daily file — that keeps the ledger's hash stable. Once both join, the
+ * driver refreshes the search index IN CODE (see refreshPersonaIndex), which
+ * is both guaranteed and correctly ordered after the writes.
  *
- * If the persona ships a `nightly-prompt.md` override, that custom
- * prompt is run as a single monolithic turn (no checkpointing) — the
- * override owns the phase contract, so phantombot can't safely split it.
+ * Conversation key is `system:nightly:<YYYY-MM-DD>` so stages are isolated
+ * from Telegram chats and share context per date.
  *
- * Schedule: runs daily at 02:00 local via systemd timer. Manual
- * invocation works the same.
+ * If the persona ships a `nightly-prompt.md` override, that custom prompt is
+ * run as a single monolithic turn per date — the override owns the contract,
+ * so phantombot can't safely split it.
  */
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
+import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
   buildNightlyPromptForPersona,
   buildNightlyStagePrompt,
-  clearNightlyProgress,
+  dateRecord,
+  loadNightlyState,
+  NIGHTLY_STAGES,
   type NightlyStage,
   nightlyConversationKey,
-  type NightlyProgress,
-  pendingNightlyStages,
-  saveNightlyProgress,
+  type PendingDate,
+  pendingForDate,
+  STALE_RUN_MS,
   saveNightlyState,
+  sweepDailyFiles,
 } from "../lib/nightly.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
+
+/**
+ * Positive tool grant for nightly stages (#387).
+ *
+ * A stage reads and writes files under `memory/` and `kb/` and shells out to
+ * `phantombot memory …`; that is the whole job. Granting exactly those four
+ * drops claude's native Glob/Grep, whose parallel workers recursively walk
+ * the tree from cwd — the mechanism that turned one mis-rooted stage into a
+ * barrage of macOS TCC "access data from other apps" prompts. Search is still
+ * available, but through `phantombot memory search` (FTS5 + semantic), which
+ * queries an index instead of stat-ing the filesystem.
+ *
+ * Defence-in-depth on top of the cwd fix, not a substitute for it: claude
+ * honours this, pi/codex ignore it (no positive-grant flag), and Bash remains
+ * unconstrained because the memory CLI needs it.
+ */
+export const NIGHTLY_TOOLS = ["Bash", "Read", "Write", "Edit"];
 
 const NIGHTLY_SUFFIX =
   "You are operating in NIGHTLY MAINTENANCE MODE. " +
   "Skip pleasantries. Do work, write files, report briefly.";
 
-// Per-stage timeouts. A single stage is far smaller than the old
-// monolithic pass, so the hard cap can be tighter; idle stays at 5 min
-// to tolerate long thinking between tool calls.
+// Per-stage timeouts. A stage is one bounded job, so the hard cap can be
+// tight; idle stays at 5 min to tolerate long thinking between tool calls.
 const STAGE_IDLE_TIMEOUT_MS = 5 * 60_000;
 const STAGE_HARD_TIMEOUT_MS = 20 * 60_000;
 
 export interface RunNightlyInput {
   config?: Config;
   persona?: string;
-  /** Override "today" — useful for backfill or testing. ISO YYYY-MM-DD. */
+  /** Process ONE specific date (YYYY-MM-DD), ledger state ignored. */
   today?: string;
-  /** Resume from `.nightly-progress.json` instead of starting fresh. */
-  resume?: boolean;
+  /**
+   * Cap dates processed this run. Unset means NO cap: a sweep drains the whole
+   * backlog in one pass. A months-deep first sweep is a long run, but it is a
+   * one-off, the in-flight marker keeps the rollover trigger from starting a
+   * second one on top of it, and a half-drained backlog that reappears every
+   * night is worse than one long night. Set it only to bound a manual run.
+   */
+  maxDates?: number;
+  /** Run even if another sweep holds the in-flight marker. */
+  force?: boolean;
   out?: WriteSink;
   err?: WriteSink;
+  /** Test seam — override the clock. */
+  now?: Date;
+  /** Test seam — run a stage without a real harness. */
+  runStage?: (args: {
+    persona: string;
+    date: string;
+    stage: NightlyStage | "override";
+    prompt: string;
+  }) => Promise<TurnResult>;
+  /** Test seam — skip the real index refresh. */
+  refreshIndex?: (personaDir: string) => Promise<void>;
 }
 
-interface TurnResult {
+export interface TurnResult {
   finalReply: string;
   errored?: string;
   durationMs: number;
 }
 
 /** Run one harness turn for the nightly conversation. */
-async function runNightlyTurn(opts: {
+export async function runNightlyTurn(opts: {
   persona: string;
   conversation: string;
   userMessage: string;
@@ -89,6 +132,15 @@ async function runNightlyTurn(opts: {
       conversation: opts.conversation,
       userMessage: opts.userMessage,
       agentDir: opts.agentDir,
+      // Spawn the stage INSIDE the persona dir, not the user's home (#387).
+      // A stage's whole job is `memory/` and `kb/`; waking it up in $HOME
+      // meant those were invisible from cwd, so the agent went looking for
+      // them — 79 `find` calls in one sweep, 7 of them rooted at `/`, plus
+      // claude's own parallel Glob walk. On macOS that walk crosses
+      // ~/Library/Containers and re-triggers the TCC "access data from other
+      // apps" prompt on every spawned date. Correct cwd removes the reason
+      // to search at all.
+      workingDir: opts.agentDir,
       harnesses: opts.harnesses,
       memory: opts.memory,
       idleTimeoutMs: STAGE_IDLE_TIMEOUT_MS,
@@ -102,8 +154,9 @@ async function runNightlyTurn(opts: {
       origin: "internal",
       // Nightly needs no MCP; running MCP-free stops an unauthenticated remote
       // connector from wedging the --print startup and killing a stage on the
-      // idle timeout (essence "timed out with no output"). See HarnessRequest.mcpMode.
+      // idle timeout. See HarnessRequest.mcpMode.
       mcpMode: "none",
+      toolsMode: { allow: NIGHTLY_TOOLS },
     })) {
       if (chunk.type === "text") finalReply += chunk.text;
       if (chunk.type === "done") finalReply = chunk.finalText;
@@ -118,6 +171,7 @@ async function runNightlyTurn(opts: {
 export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
+  const now = input.now ?? new Date();
 
   let config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
@@ -131,152 +185,226 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   // long-running `run` daemon does. Without this the nightly oneshot relied
   // solely on the systemd unit's narrow Environment=PATH and a PATH-relative
   // `pi` could fail with `exit 127` every night (issue #181 §1).
-  ({ config } = await resolveHarnessBinsForConfig(config, { err }));
+  if (!input.runStage) {
+    ({ config } = await resolveHarnessBinsForConfig(config, { err }));
+  }
 
-  const harnesses = buildHarnessChain(config, err);
-  if (harnesses.length === 0) {
+  const harnesses = input.runStage ? [] : buildHarnessChain(config, err);
+  if (!input.runStage && harnesses.length === 0) {
     err.write("no harnesses configured\n");
     return 2;
   }
 
-  const today = input.today ?? new Date().toISOString().slice(0, 10);
-  const conversation = nightlyConversationKey(today);
-  const memory = await openMemoryStore(config.memoryDbPath);
-  const runStartedAt = Date.now();
+  const state = await loadNightlyState(dir);
 
-  try {
-    // A persona-provided override owns the whole phase contract; we
-    // can't safely chunk it, so run it as one monolithic turn.
-    if (existsSync(join(dir, "nightly-prompt.md"))) {
+  // Single-sweep lock. A long backlog can outlive the gap to the next timer
+  // fire; two sweeps on the same dates would double-file drawers. A marker
+  // older than STALE_RUN_MS is a crashed run, not a live one, so it's taken
+  // over rather than obeyed.
+  if (state.current && !input.force) {
+    const beat = Date.parse(state.current.updated_at ?? state.current.started_at);
+    const alive = !Number.isNaN(beat) && now.getTime() - beat <= STALE_RUN_MS;
+    if (alive) {
       out.write(
-        `nightly: persona='${persona}' date=${today} conversation=${conversation} (override prompt — monolithic, no checkpointing)\n`,
+        `nightly: a sweep is already in flight (on ${state.current.date}, ` +
+          `started ${state.current.started_at}) — skipping. Use --force to override.\n`,
       );
-      const prompt = await buildNightlyPromptForPersona(dir, persona, today);
-      const r = await runNightlyTurn({
-        persona,
-        conversation,
-        userMessage: prompt,
-        agentDir: dir,
-        harnesses,
-        memory,
-      });
-      if (r.errored) log.error("nightly: override turn failed", { error: r.errored });
-      await saveNightlyState(dir, {
-        last_run: new Date().toISOString(),
-        last_status: r.errored ? "error" : "ok",
-        ...(r.errored ? { errors: [r.errored] } : {}),
-      });
-      out.write(
-        `nightly ${r.errored ? "FAILED" : "ok"}: ${r.durationMs}ms` +
-          (r.errored ? ` — ${r.errored}` : "") +
-          `\n`,
-      );
-      return r.errored ? 1 : 0;
-    }
-
-    // Checkpointed path: run each pending stage, checkpoint after each.
-    const stages = await pendingNightlyStages(dir, today, input.resume ?? false);
-    const allStages: NightlyStage[] = [
-      "essence",
-      "promote",
-      "kb",
-      "compress",
-      "state",
-    ];
-    const completed = allStages.filter((s) => !stages.includes(s));
-
-    out.write(
-      `nightly: persona='${persona}' date=${today} conversation=${conversation}\n`,
-    );
-    if (stages.length === 0) {
-      out.write("nightly: all stages already complete for today — nothing to do\n");
       return 0;
     }
-    if (completed.length > 0) {
-      out.write(
-        `nightly: resuming — ${completed.length} stage(s) already done [${completed.join(", ")}], ${stages.length} remaining\n`,
-      );
+    out.write(
+      `nightly: taking over a stalled sweep (last beat ${state.current.updated_at}) \n`,
+    );
+  }
+
+  // Which dates to process. `--date` is an explicit override for one day
+  // (backfill / debugging); otherwise sweep everything unprocessed or changed.
+  let queue: PendingDate[];
+  if (input.today) {
+    const one = await pendingForDate(dir, input.today);
+    if (!one) {
+      err.write(`no daily file for ${input.today} — nothing to process\n`);
+      return 2;
     }
-
-    const progress: NightlyProgress = {
-      date: today,
-      started_at: new Date(runStartedAt).toISOString(),
-      updated_at: new Date().toISOString(),
-      completed_stages: [...completed],
-      status: "in_progress",
-    };
-    await saveNightlyProgress(dir, progress);
-
-    for (const stage of stages) {
-      out.write(`nightly: stage '${stage}' starting\n`);
-      const prompt = buildNightlyStagePrompt(persona, today, stage);
-      const r = await runNightlyTurn({
-        persona,
-        conversation,
-        userMessage: prompt,
-        agentDir: dir,
-        harnesses,
-        memory,
-      });
-
-      if (r.errored) {
-        // Checkpoint stays at the last good stage; status -> partial so
-        // resume / doctor pick up exactly here next time.
-        progress.status = "partial";
-        progress.last_error = `stage '${stage}': ${r.errored}`;
-        progress.updated_at = new Date().toISOString();
-        await saveNightlyProgress(dir, progress);
-        await saveNightlyState(dir, {
-          last_run: new Date().toISOString(),
-          last_status: "partial",
-          errors: [`stage '${stage}': ${r.errored}`],
-        });
-        log.error("nightly: stage failed — checkpoint saved", {
-          persona,
-          date: today,
-          stage,
-          error: r.errored,
-          completed: progress.completed_stages,
-        });
-        out.write(
-          `nightly PARTIAL: stage '${stage}' failed after ${r.durationMs}ms — ${r.errored}\n` +
-            `nightly: ${progress.completed_stages.length}/${allStages.length} stages done; rerun with --resume to continue\n`,
-        );
-        return 1;
+    queue = [one];
+  } else {
+    const sweep = await sweepDailyFiles(
+      dir,
+      state,
+      now.toISOString().slice(0, 10),
+    );
+    // Files that were touched but not changed: refresh the ledger's mtime so
+    // the next sweep takes the cheap stat-only path again. No turns spent.
+    if (sweep.touched.length > 0) {
+      const patch: Record<string, ReturnType<typeof dateRecord>> = {};
+      for (const t of sweep.touched) {
+        const prev = state.processed?.[t.date];
+        if (prev) patch[t.date] = { ...prev, mtime_ms: t.mtime_ms, size: t.size };
       }
-
-      progress.completed_stages.push(stage);
-      progress.updated_at = new Date().toISOString();
-      await saveNightlyProgress(dir, progress);
-      out.write(`nightly: stage '${stage}' ok (${r.durationMs}ms)\n`);
+      await saveNightlyState(dir, { processed: patch });
     }
+    queue = sweep.pending;
+  }
 
-    // Every stage done — clear the checkpoint and stamp success.
-    progress.status = "complete";
-    await clearNightlyProgress(dir);
+  // No cap by default — the sweep drains the whole backlog. `--max-dates`
+  // bounds a manual run; anything it leaves behind stays pending in the ledger.
+  const cap = input.maxDates;
+  const deferred =
+    cap !== undefined && cap > 0 ? Math.max(0, queue.length - cap) : 0;
+  if (deferred > 0) queue = queue.slice(0, cap);
+
+  if (queue.length === 0) {
+    out.write(`nightly: persona='${persona}' — nothing pending\n`);
     await saveNightlyState(dir, {
-      last_run: new Date().toISOString(),
+      last_run: now.toISOString(),
       last_status: "ok",
-    });
-    const totalMs = Date.now() - runStartedAt;
-    out.write(`nightly ok: ${allStages.length} stages, ${totalMs}ms total\n`);
-    log.info("nightly: complete", {
-      persona,
-      date: today,
-      durationMs: totalMs,
-      stages: allStages.length,
+      current: null,
     });
     return 0;
-  } finally {
-    await memory.close();
   }
+
+  out.write(
+    `nightly: persona='${persona}' — ${queue.length} date(s) to process ` +
+      `[${queue.map((q) => `${q.date}:${q.reason}`).join(", ")}]` +
+      (deferred > 0 ? ` (+${deferred} deferred to the next run)` : "") +
+      `\n`,
+  );
+
+  const monolithic = existsSync(join(dir, "nightly-prompt.md"));
+  const memory = input.runStage ? null : await openMemoryStore(config.memoryDbPath);
+  const startedAt = new Date().toISOString();
+  const errors: string[] = [];
+
+  try {
+    for (const [i, pending] of queue.entries()) {
+      const conversation = nightlyConversationKey(pending.date);
+      await saveNightlyState(dir, {
+        current: {
+          date: pending.date,
+          index: i + 1,
+          total: queue.length,
+          started_at: startedAt,
+          updated_at: new Date().toISOString(),
+          pid: process.pid,
+        },
+      });
+
+      const runOne = async (
+        stage: NightlyStage | "override",
+        prompt: string,
+      ): Promise<TurnResult> =>
+        input.runStage
+          ? await input.runStage({ persona, date: pending.date, stage, prompt })
+          : await runNightlyTurn({
+              persona,
+              conversation,
+              userMessage: prompt,
+              agentDir: dir,
+              harnesses,
+              memory: memory!,
+            });
+
+      const stagesDone: NightlyStage[] = [];
+      let dateError: string | undefined;
+      const t0 = Date.now();
+
+      if (monolithic) {
+        const prompt = await buildNightlyPromptForPersona(
+          dir,
+          persona,
+          pending.date,
+        );
+        const r = await runOne("override", prompt);
+        if (r.errored) dateError = `override: ${r.errored}`;
+        else stagesDone.push(...NIGHTLY_STAGES);
+      } else {
+        // The two stages write to disjoint targets (drawers+MEMORY.md vs kb/),
+        // so they run concurrently. Nothing between them needs ordering — the
+        // one thing that did, the index refresh, now happens after the join.
+        const results = await Promise.all(
+          NIGHTLY_STAGES.map(async (stage) => ({
+            stage,
+            r: await runOne(
+              stage,
+              buildNightlyStagePrompt(persona, pending.date, stage),
+            ),
+          })),
+        );
+        for (const { stage, r } of results) {
+          if (r.errored) {
+            const msg = `stage '${stage}' (${pending.date}): ${r.errored}`;
+            dateError ??= msg;
+            errors.push(msg);
+            log.error("nightly: stage failed", {
+              persona,
+              date: pending.date,
+              stage,
+              error: r.errored,
+            });
+          } else {
+            stagesDone.push(stage);
+          }
+        }
+      }
+
+      // Index refresh in code — guaranteed, once, after both stages joined.
+      // A failure here is reported but never marks the date unprocessed: the
+      // distillation itself succeeded and the next refresh picks the files up.
+      if (input.refreshIndex) {
+        await input.refreshIndex(dir);
+      } else {
+        const ix = await refreshPersonaIndex({
+          config,
+          personaDir: dir,
+          indexPath: memoryIndexPath(persona),
+        });
+        if (ix.error) err.write(`nightly: index refresh failed — ${ix.error}\n`);
+      }
+
+      await saveNightlyState(dir, {
+        processed: {
+          [pending.date]: dateRecord(pending, stagesDone, dateError),
+        },
+      });
+      if (dateError) {
+        if (!errors.includes(dateError)) errors.push(dateError);
+        out.write(
+          `nightly: ${pending.date} PARTIAL (${stagesDone.length}/${NIGHTLY_STAGES.length} stages, ` +
+            `${Date.now() - t0}ms) — ${dateError}\n`,
+        );
+      } else {
+        out.write(`nightly: ${pending.date} ok (${Date.now() - t0}ms)\n`);
+      }
+    }
+  } finally {
+    await memory?.close();
+  }
+
+  const failed = errors.length > 0;
+  await saveNightlyState(dir, {
+    last_run: new Date().toISOString(),
+    last_status: failed ? "partial" : "ok",
+    ...(failed ? { errors } : { errors: [] }),
+    current: null,
+  });
+  out.write(
+    `nightly ${failed ? "FINISHED WITH ERRORS" : "ok"}: ${queue.length} date(s)` +
+      (deferred > 0 ? `, ${deferred} deferred` : "") +
+      `\n`,
+  );
+  log.info("nightly: sweep complete", {
+    persona,
+    dates: queue.length,
+    deferred,
+    errors: errors.length,
+  });
+  return failed ? 1 : 0;
 }
 
 export default defineCommand({
   meta: {
     name: "nightly",
     description:
-      "Run the cognitive distillation pass — promote, KB-feed, compress. Checkpointed into resumable stages; isolated conversation; manual or via the systemd timer.",
+      "Run the cognitive distillation sweep — every unprocessed or changed daily file is distilled into the drawers, MEMORY.md and the KB. Idempotent: re-running with nothing pending does nothing.",
   },
   args: {
     persona: {
@@ -285,20 +413,27 @@ export default defineCommand({
     },
     date: {
       type: "string",
-      description: "Override today's date (YYYY-MM-DD); useful for backfill.",
-    },
-    resume: {
-      type: "boolean",
       description:
-        "Resume from .nightly-progress.json — skip stages already completed today.",
+        "Process only this date (YYYY-MM-DD), regardless of ledger state.",
+    },
+    "max-dates": {
+      type: "string",
+      description:
+        "Cap dates processed this run (default: no cap — drain the backlog).",
+    },
+    force: {
+      type: "boolean",
+      description: "Run even if another sweep holds the in-flight marker.",
       default: false,
     },
   },
   async run({ args }) {
+    const max = args["max-dates"] ? Number(args["max-dates"]) : undefined;
     process.exitCode = await runNightly({
       persona: args.persona ? String(args.persona) : undefined,
       today: args.date ? String(args.date) : undefined,
-      resume: Boolean(args.resume),
+      maxDates: Number.isFinite(max) ? max : undefined,
+      force: Boolean(args.force),
     });
   },
 });

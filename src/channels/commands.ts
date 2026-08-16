@@ -750,7 +750,8 @@ async function handleStatus(
     (probes.telegram ? `telegram: ${probes.telegram}\n` : "") +
     (probes.acp ? `acp:     ${probes.acp}\n` : "") +
     (probes.memory ? `memory:  ${probes.memory}\n` : "") +
-    (probes.voice ? `voice:   ${probes.voice}\n` : "");
+    (probes.voice ? `voice:   ${probes.voice}\n` : "") +
+    (probes.dreaming ? `dreaming: ${probes.dreaming}\n` : "");
 
   return {
     reply:

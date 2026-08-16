@@ -62,6 +62,7 @@ const baseInput = () => ({
   persona: "phantom",
   conversation: "cli:default",
   agentDir,
+  workingDir: agentDir,
   memory,
   idleTimeoutMs: 1_000,
   hardTimeoutMs: 5_000,
@@ -114,7 +115,13 @@ describe("runTurn — successful path", () => {
     expect(sawPersistedTurns).toBe(2);
   });
 
-  test("workingDir defaults to the running user's home dir (gemini sandbox spans the whole user account)", async () => {
+  // #387: workingDir used to default to homedir() when a caller omitted it.
+  // Every background caller omitted it, so nightly stages woke up in $HOME
+  // with their own memory/ invisible from cwd and went hunting for it —
+  // recursive walks that trip the macOS TCC "access data from other apps"
+  // prompt once per spawned process. There is now NO default: the field is
+  // required, and runTurn hands it to the harness verbatim.
+  test("workingDir is passed to the harness verbatim — no homedir() fallback", async () => {
     let captured: HarnessRequest | undefined;
     const harness = new ScriptedHarness(
       "fake",
@@ -129,10 +136,12 @@ describe("runTurn — successful path", () => {
         ...baseInput(),
         userMessage: "x",
         harnesses: [harness],
+        workingDir: agentDir,
       }),
     );
 
-    expect(captured?.workingDir).toBe(homedir());
+    expect(captured?.workingDir).toBe(agentDir);
+    expect(captured?.workingDir).not.toBe(homedir());
   });
 
   test("workingDir override is respected (callers can scope down)", async () => {
@@ -155,6 +164,30 @@ describe("runTurn — successful path", () => {
     );
 
     expect(captured?.workingDir).toBe(agentDir);
+  });
+
+  test("toolsMode allowlist reaches the harness; omitted stays undefined", async () => {
+    const seen: HarnessRequest[] = [];
+    const mk = () =>
+      new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }], (req) => {
+        seen.push(req);
+      });
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "x",
+        harnesses: [mk()],
+        toolsMode: { allow: ["Bash", "Read"] },
+      }),
+    );
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "y", harnesses: [mk()] }),
+    );
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]?.toolsMode).toEqual({ allow: ["Bash", "Read"] });
+    expect(seen[1]?.toolsMode).toBeUndefined();
   });
 
   test("passes loaded history to the harness", async () => {

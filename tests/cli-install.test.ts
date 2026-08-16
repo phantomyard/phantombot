@@ -212,8 +212,6 @@ describe("runInstall (linux/systemd)", () => {
       "--user start phantombot.service",
       "--user enable phantombot-heartbeat.timer",
       "--user start phantombot-heartbeat.timer",
-      "--user enable phantombot-nightly.timer",
-      "--user start phantombot-nightly.timer",
       "--user enable phantombot-tick.timer",
       "--user start phantombot-tick.timer",
     ]);
@@ -245,15 +243,14 @@ describe("runInstall (darwin/launchd)", () => {
       platform: "darwin",
     });
     expect(code).toBe(0);
-    // bootouts of nothing × 4, then bootstrap each plist × 4. We check the
-    // verb sequence rather than full strings so test stays readable.
+    // bootouts of nothing × 3, then bootstrap each plist × 3 (the retired
+    // nightly agent is neither written nor bootstrapped). We check the verb
+    // sequence rather than full strings so the test stays readable.
     const verbs = lc.calls.map((c) => c[0]);
     expect(verbs).toEqual([
       "bootout",
       "bootout",
       "bootout",
-      "bootout",
-      "bootstrap",
       "bootstrap",
       "bootstrap",
       "bootstrap",
@@ -329,9 +326,9 @@ describe("runInstall (windows/schtasks)", () => {
       platform: "windows",
     });
     expect(code).toBe(0);
-    // Four /Create imports, one per task.
+    // Three /Create imports, one per live task.
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    expect(creates.length).toBe(4);
+    expect(creates.length).toBe(3);
     expect(out.text).toContain("registered");
     expect(out.text).toContain("while logged in");
   });
@@ -400,7 +397,8 @@ describe("runUninstall (windows/schtasks)", () => {
     const out = new CaptureStream();
     const st = new FakeSchtasks();
     const sid = "S-1-5-21-1-2-3-1001";
-    // 4 persona-scoped tasks + 4 legacy pre-rename names, all owned by us.
+    // 3 live + 1 retired persona-scoped task, plus 4 legacy pre-rename names,
+    // all owned by us. Uninstall must clear the retired nightly task too.
     const names = [
       "phantombot-testbot",
       "heartbeat-testbot",
@@ -535,7 +533,7 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     });
     expect(code).toBe(0);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    expect(creates.length).toBe(4);
+    expect(creates.length).toBe(3);
     for (const c of creates) {
       expect(c).not.toContain("/RU");
       expect(c).not.toContain("/RP");
@@ -569,8 +567,8 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     expect(code).toBe(0);
     expect(askedPassword).toBe(true);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    // 4 password tasks + the interactive login-fallback twin.
-    expect(creates.length).toBe(5);
+    // 3 password tasks + the interactive login-fallback twin.
+    expect(creates.length).toBe(4);
     for (const c of creates.filter((c) => !c.some((a) => a.includes("login-testbot")))) {
       expect(c).toContain("/RU");
       expect(c).toContain("MEGAN-PC\\megan");
@@ -626,8 +624,8 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     expect(code).toBe(0);
     expect(prompted).toBe(false);
     const creates = st.calls.filter((c) => c[0] === "/Create");
-    // 4 password tasks + the interactive login-fallback twin.
-    expect(creates.length).toBe(5);
+    // 3 password tasks + the interactive login-fallback twin.
+    expect(creates.length).toBe(4);
     for (const c of creates.filter((c) => !c.some((a) => a.includes("login-testbot")))) {
       expect(c).toContain("/RP");
     }
@@ -684,7 +682,7 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     const pwCreates = st.calls.filter(
       (c) => c[0] === "/Create" && !c.some((a) => a.includes("login-testbot")),
     );
-    expect(pwCreates.length).toBe(4);
+    expect(pwCreates.length).toBe(3);
     // The reused vault password was applied via /RP.
     for (const c of pwCreates) {
       expect(c).toContain("/RP");
@@ -751,7 +749,7 @@ describe("runInstall (windows) logged-off prompt flow", () => {
     const pwCreates = st.calls.filter(
       (c) => c[0] === "/Create" && !c.some((a) => a.includes("login-testbot")),
     );
-    expect(pwCreates.length).toBe(4);
+    expect(pwCreates.length).toBe(3);
     for (const c of pwCreates) expect(c).toContain("migrated-pw");
     // The interactive login-fallback twin is registered too.
     expect(st.calls.some((c) => c.some((a) => a.includes("login-testbot")))).toBe(

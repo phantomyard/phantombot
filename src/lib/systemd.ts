@@ -15,8 +15,20 @@ import type { WriteSink } from "./io.ts";
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
 export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
 export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
+/**
+ * RETIRED units. The nightly no longer runs on a clock — it is triggered by
+ * startup and by the heartbeat noticing the calendar day rolled over (see
+ * src/lib/nightlyTrigger.ts), so a 02:00 timer would only ever duplicate work
+ * on a box that happened to be awake. These names survive solely so upgrades
+ * can stop, disable and delete what a previous install left behind.
+ */
 export const NIGHTLY_SERVICE_NAME = "phantombot-nightly.service";
 export const NIGHTLY_TIMER_NAME = "phantombot-nightly.timer";
+export const RETIRED_TIMER_NAMES = [NIGHTLY_TIMER_NAME] as const;
+export const RETIRED_UNIT_NAMES = [
+  NIGHTLY_TIMER_NAME,
+  NIGHTLY_SERVICE_NAME,
+] as const;
 export const TICK_SERVICE_NAME = "phantombot-tick.service";
 export const TICK_TIMER_NAME = "phantombot-tick.timer";
 
@@ -56,10 +68,12 @@ export function heartbeatTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", HEARTBEAT_TIMER_NAME);
 }
 
+/** Path of the retired nightly service (kept for cleanup only). */
 export function nightlyServicePath(): string {
   return join(homedir(), ".config", "systemd", "user", NIGHTLY_SERVICE_NAME);
 }
 
+/** Path of the retired nightly timer (kept for cleanup only). */
 export function nightlyTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", NIGHTLY_TIMER_NAME);
 }
@@ -167,40 +181,6 @@ Description=Phantombot heartbeat timer (every 30 min)
 
 [Timer]
 OnCalendar=*:0/30
-AccuracySec=1min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-`;
-}
-
-/** Generate the nightly oneshot service body. */
-export function generateNightlyService(binPath: string): string {
-  const exec = [binPath, "nightly"].map(quoteArg).join(" ");
-  return `[Unit]
-Description=Phantombot nightly — cognitive distillation pass
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${exec}
-TimeoutStartSec=2700
-Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
-${ENVIRONMENT_FILE_LINES}
-StandardOutput=journal
-StandardError=journal
-`;
-}
-
-/** Generate the nightly timer body — fires daily at 02:00 local. */
-export function generateNightlyTimer(): string {
-  return `[Unit]
-Description=Phantombot nightly timer (daily 02:00)
-
-[Timer]
-OnCalendar=*-*-* 02:00:00
 AccuracySec=1min
 Persistent=true
 
@@ -514,10 +494,14 @@ export interface PhantombotUnitPathOverrides {
   unitPath?: string;
   heartbeatServicePath?: string;
   heartbeatTimerPath?: string;
-  nightlyServicePath?: string;
-  nightlyTimerPath?: string;
   tickServicePath?: string;
   tickTimerPath?: string;
+  /**
+   * Where the RETIRED nightly units would live. Not generated any more — only
+   * consulted so cleanup can delete them out of a tmpdir under test.
+   */
+  nightlyServicePath?: string;
+  nightlyTimerPath?: string;
 }
 
 /**
@@ -547,18 +531,6 @@ export function phantombotUnitTargets(
       path: overrides.heartbeatTimerPath ?? heartbeatTimerPath(),
       content: generateHeartbeatTimer(),
       unit: HEARTBEAT_TIMER_NAME,
-      isTimer: true,
-    },
-    {
-      path: overrides.nightlyServicePath ?? nightlyServicePath(),
-      content: generateNightlyService(binPath),
-      unit: NIGHTLY_SERVICE_NAME,
-      isTimer: false,
-    },
-    {
-      path: overrides.nightlyTimerPath ?? nightlyTimerPath(),
-      content: generateNightlyTimer(),
-      unit: NIGHTLY_TIMER_NAME,
       isTimer: true,
     },
     {
@@ -653,12 +625,59 @@ export interface EnsureUnitsCurrentResult {
   backups: string[];
   /** Timer unit names that were re-enabled and/or restarted to repair them. */
   repairedTimers: string[];
+  /** Retired unit files removed from disk (upgrade cleanup). Usually empty. */
+  removedRetired: string[];
+}
+
+/**
+ * Stop, disable and delete the units phantombot no longer installs.
+ *
+ * Upgrade path only: an install from before the nightly timer was retired
+ * still has `phantombot-nightly.timer` armed at 02:00. Leaving it would fire a
+ * redundant (harmless but confusing) sweep forever, and `doctor` would keep
+ * reporting a timer that no template claims. Best-effort throughout — a
+ * systemctl that fails on an already-absent unit is expected, not an error.
+ * Returns the basenames actually deleted, so callers only log on real cleanup.
+ */
+export async function removeRetiredUnits(
+  systemctl: SystemctlRunner,
+  paths: readonly string[] = [nightlyTimerPath(), nightlyServicePath()],
+): Promise<string[]> {
+  const present = paths.filter((p) => existsSync(p));
+  // Nothing on disk → nothing systemd can run, so skip the IPC entirely. This
+  // is the case on every install from this version onward, which matters
+  // because the heal path runs on every heartbeat.
+  if (present.length === 0) return [];
+
+  for (const unit of RETIRED_TIMER_NAMES) {
+    await systemctl.run(["--user", "stop", unit]);
+    await systemctl.run(["--user", "disable", unit]);
+  }
+  const removed: string[] = [];
+  for (const path of present) {
+    try {
+      await unlink(path);
+      removed.push(basename(path));
+    } catch {
+      // Read-only dir or a racing uninstall — nothing we can do, and the
+      // stale unit is inert once disabled above.
+    }
+  }
+  return removed;
 }
 
 export async function ensureSystemdUnitsCurrent(
   opts: EnsureUnitsCurrentOptions,
 ): Promise<EnsureUnitsCurrentResult> {
   const targets = phantombotUnitTargets(opts.binPath, opts);
+
+  // Sweep away units we no longer install (currently the 02:00 nightly timer)
+  // before reconciling the ones we do. Cheap, and it means a box heals itself
+  // on the next heartbeat instead of needing a reinstall.
+  const removedRetired = await removeRetiredUnits(opts.systemctl, [
+    opts.nightlyTimerPath ?? nightlyTimerPath(),
+    opts.nightlyServicePath ?? nightlyServicePath(),
+  ]);
 
   const rewrote: string[] = [];
   const backups: string[] = [];
@@ -684,7 +703,7 @@ export async function ensureSystemdUnitsCurrent(
     rewrote.push(basename(t.path));
     if (t.isTimer) rewroteTimerUnits.add(t.unit);
   }
-  if (rewrote.length > 0) {
+  if (rewrote.length > 0 || removedRetired.length > 0) {
     await opts.systemctl.run(["--user", "daemon-reload"]);
   }
 
@@ -728,7 +747,7 @@ export async function ensureSystemdUnitsCurrent(
     repairedTimers.push(t.unit);
   }
 
-  return { rewrote, backups, repairedTimers };
+  return { rewrote, backups, repairedTimers, removedRetired };
 }
 
 export interface InstallOptions {
@@ -765,14 +784,21 @@ export async function installPhantombotUnit(
     opts.out.write(`wrote ${t.unit}: ${t.path}\n`);
   }
 
+  // Reinstalling over an older layout: drop the retired 02:00 nightly timer.
+  const removedRetired = await removeRetiredUnits(opts.systemctl, [
+    opts.nightlyTimerPath ?? nightlyTimerPath(),
+    opts.nightlyServicePath ?? nightlyServicePath(),
+  ]);
+  for (const name of removedRetired) {
+    opts.out.write(`removed retired unit: ${name}\n`);
+  }
+
   for (const args of [
     ["--user", "daemon-reload"],
     ["--user", "enable", PHANTOMBOT_UNIT_NAME],
     ["--user", "start", PHANTOMBOT_UNIT_NAME],
     ["--user", "enable", HEARTBEAT_TIMER_NAME],
     ["--user", "start", HEARTBEAT_TIMER_NAME],
-    ["--user", "enable", NIGHTLY_TIMER_NAME],
-    ["--user", "start", NIGHTLY_TIMER_NAME],
     ["--user", "enable", TICK_TIMER_NAME],
     ["--user", "start", TICK_TIMER_NAME],
   ]) {
@@ -785,7 +811,7 @@ export async function installPhantombotUnit(
     }
   }
   opts.out.write(
-    "enabled and started phantombot.service + heartbeat.timer + nightly.timer + tick.timer\n",
+    "enabled and started phantombot.service + heartbeat.timer + tick.timer\n",
   );
   return { installed: true };
 }

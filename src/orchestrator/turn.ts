@@ -21,7 +21,6 @@
  * to catch them and present cleanly.
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
@@ -48,15 +47,29 @@ export interface TurnInput {
   /** Path to the persona directory (BOOT.md / SOUL.md / IDENTITY.md etc. live here). */
   agentDir: string;
   /**
-   * cwd for harness subprocesses. Defaults to the running user's home
-   * dir. Set to `agentDir` (or anything else) to scope down. Affects:
+   * cwd for harness subprocesses. REQUIRED — there is deliberately no
+   * default (see #387). Affects:
    *   - pi:     where relative-path tools resolve (no sandbox).
-   *   - claude: same + the "trusted dir" framing for the workspace.
+   *   - claude: same + the "trusted dir" framing for the workspace, AND
+   *             the root that Glob/Grep walk when the agent searches.
    *   - gemini: the *workspace sandbox root* — gemini hard-rejects tool
    *             calls that touch paths outside cwd + its temp dir.
    * Persona files load via absolute paths regardless of this setting.
+   *
+   * This used to silently default to `homedir()`, which meant a background
+   * turn woke up in `$HOME` unable to see its own `memory/` — so its file
+   * search walked the whole home tree looking for them. On macOS that walk
+   * crosses `~/Library/Containers` and trips the TCC
+   * `kTCCServiceSystemPolicyAppData` prompt ("phantombot would like to
+   * access data from other apps"), once per spawned process. A default
+   * nobody passes is a default nobody audits: make every call site say
+   * which tree this turn is allowed to treat as home.
+   *
+   *   - Interactive/chat surfaces pass `homedir()` — the owner asks for work
+   *     on repos all over their home dir, so scoping those down is wrong.
+   *   - Machine-driven background turns (nightly) pass the persona dir.
    */
-  workingDir?: string;
+  workingDir: string;
   /** Harness chain in priority order; first that succeeds wins. */
   harnesses: Harness[];
   /** Open memory store; runTurn appends to it on success. */
@@ -79,6 +92,14 @@ export interface TurnInput {
    * non-interactive `--print` startup handshake. See HarnessRequest.mcpMode.
    */
   mcpMode?: "none";
+  /**
+   * Restrict the harness's built-in tool surface for this turn. Omitted =
+   * the normal full surface. `{ allow: [...] }` is a positive grant used by
+   * background turns whose job is known up front (nightly); claude honours
+   * it, pi/codex ignore it. See HarnessRequest.toolsMode — and note it is
+   * defence-in-depth, NOT a trust boundary.
+   */
+  toolsMode?: { allow: string[] };
   /**
    * Append PRE_TOOL_NARRATION_INSTRUCTION to the system prompt — asks
    * the model to say one short sentence before each tool call so
@@ -343,7 +364,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       history,
       persona: input.persona,
       conversation: input.conversation,
-      workingDir: input.workingDir ?? homedir(),
+      workingDir: input.workingDir,
       // Harness temp files land under the persona's own dir, not the shared
       // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
       tmpBaseDir: join(input.agentDir, "tmp"),
@@ -351,6 +372,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
       hardTimeoutMs: input.hardTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,
       mcpMode: input.mcpMode,
+      toolsMode: input.toolsMode,
       signal: input.signal,
     },
     { onToolCall: auditSink },

@@ -1493,17 +1493,61 @@ Environment overrides: `PHANTOMBOT_RETRIEVAL_CROSS_ENABLED`,
 
 ### Nightly and Doctor
 
-The nightly distillation is checkpointed in five stages:
+Every `phantombot nightly` run is a **sweep**. It lists the daily files, diffs
+them against the ledger in `memory/.nightly-state.json` (mtime + size, then
+content hash) and processes every date that is new, that grew since it was
+processed, or whose last pass didn't finish:
 
 ```text
-essence -> promote -> kb -> compress -> state
+sweep (code) -> per date: distill ‖ kb -> index refresh (code) -> ledger (code)
 ```
 
-If it times out or the machine restarts, `phantombot nightly --resume`
-continues from the checkpoint.
+* `distill` files the day's captures into the drawers (people / decisions /
+  lessons / commitments / norms) and maintains MEMORY.md's `## Recent`.
+* `kb` extracts durable knowledge into `kb/` — reconcile, create, sweep inbox.
 
-`phantombot doctor` checks memory health and can auto-repair stale, failed, or
-partial nightly runs.
+The two stages run **concurrently**: they read the same daily file and write
+disjoint targets. Neither writes back to the daily file, which is what keeps
+the ledger's hash stable. Once both join, phantombot refreshes the search index
+itself (incremental FTS + embeddings), so a new KB note is searchable without
+the model having to remember to ask.
+
+The sweep has **no timer**. It is triggered by two events instead: `run` fires
+one at startup, and the heartbeat fires one the first time it runs on a new
+calendar day (the previous day's file has closed by then). Rollover *detection*
+rather than a file-creation watch, because a daily file is created lazily on the
+first capture — on a quiet day it may never exist, and a creation hook would
+starve. Because the ledger decides what to process, both triggers are safe to
+fire redundantly: re-running with nothing pending costs nothing, and a machine
+that was off for a week sweeps the backlog when it comes back. There is no
+`--resume` and no catch-up mode. Useful flags:
+`--date <YYYY-MM-DD>` to reprocess one day, `--max-dates N` to bound a manual
+run, `--force` to take over a stuck in-flight marker.
+
+A stage runs **scoped to the persona directory**. Its working directory is the
+persona dir (not your home dir), it runs with no MCP servers, and it is granted
+exactly four tools — `Bash`, `Read`, `Write`, `Edit`. That is the whole job: read
+the day's file, write `memory/` and `kb/`, and search through
+`phantombot memory search`. It never needs to walk your filesystem, and it is no
+longer able to. Before this, stages ran from `$HOME` and would go looking for
+their own `memory/` directory; on macOS that search crossed
+`~/Library/Containers` and made the system ask *"phantombot would like to access
+data from other apps"* over and over — once for every date in the backlog. If
+you see that prompt, you are on a build older than #387.
+
+A sweep is **uncapped by default**: it drains the entire backlog in one pass,
+so a first run after months of history is one long night rather than a queue
+that reappears every morning. The in-flight marker stops the rollover trigger
+from starting a second sweep on top of a running one.
+
+`/status` shows a `dreaming:` line — `OK (nothing pending)`,
+`RUNNING (2/5 dates, on 2026-06-02)`, `WARN (2 dates pending …)` or `ERR`.
+Health is backlog-driven, not schedule-driven: nothing pending is OK no matter
+when the last sweep ran, and a backlog of *any* depth is only a WARN while it
+drains. It turns into ERR when a sweep errored, when the in-flight marker went
+stale, or when dates are pending and no sweep has run for over 24h — a backlog
+nobody is picking up. `phantombot doctor` reports the same signal (plus capture
+health, timers and connectors) but never runs the nightly itself.
 
 ## Maintenance
 
@@ -1519,8 +1563,7 @@ Installed user units:
 |---|---|---|
 | `phantombot.service` | Always on | Telegram listener |
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
-| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance |
-| `phantombot-nightly.timer` | Daily | LLM-backed memory distillation |
+| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance + fires the nightly sweep on day rollover |
 
 Update commands:
 

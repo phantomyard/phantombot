@@ -2,7 +2,12 @@
  * `phantombot heartbeat` — short, mechanical maintenance pass.
  *
  * Runs every 30 minutes via systemd timer (installed by `phantombot install`).
- * No LLM call. See src/lib/heartbeat.ts for what it does.
+ * No LLM call. See src/lib/heartbeat.ts for the memory work it does.
+ *
+ * It is also the clock the nightly hangs off: when the calendar day changes
+ * between two fires, yesterday's daily file has closed, so the heartbeat spawns
+ * a detached nightly sweep. That (plus the startup sweep in `run`) is why there
+ * is no phantombot-nightly.timer any more.
  */
 
 import { defineCommand } from "citty";
@@ -15,6 +20,11 @@ import { runHeartbeat } from "../lib/heartbeat.ts";
 import { MemoryIndex } from "../lib/memoryIndex.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import {
+  dayRolledOver,
+  type NightlyTriggerReason,
+  spawnNightlySweep,
+} from "../lib/nightlyTrigger.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
@@ -28,7 +38,10 @@ import {
   BunSchtasksRunner,
   ensureTasksCurrent,
 } from "../lib/taskScheduler.ts";
-import { recordHeartbeatFired } from "../lib/timerHealth.ts";
+import {
+  loadHeartbeatLastFired,
+  recordHeartbeatFired,
+} from "../lib/timerHealth.ts";
 import { VERSION } from "../version.ts";
 
 // Delegates to the shared resolver in config.ts so the memory-index path
@@ -62,6 +75,14 @@ export interface RunHeartbeatCliInput {
    * real embedder from config and run runEmbedJob against the note index.
    */
   embedNotes?: false | (() => Promise<EmbedNotesResult | null>);
+  /**
+   * Test seam for the day-rollover nightly trigger. Pass `false` to skip the
+   * check entirely, or a function to capture the spawn without forking a real
+   * process. Production passes undefined → {@link spawnNightlySweep}.
+   */
+  triggerNightly?:
+    | false
+    | ((persona: string, reason: NightlyTriggerReason) => void);
 }
 
 /** Outcome of the heartbeat's incremental note-embed pass. */
@@ -178,6 +199,34 @@ export async function runHeartbeatCli(
     }
   }
 
+  // Day-rollover trigger — this is what replaced the 02:00 nightly timer.
+  // The heartbeat already fires every 30 min and already knows what day it is,
+  // so it is the natural place to notice that the calendar day changed since
+  // the last fire: the moment it does, yesterday's daily file is closed and
+  // can be distilled. Read the PREVIOUS marker before recordHeartbeatFired()
+  // overwrites it. Worst-case latency is one heartbeat interval, and firing
+  // redundantly is free — the sweep is ledger-driven and no-ops when nothing
+  // is pending. Wrapped in try/catch: a spawn failure must not fail the
+  // heartbeat, and the next startup sweeps the same backlog anyway.
+  let rolloverLine = "";
+  if (input.triggerNightly !== false) {
+    try {
+      const prev = loadHeartbeatLastFired(new Date()).iso;
+      if (dayRolledOver(prev)) {
+        (input.triggerNightly ?? spawnNightlySweep)(persona, "rollover");
+        rolloverLine = ", day rolled over → nightly sweep";
+        log.info("heartbeat: day rolled over, spawned nightly sweep", {
+          persona,
+          previousFire: prev,
+        });
+      }
+    } catch (e) {
+      log.warn("heartbeat: rollover check threw unexpectedly", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
   // Record the fire AFTER the primary work succeeded. Doctor uses
   // this marker's mtime to flag a dead heartbeat timer.
   await recordHeartbeatFired();
@@ -191,7 +240,7 @@ export async function runHeartbeatCli(
   out.write(
     `heartbeat ok: promoted ${r.promoted.length}, ` +
       `stale ${r.staleRecent.length}, ` +
-      `indexed ${r.indexedFiles}${noteEmbedLine}${updateLine}\n`,
+      `indexed ${r.indexedFiles}${noteEmbedLine}${updateLine}${rolloverLine}\n`,
   );
   return 0;
 }
@@ -278,7 +327,7 @@ export default defineCommand({
   meta: {
     name: "heartbeat",
     description:
-      "Mechanical 30-min maintenance: promote tagged daily-file lines to drawers, scan ## Recent for staleness, refresh FTS index, flush due conversation-turn tails, and embed newly-written notes. No LLM call.",
+      "Mechanical 30-min maintenance: promote tagged daily-file lines to drawers, scan ## Recent for staleness, refresh FTS index, flush due conversation-turn tails, embed newly-written notes, and fire the nightly sweep when the calendar day has rolled over. No LLM call.",
   },
   args: {
     persona: {

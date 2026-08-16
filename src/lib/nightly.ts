@@ -1,36 +1,112 @@
 /**
  * Nightly cognitive pass.
  *
- * Runs the harness once per day in an isolated conversation
- * (`system:nightly:<YYYY-MM-DD>`) so it can never bleed into Telegram
- * chats. The harness gets the full persona BOOT.md + a focused
- * distillation directive, plus access to phantombot's memory CLI tools
- * (search / get / list / today / index) via its native Bash tool.
+ * Every run is a SWEEP: phantombot lists the daily files on disk, compares
+ * each one against the ledger in `memory/.nightly-state.json` (mtime + content
+ * hash), and processes every date that has never been processed or has grown
+ * since it was. There is no catch-up mode, no resume flag and no separate
+ * repair path — a box that was asleep at 02:00 simply sweeps a longer backlog
+ * the next time the pass runs, and a re-run with nothing pending is free.
  *
- * Phases the harness is instructed to run (from the OpenClaw spec):
+ * Each pending date is processed by exactly TWO harness turns, run
+ * CONCURRENTLY because they write to disjoint targets:
  *
- *   1. Day essence — read today's daily file, write a 2-3 line summary
- *      header at the top.
- *   2. Promote — anything tagged or worth keeping into the structured
- *      drawers (people / decisions / lessons / commitments).
- *   3. KB feed — for each durable concept, `phantombot memory search`
- *      first to dedup, then update an existing note OR create a new
- *      atomic note with frontmatter and [[wikilinks]]. Sweep kb/inbox/.
- *   4. Compress — trim MEMORY.md if bloating; clear ## Recent items
- *      that have been distilled.
- *   5. State — write a summary to memory/.nightly-state.json so the
- *      next run knows what was done.
+ *   1. distill — file the day's captures the heartbeat missed into the
+ *      structured drawers (people / decisions / lessons / commitments) and
+ *      maintain MEMORY.md's "## Recent" orientation layer.
+ *   2. kb      — extract durable knowledge into kb/: reconcile against
+ *      existing notes, create new atomic notes, sweep kb/inbox/.
  *
- * Phantombot just spawns this run; the cognitive work is the harness's
- * own. No phantombot-side judgment about what to keep, distill, or link.
+ * Neither stage writes back to the daily file — that is what keeps the
+ * ledger's hash stable, so "hash changed" means "genuinely more content".
+ *
+ * The search-index refresh that used to be a line in the KB prompt is now
+ * done by the driver in code after both stages join (see
+ * `refreshPersonaIndex`): deterministic work does not belong behind a
+ * probabilistic trigger, and doing it once after the join closes the race
+ * between the KB writes and the drawer writes.
+ *
+ * Conversation key is `system:nightly:<YYYY-MM-DD>` so the pass can never
+ * bleed into Telegram chats, and both stages for a date share context.
  */
 
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { log } from "./logger.ts";
 
 const NIGHTLY_PROMPT_OVERRIDE = "nightly-prompt.md";
+
+/** Daily files are named strictly `YYYY-MM-DD.md` under `memory/`. */
+const DAILY_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.md$/;
+
+/**
+ * A sweep that hasn't touched its `current` block in this long is treated as
+ * dead (crashed process, powered-off box) rather than running. Generous: one
+ * date is two concurrent turns, each capped at the stage hard timeout.
+ */
+export const STALE_RUN_MS = 45 * 60_000;
+
+/**
+ * A backlog is work queued, not a fault — however deep it is, it reads as a
+ * warning while it drains. It only turns into an error once it is STAGNANT:
+ * dates are pending and no sweep has run in this long, which means the thing
+ * that triggers sweeps is broken rather than merely behind.
+ */
+export const BACKLOG_STAGNANT_MS = 24 * 60 * 60_000;
+
+// ---------------------------------------------------------------------------
+// Stage model
+// ---------------------------------------------------------------------------
+
+/**
+ * The two stages of a nightly pass. Split by OUTPUT target, not input: both
+ * read the same daily file, `distill` writes drawers + MEMORY.md and `kb`
+ * writes kb/. Kept separate (rather than merged into one cheaper turn)
+ * because the KB stage's search-read-reconcile work degrades badly when it
+ * shares a turn with mechanical filing.
+ */
+export type NightlyStage = "distill" | "kb";
+
+export const NIGHTLY_STAGES: readonly NightlyStage[] = [
+  "distill",
+  "kb",
+] as const;
+
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+
+/** What the ledger remembers about one processed date. */
+export interface NightlyDateRecord {
+  /** mtime of the daily file at the moment it was processed. */
+  mtime_ms: number;
+  /** Byte size when processed — paired with mtime for the cheap skip path. */
+  size: number;
+  /** sha256 of the daily file's bytes when processed (hex). */
+  hash: string;
+  /** Stages that completed for this date. */
+  stages_done: NightlyStage[];
+  completed_at: string;
+  status: "ok" | "partial" | "error";
+  /** First stage error, if the date didn't fully succeed. */
+  error?: string;
+}
+
+/** Progress marker for a sweep that is running right now. Feeds `/status`. */
+export interface NightlyCurrent {
+  /** Date being processed at this instant. */
+  date: string;
+  /** 1-based position of that date within this sweep. */
+  index: number;
+  /** Total dates this sweep intends to process. */
+  total: number;
+  started_at: string;
+  /** Refreshed as each date starts — drives stale-run detection. */
+  updated_at: string;
+  pid?: number;
+}
 
 export interface NightlyState {
   last_run?: string;
@@ -39,6 +115,10 @@ export interface NightlyState {
   kb_notes_updated?: number;
   kb_notes_created?: number;
   errors?: string[];
+  /** date (YYYY-MM-DD) → what was done for it. The idempotency ledger. */
+  processed?: Record<string, NightlyDateRecord>;
+  /** Set while a sweep is in flight; cleared when it finishes. */
+  current?: NightlyCurrent | null;
 }
 
 export function nightlyConversationKey(date: string): string {
@@ -49,137 +129,12 @@ export function nightlyStatePath(personaDir: string): string {
   return join(personaDir, "memory", ".nightly-state.json");
 }
 
-// ---------------------------------------------------------------------------
-// Checkpointed nightly — stage model
-// ---------------------------------------------------------------------------
-
-/**
- * The nightly pass decomposed into idempotent stages. Each stage is one
- * bounded harness turn; phantombot checkpoints after every completed
- * stage to `.nightly-progress.json`. A run that times out (or the box
- * powering off) loses at most the in-flight stage — the next run resumes
- * from the checkpoint instead of redoing the whole night.
- *
- * Order matters: `essence` and `promote` read the daily file, `kb`
- * synthesises (the long pole), `compress` trims MEMORY.md, `state`
- * records counts.
- */
-export type NightlyStage =
-  | "essence"
-  | "promote"
-  | "kb"
-  | "compress"
-  | "state";
-
-export const NIGHTLY_STAGES: readonly NightlyStage[] = [
-  "essence",
-  "promote",
-  "kb",
-  "compress",
-  "state",
-] as const;
-
-export interface NightlyProgress {
-  /** ISO date (YYYY-MM-DD) this checkpoint belongs to. */
-  date: string;
-  started_at: string;
-  updated_at: string;
-  /** Stages finished successfully, in completion order. */
-  completed_stages: NightlyStage[];
-  status: "in_progress" | "partial" | "complete";
-  /** Message from the stage that failed/timed out, if any. */
-  last_error?: string;
+/** Absolute path of one daily file. The filename IS the primary key. */
+export function dailyFilePath(personaDir: string, date: string): string {
+  return join(personaDir, "memory", `${date}.md`);
 }
 
-export function nightlyProgressPath(personaDir: string): string {
-  return join(personaDir, "memory", ".nightly-progress.json");
-}
-
-/** Read the current checkpoint. Returns null if none exists. */
-export async function loadNightlyProgress(
-  personaDir: string,
-): Promise<NightlyProgress | null> {
-  const p = nightlyProgressPath(personaDir);
-  if (!existsSync(p)) return null;
-  try {
-    return JSON.parse(await readFile(p, "utf8")) as NightlyProgress;
-  } catch (e) {
-    log.warn("nightly: progress file unreadable; treating as absent", {
-      error: (e as Error).message,
-    });
-    return null;
-  }
-}
-
-export async function saveNightlyProgress(
-  personaDir: string,
-  progress: NightlyProgress,
-): Promise<void> {
-  await writeFile(
-    nightlyProgressPath(personaDir),
-    JSON.stringify(progress, null, 2) + "\n",
-    "utf8",
-  );
-}
-
-/** Remove the checkpoint — called once all stages complete. */
-export async function clearNightlyProgress(
-  personaDir: string,
-): Promise<void> {
-  const p = nightlyProgressPath(personaDir);
-  if (!existsSync(p)) return;
-  try {
-    await rm(p);
-  } catch (e) {
-    log.warn("nightly: could not clear progress file", {
-      error: (e as Error).message,
-    });
-  }
-}
-
-/**
- * Given a persona dir and the date being processed, return the stages
- * still to run. Honors an existing checkpoint ONLY when it belongs to
- * the same date — a stale checkpoint from a previous day is ignored so
- * we always start a fresh day clean.
- */
-export async function pendingNightlyStages(
-  personaDir: string,
-  today: string,
-  resume: boolean,
-): Promise<NightlyStage[]> {
-  if (!resume) return [...NIGHTLY_STAGES];
-  const progress = await loadNightlyProgress(personaDir);
-  if (!progress || progress.date !== today) return [...NIGHTLY_STAGES];
-  const done = new Set(progress.completed_stages);
-  return NIGHTLY_STAGES.filter((s) => !done.has(s));
-}
-
-/**
- * Catch-up window: if the last nightly run was more than this many
- * milliseconds ago, a startup catch-up is warranted. Default: 24 hours.
- */
-export const CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Should a catch-up nightly run at startup?
- *
- * Returns `true` when the persona has no record of a previous nightly
- * run OR the last run was more than {@link CATCHUP_WINDOW_MS} ago.
- * Designed for users who shut down their machine overnight and miss
- * the 02:00 scheduled run.
- */
-export async function shouldRunCatchupNightly(
-  personaDir: string,
-): Promise<boolean> {
-  const state = await loadNightlyState(personaDir);
-  if (!state.last_run) return true;
-  const lastRun = Date.parse(state.last_run);
-  if (Number.isNaN(lastRun)) return true;
-  return Date.now() - lastRun > CATCHUP_WINDOW_MS;
-}
-
-/** Read the previous nightly state. Returns {} if no prior run. */
+/** Read the ledger. Returns {} if no prior run (or an unreadable file). */
 export async function loadNightlyState(
   personaDir: string,
 ): Promise<NightlyState> {
@@ -195,13 +150,22 @@ export async function loadNightlyState(
   }
 }
 
-/** Update the previous nightly state with a fresh run record. */
+/**
+ * Merge a patch into the ledger and write it back. `processed` is merged
+ * key-by-key so a patch carrying one date never drops the rest of history;
+ * `current: null` explicitly clears the in-flight marker.
+ */
 export async function saveNightlyState(
   personaDir: string,
   patch: Partial<NightlyState>,
 ): Promise<void> {
   const cur = await loadNightlyState(personaDir);
-  const next = { ...cur, ...patch };
+  const next: NightlyState = {
+    ...cur,
+    ...patch,
+    processed: { ...(cur.processed ?? {}), ...(patch.processed ?? {}) },
+  };
+  if (patch.current === null) delete next.current;
   await writeFile(
     nightlyStatePath(personaDir),
     JSON.stringify(next, null, 2) + "\n",
@@ -209,12 +173,286 @@ export async function saveNightlyState(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Sweep
+// ---------------------------------------------------------------------------
+
+/** A daily file the sweep has decided needs (re)processing. */
+export interface PendingDate {
+  date: string;
+  path: string;
+  mtime_ms: number;
+  size: number;
+  hash: string;
+  /** Why it's pending: never seen, content grew, or last pass didn't finish. */
+  reason: "new" | "changed" | "incomplete";
+}
+
+export interface SweepResult {
+  /** Dates needing harness turns, oldest first. */
+  pending: PendingDate[];
+  /**
+   * Dates whose file was touched (mtime moved) but whose CONTENT is
+   * unchanged — the ledger's mtime is refreshed for free, no turn spent.
+   */
+  touched: Array<{ date: string; mtime_ms: number; size: number }>;
+  /** Every date file seen on disk, oldest first. */
+  seen: string[];
+}
+
+async function sha256File(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/**
+ * Reconcile the daily files on disk against the ledger.
+ *
+ * `before` is exclusive: the day still being written to (today) is never
+ * swept, because the drawers would be filed from a half-finished file and
+ * the hash would change minutes later anyway.
+ *
+ * Cost control: a date whose ledger mtime still matches `stat` is skipped
+ * without reading the file at all, so a ten-year archive costs one `readdir`
+ * plus N `stat`s. Only files whose mtime moved get hashed — and a hash that
+ * matches means the file was merely touched, not changed.
+ */
+export async function sweepDailyFiles(
+  personaDir: string,
+  state: NightlyState,
+  before: string,
+): Promise<SweepResult> {
+  const memDir = join(personaDir, "memory");
+  const pending: PendingDate[] = [];
+  const touched: Array<{ date: string; mtime_ms: number; size: number }> = [];
+  const seen: string[] = [];
+  if (!existsSync(memDir)) return { pending, touched, seen };
+
+  const entries = (await readdir(memDir))
+    .map((f) => ({ file: f, m: DAILY_FILE_RE.exec(f) }))
+    .filter((e): e is { file: string; m: RegExpExecArray } => e.m !== null)
+    .map((e) => e.m[1]!)
+    .filter((d) => d < before)
+    .sort();
+
+  const ledger = state.processed ?? {};
+  for (const date of entries) {
+    seen.push(date);
+    const path = join(memDir, `${date}.md`);
+    let mtimeMs: number;
+    let size: number;
+    try {
+      const st = await stat(path);
+      mtimeMs = Math.floor(st.mtimeMs);
+      size = st.size;
+    } catch {
+      continue; // vanished between readdir and stat — nothing to process
+    }
+    const rec = ledger[date];
+    const done =
+      rec !== undefined &&
+      rec.status === "ok" &&
+      NIGHTLY_STAGES.every((s) => rec.stages_done.includes(s));
+
+    // Fast path: mtime AND size both unchanged. Size is the belt to mtime's
+    // braces — an append landing inside the same millisecond as the last
+    // stat still moves the size, so a late capture can't hide from the sweep.
+    if (done && rec.mtime_ms === mtimeMs && rec.size === size) continue;
+
+    let hash: string;
+    try {
+      hash = await sha256File(path);
+    } catch (e) {
+      log.warn("nightly: daily file unreadable during sweep", {
+        date,
+        error: (e as Error).message,
+      });
+      continue;
+    }
+    if (done && rec.hash === hash) {
+      touched.push({ date, mtime_ms: mtimeMs, size });
+      continue;
+    }
+    pending.push({
+      date,
+      path,
+      mtime_ms: mtimeMs,
+      size,
+      hash,
+      reason: rec === undefined ? "new" : done ? "changed" : "incomplete",
+    });
+  }
+  return { pending, touched, seen };
+}
+
+/**
+ * Build a {@link PendingDate} for ONE explicit date, ignoring the ledger.
+ * Backs `nightly --date` (backfill / debugging), which must reprocess a day
+ * on demand without walking the whole archive. Returns null if there's no
+ * daily file for that date.
+ */
+export async function pendingForDate(
+  personaDir: string,
+  date: string,
+): Promise<PendingDate | null> {
+  const path = dailyFilePath(personaDir, date);
+  if (!existsSync(path)) return null;
+  try {
+    const st = await stat(path);
+    return {
+      date,
+      path,
+      mtime_ms: Math.floor(st.mtimeMs),
+      size: st.size,
+      hash: await sha256File(path),
+      reason: "new",
+    };
+  } catch (e) {
+    log.warn("nightly: daily file unreadable", {
+      date,
+      error: (e as Error).message,
+    });
+    return null;
+  }
+}
+
+/** Build the ledger entry for a date the driver has just finished. */
+export function dateRecord(
+  p: PendingDate,
+  stagesDone: NightlyStage[],
+  error?: string,
+): NightlyDateRecord {
+  return {
+    mtime_ms: p.mtime_ms,
+    size: p.size,
+    hash: p.hash,
+    stages_done: stagesDone,
+    completed_at: new Date().toISOString(),
+    status: error ? (stagesDone.length > 0 ? "partial" : "error") : "ok",
+    ...(error ? { error } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Health — the `/status` "dreaming:" line and `doctor`'s nightly section
+// ---------------------------------------------------------------------------
+
+export type NightlyHealthStatus = "ok" | "running" | "warning" | "error";
+
+export interface NightlyHealth {
+  status: NightlyHealthStatus;
+  /** One short line, e.g. "2/5 dates, on 2026-06-02". */
+  detail: string;
+  /** Dates still needing a pass. */
+  backlog: number;
+  /** Oldest pending date, when there is one. */
+  oldest_pending?: string;
+  last_run?: string;
+}
+
+/**
+ * Judge nightly health from the ledger + what's on disk.
+ *
+ * Deliberately schedule-agnostic: an always-on box that sweeps at 02:00 and a
+ * laptop that sweeps at 09:15 on boot both read `ok` as long as nothing is
+ * pending. Backlog is the only truth — "the timer didn't fire in its window"
+ * is not a fault if there was nothing to do.
+ */
+export async function nightlyHealth(
+  personaDir: string,
+  opts: { now?: Date; state?: NightlyState } = {},
+): Promise<NightlyHealth> {
+  const now = opts.now ?? new Date();
+  const state = opts.state ?? (await loadNightlyState(personaDir));
+  const sweep = await sweepDailyFiles(
+    personaDir,
+    state,
+    now.toISOString().slice(0, 10),
+  );
+  const backlog = sweep.pending.length;
+  const oldest = sweep.pending[0]?.date;
+  const base = {
+    backlog,
+    ...(oldest ? { oldest_pending: oldest } : {}),
+    ...(state.last_run ? { last_run: state.last_run } : {}),
+  };
+
+  const cur = state.current;
+  if (cur) {
+    const beat = Date.parse(cur.updated_at ?? cur.started_at);
+    const stalled = Number.isNaN(beat) || now.getTime() - beat > STALE_RUN_MS;
+    if (!stalled) {
+      return {
+        ...base,
+        status: "running",
+        detail: `${cur.index}/${cur.total} dates, on ${cur.date}`,
+      };
+    }
+    return {
+      ...base,
+      status: "error",
+      detail: `sweep stalled on ${cur.date} since ${cur.updated_at ?? cur.started_at}`,
+    };
+  }
+
+  const failed = Object.entries(state.processed ?? {})
+    .filter(([, r]) => r.status === "error" || r.status === "partial")
+    .map(([d]) => d)
+    .sort();
+
+  if (state.last_status === "error") {
+    return {
+      ...base,
+      status: "error",
+      detail: `last sweep errored${state.errors?.[0] ? ` — ${state.errors[0]}` : ""}`,
+    };
+  }
+  if (backlog > 0) {
+    // Deep backlog is not itself a fault — a sweep drains it whole, so it is
+    // simply work in the queue. The fault case is a backlog nobody is picking
+    // up: pending dates and no sweep within BACKLOG_STAGNANT_MS.
+    // A ledger with no `last_run` is a fresh install, not a stuck one — the
+    // startup trigger stamps it within a minute of the process coming up, so
+    // "never swept" is a warning and only an OLD sweep is an error.
+    const last = state.last_run ? Date.parse(state.last_run) : NaN;
+    if (!Number.isNaN(last) && now.getTime() - last > BACKLOG_STAGNANT_MS) {
+      return {
+        ...base,
+        status: "error",
+        detail: `${backlog} date${backlog === 1 ? "" : "s"} pending, no sweep since ${state.last_run}`,
+      };
+    }
+    return {
+      ...base,
+      status: "warning",
+      detail: `${backlog} date${backlog === 1 ? "" : "s"} pending (oldest ${oldest})`,
+    };
+  }
+  if (failed.length > 0) {
+    return {
+      ...base,
+      status: "warning",
+      detail: `${failed.length} date(s) processed with errors (${failed.slice(-1)[0]})`,
+    };
+  }
+  return {
+    ...base,
+    status: "ok",
+    detail: state.last_run
+      ? `nothing pending (last sweep ${state.last_run})`
+      : "nothing pending",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
+
 /**
  * If a persona dir contains a `nightly-prompt.md` file, use it as the
  * template (with `{{persona}}` and `{{today}}` substitutions); otherwise
- * fall back to the built-in `buildNightlyPrompt`. Lets users customize
- * the nightly directive per-persona (e.g. add a "summarize calendar
- * before phase 3" step) without forking phantombot.
+ * fall back to the built-in {@link buildNightlyPrompt}. The override owns the
+ * whole contract, so the driver runs it as ONE monolithic turn per date
+ * instead of the two-stage split.
  */
 export async function buildNightlyPromptForPersona(
   personaDir: string,
@@ -238,141 +476,104 @@ export async function buildNightlyPromptForPersona(
   return buildNightlyPrompt(personaName, today);
 }
 
-/**
- * Build the user-message that starts the nightly turn. Embeds the
- * persona name, today's date, and the 5-phase contract.
- */
-export function buildNightlyPrompt(
-  personaName: string,
-  today: string,
-): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
+/** Shared preamble: what is being processed, isolation note, tools. */
+function nightlyPreamble(personaName: string, today: string): string {
+  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Processing date: ${today} (a day that has closed).
 
 This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
 
 You have access to phantombot's memory tools via Bash:
 
-  phantombot memory today                       # path to today's daily file
+  phantombot memory get memory/${today}.md      # the daily file being processed (do NOT use 'memory today' — that resolves to the real current day, not ${today})
   phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir
-  phantombot memory index --rebuild             # full reindex (FTS + embeddings)
-
-You also have your normal Read / Write / Edit tools — use them on files inside this persona's working directory (\`agentDir\`). The structured drawers are under memory/ and the KB vault under kb/. The four templates in kb/templates/ are scaffolds for atomic-note / runbook / decision / postmortem.
-
-Run these five phases IN ORDER. Be brief in any text you write to MEMORY.md or drawers — long form goes in KB notes:
-
-PHASE 1 — Day essence
-  Read today's daily file (memory/${today}.md). If it exists, prepend a 2-3 line "Day essence" section summarising what mattered today. Skip if the file doesn't exist or is empty.
-
-PHASE 2 — Promote to drawers
-  Re-read the daily file. For each promote-able item that the heartbeat hasn't already filed:
-    - People / relationships  → memory/people.md
-    - Decisions with rationale → memory/decisions.md
-    - Mistakes and learnings   → memory/lessons.md
-    - Deadlines / obligations  → memory/commitments.md
-  Append under a "## ${today}" header. Don't duplicate items the heartbeat already promoted.
-
-PHASE 3 — Feed the KB
-  Re-read the daily file for durable knowledge (procedures, configs, runbooks, concepts, decisions worth keeping).
-  For each candidate:
-    a) phantombot memory search "<topic>" to check for existing coverage
-    b) If a note already covers the area, open it and RECONCILE it against today's knowledge — don't just append:
-       - ADDS (new case, edge case, link): update in place.
-       - CONTRADICTS / INVALIDATES it (a fact changed, something was decommissioned, an old assumption proved wrong): do NOT silently overwrite, and do NOT leave the stale claim standing beside the new one. Rewrite the note so its body states the CURRENT truth, bump \`updated:\`, and append a dated line under a "## Changelog" section recording what was invalidated — "${today}: was X → now Y, because Z". The old belief survives as history; it just stops being served as current truth.
-       - The whole subject is DECOMMISSIONED / no longer real: set frontmatter \`status: obsolete\` with a dated one-line reason (and a [[wikilink]] to any replacement) instead of deleting — recall must know it's dead, not silently lose it.
-    c) Otherwise create a new atomic note in the right kb/<category>/ subdir using one of kb/templates/ as a starting point. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
-  Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
-  Run \`phantombot memory index --rebuild\` at the end so new notes have embeddings.
-
-PHASE 4 — Maintain MEMORY.md
-  MEMORY.md is the always-in-context orientation layer — MAINTAIN it (fill AND trim), don't only trim.
-    - FILL: read MEMORY.md; if there is no "## Recent" section, add one. From today's daily file and what you promoted/distilled above, add a few SHORT orientation bullets (one line each) for durable, still-relevant facts worth having in context every turn. Summarise and point to the KB note / drawer that holds the detail — don't paste whole entries.
-    - TRIM: keep MEMORY.md short. Remove "## Recent" bullets that are now stale or fully distilled to a permanent home (leave a pointer if useful). If a section bloated into long-form prose, move detail into the relevant KB note(s) and leave a short pointer.
-
-PHASE 5 — State report
-  Write your summary to memory/.nightly-state.json (overwrite). Include:
-    last_run         (ISO 8601 timestamp)
-    last_status      ("ok" | "partial" | "error")
-    items_promoted   (count from phase 2)
-    kb_notes_updated (count from phase 3, existing-note edits)
-    kb_notes_created (count from phase 3, new-note writes)
-    errors           (array of strings — anything that went wrong; empty array on full success)
-
-When you're done, your final reply (which won't go anywhere user-facing) should be a brief sentence acknowledging completion. Phantombot will log it.`;
-}
-
-/**
- * Common preamble for every checkpointed nightly stage — the tools list
- * and the isolation note, shared by all five stage prompts.
- */
-function nightlyStagePreamble(personaName: string, today: string): string {
-  return `You are running your nightly cognitive maintenance pass for persona '${personaName}'. Today is ${today}.
-
-This conversation is ISOLATED (conversation key system:nightly:${today}); nothing you say here will appear in Telegram or any user-facing chat. Speak in summaries, not replies.
-
-You have access to phantombot's memory tools via Bash:
-
-  phantombot memory today                       # path to today's daily file
-  phantombot memory search "<query>"            # FTS5 + (if configured) semantic search
-  phantombot memory get <persona-relative-path> # cat a file
-  phantombot memory list <persona-relative-dir> # ls a dir
-  phantombot memory index --rebuild             # full reindex (FTS + embeddings)
 
 You also have your normal Read / Write / Edit tools — use them on files inside this persona's working directory. The structured drawers are under memory/ and the KB vault under kb/.
 
-This nightly run is CHECKPOINTED: you are executing exactly ONE stage. Do only the stage described below, then stop with a one-line completion note. Do not run other phases — phantombot drives them as separate turns.`;
+Two rules that apply to every stage:
+  - NEVER write to memory/${today}.md. Daily files are append-only inputs; phantombot tracks them by content hash and an edit here makes the day look unprocessed forever.
+  - Do NOT run \`phantombot memory index\`. Phantombot refreshes the index itself in code once your stage and its sibling have both finished.`;
 }
 
-/** Per-stage instruction body. Mirrors the phases of {@link buildNightlyPrompt}. */
+/** Per-stage instruction body. */
 const NIGHTLY_STAGE_BODY: Record<NightlyStage, (today: string) => string> = {
-  essence: (today) => `STAGE: DAY ESSENCE
-Read today's daily file (memory/${today}.md). If it exists and is non-empty, prepend a 2-3 line "Day essence" section summarising what mattered today. If the file is missing or empty, do nothing and say so.`,
-  promote: (today) => `STAGE: PROMOTE TO DRAWERS
-Re-read the daily file (memory/${today}.md). For each promote-able item the heartbeat has not already filed:
-  - People / relationships   → memory/people.md
-  - Decisions with rationale → memory/decisions.md
-  - Mistakes and learnings   → memory/lessons.md
-  - Deadlines / obligations  → memory/commitments.md
-Append under a "## ${today}" header. Do not duplicate items the heartbeat already promoted.`,
-  kb: (today) => `STAGE: FEED THE KB
-Re-read today's daily file for durable knowledge (procedures, configs, runbooks, concepts, decisions worth keeping). For each candidate:
-  a) phantombot memory search "<topic>" to check for existing coverage
+  distill: (today) => `STAGE: DISTILL (drawers + MEMORY.md)
+
+You are running ONE of two concurrent stages. Yours writes to the structured
+drawers and MEMORY.md — nothing else. A sibling turn is handling kb/ right
+now, so do not touch kb/ files.
+
+1. Read the daily file (memory/${today}.md). If it is missing or empty, say so
+   and make no edits.
+2. FILE the promote-able items the heartbeat has not already picked up:
+     - People / relationships   → memory/people.md
+     - Decisions with rationale → memory/decisions.md
+     - Mistakes and learnings   → memory/lessons.md
+     - Deadlines / obligations  → memory/commitments.md
+     - What is ROUTINE in your owner's world → memory/norms.md
+   Append under a "## ${today}" header. Do not duplicate what is already filed —
+   read the drawer first.
+3. MAINTAIN MEMORY.md — the always-in-context orientation layer. Fill AND trim:
+     - FILL: add a few SHORT one-line bullets under "## Recent" for durable,
+       still-relevant facts worth having in context every turn. Summarise and
+       point at the drawer or KB note holding the detail; never paste entries.
+     - TRIM: remove "## Recent" bullets that are stale or now have a permanent
+       home. If a section has bloated into prose, move the detail into a KB
+       note and leave a one-line pointer.
+Finish with a one-line summary of what you filed.`,
+
+  kb: (today) => `STAGE: KB (durable knowledge)
+
+You are running ONE of two concurrent stages. Yours writes to kb/ — nothing
+else. A sibling turn is filing drawers and MEMORY.md right now, so do not
+touch memory/ files.
+
+Read the daily file (memory/${today}.md) for durable knowledge (procedures,
+configs, runbooks, concepts, decisions worth keeping). For each candidate:
+  a) \`phantombot memory search "<topic>"\` to check for existing coverage.
   b) If a note already covers the area, open it and RECONCILE — don't just append:
      - ADDS (new case, edge case, link): update in place.
-     - CONTRADICTS / INVALIDATES it (fact changed, thing decommissioned, old assumption wrong): rewrite the body to the CURRENT truth, bump \`updated:\`, and append a dated line under a "## Changelog" section — "${today}: was X → now Y, because Z". Don't leave the stale claim standing beside the new one; the old belief lives on only as changelog history.
-     - Whole subject DECOMMISSIONED: set frontmatter \`status: obsolete\` with a dated reason (+ [[wikilink]] to any replacement) instead of deleting.
-  c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a kb/templates/ scaffold. Frontmatter required: type, tags, created, updated. Link related notes with [[wikilinks]].
-Then sweep kb/inbox/: file each stub into the right category, or delete if no longer relevant.
-Finish with \`phantombot memory index --rebuild\` so new notes get embeddings.`,
-  compress: (today) => `STAGE: COMPRESS / MAINTAIN MEMORY.md
-MEMORY.md is the always-in-context orientation layer. Your job here is to MAINTAIN it — both fill and trim — not just trim.
-  1. Read MEMORY.md (use your Read tool). If it has no "## Recent" section, add one.
-  2. FILL: from today's daily file (memory/${today}.md) and the items you promoted/distilled in earlier stages, add a few SHORT orientation bullets under "## Recent" — only durable, still-relevant facts worth having in context every turn (current focus, active projects, fresh standing facts). One line each. Do not copy whole entries; summarise and link to the KB note or drawer that holds the detail.
-  3. TRIM: MEMORY.md must stay short. Remove "## Recent" bullets that are now stale or have a permanent home in a drawer/KB note (leave a short pointer if useful). If any section has bloated into long-form prose, move that detail into the relevant KB note and leave a one-line pointer.
-If today's daily file is missing or empty and nothing has changed, say so and make no edits.`,
-  state: (today) => `STAGE: STATE REPORT
-Write memory/.nightly-state.json (overwrite). Include:
-  last_run         (ISO 8601 timestamp — now)
-  last_status      ("ok" | "partial" | "error")
-  items_promoted   (count of items promoted in the PROMOTE stage)
-  kb_notes_updated (existing-note edits from the KB stage)
-  kb_notes_created (new notes from the KB stage)
-  errors           (array of strings; empty array on full success)
-Use \`phantombot memory get\`/your Read tool to recall counts from this conversation's earlier stages. Phantombot also patches last_run/last_status itself, so an approximate count is fine — date ${today}.`,
+     - CONTRADICTS / INVALIDATES it (a fact changed, something was decommissioned,
+       an old assumption proved wrong): rewrite the body so it states the CURRENT
+       truth, bump \`updated:\`, and append a dated line under a "## Changelog"
+       section — "${today}: was X → now Y, because Z". Don't leave the stale claim
+       standing beside the new one; the old belief survives only as history.
+     - Whole subject DECOMMISSIONED: set frontmatter \`status: obsolete\` with a
+       dated one-line reason (+ [[wikilink]] to any replacement) instead of deleting.
+  c) Otherwise create a new atomic note in the right kb/<category>/ subdir from a
+     kb/templates/ scaffold. Frontmatter required: type, tags, created, updated.
+     Link related notes with [[wikilinks]].
+Then sweep kb/inbox/: file each stub into the right category, or delete it if it
+is no longer relevant.
+Finish with a one-line summary of notes created / updated.`,
 };
 
-/**
- * Build the user-message for ONE checkpointed nightly stage. Used by the
- * resumable nightly driver, which runs each stage as a separate harness
- * turn and checkpoints between them.
- */
+/** Build the user-message for ONE nightly stage. */
 export function buildNightlyStagePrompt(
   personaName: string,
   today: string,
   stage: NightlyStage,
 ): string {
-  return `${nightlyStagePreamble(personaName, today)}
+  return `${nightlyPreamble(personaName, today)}
 
 ${NIGHTLY_STAGE_BODY[stage](today)}`;
+}
+
+/**
+ * Monolithic prompt — used only for the persona-override path, where a custom
+ * `nightly-prompt.md` is absent but the override machinery still asks for a
+ * single-turn prompt. Same two jobs, one turn.
+ */
+export function buildNightlyPrompt(
+  personaName: string,
+  today: string,
+): string {
+  return `${nightlyPreamble(personaName, today)}
+
+Run BOTH stages below, in order, in this single turn.
+
+${NIGHTLY_STAGE_BODY.distill(today)}
+
+${NIGHTLY_STAGE_BODY.kb(today)}`;
 }
