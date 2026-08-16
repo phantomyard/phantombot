@@ -501,6 +501,19 @@ Interactive setup:
 | `phantombot acp install jetbrains` | Register phantombot as an ACP agent in JetBrains IDEs (Rider, IntelliJ, …) |
 | `phantombot acp install vscode` | Install the first-party VS Code extension |
 
+`phantombot persona <name>` switches the daemon-wide default persona.
+Because that re-points the default every listener binds to, the switch is
+gated on an explicit confirmation: interactive terminals get a @clack confirm
+prompt, and non-interactive contexts (agent Bash, cron, CI) require the
+`--yes` flag or exit 2 without touching `state.json`. A persona agent running
+under `PHANTOMBOT_PERSONA` is always refused (exit 2) — it can't re-point the
+daemon-wide default; use `--persona` for per-invocation scope instead.
+
+```bash
+phantombot persona robbie          # interactive: prompts to confirm
+phantombot persona robbie --yes    # non-interactive: explicit consent
+```
+
 Runtime:
 
 | Command | Purpose |

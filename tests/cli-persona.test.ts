@@ -46,6 +46,7 @@ let workdir: string;
 let personasDir: string;
 let configPath: string;
 let stateDir: string;
+let savedPersonaEnv: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-persona-cli-"));
@@ -57,10 +58,21 @@ beforeEach(async () => {
   stateDir = join(workdir, "data");
   await mkdir(stateDir, { recursive: true });
   process.env.PHANTOMBOT_STATE = join(stateDir, "state.json");
+  // Isolate PHANTOMBOT_PERSONA: the normal agent runtime sets it, which
+  // would make every non-agent test hit the scope-refusal path (3/13
+  // failures). Preserve the ambient value and restore it in afterEach so
+  // the suite also passes when run from inside an agent.
+  savedPersonaEnv = process.env.PHANTOMBOT_PERSONA;
+  delete process.env.PHANTOMBOT_PERSONA;
 });
 
 afterEach(async () => {
   delete process.env.PHANTOMBOT_STATE;
+  if (savedPersonaEnv === undefined) {
+    delete process.env.PHANTOMBOT_PERSONA;
+  } else {
+    process.env.PHANTOMBOT_PERSONA = savedPersonaEnv;
+  }
   mock.restore();
   await rm(workdir, { recursive: true, force: true });
 });
