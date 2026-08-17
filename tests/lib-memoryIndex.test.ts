@@ -1047,6 +1047,16 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
   const vec = new Float32Array([1, 0, 0]);
   const pad = Array.from({ length: 120 }, (_, k) => `padding${k}`).join(" ");
 
+  // Note: this fixture's raw BM25 for BBB is ~5.4e-7 — effectively zero,
+  // because all 31 seeded docs contain every query term so IDF collapses.
+  // That's far below the production tier-2 floor (minScore: 2.0), and that's
+  // fine: the invariant under test is score CONVENTION (per-path must equal
+  // undecayed), not a realistic score value. Don't "fix" this fixture to
+  // produce a plausible-looking score — doing so would break the length
+  // inversion (padding vs. short fillers) that pushes BBB out of the FTS
+  // top-25 pool, which is the vector-only condition the test depends on.
+  // (#379/5)
+
   // Shared seeding helper so both tests use the same fixture.
   function seed(): void {
     // 30 short filler turns in AAA — all lexically competitive.

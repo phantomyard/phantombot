@@ -219,9 +219,15 @@ export async function retrieveContext(
       // defaults, a genuine ≈4 BM25 match stops clearing the 2.0 floor
       // past ~30 days and tier 2 goes permanently silent for exactly the
       // aged cross-chat memory #377 exists to surface.
+      // Pool width is deliberately wider than crossLimit: crossProvenanceWeight
+      // (below, via selectCrossConversationHits) re-ranks survivors by trust,
+      // and a pool truncated to crossLimit BEFORE that re-rank runs leaves
+      // nothing for it to rerank — it would just rubber-stamp RRF's raw top-N
+      // (#382). hybridSearch's own limit clamp (≤50) is the real ceiling; this
+      // just asks for enough candidates that provenance has room to work.
       const candidates = ix.hybridSearch(query, queryVec, {
         scope: "turns",
-        limit: crossLimit,
+        limit: Math.max(crossLimit * 10, CROSS_CANDIDATE_POOL_MIN),
         decay,
         turnFilter,
       });
@@ -396,6 +402,15 @@ export function crossAttribution(
  * hit's position among survivors and never decides admission: the floor
  * (`minScore` / `minVecScore`) still runs on RAW relevance, untouched.
  */
+/**
+ * Floor on the tier-2 candidate pool passed into hybridSearch, independent
+ * of crossLimit (the OUTPUT cap applied after provenance re-ranking, in
+ * selectCrossConversationHits). Matches hybridSearch's internal FTS/vector
+ * pool width (25 each side, see memoryIndex.ts) — no point asking for a
+ * shallower pool than hybridSearch already builds internally.
+ */
+export const CROSS_CANDIDATE_POOL_MIN = 25;
+
 export const CROSS_SOURCE_WEIGHT: Record<FactSource, number> = {
   principal: 1,
   self: 0.9,

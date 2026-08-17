@@ -459,6 +459,62 @@ describe("retrieveContext", () => {
     expect(crossLabels.length).toBe(2);
   });
 
+  test("candidate pool is wider than crossLimit, so provenance re-ranking has something to work with (#382)", async () => {
+    // Two candidates, one per conversation, both clearing the raw-relevance
+    // floor. DDD has the stronger raw BM25 (repeats the query terms) but
+    // weak provenance (unverified/internal, weight 0.42). EEE has weaker raw
+    // BM25 (states the terms once) but full-trust provenance
+    // (principal/channel, weight 1.0) — so weighted, EEE should outrank DDD.
+    //
+    // Before the fix, hybridSearch's own `limit` was crossLimit (1 here), so
+    // only DDD (the raw-BM25 winner) ever reached selectCrossConversationHits
+    // — EEE was truncated out of the pool before provenance got a vote, and
+    // the hard-capped output was always DDD. The fix widens the pool so both
+    // candidates survive into the re-rank.
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
+    const when = new Date(Date.now() - 86_400_000); // same day: decay a wash
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "phantomchat:group:DDD",
+      role: "user",
+      text: "Narwhal telemetry narwhal telemetry narwhal telemetry checksum retry backoff.",
+      createdAt: when,
+      embeddable: true,
+      source: "unverified",
+      origin: "internal",
+    });
+    ix.upsertTurn({
+      id: 2,
+      persona: "phantom",
+      conversation: "phantomchat:group:EEE",
+      role: "user",
+      text: "Narwhal telemetry checksum noted once for the record.",
+      createdAt: when,
+      embeddable: true,
+      source: "principal",
+      origin: "channel",
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      query: "narwhal telemetry checksum",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: {
+        ...DEFAULT_RETRIEVAL,
+        crossConversation: { ...DEFAULT_CROSS_CONVERSATION, limit: 1 },
+      },
+      conversation: "phantomchat:group:AAA", // no in-conversation match
+    });
+    expect(out).toBeDefined();
+    expect(out!).toContain("EEE");
+    expect(out!).not.toContain("DDD");
+  });
+
   test("excluded sources never surface cross-conversation", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);
