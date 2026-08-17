@@ -223,11 +223,12 @@ export async function retrieveContext(
       // (below, via selectCrossConversationHits) re-ranks survivors by trust,
       // and a pool truncated to crossLimit BEFORE that re-rank runs leaves
       // nothing for it to rerank — it would just rubber-stamp RRF's raw top-N
-      // (#382). hybridSearch's own limit clamp (≤50) is the real ceiling; this
-      // just asks for enough candidates that provenance has room to work.
+      // (#382). Taking the whole fused pool also means hybridSearch's own
+      // decay-ordered slice no longer selects anything, which is why the
+      // re-rank multiplies decayFactor back in — see selectCrossConversationHits.
       const candidates = ix.hybridSearch(query, queryVec, {
         scope: "turns",
-        limit: Math.max(crossLimit * 10, CROSS_CANDIDATE_POOL_MIN),
+        limit: CROSS_CANDIDATE_POOL,
         decay,
         turnFilter,
       });
@@ -394,13 +395,18 @@ export function crossAttribution(
 }
 
 /**
- * Floor on the tier-2 candidate pool passed into hybridSearch, independent
- * of crossLimit (the OUTPUT cap applied after provenance re-ranking, in
- * selectCrossConversationHits). Matches hybridSearch's internal FTS/vector
- * pool width (25 each side, see memoryIndex.ts) — no point asking for a
- * shallower pool than hybridSearch already builds internally.
+ * Width of the tier-2 candidate pool passed into hybridSearch, independent of
+ * crossLimit (the OUTPUT cap applied after provenance and decay re-ranking, in
+ * selectCrossConversationHits).
+ *
+ * 50 is hybridSearch's own ceiling, not an arbitrary number: it clamps `limit`
+ * to 50 and its RRF merge fuses at most 25 FTS + 25 vector paths, so asking
+ * for 50 means "hand me the whole fused pool and let the re-rank decide the
+ * output" — which is the entire point of #382. Cost is bounded by that same
+ * ceiling: the per-hit `lookupScope`/`turnMetaForPath`/`snippetForPath`
+ * round-trips only run on paths that survived the merge, ≤50 of them.
  */
-export const CROSS_CANDIDATE_POOL_MIN = 25;
+export const CROSS_CANDIDATE_POOL = 50;
 
 /**
  * Tier-2 TRUST weights, by `source` (who asserted the content).
