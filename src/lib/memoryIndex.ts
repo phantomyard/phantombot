@@ -298,6 +298,18 @@ export interface SearchHit {
    * confidentiality boundary. Only set for conversation-turn hits.
    */
   audience?: TurnAudience;
+  /**
+   * Multiplicative time-decay factor applied to this hit's ordering inside
+   * hybridSearch (see turnDecayFactor), when decay was requested. Carried
+   * on the hit — separately from the RAW `ftsScore`/`rrfScore`, which stay
+   * undecayed for callers that threshold on relevance — so a downstream
+   * re-rank (e.g. tier-2 provenance weighting in retrieval.ts) can factor
+   * decay back in instead of silently dropping it once the hit has left
+   * hybridSearch's own decay-ordered slice. Always populated by
+   * hybridSearch (1 = no decay, when decay wasn't requested or the turn's
+   * age was unavailable). Only meaningful for conversation-turn hits.
+   */
+  decayFactor?: number;
   snippet: string;
 }
 
@@ -1381,7 +1393,8 @@ export class MemoryIndex {
             (b.ftsScore ?? 0) * (factors.get(b.path) ?? 1) -
             (a.ftsScore ?? 0) * (factors.get(a.path) ?? 1),
         )
-        .slice(0, limit);
+        .slice(0, limit)
+        .map((h) => ({ ...h, decayFactor: factors.get(h.path) ?? 1 }));
     }
 
     // Vector search. Brute-force cosine over all embeddings.
@@ -1489,6 +1502,7 @@ export class MemoryIndex {
           ftsScore: ftsHit?.ftsScore,
           vecScore: vecScores.get(path),
           rrfScore,
+          decayFactor: decayFactors?.get(path) ?? 1,
           ...turnMeta,
           snippet: ftsHit?.snippet ?? this.snippetForPath(path),
         };

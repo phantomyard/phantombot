@@ -515,6 +515,62 @@ describe("retrieveContext", () => {
     expect(out!).not.toContain("DDD");
   });
 
+  test("time-decay still wins a cross-conversation tie-break with the widened pool (#390)", async () => {
+    // Same shape as the #382 test above, but the axis under test is AGE, not
+    // provenance — both candidates share provenance (unverified/internal) so
+    // decay is the only thing that can separate them. FRESH is 1 day old;
+    // ANCIENT is 400 days old (well past the 30-day half-life, pinned at the
+    // 0.02 floor) and states the query terms more times, so it wins on raw
+    // BM25 alone.
+    //
+    // Before the #390 fix, hybridSearch's OWN decay-adjusted ordering decided
+    // who survived truncation to `limit` — but #382 widened that pool well
+    // past crossLimit, so decay only gated pool ENTRY, and the final
+    // selectCrossConversationHits re-rank (raw score × provenance) had no
+    // decay term at all: ANCIENT's stronger raw BM25 let it win outright.
+    const ix = await MemoryIndex.open(indexPath);
+    await ix.refreshStale(personaDir);
+    seedFillerTurns(ix);
+    ix.upsertTurn({
+      id: 1,
+      persona: "phantom",
+      conversation: "phantomchat:group:FRESH",
+      role: "user",
+      text: "Yeti spelunking checksum noted once for the record.",
+      createdAt: new Date(Date.now() - 86_400_000), // 1 day old
+      embeddable: true,
+      source: "unverified",
+      origin: "internal",
+    });
+    ix.upsertTurn({
+      id: 2,
+      persona: "phantom",
+      conversation: "phantomchat:group:ANCIENT",
+      role: "user",
+      text: "Yeti spelunking yeti spelunking yeti spelunking checksum retry backoff.",
+      createdAt: new Date(Date.now() - 400 * 86_400_000), // 400 days old
+      embeddable: true,
+      source: "unverified",
+      origin: "internal",
+    });
+    ix.close();
+
+    const out = await retrieveContext({
+      query: "yeti spelunking checksum",
+      personaDir,
+      indexPath,
+      embeddings: noEmbeddings,
+      settings: {
+        ...DEFAULT_RETRIEVAL,
+        crossConversation: { ...DEFAULT_CROSS_CONVERSATION, limit: 1 },
+      },
+      conversation: "phantomchat:group:AAA", // no in-conversation match
+    });
+    expect(out).toBeDefined();
+    expect(out!).toContain("FRESH");
+    expect(out!).not.toContain("ANCIENT");
+  });
+
   test("excluded sources never surface cross-conversation", async () => {
     const ix = await MemoryIndex.open(indexPath);
     await ix.refreshStale(personaDir);

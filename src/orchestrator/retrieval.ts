@@ -394,15 +394,6 @@ export function crossAttribution(
 }
 
 /**
- * Tier-2 TRUST weights, by `source` (who asserted the content).
- *
- * Weight, do not filter — the principal's call on #377. A low-provenance
- * memory is still a memory; the failure we are guarding is a weak claim
- * OUTRANKING a strong one, not a weak claim existing. So provenance moves a
- * hit's position among survivors and never decides admission: the floor
- * (`minScore` / `minVecScore`) still runs on RAW relevance, untouched.
- */
-/**
  * Floor on the tier-2 candidate pool passed into hybridSearch, independent
  * of crossLimit (the OUTPUT cap applied after provenance re-ranking, in
  * selectCrossConversationHits). Matches hybridSearch's internal FTS/vector
@@ -411,6 +402,15 @@ export function crossAttribution(
  */
 export const CROSS_CANDIDATE_POOL_MIN = 25;
 
+/**
+ * Tier-2 TRUST weights, by `source` (who asserted the content).
+ *
+ * Weight, do not filter — the principal's call on #377. A low-provenance
+ * memory is still a memory; the failure we are guarding is a weak claim
+ * OUTRANKING a strong one, not a weak claim existing. So provenance moves a
+ * hit's position among survivors and never decides admission: the floor
+ * (`minScore` / `minVecScore`) still runs on RAW relevance, untouched.
+ */
 export const CROSS_SOURCE_WEIGHT: Record<FactSource, number> = {
   principal: 1,
   self: 0.9,
@@ -544,11 +544,19 @@ export function selectCrossConversationHits(
   // floor than we have slots for, the slots go to the better-attested ones
   // rather than to whoever happened to rank higher lexically.
   //
+  // decayFactor is folded back in here deliberately: hybridSearch's own
+  // ordering is decay-adjusted, but with the pool now wider than `limit`
+  // (#382) that ordering only decides who ENTERS the pool, not who wins the
+  // final slots — this multiply is what makes decay matter again for a pool
+  // this wide. Without it, a 400-day-old hit at the decay floor can
+  // outrank a same-day hit purely on raw score × provenance (#390 review).
+  // 1 when decay wasn't requested, so this is a no-op in that case.
+  //
   // Ordering only: the weighted value is never written back onto the hit,
   // so nothing downstream can mistake it for a relevance score. Array.sort
   // is stable, so equal weights preserve the incoming best-first order.
   const ranked = out
-    .map((h, i) => ({ h, i, w: crossProvenanceWeight(h) }))
+    .map((h, i) => ({ h, i, w: crossProvenanceWeight(h) * (h.decayFactor ?? 1) }))
     .sort((a, b) => scoreOf(b.h) * b.w - scoreOf(a.h) * a.w || a.i - b.i)
     .map((r) => r.h);
   return ranked.slice(0, opts.limit);
