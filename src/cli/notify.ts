@@ -213,6 +213,11 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // and swallowed — delivery already happened and the exit code reflects
   // delivery, not bookkeeping. The store opens lazily on first use so a
   // fully-failed notify never touches the DB.
+  //
+  // SINGLE WRITER (#381): this is the only place a delivered notification's
+  // text is persisted. The screener's recordHeld grounds only the quarantined
+  // payload — writing the notify text there too landed two embeddable copies
+  // in one conversation and double-counted a single held event in retrieval.
   let ownedStore: MemoryStore | undefined;
   const persistNotification = async (conversation: string, text: string) => {
     try {
