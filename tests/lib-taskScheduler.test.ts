@@ -18,7 +18,6 @@ import {
   ensureTasksCurrent,
   generateHeartbeatTaskXml,
   generateLoginFallbackTaskXml,
-  generateNightlyTaskXml,
   generatePhantombotTaskXml,
   generateTickTaskXml,
   daemonKillOrder,
