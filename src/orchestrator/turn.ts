@@ -279,7 +279,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
     }
     if (verdict?.action === "hold") {
       // NOTE: the screener already did the grounding write — it wrote the
-      // held episode (quarantined payload + judge text) into the PRINCIPAL'S
+      // held episode (quarantined payload) into the PRINCIPAL'S
       // telegram conversation, which is the correct scope (that's where the
       // approve/deny reply lands). We deliberately do NOT write anything here:
       // this entry point's conversation is the wrong one to ground against.

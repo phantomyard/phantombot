@@ -363,7 +363,16 @@ export function makeScreener(
       return { action: "pass", score: v.score, reason: v.reason };
     }
 
-    // 3. HOLD — fail-closed (the turn does nothing) + notify conversationally.
+    // 3. GROUNDING WRITE (concern D+E) — BEFORE notifying. Write the held
+    //    episode into each principal telegram conversation so the principal's
+    //    approve/deny reply (which lands in telegram:<userId>, NOT this
+    //    untrusted entry point) replays the payload and is grounded.
+    //    runNotify (step 4) then closes the episode with safe, truncated text
+    //    as the LAST row — so the principal's next reply is preceded by the
+    //    notify message, not raw untrusted payload (#395 review: turn
+    //    ordering). Best-effort: a failure logs but must NEVER downgrade the
+    //    hold to a pass and must never throw out of the screener. No-op when
+    //    telegram isn't configured or the allowlist is empty.
     const concern =
       v.question && v.question.trim().length > 0
         ? v.question.trim()
@@ -375,21 +384,6 @@ export function makeScreener(
       `What it asked: "${preview}"\n` +
       `${concern}`;
 
-    try {
-      const code = await notify(notifyMessage);
-      if (code !== 0) log.warn(`screen: notify exited ${code} for held request`);
-    } catch (e) {
-      log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
-    }
-
-    // 4. GROUNDING WRITE (concern D+E) — AFTER notifying. Write the held
-    //    episode into each principal telegram conversation so the principal's
-    //    approve/deny reply (which lands in telegram:<userId>, NOT this
-    //    untrusted entry point) replays the payload and is grounded. The
-    //    judge text itself was already persisted by runNotify in step 3 —
-    //    writing it here too would double-count one event in retrieval (#381). Best-effort: a failure logs but must NEVER downgrade the
-    //    hold to a pass and must never throw out of the screener. No-op when
-    //    telegram isn't configured or the allowlist is empty.
     try {
       const payload = content.replace(/\s+/g, " ").trim().slice(0, HELD_PAYLOAD_CAP);
       for (const conversation of principalConversations(config, persona)) {
@@ -405,6 +399,17 @@ export function makeScreener(
       // Defensive belt-and-suspenders: resolving the principal list must never
       // bring down the screener or weaken the hold.
       log.warn(`screen: held-episode grounding skipped: ${(e as Error).message}`);
+    }
+
+    // 4. NOTIFY — AFTER the grounding write so the notify text is the last
+    //    row in the principal's conversation. runNotify persists the notify
+    //    message into the same conversation (single writer, #381), closing
+    //    the episode with safe, truncated text rather than raw payload.
+    try {
+      const code = await notify(notifyMessage);
+      if (code !== 0) log.warn(`screen: notify exited ${code} for held request`);
+    } catch (e) {
+      log.warn(`screen: notify failed for held request: ${(e as Error).message}`);
     }
 
     return {
