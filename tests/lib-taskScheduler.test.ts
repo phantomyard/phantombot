@@ -17,6 +17,7 @@ import {
   defaultTaskSchedulerServiceControl,
   ensureTasksCurrent,
   generateHeartbeatTaskXml,
+  generateLoginFallbackTaskXml,
   generatePhantombotTaskXml,
   generateTickTaskXml,
   daemonKillOrder,
@@ -234,6 +235,17 @@ describe("generatePhantombotTaskXml", () => {
     // The redirection operators now live in the .vbs, never in the task XML.
     expect(xml).not.toContain("1>>");
     expect(xml).not.toContain("1&gt;&gt;");
+  });
+
+  test("uses quiet supervisor mode for an existing daemon", () => {
+    expect(xml).toContain("run --if-not-running");
+  });
+});
+
+describe("login fallback task", () => {
+  test("uses quiet supervisor mode for an existing daemon", () => {
+    const xml = generateLoginFallbackTaskXml(SID, BIN, PERSONA);
+    expect(xml).toContain("run --if-not-running");
   });
 });
 

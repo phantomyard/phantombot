@@ -136,6 +136,29 @@ describe("formatRetrieved", () => {
     expect(out).toContain("kb/note-0.md");
     expect(out).not.toContain("kb/note-1.md");
   });
+
+  test("an oversized hit is skipped, not fatal — smaller hits behind it still fit (#379)", () => {
+    // maxTokens tuned so the header + first hit comfortably fit, the second
+    // (oversized) hit alone would blow the remaining budget, but the third —
+    // small, and positioned behind the oversized block — still fits in
+    // what's left once the oversized block is skipped rather than fatal.
+    const settingsTight: RetrievalSettings = { ...settings, maxTokens: 175 }; // ~700 chars
+    const hits = [
+      { path: "kb/first.md", scope: "kb" as const, ftsScore: 3, snippet: "x".repeat(150) },
+      { path: "kb/oversized.md", scope: "kb" as const, ftsScore: 2, snippet: "y".repeat(500) },
+      {
+        path: "turns/phantom/telegram%3ABBB/9",
+        scope: "turns" as const,
+        ftsScore: 1,
+        snippet: "small cross-conversation hit",
+        crossConversation: "telegram:2002",
+      },
+    ];
+    const out = formatRetrieved(hits, settingsTight)!;
+    expect(out).toContain("kb/first.md");
+    expect(out).not.toContain("kb/oversized.md");
+    expect(out).toContain("small cross-conversation hit");
+  });
 });
 
 // ---------------------------------------------------------------------------

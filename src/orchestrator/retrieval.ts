@@ -316,8 +316,12 @@ export function formatRetrieved(
         : ` ${h.path}`;
     const block = `\n\n##${label}\n${cleanSnippet(h.snippet)}`;
     // Always include at least one hit (so a single long snippet isn't
-    // silently dropped); after that, respect the budget.
-    if (included > 0 && out.length + block.length > budgetChars) break;
+    // silently dropped); after that, respect the budget. `continue` rather
+    // than `break` (#379 item 4): tier 1 is concatenated ahead of tier 2, so
+    // breaking on the first oversized block always cuts off every
+    // cross-conversation hit behind it, regardless of score. Skipping past
+    // an oversized block lets smaller, lower-positioned hits still fit.
+    if (included > 0 && out.length + block.length > budgetChars) continue;
     out += block;
     included++;
   }

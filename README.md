@@ -235,6 +235,7 @@ phantombot voice       # optional TTS/STT setup
 phantombot embedding   # recommended semantic memory setup
 
 phantombot run         # foreground listener
+phantombot run --if-not-running  # supervisor keep-alive; quiet success if already running
 phantombot install     # install systemd --user units
 
 phantombot start       # start the installed background service
