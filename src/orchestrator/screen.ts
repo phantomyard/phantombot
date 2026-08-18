@@ -63,15 +63,20 @@
  * what was held, the held episode must be written into the PRINCIPAL'S
  * telegram conversation, the same one the notify went to.
  *
- * So on HOLD, after notifying, we write a turn PAIR per principal telegram
- * conversation: a QUARANTINED user turn carrying the raw untrusted payload
+ * So on HOLD we write a turn PAIR per principal conversation, in order:
+ * first a QUARANTINED user turn carrying the raw untrusted payload
  * (embeddable:false — never indexed/embedded; see memory/store.ts + the
- * turnIndexer), and an embeddable assistant turn carrying the judge-
- * notification text. The pair replays into the principal's next turn so
- * "yes, go ahead" / "no" has a referent. This is done HERE in the screener,
- * correctly scoped to the principal — NOT in notify.ts (which only sends a
- * message and has no business writing memory) and NOT in turn.ts's hold path
- * (which is scoped to the untrusted entry point, the wrong conversation).
+ * turnIndexer), written HERE by the screener (recordHeld); then the
+ * embeddable assistant turn carrying the judge-notification text, persisted
+ * by runNotify as its `[notification] ` row. Ordering matters: the notify
+ * row must land LAST, so the assistant-authored, safely-truncated text — not
+ * the raw untrusted payload — is the closing row before the principal's
+ * reply. Single-writer for the notify text (runNotify only) is what prevents
+ * one held event double-counting in retrieval (#381). The pair replays into
+ * the principal's next turn so "yes, go ahead" / "no" has a referent. The
+ * scoping is done HERE in the screener, correctly targeted at the principal
+ * — NOT in turn.ts's hold path (which is scoped to the untrusted entry
+ * point, the wrong conversation).
  * ─────────────────────────────────────────────────────────────────────────
  *
  * Fail-OPEN on judge/recall error by design: if screening itself errors
