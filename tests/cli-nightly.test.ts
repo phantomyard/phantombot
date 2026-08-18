@@ -473,3 +473,90 @@ describe("runNightlyTurn — harness scoping (#387)", () => {
     expect(allowed).not.toContain("Grep");
   });
 });
+
+// A stage's whole job is editing its own memory/kb — exactly what the
+// UNTRUSTED security-perimeter block tells a turn to escalate instead of
+// doing. A harness that reads that block literally refuses its own task
+// with no judge involved and nothing recorded — self-censorship off the
+// prompt, not a hold. Pins the fix: nightly gets the TRUSTED prompt block
+// (command authority over its own persona dir) while its provenance stays
+// `other` (it is not the owner speaking, so it must not inflate to
+// `principal` tier in the durable-fact pool — same call tick's task wakes
+// make, and for the same reason, #327).
+describe("runNightlyTurn — trusted prompt, untrusted provenance", () => {
+  class CaptureHarness implements Harness {
+    readonly id = "capture";
+    seen: HarnessRequest | undefined;
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+      this.seen = req;
+      yield { type: "done", finalText: "ok" };
+    }
+  }
+
+  test("selects the TRUSTED security-perimeter block, not the UNTRUSTED one", async () => {
+    await writeFile(join(personaDir, "BOOT.md"), "# persona", "utf8");
+    const memory = await openMemoryStore(":memory:");
+    const harness = new CaptureHarness();
+    try {
+      await runNightlyTurn({
+        persona: "phantom",
+        conversation: "system:nightly:2026-05-10",
+        userMessage: "distill",
+        agentDir: personaDir,
+        harnesses: [harness],
+        memory,
+      });
+    } finally {
+      await memory.close();
+    }
+    expect(harness.seen?.systemPrompt).toContain(
+      "Security perimeter — TRUSTED turn",
+    );
+    expect(harness.seen?.systemPrompt).not.toContain(
+      "Security perimeter — UNTRUSTED turn",
+    );
+  });
+
+  test("still stamps both turns `other` — not `principal` — in the fact pool", async () => {
+    await writeFile(join(personaDir, "BOOT.md"), "# persona", "utf8");
+    const memory = await openMemoryStore(":memory:");
+    const pairCalls: Array<{
+      user: { source?: string };
+      assistant: { source?: string };
+    }> = [];
+    const spied = new Proxy(memory, {
+      get(target, prop, receiver) {
+        if (prop === "appendTurnPair") {
+          return async (
+            user: { source?: string },
+            assistant: { source?: string },
+          ) => {
+            pairCalls.push({ user, assistant });
+            return (
+              memory.appendTurnPair as (u: unknown, a: unknown) => Promise<void>
+            )(user, assistant);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    try {
+      await runNightlyTurn({
+        persona: "phantom",
+        conversation: "system:nightly:2026-05-10",
+        userMessage: "distill",
+        agentDir: personaDir,
+        harnesses: [new CaptureHarness()],
+        memory: spied,
+      });
+    } finally {
+      await memory.close();
+    }
+    expect(pairCalls).toHaveLength(1);
+    expect(pairCalls[0]!.user.source).toBe("other");
+    expect(pairCalls[0]!.assistant.source).toBe("other");
+  });
+});

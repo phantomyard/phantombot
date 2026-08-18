@@ -152,6 +152,27 @@ export async function runNightlyTurn(opts: {
       // `internal` — the same column disagreeing with itself either side of
       // an upgrade.
       origin: "internal",
+      // Nightly's whole job is editing its OWN memory/kb — the operation the
+      // UNTRUSTED security-perimeter block explicitly tells a turn to
+      // escalate instead of doing. Without this, a harness that reads that
+      // block literally (observed on Kai's codex chain, not Claude) refuses
+      // its own task: no judge involved, no hold recorded, just the prompt's
+      // own "escalate instead of doing" line winning against NIGHTLY_SUFFIX.
+      // A nightly stage reads/writes only its own persona dir (NIGHTLY_TOOLS
+      // below is Bash/Read/Write/Edit, no MCP, no email/web tools), so this
+      // is command authority over the persona's own files, not exposure to
+      // ambient content — the same authority a `trusted` chat turn gets.
+      trusted: true,
+      // Provenance stays DECOUPLED from that trust bit on purpose (see
+      // runTurn's userSource doc). `trusted: true` would otherwise default
+      // the user turn to `principal` tier — but nightly wrote this prompt
+      // itself, Andrew didn't, so stamping it as the owner's own words would
+      // let machine-authored maintenance text inflate the persona-wide fact
+      // pool one tier below where it belongs. Pin `other`, the same call
+      // tick's task wakes make for the same reason (#327): command authority
+      // without provenance authority.
+      userSource: "other",
+      assistantSource: "other",
       // Nightly needs no MCP; running MCP-free stops an unauthenticated remote
       // connector from wedging the --print startup and killing a stage on the
       // idle timeout. See HarnessRequest.mcpMode.
