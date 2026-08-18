@@ -108,6 +108,8 @@ export interface RunInput {
   err?: WriteSink;
   /** Override the lock file path (for testing). */
   lockPath?: string;
+  /** Treat an existing run lock as a healthy no-op (used by supervisors). */
+  ifNotRunning?: boolean;
   /** Test seam for harness binary availability. Pass false to skip. */
   checkHarnesses?:
     | false
@@ -312,6 +314,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   const lockPath = input.lockPath ?? defaultLockPath();
   const lock = acquireRunLock(lockPath);
   if (!isLockHandle(lock)) {
+    if (input.ifNotRunning) {
+      log.debug("run: already running, supervisor no-op", {
+        holderPid: Number.isFinite(lock.pid) ? lock.pid : undefined,
+      });
+      return 0;
+    }
     err.write(
       `phantombot is already running (pid ${Number.isFinite(lock.pid) ? lock.pid : "unknown"}; lock at ${lock.path})\n` +
         `view logs:    ${logsCommand()}\n` +
@@ -948,8 +956,16 @@ export default defineCommand({
     description:
       "Run phantombot in the foreground (Telegram listener + harness loop). Ctrl-C to stop.",
   },
-  async run() {
-    const code = await runRun();
+  args: {
+    "if-not-running": {
+      type: "boolean",
+      description:
+        "Exit successfully when another phantombot run already holds the lock (for supervisor keep-alive tasks).",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const code = await runRun({ ifNotRunning: Boolean(args["if-not-running"]) });
     process.exitCode = code;
   },
 });

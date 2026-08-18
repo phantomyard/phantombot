@@ -16,6 +16,7 @@ import {
 } from "../src/cli/run.ts";
 import { savePhantomchatPersonaConfig } from "../src/channels/phantomchat/personaStore.ts";
 import { generateIdentity } from "../src/lib/nostrIdentity.ts";
+import { acquireRunLock } from "../src/lib/runLock.ts";
 import type { Config } from "../src/config.ts";
 
 class CaptureStream {
@@ -150,6 +151,59 @@ describe("runRun — early exits", () => {
     });
     expect(code).toBe(2);
     expect(err.text).toContain("phantombot harness");
+  });
+
+  test("returns success without stderr when the supervisor finds the daemon already running", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lockPath = join(workdir, "run.lock");
+    const held = acquireRunLock(lockPath);
+    if (!("release" in held)) throw new Error("setup: expected to hold run lock");
+    try {
+      const code = await runRun({
+        config: {
+          ...config,
+          channels: {
+            telegram: { token: "abc", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+        lockPath,
+        ifNotRunning: true,
+        checkHarnesses: false,
+        out,
+        err,
+      });
+      expect(code).toBe(0);
+      expect(err.text).toBe("");
+    } finally {
+      held.release();
+    }
+  });
+
+  test("keeps the interactive already-running diagnostic by default", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lockPath = join(workdir, "run.lock");
+    const held = acquireRunLock(lockPath);
+    if (!("release" in held)) throw new Error("setup: expected to hold run lock");
+    try {
+      const code = await runRun({
+        config: {
+          ...config,
+          channels: {
+            telegram: { token: "abc", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+        lockPath,
+        checkHarnesses: false,
+        out,
+        err,
+      });
+      expect(code).toBe(1);
+      expect(err.text).toContain("phantombot is already running");
+    } finally {
+      held.release();
+    }
   });
 
   test("warns but keeps running when a configured harness binary is missing", async () => {

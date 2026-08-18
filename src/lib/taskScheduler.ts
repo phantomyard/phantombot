@@ -534,7 +534,7 @@ export function generatePhantombotTaskXml(
     persona,
     label: "phantombot",
     binPath,
-    args: ["run"],
+    args: ["run", "--if-not-running"],
     triggersXml: triggers,
     executionTimeLimit: "PT0S", // unlimited — long-running daemon
     restartOnFailure: true,
@@ -570,7 +570,7 @@ export function generateLoginFallbackTaskXml(
     persona,
     label: "login",
     binPath,
-    args: ["run"],
+    args: ["run", "--if-not-running"],
     triggersXml: triggers,
     executionTimeLimit: "PT0S", // unlimited — long-running daemon
     restartOnFailure: true,
@@ -1718,7 +1718,10 @@ export async function ensureTasksCurrent(
 /** Subcommand line each task label runs — kept in sync with allTaskSpecs. */
 function specArgsForLabel(label: TaskLabel): string[] {
   // Both the always-on daemon and its login-fallback twin run `phantombot run`.
-  return [label === "phantombot" || label === "login" ? "run" : label];
+  return [
+    label === "phantombot" || label === "login" ? "run" : label,
+    ...(label === "phantombot" || label === "login" ? ["--if-not-running"] : []),
+  ];
 }
 
 export interface TaskSchedulerServiceControl {
