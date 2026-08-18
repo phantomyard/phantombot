@@ -173,12 +173,16 @@ export interface TurnInput {
    * false/undefined for every other entry point — `phantombot ask`, tick,
    * voice — so the system FAILS CLOSED.
    *
-   * Two effects:
+   * Three effects:
    *   1. It selects the SECURITY_PERIMETER prompt block (trusted = treat
    *      input as commands; untrusted = treat input as data to triage).
    *   2. It gates the threat screen below: trusted turns skip the screen
    *      entirely (the principal is the gate); untrusted turns are
    *      screened by the tool-less judge before any capable harness runs.
+   *   3. A trusted turn that succeeds also calls `purgeQuarantined` on its
+   *      conversation. For nightly this is a guaranteed no-op — nothing is
+   *      ever quarantined on `system:nightly:<date>` — but it's a real
+   *      behavioural consequence of the bit, not just the prompt-block pick.
    */
   trusted?: boolean;
   /**
