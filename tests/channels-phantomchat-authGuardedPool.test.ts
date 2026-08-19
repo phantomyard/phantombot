@@ -17,6 +17,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AbstractRelay } from "nostr-tools/abstract-relay";
 import type { EventTemplate } from "nostr-tools/core";
 import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
@@ -68,11 +69,11 @@ function fakeRelay(): {
  *
  * The two runs differ by ONE line: whether the relay is guarded.
  */
-const MODULE = join(
-  import.meta.dir,
-  "..",
-  "src/channels/phantomchat/authGuardedPool.ts",
-);
+// A file:// URL, not a bare path: a Windows path in a dynamic import()
+// is not a valid specifier.
+const MODULE = pathToFileURL(
+  join(import.meta.dir, "..", "src/channels/phantomchat/authGuardedPool.ts"),
+).href;
 
 async function runFireAndForgetAuth(
   guarded: boolean,

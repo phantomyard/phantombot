@@ -331,17 +331,22 @@ describe("isProcessAlive", () => {
   });
 
   test("false for a pid that has exited", async () => {
-    const child = Bun.spawn(["sh", "-c", "exit 0"]);
+    // Spawn bun itself rather than a shell: this suite also runs on Windows.
+    const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"]);
     const pid = child.pid;
     await child.exited;
     expect(isProcessAlive(pid)).toBe(false);
   });
 
-  // pid 1 always exists and (outside a root container) is not ours: kill(2)
-  // answers EPERM, which means "there, but not yours" — still alive.
-  test("a pid we may not signal still counts as alive", () => {
-    expect(isProcessAlive(1)).toBe(true);
-  });
+  // On POSIX pid 1 always exists and is not ours, so kill(2) answers EPERM —
+  // "there, but not yours", which must still count as alive or we would take
+  // over a sweep owned by another user. Windows has no equivalent pid.
+  test.skipIf(process.platform === "win32")(
+    "a pid we may not signal still counts as alive",
+    () => {
+      expect(isProcessAlive(1)).toBe(true);
+    },
+  );
 });
 
 describe("nightlyHealth", () => {
