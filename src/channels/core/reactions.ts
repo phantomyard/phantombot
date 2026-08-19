@@ -296,6 +296,14 @@ export async function runReactionTurn(
       startupTimeoutMs: input.startupTimeoutMs,
       signal: input.signal,
       trusted: input.trusted,
+      // Wake-but-SILENT: the principal gave ambient feedback, not a request
+      // for information, and the reply defaults to never being sent. This
+      // turn is still `origin: channel` and (for the principal) trusted, so
+      // without an explicit audience it would be handed pending digests —
+      // and, succeeding with SILENT, would mark them delivered, consuming
+      // the record so the next real conversation never sees it. "silent"
+      // takes it out of delivery: nothing shown, nothing marked.
+      replyAudience: "silent",
       // Reactions from the principal are trusted, so no threat screen. Pass
       // retrieval + fact pull through so the agent can interpret the reaction
       // against relevant memory/history; both are contracted never to throw.

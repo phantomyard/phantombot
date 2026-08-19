@@ -255,6 +255,31 @@ export interface TurnInput {
    */
   origin?: TurnOrigin;
   /**
+   * AUDIENCE axis — who will actually SEE this turn's reply. Separate from
+   * origin (which surface produced the wake) and from `trusted` (who is
+   * speaking): trust authenticates the speaker, it says nothing about who
+   * else is in the room or whether a reply is rendered at all.
+   *
+   * This gates post-turn digest delivery (#405). A digest is persona-private
+   * operational state — what the nightly touched, which repos and paths a
+   * poller wrote to — so it is handed ONLY to a `private` turn: a 1:1 reply
+   * rendered in front of the principal and nobody else.
+   *
+   *   - "shared"  — a trusted GROUP turn. The reply is broadcast to every
+   *     member, so injecting a digest would disclose persona-private state
+   *     to the room.
+   *   - "silent"  — a wake-but-silent turn (reactions). The harness reply
+   *     defaults to never being sent, so delivering a digest here would
+   *     CONSUME it into the void: marked delivered, never seen, and the
+   *     next real conversation gets nothing.
+   *
+   * Omitted = "silent" (fail closed). A caller that does not state its
+   * reply is private-and-visible receives no digests and, just as
+   * importantly, consumes none — they stay pending for the turn that can
+   * actually show them.
+   */
+  replyAudience?: "private" | "shared" | "silent";
+  /**
    * Optional threat screen for UNTRUSTED turns (built by
    * orchestrator/screen.ts#makeScreener). Called with the incoming user
    * message before the harness chain runs. If it returns a `hold`
@@ -447,15 +472,22 @@ async function* runTurnBody(
   // wake the digest of another task wake tells nobody anything, and would let
   // two background turns bounce a report between themselves forever.
   //
-  // And only to a TRUSTED one. Origin is not trust: a raw `phantombot ask` from
-  // an inbound email or a webhook is origin `channel` and `trusted !== true`,
-  // and a digest is persona-private context — what the nightly touched, which
-  // repos and paths a poller wrote to. Handing that to a turn driven by an
-  // untrusted stranger is both a disclosure and an injection surface, since the
-  // digest text lands in the same prompt the stranger is steering. The
-  // principal's own turn is the only correct recipient, and the untrusted turn
-  // does not consume the digest either — it stays pending for that turn.
-  const deliverDigests = isInteractiveOrigin(origin) && input.trusted === true;
+  // And only to a turn whose reply the principal will actually SEE, alone
+  // (see TurnInput.replyAudience). Trust authenticates the speaker; it says
+  // nothing about the audience. A trusted GROUP turn is `origin: channel`
+  // and `trusted: true`, but its reply is broadcast to every member —
+  // injecting persona-private paths and summaries into its prompt is a
+  // disclosure AND an injection surface, since the group's text lands in
+  // the same prompt. A wake-but-silent REACTION turn is worse in the other
+  // direction: its reply defaults to never being sent, so a digest
+  // delivered there is consumed into the void — marked delivered, never
+  // seen, and the next real conversation gets nothing. Shared and silent
+  // turns therefore neither receive nor mark digests; they stay pending
+  // for the private turn that comes after.
+  const deliverDigests =
+    isInteractiveOrigin(origin) &&
+    input.trusted === true &&
+    input.replyAudience === "private";
   const digests = deliverDigests ? pendingDigests(input.persona) : [];
   // Oldest first, so a backlog drains front-to-back instead of starving its
   // tail — see pendingDigests.

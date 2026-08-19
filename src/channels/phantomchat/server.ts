@@ -889,6 +889,10 @@ export async function runPhantomchatServer(
         // The trust grant — see the auth gate above. Always true here because
         // we already dropped non-allowlisted senders.
         trusted: true,
+        // Audience: a group reply is broadcast to every member, so
+        // persona-private state (pending digests) must neither be injected
+        // nor consumed here — it stays pending for the principal's next DM.
+        replyAudience: msg.groupId ? "shared" : "private",
         // Trusted turns never screen, but pass the screener for parity/future
         // open-bot use (empty allowlist → trusted: true still, matching
         // Telegram's "answer anyone" semantics, so the screen is effectively

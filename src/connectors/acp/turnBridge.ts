@@ -108,6 +108,9 @@ export async function runBridgeTurn(
     // Stream-first surface (Zed renders deltas live) → narrate before tools.
     toolNarration: true,
     trusted: true,
+    // The principal's own editor surface: a 1:1, visible reply, so it is a
+    // legitimate recipient for pending background-turn digests (#405).
+    replyAudience: "private",
     signal: input.signal,
     // Forwarded ONLY so tests can prove it's never consulted on a trusted
     // turn. runTurn ignores it whenever trusted === true.

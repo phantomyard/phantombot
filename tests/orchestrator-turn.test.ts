@@ -1046,12 +1046,19 @@ describe("runTurn — background-turn visibility (#405)", () => {
     );
 
   /**
-   * The turn a digest is delivered TO: interactive AND trusted. `trusted` is
-   * not decoration here — an untrusted `channel` turn (a raw `phantombot ask`
-   * carrying an inbound email) is deliberately not a recipient, so a test that
-   * omits it is testing the wrong path.
+   * The turn a digest is delivered TO: interactive, trusted, AND
+   * private-and-visible. `trusted` is not decoration here — an untrusted
+   * `channel` turn (a raw `phantombot ask` carrying an inbound email) is
+   * deliberately not a recipient, and neither is a trusted turn whose reply
+   * is shared with a group or never sent at all (replyAudience defaults to
+   * "silent", fail closed). A test that omits any of the three is testing
+   * the wrong path.
    */
-  const principalInput = () => ({ ...baseInput(), trusted: true });
+  const principalInput = () => ({
+    ...baseInput(),
+    trusted: true,
+    replyAudience: "private" as const,
+  });
 
   test("a task turn's actions reach the NEXT interactive turn's prompt", async () => {
     // The background turn: nobody is watching this one.
@@ -1370,6 +1377,129 @@ describe("runTurn — background-turn visibility (#405)", () => {
     );
 
     // Still there for the principal.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("a trusted GROUP turn is not given the digest, and does not consume it", async () => {
+    // Trust authenticates the speaker, not the audience. A trusted turn in
+    // a Telegram group is `origin: channel` and `trusted: true`, but the
+    // reply is visible to every member — so injecting persona-private paths
+    // and summaries into its prompt is a disclosure AND an injection surface.
+    // It must also stay PENDING: consuming it would destroy the record the
+    // principal's next 1:1 turn needs to see.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let group: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        replyAudience: "shared",
+        userMessage: "guys, what's the status?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              group = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(group?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // Still there for the principal's next private turn.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("a wake-but-silent turn (reaction) does not receive or consume digests", async () => {
+    // runReactionTurn is WAKE-BUT-SILENT: the principal gave ambient feedback,
+    // not a request for information. It is still `origin: channel` and
+    // `trusted: true`, so before the fix it was eligible to receive pending
+    // digests — and since it succeeds (produces SILENT), it marked them
+    // delivered, consuming the record so the next real conversation never
+    // saw it. `replyAudience: "silent"` takes it out of delivery: nothing
+    // shown, nothing marked.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    // Simulates what runReactionTurn now passes: a trusted channel turn
+    // whose reply defaults to never being sent.
+    let reaction: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        replyAudience: "silent",
+        userMessage: "[reaction] Andrew added 👍 to your message",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "SILENT" }],
+            (r) => {
+              reaction = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(reaction?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // The digest is still pending for the next real interactive turn.
     let principal: HarnessRequest | undefined;
     await collect(
       runTurn({
