@@ -1254,9 +1254,9 @@ digest when it ends: what woke it, the state-changing tool calls it made
 they named, and its own closing summary. The digest lands in
 `$XDG_STATE_HOME/phantombot/digests/`.
 
-The next **interactive and trusted** turn for that persona gets the pending
-digests injected into its system prompt, alongside the sibling notice, and
-decides for itself whether any of it is worth mentioning. That's deliberate: pushing every poller
+The next **interactive, trusted, and private** turn for that persona gets the
+pending digests injected into its system prompt, alongside the sibling notice,
+and decides for itself whether any of it is worth mentioning. That's deliberate: pushing every poller
 fire to Telegram would break the "don't notify unless it's material" rule and
 train the principal to mute the channel, and writing a synthetic turn into their
 conversation history would forge transcript that later retrieval treats as
@@ -1278,6 +1278,16 @@ Details worth knowing:
   poller wrote to — so handing it to a turn a stranger is steering is both a
   disclosure and an injection surface. An untrusted turn doesn't consume them
   either; they stay pending for the principal.
+- **Only *private* turns receive them.** Trust authenticates the speaker, not
+  the audience. A trusted turn in a Telegram group is `origin: channel` and
+  `trusted: true`, but its reply is visible to every member — so injecting
+  persona-private paths and summaries into its prompt is a disclosure and an
+  injection surface, since the group's text lands in the same prompt. A
+  wake-but-silent reaction turn is worse: its reply defaults to never being
+  sent, so a digest delivered there is consumed into the void — marked
+  delivered, never seen. `replyAudience` (defaults to `"silent"`, fail closed)
+  gates both: `"shared"` for group/supergroup chats, `"silent"` for reaction
+  turns, `"private"` for 1:1 DMs and the only value that receives digests.
 - At most 5 digests go into one prompt, **oldest first**, with the rest reported
   as a count and left pending for the next turn. Only what was actually shown is
   marked delivered — marking the overflow would destroy the record of a turn
