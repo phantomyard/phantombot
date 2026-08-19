@@ -139,8 +139,13 @@ const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
  * threat-relevant and keeps sensitive operational memory (finances, inbox,
  * daily dumps, commitments) out of the judge entirely. Read in FULL now, not
  * as snippets — see DRAWERS_CAP_BYTES. Paths are relative to the persona dir.
+ *
+ * Exported so the scaffold can be tested against it: a drawer the judge briefs
+ * from but `ensurePersonaScaffold` never seeds is invisible on a fresh persona
+ * (missing files are silently skipped below), so the coupling is asserted in
+ * tests rather than left to memory.
  */
-const BRIEFING_DRAWERS: readonly string[] = [
+export const BRIEFING_DRAWERS: readonly string[] = [
   "memory/decisions.md",
   "memory/people.md",
   "memory/norms.md",

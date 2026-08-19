@@ -7,8 +7,10 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TAG_TO_DRAWER } from "../src/lib/heartbeat.ts";
 import { isCanonicalOkfType, parseOkf } from "../src/lib/okf.ts";
 import { ensurePersonaScaffold } from "../src/lib/personaScaffold.ts";
+import { BRIEFING_DRAWERS } from "../src/orchestrator/screen.ts";
 
 let workdir: string;
 
@@ -29,6 +31,7 @@ describe("ensurePersonaScaffold", () => {
       "memory/decisions.md",
       "memory/lessons.md",
       "memory/commitments.md",
+      "memory/norms.md",
     ]) {
       expect(existsSync(join(workdir, f))).toBe(true);
       expect(r.created).toContain(f);
@@ -126,5 +129,39 @@ describe("scaffolded templates carry full OKF frontmatter", () => {
     const raw = await readFile(join(workdir, "kb/templates/concept.md"), "utf8");
     expect(parseOkf(raw).type).toBe("concept");
     expect(existsSync(join(workdir, "kb/templates/atomic-note.md"))).toBe(false);
+  });
+});
+
+describe("the scaffold seeds every drawer the rest of the system writes to", () => {
+  test("every heartbeat promotion target exists after scaffolding", async () => {
+    // Regression: `norms.md` was reachable via `--tag norm` but never seeded,
+    // so the heartbeat's appendFile created it on first capture — a drawer
+    // with no title and no intro, unlike every other one.
+    await ensurePersonaScaffold(workdir);
+    for (const rel of new Set(Object.values(TAG_TO_DRAWER))) {
+      expect(existsSync(join(workdir, rel))).toBe(true);
+      const body = await readFile(join(workdir, rel), "utf8");
+      expect(body.startsWith("# ")).toBe(true);
+    }
+  });
+
+  test("every threat-judge briefing drawer exists after scaffolding", async () => {
+    // A briefing drawer the scaffold skips is silently absent on a fresh
+    // persona: readBriefingDrawers swallows the ENOENT, so the judge briefs
+    // on a partial worldview with nothing logged anywhere.
+    await ensurePersonaScaffold(workdir);
+    for (const rel of BRIEFING_DRAWERS) {
+      expect(existsSync(join(workdir, rel))).toBe(true);
+    }
+  });
+
+  test("the norms drawer explains that the threat judge reads it", async () => {
+    // The drawer's own text is the only place an agent learns this drawer is
+    // security-load-bearing rather than another notes file.
+    await ensurePersonaScaffold(workdir);
+    const norms = await readFile(join(workdir, "memory", "norms.md"), "utf8");
+    expect(norms).toContain("# Norms");
+    expect(norms).toContain("threat judge");
+    expect(norms).toContain("--tag norm");
   });
 });

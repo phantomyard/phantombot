@@ -1380,6 +1380,7 @@ Markdown memory lives under each persona directory:
     lessons.md
     people.md
     commitments.md
+    norms.md
   kb/
 ```
 
