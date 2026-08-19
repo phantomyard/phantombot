@@ -94,6 +94,23 @@ export default defineCommand({
           process.exitCode = 1;
           return;
         }
+        if (!result.recorded) {
+          // Fail-open, stated honestly. `ok` here means "go ahead and work",
+          // NOT "the claim is on disk": either locking is switched off or the
+          // state directory would not take the write, and in both cases no
+          // other turn can see this claim. Printing `locked` would be a false
+          // assurance - the caller would believe it followed the protocol and
+          // stop watching for the collision this command exists to prevent.
+          // Exit stays 0: a broken state file must not stop the actual work.
+          process.stderr.write(
+            (result.unrecorded === "disabled"
+              ? `workspace locking is switched off (PHANTOMBOT_WORKSPACE_LOCKS)`
+              : `could not record the claim — the lock directory is unwritable`) +
+              `: ${result.record.workspace} is NOT claimed and no other turn can see it.\n` +
+              `Proceeding WITHOUT protection — check for other turns before you write here.\n`,
+          );
+          return;
+        }
         if (result.tookOver) {
           // Worth saying out loud: the previous holder died mid-turn, so the
           // tree may be in a state it never finished (a half-rebase, a dirty

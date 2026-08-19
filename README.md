@@ -1316,6 +1316,14 @@ queue. A claim held by a turn that is still in flight is named in every sibling
 turn's system prompt. It also exits 1 if another `lock` is inside its critical
 section at that instant (the message says so); that one is a genuine retry.
 
+If the lock directory can't be written — or locking is switched off — `lock`
+still exits **0**, because a state file that won't write must not stop the
+turn's actual work. It does **not** print `locked`: it says on stderr that the
+path is **NOT claimed** and that you are proceeding without protection. `ok` and
+`recorded` are different questions, and answering the second with the first
+would leave a turn believing it followed the protocol while nobody else can see
+its claim.
+
 `unlock` refuses unless you are the turn that took the lock. A caller with **no**
 turn id — a plain shell, a script, a harness with the registry off — is refused
 too, because dropping a claim you never took is how a cooperative protocol turns

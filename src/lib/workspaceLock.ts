@@ -696,8 +696,36 @@ function isHeldRaw(raw: string, now: Date, probes: LockProbes): boolean {
   }
 }
 
+/**
+ * Why a claim was allowed to proceed without being written down.
+ *
+ * `disabled` is an operator choice (`PHANTOMBOT_WORKSPACE_LOCKS=0`);
+ * `unwritable` is the fail-open path — the state directory is broken, so the
+ * claim could not be recorded and no other turn can see it.
+ */
+export type Unrecorded = "disabled" | "unwritable";
+
+/**
+ * `ok` answers "may I work here". `recorded` answers the SEPARATE question of
+ * whether anyone else can see that.
+ *
+ * These were one flag, and conflating them made the fail-open path lie: a
+ * broken state directory returned exactly the shape of a persisted claim, so
+ * the CLI printed `locked <path>` and exited 0 with nothing on disk. Failing
+ * open is the right policy — a state file that will not write should not stop
+ * the turn's actual work — but the caller is then operating with no protection
+ * at all, and telling it the opposite is worse than telling it nothing. A turn
+ * that believes it followed the protocol stops looking for the collision.
+ */
 export type AcquireResult =
-  | { ok: true; record: WorkspaceLockRecord; tookOver: boolean }
+  | { ok: true; record: WorkspaceLockRecord; tookOver: boolean; recorded: true }
+  | {
+      ok: true;
+      record: WorkspaceLockRecord;
+      tookOver: false;
+      recorded: false;
+      unrecorded: Unrecorded;
+    }
   | { ok: false; reason: "held"; heldBy: WorkspaceLockRecord }
   | { ok: false; reason: "contended" };
 
@@ -736,7 +764,14 @@ export function acquireWorkspace(
   const token = selfStartToken();
   if (token !== null) record.pid_start = token;
 
-  if (!locksEnabled()) return { ok: true, record, tookOver: false };
+  if (!locksEnabled())
+    return {
+      ok: true,
+      record,
+      tookOver: false,
+      recorded: false,
+      unrecorded: "disabled",
+    };
 
   const dir = probes.dir ?? defaultLockDir();
   try {
@@ -750,11 +785,17 @@ export function acquireWorkspace(
       // cannot guard is a lock nobody can see, and refusing the turn's work
       // because a state file will not write turns a visibility feature into an
       // outage. Fail OPEN, exactly as the write path below does.
-      log.debug("workspaceLock: guard unavailable, proceeding unguarded", {
+      log.warn("workspaceLock: guard unavailable, workspace NOT claimed", {
         workspace,
         error: guard.error.message,
       });
-      return { ok: true, record, tookOver: false };
+      return {
+        ok: true,
+        record,
+        tookOver: false,
+        recorded: false,
+        unrecorded: "unwritable",
+      };
     }
     // Another acquire is inside the critical section. We cannot read-check-write
     // safely, and we will not guess: report contention and let the caller pick a
@@ -781,12 +822,19 @@ export function acquireWorkspace(
       // A lock we cannot write is a lock nobody can see. Fail OPEN: refusing the
       // turn's work because a state file would not write turns a visibility
       // feature into an outage.
-      log.debug("workspaceLock: acquire failed", {
+      log.warn("workspaceLock: lock unwritable, workspace NOT claimed", {
+        workspace,
         error: (e as Error).message,
       });
-      return { ok: true, record, tookOver: false };
+      return {
+        ok: true,
+        record,
+        tookOver: false,
+        recorded: false,
+        unrecorded: "unwritable",
+      };
     }
-    return { ok: true, record, tookOver };
+    return { ok: true, record, tookOver, recorded: true };
   } finally {
     guard.release();
   }
