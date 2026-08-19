@@ -149,7 +149,7 @@ describe("liveness follows the TURN, not the writing process", () => {
   test("a hand-taken lock with no turn id is held until released", async () => {
     await put({ turn_id: undefined });
     expect(workspaceHolder(WS, { now: NOW, ...finished })).toBeDefined();
-    expect(releaseWorkspace(WS, {}, { now: NOW })).toBe(true);
+    expect(releaseWorkspace(WS, {}, { now: NOW }).ok).toBe(true);
     expect(workspaceHolder(WS, { now: NOW })).toBeUndefined();
   });
 });
@@ -366,15 +366,21 @@ describe("acquire is serialised by a guard", () => {
 });
 
 describe("releaseWorkspace", () => {
+  const guardPath = () => join(dir, `${fileFor(WS)}.guard`);
+
   test("the holder can release", async () => {
     await put({ turn_id: "t1" });
-    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toBe(true);
+    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
+      ok: true,
+    });
     expect(workspaceHolder(WS, { now: NOW, ...running })).toBeUndefined();
   });
 
   test("a different turn cannot drop a lock it never took", async () => {
     await put({ turn_id: "t1" });
-    expect(releaseWorkspace(WS, { turnId: "t2" }, { now: NOW })).toBe(false);
+    const result = releaseWorkspace(WS, { turnId: "t2" }, { now: NOW });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("not-owner");
     expect(workspaceHolder(WS, { now: NOW, ...running })?.turn_id).toBe("t1");
   });
 
@@ -384,19 +390,143 @@ describe("releaseWorkspace", () => {
     // live claim just by not having a turn id. Dropping a lock you never took
     // is how a cooperative protocol turns into corruption.
     await put({ turn_id: "t1" });
-    expect(releaseWorkspace(WS, {}, { now: NOW })).toBe(false);
+    const result = releaseWorkspace(WS, {}, { now: NOW });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("not-owner");
     expect(workspaceHolder(WS, { now: NOW, ...running })?.turn_id).toBe("t1");
   });
 
   test("--force overrides for hand-clearing", async () => {
     await put({ turn_id: "t1" });
-    expect(releaseWorkspace(WS, { force: true }, { now: NOW })).toBe(true);
+    expect(releaseWorkspace(WS, { force: true }, { now: NOW })).toEqual({
+      ok: true,
+    });
     expect(workspaceHolder(WS, { now: NOW, ...running })).toBeUndefined();
   });
 
   test("releasing an unheld workspace is a no-op, not a failure", () => {
-    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toBe(true);
+    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
+      ok: true,
+    });
   });
+
+  test("refuses — and deletes nothing — while an acquire holds the guard", async () => {
+    // The bug this replaces: release took the guard but carried on without it,
+    // justified by "unlink is atomic". Atomic unlink does not make
+    // read → ownership-check → unlink atomic, so a release could read the OLD
+    // record, pass its own ownership check, and then unlink AFTER a guarded
+    // acquire had already published a NEW holder's claim — deleting a live
+    // claim and leaving the tree reading as free while that turn works in it.
+    await put({ turn_id: "t1" });
+    writeFileSync(guardPath(), "999999");
+
+    const result = releaseWorkspace(WS, { turnId: "t1" }, { now: NOW });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("contended");
+    // The claim survived, and the guard was left for its owner to release.
+    expect(existsSync(join(dir, fileFor(WS)))).toBe(true);
+    expect(existsSync(guardPath())).toBe(true);
+  });
+
+  test("breaks a guard abandoned mid-critical-section rather than wedging", async () => {
+    // Refusing is safe only because it is bounded. A guard whose owner died is
+    // swept by age, so a crash cannot make a workspace permanently unreleasable.
+    await put({ turn_id: "t1" });
+    writeFileSync(guardPath(), "999999");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(guardPath(), old, old);
+
+    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
+      ok: true,
+    });
+    expect(existsSync(join(dir, fileFor(WS)))).toBe(false);
+  });
+
+  test("releases the guard on the way out, including on refusal", async () => {
+    await put({ turn_id: "t1" });
+    releaseWorkspace(WS, { turnId: "stranger" }, { now: NOW });
+    expect(existsSync(guardPath())).toBe(false);
+  });
+
+  test("a concurrent unlock cannot delete a claim an in-flight acquire published", async () => {
+    // The multi-process proof, with real processes released off a barrier.
+    //
+    // What it stages: child A is INSIDE acquire's critical section — it holds
+    // the guard and, still holding it, publishes t2's claim. Child B force-
+    // unlocks at the same moment. Force is the honest way to drive this from
+    // outside: the ownership check would otherwise reject B on the new record
+    // by luck rather than by design, and hiding behind that is how the bug
+    // survived review the first time.
+    //
+    // Unguarded, B exhausts its guard attempts, carries on regardless — the old
+    // code's "unlink is atomic" reasoning — and deletes a claim its holder is
+    // still in the middle of taking. A believes it holds the tree; every other
+    // turn reads the tree as free. Guarded, B reports contention and the claim
+    // survives.
+    //
+    // Note on what is and is not provable here: the sub-millisecond alignment
+    // of B's read against A's write cannot be scheduled across processes. So
+    // what is asserted is the invariant that forecloses it — a release that
+    // cannot take the guard changes NOTHING — which is the fix itself.
+    const MODULE = join(import.meta.dir, "../src/lib/workspaceLock.ts");
+    const barrier = join(dir, "go");
+    const lockFile = join(dir, fileFor(WS));
+    const childEnv = {
+      ...process.env,
+      PHANTOMBOT_WORKSPACE_LOCKS: "1",
+      PHANTOMBOT_WORKSPACE_LOCK_DIR: dir,
+      PHANTOMBOT_TURN_REGISTRY: "0",
+      NODE_ENV: "production",
+    };
+
+    await put({ turn_id: "t1" });
+
+    // A: occupy the critical section for far longer than B will wait on the
+    // guard (GUARD_ATTEMPTS * GUARD_BACKOFF_MS), so B genuinely runs out.
+    const acquirer = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        [
+          `const fs = require("fs");`,
+          `const fd = fs.openSync(${JSON.stringify(guardPath())}, "wx");`,
+          `fs.closeSync(fd);`,
+          `fs.writeFileSync(${JSON.stringify(barrier)}, "go");`,
+          `Bun.sleepSync(60);`,
+          `fs.writeFileSync(${JSON.stringify(lockFile)}, JSON.stringify({ workspace: ${JSON.stringify(normalizeWorkspace(WS))}, persona: "robbie", conversation: "c", turn_id: "t2", pid: 1, acquired_at: new Date().toISOString() }));`,
+          `Bun.sleepSync(600);`,
+          `fs.unlinkSync(${JSON.stringify(guardPath())});`,
+        ].join("\n"),
+      ],
+      { env: childEnv, stdout: "pipe", stderr: "pipe" },
+    );
+
+    const releaser = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        [
+          `const fs = require("fs");`,
+          `while (!fs.existsSync(${JSON.stringify(barrier)})) Bun.sleepSync(1);`,
+          `const { releaseWorkspace } = require(${JSON.stringify(MODULE)});`,
+          `const r = releaseWorkspace(${JSON.stringify(WS)}, { force: true });`,
+          `process.stdout.write(JSON.stringify(r));`,
+        ].join("\n"),
+      ],
+      { env: childEnv, stdout: "pipe", stderr: "pipe" },
+    );
+
+    const out = await new Response(releaser.stdout).text();
+    await releaser.exited;
+    await acquirer.exited;
+
+    expect(JSON.parse(out)).toEqual({ ok: false, reason: "contended" });
+    // The claim A published while inside the guard is still there.
+    const onDisk = JSON.parse(
+      readFileSync(lockFile, "utf8"),
+    ) as WorkspaceLockRecord;
+    expect(onDisk.turn_id).toBe("t2");
+  }, 60_000);
 });
 
 describe("workspaceHolder / listWorkspaceLocks", () => {

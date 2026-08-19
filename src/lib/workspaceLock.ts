@@ -415,6 +415,12 @@ export function acquireWorkspace(
   }
 }
 
+export type ReleaseResult =
+  | { ok: true }
+  | { ok: false; reason: "not-owner"; heldBy: WorkspaceLockRecord }
+  | { ok: false; reason: "contended" }
+  | { ok: false; reason: "failed" };
+
 /**
  * Release a workspace.
  *
@@ -423,37 +429,62 @@ export function acquireWorkspace(
  * turn id at all, which is how a plain shell would otherwise drop a live claim
  * without meaning to. A record with no turn id was taken by hand, so a hand can
  * drop it.
+ *
+ * ── Release is guarded exactly as strictly as acquire ──
+ * The first cut took the guard but carried on without it, on the reasoning that
+ * `unlink` is atomic. That reasoning was wrong, and the distinction is the
+ * whole point of the guard: an atomic unlink does not make
+ * read → ownership-check → unlink atomic. Unguarded, this interleaving is live:
+ *
+ *   release  reads the record, sees turn A, ownership check passes
+ *   acquire  (inside the guard) sees A is finished, publishes B's claim
+ *   release  unlinks — deleting B's claim, not A's
+ *
+ * B is now working in a tree that reads as FREE, so the next turn along claims
+ * it and both write. That is precisely the #391 collision, manufactured by the
+ * module built to prevent it. So a release that cannot take the guard reports
+ * `contended` and changes nothing.
+ *
+ * Refusing used to look like the more dangerous direction — a workspace stuck
+ * claimed forever. It is not, now that liveness is turn-based: a refused
+ * release self-heals, because when the turn ends the registry stops reporting
+ * it running and the lock stops being held whether or not anyone unlocked it.
+ * The guard is stale-swept at GUARD_STALE_MS on top of that, so contention is
+ * bounded in seconds. A momentary "retry once" beats deleting a live claim.
  */
 export function releaseWorkspace(
   workspace: string,
   opts: { turnId?: string; force?: boolean } = {},
   probes: LockProbes = {},
-): boolean {
-  if (!locksEnabled()) return true;
+): ReleaseResult {
+  if (!locksEnabled()) return { ok: true };
   const dir = probes.dir ?? defaultLockDir();
   const normalized = normalizeWorkspace(workspace);
 
-  // Take the guard so a release cannot land between a concurrent acquire's
-  // read and its write. Unlike acquire we proceed without it: unlink is atomic,
-  // and refusing to release is how a workspace stays claimed forever.
   const releaseGuard = takeGuard(dir, normalized);
+  if (!releaseGuard) {
+    log.debug("workspaceLock: release contended", { workspace: normalized });
+    return { ok: false, reason: "contended" };
+  }
+
   try {
     const found = readLock(dir, normalized);
-    if (!found) return true;
+    if (!found) return { ok: true };
     if (!opts.force && found.record.turn_id) {
-      if (found.record.turn_id !== opts.turnId) return false;
+      if (found.record.turn_id !== opts.turnId)
+        return { ok: false, reason: "not-owner", heldBy: found.record };
     }
     try {
       unlinkSync(found.path);
-      return true;
+      return { ok: true };
     } catch (e) {
       log.debug("workspaceLock: release failed", {
         error: (e as Error).message,
       });
-      return false;
+      return { ok: false, reason: "failed" };
     }
   } finally {
-    releaseGuard?.();
+    releaseGuard();
   }
 }
 

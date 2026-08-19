@@ -1322,6 +1322,15 @@ too, because dropping a claim you never took is how a cooperative protocol turns
 into silent corruption. `--force` is the deliberate override for clearing one by
 hand.
 
+`unlock` is guarded exactly as strictly as `lock`, and exits 1 with a retry
+message if it can't take the guard. An atomic `unlink` does *not* make
+read → ownership-check → unlink atomic: an unguarded release can read the old
+record, pass its own ownership check, and unlink *after* a guarded `lock` has
+published a new holder's claim — deleting a live claim and leaving the tree
+reading as free while that turn works in it. Refusing is the safe direction now
+that liveness is turn-based: a refused release self-heals, because the claim
+stops being held the moment its turn ends, whether or not anyone unlocked it.
+
 **This is advisory, and cannot be otherwise at this layer.** A turn runs `git`
 through the harness's own Bash tool; phantombot isn't in that path and cannot
 intercept it, so nothing here *prevents* a write to a checkout you don't hold.

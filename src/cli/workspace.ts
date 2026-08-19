@@ -123,15 +123,23 @@ export default defineCommand({
         },
       },
       run({ args }) {
-        const ok = releaseWorkspace(String(args.path), {
+        const result = releaseWorkspace(String(args.path), {
           turnId: callerTurnId(),
           force: Boolean(args.force),
         });
-        if (!ok) {
-          // Also the no-turn-id case: a claim made by a turn is not something a
-          // bare shell gets to drop by accident.
+        if (!result.ok) {
+          // Three different answers, and conflating them would send the caller
+          // the wrong way. "contended" means try again in a moment; "not-owner"
+          // means this was never yours to drop (the no-turn-id case too — a
+          // claim made by a turn is not something a bare shell gets to release
+          // by accident); "failed" is a broken state dir, not a live holder.
           process.stderr.write(
-            `refusing to unlock ${args.path}: it is held by another turn (use --force to override)\n`,
+            result.reason === "contended"
+              ? `another turn is claiming or releasing ${String(args.path)} right now — retry once\n`
+              : result.reason === "failed"
+                ? `could not remove the lock for ${String(args.path)} — the lock directory is unwritable; the claim expires on its own when the holding turn ends\n`
+                : `refusing to unlock ${String(args.path)}: it is held by ${result.heldBy.conversation} ` +
+                  `since ${result.heldBy.acquired_at} (use --force to override)\n`,
           );
           process.exitCode = 1;
           return;
