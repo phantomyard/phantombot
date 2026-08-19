@@ -145,20 +145,27 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       // migration. The task is not marked run, so run_count, one-off
       // deactivation and maxRuns all stay honest.
       //
-      // Command tasks are exempt: they run a deterministic script, never wake
-      // a harness, and so cannot collide with a conversation turn.
-      if (!isCommandTask) {
-        const verdict = shouldDeferWake(task.persona, task.nextRunAt, { now });
-        if (verdict.defer) {
-          log.info("tick: deferring task wake", {
-            id: task.id,
-            description: task.description,
-            persona: task.persona,
-            reason: verdict.reason,
-            overdueMs: now.getTime() - task.nextRunAt.getTime(),
-          });
-          continue;
-        }
+      // Command tasks are NOT exempt, despite running no harness themselves.
+      // The shipped contract tells a poller to call `phantombot ask` when it
+      // finds work (`persona/builder.ts`, and the Jira example in the README),
+      // and `ask` starts a full `runTurn` in yet another process. Exempting
+      // command tasks would leave that documented path as an unguarded back
+      // door into the exact collision this defers against — the poller fires
+      // mid-conversation, decides there is work, and wakes an agent anyway.
+      // Deferring the poller is cheap and safe: it is idempotent by
+      // construction, the next tick re-evaluates 60s later, and MAX_DEFERRAL_MS
+      // still guarantees it runs.
+      const verdict = shouldDeferWake(task.persona, task.nextRunAt, { now });
+      if (verdict.defer) {
+        log.info("tick: deferring task wake", {
+          id: task.id,
+          description: task.description,
+          persona: task.persona,
+          isCommandTask,
+          reason: verdict.reason,
+          overdueMs: now.getTime() - task.nextRunAt.getTime(),
+        });
+        continue;
       }
 
       log.info("tick: firing task", {

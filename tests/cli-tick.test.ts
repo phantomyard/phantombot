@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -879,16 +880,32 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
     expect(harness.invocations).toBe(1);
   });
 
-  test("command-backed tasks are exempt — they never wake a harness to collide", async () => {
+  // A command-backed poller runs no harness ITSELF, which makes it look exempt
+  // — but the shipped contract (`persona/builder.ts`, and the Jira example in
+  // the README) tells it to call `phantombot ask` when it finds work, and that
+  // starts a full turn in a third process. So the poller is deferred too;
+  // otherwise the documented wake path is an unguarded back door into the very
+  // collision this feature exists to prevent.
+  //
+  // `askMarker` stands in for that documented wake: the command only touches it
+  // when it actually got to run, so its absence is proof no agent was woken.
+  function addPoller(askMarker: string) {
     const created = store.add({
       persona: "phantom",
       description: "poller",
       schedule: "0 * * * *",
       prompt: "audit context",
-      command: "exit 0",
+      // Exactly the shape the docs prescribe: detect work, then wake an agent.
+      command: `printf woke > ${askMarker}`,
       now: new Date("2026-05-02T09:30:00Z"),
     });
     if (!created.ok) throw new Error("setup");
+    return created;
+  }
+
+  test("a command poller is deferred too — its documented `ask` wake never launches", async () => {
+    const askMarker = join(workdir, "poller-ask-live.txt");
+    const created = addPoller(askMarker);
     await seedLiveConversation(new Date("2026-05-02T10:00:00Z"));
 
     await runTick({
@@ -899,7 +916,52 @@ describe("runTick — wake deferral while the principal is talking (issue #391)"
       lockPath,
       now: new Date("2026-05-02T10:00:30Z"),
     });
-    // It ran: run_count advanced even though a conversation is in flight.
+
+    // The command never ran, so it never reached its `phantombot ask` call.
+    expect(existsSync(askMarker)).toBe(false);
+    // And the row is untouched, so the next tick re-evaluates for free.
+    const after = store.get(created.id)!;
+    expect(after.runCount).toBe(0);
+    expect(after.lastRunAt).toBeUndefined();
+    expect(after.nextRunAt.getTime()).toBe(created.task.nextRunAt.getTime());
+    expect(after.active).toBe(true);
+  });
+
+  test("the deferred poller — and its wake — go through once the conversation is quiet", async () => {
+    const askMarker = join(workdir, "poller-ask-quiet.txt");
+    const created = addPoller(askMarker);
+    // No registry entries at all — nobody is talking.
+
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:00:30Z"),
+    });
+
+    expect(existsSync(askMarker)).toBe(true);
+    expect(store.get(created.id)!.runCount).toBe(1);
+  });
+
+  test("poller deferral is bounded too — an overdue poller fires mid-conversation", async () => {
+    const askMarker = join(workdir, "poller-ask-overdue.txt");
+    const created = addPoller(askMarker);
+    await seedLiveConversation(new Date("2026-05-02T10:20:00Z"));
+
+    // 20 minutes past due, beyond MAX_DEFERRAL_MS: a poller that never polls is
+    // a worse failure than the collision, because it is silent.
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:20:30Z"),
+    });
+
+    expect(existsSync(askMarker)).toBe(true);
     expect(store.get(created.id)!.runCount).toBe(1);
   });
 });

@@ -1191,6 +1191,8 @@ Task behavior:
 - Recurring LLM tasks get periodic self-review prompts.
 - Recurring command tasks do not self-review, so add `--until`, `--count`, or
   `--for` when the poller has a natural end.
+- A due task is **held** while the principal is mid-conversation — see
+  [Turn registry](#turn-registry-concurrent-turns) below.
 
 Manage tasks:
 
@@ -1200,6 +1202,43 @@ phantombot task show <id>
 phantombot task cancel <id>
 phantombot tick
 ```
+
+### Turn registry (concurrent turns)
+
+Two turns for the same persona can run at once in **different processes**: the
+daemon (`phantombot run`) is answering the principal while `phantombot tick`
+wakes a scheduled task and spawns its own harness. The existing locks don't
+cover this — `runLock` guards `run` against `run`, `tick.lock` guards `tick`
+against `tick`, and neither sits between the two. In practice both turns picked
+up the same PR and the same working checkout, and a contributor got duplicate
+review comments.
+
+Every turn, from every entry point (`run`, `ask`, `tick`, `nightly`, ACP),
+registers itself for its lifetime in a small JSON file under
+`$XDG_STATE_HOME/phantombot/turns/`. This is a **registry, not a mutex**: it
+never blocks a turn and never queues one behind another. It buys two things:
+
+- **`tick` defers a due task** while an interactive turn is in flight, or within
+  3 minutes of one finishing (the conversation, not just the turn, is what a
+  wake collides with). Deferral is capped at 15 minutes, after which the task
+  fires regardless — a task that silently never runs is the worse failure. The
+  task row is untouched while deferred, so `run_count`, one-off deactivation and
+  `--count` limits stay accurate, and the next tick re-evaluates a minute later.
+  **Command-backed tasks are deferred too**, because the documented poller
+  contract is to call `phantombot ask` when work appears, and that starts a full
+  turn.
+- **A turn that runs anyway is told about its siblings** via a line added to its
+  system prompt, so it knows to keep its hands off shared state instead of
+  racing a turn it cannot see.
+
+Entries are best-effort cleaned up when a turn ends. A crashed turn leaves one
+behind, so an entry only counts as live if its recorded pid is still the same
+process *and* it is under an hour old; stale entries are pruned on read.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PHANTOMBOT_TURN_REGISTRY` | on (off under `NODE_ENV=test`) | Kill switch. `0`/`off`/`false`/`no` disables it: every read reports "nobody home", which is the old pre-registry behaviour — no deferral, no sibling notice. |
+| `PHANTOMBOT_TURN_REGISTRY_DIR` | `$XDG_STATE_HOME/phantombot/turns` | Relocate the entries without moving the rest of the state dir. |
 
 ## Notifications
 
