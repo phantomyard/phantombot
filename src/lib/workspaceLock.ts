@@ -260,6 +260,23 @@ interface Ticket {
 }
 
 /**
+ * Filename of one acquisition's ticket.
+ *
+ * Derived from the token alone, never by taking a path apart. A ticket used to
+ * be re-identified with `myPath.slice(dir.length + 1)`, which silently assumed
+ * `dir` had no trailing separator: `PHANTOMBOT_WORKSPACE_LOCK_DIR` is
+ * documented as a free-form path, so `/tmp/locks/` shifted that slice by one
+ * and dropped the first character of the name. The caller then could not find
+ * its OWN ticket, so an uncontended acquire reported `contended` and left every
+ * ticket it published behind. Equivalent spellings of a directory must behave
+ * identically, and the way to guarantee that is to never let the spelling reach
+ * the name at all.
+ */
+function ticketName(lockName: string, token: string): string {
+  return `${lockName}${GUARD_INFIX}${token}`;
+}
+
+/**
  * Publish a ticket, atomically.
  *
  * Write-then-rename, because a name that exists must already be COMPLETE. The
@@ -276,7 +293,7 @@ interface Ticket {
  * never collide with, or overwrite, another caller's ticket.
  */
 function publishTicket(dir: string, lockName: string, token: string): string {
-  const path = join(dir, `${lockName}${GUARD_INFIX}${token}`);
+  const path = join(dir, ticketName(lockName, token));
   const tmp = `${path}.tmp`;
   const body: GuardFile = {
     token,
@@ -426,7 +443,7 @@ export function takeGuard(
   };
 
   for (let attempt = 0; attempt < GUARD_ATTEMPTS; attempt += 1) {
-    const mine = readTicket(dir, myPath.slice(dir.length + 1));
+    const mine = readTicket(dir, ticketName(lockName, token));
     if (!mine) {
       // Our own ticket is gone: swept as ownerless, or the state directory was
       // cleared under us. Without a visible ticket we are not in the queue at

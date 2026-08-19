@@ -894,6 +894,60 @@ describe("a broken state directory is not contention", () => {
   });
 });
 
+describe("the lock directory's spelling does not change behaviour", () => {
+  /**
+   * `PHANTOMBOT_WORKSPACE_LOCK_DIR` is documented as a free-form path, so a
+   * trailing separator is a spelling a user can reasonably write — and every
+   * equivalent spelling has to behave identically.
+   *
+   * The bug these cover: the guard re-identified its own ticket by slicing the
+   * directory prefix off the published path, which assumed the directory had no
+   * trailing separator. Given `/tmp/locks/` the slice shifted by one and cut the
+   * first character off the filename, so the caller could never find its OWN
+   * ticket. An UNCONTENDED acquire then reported `contended` and left behind a
+   * ticket from each of its six attempts.
+   */
+  const trailing = () => `${dir}/`;
+
+  test("an uncontended acquire through a trailing separator succeeds", () => {
+    const result = takeGuard(trailing(), fileFor(WS));
+    expect(result.ok).toBe(true);
+    expect(ticketsFor(fileFor(WS))).toHaveLength(1);
+  });
+
+  test("release through a trailing separator leaves no tickets behind", () => {
+    const result = takeGuard(trailing(), fileFor(WS));
+    expect(result.ok).toBe(true);
+    if (result.ok) result.release();
+    expect(ticketsFor(fileFor(WS))).toEqual([]);
+  });
+
+  test("real contention is still reported through a trailing separator", () => {
+    putLiveTicket(fileFor(WS));
+    const result = takeGuard(trailing(), fileFor(WS));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("contended");
+  });
+
+  test("acquire and release work through the relocation variable", () => {
+    // End to end on the documented knob, not just the internal entry point:
+    // this is the path a user who sets the variable actually takes.
+    process.env.PHANTOMBOT_WORKSPACE_LOCK_DIR = trailing();
+    const claim = acquireWorkspace(
+      { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+      { now: NOW },
+    );
+    expect(claim.ok).toBe(true);
+    expect(workspaceHolder(WS, { now: NOW, ...running })?.turn_id).toBe("t1");
+    expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
+      ok: true,
+    });
+    expect(workspaceHolder(WS, { now: NOW, ...running })).toBeUndefined();
+    // Nothing left over: neither the claim nor any guard ticket.
+    expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
 describe("pruning cannot delete a claim published while it was deciding", () => {
   /**
    * Deciding a lock is stale is not instant — it reads the turn registry. The
