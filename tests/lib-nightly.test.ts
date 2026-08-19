@@ -16,8 +16,11 @@ import {
   nightlyHealth,
   nightlyStatePath,
   pendingForDate,
+  isProcessAlive,
+  type NightlyCurrent,
   saveNightlyState,
   STALE_RUN_MS,
+  sweepLiveness,
   sweepDailyFiles,
 } from "../src/lib/nightly.ts";
 import { OKF_TYPES } from "../src/lib/okf.ts";
@@ -264,6 +267,83 @@ describe("dateRecord", () => {
   });
 });
 
+/**
+ * Issue #402. The in-flight marker used to be judged purely on its timestamp,
+ * which is precisely wrong for the way sweeps actually die: the sweep runs
+ * inside the daemon's process, so a crash or a restart kills it while its last
+ * beat is seconds old, and the sweep the restart spawns then stands down out
+ * of deference to a process that no longer exists.
+ */
+describe("sweepLiveness", () => {
+  const now = new Date("2026-05-18T09:00:00Z");
+  function marker(beatAgoMs: number, pid?: number): NightlyCurrent {
+    const at = new Date(now.getTime() - beatAgoMs).toISOString();
+    return {
+      date: "2026-05-01",
+      index: 1,
+      total: 3,
+      started_at: at,
+      updated_at: at,
+      ...(pid === undefined ? {} : { pid }),
+    };
+  }
+
+  test("a dead owner is dead however fresh its last beat looks", () => {
+    expect(sweepLiveness(marker(1_000, 4242), now, () => false)).toBe("dead");
+  });
+
+  test("a live owner with a fresh beat is running", () => {
+    expect(sweepLiveness(marker(1_000, 4242), now, () => true)).toBe("running");
+  });
+
+  // A process that exists but has stopped beating is a wedged turn, not a
+  // crash — the pre-existing 45-minute rule still retires it.
+  test("a live owner past STALE_RUN_MS is stalled", () => {
+    expect(
+      sweepLiveness(marker(STALE_RUN_MS + 1_000, 4242), now, () => true),
+    ).toBe("stalled");
+  });
+
+  // Markers written before this change carry no pid; they must keep behaving
+  // exactly as they did, or an upgrade would start stealing live sweeps.
+  test("a marker with no pid falls back to the clock", () => {
+    expect(sweepLiveness(marker(1_000), now, () => false)).toBe("running");
+    expect(sweepLiveness(marker(STALE_RUN_MS + 1_000), now, () => false)).toBe(
+      "stalled",
+    );
+  });
+
+  test("an unparseable beat is stalled, not running", () => {
+    const bad: NightlyCurrent = {
+      date: "2026-05-01",
+      index: 1,
+      total: 1,
+      started_at: "not-a-date",
+      updated_at: "not-a-date",
+    };
+    expect(sweepLiveness(bad, now, () => true)).toBe("stalled");
+  });
+});
+
+describe("isProcessAlive", () => {
+  test("true for this very process", () => {
+    expect(isProcessAlive(process.pid)).toBe(true);
+  });
+
+  test("false for a pid that has exited", async () => {
+    const child = Bun.spawn(["sh", "-c", "exit 0"]);
+    const pid = child.pid;
+    await child.exited;
+    expect(isProcessAlive(pid)).toBe(false);
+  });
+
+  // pid 1 always exists and (outside a root container) is not ours: kill(2)
+  // answers EPERM, which means "there, but not yours" — still alive.
+  test("a pid we may not signal still counts as alive", () => {
+    expect(isProcessAlive(1)).toBe(true);
+  });
+});
+
 describe("nightlyHealth", () => {
   const now = new Date("2026-05-10T09:00:00Z");
 
@@ -330,6 +410,27 @@ describe("nightlyHealth", () => {
     }
     const h = await nightlyHealth(workdir, { now });
     expect(h.status).toBe("warning");
+  });
+
+  // /status must separate the two failure modes: a dead owner is a crash to
+  // investigate, a stalled one is a hung turn. A dead owner is also reportable
+  // at once, instead of reading "running" for the first 45 minutes.
+  test("a fresh marker whose owner is gone reports died, not running", async () => {
+    await daily("2026-05-01");
+    await saveNightlyState(workdir, {
+      current: {
+        date: "2026-05-01",
+        index: 2,
+        total: 9,
+        started_at: new Date(now.getTime() - 10_000).toISOString(),
+        updated_at: new Date(now.getTime() - 10_000).toISOString(),
+        pid: 4242,
+      },
+    });
+    const h = await nightlyHealth(workdir, { now, isAlive: () => false });
+    expect(h.status).toBe("error");
+    expect(h.detail).toContain("sweep died on 2026-05-01");
+    expect(h.detail).toContain("4242");
   });
 
   test("an in-flight sweep with a fresh beat → running with progress", async () => {

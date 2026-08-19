@@ -360,6 +360,89 @@ describe("runNightly — bounds and locking", () => {
     expect(h.calls.length).toBe(2);
     expect(out.text).toContain("stalled sweep");
   });
+
+  // Issue #402. The killer case: the daemon dies mid-sweep, so the marker it
+  // leaves behind is SECONDS old — the freshest it will ever be — and the
+  // restart that follows is exactly when a new sweep tries to start. Judging
+  // that marker by its timestamp makes the new sweep defer to a corpse, and
+  // nothing retries until the next UTC day rollover.
+  test("a fresh marker whose owner process is gone is taken over", async () => {
+    await daily("2026-05-01");
+    const { saveNightlyState } = await import("../src/lib/nightly.ts");
+    await saveNightlyState(personaDir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: new Date(now.getTime() - 5_000).toISOString(),
+        updated_at: new Date(now.getTime() - 5_000).toISOString(),
+        pid: 424242,
+      },
+    });
+    const h = harness();
+    const out = new CaptureStream();
+    await runNightly({
+      config, now, out,
+      isProcessAlive: (pid) => pid !== 424242,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(h.calls.length).toBe(2);
+    expect(out.text).toContain("dead sweep");
+    expect(out.text).toContain("424242");
+  });
+
+  // The other half of the same rule: a live owner still holds the lock, so a
+  // pid check can never turn into a licence to double-file drawers.
+  test("a fresh marker whose owner process is alive still blocks", async () => {
+    await daily("2026-05-01");
+    const { saveNightlyState } = await import("../src/lib/nightly.ts");
+    await saveNightlyState(personaDir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: now.toISOString(),
+        updated_at: now.toISOString(),
+        pid: 424242,
+      },
+    });
+    const h = harness();
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      isProcessAlive: () => true,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(h.calls).toEqual([]);
+    expect(out.text).toContain("already in flight");
+  });
+
+  // A live owner that has stopped beating is a wedged turn, not a crash — the
+  // 45-minute rule still applies to it.
+  test("a live owner that stopped beating is still taken over", async () => {
+    await daily("2026-05-01");
+    const { saveNightlyState } = await import("../src/lib/nightly.ts");
+    await saveNightlyState(personaDir, {
+      current: {
+        date: "2026-05-01",
+        index: 1,
+        total: 1,
+        started_at: "2026-05-09T02:00:00Z",
+        updated_at: "2026-05-09T02:00:00Z",
+        pid: 424242,
+      },
+    });
+    const h = harness();
+    const out = new CaptureStream();
+    await runNightly({
+      config, now, out,
+      isProcessAlive: () => true,
+      runStage: h.runStage, refreshIndex: async () => {},
+    });
+    expect(h.calls.length).toBe(2);
+    expect(out.text).toContain("stalled sweep");
+  });
 });
 
 describe("runNightly — --date override", () => {

@@ -44,7 +44,6 @@ import {
   loadConfig,
 } from "../config.ts";
 import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
-import { automaticallyAuthWith } from "../channels/phantomchat/relayAuth.ts";
 import { synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -73,17 +72,16 @@ const defaultPhantomchatSend: PhantomchatNotifySend = async ({
 }) => {
   // Lazy import keeps the nostr-tools websocket machinery out of the import
   // graph for Telegram-only notifies.
-  const { SimplePool } = await import("nostr-tools/pool");
+  const { AuthGuardedSimplePool } = await import(
+    "../channels/phantomchat/authGuardedPool.ts"
+  );
   const { SimplePoolPhantomchatTransport } = await import(
     "../channels/phantomchat/transport.ts"
   );
-  const pool = new SimplePool();
   // NIP-42 (issue #368): answer AUTH challenges so a notify to an
-  // auth-requiring relay isn't silently dropped. `automaticallyAuth` is a
-  // public AbstractSimplePool field read at relay-connect time — assigning it
-  // before the first publish is the supported path (the SimplePool constructor
-  // type only exposes enablePing/enableReconnect).
-  pool.automaticallyAuth = automaticallyAuthWith(secretKey);
+  // auth-requiring relay isn't silently dropped — and don't die if a relay
+  // never answers the challenge we send back (issue #401).
+  const pool = new AuthGuardedSimplePool(secretKey);
   const transport = new SimplePoolPhantomchatTransport(
     secretKey,
     relays,

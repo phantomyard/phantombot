@@ -45,9 +45,10 @@ import {
   nightlyConversationKey,
   type PendingDate,
   pendingForDate,
-  STALE_RUN_MS,
+  type ProcessAliveProbe,
   saveNightlyState,
   sweepDailyFiles,
+  sweepLiveness,
 } from "../lib/nightly.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
@@ -108,6 +109,8 @@ export interface RunNightlyInput {
   }) => Promise<TurnResult>;
   /** Test seam — skip the real index refresh. */
   refreshIndex?: (personaDir: string) => Promise<void>;
+  /** Test seam — override the process-liveness probe. */
+  isProcessAlive?: ProcessAliveProbe;
 }
 
 export interface TurnResult {
@@ -228,14 +231,15 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
 
   const state = await loadNightlyState(dir);
 
-  // Single-sweep lock. A long backlog can outlive the gap to the next timer
-  // fire; two sweeps on the same dates would double-file drawers. A marker
-  // older than STALE_RUN_MS is a crashed run, not a live one, so it's taken
-  // over rather than obeyed.
+  // Single-sweep lock. A long backlog can outlive the gap to the next trigger;
+  // two sweeps on the same dates would double-file drawers. Only a marker whose
+  // owner is BOTH still running and still beating is obeyed — a dead owner is
+  // taken over on the spot however fresh its last beat looks (#402), because
+  // the sweep dies with the daemon that spawned it and the restart is exactly
+  // when the marker is freshest.
   if (state.current && !input.force) {
-    const beat = Date.parse(state.current.updated_at ?? state.current.started_at);
-    const alive = !Number.isNaN(beat) && now.getTime() - beat <= STALE_RUN_MS;
-    if (alive) {
+    const liveness = sweepLiveness(state.current, now, input.isProcessAlive);
+    if (liveness === "running") {
       out.write(
         `nightly: a sweep is already in flight (on ${state.current.date}, ` +
           `started ${state.current.started_at}) — skipping. Use --force to override.\n`,
@@ -243,7 +247,10 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
       return 0;
     }
     out.write(
-      `nightly: taking over a stalled sweep (last beat ${state.current.updated_at}) \n`,
+      liveness === "dead"
+        ? `nightly: taking over a dead sweep (owner pid ${state.current.pid} is gone, ` +
+          `last beat ${state.current.updated_at})\n`
+        : `nightly: taking over a stalled sweep (last beat ${state.current.updated_at})\n`,
     );
   }
 

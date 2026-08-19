@@ -17,7 +17,6 @@ import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";
 import { createPhantomchatChannel } from "../channels/phantomchat/channel.ts";
 import { runPhantomchatServer } from "../channels/phantomchat/server.ts";
 import { SimplePoolPhantomchatTransport } from "../channels/phantomchat/transport.ts";
-import { automaticallyAuthWith } from "../channels/phantomchat/relayAuth.ts";
 import {
   listPhantomchatPersonas,
   cacheRelaysForPersona,
@@ -618,7 +617,9 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       // SimplePool that gets built here is never actually driven by a test.
       const startPhantomchat =
         input.runPhantomchatServer ?? runPhantomchatServer;
-      const { SimplePool } = await import("nostr-tools/pool");
+      const { AuthGuardedSimplePool } = await import(
+        "../channels/phantomchat/authGuardedPool.ts"
+      );
 
       // Fetch the canonical relay list ONCE (single source of truth, served by
       // the PWA at /relays.json). Shared across every persona. null = fetch
@@ -702,16 +703,14 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         // handled instead by the channel-layer self-heal watchdog, which re-arms
         // the subscription with our own correct wide `since`.
         //
-        // automaticallyAuth: NIP-42 (issue #368). A relay that sends an AUTH
-        // challenge — on connect or mid-subscription — gets a signed kind-22242
-        // response from the persona's key. Without it, a `nip42_auth = true`
-        // relay silently drops every event we publish. (SimplePool's
-        // constructor type only exposes enablePing/enableReconnect, but
-        // `automaticallyAuth` is a public AbstractSimplePool field read at
-        // relay-connect time — assigning it here, before any ensureRelay call,
-        // is the supported path.)
-        const pool = new SimplePool({ enablePing: true });
-        pool.automaticallyAuth = automaticallyAuthWith(identity.secretKey);
+        // NIP-42 (issue #368). A relay that sends an AUTH challenge — on
+        // connect or mid-subscription — gets a signed kind-22242 response from
+        // the persona's key. Without it, a `nip42_auth = true` relay silently
+        // drops every event we publish. The guarded subclass also keeps an
+        // unanswered challenge from crashing the daemon (issue #401).
+        const pool = new AuthGuardedSimplePool(identity.secretKey, {
+          enablePing: true,
+        });
         const transport = new SimplePoolPhantomchatTransport(
           identity.secretKey,
           relays,

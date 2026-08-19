@@ -122,6 +122,63 @@ export interface NightlyState {
   current?: NightlyCurrent | null;
 }
 
+/**
+ * What a sweep marker actually means right now.
+ *
+ * - `running` — the owner is alive and beating; a new sweep must stand down.
+ * - `dead`    — the owner process is GONE; the marker is a corpse, take over.
+ * - `stalled` — the owner may still exist but hasn't beaten in STALE_RUN_MS;
+ *               take over (the pre-existing, time-only rule).
+ */
+export type SweepLiveness = "running" | "dead" | "stalled";
+
+/** Probe seam so tests don't have to conjure real pids. */
+export type ProcessAliveProbe = (pid: number) => boolean;
+
+/**
+ * Does this pid name a process that exists on this box?
+ *
+ * `kill(pid, 0)` sends no signal — it only runs the kernel's permission and
+ * existence checks. ESRCH means gone; EPERM means it exists but belongs to
+ * another user, which still counts as alive.
+ */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Classify an in-flight marker (issue #402).
+ *
+ * THE BUG: liveness used to be time-only — a marker younger than
+ * STALE_RUN_MS was assumed to be a running sweep. When the daemon is killed
+ * mid-sweep (a crash, a restart, systemd taking down the cgroup) the child
+ * dies with it and leaves a marker seconds old. The very next start spawns a
+ * sweep, sees that fresh-looking marker, and stands down — DEFERRING TO A
+ * CORPSE. Nothing else fires until the next UTC day rollover, so the backlog
+ * sits untouched for up to a day, reported as `sweep stalled` only after the
+ * 45 minutes have elapsed. Observed on three separate boxes.
+ *
+ * THE FIX: the marker already records `pid`. A dead owner is dead the instant
+ * we look, whatever the clock says, so check the process first and fall back
+ * to the clock only for markers written by an older build (no `pid`) or an
+ * owner that is alive but wedged.
+ */
+export function sweepLiveness(
+  current: NightlyCurrent,
+  now: Date,
+  isAlive: ProcessAliveProbe = isProcessAlive,
+): SweepLiveness {
+  if (typeof current.pid === "number" && !isAlive(current.pid)) return "dead";
+  const beat = Date.parse(current.updated_at ?? current.started_at);
+  const fresh = !Number.isNaN(beat) && now.getTime() - beat <= STALE_RUN_MS;
+  return fresh ? "running" : "stalled";
+}
+
 export function nightlyConversationKey(date: string): string {
   return `system:nightly:${date}`;
 }
@@ -360,7 +417,12 @@ export interface NightlyHealth {
  */
 export async function nightlyHealth(
   personaDir: string,
-  opts: { now?: Date; state?: NightlyState } = {},
+  opts: {
+    now?: Date;
+    state?: NightlyState;
+    /** Test seam — override the process-liveness probe. */
+    isAlive?: ProcessAliveProbe;
+  } = {},
 ): Promise<NightlyHealth> {
   const now = opts.now ?? new Date();
   const state = opts.state ?? (await loadNightlyState(personaDir));
@@ -379,19 +441,22 @@ export async function nightlyHealth(
 
   const cur = state.current;
   if (cur) {
-    const beat = Date.parse(cur.updated_at ?? cur.started_at);
-    const stalled = Number.isNaN(beat) || now.getTime() - beat > STALE_RUN_MS;
-    if (!stalled) {
+    const liveness = sweepLiveness(cur, now, opts.isAlive);
+    if (liveness === "running") {
       return {
         ...base,
         status: "running",
         detail: `${cur.index}/${cur.total} dates, on ${cur.date}`,
       };
     }
+    const since = cur.updated_at ?? cur.started_at;
     return {
       ...base,
       status: "error",
-      detail: `sweep stalled on ${cur.date} since ${cur.updated_at ?? cur.started_at}`,
+      detail:
+        liveness === "dead"
+          ? `sweep died on ${cur.date} — owner pid ${cur.pid} is gone (last beat ${since})`
+          : `sweep stalled on ${cur.date} since ${since}`,
     };
   }
 
