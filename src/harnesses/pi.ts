@@ -255,7 +255,7 @@ export class PiHarness implements Harness {
     // Clone, never mutate in place: withPersonaEnv returns the SAME process.env
     // reference when there's no persona/conversation, so assigning onto it would
     // clobber the parent's global env. The spread guarantees a fresh object.
-    const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation) };
+    const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation, req.turnId) };
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
     // Route the pi capability-routing extension's `phantombot-route-*` temp

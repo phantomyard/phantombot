@@ -32,11 +32,26 @@ import {
   siblingTurns,
 } from "../lib/turnRegistry.ts";
 import {
+  DigestCollector,
+  digestNotice,
+  isBackgroundOrigin,
+  isInteractiveOrigin,
+  markDelivered,
+  MAX_DIGESTS_PER_TURN,
+  pendingDigests,
+  recordDigest,
+} from "../lib/turnDigest.ts";
+import {
+  listWorkspaceLocks,
+  workspaceLockNotice,
+} from "../lib/workspaceLock.ts";
+import {
   buildSystemPrompt,
   PRE_TOOL_NARRATION_INSTRUCTION,
 } from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
+import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
 import type { FactSource } from "../config.ts";
 import type { ScreenVerdict } from "./screen.ts";
@@ -294,6 +309,8 @@ async function* runTurnBody(
   input: TurnInput,
   turnId: string,
 ): AsyncGenerator<HarnessChunk> {
+  const origin: TurnOrigin = input.origin ?? "channel";
+  const startedAt = new Date();
   const persona = await loadPersona(input.agentDir);
 
   const history = input.noHistory
@@ -402,6 +419,48 @@ async function* runTurnBody(
       conversation: input.conversation,
       siblings: siblings.map((sib) => sib.conversation),
     });
+
+    // 2b. Workspace claims (#405). Only meaningful WHILE a sibling is in
+    // flight: a lock outliving its turn is already pruned as stale, and a lock
+    // this turn holds itself is not news to it. Filtering by the live sibling
+    // set also keeps the block off the 99% of prompts with nothing to say.
+    const siblingIds = new Set(siblings.map((sib) => sib.id));
+    const heldElsewhere = listWorkspaceLocks().filter(
+      (lock) =>
+        lock.persona === input.persona &&
+        lock.turn_id !== turnId &&
+        (lock.turn_id === undefined || siblingIds.has(lock.turn_id)),
+    );
+    const lockNotice = workspaceLockNotice(heldElsewhere);
+    if (lockNotice) {
+      overlays.push(lockNotice);
+      log.info("turn: workspaces held by sibling", {
+        persona: input.persona,
+        workspaces: heldElsewhere.map((lock) => lock.workspace),
+      });
+    }
+  }
+
+  // 3. Post-turn digests (#405). Background turns reply into their own
+  // transcripts, which the principal never opens; this is the only moment they
+  // become visible. Delivered ONLY to an interactive turn — handing a task
+  // wake the digest of another task wake tells nobody anything, and would let
+  // two background turns bounce a report between themselves forever.
+  const digests = isInteractiveOrigin(origin)
+    ? pendingDigests(input.persona)
+    : [];
+  const shownDigests = digests.slice(-MAX_DIGESTS_PER_TURN);
+  const digestBlock = digestNotice(
+    shownDigests,
+    digests.length - shownDigests.length,
+  );
+  if (digestBlock) {
+    overlays.push(digestBlock);
+    log.info("turn: delivering background digests", {
+      persona: input.persona,
+      pending: digests.length,
+      shown: shownDigests.length,
+    });
   }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
   const systemPrompt =
@@ -417,35 +476,94 @@ async function* runTurnBody(
   // it for free; the sink self-disables when PHANTOMBOT_AUDIT_TOOL_CALLS is off.
   const auditSink = createAuditSink(input.agentDir);
 
-  for await (const chunk of runWithFallback(
-    input.harnesses,
-    {
-      systemPrompt,
-      userMessage: input.userMessage,
-      history,
-      persona: input.persona,
-      conversation: input.conversation,
-      workingDir: input.workingDir,
-      // Harness temp files land under the persona's own dir, not the shared
-      // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
-      tmpBaseDir: join(input.agentDir, "tmp"),
-      idleTimeoutMs: input.idleTimeoutMs,
-      hardTimeoutMs: input.hardTimeoutMs,
-      startupTimeoutMs: input.startupTimeoutMs,
-      mcpMode: input.mcpMode,
-      toolsMode: input.toolsMode,
-      signal: input.signal,
-    },
-    { onToolCall: auditSink },
-  )) {
-    if (chunk.type === "text") finalText += chunk.text;
-    if (chunk.type === "done") {
-      // The done chunk carries the authoritative finalText — prefer it
-      // over our running accumulation in case the harness reformatted.
-      finalText = chunk.finalText;
-      succeeded = true;
+  // Digest collection (#405) rides the same hook but is INDEPENDENT of the
+  // audit sink: auditing has its own kill switch, and an operator who turns off
+  // the on-disk audit log has not asked to go blind to what background turns
+  // did. Only background turns collect — an interactive turn's actions were
+  // already streamed to the principal as they happened.
+  const digestCollector = isBackgroundOrigin(origin)
+    ? new DigestCollector()
+    : undefined;
+  const toolSink =
+    auditSink || digestCollector
+      ? (detail: ToolCallDetail) => {
+          try {
+            digestCollector?.record(detail);
+          } catch {
+            // Digest bookkeeping must never break a tool call.
+          }
+          auditSink?.(detail);
+        }
+      : undefined;
+
+  // Written in a `finally` rather than after a clean drain, on purpose: a
+  // background turn that pushed a commit and THEN died is the single most
+  // important case to surface, and gating the digest on success would hide
+  // exactly that turn. The generator's `finally` also covers the consumer
+  // breaking out of its `for await`.
+  const flushDigest = () => {
+    if (!digestCollector) return;
+    const { actions, omitted } = digestCollector.snapshot();
+    try {
+      recordDigest({
+        persona: input.persona,
+        conversation: input.conversation,
+        origin,
+        trigger: input.userMessage,
+        summary: finalText,
+        startedAt,
+        actions,
+        omitted,
+      });
+    } catch (e) {
+      log.debug("turn: digest write failed", { error: (e as Error).message });
     }
-    yield chunk;
+  };
+
+  try {
+    for await (const chunk of runWithFallback(
+      input.harnesses,
+      {
+        systemPrompt,
+        userMessage: input.userMessage,
+        history,
+        persona: input.persona,
+        conversation: input.conversation,
+        // #405: lets `phantombot workspace lock/unlock` attribute a claim to the
+        // turn that made it, so a release from a different turn is refused.
+        turnId,
+        workingDir: input.workingDir,
+        // Harness temp files land under the persona's own dir, not the shared
+        // system /tmp (issue #365) — per-persona isolation + survives a full /tmp.
+        tmpBaseDir: join(input.agentDir, "tmp"),
+        idleTimeoutMs: input.idleTimeoutMs,
+        hardTimeoutMs: input.hardTimeoutMs,
+        startupTimeoutMs: input.startupTimeoutMs,
+        mcpMode: input.mcpMode,
+        toolsMode: input.toolsMode,
+        signal: input.signal,
+      },
+      { onToolCall: toolSink },
+    )) {
+      if (chunk.type === "text") finalText += chunk.text;
+      if (chunk.type === "done") {
+        // The done chunk carries the authoritative finalText — prefer it
+        // over our running accumulation in case the harness reformatted.
+        finalText = chunk.finalText;
+        succeeded = true;
+      }
+      yield chunk;
+    }
+  } finally {
+    flushDigest();
+  }
+
+  // Mark delivered only now that the turn actually SUCCEEDED. At-least-once by
+  // design — a turn that dies mid-flight re-delivers on the next one. Marking
+  // at injection time would drop a background turn's only trace precisely when
+  // the box is unhealthy, which is when it matters most.
+  if (succeeded && shownDigests.length > 0) {
+    markDelivered(digests.map((d) => d.id));
   }
 
   if (succeeded && !input.noHistory) {

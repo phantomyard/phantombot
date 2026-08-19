@@ -41,6 +41,7 @@ import nightlyCmd from "./nightly.ts";
 import doctorCmd from "./doctor.ts";
 import envCmd from "./env.ts";
 import vaultCmd from "./vault.ts";
+import workspaceCmd from "./workspace.ts";
 import mcpCmd from "./mcp.ts";
 import notifyCmd from "./notify.ts";
 import taskCmd from "./task.ts";
@@ -90,5 +91,6 @@ export const mainCommand = defineCommand({
     voice: voiceCmd,
     "reply-mode": replyModeCmd,
     p2p: p2pCmd,
+    workspace: workspaceCmd,
   },
 });

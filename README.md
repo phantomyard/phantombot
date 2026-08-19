@@ -1240,6 +1240,87 @@ process *and* it is under an hour old; stale entries are pruned on read.
 | `PHANTOMBOT_TURN_REGISTRY` | on (off under `NODE_ENV=test`) | Kill switch. `0`/`off`/`false`/`no` disables it: every read reports "nobody home", which is the old pre-registry behaviour — no deferral, no sibling notice. |
 | `PHANTOMBOT_TURN_REGISTRY_DIR` | `$XDG_STATE_HOME/phantombot/turns` | Relocate the entries without moving the rest of the state dir. |
 
+### Background-turn digests
+
+The registry stops two turns colliding, but it does nothing about *why* the
+collisions went unnoticed: a turn woken by `tick` streams its reply into its own
+transcript and nowhere else. The principal is reading a Telegram thread; the
+background turn commits, comments on a PR, edits a file, and leaves no trace
+anywhere they will look.
+
+So a **background turn** (origin `task`, `notification` or `internal`) writes a
+digest when it ends: what woke it, the state-changing tool calls it made
+(`edit`/`delete`/`move`/`execute` — reads are dropped as noise) with the files
+they named, and its own closing summary. The digest lands in
+`$XDG_STATE_HOME/phantombot/digests/`.
+
+The next **interactive** turn for that persona gets the pending digests injected
+into its system prompt, alongside the sibling notice, and decides for itself
+whether any of it is worth mentioning. That's deliberate: pushing every poller
+fire to Telegram would break the "don't notify unless it's material" rule and
+train the principal to mute the channel, and writing a synthetic turn into their
+conversation history would forge transcript that later retrieval treats as
+something they actually said.
+
+Details worth knowing:
+
+- **Delivery is at-least-once.** A digest is marked delivered only after the
+  receiving turn *succeeds*, so a turn that dies re-delivers on the next one.
+  Marking at injection time would drop a background turn's only trace exactly
+  when the box is unhealthy.
+- **Written from a `finally`,** so a background turn that pushed a commit and
+  *then* crashed still leaves a digest — that's the case that matters most.
+- **Only interactive turns receive them.** Handing one background turn another's
+  digest informs nobody and would let two of them bounce a report forever.
+- At most 5 digests go into one prompt (newest), with the older count reported
+  rather than silently dropped; all pending are marked delivered so a backlog
+  can't wedge. Undelivered digests expire after 24h — if you haven't spoken to
+  the persona in a day, a wall of poller output is not a briefing.
+- Independent of the audit log: turning off `PHANTOMBOT_AUDIT_TOOL_CALLS` isn't
+  a request to go blind to what background turns did.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PHANTOMBOT_TURN_DIGEST` | on (off under `NODE_ENV=test`) | Kill switch. `0`/`off`/`false`/`no` disables writing *and* injection. |
+| `PHANTOMBOT_TURN_DIGEST_DIR` | `$XDG_STATE_HOME/phantombot/digests` | Relocate the digests. |
+
+### Workspace locks (shared working copies)
+
+The #391 collisions didn't happen in phantombot's state — they happened in a git
+checkout two turns shared, with no lock on it at all. The registry makes turns
+*aware* of each other; it gives them nowhere to serialise.
+
+```bash
+phantombot workspace lock /tmp/phantombot-inspect --purpose "reviewing PR #405"
+phantombot workspace status            # all live claims
+phantombot workspace status /tmp/x     # just that one
+phantombot workspace unlock /tmp/phantombot-inspect
+```
+
+`lock` exits **1 immediately** if another live turn holds the path — it never
+waits. The right response is a different directory (clone a fresh copy), not a
+queue. A claim held by a turn that is still in flight is named in every sibling
+turn's system prompt.
+
+**This is advisory, and cannot be otherwise at this layer.** A turn runs `git`
+through the harness's own Bash tool; phantombot isn't in that path and cannot
+intercept it, so nothing here *prevents* a write to a checkout you don't hold.
+What it provides is a truthful, crash-safe answer to "is another turn in this
+tree", which previously did not exist. Real enforcement would need the mutation
+path itself to take the lock — a bigger change, and its own issue.
+
+Locks are attributed to the turn that took them via `PHANTOMBOT_TURN_ID` (set in
+the harness environment next to `PHANTOMBOT_PERSONA`/`PHANTOMBOT_CONVERSATION`),
+which is what lets `unlock` refuse to drop a lock the caller never took. A
+holder that dies leaves a stale file; it is broken on inspection using the same
+pid + start-time check as the registry, and expires after an hour regardless, so
+a crash can never wedge a workspace until a human clears a lockfile.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PHANTOMBOT_WORKSPACE_LOCKS` | on (off under `NODE_ENV=test`) | Kill switch. Disabled means every `lock` succeeds and every query reports unheld. |
+| `PHANTOMBOT_WORKSPACE_LOCK_DIR` | `$XDG_STATE_HOME/phantombot/workspaces` | Relocate the lock files. |
+
 ## Notifications
 
 `phantombot notify` is the agent-facing way to proactively contact the user
