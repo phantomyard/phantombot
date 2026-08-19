@@ -236,6 +236,14 @@ interface Ticket {
    * ordering key is exactly the instant its name appeared - and any scan that
    * misses a ticket necessarily happened before that instant, i.e. only ever
    * misses tickets that sort AFTER it.
+   *
+   * That last step assumes rename UPDATES ctime, which POSIX requires and NTFS
+   * gives too (the change time tracks the directory entry, not the contents).
+   * On a filesystem that did not, the key would fall back to the moment the
+   * bytes were written - one syscall earlier - and two tickets published within
+   * that gap could each read themselves oldest. Stated rather than defended
+   * against: the one platform this module actually serialises turns on is the
+   * one it runs on, and the alternative is a fixed sleep on every acquire.
    */
   seq: bigint;
   /**
