@@ -14,16 +14,18 @@
  *      deliberate reversal the principal approved: instead of semantic-
  *      searching three drawers and feeding the judge a handful of TRUNCATED
  *      FTS snippets, the screener loads the persona (identity + MEMORY) and
- *      reads the decisions/people/norms drawers as WHOLE ENTRIES — up to a
- *      shared DRAWERS_CAP_BYTES budget across all three, not per drawer —
+ *      reads the decisions/people/norms drawers VERBATIM — concatenated and
+ *      hard-truncated at a shared DRAWERS_CAP_BYTES budget across all three,
+ *      not per drawer; the cut is a raw byte slice, so it can land mid-entry —
  *      then composes them into the judge's system prompt via
  *      buildSystemPrompt + JUDGE_NARROWING.
  *      The judge therefore has the principal's real context — identity, prior
- *      rulings, known senders, documented norms — at full fidelity, which
- *      fixes the old "nuance lost to truncation" problem (concern #1). The
- *      drawers are still scoped to decisions/people/norms (capped at ~16KB),
- *      so finances/inbox stay out of the judge; what changed is they are now
- *      full rulings, and MEMORY/identity also inform the judge. Best-effort:
+ *      rulings, known senders, documented norms — as verbatim text rather
+ *      than snippets, which fixes the old "nuance lost to truncation" problem
+ *      (concern #1) for everything that fits under the cap. The drawers are
+ *      still scoped to decisions/people/norms (capped at ~16KB), so finances/
+ *      inbox stay out of the judge; what changed is they are now verbatim
+ *      drawer text, and MEMORY/identity also inform the judge. Best-effort:
  *      if the persona can't load, the judge falls back to the module
  *      JUDGE_SYSTEM classifier (no persona context) and still screens.
  *   2. JUDGE — run the tool-less harness judge over the content, with the
@@ -139,11 +141,12 @@ const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
  * rulings), people (known senders), norms (what's routine in the principal's
  * world). Scoping the persona-as-judge briefing to these three keeps it
  * threat-relevant and keeps sensitive operational memory (finances, inbox,
- * daily dumps, commitments) out of the judge entirely. Read as whole entries
- * now rather than FTS snippets, but NOT unbounded: the three are concatenated
- * IN THIS ORDER and the result is capped at DRAWERS_CAP_BYTES, so the last
- * drawer listed here is the first content dropped when the briefing runs
- * long. Paths are relative to the persona dir.
+ * daily dumps, commitments) out of the judge entirely. Read verbatim now
+ * rather than as FTS snippets, but NOT unbounded: the three are concatenated
+ * IN THIS ORDER and the result is hard-truncated at DRAWERS_CAP_BYTES — a raw
+ * byte slice, so the cut can land mid-entry — and the last drawer listed here
+ * is the first content dropped when the briefing runs long. Paths are
+ * relative to the persona dir.
  *
  * Exported so the scaffold can be tested against it: a drawer the judge briefs
  * from but `ensurePersonaScaffold` never seeds is invisible on a fresh persona
@@ -158,8 +161,10 @@ export const BRIEFING_DRAWERS: readonly string[] = [
 
 /**
  * Cap on the concatenated drawer text injected into the judge's prompt.
- * Full rulings (concern #1's fix) but bounded so a runaway drawer can't blow
- * the judge's context. ~16KB ≈ 4K tokens — generous for three drawers.
+ * Verbatim drawer text (concern #1's fix) but bounded so a runaway drawer
+ * can't blow the judge's context. The slice is by BYTES, not entries: an
+ * oversized briefing is cut wherever the budget runs out, not rounded down to
+ * an entry boundary. ~16KB ≈ 4K tokens — generous for three drawers.
  */
 const DRAWERS_CAP_BYTES = 16 * 1024;
 
@@ -500,9 +505,10 @@ export function resolveNotifyPersona(
  * Read the briefing drawers (decisions/people/norms) from the persona dir,
  * concatenate them under short headers IN BRIEFING_DRAWERS ORDER, and cap the
  * TOTAL at DRAWERS_CAP_BYTES (truncating with a marker if larger). This
- * replaces the old truncated FTS snippets — whole rulings fix concern #1's
- * "nuance lost to truncation" — but the cap is shared, so an oversized early
- * drawer can crowd a later one out of the briefing entirely. Best-effort per
+ * replaces the old truncated FTS snippets — verbatim text fixes concern #1's
+ * "nuance lost to truncation" — but the cap is shared AND applied as a raw
+ * byte slice, so an oversized early drawer can crowd a later one out of the
+ * briefing entirely and the cut itself can land mid-entry. Best-effort per
  * file (missing files are skipped); never throws.
  * Returns undefined when no drawer exists, so buildSystemPrompt omits the
  * retrieved-context slot entirely.

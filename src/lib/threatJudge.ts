@@ -48,12 +48,13 @@
  * judge can now run as the FULL persona, narrowed to one job. Instead of a
  * bare module-const classifier prompt, the SCREENER composes the persona's
  * own system prompt (identity + MEMORY + the decisions/people/norms drawers,
- * fed as whole entries rather than truncated FTS snippets, subject to the
- * shared byte cap in screen.ts) and appends JUDGE_NARROWING to
- * collapse it down to "rate this for prompt-injection only, you have no
- * tools, you do not act." This gives the judge the principal's real context
- * — who is known, what is routine, prior rulings — so it stops crying wolf
- * on normal operations, WITHOUT widening what it can do: it is still tool-
+ * fed verbatim rather than as truncated FTS snippets, subject to the shared
+ * byte cap in screen.ts — which slices by bytes and can cut mid-entry) and
+ * appends JUDGE_NARROWING to collapse it down to "rate this for prompt-
+ * injection only, you have no tools, you do not act." This gives the judge
+ * the principal's real context — who is known, what is routine, prior
+ * rulings — so it stops crying wolf on normal operations, WITHOUT widening
+ * what it can do: it is still tool-
  * less and still emits only a number. The module-const JUDGE_SYSTEM below
  * stays as the FALLBACK for direct callers (and when the persona can't be
  * loaded), so the contract is unchanged for them.
@@ -274,10 +275,11 @@ export async function judgeThreat(
   // NOTE (persona-as-judge): in PRODUCTION the screener no longer fills this
   // <briefing> via opts.priors — it now runs the judge as the FULL NARROWED
   // PERSONA, which already carries identity + MEMORY + the decisions/people/
-  // norms drawers as whole entries (up to screen.ts's shared byte cap) as
-  // the judge's system prompt (see screen.ts +
-  // JUDGE_NARROWING). That persona context IS the new, richer briefing — same
-  // anti-nag purpose, full fidelity instead of truncated snippets. The
+  // norms drawers verbatim (up to screen.ts's shared byte cap, which is a raw
+  // byte slice and can cut mid-entry) as the judge's system prompt (see
+  // screen.ts + JUDGE_NARROWING). That persona context IS the new, richer
+  // briefing — same anti-nag purpose, verbatim drawer text instead of FTS
+  // snippets. The
   // opts.priors / <briefing> channel is KEPT (direct callers and back-compat
   // tests still use it, and it remains a valid trusted-context channel), and
   // the strip below stays load-bearing regardless of which path populates it.

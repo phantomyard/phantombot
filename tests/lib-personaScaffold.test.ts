@@ -176,6 +176,27 @@ describe("the scaffold seeds every drawer the rest of the system writes to", () 
     expect(norms).toContain("LAST");
   });
 
+  test("no seeded drawer claims the briefing preserves entry boundaries", async () => {
+    // readBriefingDrawers truncates with a RAW BYTE SLICE
+    // (`Buffer.from(text).subarray(0, DRAWERS_CAP_BYTES)`) over the
+    // CONCATENATED drawers — there is no entry-boundary logic anywhere in it,
+    // so the cut can land mid-entry, mid-line, even mid-codepoint. "IN FULL"
+    // was the first way this got overstated and "whole entries, not snippets"
+    // was the second, weaker way; both promise a guarantee the runtime does
+    // not give. Assert against the class of claim, not the one wording.
+    await ensurePersonaScaffold(workdir);
+    for (const rel of BRIEFING_DRAWERS) {
+      const body = await readFile(join(workdir, rel), "utf8");
+      expect(body).not.toMatch(/in full/i);
+      expect(body).not.toMatch(/whole (entries|rulings)/i);
+      expect(body).not.toMatch(/full fidelity/i);
+      expect(body).not.toMatch(/not snippets/i);
+    }
+    // And the norms drawer must say what actually happens instead.
+    const norms = await readFile(join(workdir, "memory", "norms.md"), "utf8");
+    expect(norms).toContain("mid-entry");
+  });
+
   test("no seeded drawer credits the nightly cycle with promotion", async () => {
     // Promotion is the heartbeat's deterministic every-30-min pass
     // (TAG_TO_DRAWER lives in heartbeat.ts); the nightly cycle is the
