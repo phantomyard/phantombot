@@ -524,8 +524,21 @@ describe("releaseWorkspace", () => {
     // of B's read against A's write cannot be scheduled across processes. So
     // what is asserted is the invariant that forecloses it — a release that
     // cannot take the guard changes NOTHING — which is the fix itself.
+    //
+    // The staging is a HANDSHAKE, and the first cut's fixed sleeps are why. A
+    // held the section for 660ms and hoped B would arrive inside it; on a slow
+    // Windows runner B's process was still starting when the window shut, so B
+    // released an unguarded tree and got `ok: true`. That is the same answer
+    // the unfixed code gives — the test failed for a reason unrelated to what
+    // it tests, and would equally have PASSED an unfixed build on a machine
+    // where B arrived late. A window sized in milliseconds cannot bound
+    // process creation on someone else's CI. So A now waits for B to finish
+    // rather than guessing how long that takes, and B pays its startup before
+    // the window opens; the remaining deadline is a hang-stop, not a race.
     const MODULE = join(import.meta.dir, "../src/lib/workspaceLock.ts");
-    const barrier = join(dir, "go");
+    // A handshake, not a stopwatch. See the note above on why.
+    const ready = join(dir, "ready");
+    const done = join(dir, "done");
     const lockFile = join(dir, fileFor(WS));
     const childEnv = {
       ...process.env,
@@ -537,8 +550,8 @@ describe("releaseWorkspace", () => {
 
     await put({ turn_id: "t1" });
 
-    // A: occupy the critical section for far longer than B will wait on the
-    // guard (GUARD_ATTEMPTS * GUARD_BACKOFF_MS), so B genuinely runs out.
+    // A: hold the critical section until B has actually finished with it. The
+    // hold is bounded only as a hang-stop; nothing is timed against it.
     const acquirer = Bun.spawn(
       [
         "bun",
@@ -549,10 +562,15 @@ describe("releaseWorkspace", () => {
           `const staging = ${JSON.stringify(join(dir, "staging-child-a"))};`,
           `fs.writeFileSync(staging, JSON.stringify({ token: "child-a", pid: process.pid, at: new Date().toISOString() }));`,
           `fs.renameSync(staging, ticket);`,
-          `fs.writeFileSync(${JSON.stringify(barrier)}, "go");`,
-          `Bun.sleepSync(60);`,
+          // Published from INSIDE the section, which is the whole point: the
+          // record B is about to try to delete is one whose holder is still
+          // mid-acquire.
           `fs.writeFileSync(${JSON.stringify(lockFile)}, JSON.stringify({ workspace: ${JSON.stringify(normalizeWorkspace(WS))}, persona: "robbie", conversation: "c", turn_id: "t2", pid: 1, acquired_at: new Date().toISOString() }));`,
-          `Bun.sleepSync(600);`,
+          // Signal by rename, so B can never observe a half-written flag.
+          `fs.writeFileSync(staging, "go");`,
+          `fs.renameSync(staging, ${JSON.stringify(ready)});`,
+          `const deadline = Date.now() + 30_000;`,
+          `while (!fs.existsSync(${JSON.stringify(done)}) && Date.now() < deadline) Bun.sleepSync(2);`,
           `fs.unlinkSync(ticket);`,
         ].join("\n"),
       ],
@@ -565,10 +583,13 @@ describe("releaseWorkspace", () => {
         "-e",
         [
           `const fs = require("fs");`,
-          `while (!fs.existsSync(${JSON.stringify(barrier)})) Bun.sleepSync(1);`,
+          // Load the module BEFORE waiting, so no part of B's startup — process
+          // creation, transpile, module graph — is spent inside the window.
           `const { releaseWorkspace } = require(${JSON.stringify(MODULE)});`,
+          `while (!fs.existsSync(${JSON.stringify(ready)})) Bun.sleepSync(1);`,
           `const r = releaseWorkspace(${JSON.stringify(WS)}, { force: true });`,
           `process.stdout.write(JSON.stringify(r));`,
+          `fs.writeFileSync(${JSON.stringify(done)}, "1");`,
         ].join("\n"),
       ],
       { env: childEnv, stdout: "pipe", stderr: "pipe" },
