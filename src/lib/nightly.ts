@@ -12,8 +12,8 @@
  * CONCURRENTLY because they write to disjoint targets:
  *
  *   1. distill — file the day's captures the heartbeat missed into the
- *      structured drawers (people / decisions / lessons / commitments) and
- *      maintain MEMORY.md's "## Recent" orientation layer.
+ *      structured drawers (people / decisions / lessons / commitments /
+ *      norms) and maintain MEMORY.md's "## Recent" orientation layer.
  *   2. kb      — extract durable knowledge into kb/: reconcile against
  *      existing notes, create new atomic notes, sweep kb/inbox/.
  *

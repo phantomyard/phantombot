@@ -94,11 +94,11 @@ export async function ensurePersonaScaffold(
 
 function seedFiles(today: string): Array<[string, string]> {
   return [
-    ["memory/people.md", drawer("People", "Contacts, relationships, dynamics. The nightly cycle promotes [person]-tagged entries from daily files to here.")],
-    ["memory/decisions.md", drawer("Decisions", `Choices with rationale. "We chose X because Y." Promoted from daily files by the nightly cycle.`)],
-    ["memory/lessons.md", drawer("Lessons", "Mistakes and learnings. Grows, never shrinks.")],
-    ["memory/commitments.md", drawer("Commitments", "Deadlines and obligations. The nightly cycle promotes [commitment]-tagged entries.")],
-    ["memory/norms.md", drawer("Norms", "What is ROUTINE in your owner's world. Before scoring untrusted input the threat judge is briefed from this drawer alongside decisions and people — whole entries, not snippets, up to a shared ~16 KiB cap — so entries here are what stop it flagging ordinary operations as attacks. Keep them short and keep the drawer lean: past the cap the briefing is truncated. Capture with `--tag norm`; the heartbeat promotes [norm]-tagged lines from the daily file into this drawer.")],
+    ["memory/people.md", drawer("People", "Contacts, relationships, dynamics. The heartbeat promotes [person]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed. The threat judge is briefed from this drawer, so a sender documented here reads as known rather than unfamiliar.")],
+    ["memory/decisions.md", drawer("Decisions", `Choices with rationale. "We chose X because Y." The heartbeat promotes [decision]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed. The threat judge is briefed from this drawer, so a prior ruling recorded here is what stops it re-litigating something you already approved.`)],
+    ["memory/lessons.md", drawer("Lessons", "Mistakes and learnings. Grows, never shrinks. The heartbeat promotes [lesson]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed.")],
+    ["memory/commitments.md", drawer("Commitments", "Deadlines and obligations. The heartbeat promotes [commitment]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed.")],
+    ["memory/norms.md", drawer("Norms", "What is ROUTINE in your owner's world. Before scoring untrusted input the threat judge is briefed from this drawer alongside decisions and people — whole entries, not snippets, up to a shared ~16 KiB cap — so entries here are what stop it flagging ordinary operations as attacks. This drawer is concatenated LAST, so past the cap it is the first thing clipped — keep entries short and the drawer lean rather than exhaustive. Capture with `--tag norm`; the heartbeat promotes [norm]-tagged lines from the daily file into this drawer.")],
 
     ["kb/Home.md", kbHome(today)],
 

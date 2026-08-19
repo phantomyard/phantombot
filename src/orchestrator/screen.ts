@@ -14,8 +14,10 @@
  *      deliberate reversal the principal approved: instead of semantic-
  *      searching three drawers and feeding the judge a handful of TRUNCATED
  *      FTS snippets, the screener loads the persona (identity + MEMORY) and
- *      reads the decisions/people/norms drawers IN FULL, then composes them
- *      into the judge's system prompt via buildSystemPrompt + JUDGE_NARROWING.
+ *      reads the decisions/people/norms drawers as WHOLE ENTRIES — up to a
+ *      shared DRAWERS_CAP_BYTES budget across all three, not per drawer —
+ *      then composes them into the judge's system prompt via
+ *      buildSystemPrompt + JUDGE_NARROWING.
  *      The judge therefore has the principal's real context — identity, prior
  *      rulings, known senders, documented norms — at full fidelity, which
  *      fixes the old "nuance lost to truncation" problem (concern #1). The
@@ -137,8 +139,11 @@ const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
  * rulings), people (known senders), norms (what's routine in the principal's
  * world). Scoping the persona-as-judge briefing to these three keeps it
  * threat-relevant and keeps sensitive operational memory (finances, inbox,
- * daily dumps, commitments) out of the judge entirely. Read in FULL now, not
- * as snippets — see DRAWERS_CAP_BYTES. Paths are relative to the persona dir.
+ * daily dumps, commitments) out of the judge entirely. Read as whole entries
+ * now rather than FTS snippets, but NOT unbounded: the three are concatenated
+ * IN THIS ORDER and the result is capped at DRAWERS_CAP_BYTES, so the last
+ * drawer listed here is the first content dropped when the briefing runs
+ * long. Paths are relative to the persona dir.
  *
  * Exported so the scaffold can be tested against it: a drawer the judge briefs
  * from but `ensurePersonaScaffold` never seeds is invisible on a fresh persona
@@ -492,11 +497,13 @@ export function resolveNotifyPersona(
 }
 
 /**
- * Read the briefing drawers (decisions/people/norms) in FULL from the persona
- * dir, concatenate them under short headers, and cap the total at
- * DRAWERS_CAP_BYTES (truncating with a marker if larger). This replaces the
- * old truncated FTS snippets — full rulings fix concern #1's "nuance lost to
- * truncation". Best-effort per file (missing files are skipped); never throws.
+ * Read the briefing drawers (decisions/people/norms) from the persona dir,
+ * concatenate them under short headers IN BRIEFING_DRAWERS ORDER, and cap the
+ * TOTAL at DRAWERS_CAP_BYTES (truncating with a marker if larger). This
+ * replaces the old truncated FTS snippets — whole rulings fix concern #1's
+ * "nuance lost to truncation" — but the cap is shared, so an oversized early
+ * drawer can crowd a later one out of the briefing entirely. Best-effort per
+ * file (missing files are skipped); never throws.
  * Returns undefined when no drawer exists, so buildSystemPrompt omits the
  * retrieved-context slot entirely.
  */

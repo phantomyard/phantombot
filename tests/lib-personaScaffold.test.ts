@@ -170,5 +170,25 @@ describe("the scaffold seeds every drawer the rest of the system writes to", () 
     expect(norms).toContain("cap");
     expect(norms).toContain("heartbeat");
     expect(norms).not.toContain("IN FULL");
+    // The cap is shared and this drawer is concatenated last, so it is the
+    // first content dropped — the drawer has to say so, or "be exhaustive"
+    // looks free.
+    expect(norms).toContain("LAST");
+  });
+
+  test("no seeded drawer credits the nightly cycle with promotion", async () => {
+    // Promotion is the heartbeat's deterministic every-30-min pass
+    // (TAG_TO_DRAWER lives in heartbeat.ts); the nightly cycle is the
+    // cognitive catch-up for what the heartbeat could not file. Four drawer
+    // intros shipped the reverse for long enough that it was copied into a
+    // fifth, so assert the attribution rather than trusting review to catch
+    // the next copy.
+    await ensurePersonaScaffold(workdir);
+    for (const rel of new Set(Object.values(TAG_TO_DRAWER))) {
+      const body = await readFile(join(workdir, rel), "utf8");
+      expect(body).toContain("heartbeat promotes");
+      expect(body).not.toMatch(/nightly cycle promotes/i);
+      expect(body).not.toMatch(/promoted from daily files by the nightly/i);
+    }
   });
 });

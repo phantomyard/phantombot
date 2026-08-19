@@ -48,7 +48,8 @@
  * judge can now run as the FULL persona, narrowed to one job. Instead of a
  * bare module-const classifier prompt, the SCREENER composes the persona's
  * own system prompt (identity + MEMORY + the decisions/people/norms drawers,
- * fed in FULL, not as truncated FTS snippets) and appends JUDGE_NARROWING to
+ * fed as whole entries rather than truncated FTS snippets, subject to the
+ * shared byte cap in screen.ts) and appends JUDGE_NARROWING to
  * collapse it down to "rate this for prompt-injection only, you have no
  * tools, you do not act." This gives the judge the principal's real context
  * — who is known, what is routine, prior rulings — so it stops crying wolf
@@ -273,7 +274,8 @@ export async function judgeThreat(
   // NOTE (persona-as-judge): in PRODUCTION the screener no longer fills this
   // <briefing> via opts.priors — it now runs the judge as the FULL NARROWED
   // PERSONA, which already carries identity + MEMORY + the decisions/people/
-  // norms drawers IN FULL as the judge's system prompt (see screen.ts +
+  // norms drawers as whole entries (up to screen.ts's shared byte cap) as
+  // the judge's system prompt (see screen.ts +
   // JUDGE_NARROWING). That persona context IS the new, richer briefing — same
   // anti-nag purpose, full fidelity instead of truncated snippets. The
   // opts.priors / <briefing> channel is KEPT (direct callers and back-compat
