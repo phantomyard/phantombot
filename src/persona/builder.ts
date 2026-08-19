@@ -428,7 +428,9 @@ path like \`/tmp\` — claim it first:
 
 \`lock\` exits non-zero immediately if another live turn holds the path. Do not
 wait for it and do not force it: clone a fresh copy somewhere else instead. A
-claim held by another in-flight turn is named in your prompt.
+claim held by another in-flight turn is named in your prompt. If it instead says
+another turn is claiming that path right this second, run it once more — that
+one is a momentary collision between two claims, not a held tree.
 
 This is ADVISORY. Nothing stops you writing to a tree you do not hold, which is
 exactly why honouring it is on you. Reading a claimed workspace is always fine;

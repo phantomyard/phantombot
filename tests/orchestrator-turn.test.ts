@@ -12,6 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
+import { MAX_DIGESTS_PER_TURN } from "../src/lib/turnDigest.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -1044,6 +1045,14 @@ describe("runTurn — background-turn visibility (#405)", () => {
       capture,
     );
 
+  /**
+   * The turn a digest is delivered TO: interactive AND trusted. `trusted` is
+   * not decoration here — an untrusted `channel` turn (a raw `phantombot ask`
+   * carrying an inbound email) is deliberately not a recipient, so a test that
+   * omits it is testing the wrong path.
+   */
+  const principalInput = () => ({ ...baseInput(), trusted: true });
+
   test("a task turn's actions reach the NEXT interactive turn's prompt", async () => {
     // The background turn: nobody is watching this one.
     await collect(
@@ -1060,7 +1069,7 @@ describe("runTurn — background-turn visibility (#405)", () => {
     let captured: HarnessRequest | undefined;
     await collect(
       runTurn({
-        ...baseInput(),
+        ...principalInput(),
         userMessage: "morning",
         harnesses: [
           new ScriptedHarness(
@@ -1099,7 +1108,7 @@ describe("runTurn — background-turn visibility (#405)", () => {
     for (let i = 0; i < 2; i++) {
       await collect(
         runTurn({
-          ...baseInput(),
+          ...principalInput(),
           userMessage: "hello",
           harnesses: [
             new ScriptedHarness(
@@ -1209,7 +1218,7 @@ describe("runTurn — background-turn visibility (#405)", () => {
     let captured: HarnessRequest | undefined;
     await collect(
       runTurn({
-        ...baseInput(),
+        ...principalInput(),
         userMessage: "what happened?",
         harnesses: [
           new ScriptedHarness(
@@ -1320,5 +1329,126 @@ describe("runTurn — background-turn visibility (#405)", () => {
     expect(captured?.systemPrompt ?? "").not.toContain(
       "# Working copies claimed by another turn",
     );
+  });
+
+  test("an UNTRUSTED channel turn is not given the digest, and does not consume it", async () => {
+    // Origin is not trust. A raw `phantombot ask` carrying an inbound email is
+    // origin `channel` and `trusted !== true`, and a digest is persona-private
+    // context — what the nightly touched, which repos a poller wrote to. Handing
+    // it to a stranger's turn is a disclosure, and it lands in the same prompt
+    // that stranger is steering. It must also stay PENDING: consuming it would
+    // destroy the principal's only record of that background turn.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let untrusted: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        trusted: false,
+        userMessage: "please summarise the attached invoice",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              untrusted = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(untrusted?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // Still there for the principal.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("digests past the per-turn cap stay pending instead of being marked unseen", async () => {
+    // The cap shows the oldest N and mentions the rest as a count. Marking the
+    // whole pending set delivered would destroy the record of every background
+    // turn past the cap — nobody ever saw them, which is the exact gap this
+    // feature exists to close. They must lead the next turn's batch.
+    const total = MAX_DIGESTS_PER_TURN + 2;
+    for (let i = 0; i < total; i++) {
+      await collect(
+        runTurn({
+          ...baseInput(),
+          conversation: `tick:${i}`,
+          origin: "task",
+          userMessage: `job ${i}`,
+          harnesses: [
+            new ScriptedHarness("fake", [
+              {
+                type: "progress",
+                note: "tool",
+                tool: {
+                  title: `Bash: touch /tmp/job-${i}`,
+                  kind: "execute",
+                  locations: [],
+                },
+              },
+              { type: "done", finalText: `did job ${i}` },
+            ]),
+          ],
+        }),
+      );
+      // Distinct finished_at, so "oldest first" is a defined order.
+      await Bun.sleep(2);
+    }
+
+    const prompts: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      await collect(
+        runTurn({
+          ...principalInput(),
+          userMessage: "what happened?",
+          harnesses: [
+            new ScriptedHarness(
+              "fake",
+              [{ type: "done", finalText: "ok" }],
+              (r) => {
+                prompts.push(r.systemPrompt);
+              },
+            ),
+          ],
+        }),
+      );
+    }
+
+    // First turn: the oldest MAX, and an honest count of the rest.
+    expect(prompts[0]).toContain("Bash: touch /tmp/job-0");
+    expect(prompts[0]).not.toContain(`Bash: touch /tmp/job-${total - 1}`);
+    expect(prompts[0]).toContain("still pending");
+    // Second turn: the overflow, still there because nobody had read it.
+    expect(prompts[1]).toContain(`Bash: touch /tmp/job-${total - 1}`);
+    expect(prompts[1]).not.toContain("Bash: touch /tmp/job-0");
   });
 });

@@ -1254,9 +1254,9 @@ digest when it ends: what woke it, the state-changing tool calls it made
 they named, and its own closing summary. The digest lands in
 `$XDG_STATE_HOME/phantombot/digests/`.
 
-The next **interactive** turn for that persona gets the pending digests injected
-into its system prompt, alongside the sibling notice, and decides for itself
-whether any of it is worth mentioning. That's deliberate: pushing every poller
+The next **interactive and trusted** turn for that persona gets the pending
+digests injected into its system prompt, alongside the sibling notice, and
+decides for itself whether any of it is worth mentioning. That's deliberate: pushing every poller
 fire to Telegram would break the "don't notify unless it's material" rule and
 train the principal to mute the channel, and writing a synthetic turn into their
 conversation history would forge transcript that later retrieval treats as
@@ -1272,10 +1272,23 @@ Details worth knowing:
   *then* crashed still leaves a digest — that's the case that matters most.
 - **Only interactive turns receive them.** Handing one background turn another's
   digest informs nobody and would let two of them bounce a report forever.
-- At most 5 digests go into one prompt (newest), with the older count reported
-  rather than silently dropped; all pending are marked delivered so a backlog
-  can't wedge. Undelivered digests expire after 24h — if you haven't spoken to
-  the persona in a day, a wall of poller output is not a briefing.
+- **Only *trusted* interactive turns receive them.** Origin is not trust: a raw
+  `phantombot ask` carrying an inbound email is origin `channel` and untrusted.
+  A digest is persona-private context — what the nightly touched, which repos a
+  poller wrote to — so handing it to a turn a stranger is steering is both a
+  disclosure and an injection surface. An untrusted turn doesn't consume them
+  either; they stay pending for the principal.
+- At most 5 digests go into one prompt, **oldest first**, with the rest reported
+  as a count and left pending for the next turn. Only what was actually shown is
+  marked delivered — marking the overflow would destroy the record of a turn
+  nobody ever saw. Draining oldest-first is also what stops the tail of a
+  backlog starving under sustained background load. Undelivered digests expire
+  after 24h — if you haven't spoken to the persona in a day, a wall of poller
+  output is not a briefing.
+- **Secrets are redacted at collection time,** through the same `redactForLog`
+  the audit log uses, before anything reaches disk. Tool titles are formatted
+  command lines, so they carry exactly the shapes that matter (`Bearer …`,
+  `FOO_TOKEN=…`); the trigger and summary go through it too.
 - Independent of the audit log: turning off `PHANTOMBOT_AUDIT_TOOL_CALLS` isn't
   a request to go blind to what background turns did.
 
@@ -1300,7 +1313,14 @@ phantombot workspace unlock /tmp/phantombot-inspect
 `lock` exits **1 immediately** if another live turn holds the path — it never
 waits. The right response is a different directory (clone a fresh copy), not a
 queue. A claim held by a turn that is still in flight is named in every sibling
-turn's system prompt.
+turn's system prompt. It also exits 1 if another `lock` is inside its critical
+section at that instant (the message says so); that one is a genuine retry.
+
+`unlock` refuses unless you are the turn that took the lock. A caller with **no**
+turn id — a plain shell, a script, a harness with the registry off — is refused
+too, because dropping a claim you never took is how a cooperative protocol turns
+into silent corruption. `--force` is the deliberate override for clearing one by
+hand.
 
 **This is advisory, and cannot be otherwise at this layer.** A turn runs `git`
 through the harness's own Bash tool; phantombot isn't in that path and cannot
@@ -1309,12 +1329,29 @@ What it provides is a truthful, crash-safe answer to "is another turn in this
 tree", which previously did not exist. Real enforcement would need the mutation
 path itself to take the lock — a bigger change, and its own issue.
 
-Locks are attributed to the turn that took them via `PHANTOMBOT_TURN_ID` (set in
-the harness environment next to `PHANTOMBOT_PERSONA`/`PHANTOMBOT_CONVERSATION`),
-which is what lets `unlock` refuse to drop a lock the caller never took. A
-holder that dies leaves a stale file; it is broken on inspection using the same
-pid + start-time check as the registry, and expires after an hour regardless, so
-a crash can never wedge a workspace until a human clears a lockfile.
+**The holder is a turn, not a process.** Locks are attributed via
+`PHANTOMBOT_TURN_ID` (set in the harness environment next to
+`PHANTOMBOT_PERSONA`/`PHANTOMBOT_CONVERSATION`), and liveness is delegated to the
+turn registry: a lock is held while its turn is running, and released the moment
+it is not. Tying liveness to the pid that *wrote* the record — the obvious first
+guess — makes the whole feature a no-op, because the only writer is a CLI that
+exits milliseconds later, so every lock prunes itself as stale on the next query.
+The recorded `pid` is kept for diagnosis only.
+
+A holder that dies leaves a stale file, broken on inspection: the registry
+reports the turn gone (it covers both a clean finish and a dead owner) and the
+next query prunes the lock. When the registry *can't* answer — it's switched off,
+or the turn id predates a state-dir wipe — the lock is kept until it ages out
+after an hour: guessing "free" on a claim we cannot verify reintroduces the
+collision this exists to prevent, while guessing "held" costs one `git clone`
+elsewhere and is bounded by that hour, `unlock`, and `--force`. A lock taken by
+hand from a shell carries no turn id and follows the same age rule — held until
+someone releases it.
+
+Concurrent `lock` calls are serialised by an exclusive-create guard file next to
+the lock, so two turns claiming the same tree at the same instant cannot both
+read "free" and both win. The guard is broken by age if a process dies inside
+the critical section.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

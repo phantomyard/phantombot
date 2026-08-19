@@ -303,11 +303,77 @@ describe("digestNotice", () => {
 
   test("reports the overflow count rather than silently hiding it", () => {
     const notice = digestNotice([write()], 3) ?? "";
-    expect(notice).toContain("3 older background turns");
+    expect(notice).toContain("3 more recent background turns");
+    // Still pending, not written off — the caller marks only what it showed.
+    expect(notice).toContain("still pending");
   });
 
   test("MAX_DIGESTS_PER_TURN keeps the block bounded", () => {
     expect(MAX_DIGESTS_PER_TURN).toBeGreaterThan(0);
     expect(MAX_DIGESTS_PER_TURN).toBeLessThanOrEqual(10);
+  });
+});
+
+/**
+ * A digest is durable, persona-private state that later lands in a prompt, so a
+ * credential inside one is a leak with a 24-hour half-life. Redaction happens at
+ * COLLECTION time — before anything reaches disk — for the same reason auditLog
+ * redacts on write rather than on read.
+ */
+describe("secret redaction", () => {
+  test("a bearer token in a tool title never reaches the digest", () => {
+    const collector = new DigestCollector();
+    collector.record(
+      detail({
+        title:
+          'Bash: curl -H "Authorization: Bearer abcdef1234567890abcdef" https://api.example.com',
+      }),
+    );
+    const { actions } = collector.snapshot();
+    expect(actions[0]!.title).not.toContain("abcdef1234567890abcdef");
+    expect(actions[0]!.title).toContain("[REDACTED]");
+  });
+
+  test("a credential-shaped assignment in a title is masked", () => {
+    const collector = new DigestCollector();
+    collector.record(
+      detail({
+        title: "Bash: GITHUB_TOKEN=ghp_reallylongsecretvalue123456 gh pr merge",
+      }),
+    );
+    const title = collector.snapshot().actions[0]!.title;
+    expect(title).not.toContain("reallylongsecretvalue123456");
+  });
+
+  test("paths are redacted too — a token can be in a URL or a filename", () => {
+    const collector = new DigestCollector();
+    collector.record(
+      detail({
+        kind: "edit",
+        locations: [{ path: "/tmp/sk-abcdefghijklmnopqrstuvwx/notes.md" }],
+      }),
+    );
+    const paths = collector.snapshot().actions[0]!.paths ?? [];
+    expect(paths[0]).not.toContain("abcdefghijklmnopqrstuvwx");
+  });
+
+  test("the trigger and the summary are redacted on the way to disk", async () => {
+    recordDigest(
+      {
+        persona: "robbie",
+        conversation: "task:poller",
+        origin: "task",
+        trigger: "poll with API_KEY=supersecretvalue123",
+        summary: "used ghp_abcdefghijklmnopqrstuvwxyz012345 to push",
+        startedAt: NOW,
+        actions: [],
+      },
+      { dir, now: NOW },
+    );
+    const [name] = await readdir(dir);
+    const raw = await readFile(join(dir, name!), "utf8");
+    expect(raw).not.toContain("supersecretvalue123");
+    expect(raw).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz012345");
+    expect(raw).toContain("REDACTED");
   });
 });

@@ -12,9 +12,15 @@
  * previously did not exist at all.
  *
  * `PHANTOMBOT_TURN_ID` and `PHANTOMBOT_CONVERSATION` are read from the harness
- * environment so a claim is attributable to the turn that made it — that is
- * what lets `release` refuse to drop a lock the caller never took, and what
- * lets the orchestrator show a sibling's claims in the prompt.
+ * environment so a claim is attributable to the turn that made it. The turn id
+ * is load-bearing, not bookkeeping: this CLI exits milliseconds after it writes
+ * the lock, so the turn — looked up in the #404 registry — is the only thing
+ * still alive to hold it. It is also what lets `unlock` refuse to drop a lock
+ * the caller never took, and what lets the orchestrator show a sibling's claims
+ * in the prompt.
+ *
+ * A lock taken from a plain shell has no turn id. That is supported, and means
+ * "held until someone unlocks it (or an hour passes)" — see lib/workspaceLock.ts.
  */
 
 import { defineCommand } from "citty";
@@ -74,11 +80,16 @@ export default defineCommand({
           purpose: args.purpose ? String(args.purpose) : undefined,
         });
         if (!result.ok) {
+          // Contention is a DIFFERENT answer from "held", and saying so matters:
+          // held means go elsewhere, contended means two claims raced and the
+          // same command a moment later will get a truthful held/free answer.
           process.stderr.write(
-            `workspace ${result.heldBy.workspace} is held by ${result.heldBy.conversation} ` +
-              `since ${result.heldBy.acquired_at}` +
-              (result.heldBy.purpose ? ` (${result.heldBy.purpose})` : "") +
-              `\nUse a different directory — do not wait, and do not write here.\n`,
+            result.reason === "contended"
+              ? `another turn is claiming ${String(args.path)} right now — retry once, then use a different directory\n`
+              : `workspace ${result.heldBy.workspace} is held by ${result.heldBy.conversation} ` +
+                  `since ${result.heldBy.acquired_at}` +
+                  (result.heldBy.purpose ? ` (${result.heldBy.purpose})` : "") +
+                  `\nUse a different directory — do not wait, and do not write here.\n`,
           );
           process.exitCode = 1;
           return;
@@ -117,8 +128,10 @@ export default defineCommand({
           force: Boolean(args.force),
         });
         if (!ok) {
+          // Also the no-turn-id case: a claim made by a turn is not something a
+          // bare shell gets to drop by accident.
           process.stderr.write(
-            `refusing to unlock ${args.path}: it is held by a different turn (use --force to override)\n`,
+            `refusing to unlock ${args.path}: it is held by another turn (use --force to override)\n`,
           );
           process.exitCode = 1;
           return;

@@ -59,6 +59,7 @@ import { join } from "node:path";
 
 import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
+import { redactForLog } from "./redact.ts";
 import type { ToolCallDetail, ToolKind } from "../harnesses/toolNote.ts";
 import type { TurnOrigin } from "../memory/store.ts";
 
@@ -82,7 +83,12 @@ const MATERIAL_KINDS: readonly ToolKind[] = [
 /** Max actions recorded per digest. */
 const MAX_ACTIONS = 12;
 
-/** Max digests injected into one turn's prompt. */
+/**
+ * Max digests injected into one turn's prompt.
+ *
+ * Overflow past this is NOT delivered and NOT marked — see the FIFO note on
+ * `pendingDigests`. It waits for the next interactive turn.
+ */
 export const MAX_DIGESTS_PER_TURN = 5;
 
 /** Max characters of a background turn's closing summary that we keep. */
@@ -202,8 +208,19 @@ export class DigestCollector {
     }
     const paths = (detail.locations ?? [])
       .map((l) => l.path)
-      .filter((p): p is string => typeof p === "string" && p.length > 0);
-    const action: DigestAction = { kind: detail.kind, title: detail.title };
+      .filter((p): p is string => typeof p === "string" && p.length > 0)
+      .map(redactForLog);
+    // Redact at COLLECTION time, not on render. A tool title is a formatted
+    // command line — `curl -H "Authorization: Bearer …"`, `FOO_TOKEN=… deploy`
+    // — so it carries exactly the shapes redactForLog exists for. Doing it here
+    // means the secret is never written to the digest file in the first place;
+    // redacting only on the way into the prompt would leave it in plaintext on
+    // disk for a day, which is the leak. auditLog.ts does the same to the same
+    // field, and a digest is no less durable than an audit line.
+    const action: DigestAction = {
+      kind: detail.kind,
+      title: redactForLog(detail.title),
+    };
     if (paths.length > 0) action.paths = paths;
     this.actions.push(action);
   }
@@ -238,7 +255,12 @@ export function recordDigest(
   // A turn that changed nothing AND said nothing is not news. A turn that
   // changed nothing but produced a summary still is: "checked the queue, found
   // three failures" is exactly the kind of thing that currently vanishes.
-  const summary = truncate(input.summary, MAX_SUMMARY_CHARS);
+  // Redacted for the same reason as the actions: the trigger is a task prompt
+  // and the summary is free text the turn wrote after reading tool output, so
+  // either can carry a credential it echoed. Over-redaction (an email masked in
+  // a summary) is the correct trade here — the digest is a heads-up, not a
+  // record of record; the transcript remains that.
+  const summary = truncate(redactForLog(input.summary), MAX_SUMMARY_CHARS);
   if (input.actions.length === 0 && summary.length === 0) return undefined;
 
   const now = probes.now ?? new Date();
@@ -247,7 +269,7 @@ export function recordDigest(
     persona: input.persona,
     conversation: input.conversation,
     origin: input.origin,
-    trigger: truncate(input.trigger, 200),
+    trigger: truncate(redactForLog(input.trigger), 200),
     summary,
     actions: input.actions,
     started_at: input.startedAt.toISOString(),
@@ -281,6 +303,13 @@ function isPrunable(digest: TurnDigest, now: Date): boolean {
  *
  * Oldest first because these are read as a narrative of what happened while the
  * principal was away; reverse-chronological would tell the story backwards.
+ *
+ * It is also what makes the MAX_DIGESTS_PER_TURN cap safe. The caller takes the
+ * FIRST N and marks only those delivered, so a backlog drains front-to-back
+ * over successive turns. Taking the NEWEST N instead would starve the oldest
+ * digests permanently under any sustained background load — they would be
+ * pushed past the cap on every turn and expire unread, which is the failure the
+ * cap was supposed to avoid.
  */
 export function pendingDigests(
   persona: string,
@@ -330,7 +359,10 @@ export function pendingDigests(
 }
 
 /**
- * Mark digests delivered. Called only after the receiving turn SUCCEEDS.
+ * Mark digests delivered. Called only after the receiving turn SUCCEEDS, and
+ * only for the digests that were actually SHOWN — an overflow digest the prompt
+ * mentioned as a bare count has not been delivered to anyone and must stay
+ * pending.
  *
  * Rewrites rather than unlinks so a delivered digest stays readable for its
  * retention window — when the principal asks "what did you just tell me about
@@ -415,11 +447,15 @@ export function digestNotice(
     "or list it back to the principal unprompted.",
   ].join("\n");
 
+  // The overflow is NEWER than what is shown (oldest-first drain), and it is
+  // still pending — so the wording promises it rather than writing it off.
   const footer =
     overflow > 0
-      ? `\n\n(${overflow} older background ${
+      ? `\n\n(${overflow} more recent background ${
           overflow === 1 ? "turn" : "turns"
-        } also ran and are not shown.)`
+        } also ran; ${
+          overflow === 1 ? "it is" : "they are"
+        } still pending and will be reported next time.)`
       : "";
 
   return `${header}\n\n${blocks.join("\n\n")}${footer}`;

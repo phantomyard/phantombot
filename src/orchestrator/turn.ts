@@ -446,10 +446,20 @@ async function* runTurnBody(
   // become visible. Delivered ONLY to an interactive turn — handing a task
   // wake the digest of another task wake tells nobody anything, and would let
   // two background turns bounce a report between themselves forever.
-  const digests = isInteractiveOrigin(origin)
-    ? pendingDigests(input.persona)
-    : [];
-  const shownDigests = digests.slice(-MAX_DIGESTS_PER_TURN);
+  //
+  // And only to a TRUSTED one. Origin is not trust: a raw `phantombot ask` from
+  // an inbound email or a webhook is origin `channel` and `trusted !== true`,
+  // and a digest is persona-private context — what the nightly touched, which
+  // repos and paths a poller wrote to. Handing that to a turn driven by an
+  // untrusted stranger is both a disclosure and an injection surface, since the
+  // digest text lands in the same prompt the stranger is steering. The
+  // principal's own turn is the only correct recipient, and the untrusted turn
+  // does not consume the digest either — it stays pending for that turn.
+  const deliverDigests = isInteractiveOrigin(origin) && input.trusted === true;
+  const digests = deliverDigests ? pendingDigests(input.persona) : [];
+  // Oldest first, so a backlog drains front-to-back instead of starving its
+  // tail — see pendingDigests.
+  const shownDigests = digests.slice(0, MAX_DIGESTS_PER_TURN);
   const digestBlock = digestNotice(
     shownDigests,
     digests.length - shownDigests.length,
@@ -562,8 +572,12 @@ async function* runTurnBody(
   // design — a turn that dies mid-flight re-delivers on the next one. Marking
   // at injection time would drop a background turn's only trace precisely when
   // the box is unhealthy, which is when it matters most.
+  // ONLY the digests actually shown. The overflow appeared as a bare count, so
+  // nobody has read it; marking it delivered here would destroy the record of a
+  // background turn the principal never saw, which is precisely the gap #405
+  // exists to close. It stays pending and leads the next turn's batch.
   if (succeeded && shownDigests.length > 0) {
-    markDelivered(digests.map((d) => d.id));
+    markDelivered(shownDigests.map((d) => d.id));
   }
 
   if (succeeded && !input.noHistory) {

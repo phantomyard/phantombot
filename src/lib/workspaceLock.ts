@@ -21,23 +21,42 @@
  * itself to take the lock (a git wrapper, or a harness-level hook), which is a
  * bigger change than this one and belongs in its own issue.
  *
- * ── Why not flock ──
- * `flock(2)` would be genuinely mandatory-ish and crash-safe for free, and it
- * is what `lib/runLock.ts` uses. It is the wrong tool HERE: an fd-backed lock
- * dies with the process that opened it, and the holder we need to represent is
- * a TURN — which outlives no process boundary we control and may be one of
- * several in a single daemon. We also need to answer "who holds it, and since
- * when" from a DIFFERENT process, which an fd cannot tell you. So: a JSON file
- * plus the #403 pid+start-time liveness check, the same pattern the turn
- * registry uses, for the same reasons.
+ * ── The holder is a TURN, not a process ──
+ * First cut of this module tied liveness to `process.pid`, copying the turn
+ * registry. That made the whole feature a no-op, and the reason is worth
+ * keeping written down: the only caller is `phantombot workspace lock`, a CLI
+ * that exits milliseconds after it writes the file, so the recorded pid was
+ * always dead by the time anyone read it and every lock pruned itself as stale
+ * on the very next query. The daemon process that runs the turn is the wrong
+ * answer too — it hosts several turns at once and outlives all of them.
  *
- * ── Crash safety ──
- * A holder that dies without releasing leaves a stale file. It is broken on
- * inspection, not by a timer: a lock is only held if its owner pid is still the
- * SAME process (`lib/processLiveness.ts`) and it is younger than
- * MAX_LOCK_AGE_MS. An unprobeable platform falls back to the pid check, and a
- * stale lock is taken over silently — the alternative, a wedged workspace that
- * needs a human to clear a lockfile, is worse than the race it prevents.
+ * So the holder is the TURN, and liveness is delegated to the #404 registry:
+ * a lock carrying a `turn_id` is held while that turn is running, and released
+ * the moment it is not. `pid` is retained for diagnosis only, never for
+ * liveness.
+ *
+ * ── Crash safety, and what happens when we cannot tell ──
+ * A holder that dies without releasing leaves a stale file, broken on
+ * inspection rather than by a timer: the registry reports the turn finished (or
+ * its owning process died — `isRunning` covers both) and the next query prunes
+ * the lock.
+ *
+ * When the registry cannot answer — it is disabled, or the turn id is not in it
+ * at all — we fall back to AGE ALONE and keep the lock until MAX_LOCK_AGE_MS.
+ * That direction is deliberate. Guessing "free" on a lock we cannot verify
+ * reintroduces exactly the collision this exists to prevent, whereas guessing
+ * "held" costs a second turn a `git clone` into a different directory, and is
+ * bounded: an hour, `--force`, or a plain `unlock`. Locks taken by hand from a
+ * shell carry no turn id and are governed by that same age rule — they are held
+ * until released, which is what someone taking a lock by hand means.
+ *
+ * ── Why not flock ──
+ * `flock(2)` would be mandatory-ish and crash-safe for free, and it is what
+ * `lib/runLock.ts` uses. It is the wrong tool HERE for the same reason pid
+ * liveness was: an fd-backed lock dies with the process that opened it, and the
+ * holder we need to represent outlives the CLI that claims it. We also need to
+ * answer "who holds it, and since when" from a DIFFERENT process, which an fd
+ * cannot tell you. So: a JSON file, plus the registry for liveness.
  *
  * Toggle: `PHANTOMBOT_WORKSPACE_LOCKS=0/off/false/no` disables — every acquire
  * succeeds and every query reports unheld, which is the pre-#405 behaviour.
@@ -45,19 +64,23 @@
 
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
+import { readRegistry, registryEnabled } from "./turnRegistry.ts";
 import {
-  isSameProcess,
   selfStartToken,
   type ProcessAliveProbe,
   type ProcessStartProbe,
@@ -66,22 +89,43 @@ import {
 /**
  * Age past which a held lock is considered abandoned.
  *
- * Backstop for the leak the pid check cannot see: a long-lived daemon whose
- * turn was abandoned without running its release path stays "alive and the same
- * process" forever. One hour matches MAX_TURN_LIFETIME_MS in the turn registry
- * — a lock cannot outlive the turn that holds it.
+ * Backstop for everything the registry cannot see: a lock whose turn id is
+ * unknown to it, or a hand-taken lock with no turn at all. One hour matches
+ * MAX_TURN_LIFETIME_MS in the turn registry — a lock cannot outlive the longest
+ * turn we are willing to believe in.
  */
 export const MAX_LOCK_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * How long the acquire critical section may be guarded before the guard itself
+ * is presumed abandoned. Generous next to the work it protects (one read, one
+ * rename) so a loaded box never breaks a live guard, tight enough that a
+ * process killed mid-acquire does not wedge the workspace.
+ */
+const GUARD_STALE_MS = 5_000;
+
+/** Attempts, and backoff between them, when another acquire holds the guard. */
+const GUARD_ATTEMPTS = 6;
+const GUARD_BACKOFF_MS = 20;
 
 export interface WorkspaceLockRecord {
   /** Absolute, resolved path of the working copy. */
   workspace: string;
-  /** Turn id from the turn registry, when the caller has one. */
+  /**
+   * Turn id from the #404 registry, when the caller has one. This — not `pid`
+   * — is what liveness is judged on. Absent for a lock taken by hand.
+   */
   turn_id?: string;
   persona: string;
   conversation: string;
+  /**
+   * Process that wrote the record. DIAGNOSTIC ONLY: for the CLI this is a
+   * process that exits immediately, so it says nothing about whether the lock
+   * is live. Kept because "which process claimed this" is useful when reading
+   * a lock by hand.
+   */
   pid: number;
-  /** Start token for `pid` — see lib/processLiveness.ts. */
+  /** Start token for `pid` — see lib/processLiveness.ts. Diagnostic only. */
   pid_start?: string;
   acquired_at: string;
   /** Free-text note on what the holder is doing. */
@@ -103,9 +147,16 @@ export function defaultLockDir(): string {
 
 export interface LockProbes {
   dir?: string;
+  /** Turn registry directory, when it is not the default (tests). */
+  registryDir?: string;
   now?: Date;
   isAlive?: ProcessAliveProbe;
   startToken?: ProcessStartProbe;
+  /**
+   * Override turn liveness. `true`/`false` answer it; `undefined` means "cannot
+   * tell", which sends the caller to the age-only fallback.
+   */
+  turnRunning?: (turnId: string) => boolean | undefined;
 }
 
 /**
@@ -125,25 +176,109 @@ export function normalizeWorkspace(workspace: string): string {
   return resolve(workspace);
 }
 
-function writeLock(dir: string, record: WorkspaceLockRecord): void {
-  mkdirSync(dir, { recursive: true });
-  const finalPath = join(dir, lockFileName(record.workspace));
-  const tmpPath = `${finalPath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(record), "utf8");
-  renameSync(tmpPath, finalPath);
+/** Block this thread briefly. Used only for guard backoff, only in milliseconds. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      /* Atomics unavailable — spin. Bounded by GUARD_BACKOFF_MS. */
+    }
+  }
+}
+
+/**
+ * Serialise the acquire critical section.
+ *
+ * Acquire is read-check-write, and without this two `workspace lock` calls
+ * racing on the same tree both read "free", both write, and both believe they
+ * won — the precise failure the module exists to prevent, reproduced inside it.
+ * `open(…, "wx")` is the atom: the kernel gives exclusive create to exactly one
+ * caller, and everyone else sees EEXIST.
+ *
+ * Returns a release function, or undefined when the guard could not be taken —
+ * which the caller must report as contention rather than papering over, because
+ * proceeding without the guard is proceeding with the race.
+ *
+ * Staleness is judged against the WALL CLOCK, not the caller's injected `now`.
+ * The guard's age comes from a real mtime written by a real process moments
+ * ago; a test that pins `now` to a fixed date is reasoning about lock RECORDS,
+ * and applying that clock here would either break live guards or preserve dead
+ * ones depending on which side of the pinned date the suite runs.
+ */
+function takeGuard(dir: string, workspace: string): (() => void) | undefined {
+  const guardPath = join(dir, `${lockFileName(workspace)}.guard`);
+  for (let attempt = 0; attempt < GUARD_ATTEMPTS; attempt += 1) {
+    try {
+      const fd = openSync(guardPath, "wx");
+      try {
+        writeSync(fd, String(process.pid));
+      } finally {
+        closeSync(fd);
+      }
+      return () => {
+        try {
+          unlinkSync(guardPath);
+        } catch {}
+      };
+    } catch {
+      // Held by someone else — or abandoned by a process that died inside the
+      // critical section, which we break by age so a crash cannot wedge a tree.
+      try {
+        const age = Date.now() - statSync(guardPath).mtimeMs;
+        if (age > GUARD_STALE_MS) {
+          unlinkSync(guardPath);
+          continue;
+        }
+      } catch {
+        // Vanished between the failed create and the stat: it was released, so
+        // retry immediately rather than sleeping on a guard nobody holds.
+        continue;
+      }
+      if (attempt < GUARD_ATTEMPTS - 1) sleepSync(GUARD_BACKOFF_MS);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Is the turn holding this lock still running?
+ *
+ * `undefined` means the registry cannot answer — it is switched off, or the id
+ * is not in it. Both go to the age-only fallback; see the header for why we
+ * fail toward "still held".
+ */
+function turnRunning(turnId: string, probes: LockProbes): boolean | undefined {
+  if (probes.turnRunning) return probes.turnRunning(turnId);
+  if (!registryEnabled()) return undefined;
+  const snapshot = readRegistry({
+    dir: probes.registryDir,
+    now: probes.now,
+    isAlive: probes.isAlive,
+    startToken: probes.startToken,
+  });
+  if (snapshot.running.some((turn) => turn.id === turnId)) return true;
+  if (snapshot.recent.some((turn) => turn.id === turnId)) return false;
+  return undefined;
+}
+
+function withinMaxAge(record: WorkspaceLockRecord, now: Date): boolean {
+  const acquired = Date.parse(record.acquired_at);
+  if (Number.isNaN(acquired)) return false;
+  return now.getTime() - acquired <= MAX_LOCK_AGE_MS;
 }
 
 function isHeld(
   record: WorkspaceLockRecord,
   now: Date,
-  isAlive?: ProcessAliveProbe,
-  startToken?: ProcessStartProbe,
+  probes: LockProbes,
 ): boolean {
-  const acquired = Date.parse(record.acquired_at);
-  if (!Number.isNaN(acquired) && now.getTime() - acquired > MAX_LOCK_AGE_MS) {
-    return false;
-  }
-  return isSameProcess(record.pid, record.pid_start, isAlive, startToken);
+  // The age ceiling applies to every lock, however confident we are in it.
+  if (!withinMaxAge(record, now)) return false;
+  if (!record.turn_id) return true;
+  const running = turnRunning(record.turn_id, probes);
+  return running ?? true;
 }
 
 function readLock(
@@ -157,7 +292,7 @@ function readLock(
     ) as WorkspaceLockRecord;
     if (
       typeof record?.workspace !== "string" ||
-      typeof record?.pid !== "number"
+      typeof record?.acquired_at !== "string"
     ) {
       try {
         unlinkSync(path);
@@ -170,6 +305,14 @@ function readLock(
   }
 }
 
+function writeLock(dir: string, record: WorkspaceLockRecord): void {
+  mkdirSync(dir, { recursive: true });
+  const finalPath = join(dir, lockFileName(record.workspace));
+  const tmpPath = `${finalPath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(record), "utf8");
+  renameSync(tmpPath, finalPath);
+}
+
 /** Who holds this workspace right now, if anyone. Prunes a stale lock as it reads. */
 export function workspaceHolder(
   workspace: string,
@@ -180,9 +323,7 @@ export function workspaceHolder(
   const now = probes.now ?? new Date();
   const found = readLock(dir, normalizeWorkspace(workspace));
   if (!found) return undefined;
-  if (isHeld(found.record, now, probes.isAlive, probes.startToken)) {
-    return found.record;
-  }
+  if (isHeld(found.record, now, { ...probes, now })) return found.record;
   try {
     unlinkSync(found.path);
   } catch {}
@@ -191,7 +332,8 @@ export function workspaceHolder(
 
 export type AcquireResult =
   | { ok: true; record: WorkspaceLockRecord; tookOver: boolean }
-  | { ok: false; heldBy: WorkspaceLockRecord };
+  | { ok: false; reason: "held"; heldBy: WorkspaceLockRecord }
+  | { ok: false; reason: "contended" };
 
 /**
  * Claim a workspace.
@@ -231,39 +373,56 @@ export function acquireWorkspace(
   if (!locksEnabled()) return { ok: true, record, tookOver: false };
 
   const dir = probes.dir ?? defaultLockDir();
-  const existing = readLock(dir, workspace);
-  let tookOver = false;
-  if (existing) {
-    const held = isHeld(
-      existing.record,
-      now,
-      probes.isAlive,
-      probes.startToken,
-    );
-    const mine =
-      input.turnId !== undefined && existing.record.turn_id === input.turnId;
-    if (held && !mine) return { ok: false, heldBy: existing.record };
-    tookOver = !held;
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {}
+
+  const releaseGuard = takeGuard(dir, workspace);
+  if (!releaseGuard) {
+    // Another acquire is inside the critical section. We cannot read-check-write
+    // safely, and we will not guess: report contention and let the caller pick a
+    // different directory, exactly as it would for a live holder.
+    log.debug("workspaceLock: acquire contended", { workspace });
+    return { ok: false, reason: "contended" };
   }
 
   try {
-    writeLock(dir, record);
-  } catch (e) {
-    // A lock we cannot write is a lock nobody can see. Fail OPEN: refusing the
-    // turn's work because a state file would not write turns a visibility
-    // feature into an outage.
-    log.debug("workspaceLock: acquire failed", { error: (e as Error).message });
-    return { ok: true, record, tookOver: false };
+    const existing = readLock(dir, workspace);
+    let tookOver = false;
+    if (existing) {
+      const held = isHeld(existing.record, now, { ...probes, now });
+      const mine =
+        input.turnId !== undefined && existing.record.turn_id === input.turnId;
+      if (held && !mine)
+        return { ok: false, reason: "held", heldBy: existing.record };
+      tookOver = !held;
+    }
+
+    try {
+      writeLock(dir, record);
+    } catch (e) {
+      // A lock we cannot write is a lock nobody can see. Fail OPEN: refusing the
+      // turn's work because a state file would not write turns a visibility
+      // feature into an outage.
+      log.debug("workspaceLock: acquire failed", {
+        error: (e as Error).message,
+      });
+      return { ok: true, record, tookOver: false };
+    }
+    return { ok: true, record, tookOver };
+  } finally {
+    releaseGuard();
   }
-  return { ok: true, record, tookOver };
 }
 
 /**
  * Release a workspace.
  *
- * Only the holder may release. `turnId` is checked when both sides have one, so
- * a turn cannot drop a lock it never took — the classic way a cooperative
- * protocol turns into silent corruption.
+ * Only the holder may release. A record attributed to a turn is released by
+ * THAT turn or by `force`, and by nothing else — including a caller with no
+ * turn id at all, which is how a plain shell would otherwise drop a live claim
+ * without meaning to. A record with no turn id was taken by hand, so a hand can
+ * drop it.
  */
 export function releaseWorkspace(
   workspace: string,
@@ -272,17 +431,29 @@ export function releaseWorkspace(
 ): boolean {
   if (!locksEnabled()) return true;
   const dir = probes.dir ?? defaultLockDir();
-  const found = readLock(dir, normalizeWorkspace(workspace));
-  if (!found) return true;
-  if (!opts.force && opts.turnId && found.record.turn_id) {
-    if (found.record.turn_id !== opts.turnId) return false;
-  }
+  const normalized = normalizeWorkspace(workspace);
+
+  // Take the guard so a release cannot land between a concurrent acquire's
+  // read and its write. Unlike acquire we proceed without it: unlink is atomic,
+  // and refusing to release is how a workspace stays claimed forever.
+  const releaseGuard = takeGuard(dir, normalized);
   try {
-    unlinkSync(found.path);
-    return true;
-  } catch (e) {
-    log.debug("workspaceLock: release failed", { error: (e as Error).message });
-    return false;
+    const found = readLock(dir, normalized);
+    if (!found) return true;
+    if (!opts.force && found.record.turn_id) {
+      if (found.record.turn_id !== opts.turnId) return false;
+    }
+    try {
+      unlinkSync(found.path);
+      return true;
+    } catch (e) {
+      log.debug("workspaceLock: release failed", {
+        error: (e as Error).message,
+      });
+      return false;
+    }
+  } finally {
+    releaseGuard?.();
   }
 }
 
@@ -313,14 +484,14 @@ export function listWorkspaceLocks(
     }
     if (
       typeof record?.workspace !== "string" ||
-      typeof record?.pid !== "number"
+      typeof record?.acquired_at !== "string"
     ) {
       try {
         unlinkSync(path);
       } catch {}
       continue;
     }
-    if (!isHeld(record, now, probes.isAlive, probes.startToken)) {
+    if (!isHeld(record, now, { ...probes, now })) {
       try {
         unlinkSync(path);
       } catch {}
