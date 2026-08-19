@@ -35,6 +35,7 @@ import {
   type WorkspaceLockRecord,
 } from "../src/lib/workspaceLock.ts";
 import { registerTurn } from "../src/lib/turnRegistry.ts";
+import { processStartToken } from "../src/lib/processLiveness.ts";
 
 let dir: string;
 let registryDir: string;
@@ -847,6 +848,61 @@ describe("a guard is decided by ownership, never surrendered to age", () => {
     if (first.ok) first.release();
     expect(existsSync(older)).toBe(true);
   });
+});
+
+describe("a crashed holder is recovered by the REAL process probes", () => {
+  // The injected-probe tests above pin the decision logic; these two run the
+  // probes themselves — /proc on Linux, ps on macOS, Win32_Process.CreationDate
+  // on Windows, where a recycled pid used to wedge the guard forever because
+  // every ticket was written with no pid_start. The token must come from the
+  // same probe the recovery path will use: processStartToken, not a fixture.
+  const lock = () => fileFor(WS);
+
+  const spawnHolder = () =>
+    Bun.spawn(["bun", "-e", "Bun.sleepSync(30_000)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+  test("a live holder probed for real still blocks", async () => {
+    // The half that must never regress: a verifiably live owner is never
+    // stolen, whatever its ticket's age or spelling.
+    const child = spawnHolder();
+    try {
+      const ticket = putTicket(lock(), "guard-live", {
+        pid: child.pid,
+        pid_start: processStartToken(child.pid) ?? undefined,
+      });
+      const result = acquireWorkspace(
+        { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+        { now: NOW },
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe("contended");
+      expect(existsSync(ticket)).toBe(true);
+    } finally {
+      child.kill(9);
+      await child.exited;
+    }
+  }, 30_000);
+
+  test("crash, then reacquire — with no injected probes", async () => {
+    const child = spawnHolder();
+    const ticket = putTicket(lock(), "guard-crashed", {
+      pid: child.pid,
+      pid_start: processStartToken(child.pid) ?? undefined,
+    });
+    child.kill(9);
+    await child.exited;
+
+    const result = acquireWorkspace(
+      { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+      { now: NOW },
+    );
+    expect(result.ok).toBe(true);
+    // The dead holder's ticket was swept, not honoured.
+    expect(existsSync(ticket)).toBe(false);
+  }, 30_000);
 });
 
 describe("a broken state directory is not contention", () => {

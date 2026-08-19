@@ -369,9 +369,14 @@ describe("sweepLiveness", () => {
 });
 
 describe("processStartToken", () => {
-  // Only meaningful where a probe exists; elsewhere null is the contract.
+  // Only meaningful where a probe exists. Every supported desktop platform
+  // has one now: /proc on Linux, ps on macOS, Win32_Process.CreationDate on
+  // Windows (a ticket written with NO pid_start could not survive a pid
+  // recycle — see workspaceLock). Elsewhere null remains the contract.
   const supported =
-    process.platform === "linux" || process.platform === "darwin";
+    process.platform === "linux" ||
+    process.platform === "darwin" ||
+    process.platform === "win32";
 
   test("is stable across calls for this process", () => {
     const a = processStartToken(process.pid);
