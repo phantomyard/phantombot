@@ -459,7 +459,7 @@ describe("health alerting", () => {
       expect(chunks.at(-1)?.type).toBe("done");
     }
     expect(sent.length).toBe(1);
-    expect(sent[0]).toContain("authentication");
+    expect(sent[0]).toContain("auth failure");
   });
 
   test("the primary answering clears the run — no alert", async () => {
@@ -496,9 +496,7 @@ describe("health alerting", () => {
     );
     expect(chunks.at(-1)?.type).toBe("error");
     expect(sent.length).toBe(1);
-    // Headline only — the legend below names every glyph, so matching the
-    // whole message would pass regardless of the cause we classified.
-    expect(sent[0].split("\n")[0]).toContain("\u23f3\u2716 429");
+    expect(sent[0]).toContain("rate limited 429");
   });
 
   test("a terminal (non-recoverable) error does not alert", async () => {

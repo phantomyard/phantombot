@@ -93,29 +93,6 @@ export function classifyFailure(
   return "other";
 }
 
-/**
- * Legend appended to every alert.
- *
- * These messages are read by owners who do not necessarily read English, so
- * the payload above carries meaning in symbols, proper nouns and numbers —
- * harness ids, hostname, counts, HTTP status, the chain arrow. None of that
- * needs translating. What symbols alone cannot do is TEACH themselves, so a
- * legend rides along: the first alert someone ever receives should be
- * readable without a search. It costs a few lines in a message that fires at
- * most once per incident.
- *
- * Kept as one block so the glyph vocabulary has a single source of truth —
- * a symbol added to a message and not to the legend is a puzzle, and a
- * symbol reused for two causes is worse than prose.
- */
-const LEGEND = [
-  "\u2139\ufe0f  \u26a0\ufe0f degraded \u00b7 \ud83d\udea8 outage",
-  "\ud83d\udd11\u2716 auth \u00b7 \u23f3\u2716 rate limit \u00b7 \ud83d\udca5 other",
-  "\u00d7N failed turns \u00b7 \ud83d\udda5 host \u00b7 \u23f1 UTC",
-  "\u2705\u2190\ud83d\udcac now answering \u00b7 \u26d4 chain exhausted, 0 replies",
-  "\ud83d\udd27 fix \u00b7 \ud83d\udcc4 raw error",
-].join("\n");
-
 /** Sends one alert line to the owner. Injected so this module never
  *  imports a channel. Contracted to never throw. */
 export type AlertSender = (message: string) => Promise<void> | void;
@@ -213,16 +190,7 @@ export class HarnessAlerter {
     await this.emit(
       input.harnessId,
       "degraded",
-      [
-        `\u26a0\ufe0f ${input.harnessId} \ud83d\udd11\u2716 \u00d7${state.consecutiveFailures}${this.hostTag()}`,
-        `\u2705 ${input.servedBy} \u2190 \ud83d\udcac`,
-        `\ud83d\udd27 ${input.harnessId} /login`,
-        `\u23f1 ${this.stamp()}`,
-        "",
-        LEGEND,
-        "",
-        `\ud83d\udcc4 ${truncate(input.error)}`,
-      ].join("\n"),
+      `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, run \`${input.harnessId} /login\``,
     );
   }
 
@@ -239,12 +207,12 @@ export class HarnessAlerter {
     chain: string[];
   }): Promise<void> {
     const cause = classifyFailure(input.error, input.httpStatus);
-    const causeGlyph =
+    const label =
       cause === "rate_limit"
-        ? "\u23f3\u2716"
+        ? "rate limited"
         : cause === "auth"
-          ? "\ud83d\udd11\u2716"
-          : "\ud83d\udca5";
+          ? "auth failure"
+          : "harness error";
     const detail =
       cause === "rate_limit" && input.httpStatus
         ? ` ${input.httpStatus}`
@@ -254,15 +222,7 @@ export class HarnessAlerter {
     await this.emit(
       input.harnessId,
       "exhausted",
-      [
-        `\ud83d\udea8 ${input.harnessId} ${causeGlyph}${detail}${this.hostTag()}`,
-        `\u26d4 ${input.chain.join(" \u2192 ")} \u2192 \u2716  (0 \ud83d\udcac)`,
-        `\u23f1 ${this.stamp()}`,
-        "",
-        LEGEND,
-        "",
-        `\ud83d\udcc4 ${truncate(input.error)}`,
-      ].join("\n"),
+      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 no fallback left, turn undelivered`,
     );
   }
 
@@ -274,12 +234,6 @@ export class HarnessAlerter {
   /** ` \ud83d\udda5 <host>` — omitted entirely when the host is unknown. */
   private hostTag(): string {
     return this.host ? ` \ud83d\udda5 ${this.host}` : "";
-  }
-
-  /** `YYYY-MM-DD HH:MMZ`. UTC on purpose: the reader and the broken box are
-   *  routinely in different timezones, and Z is unambiguous in every locale. */
-  private stamp(): string {
-    return new Date(this.now()).toISOString().slice(0, 16).replace("T", " ") + "Z";
   }
 
   /**
@@ -320,10 +274,6 @@ export class HarnessAlerter {
       });
     }
   }
-}
-
-function truncate(text: string, limit = 200): string {
-  return text.length <= limit ? text : text.slice(0, limit) + "…";
 }
 
 /**
