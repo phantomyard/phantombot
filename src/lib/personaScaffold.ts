@@ -98,7 +98,7 @@ function seedFiles(today: string): Array<[string, string]> {
     ["memory/decisions.md", drawer("Decisions", `Choices with rationale. "We chose X because Y." Promoted from daily files by the nightly cycle.`)],
     ["memory/lessons.md", drawer("Lessons", "Mistakes and learnings. Grows, never shrinks.")],
     ["memory/commitments.md", drawer("Commitments", "Deadlines and obligations. The nightly cycle promotes [commitment]-tagged entries.")],
-    ["memory/norms.md", drawer("Norms", "What is ROUTINE in your owner's world. The threat judge reads this drawer IN FULL before scoring untrusted input, so entries here are what stop it flagging ordinary operations as attacks. Capture with `--tag norm`; the nightly cycle promotes [norm]-tagged entries.")],
+    ["memory/norms.md", drawer("Norms", "What is ROUTINE in your owner's world. Before scoring untrusted input the threat judge is briefed from this drawer alongside decisions and people — whole entries, not snippets, up to a shared ~16 KiB cap — so entries here are what stop it flagging ordinary operations as attacks. Keep them short and keep the drawer lean: past the cap the briefing is truncated. Capture with `--tag norm`; the heartbeat promotes [norm]-tagged lines from the daily file into this drawer.")],
 
     ["kb/Home.md", kbHome(today)],
 

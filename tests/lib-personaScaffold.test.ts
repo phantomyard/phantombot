@@ -163,5 +163,12 @@ describe("the scaffold seeds every drawer the rest of the system writes to", () 
     expect(norms).toContain("# Norms");
     expect(norms).toContain("threat judge");
     expect(norms).toContain("--tag norm");
+    // Accuracy, not decoration: the briefing shares a byte cap with the other
+    // two drawers, and promotion is the heartbeat's deterministic job. A
+    // drawer that claims otherwise teaches every fresh persona the wrong
+    // model of the one file its threat scoring depends on.
+    expect(norms).toContain("cap");
+    expect(norms).toContain("heartbeat");
+    expect(norms).not.toContain("IN FULL");
   });
 });
