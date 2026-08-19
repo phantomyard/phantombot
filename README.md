@@ -1429,6 +1429,17 @@ digests, for the same reason.
 | --- | --- | --- |
 | `PHANTOMBOT_WORKSPACE_LOCKS` | on (off under `NODE_ENV=test`) | Kill switch. Disabled means every `lock` succeeds and every query reports unheld. |
 | `PHANTOMBOT_WORKSPACE_LOCK_DIR` | `$XDG_STATE_HOME/phantombot/workspaces` | Relocate the lock files. |
+| `PHANTOMBOT_PROCESS_START_PROBE` | on | Off-switch for the process-identity probe that has to spawn a helper (macOS `ps`, Windows `wmic`/PowerShell). Off means the guard falls back to a plain pid check, which cannot detect pid reuse. Linux reads `/proc` and is unaffected either way. |
+
+On Windows and macOS there is no `/proc`, so answering "is the process that
+took this ticket still the same process?" costs a child process. That probe
+sits on a path budgeted in tens of milliseconds, so it asks the cheapest
+available tool first, remembers which one works (including that none does),
+caches an answer per pid for a few seconds, and runs every child with
+`windowsHide` so a console-less phantombot — the scheduled-task and service
+installs — never flashes a black window at you. Set
+`PHANTOMBOT_PROCESS_START_PROBE=0` where the interpreter is blocked by policy
+or simply unwanted; the lock still works, it just loses pid-reuse detection.
 
 ## Notifications
 

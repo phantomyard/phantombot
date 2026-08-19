@@ -8,7 +8,7 @@
  * lock. Several tests below exist specifically to keep that from coming back.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import {
   existsSync,
@@ -35,7 +35,19 @@ import {
   type WorkspaceLockRecord,
 } from "../src/lib/workspaceLock.ts";
 import { registerTurn } from "../src/lib/turnRegistry.ts";
-import { processStartToken } from "../src/lib/processLiveness.ts";
+import { processStartToken, selfStartToken } from "../src/lib/processLiveness.ts";
+
+/**
+ * Warm the one-off process-identity probe before any test is on the clock.
+ *
+ * Same reason as the turn-registry suite: off Linux the token costs a child
+ * process, and the guard asks for it the moment a foreign ticket appears. It is
+ * memoised per process, so paying it once here keeps a cold interpreter start
+ * out of a test's own budget.
+ */
+beforeAll(() => {
+  selfStartToken();
+}, 30_000);
 
 let dir: string;
 let registryDir: string;

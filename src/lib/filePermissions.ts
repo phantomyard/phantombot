@@ -32,7 +32,12 @@
  * is immune to renamed accounts and localized principal names.
  */
 export function currentUserSid(): string {
-  const res = Bun.spawnSync(["whoami", "/user", "/fo", "csv", "/nh"]);
+  // CREATE_NO_WINDOW: without it a phantombot with no console of its own (a
+  // scheduled task, a service, a GUI launch) makes Windows allocate a NEW
+  // console for the child, flashing a black window at the user.
+  const res = Bun.spawnSync(["whoami", "/user", "/fo", "csv", "/nh"], {
+    windowsHide: true,
+  });
   const out = new TextDecoder().decode(res.stdout).trim();
   // Output shape: "DOMAIN\user","S-1-5-21-…"
   const m = out.match(/(S-1-[0-9-]+)/);
@@ -49,7 +54,8 @@ export function currentUserSid(): string {
  * currentUserSid().
  */
 export function currentUserName(): string {
-  const res = Bun.spawnSync(["whoami"]);
+  // windowsHide — see currentUserSid.
+  const res = Bun.spawnSync(["whoami"], { windowsHide: true });
   const out = new TextDecoder().decode(res.stdout).trim();
   if (res.exitCode !== 0 || !out) {
     throw new Error("could not resolve current user name (whoami: no output)");
@@ -67,13 +73,11 @@ export function restrictFileToCurrentUser(path: string): void {
 
   // Grant by SID (`*S-1-…`) — see currentUserSid for why names are unsafe.
   const sid = currentUserSid();
-  const res = Bun.spawnSync([
-    "icacls",
-    path,
-    "/inheritance:r",
-    "/grant:r",
-    `*${sid}:(F)`,
-  ]);
+  // windowsHide — see currentUserSid.
+  const res = Bun.spawnSync(
+    ["icacls", path, "/inheritance:r", "/grant:r", `*${sid}:(F)`],
+    { windowsHide: true },
+  );
   if (res.exitCode !== 0) {
     const stderr = new TextDecoder().decode(res.stderr).trim();
     const stdout = new TextDecoder().decode(res.stdout).trim();

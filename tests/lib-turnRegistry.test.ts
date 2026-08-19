@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,21 @@ import {
   siblingTurns,
   type TurnRecord,
 } from "../src/lib/turnRegistry.ts";
+import { selfStartToken } from "../src/lib/processLiveness.ts";
+
+/**
+ * Pay the one-off process-identity probe here rather than inside a test.
+ *
+ * On Linux it is a `/proc` read and this is free. Off Linux the token costs a
+ * child process, and `registerTurn` is the first thing to ask for it — so on a
+ * cold, loaded Windows runner the FIRST test in this file was charged an
+ * interpreter start and timed out at 5021ms against bun's 5s default. The probe
+ * is memoised per process, so warming it once here keeps that cost out of every
+ * individual test's budget instead of hiding it behind a raised timeout.
+ */
+beforeAll(() => {
+  selfStartToken();
+}, 30_000);
 
 let dir: string;
 const prevEnabled = process.env.PHANTOMBOT_TURN_REGISTRY;
