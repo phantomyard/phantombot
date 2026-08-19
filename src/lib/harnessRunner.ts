@@ -554,7 +554,28 @@ export async function* runHarnessProcess(
   }
 
   const code = await proc.exited;
+  const signalCode = (proc as { signalCode?: string | null }).signalCode ?? undefined;
   if (code !== 0) {
+    // Host shutdown, not a harness fault. systemd (and `phantombot restart`)
+    // SIGTERMs the whole cgroup, so an in-flight harness child dies with
+    // 143 while phantombot is on its way down. The old code classified that
+    // as a recoverable harness error, which made the orchestrator spawn a
+    // FALLBACK harness mid-shutdown — a fresh subprocess that burns paid
+    // provider tokens for a reply nobody will ever receive, and then dies
+    // with 143 itself. Observed on Robbie: 5 restarts in one day, each one
+    // manufacturing a phantom failover. Mark it terminal so the chain stops.
+    //
+    // Deliberately NOT including SIGKILL/137: that is the OOM killer at
+    // least as often as it is a shutdown, and an OOM is a real failure the
+    // owner should see reported rather than silently swallowed.
+    if (isShutdownExit(signalCode, code)) {
+      yield {
+        type: "error",
+        error: `${harnessId} terminated by ${signalCode ?? "SIGTERM"} (host shutting down)`,
+        recoverable: false,
+      };
+      return;
+    }
     yield {
       type: "error",
       error: `${harnessId} exited with code ${code}`,
@@ -588,4 +609,29 @@ export async function* runHarnessProcess(
     finalText,
     meta: spec.buildDoneMeta(finalText, captured),
   };
+}
+
+/**
+ * Did this subprocess die because the host asked everything to stop?
+ *
+ * Bun surfaces a signal death two ways depending on how the child was
+ * reaped — `signalCode` ("SIGTERM"), or the shell convention of 128+signum
+ * in the exit code — so both are checked. Only the "please stop" signals
+ * count: SIGTERM (systemd stop/restart, `phantombot restart`), SIGINT
+ * (Ctrl-C) and SIGHUP (terminal went away).
+ *
+ * Note this is only ever consulted when the kill coordinator did NOT fire —
+ * our own timeout/abort kills are classified earlier from `killCause()`, so
+ * reaching here with a signal means it came from OUTSIDE phantombot.
+ *
+ * Exported for testing.
+ */
+export function isShutdownExit(
+  signalCode: string | undefined,
+  code: number,
+): boolean {
+  if (signalCode === "SIGTERM" || signalCode === "SIGINT" || signalCode === "SIGHUP") {
+    return true;
+  }
+  return code === 143 || code === 130 || code === 129;
 }

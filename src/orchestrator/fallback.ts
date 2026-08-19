@@ -28,6 +28,10 @@
 
 import type { Harness, HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 import { type CooldownStore, cooldownStore as defaultStore } from "../lib/cooldown.ts";
+import {
+  type HarnessAlerter,
+  harnessAlerter as defaultAlerter,
+} from "../lib/harnessAlert.ts";
 import { log } from "../lib/logger.ts";
 import type { AuditSink } from "../lib/auditLog.ts";
 
@@ -46,6 +50,12 @@ export interface RunWithFallbackOptions {
    * able to break the turn.
    */
   onToolCall?: AuditSink;
+  /**
+   * Health alerter. Defaults to the process-wide singleton, which is silent
+   * until `phantombot run` installs a sender — so tests and one-shot CLI
+   * paths alert nobody unless they inject their own.
+   */
+  alerter?: HarnessAlerter;
 }
 
 export async function* runWithFallback(
@@ -63,6 +73,12 @@ export async function* runWithFallback(
   }
 
   const cooldown = options.cooldown ?? defaultStore;
+  const alerter = options.alerter ?? defaultAlerter;
+  const chainIds = chain.map((h) => h.id);
+  // Remembers the first harness that failed this turn, so that if a LATER
+  // harness answers we can tell the owner which one is broken and who is
+  // covering for it. Only the first matters: that's the primary.
+  let firstFailure: { harnessId: string; error: string } | undefined;
   const estimatedBytes = estimatePayloadBytes(req);
 
   // Snapshot cooldown state at turn start. We don't re-poll within the
@@ -114,11 +130,13 @@ export async function* runWithFallback(
       // the allCooled escape hatch above, but defensive), yield a
       // terminal error rather than producing nothing.
       if (isLast) {
-        yield {
-          type: "error",
-          error: `all harnesses in chain skipped (last in cooldown: ${harness.id})`,
-          recoverable: false,
-        };
+        const error = `all harnesses in chain skipped (last in cooldown: ${harness.id})`;
+        await alerter.noteExhausted({
+          harnessId: harness.id,
+          error,
+          chain: chainIds,
+        });
+        yield { type: "error", error, recoverable: false };
         return;
       }
       continue;
@@ -198,8 +216,23 @@ export async function* runWithFallback(
           // don't want to keep slamming it). markFailure() handles
           // the exponential backoff bookkeeping.
           cooldown.markFailure(harness.id);
+          alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
+          firstFailure ??= { harnessId: harness.id, error: chunk.error };
           recoverableError = true;
           break;
+        }
+        // Terminal, or recoverable-but-nowhere-left-to-go. Either way the
+        // user gets no reply from this turn, so this is an outage worth
+        // waking the owner for — the case that would otherwise only ever be
+        // visible as "it stopped replying".
+        if (chunk.recoverable) {
+          alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
+          await alerter.noteExhausted({
+            harnessId: harness.id,
+            error: chunk.error,
+            httpStatus: chunk.httpStatus,
+            chain: chainIds,
+          });
         }
         yield chunk;
         return;
@@ -221,6 +254,8 @@ export async function* runWithFallback(
           { harnessId: harness.id },
         );
         cooldown.markFailure(harness.id);
+        alerter.noteFailure(harness.id, "empty reply");
+        firstFailure ??= { harnessId: harness.id, error: "empty reply" };
         recoverableError = true;
         break;
       }
@@ -245,6 +280,16 @@ export async function* runWithFallback(
       // harness, the CLI did its job. Clear any prior cooldown so the
       // next turn picks the chain back up at the top.
       cooldown.markSuccess(harness.id);
+      alerter.noteSuccess(harness.id);
+      // Served, but not by the head of the chain: the owner is paying a
+      // fallback to cover a broken primary and nothing else would tell them.
+      if (firstFailure && firstFailure.harnessId !== harness.id) {
+        await alerter.noteDegraded({
+          harnessId: firstFailure.harnessId,
+          servedBy: harness.id,
+          error: firstFailure.error,
+        });
+      }
       return;
     }
     if (!recoverableError) {

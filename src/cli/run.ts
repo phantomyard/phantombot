@@ -9,6 +9,8 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 
+import { hostname } from "node:os";
+
 import {
   HttpTelegramTransport,
   runTelegramServer,
@@ -53,6 +55,7 @@ import {
 } from "../lib/harnessAvailability.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { harnessAlerter } from "../lib/harnessAlert.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { currentPlatform, logsCommand, statusCommand } from "../lib/platform.ts";
@@ -416,6 +419,25 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         error: (e as Error).message,
       });
     }
+  }
+
+  // Harness health alerts (#284 follow-up). Failover is silent by design, so
+  // a primary harness whose credential has died degrades to a paid fallback
+  // with no signal anywhere but the provider's billing page — that is exactly
+  // how Robbie spent 3.5 days on pi. Install a sender here, at the daemon,
+  // where an owner channel actually exists; every other entry point (`ask`,
+  // tick, tests) leaves the alerter unconfigured and therefore silent.
+  if (adminListener) {
+    const alertAccount = adminListener.account;
+    const alertTransport = new HttpTelegramTransport(alertAccount.token);
+    harnessAlerter.configure({
+      host: hostname(),
+      send: async (message: string) => {
+        for (const chatId of alertAccount.allowedUserIds) {
+          await alertTransport.sendMessage(String(chatId), message);
+        }
+      },
+    });
   }
 
   out.write(

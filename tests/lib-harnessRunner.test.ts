@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   createKillCoordinator,
+  isShutdownExit,
   killCauseToErrorChunk,
   runHarnessProcess,
 } from "../src/lib/harnessRunner.ts";
@@ -613,5 +614,70 @@ describe("runHarnessProcess — terminal policy tripwire", () => {
       { type: "done", finalText: "still here", meta: {} },
     ]);
     expect(await proc.exited).toBe(0);
+  });
+});
+
+describe("isShutdownExit", () => {
+  test("SIGTERM from outside phantombot is a shutdown, not a harness fault", () => {
+    expect(isShutdownExit("SIGTERM", 143)).toBe(true);
+    expect(isShutdownExit(undefined, 143)).toBe(true);
+    expect(isShutdownExit("SIGINT", 130)).toBe(true);
+    expect(isShutdownExit("SIGHUP", 129)).toBe(true);
+  });
+
+  test("SIGKILL is NOT — that's as often the OOM killer as a stop", () => {
+    expect(isShutdownExit("SIGKILL", 137)).toBe(false);
+  });
+
+  test("ordinary failures are unaffected", () => {
+    expect(isShutdownExit(undefined, 1)).toBe(false);
+    expect(isShutdownExit(undefined, 127)).toBe(false);
+  });
+});
+
+describe("runHarnessProcess — shutdown signal", () => {
+  test("a SIGTERMed child yields a NON-recoverable error (no fallback spawn)", async () => {
+    // Emit one line so the stream is live, then sit still and get SIGTERMed
+    // from outside — exactly what systemd does to the whole cgroup on
+    // `phantombot restart`, and what made Robbie spawn a paid fallback for a
+    // reply nobody would receive.
+    const proc = spawnInNewSession(
+      ["sh", "-c", 'echo \'{"text":"hi"}\'; sleep 30'],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+    setTimeout(() => {
+      try {
+        // Signal the whole group, like systemd does to the cgroup — killing
+        // only `sh` would leave `sleep` holding the pipe open.
+        process.kill(-proc.pid!, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }, 250);
+
+    const chunks: any[] = [];
+    const generator = runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 30_000,
+        hardTimeoutMs: 30_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: (parsed: any) =>
+        parsed?.text ? { type: "text", text: parsed.text } : undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    });
+    for await (const chunk of generator) chunks.push(chunk);
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.recoverable).toBe(false);
+    expect(err.error).toContain("shutting down");
   });
 });

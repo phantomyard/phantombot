@@ -11,6 +11,10 @@ import {
   runWithFallback,
 } from "../src/orchestrator/fallback.ts";
 import { CooldownStore } from "../src/lib/cooldown.ts";
+import {
+  DEGRADE_AFTER_FAILURES,
+  HarnessAlerter,
+} from "../src/lib/harnessAlert.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -416,5 +420,96 @@ describe("runWithFallback onToolCall audit hook (#282)", () => {
       }),
     );
     expect(chunks.at(-1)).toEqual({ type: "done", finalText: "done" });
+  });
+});
+
+describe("health alerting", () => {
+  function recordingAlerter() {
+    const sent: string[] = [];
+    return {
+      sent,
+      alerter: new HarnessAlerter({
+        send: (m) => {
+          sent.push(m);
+        },
+      }),
+    };
+  }
+
+  const authError: HarnessChunk = {
+    type: "error",
+    error: "claude api error: authentication_failed",
+    recoverable: true,
+  };
+
+  test("a fallback covering a dead primary alerts the owner", async () => {
+    const { alerter, sent } = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      const primary = new FakeHarness("claude", [authError]);
+      const backup = new FakeHarness("pi", [
+        { type: "done", finalText: "answered", meta: {} },
+      ]);
+      const chunks = await collect(
+        runWithFallback([primary, backup], newRequest(), {
+          cooldown: new CooldownStore(), // fresh: cooldown is not what's under test
+          alerter,
+        }),
+      );
+      // The turn still succeeds — alerting must not change the reply path.
+      expect(chunks.at(-1)?.type).toBe("done");
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("authentication");
+  });
+
+  test("the primary answering clears the run — no alert", async () => {
+    const { alerter, sent } = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES + 2; i++) {
+      const primary = new FakeHarness("claude", [
+        { type: "done", finalText: "hi", meta: {} },
+      ]);
+      await collect(
+        runWithFallback([primary], newRequest(), {
+          cooldown: new CooldownStore(),
+          alerter,
+        }),
+      );
+    }
+    expect(sent).toEqual([]);
+  });
+
+  test("a rate limit with no fallback left alerts as an outage", async () => {
+    const { alerter, sent } = recordingAlerter();
+    const only = new FakeHarness("claude", [
+      {
+        type: "error",
+        error: "claude api error: rate_limit",
+        recoverable: true,
+        httpStatus: 429,
+      },
+    ]);
+    const chunks = await collect(
+      runWithFallback([only], newRequest(), {
+        cooldown: new CooldownStore(),
+        alerter,
+      }),
+    );
+    expect(chunks.at(-1)?.type).toBe("error");
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("rate limited");
+  });
+
+  test("a terminal (non-recoverable) error does not alert", async () => {
+    const { alerter, sent } = recordingAlerter();
+    const only = new FakeHarness("claude", [
+      { type: "error", error: "claude not found", recoverable: false },
+    ]);
+    await collect(
+      runWithFallback([only], newRequest(), {
+        cooldown: new CooldownStore(),
+        alerter,
+      }),
+    );
+    expect(sent).toEqual([]);
   });
 });

@@ -485,6 +485,13 @@ Harness notes:
 - Gemini remains available for optional semantic-memory embeddings via `phantombot embedding`; it is not an agent harness.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
+- Falling back is silent in chat, but not silent to you: if the primary
+  harness fails authentication several turns running, phantombot sends you
+  one Telegram alert naming the host and which harness is covering for it
+  (a broken OAuth token never recovers on its own, and the fallback may be
+  billed per token). If the whole chain is exhausted and no reply could be
+  produced at all, you get an alert for that too. Both are deduped per
+  incident, so a long outage does not spam you.
 
 ## Command Reference
 
