@@ -25,6 +25,12 @@ import { join } from "node:path";
 
 import { runWithFallback } from "./fallback.ts";
 import { createAuditSink } from "../lib/auditLog.ts";
+import { log } from "../lib/logger.ts";
+import {
+  registerTurn,
+  siblingNotice,
+  siblingTurns,
+} from "../lib/turnRegistry.ts";
 import {
   buildSystemPrompt,
   PRE_TOOL_NARRATION_INSTRUCTION,
@@ -254,7 +260,40 @@ export interface TurnInput {
   ) => Promise<ScreenVerdict | undefined>;
 }
 
+/**
+ * Register this turn for the duration, then run it (issue #391).
+ *
+ * A thin wrapper on purpose. Registration belongs HERE rather than at each
+ * call site because every entry point — Telegram, phantomchat, `ask`, tick,
+ * nightly, ACP — funnels through `runTurn`, so doing it once covers all of
+ * them and, more importantly, makes it impossible for a future entry point to
+ * forget. The `finally` is the only place that can reliably see the end of the
+ * turn: the body returns early on a screened hold, throws on a harness
+ * failure, and streams normally otherwise.
+ *
+ * `finally` in an async generator runs when the consumer drains the stream,
+ * breaks out of its `for await` (which calls `.return()`), or throws. The one
+ * case it cannot cover is a generator abandoned without being closed — which is
+ * why a stale entry is bounded by MAX_TURN_LIFETIME_MS rather than trusted
+ * until deleted.
+ */
 export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
+  const handle = registerTurn({
+    persona: input.persona,
+    conversation: input.conversation,
+    origin: input.origin ?? "channel",
+  });
+  try {
+    yield* runTurnBody(input, handle.id);
+  } finally {
+    handle.release();
+  }
+}
+
+async function* runTurnBody(
+  input: TurnInput,
+  turnId: string,
+): AsyncGenerator<HarnessChunk> {
   const persona = await loadPersona(input.agentDir);
 
   const history = input.noHistory
@@ -344,11 +383,26 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<HarnessChunk> {
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's
   //      reply-style + voice-brevity rules; nightly's distillation
   //      directives).
-  //   2. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration,
+  //   2. siblingNotice — #391. Sits between the caller's suffix and the
+  //      narration rule: it is a constraint on WHAT the turn may do, so it
+  //      outranks the formatting directive, but it must not displace the
+  //      channel's own framing. Absent (and free) whenever nothing else is
+  //      running, which is the overwhelming majority of turns.
+  //   3. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration,
   //      added LAST so its directive sits closest to the user message
   //      and is the most prominent format-of-reply rule the model sees.
   const overlays: string[] = [];
   if (input.systemPromptSuffix) overlays.push(input.systemPromptSuffix);
+  const siblings = siblingTurns(input.persona, turnId);
+  const notice = siblingNotice(siblings);
+  if (notice) {
+    overlays.push(notice);
+    log.info("turn: sibling turn in flight", {
+      persona: input.persona,
+      conversation: input.conversation,
+      siblings: siblings.map((sib) => sib.conversation),
+    });
+  }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
   const systemPrompt =
     overlays.length > 0

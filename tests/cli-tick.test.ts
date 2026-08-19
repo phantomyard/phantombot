@@ -750,3 +750,156 @@ describe("runTick — failure resilience", () => {
     );
   });
 });
+
+describe("runTick — wake deferral while the principal is talking (issue #391)", () => {
+  // The registry is inert under NODE_ENV=test by default (so unrelated suites
+  // can't write live-looking entries into the real state dir); these tests opt
+  // in explicitly and point it at the per-test workdir.
+  let prevEnabled: string | undefined;
+  let turnsDir: string;
+
+  beforeEach(async () => {
+    prevEnabled = process.env.PHANTOMBOT_TURN_REGISTRY;
+    process.env.PHANTOMBOT_TURN_REGISTRY = "1";
+    turnsDir = join(workdir, "turns");
+    process.env.PHANTOMBOT_TURN_REGISTRY_DIR = turnsDir;
+    await mkdir(turnsDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (prevEnabled === undefined) delete process.env.PHANTOMBOT_TURN_REGISTRY;
+    else process.env.PHANTOMBOT_TURN_REGISTRY = prevEnabled;
+    delete process.env.PHANTOMBOT_TURN_REGISTRY_DIR;
+  });
+
+  /**
+   * Seed an in-flight interactive turn owned by THIS process, so the pid probe
+   * genuinely reports it alive rather than being stubbed.
+   */
+  async function seedLiveConversation(startedAt: Date): Promise<void> {
+    await writeFile(
+      join(turnsDir, "live.json"),
+      JSON.stringify({
+        id: "live",
+        persona: "phantom",
+        conversation: "telegram:7995070089",
+        origin: "channel",
+        pid: process.pid,
+        started_at: startedAt.toISOString(),
+      }),
+      "utf8",
+    );
+  }
+
+  test("a due task does NOT wake a harness while an interactive turn is live", async () => {
+    const now = new Date("2026-05-02T10:00:30Z");
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    await seedLiveConversation(new Date("2026-05-02T10:00:00Z"));
+
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "should not run" },
+    ]);
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now,
+    });
+
+    expect(code).toBe(0);
+    expect(harness.invocations).toBe(0);
+
+    // Crucially the row is UNTOUCHED: not counted as a run, and still due, so
+    // the next tick re-evaluates and the overdue-by clock keeps running.
+    const after = store.get(created.id)!;
+    expect(after.runCount).toBe(0);
+    expect(after.lastRunAt).toBeUndefined();
+    expect(after.nextRunAt.getTime()).toBe(created.task.nextRunAt.getTime());
+    expect(after.active).toBe(true);
+  });
+
+  test("the same task fires once the conversation has gone quiet", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    // No registry entries at all — nobody is talking.
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ran" },
+    ]);
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:00:30Z"),
+    });
+    expect(harness.invocations).toBe(1);
+    expect(store.get(created.id)!.runCount).toBe(1);
+  });
+
+  test("deferral is bounded — a task overdue past the ceiling fires anyway", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "hourly check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    await seedLiveConversation(new Date("2026-05-02T10:20:00Z"));
+
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "ran late" },
+    ]);
+    // 20 minutes past due, well beyond MAX_DEFERRAL_MS. Starving a scheduled
+    // task indefinitely is a worse failure than the collision — it is silent.
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [harness],
+      lockPath,
+      now: new Date("2026-05-02T10:20:30Z"),
+    });
+    expect(harness.invocations).toBe(1);
+  });
+
+  test("command-backed tasks are exempt — they never wake a harness to collide", async () => {
+    const created = store.add({
+      persona: "phantom",
+      description: "poller",
+      schedule: "0 * * * *",
+      prompt: "audit context",
+      command: "exit 0",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    await seedLiveConversation(new Date("2026-05-02T10:00:00Z"));
+
+    await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:00:30Z"),
+    });
+    // It ran: run_count advanced even though a conversation is in flight.
+    expect(store.get(created.id)!.runCount).toBe(1);
+  });
+});

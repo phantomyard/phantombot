@@ -105,3 +105,4 @@ jobs:
           tests/cli-install.test.ts
           tests/cli-heartbeat.test.ts
           tests/lib-heartbeat.test.ts
+          tests/lib-turnRegistry.test.ts

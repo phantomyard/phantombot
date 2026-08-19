@@ -812,3 +812,150 @@ describe("runTurn — historyLimit", () => {
     ]);
   });
 });
+
+describe("runTurn — concurrent-turn awareness (issue #391)", () => {
+  // The registry is inert under NODE_ENV=test by default so unrelated suites
+  // can't write live-looking entries into the developer's real state dir.
+  // These tests opt in and isolate it to a temp dir.
+  let turnsDir: string;
+  let prevEnabled: string | undefined;
+
+  beforeEach(async () => {
+    prevEnabled = process.env.PHANTOMBOT_TURN_REGISTRY;
+    turnsDir = await mkdtemp(join(tmpdir(), "phantombot-turns-"));
+    process.env.PHANTOMBOT_TURN_REGISTRY = "1";
+    process.env.PHANTOMBOT_TURN_REGISTRY_DIR = turnsDir;
+  });
+
+  afterEach(async () => {
+    await rm(turnsDir, { recursive: true, force: true });
+    if (prevEnabled === undefined) delete process.env.PHANTOMBOT_TURN_REGISTRY;
+    else process.env.PHANTOMBOT_TURN_REGISTRY = prevEnabled;
+    delete process.env.PHANTOMBOT_TURN_REGISTRY_DIR;
+  });
+
+  /** An in-flight turn owned by THIS process, so the pid probe sees it alive. */
+  async function seedSibling(over: Record<string, unknown> = {}): Promise<void> {
+    await writeFile(
+      join(turnsDir, `${(over.id as string) ?? "sib"}.json`),
+      JSON.stringify({
+        id: "sib",
+        persona: "phantom",
+        conversation: "tick:42",
+        origin: "task",
+        pid: process.pid,
+        started_at: new Date().toISOString(),
+        ...over,
+      }),
+      "utf8",
+    );
+  }
+
+  test("a live sibling injects the concurrency notice into the system prompt", async () => {
+    await seedSibling();
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("# Concurrent turn in progress");
+    expect(prompt).toContain("tick:42");
+  });
+
+  test("no sibling means no notice — the ordinary turn is unchanged", async () => {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Concurrent turn in progress",
+    );
+  });
+
+  test("a turn never sees ITSELF as a sibling", async () => {
+    // runTurn registers before it builds the prompt, so without the self-filter
+    // every single turn would announce itself as concurrent with itself.
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    // Registration really did happen (so the filter is what suppressed it,
+    // not an inert registry).
+    const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+    expect(readRegistry({ now: new Date() }).recent).toHaveLength(1);
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Concurrent turn in progress",
+    );
+  });
+
+  test("another persona's live turn is not a sibling", async () => {
+    await seedSibling({ persona: "lena" });
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Concurrent turn in progress",
+    );
+  });
+
+  test("the entry is released when the turn ends, even if the harness throws", async () => {
+    const exploding: Harness = {
+      id: "boom",
+      available: async () => true,
+      // eslint-disable-next-line require-yield
+      async *invoke(): AsyncGenerator<HarnessChunk> {
+        throw new Error("harness died");
+      },
+    };
+
+    await expect(
+      collect(
+        runTurn({ ...baseInput(), userMessage: "hi", harnesses: [exploding] }),
+      ),
+    ).rejects.toThrow();
+
+    // A turn that blew up must not leave an entry that looks in-flight — that
+    // is what would park every scheduled task behind a corpse.
+    const { readRegistry } = await import("../src/lib/turnRegistry.ts");
+    const snap = readRegistry({ now: new Date() });
+    expect(snap.running).toHaveLength(0);
+    expect(snap.recent).toHaveLength(1);
+  });
+});

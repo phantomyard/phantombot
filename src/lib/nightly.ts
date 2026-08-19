@@ -30,12 +30,17 @@
  * bleed into Telegram chats, and both stages for a date share context.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { log } from "./logger.ts";
+import {
+  isProcessAlive,
+  processStartToken,
+  type ProcessAliveProbe,
+  type ProcessStartProbe,
+} from "./processLiveness.ts";
 import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "./okf.ts";
 
 const NIGHTLY_PROMPT_OVERRIDE = "nightly-prompt.md";
@@ -139,73 +144,19 @@ export interface NightlyState {
  */
 export type SweepLiveness = "running" | "dead" | "stalled";
 
-/** Probe seam so tests don't have to conjure real pids. */
-export type ProcessAliveProbe = (pid: number) => boolean;
-
 /**
- * Does this pid name a process that exists on this box?
- *
- * `kill(pid, 0)` sends no signal — it only runs the kernel's permission and
- * existence checks. ESRCH means gone; EPERM means it exists but belongs to
- * another user, which still counts as alive.
+ * Pid-liveness primitives (#403) now live in `lib/processLiveness.ts` — issue
+ * #391 needs the identical check for in-flight TURNS, and one copy of a
+ * kernel-probe is the only supportable number. Re-exported here so existing
+ * importers (and the #403 tests) keep working unchanged.
  */
-export function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** Probe seam for the start-time half of the identity check. */
-export type ProcessStartProbe = (pid: number) => string | null;
-
-/**
- * An opaque token that identifies WHICH process currently holds `pid`.
- *
- * `kill(pid, 0)` alone can be fooled: pids wrap, so between the sweep dying
- * and the next start an unrelated process can inherit the number and be
- * reported alive. The kernel's own start time for the pid disambiguates —
- * the reused pid is necessarily a different process with a different start.
- *
- * Returns `null` when the platform has no cheap probe or the read fails; the
- * caller then falls back to the pid check alone, which is what shipped in
- * #403 and is still strictly better than the time-only rule it replaced.
- * Only ever compared for equality with a token produced the same way, so the
- * format is deliberately unspecified.
- */
-export function processStartToken(pid: number): string | null {
-  try {
-    if (process.platform === "linux") {
-      // /proc/<pid>/stat field 22 (starttime, in clock ticks since boot).
-      // comm (field 2) is parenthesised and may itself contain spaces and
-      // parens, so split AFTER the last ')' — field 3 lands at index 0.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      return tail[19] ?? null;
-    }
-    if (process.platform === "darwin") {
-      const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-        encoding: "utf8",
-        timeout: 5_000,
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      return out.trim() || null;
-    }
-  } catch {
-    // Process gone, permission denied, no procfs, ps missing — all mean
-    // "can't tell", and "can't tell" must never masquerade as a match.
-  }
-  return null;
-}
-
-/** Our own token never changes, and on darwin it costs a fork. Compute once. */
-let ownStartToken: string | null | undefined;
-export function selfStartToken(): string | null {
-  if (ownStartToken === undefined) ownStartToken = processStartToken(process.pid);
-  return ownStartToken;
-}
+export {
+  isProcessAlive,
+  processStartToken,
+  selfStartToken,
+  type ProcessAliveProbe,
+  type ProcessStartProbe,
+} from "./processLiveness.ts";
 
 /**
  * Classify an in-flight marker (issue #402).
