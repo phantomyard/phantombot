@@ -48,6 +48,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -181,11 +182,56 @@ function truncate(text: string, max: number): string {
   return flat.slice(0, max - 1).trimEnd() + "…";
 }
 
+/**
+ * Modes for the digest directory and the files in it.
+ *
+ * A digest carries conversation ids, local filesystem paths, the trigger text
+ * and a summary of what a background turn did. The redaction pass narrows that
+ * to remove secrets; it does not make the remainder public-safe, and this whole
+ * feature is built on the premise that the material is persona-PRIVATE. The
+ * audit sink writes exactly the same class of content at 0700/0600, so digests
+ * match it.
+ *
+ * Ambient umask is not a permission policy. On the common `0002` a default
+ * create lands at 0755/0644 and every local account can read the lot; a service
+ * umask of `0022` is barely better. So the modes are stated explicitly here.
+ */
+const DIGEST_DIR_MODE = 0o700;
+const DIGEST_FILE_MODE = 0o600;
+
+/**
+ * Tighten an existing path, best effort.
+ *
+ * Needed on top of the create modes for two reasons. A create mode is MASKED by
+ * umask, so it can only ever be narrower than asked; and it does nothing at all
+ * for a path that already exists — a digest directory made by an earlier build,
+ * or a tmp file left behind by a writer that died between write and rename.
+ *
+ * Best effort because a failure to chmod is not a reason to lose the digest,
+ * and because on Windows the mode bits are near-meaningless (chmod moves the
+ * read-only flag; the ACL is what governs). A digest is not the vault: the
+ * right trade here is "narrow it when we can", not "fail the turn".
+ */
+function tighten(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // Not ours to chmod, or a platform that does not honour the bits.
+  }
+}
+
 function writeDigest(dir: string, digest: TurnDigest): void {
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: DIGEST_DIR_MODE });
+  tighten(dir, DIGEST_DIR_MODE);
   const finalPath = join(dir, `${digest.id}.json`);
   const tmpPath = `${finalPath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(digest), "utf8");
+  writeFileSync(tmpPath, JSON.stringify(digest), {
+    encoding: "utf8",
+    mode: DIGEST_FILE_MODE,
+  });
+  // Before the rename, so the digest is never readable at its real name under
+  // a wider mode - and so the rewrite in markDelivered narrows an old file too.
+  tighten(tmpPath, DIGEST_FILE_MODE);
   renameSync(tmpPath, finalPath);
 }
 

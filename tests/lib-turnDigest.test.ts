@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -120,6 +128,80 @@ describe("DigestCollector", () => {
     const { actions, omitted } = c.snapshot();
     expect(actions).toHaveLength(12);
     expect(omitted).toBe(8);
+  });
+});
+
+describe("persisted digests are readable only by their owner", () => {
+  /**
+   * A digest holds conversation ids, local paths, trigger text and a summary of
+   * what a background turn did — the private operational state this feature
+   * exists to carry between turns. Under the common `0002` umask a default
+   * create landed at 0755/0644, so any local account could read all of it.
+   *
+   * The umask is forced WIDE in these tests: a mode that only holds because the
+   * ambient umask happened to be strict is not a permission policy, and that is
+   * exactly the bug.
+   */
+  let prevUmask: number;
+
+  beforeEach(() => {
+    prevUmask = process.umask(0o000);
+  });
+
+  afterEach(() => {
+    process.umask(prevUmask);
+  });
+
+  const mode = async (path: string): Promise<number> =>
+    (await stat(path)).mode & 0o777;
+
+  // chmod bits do not govern on Windows; the ACL does. Asserting them there
+  // would test the emulation, not the security property.
+  const posix = process.platform === "win32" ? test.skip : test;
+
+  posix("a recorded digest lands at 0600 in a 0700 directory", async () => {
+    const id = recordDigest(
+      {
+        persona: "robbie",
+        conversation: "task:42",
+        origin: "task",
+        trigger: "check the deploy queue",
+        summary: "three jobs queued",
+        startedAt: NOW,
+        actions: [],
+      },
+      { now: NOW },
+    );
+    expect(id).toBeDefined();
+    expect(await mode(dir)).toBe(0o700);
+    expect(await mode(join(dir, `${id}.json`))).toBe(0o600);
+  });
+
+  posix("the markDelivered rewrite does not widen the file", async () => {
+    await put(write({ id: "d1", persona: "robbie" }));
+    await chmod(join(dir, "d1.json"), 0o644);
+    markDelivered(["d1"], { now: NOW });
+    expect(await mode(join(dir, "d1.json"))).toBe(0o600);
+  });
+
+  posix("an already-permissive digest directory is tightened", async () => {
+    // Upgrade path: the directory exists from a build that created it with
+    // whatever umask was in force. mkdir(recursive) is a no-op on an existing
+    // directory, so the mode has to be applied separately or it never narrows.
+    await chmod(dir, 0o755);
+    recordDigest(
+      {
+        persona: "robbie",
+        conversation: "task:42",
+        origin: "task",
+        trigger: "t",
+        summary: "s",
+        startedAt: NOW,
+        actions: [],
+      },
+      { now: NOW },
+    );
+    expect(await mode(dir)).toBe(0o700);
   });
 });
 
