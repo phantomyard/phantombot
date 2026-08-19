@@ -88,7 +88,10 @@ async function runFireAndForgetAuth(
     `// Exactly what nostr-tools does on an ["AUTH", challenge] frame:`,
     `// call auth() and drop the promise on the floor.`,
     `relay.auth(async () => {});`,
-    `setTimeout(() => { console.log("SURVIVED"); process.exit(0); }, 150);`,
+    // Generous on purpose. The unhandled-rejection crash fires on the very
+    // next microtask drain, so this window only has to outlast scheduling
+    // jitter on a loaded CI runner — a tight one buys nothing but flakes.
+    `setTimeout(() => { console.log("SURVIVED"); process.exit(0); }, 500);`,
   ].join("\n");
   const proc = Bun.spawn([process.execPath, "-e", script], {
     stdout: "pipe",

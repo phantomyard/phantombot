@@ -30,7 +30,8 @@
  * bleed into Telegram chats, and both stages for a date share context.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -107,6 +108,12 @@ export interface NightlyCurrent {
   /** Refreshed as each date starts — drives stale-run detection. */
   updated_at: string;
   pid?: number;
+  /**
+   * OS-supplied start time of `pid`, used to spot pid REUSE (issue #402
+   * follow-up). Absent on markers written by an older build, and on
+   * platforms with no cheap probe — liveness degrades to the pid check.
+   */
+  pid_start?: string;
 }
 
 export interface NightlyState {
@@ -151,6 +158,55 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
+/** Probe seam for the start-time half of the identity check. */
+export type ProcessStartProbe = (pid: number) => string | null;
+
+/**
+ * An opaque token that identifies WHICH process currently holds `pid`.
+ *
+ * `kill(pid, 0)` alone can be fooled: pids wrap, so between the sweep dying
+ * and the next start an unrelated process can inherit the number and be
+ * reported alive. The kernel's own start time for the pid disambiguates —
+ * the reused pid is necessarily a different process with a different start.
+ *
+ * Returns `null` when the platform has no cheap probe or the read fails; the
+ * caller then falls back to the pid check alone, which is what shipped in
+ * #403 and is still strictly better than the time-only rule it replaced.
+ * Only ever compared for equality with a token produced the same way, so the
+ * format is deliberately unspecified.
+ */
+export function processStartToken(pid: number): string | null {
+  try {
+    if (process.platform === "linux") {
+      // /proc/<pid>/stat field 22 (starttime, in clock ticks since boot).
+      // comm (field 2) is parenthesised and may itself contain spaces and
+      // parens, so split AFTER the last ')' — field 3 lands at index 0.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const tail = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      return tail[19] ?? null;
+    }
+    if (process.platform === "darwin") {
+      const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8",
+        timeout: 5_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return out.trim() || null;
+    }
+  } catch {
+    // Process gone, permission denied, no procfs, ps missing — all mean
+    // "can't tell", and "can't tell" must never masquerade as a match.
+  }
+  return null;
+}
+
+/** Our own token never changes, and on darwin it costs a fork. Compute once. */
+let ownStartToken: string | null | undefined;
+export function selfStartToken(): string | null {
+  if (ownStartToken === undefined) ownStartToken = processStartToken(process.pid);
+  return ownStartToken;
+}
+
 /**
  * Classify an in-flight marker (issue #402).
  *
@@ -172,8 +228,18 @@ export function sweepLiveness(
   current: NightlyCurrent,
   now: Date,
   isAlive: ProcessAliveProbe = isProcessAlive,
+  startToken: ProcessStartProbe = processStartToken,
 ): SweepLiveness {
-  if (typeof current.pid === "number" && !isAlive(current.pid)) return "dead";
+  if (typeof current.pid === "number") {
+    if (!isAlive(current.pid)) return "dead";
+    // Alive, but is it the SAME process? A pid that has wrapped around to an
+    // unrelated process would otherwise hold the lock until the 45-minute
+    // stall timer expires. A null token means "can't tell" — trust the pid.
+    if (current.pid_start) {
+      const seen = startToken(current.pid);
+      if (seen !== null && seen !== current.pid_start) return "dead";
+    }
+  }
   const beat = Date.parse(current.updated_at ?? current.started_at);
   const fresh = !Number.isNaN(beat) && now.getTime() - beat <= STALE_RUN_MS;
   return fresh ? "running" : "stalled";

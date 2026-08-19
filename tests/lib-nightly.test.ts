@@ -20,6 +20,8 @@ import {
   type NightlyCurrent,
   saveNightlyState,
   STALE_RUN_MS,
+  processStartToken,
+  selfStartToken,
   sweepLiveness,
   sweepDailyFiles,
 } from "../src/lib/nightly.ts";
@@ -276,7 +278,11 @@ describe("dateRecord", () => {
  */
 describe("sweepLiveness", () => {
   const now = new Date("2026-05-18T09:00:00Z");
-  function marker(beatAgoMs: number, pid?: number): NightlyCurrent {
+  function marker(
+    beatAgoMs: number,
+    pid?: number,
+    pidStart?: string,
+  ): NightlyCurrent {
     const at = new Date(now.getTime() - beatAgoMs).toISOString();
     return {
       date: "2026-05-01",
@@ -285,6 +291,7 @@ describe("sweepLiveness", () => {
       started_at: at,
       updated_at: at,
       ...(pid === undefined ? {} : { pid }),
+      ...(pidStart === undefined ? {} : { pid_start: pidStart }),
     };
   }
 
@@ -322,6 +329,63 @@ describe("sweepLiveness", () => {
       updated_at: "not-a-date",
     };
     expect(sweepLiveness(bad, now, () => true)).toBe("stalled");
+  });
+
+  // Pids wrap. Between the sweep dying and the next start an unrelated
+  // process can inherit the number, and the pid check alone would then hold
+  // the lock until the 45-minute stall timer expired — the very delay #402
+  // set out to remove.
+  test("a reused pid is dead, not running", () => {
+    const m = marker(1_000, 4242, "8899001");
+    expect(sweepLiveness(m, now, () => true, () => "9911002")).toBe("dead");
+  });
+
+  test("the same pid with the same start time is still running", () => {
+    const m = marker(1_000, 4242, "8899001");
+    expect(sweepLiveness(m, now, () => true, () => "8899001")).toBe("running");
+  });
+
+  // "Can't tell" must never read as "different". An unsupported platform, a
+  // permission error or a racing exit all yield null, and stealing a live
+  // sweep on that basis would double-file the drawers.
+  test("an unavailable start token leaves the pid check in charge", () => {
+    const m = marker(1_000, 4242, "8899001");
+    expect(sweepLiveness(m, now, () => true, () => null)).toBe("running");
+    expect(sweepLiveness(m, now, () => false, () => null)).toBe("dead");
+  });
+
+  // Markers from the first #403 build carry a pid but no pid_start. They
+  // must not gain a start-time opinion retroactively.
+  test("a marker with no pid_start never consults the probe", () => {
+    let probed = false;
+    const m = marker(1_000, 4242);
+    const seen = sweepLiveness(m, now, () => true, () => {
+      probed = true;
+      return "whatever";
+    });
+    expect(seen).toBe("running");
+    expect(probed).toBe(false);
+  });
+});
+
+describe("processStartToken", () => {
+  // Only meaningful where a probe exists; elsewhere null is the contract.
+  const supported =
+    process.platform === "linux" || process.platform === "darwin";
+
+  test("is stable across calls for this process", () => {
+    const a = processStartToken(process.pid);
+    const b = processStartToken(process.pid);
+    expect(a).toBe(b);
+    if (supported) expect(a).not.toBeNull();
+  });
+
+  test("returns null rather than throwing for a pid that cannot exist", () => {
+    expect(processStartToken(-1)).toBeNull();
+  });
+
+  test("selfStartToken agrees with a direct probe of our own pid", () => {
+    expect(selfStartToken()).toBe(processStartToken(process.pid));
   });
 });
 

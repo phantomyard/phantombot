@@ -48,6 +48,7 @@ import {
   type ProcessAliveProbe,
   saveNightlyState,
   sweepDailyFiles,
+  selfStartToken,
   sweepLiveness,
 } from "../lib/nightly.ts";
 import { openMemoryStore } from "../memory/store.ts";
@@ -248,8 +249,8 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     }
     out.write(
       liveness === "dead"
-        ? `nightly: taking over a dead sweep (owner pid ${state.current.pid} is gone, ` +
-          `last beat ${state.current.updated_at})\n`
+        ? `nightly: taking over a dead sweep (owner pid ${state.current.pid} is gone ` +
+          `or has been reused, last beat ${state.current.updated_at})\n`
         : `nightly: taking over a stalled sweep (last beat ${state.current.updated_at})\n`,
     );
   }
@@ -323,6 +324,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
           started_at: startedAt,
           updated_at: new Date().toISOString(),
           pid: process.pid,
+          pid_start: selfStartToken() ?? undefined,
         },
       });
 
