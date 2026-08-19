@@ -108,3 +108,4 @@ jobs:
           tests/lib-turnRegistry.test.ts
           tests/lib-turnDigest.test.ts
           tests/lib-workspaceLock.test.ts
+          tests/lib-promptSafeText.test.ts

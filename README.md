@@ -1359,8 +1359,43 @@ someone releases it.
 
 Concurrent `lock` calls are serialised by an exclusive-create guard file next to
 the lock, so two turns claiming the same tree at the same instant cannot both
-read "free" and both win. The guard is broken by age if a process dies inside
-the critical section.
+read "free" and both win.
+
+A stale guard is broken on **liveness**, not on age alone. A guard that has
+existed for a few seconds and whose holder process is still running is a slow
+critical section — a loaded box, a cold filesystem — and breaking it puts two
+acquires inside the section at once, which is the failure the guard exists to
+prevent. So past a few seconds we check whether the holder is alive (pid plus
+start token, so a recycled pid can't impersonate it) and only break it if not,
+with a one-minute ceiling as the backstop for a holder that is alive but not
+progressing (SIGSTOPped, or hung on IO). A guard is only ever deleted by the
+unique token it carries: unlinking by pathname is how a recovered guard's
+*successor* gets destroyed, which puts two critical sections back inside the
+same lock via the cleanup meant to protect it.
+
+Pruning a stale lock also happens **under that guard**, and deletes only if the
+file's exact bytes are unchanged since they were read. Deciding a lock is stale
+isn't instant — it reads the turn registry — so an unguarded prune can read
+claim A, have a concurrent `lock` publish claim B over it, and then unlink B.
+This is the read-path twin of the release bug above, and it fires far more
+often, because every `workspace status` and every prompt render walks it.
+
+If the state directory itself is missing or unwritable, that is reported as an
+I/O failure, not as contention: `lock` **fails open** (a lock nobody can write
+is a lock nobody can see, and refusing to work because a state file won't write
+turns a visibility feature into an outage), while `unlock` says it failed rather
+than telling you to retry a loop that can never succeed.
+
+The path, conversation id and `--purpose` of a claim are written by *another*
+turn, and that turn's input may have come from email, a webhook or a raw
+`phantombot ask`. They're rendered into sibling prompts as inert data — flattened
+to one line, stripped of control, zero-width and bidirectional characters,
+backtick-free and length-bounded, inside a block that says in the prompt itself
+that none of it can authorise an action. Without that, a `--purpose` containing
+a newline and a `#` heading ends the list and opens what reads like a new
+instruction section, in the system prompt of a trusted, tool-capable turn that
+the threat judge never sees. The same treatment applies to background-turn
+digests, for the same reason.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
