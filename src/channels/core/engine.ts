@@ -794,6 +794,7 @@ export async function runTelegramServer(
             activeTurns,
             botUsername,
             groupContext,
+            isGroupChat,
             // Security perimeter: this turn is TRUSTED only if the sender
             // is an explicitly allow-listed principal. An empty allowlist
             // means "open bot" (anyone can DM) — that is NOT an
@@ -872,6 +873,11 @@ async function processChatMessage(
      *  pre-rendered as a context preamble. Prepended to the user text so
      *  the harness has the thread it stayed quiet through. */
     groupContext?: string;
+    /** True when the originating chat is a group or supergroup. Flows to
+     *  runTurn as `replyAudience: "shared"` so persona-private context
+     *  (pending digests) is not injected into a prompt whose reply is
+     *  visible to every group member. False (or absent) for 1:1 DMs. */
+    isGroupChat?: boolean;
     /** Security-perimeter provenance: true only when the sender is an
      *  explicitly allow-listed principal. Flows to runTurn as `trusted`,
      *  which gates command-vs-data framing in the prompt AND the
@@ -1279,6 +1285,10 @@ async function processChatMessage(
       // True iff the sender is an allow-listed principal (see the
       // principalAuthenticated computation at the dispatch call site).
       trusted: ctx.principalAuthenticated === true,
+      // Audience: a group/supergroup reply is visible to every member, so
+      // persona-private state (pending digests) must neither be injected
+      // nor consumed here — it stays pending for the principal's next 1:1.
+      replyAudience: ctx.isGroupChat ? "shared" : "private",
       // Threat screen for the untrusted case (open bot / non-allowlisted
       // sender). runTurn only consults this when trusted !== true, so an
       // allow-listed principal is never screened. The judge runs as the

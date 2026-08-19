@@ -11,10 +11,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
-import {
-  type MemoryStore,
-  openMemoryStore,
-} from "../src/memory/store.ts";
+import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
+import { MAX_DIGESTS_PER_TURN } from "../src/lib/turnDigest.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -169,9 +167,13 @@ describe("runTurn — successful path", () => {
   test("toolsMode allowlist reaches the harness; omitted stays undefined", async () => {
     const seen: HarnessRequest[] = [];
     const mk = () =>
-      new ScriptedHarness("fake", [{ type: "done", finalText: "ok" }], (req) => {
-        seen.push(req);
-      });
+      new ScriptedHarness(
+        "fake",
+        [{ type: "done", finalText: "ok" }],
+        (req) => {
+          seen.push(req);
+        },
+      );
 
     await collect(
       runTurn({
@@ -663,7 +665,9 @@ describe("runTurn — auto-retrieval (line-111 instinct)", () => {
       }),
     );
 
-    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+    expect(captured?.systemPrompt).not.toContain(
+      "# Retrieved context for this turn",
+    );
   });
 
   test("retrieve fn result is injected under the 'Retrieved context' slot", async () => {
@@ -715,14 +719,19 @@ describe("runTurn — auto-retrieval (line-111 instinct)", () => {
       }),
     );
 
-    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+    expect(captured?.systemPrompt).not.toContain(
+      "# Retrieved context for this turn",
+    );
   });
 
   test("a throwing retriever is swallowed — the turn still completes", async () => {
     let captured: HarnessRequest | undefined;
     const harness = new ScriptedHarness(
       "fake",
-      [{ type: "text", text: "answer" }, { type: "done", finalText: "answer" }],
+      [
+        { type: "text", text: "answer" },
+        { type: "done", finalText: "answer" },
+      ],
       (req) => {
         captured = req;
       },
@@ -741,7 +750,9 @@ describe("runTurn — auto-retrieval (line-111 instinct)", () => {
 
     // Turn proceeds normally; no retrieved context; reply persisted.
     expect(chunks.map((c) => c.type)).toEqual(["text", "done"]);
-    expect(captured?.systemPrompt).not.toContain("# Retrieved context for this turn");
+    expect(captured?.systemPrompt).not.toContain(
+      "# Retrieved context for this turn",
+    );
     const stored = await memory.recentTurns("phantom", "cli:default", 10);
     expect(stored[1]?.text).toBe("answer");
   });
@@ -835,7 +846,9 @@ describe("runTurn — concurrent-turn awareness (issue #391)", () => {
   });
 
   /** An in-flight turn owned by THIS process, so the pid probe sees it alive. */
-  async function seedSibling(over: Record<string, unknown> = {}): Promise<void> {
+  async function seedSibling(
+    over: Record<string, unknown> = {},
+  ): Promise<void> {
     await writeFile(
       join(turnsDir, `${(over.id as string) ?? "sib"}.json`),
       JSON.stringify({
@@ -957,5 +970,615 @@ describe("runTurn — concurrent-turn awareness (issue #391)", () => {
     const snap = readRegistry({ now: new Date() });
     expect(snap.running).toHaveLength(0);
     expect(snap.recent).toHaveLength(1);
+  });
+});
+
+/**
+ * #405 — post-turn digest and workspace claims.
+ *
+ * The two halves of "a background turn is invisible": what it DID (digest) and
+ * what it is HOLDING (workspace locks) while it does it.
+ */
+describe("runTurn — background-turn visibility (#405)", () => {
+  let digestDir: string;
+  let turnsDir: string;
+  let locksDir: string;
+  const prev = {
+    digest: process.env.PHANTOMBOT_TURN_DIGEST,
+    registry: process.env.PHANTOMBOT_TURN_REGISTRY,
+    locks: process.env.PHANTOMBOT_WORKSPACE_LOCKS,
+  };
+
+  beforeEach(async () => {
+    digestDir = await mkdtemp(join(tmpdir(), "phantombot-digests-"));
+    turnsDir = await mkdtemp(join(tmpdir(), "phantombot-turns-"));
+    locksDir = await mkdtemp(join(tmpdir(), "phantombot-ws-"));
+    process.env.PHANTOMBOT_TURN_DIGEST = "1";
+    process.env.PHANTOMBOT_TURN_DIGEST_DIR = digestDir;
+    process.env.PHANTOMBOT_TURN_REGISTRY = "1";
+    process.env.PHANTOMBOT_TURN_REGISTRY_DIR = turnsDir;
+    process.env.PHANTOMBOT_WORKSPACE_LOCKS = "1";
+    process.env.PHANTOMBOT_WORKSPACE_LOCK_DIR = locksDir;
+  });
+
+  afterEach(async () => {
+    await rm(digestDir, { recursive: true, force: true });
+    await rm(turnsDir, { recursive: true, force: true });
+    await rm(locksDir, { recursive: true, force: true });
+    for (const [k, v] of [
+      ["PHANTOMBOT_TURN_DIGEST", prev.digest],
+      ["PHANTOMBOT_TURN_REGISTRY", prev.registry],
+      ["PHANTOMBOT_WORKSPACE_LOCKS", prev.locks],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    delete process.env.PHANTOMBOT_TURN_DIGEST_DIR;
+    delete process.env.PHANTOMBOT_TURN_REGISTRY_DIR;
+    delete process.env.PHANTOMBOT_WORKSPACE_LOCK_DIR;
+  });
+
+  const pushHarness = (capture?: (req: HarnessRequest) => void) =>
+    new ScriptedHarness(
+      "fake",
+      [
+        {
+          type: "progress",
+          note: "tool",
+          tool: {
+            title: "Bash: git push origin main",
+            kind: "execute",
+            locations: [],
+          },
+        },
+        {
+          type: "progress",
+          note: "tool",
+          tool: {
+            title: "Read: src/foo.ts",
+            kind: "read",
+            locations: [{ path: "src/foo.ts" }],
+          },
+        },
+        { type: "done", finalText: "pushed the fix" },
+      ],
+      capture,
+    );
+
+  /**
+   * The turn a digest is delivered TO: interactive, trusted, AND
+   * private-and-visible. `trusted` is not decoration here — an untrusted
+   * `channel` turn (a raw `phantombot ask` carrying an inbound email) is
+   * deliberately not a recipient, and neither is a trusted turn whose reply
+   * is shared with a group or never sent at all (replyAudience defaults to
+   * "silent", fail closed). A test that omits any of the three is testing
+   * the wrong path.
+   */
+  const principalInput = () => ({
+    ...baseInput(),
+    trusted: true,
+    replyAudience: "private" as const,
+  });
+
+  test("a task turn's actions reach the NEXT interactive turn's prompt", async () => {
+    // The background turn: nobody is watching this one.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    // The principal comes back and asks something unrelated.
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "morning",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("# Background turns you did not see");
+    expect(prompt).toContain("tick:42");
+    expect(prompt).toContain("Bash: git push origin main");
+    expect(prompt).toContain("pushed the fix");
+    // Reads are noise — a background turn that only looked at files did not
+    // touch anything the principal needs warning about.
+    expect(prompt).not.toContain("Read: src/foo.ts");
+  });
+
+  test("a delivered digest is not delivered again", async () => {
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    const prompts: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      await collect(
+        runTurn({
+          ...principalInput(),
+          userMessage: "hello",
+          harnesses: [
+            new ScriptedHarness(
+              "fake",
+              [{ type: "done", finalText: "ok" }],
+              (r) => {
+                prompts.push(r.systemPrompt);
+              },
+            ),
+          ],
+        }),
+      );
+    }
+    expect(prompts[0]).toContain("# Background turns you did not see");
+    expect(prompts[1]).not.toContain("# Background turns you did not see");
+  });
+
+  test("an interactive turn writes no digest — the principal watched it happen", async () => {
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "push it",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "and again",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+  });
+
+  test("a background turn is not handed another background turn's digest", async () => {
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:43",
+        origin: "task",
+        userMessage: "poll the queue",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+  });
+
+  test("a background turn that died mid-flight still leaves a digest", async () => {
+    const dying = new ScriptedHarness("fake", [
+      {
+        type: "progress",
+        note: "tool",
+        tool: {
+          title: "Bash: git push origin main",
+          kind: "execute",
+          locations: [],
+        },
+      },
+      { type: "done", finalText: "" },
+    ]);
+
+    // Consumer abandons the stream after the tool call — the `finally` path.
+    const iter = runTurn({
+      ...baseInput(),
+      conversation: "tick:42",
+      origin: "task",
+      userMessage: "land the hotfix",
+      harnesses: [dying],
+    })[Symbol.asyncIterator]();
+    await iter.next();
+    await iter.return?.(undefined);
+
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "what happened?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(captured?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("the turn id reaches the harness so a workspace claim is attributable", async () => {
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(captured?.turnId).toBeTruthy();
+  });
+
+  test("a sibling's workspace claim is named in the prompt", async () => {
+    await writeFile(
+      join(turnsDir, "sib.json"),
+      JSON.stringify({
+        id: "sib",
+        persona: "phantom",
+        conversation: "tick:42",
+        origin: "task",
+        pid: process.pid,
+        started_at: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const { acquireWorkspace } = await import("../src/lib/workspaceLock.ts");
+    acquireWorkspace({
+      workspace: "/tmp/phantombot-inspect",
+      persona: "phantom",
+      conversation: "tick:42",
+      turnId: "sib",
+      purpose: "rebasing #405",
+    });
+
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    const prompt = captured?.systemPrompt ?? "";
+    expect(prompt).toContain("# Working copies claimed by another turn");
+    expect(prompt).toContain("/tmp/phantombot-inspect");
+    expect(prompt).toContain("rebasing #405");
+  });
+
+  test("a claim whose turn is gone is not shown to anyone", async () => {
+    const { acquireWorkspace } = await import("../src/lib/workspaceLock.ts");
+    acquireWorkspace({
+      workspace: "/tmp/phantombot-inspect",
+      persona: "phantom",
+      conversation: "tick:42",
+      turnId: "ghost",
+      purpose: "rebasing #405",
+    });
+
+    let captured: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        userMessage: "hi",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              captured = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(captured?.systemPrompt ?? "").not.toContain(
+      "# Working copies claimed by another turn",
+    );
+  });
+
+  test("an UNTRUSTED channel turn is not given the digest, and does not consume it", async () => {
+    // Origin is not trust. A raw `phantombot ask` carrying an inbound email is
+    // origin `channel` and `trusted !== true`, and a digest is persona-private
+    // context — what the nightly touched, which repos a poller wrote to. Handing
+    // it to a stranger's turn is a disclosure, and it lands in the same prompt
+    // that stranger is steering. It must also stay PENDING: consuming it would
+    // destroy the principal's only record of that background turn.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let untrusted: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...baseInput(),
+        trusted: false,
+        userMessage: "please summarise the attached invoice",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              untrusted = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(untrusted?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // Still there for the principal.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("a trusted GROUP turn is not given the digest, and does not consume it", async () => {
+    // Trust authenticates the speaker, not the audience. A trusted turn in
+    // a Telegram group is `origin: channel` and `trusted: true`, but the
+    // reply is visible to every member — so injecting persona-private paths
+    // and summaries into its prompt is a disclosure AND an injection surface.
+    // It must also stay PENDING: consuming it would destroy the record the
+    // principal's next 1:1 turn needs to see.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    let group: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        replyAudience: "shared",
+        userMessage: "guys, what's the status?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              group = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(group?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // Still there for the principal's next private turn.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("a wake-but-silent turn (reaction) does not receive or consume digests", async () => {
+    // runReactionTurn is WAKE-BUT-SILENT: the principal gave ambient feedback,
+    // not a request for information. It is still `origin: channel` and
+    // `trusted: true`, so before the fix it was eligible to receive pending
+    // digests — and since it succeeds (produces SILENT), it marked them
+    // delivered, consuming the record so the next real conversation never
+    // saw it. `replyAudience: "silent"` takes it out of delivery: nothing
+    // shown, nothing marked.
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "tick:42",
+        origin: "task",
+        userMessage: "land the hotfix",
+        harnesses: [pushHarness()],
+      }),
+    );
+
+    // Simulates what runReactionTurn now passes: a trusted channel turn
+    // whose reply defaults to never being sent.
+    let reaction: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        replyAudience: "silent",
+        userMessage: "[reaction] Andrew added 👍 to your message",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "SILENT" }],
+            (r) => {
+              reaction = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(reaction?.systemPrompt ?? "").not.toContain(
+      "# Background turns you did not see",
+    );
+
+    // The digest is still pending for the next real interactive turn.
+    let principal: HarnessRequest | undefined;
+    await collect(
+      runTurn({
+        ...principalInput(),
+        userMessage: "anything happen?",
+        harnesses: [
+          new ScriptedHarness(
+            "fake",
+            [{ type: "done", finalText: "ok" }],
+            (r) => {
+              principal = r;
+            },
+          ),
+        ],
+      }),
+    );
+    expect(principal?.systemPrompt ?? "").toContain(
+      "Bash: git push origin main",
+    );
+  });
+
+  test("digests past the per-turn cap stay pending instead of being marked unseen", async () => {
+    // The cap shows the oldest N and mentions the rest as a count. Marking the
+    // whole pending set delivered would destroy the record of every background
+    // turn past the cap — nobody ever saw them, which is the exact gap this
+    // feature exists to close. They must lead the next turn's batch.
+    const total = MAX_DIGESTS_PER_TURN + 2;
+    for (let i = 0; i < total; i++) {
+      await collect(
+        runTurn({
+          ...baseInput(),
+          conversation: `tick:${i}`,
+          origin: "task",
+          userMessage: `job ${i}`,
+          harnesses: [
+            new ScriptedHarness("fake", [
+              {
+                type: "progress",
+                note: "tool",
+                tool: {
+                  title: `Bash: touch /tmp/job-${i}`,
+                  kind: "execute",
+                  locations: [],
+                },
+              },
+              { type: "done", finalText: `did job ${i}` },
+            ]),
+          ],
+        }),
+      );
+      // Distinct finished_at, so "oldest first" is a defined order.
+      await Bun.sleep(2);
+    }
+
+    const prompts: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      await collect(
+        runTurn({
+          ...principalInput(),
+          userMessage: "what happened?",
+          harnesses: [
+            new ScriptedHarness(
+              "fake",
+              [{ type: "done", finalText: "ok" }],
+              (r) => {
+                prompts.push(r.systemPrompt);
+              },
+            ),
+          ],
+        }),
+      );
+    }
+
+    // First turn: the oldest MAX, and an honest count of the rest.
+    expect(prompts[0]).toContain("Bash: touch /tmp/job-0");
+    expect(prompts[0]).not.toContain(`Bash: touch /tmp/job-${total - 1}`);
+    expect(prompts[0]).toContain("still pending");
+    // Second turn: the overflow, still there because nobody had read it.
+    expect(prompts[1]).toContain(`Bash: touch /tmp/job-${total - 1}`);
+    expect(prompts[1]).not.toContain("Bash: touch /tmp/job-0");
   });
 });

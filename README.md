@@ -1247,6 +1247,207 @@ process *and* it is under an hour old; stale entries are pruned on read.
 | `PHANTOMBOT_TURN_REGISTRY` | on (off under `NODE_ENV=test`) | Kill switch. `0`/`off`/`false`/`no` disables it: every read reports "nobody home", which is the old pre-registry behaviour — no deferral, no sibling notice. |
 | `PHANTOMBOT_TURN_REGISTRY_DIR` | `$XDG_STATE_HOME/phantombot/turns` | Relocate the entries without moving the rest of the state dir. |
 
+### Background-turn digests
+
+The registry stops two turns colliding, but it does nothing about *why* the
+collisions went unnoticed: a turn woken by `tick` streams its reply into its own
+transcript and nowhere else. The principal is reading a Telegram thread; the
+background turn commits, comments on a PR, edits a file, and leaves no trace
+anywhere they will look.
+
+So a **background turn** (origin `task`, `notification` or `internal`) writes a
+digest when it ends: what woke it, the state-changing tool calls it made
+(`edit`/`delete`/`move`/`execute` — reads are dropped as noise) with the files
+they named, and its own closing summary. The digest lands in
+`$XDG_STATE_HOME/phantombot/digests/`.
+
+The next **interactive, trusted, and private** turn for that persona gets the
+pending digests injected into its system prompt, alongside the sibling notice,
+and decides for itself whether any of it is worth mentioning. That's deliberate: pushing every poller
+fire to Telegram would break the "don't notify unless it's material" rule and
+train the principal to mute the channel, and writing a synthetic turn into their
+conversation history would forge transcript that later retrieval treats as
+something they actually said.
+
+Details worth knowing:
+
+- **Delivery is at-least-once.** A digest is marked delivered only after the
+  receiving turn *succeeds*, so a turn that dies re-delivers on the next one.
+  Marking at injection time would drop a background turn's only trace exactly
+  when the box is unhealthy.
+- **Written from a `finally`,** so a background turn that pushed a commit and
+  *then* crashed still leaves a digest — that's the case that matters most.
+- **Only interactive turns receive them.** Handing one background turn another's
+  digest informs nobody and would let two of them bounce a report forever.
+- **Only *trusted* interactive turns receive them.** Origin is not trust: a raw
+  `phantombot ask` carrying an inbound email is origin `channel` and untrusted.
+  A digest is persona-private context — what the nightly touched, which repos a
+  poller wrote to — so handing it to a turn a stranger is steering is both a
+  disclosure and an injection surface. An untrusted turn doesn't consume them
+  either; they stay pending for the principal.
+- **Only *private* turns receive them.** Trust authenticates the speaker, not
+  the audience. A trusted turn in a Telegram group is `origin: channel` and
+  `trusted: true`, but its reply is visible to every member — so injecting
+  persona-private paths and summaries into its prompt is a disclosure and an
+  injection surface, since the group's text lands in the same prompt. A
+  wake-but-silent reaction turn is worse: its reply defaults to never being
+  sent, so a digest delivered there is consumed into the void — marked
+  delivered, never seen. `replyAudience` (defaults to `"silent"`, fail closed)
+  gates both: `"shared"` for group/supergroup chats, `"silent"` for reaction
+  turns, `"private"` for 1:1 DMs and the only value that receives digests.
+- At most 5 digests go into one prompt, **oldest first**, with the rest reported
+  as a count and left pending for the next turn. Only what was actually shown is
+  marked delivered — marking the overflow would destroy the record of a turn
+  nobody ever saw. Draining oldest-first is also what stops the tail of a
+  backlog starving under sustained background load. Undelivered digests expire
+  after 24h — if you haven't spoken to the persona in a day, a wall of poller
+  output is not a briefing.
+- **Secrets are redacted at collection time,** through the same `redactForLog`
+  the audit log uses, before anything reaches disk. Tool titles are formatted
+  command lines, so they carry exactly the shapes that matter (`Bearer …`,
+  `FOO_TOKEN=…`); the trigger and summary go through it too.
+- Independent of the audit log: turning off `PHANTOMBOT_AUDIT_TOOL_CALLS` isn't
+  a request to go blind to what background turns did.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PHANTOMBOT_TURN_DIGEST` | on (off under `NODE_ENV=test`) | Kill switch. `0`/`off`/`false`/`no` disables writing *and* injection. |
+| `PHANTOMBOT_TURN_DIGEST_DIR` | `$XDG_STATE_HOME/phantombot/digests` | Relocate the digests. |
+
+### Workspace locks (shared working copies)
+
+The #391 collisions didn't happen in phantombot's state — they happened in a git
+checkout two turns shared, with no lock on it at all. The registry makes turns
+*aware* of each other; it gives them nowhere to serialise.
+
+```bash
+phantombot workspace lock /tmp/phantombot-inspect --purpose "reviewing PR #405"
+phantombot workspace status            # all live claims
+phantombot workspace status /tmp/x     # just that one
+phantombot workspace unlock /tmp/phantombot-inspect
+```
+
+`lock` exits **1 immediately** if another live turn holds the path — it never
+waits. The right response is a different directory (clone a fresh copy), not a
+queue. A claim held by a turn that is still in flight is named in every sibling
+turn's system prompt. It also exits 1 if another `lock` is inside its critical
+section at that instant (the message says so); that one is a genuine retry.
+
+If the lock directory can't be written — or locking is switched off — `lock`
+still exits **0**, because a state file that won't write must not stop the
+turn's actual work. It does **not** print `locked`: it says on stderr that the
+path is **NOT claimed** and that you are proceeding without protection. `ok` and
+`recorded` are different questions, and answering the second with the first
+would leave a turn believing it followed the protocol while nobody else can see
+its claim.
+
+`unlock` refuses unless you are the turn that took the lock. A caller with **no**
+turn id — a plain shell, a script, a harness with the registry off — is refused
+too, because dropping a claim you never took is how a cooperative protocol turns
+into silent corruption. `--force` is the deliberate override for clearing one by
+hand.
+
+`unlock` is guarded exactly as strictly as `lock`, and exits 1 with a retry
+message if it can't take the guard. An atomic `unlink` does *not* make
+read → ownership-check → unlink atomic: an unguarded release can read the old
+record, pass its own ownership check, and unlink *after* a guarded `lock` has
+published a new holder's claim — deleting a live claim and leaving the tree
+reading as free while that turn works in it. Refusing is the safe direction now
+that liveness is turn-based: a refused release self-heals, because the claim
+stops being held the moment its turn ends, whether or not anyone unlocked it.
+
+**This is advisory, and cannot be otherwise at this layer.** A turn runs `git`
+through the harness's own Bash tool; phantombot isn't in that path and cannot
+intercept it, so nothing here *prevents* a write to a checkout you don't hold.
+What it provides is a truthful, crash-safe answer to "is another turn in this
+tree", which previously did not exist. Real enforcement would need the mutation
+path itself to take the lock — a bigger change, and its own issue.
+
+**The holder is a turn, not a process.** Locks are attributed via
+`PHANTOMBOT_TURN_ID` (set in the harness environment next to
+`PHANTOMBOT_PERSONA`/`PHANTOMBOT_CONVERSATION`), and liveness is delegated to the
+turn registry: a lock is held while its turn is running, and released the moment
+it is not. Tying liveness to the pid that *wrote* the record — the obvious first
+guess — makes the whole feature a no-op, because the only writer is a CLI that
+exits milliseconds later, so every lock prunes itself as stale on the next query.
+The recorded `pid` is kept for diagnosis only.
+
+A holder that dies leaves a stale file, broken on inspection: the registry
+reports the turn gone (it covers both a clean finish and a dead owner) and the
+next query prunes the lock. When the registry *can't* answer — it's switched off,
+or the turn id predates a state-dir wipe — the lock is kept until it ages out
+after an hour: guessing "free" on a claim we cannot verify reintroduces the
+collision this exists to prevent, while guessing "held" costs one `git clone`
+elsewhere and is bounded by that hour, `unlock`, and `--force`. A lock taken by
+hand from a shell carries no turn id and follows the same age rule — held until
+someone releases it.
+
+Concurrent `lock` calls are serialised by a guard beside the lock file, so two
+turns claiming the same tree at the same instant cannot both read "free" and
+both win. The guard is a **ticket queue, not one contested pathname**: each
+caller publishes its own uniquely named ticket (written to a temp name and
+renamed into place, so a ticket that exists is always complete), and the oldest
+live ticket holds the section. Everyone else reports contention and moves on.
+
+That shape is what makes the guard's own cleanup safe. A single well-known
+guard path has to be *deleted* to be freed, and a delete by pathname can always
+land on a *successor* — the guard is recovered, a new holder creates its own,
+and the previous holder's cleanup removes it, putting two callers inside the
+section via the code meant to protect it. POSIX has no compare-and-delete to
+close that with. A ticket name belongs to exactly one acquisition and is never
+reused, so no delete can reach anyone else's claim.
+
+A ticket is surrendered on **ownership, never on age**. A holder that is still
+running is a slow critical section — a loaded box, a cold filesystem, a paused
+VM — and it can resume at any moment, so its ticket is honoured for as long as
+its process lives, however old it gets. A ticket is only ignored when the
+kernel says its owner is gone: no such pid, or a pid now held by a different
+process (start tokens differ). A start token that can't be read is *not*
+evidence of death. The one timeout left applies to a ticket with no readable
+owner at all — corruption, or a leftover from an older format, since nothing
+this code writes can produce one — which is ignored after a minute because
+liveness can't be asked about it.
+
+Pruning a stale lock also happens **under that guard**, and deletes only if the
+file's exact bytes are unchanged since they were read. Deciding a lock is stale
+isn't instant — it reads the turn registry — so an unguarded prune can read
+claim A, have a concurrent `lock` publish claim B over it, and then unlink B.
+This is the read-path twin of the release bug above, and it fires far more
+often, because every `workspace status` and every prompt render walks it.
+
+If the state directory itself is missing or unwritable, that is reported as an
+I/O failure, not as contention: `lock` **fails open** (a lock nobody can write
+is a lock nobody can see, and refusing to work because a state file won't write
+turns a visibility feature into an outage), while `unlock` says it failed rather
+than telling you to retry a loop that can never succeed.
+
+The path, conversation id and `--purpose` of a claim are written by *another*
+turn, and that turn's input may have come from email, a webhook or a raw
+`phantombot ask`. They're rendered into sibling prompts as inert data — flattened
+to one line, stripped of control, zero-width and bidirectional characters,
+backtick-free and length-bounded, inside a block that says in the prompt itself
+that none of it can authorise an action. Without that, a `--purpose` containing
+a newline and a `#` heading ends the list and opens what reads like a new
+instruction section, in the system prompt of a trusted, tool-capable turn that
+the threat judge never sees. The same treatment applies to background-turn
+digests, for the same reason.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PHANTOMBOT_WORKSPACE_LOCKS` | on (off under `NODE_ENV=test`) | Kill switch. Disabled means every `lock` succeeds and every query reports unheld. |
+| `PHANTOMBOT_WORKSPACE_LOCK_DIR` | `$XDG_STATE_HOME/phantombot/workspaces` | Relocate the lock files. |
+| `PHANTOMBOT_PROCESS_START_PROBE` | on | Off-switch for the process-identity probe that has to spawn a helper (macOS `ps`, Windows `wmic`/PowerShell). Off means the guard falls back to a plain pid check, which cannot detect pid reuse. Linux reads `/proc` and is unaffected either way. |
+
+On Windows and macOS there is no `/proc`, so answering "is the process that
+took this ticket still the same process?" costs a child process. That probe
+sits on a path budgeted in tens of milliseconds, so it asks the cheapest
+available tool first, remembers which one works (including that none does),
+caches an answer per pid for a few seconds, and runs every child with
+`windowsHide` so a console-less phantombot — the scheduled-task and service
+installs — never flashes a black window at you. Set
+`PHANTOMBOT_PROCESS_START_PROBE=0` where the interpreter is blocked by policy
+or simply unwanted; the lock still works, it just loses pid-reuse detection.
+
 ## Notifications
 
 `phantombot notify` is the agent-facing way to proactively contact the user

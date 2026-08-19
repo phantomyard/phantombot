@@ -269,11 +269,13 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   base: T,
   persona: string | undefined,
   conversation?: string,
+  turnId?: string,
 ): T {
-  if (!persona && !conversation) return base;
+  if (!persona && !conversation && !turnId) return base;
   return {
     ...base,
     ...(persona ? { PHANTOMBOT_PERSONA: persona } : {}),
     ...(conversation ? { PHANTOMBOT_CONVERSATION: conversation } : {}),
+    ...(turnId ? { PHANTOMBOT_TURN_ID: turnId } : {}),
   };
 }

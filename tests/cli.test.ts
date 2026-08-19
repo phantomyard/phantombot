@@ -51,6 +51,7 @@ describe("phantombot CLI dispatcher", () => {
       "update",
       "vault",
       "voice",
+      "workspace",
     ]);
   });
 });

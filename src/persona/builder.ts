@@ -72,6 +72,12 @@ export function buildSystemPrompt(
   // about *talking to the user*, not about secrets.
   sections.push(NOTIFICATION_SECTION);
 
+  // Shared-checkout protocol (#405). Sits after notifications because it is
+  // about the agent's own hygiene rather than about talking to the user. It
+  // has to be in the prompt — an advisory lock nothing enforces only works if
+  // the agent knows to take it.
+  sections.push(WORKSPACE_LOCK_SECTION);
+
   // Credential discovery + persistence rules. Same rationale as memory tools:
   // injected after the persona's own tools.md so persona overrides stay
   // primary, but always present so the agent doesn't reinvent the
@@ -395,6 +401,46 @@ one, you want \`phantombot task add\` instead.`;
  *
  * Exported for testing.
  */
+/**
+ * Shared-working-copy protocol (issue #405).
+ *
+ * The advisory lock in `lib/workspaceLock.ts` is worthless unless the agent
+ * knows the command exists — phantombot cannot intercept the `git` a harness
+ * runs through its own Bash tool, so the ONLY thing that makes the claim
+ * effective is a turn choosing to take it. Hence a prompt section rather than
+ * a README line.
+ *
+ * Deliberately short and conditional: most turns never touch a shared
+ * checkout, and a long protocol nobody needs is a tax on every prompt.
+ *
+ * Exported for testing.
+ */
+export const WORKSPACE_LOCK_SECTION =
+  `# Shared working copies
+
+If you are about to work in a directory another turn could also be using — a
+git checkout you did not just create, a build tree, anything under a shared
+path like \`/tmp\` — claim it first:
+
+  phantombot workspace lock <path> --purpose "what you're doing"
+  phantombot workspace status              # who holds what right now
+  phantombot workspace unlock <path>       # when you're done
+
+\`lock\` exits non-zero immediately if another live turn holds the path. Do not
+wait for it and do not force it: clone a fresh copy somewhere else instead. A
+claim held by another in-flight turn is named in your prompt. If it instead says
+another turn is claiming that path right this second, run it once more — that
+one is a momentary collision between two claims, not a held tree.
+
+This is ADVISORY. Nothing stops you writing to a tree you do not hold, which is
+exactly why honouring it is on you. Reading a claimed workspace is always fine;
+what it protects against is two turns committing, switching branches or
+rebasing in the same tree at once.
+
+Release when you finish. A claim from a crashed turn expires on its own, so a
+missed unlock degrades rather than wedging anything.
+`;
+
 export const NOTIFICATION_SECTION =
   `# Surfacing things to the user
 

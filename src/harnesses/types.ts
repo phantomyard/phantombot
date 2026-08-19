@@ -35,6 +35,14 @@ export interface HarnessRequest {
   persona?: string;
   /** Conversation key for THIS turn (e.g. "telegram:123"). Exposed to the subprocess as PHANTOMBOT_CONVERSATION so tools can mutate conversation-scoped runtime state safely. Optional for degraded/non-chat paths. */
   conversation?: string;
+  /**
+   * Registry id of THIS turn (issue #405). Exposed to the subprocess as
+   * `PHANTOMBOT_TURN_ID` so agent-facing commands can attribute state to the
+   * turn that made it — `phantombot workspace lock` uses it to refuse a
+   * release from a turn that never took the lock. Optional: degraded paths and
+   * a disabled turn registry both omit it.
+   */
+  turnId?: string;
   /** Subprocess working directory. Defaults to the agent dir. */
   workingDir?: string;
   /**
