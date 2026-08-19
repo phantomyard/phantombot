@@ -33,11 +33,7 @@ async function failNTimes(
 ): Promise<void> {
   for (let i = 0; i < n; i++) {
     alerter.noteFailure("claude", error);
-    await alerter.noteDegraded({
-      harnessId: "claude",
-      servedBy: "pi",
-      error,
-    });
+    await alerter.noteDegraded({ harnessId: "claude", servedBy: "pi" });
   }
 }
 
@@ -136,6 +132,77 @@ describe("degraded alert", () => {
   });
 });
 
+describe("mixed causes in one incident", () => {
+  // The failure run is per-CAUSE. Feeding one cause per incident (as every
+  // other test here does) cannot distinguish "counts auth failures" from
+  // "counts failures and happens to read the last cause".
+  test("429s do not inflate an auth count into a false alert", async () => {
+    const { alerter, sent } = newAlerter();
+    await failNTimes(
+      alerter,
+      DEGRADE_AFTER_FAILURES - 1,
+      "claude api error: rate_limit",
+    );
+    // One auth blip on top. If the run were per-harness this would read as
+    // "auth failure x3" and page the owner about a rate limit.
+    await failNTimes(alerter, 1, "claude api error: authentication_failed");
+    expect(sent).toEqual([]);
+  });
+
+  test("the count reflects auth failures only", async () => {
+    const { alerter, sent } = newAlerter();
+    await failNTimes(alerter, 4, "claude api error: rate_limit");
+    await failNTimes(
+      alerter,
+      DEGRADE_AFTER_FAILURES,
+      "claude api error: authentication_failed",
+    );
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain(`\u00d7${DEGRADE_AFTER_FAILURES}`);
+  });
+
+  test("one stray non-auth failure cannot mute a dead token", async () => {
+    const { alerter, sent } = newAlerter();
+    await failNTimes(
+      alerter,
+      DEGRADE_AFTER_FAILURES + 2,
+      "claude api error: authentication_failed",
+    );
+    expect(sent.length).toBe(1);
+    alerter.noteSuccess("claude");
+
+    // An empty reply counts as a failure (fallback.ts) and classifies as
+    // `other`. Landing mid-run must not silence the rest of the incident.
+    await failNTimes(alerter, 2, "claude api error: authentication_failed");
+    await failNTimes(alerter, 1, "empty reply");
+    await failNTimes(
+      alerter,
+      DEGRADE_AFTER_FAILURES,
+      "claude api error: authentication_failed",
+    );
+    expect(sent.length).toBe(2);
+  });
+});
+
+describe("send deadline", () => {
+  test("a hanging sender cannot stall the turn it is reporting on", async () => {
+    const alerter = new HarnessAlerter({
+      // Never resolves — a nostr relay that accepts the socket and never ACKs.
+      // `try/catch` in emit() does not cover this; only a deadline does.
+      send: () => new Promise<void>(() => {}),
+      sendTimeoutMs: 50,
+    });
+    const started = Date.now();
+    await alerter.noteExhausted({
+      harnessId: "claude",
+      error: "claude api error: rate_limit",
+      chain: ["claude"],
+    });
+    // Settled, and settled by the deadline rather than by the send.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
 describe("exhausted alert", () => {
   test("names the rate limit and the missing fallback", async () => {
     const { alerter, sent } = newAlerter();
@@ -149,6 +216,8 @@ describe("exhausted alert", () => {
     expect(sent[0]).not.toContain("\n");
     expect(sent[0]).toContain("\ud83d\udea8 claude rate limited 429");
     expect(sent[0]).toContain("no fallback left");
+    // The chain answers "out of what?" — one harness means "add a fallback".
+    expect(sent[0]).toContain("[claude]");
   });
 
   test("fires for a non-rate-limit outage too — no reply was delivered", async () => {
@@ -163,6 +232,7 @@ describe("exhausted alert", () => {
     // did not classify.
     expect(sent[0]).toContain("harness error");
     expect(sent[0]).not.toContain("rate limited");
+    expect(sent[0]).toContain("[claude \u2192 pi]");
   });
 
   test("is silent with no sender configured", async () => {

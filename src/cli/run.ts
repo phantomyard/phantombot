@@ -435,15 +435,21 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // here — PERSISTS the alert into the conversation. Without that an owner
   // who replies "why did that fire?" is asking about a message no turn can
   // see.
-  if (adminListener) {
-    const alertPersona = adminListener.persona;
-    harnessAlerter.configure({
-      host: hostname(),
-      send: async (message: string) => {
-        await runNotify({ config, message, persona: alertPersona });
-      },
-    });
-  }
+  //
+  // Persona resolution uses the same ladder as the startup doctor below: a
+  // phantomchat-only install has no Telegram listener at all, and that is
+  // precisely the kind of headless box where a dead credential goes unnoticed
+  // for days. `runNotify` reaches phantomchat perfectly well, so gating on a
+  // Telegram listener would switch the whole feature off exactly where it is
+  // needed most.
+  const alertPersona =
+    adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
+  harnessAlerter.configure({
+    host: hostname(),
+    send: async (message: string) => {
+      await runNotify({ config, message, persona: alertPersona });
+    },
+  });
 
   out.write(
     `phantombot — ${plan.listeners.length} telegram listener(s), ${phantomchatPersonas.length} phantomchat persona(s), harnesses ${config.harnesses.chain.join(" → ")}\n`,
@@ -487,9 +493,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Startup health check — read-only for the nightly (it repairs itself by
   // sweeping); still repairs drifted units/timers/connectors. Don't await.
   // Runs against the admin persona for the same reason as notify above.
-  const doctorPersona =
-    adminListener?.persona ?? phantomchatPersonas[0]?.persona ?? defaultPersona;
-  runDoctor({ config, persona: doctorPersona, out, err }).then(
+  runDoctor({ config, persona: alertPersona, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },
@@ -507,7 +511,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Detached, so a long backlog sweep outlives neither this promise nor the
   // daemon's own lifecycle concerns, and a crash there can never take the
   // channel loop with it.
-  spawnStartupNightly(doctorPersona);
+  spawnStartupNightly(alertPersona);
 
   // Self-provision the managed Pi capability-routing extension: when a routable
   // capability (image and/or coding model) is configured, stamp the embedded

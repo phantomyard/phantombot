@@ -221,10 +221,12 @@ export async function* runWithFallback(
           recoverableError = true;
           break;
         }
-        // Terminal, or recoverable-but-nowhere-left-to-go. Either way the
-        // user gets no reply from this turn, so this is an outage worth
-        // waking the owner for — the case that would otherwise only ever be
-        // visible as "it stopped replying".
+        // Recoverable-but-nowhere-left-to-go: the chain is exhausted and the
+        // user gets no reply, so this is an outage worth waking the owner for
+        // — the case that would otherwise only ever be visible as "it stopped
+        // replying". A TERMINAL error deliberately does NOT alert: it is
+        // yielded to the channel as an error chunk, so the user is already
+        // looking at it and a push notification only says it twice.
         if (chunk.recoverable) {
           alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
           await alerter.noteExhausted({
@@ -287,7 +289,6 @@ export async function* runWithFallback(
         await alerter.noteDegraded({
           harnessId: firstFailure.harnessId,
           servedBy: harness.id,
-          error: firstFailure.error,
         });
       }
       return;

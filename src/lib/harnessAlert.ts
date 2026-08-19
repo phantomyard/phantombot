@@ -32,7 +32,10 @@
  * failures rather than firing on the first one. A single 429 that recovers
  * two minutes later (observed on Robbie 2026-08-19) is not worth a push
  * notification; a token that is actually dead fails every single turn and
- * crosses the threshold within seconds.
+ * crosses the threshold in single-digit minutes. (Not seconds: cooldown
+ * backoff skips the harness between attempts — 150s, 300s, ... — so three
+ * real attempts is ~7.5 min at best, longer on a box with sparse turns.
+ * Against 3.5 silent days that is still the whole win.)
  *
  * Lifetime: process-local, like the cooldown store. A restart re-arms the
  * alert — correct, since a restart is also when a fixed credential would
@@ -46,6 +49,18 @@ export const DEGRADE_AFTER_FAILURES = 3;
 
 /** Floor between repeat alerts of the same kind within one open incident. */
 export const REALERT_MS = 6 * 60 * 60 * 1000; // 6 h
+
+/**
+ * Hard deadline on one alert send. The degraded alert is awaited on the
+ * turn's COMPLETION path, and the installed sender (`runNotify`) publishes
+ * to nostr — `Promise.allSettled(pool.publish(...))` against a relay that
+ * accepts the socket and never ACKs has no timeout of its own. A hang there
+ * would stall the very turn the alert is reporting on, which is the same
+ * harm as throwing, only quieter (and `try/catch` does not cover it). Turn-
+ * side callers of `phantombot notify` wrap it in `timeout 25` for exactly
+ * this reason; this is that guard, moved inside so both call sites get it.
+ */
+export const ALERT_SEND_TIMEOUT_MS = 20_000;
 
 /**
  * Coarse cause classification, derived from the error text a harness
@@ -103,6 +118,8 @@ export interface HarnessAlertOptions {
   now?: () => number;
   /** Host label rendered into the message ("which box is broken?"). */
   host?: string;
+  /** Test seam — overrides ALERT_SEND_TIMEOUT_MS. */
+  sendTimeoutMs?: number;
 }
 
 interface IncidentState {
@@ -122,11 +139,13 @@ export class HarnessAlerter {
   private send: AlertSender | undefined;
   private host: string | undefined;
   private readonly now: () => number;
+  private readonly sendTimeoutMs: number;
 
   constructor(options?: HarnessAlertOptions) {
     this.send = options?.send;
     this.host = options?.host;
     this.now = options?.now ?? Date.now;
+    this.sendTimeoutMs = options?.sendTimeoutMs ?? ALERT_SEND_TIMEOUT_MS;
   }
 
   /**
@@ -161,6 +180,15 @@ export class HarnessAlerter {
       cause,
       alertedAt: new Map(),
     };
+    // A run is per-CAUSE, not merely per-harness. Counting a 429 and an auth
+    // failure into the same tally makes the count a lie in both directions:
+    // two 429s + one auth blip would announce "auth failure x3" (the exact
+    // notification this module promises NOT to send), and one stray `other`
+    // in the middle of a dead-token run would silently mute it, which is the
+    // 3.5-day scenario the module exists to catch. Changing cause therefore
+    // starts a fresh run. `alertedAt` deliberately SURVIVES: the re-alert
+    // floor is anti-spam and a flapping cause must not be a way around it.
+    if (state.cause !== cause) state.consecutiveFailures = 0;
     state.consecutiveFailures += 1;
     state.cause = cause;
     this.incidents.set(harnessId, state);
@@ -181,7 +209,6 @@ export class HarnessAlerter {
   async noteDegraded(input: {
     harnessId: string;
     servedBy: string;
-    error: string;
   }): Promise<void> {
     const state = this.incidents.get(input.harnessId);
     if (!state) return;
@@ -219,16 +246,46 @@ export class HarnessAlerter {
         : cause === "rate_limit"
           ? " 429"
           : "";
+    // Render the chain: "no fallback left" begs the question "out of what?",
+    // and the answer is the difference between "add a fallback" and "both of
+    // my harnesses are down".
+    const chain = input.chain.length > 0 ? ` [${input.chain.join(" \u2192 ")}]` : "";
     await this.emit(
       input.harnessId,
       "exhausted",
-      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 no fallback left, turn undelivered`,
+      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 no fallback left${chain}, turn undelivered`,
     );
   }
 
   /** Drop all state. Tests only. */
   clear(): void {
     this.incidents.clear();
+  }
+
+  /**
+   * Resolve `p`, or reject at ALERT_SEND_TIMEOUT_MS. The timer is unref'd so
+   * a pending deadline never holds the process open, and the underlying send
+   * is abandoned rather than cancelled — it is fire-and-forget by then, and
+   * the alternative (waiting for it) is the stall we are preventing.
+   */
+  private async withDeadline(p: Promise<void> | void): Promise<void> {
+    if (!(p instanceof Promise)) return;
+    const limit = this.sendTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`alert send timed out after ${limit}ms`)),
+            limit,
+          );
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** ` \ud83d\udda5 <host>` — omitted entirely when the host is unknown. */
@@ -262,7 +319,7 @@ export class HarnessAlerter {
     if (last !== undefined && now - last < REALERT_MS) return;
     state.alertedAt.set(kind, now);
     try {
-      await send(message);
+      await this.withDeadline(send(message));
       log.warn("harnessAlert: notified owner", { harnessId, kind });
     } catch (e) {
       // Never let a failed notification break the turn — the alert is a
