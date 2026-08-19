@@ -64,16 +64,13 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -100,28 +97,20 @@ import {
 export const MAX_LOCK_AGE_MS = 60 * 60 * 1000;
 
 /**
- * How long a guard may be held before we look at whether its holder is alive.
- * Generous next to the work it protects (one read, one rename) so a loaded box
- * is never suspected, tight enough that a process killed mid-acquire does not
- * wedge the workspace for long.
+ * Age past which a guard ticket with NO identifiable owner is ignored.
  *
- * Reaching this age is NOT on its own grounds to break the guard - see
- * recoverGuard. A guard held by a process that is still running is a slow
- * critical section, not an abandoned one, and breaking it admits exactly the
- * two-writers-at-once state the guard exists to prevent.
- */
-const GUARD_STALE_MS = 5_000;
-
-/**
- * Age past which a guard is broken even though its holder still looks alive.
+ * Every ticket this module writes is published complete and carries its
+ * holder's pid, so an ownerless ticket is not something a live acquire can
+ * produce: it is a corrupt file, a foreign one, or a leftover from a format
+ * that predates this code. Those cannot be checked for liveness at all, so
+ * they get the one thing liveness cannot give them - a timeout. It is
+ * deliberately long: this path is for garbage, not for contention, and the
+ * cost of waiting on garbage is one minute of `contended` while the cost of
+ * ignoring a real holder is the two-writer race this module exists to prevent.
  *
- * The liveness check above is the right rule for a crash, but it deadlocks on a
- * process that is alive and not progressing - SIGSTOPped, swapping, or wedged
- * on a hung filesystem. Twelve times GUARD_STALE_MS: long enough that no real
- * critical section reaches it, short enough that a wedged holder costs a minute
- * rather than an hour.
+ * A ticket WITH an owner never expires. See ticketOwnerGone.
  */
-const GUARD_WEDGED_MS = 60_000;
+const GUARD_ORPHAN_MS = 60_000;
 
 /** Attempts, and backoff between them, when another acquire holds the guard. */
 const GUARD_ATTEMPTS = 6;
@@ -208,7 +197,7 @@ function sleepSync(ms: number): void {
 }
 
 /**
- * What is written INSIDE a guard file.
+ * What is written INSIDE a guard ticket.
  *
  * The first cut wrote a bare pid and nothing else, which made both of the guard
  * bugs possible: with no owner token, a release could only unlink by pathname
@@ -216,7 +205,7 @@ function sleepSync(ms: number): void {
  * and with no way to check the holder, recovery could only go by age.
  */
 interface GuardFile {
-  /** Unique per acquisition. The ONLY thing that authorises deleting this guard. */
+  /** Unique per acquisition, and also the ticket's FILENAME. */
   token: string;
   /** Guard holder, for liveness. Unlike a lock record, this pid is load-bearing. */
   pid: number;
@@ -230,94 +219,131 @@ export type GuardResult =
   | { ok: false; reason: "contended" }
   | { ok: false; reason: "failed"; error: Error };
 
-/**
- * Delete a guard file ONLY if it still carries `token`.
- *
- * Compare-and-delete, because unlinking by pathname is how a guard's successor
- * gets destroyed: holder A is broken and its guard removed, B creates a fresh
- * guard at the same path, and A's release - which knows only the path - deletes
- * B's. Two critical sections then run at once, which is the whole failure the
- * guard exists to prevent, reintroduced by its own cleanup.
- *
- * An unparsable guard is matched by `undefined`, so a truncated or
- * older-format guard can still be recovered rather than wedging the workspace
- * permanently.
- *
- * Residual race, stated plainly: read-then-unlink is not atomic, so a
- * replacement written between the read and the unlink is still deleted. POSIX
- * gives no compare-and-unlink, and the window here is two syscalls wide against
- * a guard that has already been judged abandoned. The unbounded, routine
- * version of this bug is fixed; what remains needs a different primitive
- * (a directory rename, or O_TMPFILE plus linkat) and is not worth it for a
- * lock that is advisory by construction.
- */
-function removeGuardIfToken(path: string, token: string | undefined): boolean {
-  let current: string | undefined;
-  try {
-    const raw = readFileSync(path, "utf8");
-    try {
-      const parsed = JSON.parse(raw) as GuardFile;
-      if (typeof parsed?.token === "string") current = parsed.token;
-    } catch {
-      current = undefined;
-    }
-  } catch {
-    // Already gone: someone else recovered it, which is the outcome we wanted.
-    return true;
-  }
-  if (current !== token) return false;
-  try {
-    unlinkSync(path);
-  } catch {}
-  return true;
+/** Ticket filenames are `<lockName>.guard.<token>`; `.tmp` is the unpublished one. */
+const GUARD_INFIX = ".guard.";
+
+interface Ticket {
+  name: string;
+  path: string;
+  /**
+   * When this ticket became VISIBLE to other processes, in nanoseconds.
+   *
+   * ctime, not mtime, and the distinction decides correctness. mtime is set
+   * when the temp file's bytes are written, which is BEFORE the rename that
+   * publishes it; ordering on it would let a ticket that appeared late claim to
+   * be old, and two processes scanning at different moments would then pick
+   * different winners. ctime is updated by the rename itself, so a ticket's
+   * ordering key is exactly the instant its name appeared - and any scan that
+   * misses a ticket necessarily happened before that instant, i.e. only ever
+   * misses tickets that sort AFTER it.
+   */
+  seq: bigint;
+  /**
+   * Age of the ticket's CONTENT (mtime), used only by the ownerless backstop.
+   *
+   * Deliberately not ctime: ctime answers "when did this name appear", which is
+   * the ordering question, and it cannot be set - so a garbage file's age would
+   * reset every time anything touched it. mtime is when the bytes were written,
+   * which is what "how long has this junk been lying here" means.
+   */
+  ageMs: number;
+  /** Parsed contents, when the ticket is complete and readable. */
+  holder?: GuardFile;
 }
 
 /**
- * Decide whether an existing guard may be broken, and break it if so.
+ * Publish a ticket, atomically.
  *
- * Returns true when the path is now clear and the caller should retry the
- * create immediately.
+ * Write-then-rename, because a name that exists must already be COMPLETE. The
+ * previous design created the guard with `open(..., "wx")` and wrote the JSON
+ * afterwards, which leaves a real window - a process descheduled between the
+ * two syscalls publishes an empty guard - where the file names a holder nobody
+ * can identify. Recovery then could not check liveness, so it fell back to age
+ * and deleted a guard whose owner was very much alive and inside its critical
+ * section. rename(2) closes that: the ticket is written under a `.tmp` name
+ * nobody scans, and appears at its real name in one atomic step with all of its
+ * bytes.
  *
- * Age alone is not the test. A guard that has existed for six seconds and whose
- * holder is STILL RUNNING is a slow critical section - a loaded box, a cold
- * filesystem - and stealing it puts two acquires inside the section at once.
- * So: past GUARD_STALE_MS we check whether the holder process is alive (pid
- * plus start token, so a recycled pid does not impersonate it), and only break
- * the guard if it is not. GUARD_WEDGED_MS is the backstop for a holder that is
- * alive but not progressing, which liveness alone would wait on forever.
+ * The token is a UUID and the ticket is named after it, so this create can
+ * never collide with, or overwrite, another caller's ticket.
  */
-function recoverGuard(
-  guardPath: string,
+function publishTicket(dir: string, lockName: string, token: string): string {
+  const path = join(dir, `${lockName}${GUARD_INFIX}${token}`);
+  const tmp = `${path}.tmp`;
+  const body: GuardFile = {
+    token,
+    pid: process.pid,
+    at: new Date().toISOString(),
+  };
+  const self = selfStartToken();
+  if (self !== null) body.pid_start = self;
+  writeFileSync(tmp, JSON.stringify(body), "utf8");
+  try {
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+    throw e;
+  }
+  return path;
+}
+
+function readTicket(dir: string, name: string): Ticket | undefined {
+  const path = join(dir, name);
+  let seq: bigint;
+  let ageMs: number;
+  try {
+    const st = statSync(path, { bigint: true });
+    seq = st.ctimeNs;
+    ageMs = Date.now() - Number(st.mtimeMs);
+  } catch {
+    return undefined;
+  }
+  let holder: GuardFile | undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as GuardFile;
+    if (typeof parsed?.token === "string" && typeof parsed?.pid === "number") {
+      holder = parsed;
+    }
+  } catch {
+    // Unreadable or not ours. Handled as an ownerless ticket below.
+  }
+  return { name, path, seq, ageMs, holder };
+}
+
+/**
+ * May this ticket be ignored - and therefore deleted?
+ *
+ * The rule is ownership, never age: a ticket whose holder is STILL RUNNING is a
+ * slow critical section, not an abandoned one, and a loaded box, a cold
+ * filesystem or a paused VM are all reasons a real holder takes longer than any
+ * timeout we would care to pick. The previous cut broke a guard once it reached
+ * a minute even with the holder alive, on the theory that a wedged holder must
+ * not deadlock the workspace. That trade is not available here: the holder can
+ * resume at any moment, inside a critical section a successor has already
+ * entered, which is the two-writers state the guard exists to prevent. So a
+ * live owner keeps its ticket for as long as it lives, and a caller that cannot
+ * get in reports `contended` - a bounded, visible, self-healing outcome.
+ *
+ * "Gone" means the kernel says gone: no such pid, or a pid now held by a
+ * DIFFERENT process (start tokens differ). A token we cannot read is not
+ * evidence of death - `processStartToken` returns null when the platform has no
+ * probe - so it leaves the holder alive.
+ */
+function ticketOwnerGone(
+  ticket: Ticket,
   isAlive: ProcessAliveProbe,
   startToken: ProcessStartProbe,
 ): boolean {
-  let ageMs: number;
-  let raw: string;
-  try {
-    ageMs = Date.now() - statSync(guardPath).mtimeMs;
-    raw = readFileSync(guardPath, "utf8");
-  } catch {
-    // Vanished between the failed create and the read: it was released, so
-    // retry immediately rather than sleeping on a guard nobody holds.
-    return true;
+  const holder = ticket.holder;
+  if (!holder) return ticket.ageMs > GUARD_ORPHAN_MS;
+  if (!isAlive(holder.pid)) return true;
+  if (holder.pid_start !== undefined) {
+    const observed = startToken(holder.pid);
+    if (observed !== null && observed !== holder.pid_start) return true;
   }
-  if (ageMs <= GUARD_STALE_MS) return false;
-
-  let holder: GuardFile | undefined;
-  try {
-    const parsed = JSON.parse(raw) as GuardFile;
-    if (typeof parsed?.token === "string") holder = parsed;
-  } catch {
-    // Unparsable and old: recoverable below, matched on `undefined`.
-  }
-
-  if (holder && typeof holder.pid === "number" && ageMs < GUARD_WEDGED_MS) {
-    const samePid =
-      holder.pid_start === undefined ||
-      startToken(holder.pid) === holder.pid_start;
-    if (isAlive(holder.pid) && samePid) return false;
-  }
-  return removeGuardIfToken(guardPath, holder?.token);
+  return false;
 }
 
 /**
@@ -326,73 +352,140 @@ function recoverGuard(
  * Acquire is read-check-write and release is read-check-unlink; without this,
  * two callers racing on the same tree both read "free", both write, and both
  * believe they won - the precise failure the module exists to prevent,
- * reproduced inside it. `open(..., "wx")` is the atom: the kernel gives
- * exclusive create to exactly one caller and everyone else sees EEXIST.
+ * reproduced inside it.
  *
  * Keyed on the lock FILE NAME, not the workspace path, so a caller holding a
  * corrupt record it cannot parse a workspace out of can still guard it.
  *
- * ── Three outcomes, not two ──
- * The first cut had one `catch {}` around the create, so ENOTDIR and EACCES
- * were indistinguishable from EEXIST and a broken state directory was reported
- * as contention. That made the documented fail-open path unreachable and turned
- * a visibility feature into an outage - the exact thing AGENTS invariant 20
- * exists to forbid. `failed` is now its own outcome, and only EEXIST means
- * another caller holds the guard.
+ * ── Why tickets, and not one exclusive pathname ──
+ * The obvious primitive is `open(guardPath, "wx")`: one winner, everyone else
+ * gets EEXIST. It was the first two cuts of this module, and both leaked the
+ * same way. A single well-known pathname means recovery must DELETE that name
+ * to free it, and deletion by pathname cannot be made ownership-safe: between
+ * reading a guard and unlinking it, the guard can be replaced, and the unlink
+ * then removes its SUCCESSOR - handing two callers the section at once, which
+ * is exactly what the guard was for. A compare-and-delete does not exist in
+ * POSIX, so no amount of care inside those two syscalls closes it.
  *
- * Exported for tests only. The successor-deletion bug it now prevents is
- * invisible from acquire/release - it needs a guard taken, broken, and replaced
- * in a controlled order - and a bug that can only be reproduced by hand is a
- * bug that comes back.
+ * So no name is ever contested. Each acquisition publishes its own uniquely
+ * named ticket and the OLDEST live ticket holds the section:
  *
- * Staleness is judged against the WALL CLOCK, not the caller's injected `now`.
- * The guard's age comes from a real mtime written by a real process moments
- * ago; a test that pins `now` to a fixed date is reasoning about lock RECORDS,
- * and applying that clock here would either break live guards or preserve dead
- * ones depending on which side of the pinned date the suite runs.
+ *   - Deletion is always of a name only its own acquisition ever had, and a
+ *     UUID is never reused, so no delete can ever hit a successor. That is the
+ *     invariant the previous design could only approximate.
+ *   - Recovery of a dead holder is just "ignore its ticket", with the unlink an
+ *     optimisation rather than a correctness step; deleting garbage races
+ *     against nothing.
+ *   - Ordering is total and stable: ctime is the instant a ticket became
+ *     visible, so a scan can only miss tickets that are strictly younger than
+ *     itself. Two overlapping holders would need each to have observed itself
+ *     oldest, which the ordering forbids.
+ *
+ * Exported for tests only. The successor-deletion bug it prevents is invisible
+ * from acquire/release - it needs a guard taken, broken and replaced in a
+ * controlled order - and a bug that can only be reproduced by hand is a bug
+ * that comes back.
+ *
+ * Liveness is judged against the WALL CLOCK, not the caller's injected `now`.
+ * A ticket's age comes from a real ctime written by a real process moments ago;
+ * a test that pins `now` to a fixed date is reasoning about lock RECORDS, and
+ * applying that clock here would either discard live tickets or keep dead ones
+ * depending on which side of the pinned date the suite runs.
  */
 export function takeGuard(
   dir: string,
   lockName: string,
   probes: LockProbes = {},
 ): GuardResult {
-  const guardPath = join(dir, `${lockName}.guard`);
-  const token = randomUUID();
   const isAlive = probes.isAlive ?? isProcessAlive;
   const startToken = probes.startToken ?? processStartToken;
+  const prefix = `${lockName}${GUARD_INFIX}`;
+
+  let token = randomUUID();
+  let myPath: string;
+  try {
+    myPath = publishTicket(dir, lockName, token);
+  } catch (e) {
+    // Not contention: the directory is missing, unwritable, or not a directory.
+    // Callers must be able to tell the two apart - acquire fails OPEN on this
+    // and only on this.
+    return { ok: false, reason: "failed", error: e as Error };
+  }
+  const drop = (path: string) => {
+    try {
+      unlinkSync(path);
+    } catch {}
+  };
 
   for (let attempt = 0; attempt < GUARD_ATTEMPTS; attempt += 1) {
-    try {
-      const fd = openSync(guardPath, "wx");
+    const mine = readTicket(dir, myPath.slice(dir.length + 1));
+    if (!mine) {
+      // Our own ticket is gone: swept as ownerless, or the state directory was
+      // cleared under us. Without a visible ticket we are not in the queue at
+      // all, and proceeding would enter the section unannounced.
       try {
-        const body: GuardFile = {
-          token,
-          pid: process.pid,
-          at: new Date().toISOString(),
-        };
-        const self = selfStartToken();
-        if (self !== null) body.pid_start = self;
-        writeSync(fd, JSON.stringify(body));
-      } finally {
-        closeSync(fd);
-      }
-      return {
-        ok: true,
-        release: () => {
-          removeGuardIfToken(guardPath, token);
-        },
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
-        // Not contention: the directory is missing, unwritable, or not a
-        // directory. Callers must be able to tell the two apart - acquire fails
-        // OPEN on this and only on this.
+        token = randomUUID();
+        myPath = publishTicket(dir, lockName, token);
+      } catch (e) {
         return { ok: false, reason: "failed", error: e as Error };
       }
-      if (recoverGuard(guardPath, isAlive, startToken)) continue;
-      if (attempt < GUARD_ATTEMPTS - 1) sleepSync(GUARD_BACKOFF_MS);
+      sleepSync(GUARD_BACKOFF_MS);
+      continue;
     }
+
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch (e) {
+      drop(myPath);
+      return { ok: false, reason: "failed", error: e as Error };
+    }
+
+    let blocked = false;
+    let tied = false;
+    for (const name of names) {
+      if (!name.startsWith(prefix) || name.endsWith(".tmp")) continue;
+      if (name === mine.name) continue;
+      const other = readTicket(dir, name);
+      if (!other) continue;
+      if (ticketOwnerGone(other, isAlive, startToken)) {
+        // Safe unconditionally: this name belongs to one acquisition that is
+        // provably over, and the name is never reused.
+        drop(other.path);
+        continue;
+      }
+      if (other.seq < mine.seq) {
+        blocked = true;
+        break;
+      }
+      if (other.seq === mine.seq) tied = true;
+    }
+
+    if (!blocked && !tied) {
+      const held = myPath;
+      return { ok: true, release: () => drop(held) };
+    }
+    if (attempt === GUARD_ATTEMPTS - 1) break;
+
+    if (tied && !blocked) {
+      // Same clock tick, so the two tickets cannot be ordered. A deterministic
+      // tiebreak (lowest token wins) is NOT safe: the other side may have
+      // scanned before our ticket appeared, seen itself alone, and entered. So
+      // neither enters on a tie; a fresh ticket breaks it.
+      drop(myPath);
+      sleepSync(GUARD_BACKOFF_MS);
+      try {
+        token = randomUUID();
+        myPath = publishTicket(dir, lockName, token);
+      } catch (e) {
+        return { ok: false, reason: "failed", error: e as Error };
+      }
+      continue;
+    }
+    sleepSync(GUARD_BACKOFF_MS);
   }
+
+  drop(myPath);
   return { ok: false, reason: "contended" };
 }
 
@@ -708,8 +801,9 @@ export type ReleaseResult =
  * claimed forever. It is not, now that liveness is turn-based: a refused
  * release self-heals, because when the turn ends the registry stops reporting
  * it running and the lock stops being held whether or not anyone unlocked it.
- * The guard is stale-swept at GUARD_STALE_MS on top of that, so contention is
- * bounded in seconds. A momentary "retry once" beats deleting a live claim.
+ * The guard itself is held only for the handful of syscalls below and its
+ * ticket dies with its holder, so contention is bounded in milliseconds. A
+ * momentary "retry once" beats deleting a live claim.
  */
 export function releaseWorkspace(
   workspace: string,

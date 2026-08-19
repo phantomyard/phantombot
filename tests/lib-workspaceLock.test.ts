@@ -10,7 +10,14 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -56,6 +63,47 @@ afterEach(async () => {
     else process.env[name] = prev;
   }
 });
+
+/**
+ * Publish a guard TICKET the way the module does: a uniquely named file,
+ * written complete and renamed into place.
+ *
+ * Tests used to hand-write a single `<lock>.guard` path, which is the design
+ * that could not be made safe — one contested name means recovery has to delete
+ * it, and a delete by pathname can always land on a successor. Ticket names are
+ * per-acquisition, so nothing a test writes here can be confused for anyone
+ * else's claim.
+ */
+function putTicket(
+  lock: string,
+  token: string,
+  body: Record<string, unknown> | string = {},
+): string {
+  const path = join(dir, `${lock}.guard.${token}`);
+  // Staged OUTSIDE the ticket namespace, so a half-written file is never even
+  // momentarily visible to a scan.
+  const staging = join(dir, `staging-${token}`);
+  writeFileSync(
+    staging,
+    typeof body === "string"
+      ? body
+      : JSON.stringify({ token, at: new Date().toISOString(), ...body }),
+  );
+  renameSync(staging, path);
+  return path;
+}
+
+/** A ticket held by a process that is genuinely running: this one. */
+function putLiveTicket(lock: string, token = "live"): string {
+  return putTicket(lock, token, { pid: process.pid });
+}
+
+/** Published ticket names for a lock. */
+function ticketsFor(lock: string): string[] {
+  return readdirSync(dir).filter(
+    (n) => n.startsWith(`${lock}.guard.`) && !n.endsWith(".tmp"),
+  );
+}
 
 const NOW = new Date("2026-08-19T12:00:00.000Z");
 const WS = "/tmp/phantombot-inspect";
@@ -274,12 +322,10 @@ describe("acquireWorkspace", () => {
 });
 
 describe("acquire is serialised by a guard", () => {
-  const guardPath = () => join(dir, `${fileFor(WS)}.guard`);
-
   test("reports contention instead of racing an in-flight acquire", () => {
     // Read-check-write without this guard lets two acquires both read "free",
     // both write, and both believe they won.
-    writeFileSync(guardPath(), "999999");
+    putLiveTicket(fileFor(WS));
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW },
@@ -290,10 +336,10 @@ describe("acquire is serialised by a guard", () => {
     expect(existsSync(join(dir, fileFor(WS)))).toBe(false);
   });
 
-  test("breaks a guard abandoned by a process that died mid-acquire", async () => {
-    writeFileSync(guardPath(), "999999");
-    const old = new Date(Date.now() - 60_000);
-    await utimes(guardPath(), old, old);
+  test("breaks a guard abandoned by a process that died mid-acquire", () => {
+    // Not by age: the ticket names a pid that no longer exists, so the section
+    // it was holding is provably over.
+    putTicket(fileFor(WS), "corpse", { pid: 999_001 });
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW },
@@ -308,7 +354,7 @@ describe("acquire is serialised by a guard", () => {
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW, ...running },
     );
-    expect(existsSync(guardPath())).toBe(false);
+    expect(ticketsFor(fileFor(WS))).toEqual([]);
   });
 
   test("only one of many concurrent processes wins the workspace", async () => {
@@ -367,8 +413,6 @@ describe("acquire is serialised by a guard", () => {
 });
 
 describe("releaseWorkspace", () => {
-  const guardPath = () => join(dir, `${fileFor(WS)}.guard`);
-
   test("the holder can release", async () => {
     await put({ turn_id: "t1" });
     expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
@@ -419,23 +463,21 @@ describe("releaseWorkspace", () => {
     // acquire had already published a NEW holder's claim — deleting a live
     // claim and leaving the tree reading as free while that turn works in it.
     await put({ turn_id: "t1" });
-    writeFileSync(guardPath(), "999999");
+    const held = putLiveTicket(fileFor(WS));
 
     const result = releaseWorkspace(WS, { turnId: "t1" }, { now: NOW });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("contended");
-    // The claim survived, and the guard was left for its owner to release.
+    // The claim survived, and the ticket was left for its owner to release.
     expect(existsSync(join(dir, fileFor(WS)))).toBe(true);
-    expect(existsSync(guardPath())).toBe(true);
+    expect(existsSync(held)).toBe(true);
   });
 
   test("breaks a guard abandoned mid-critical-section rather than wedging", async () => {
-    // Refusing is safe only because it is bounded. A guard whose owner died is
-    // swept by age, so a crash cannot make a workspace permanently unreleasable.
+    // Refusing is safe only because it is bounded. A ticket whose owner died is
+    // ignored, so a crash cannot make a workspace permanently unreleasable.
     await put({ turn_id: "t1" });
-    writeFileSync(guardPath(), "999999");
-    const old = new Date(Date.now() - 60_000);
-    await utimes(guardPath(), old, old);
+    putTicket(fileFor(WS), "corpse", { pid: 999_001 });
 
     expect(releaseWorkspace(WS, { turnId: "t1" }, { now: NOW })).toEqual({
       ok: true,
@@ -446,7 +488,7 @@ describe("releaseWorkspace", () => {
   test("releases the guard on the way out, including on refusal", async () => {
     await put({ turn_id: "t1" });
     releaseWorkspace(WS, { turnId: "stranger" }, { now: NOW });
-    expect(existsSync(guardPath())).toBe(false);
+    expect(ticketsFor(fileFor(WS))).toEqual([]);
   });
 
   test("a concurrent unlock cannot delete a claim an in-flight acquire published", async () => {
@@ -490,13 +532,15 @@ describe("releaseWorkspace", () => {
         "-e",
         [
           `const fs = require("fs");`,
-          `const fd = fs.openSync(${JSON.stringify(guardPath())}, "wx");`,
-          `fs.closeSync(fd);`,
+          `const ticket = ${JSON.stringify(join(dir, `${fileFor(WS)}.guard.child-a`))};`,
+          `const staging = ${JSON.stringify(join(dir, "staging-child-a"))};`,
+          `fs.writeFileSync(staging, JSON.stringify({ token: "child-a", pid: process.pid, at: new Date().toISOString() }));`,
+          `fs.renameSync(staging, ticket);`,
           `fs.writeFileSync(${JSON.stringify(barrier)}, "go");`,
           `Bun.sleepSync(60);`,
           `fs.writeFileSync(${JSON.stringify(lockFile)}, JSON.stringify({ workspace: ${JSON.stringify(normalizeWorkspace(WS))}, persona: "robbie", conversation: "c", turn_id: "t2", pid: 1, acquired_at: new Date().toISOString() }));`,
           `Bun.sleepSync(600);`,
-          `fs.unlinkSync(${JSON.stringify(guardPath())});`,
+          `fs.unlinkSync(ticket);`,
         ].join("\n"),
       ],
       { env: childEnv, stdout: "pipe", stderr: "pipe" },
@@ -558,9 +602,9 @@ describe("workspaceHolder / listWorkspaceLocks", () => {
     expect(listWorkspaceLocks({ now: NOW, ...running })).toHaveLength(0);
   });
 
-  test("a guard file is never mistaken for a lock", async () => {
+  test("a guard ticket is never mistaken for a lock", async () => {
     await put({ turn_id: "t1" });
-    writeFileSync(join(dir, `${fileFor(WS)}.guard`), "1");
+    putLiveTicket(fileFor(WS));
     expect(listWorkspaceLocks({ now: NOW, ...running })).toHaveLength(1);
   });
 });
@@ -590,28 +634,23 @@ describe("workspaceLockNotice", () => {
   });
 });
 
-describe("a guard is broken on liveness, not on age alone", () => {
-  const guardPath = () => join(dir, `${fileFor(WS)}.guard`);
+describe("a guard is decided by ownership, never surrendered to age", () => {
+  const lock = () => fileFor(WS);
 
-  /** A guard file in the current format, owned by `pid`. */
-  async function putGuard(
-    token: string,
-    pid: number,
-    ageMs: number,
-  ): Promise<void> {
-    writeFileSync(
-      guardPath(),
-      JSON.stringify({ token, pid, at: new Date().toISOString() }),
-    );
-    const stamp = new Date(Date.now() - ageMs);
-    await utimes(guardPath(), stamp, stamp);
+  /** Age a ticket's CONTENT, which is what the ownerless backstop reads. */
+  async function age(path: string, ms: number): Promise<void> {
+    const stamp = new Date(Date.now() - ms);
+    await utimes(path, stamp, stamp);
   }
 
-  test("an old guard whose holder is STILL RUNNING is not stolen", async () => {
-    // The bug: recovery went by age alone, so a critical section that merely
-    // ran long on a loaded box was broken and TWO acquires ran inside it at
-    // once — the exact state the guard exists to prevent.
-    await putGuard("guard-a", 999_001, 10_000);
+  test("a ticket whose holder is STILL RUNNING is never taken, at any age", async () => {
+    // The bug: recovery broke a complete guard on age alone once it passed a
+    // ceiling, even with the holder alive. A holder can be slow for reasons
+    // that are none of our business - a loaded box, a hung mount, a paused VM -
+    // and it can resume at any moment, INSIDE the critical section a successor
+    // has already entered. Ten minutes is not evidence of death.
+    const held = putTicket(lock(), "guard-a", { pid: 999_001 });
+    await age(held, 600_000);
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW, isAlive: () => true, startToken: () => null },
@@ -619,30 +658,21 @@ describe("a guard is broken on liveness, not on age alone", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("contended");
     // Still theirs, untouched.
-    expect(JSON.parse(readFileSync(guardPath(), "utf8")).token).toBe("guard-a");
+    expect(JSON.parse(readFileSync(held, "utf8")).token).toBe("guard-a");
   });
 
-  test("an old guard whose holder is GONE is broken", async () => {
-    await putGuard("guard-a", 999_001, 10_000);
+  test("a ticket whose holder is GONE is ignored, and swept", async () => {
+    const held = putTicket(lock(), "guard-a", { pid: 999_001 });
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW, isAlive: () => false, startToken: () => null },
     );
     expect(result.ok).toBe(true);
+    expect(existsSync(held)).toBe(false);
   });
 
-  test("a recycled pid does not keep a dead holder's guard alive", async () => {
-    writeFileSync(
-      guardPath(),
-      JSON.stringify({
-        token: "guard-a",
-        pid: 999_001,
-        pid_start: "token-then",
-        at: new Date().toISOString(),
-      }),
-    );
-    const stamp = new Date(Date.now() - 10_000);
-    await utimes(guardPath(), stamp, stamp);
+  test("a recycled pid does not keep a dead holder's ticket alive", () => {
+    putTicket(lock(), "guard-a", { pid: 999_001, pid_start: "token-then" });
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       // Pid is alive, but it is a DIFFERENT process wearing the same number.
@@ -651,45 +681,171 @@ describe("a guard is broken on liveness, not on age alone", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("a holder that is alive but wedged is broken at the ceiling", async () => {
-    // Liveness alone deadlocks on a SIGSTOPped or IO-hung holder. The ceiling
-    // bounds that at a minute rather than forever.
-    await putGuard("guard-a", 999_001, 61_000);
+  test("a start token we cannot read is not evidence of death", async () => {
+    // `processStartToken` returns null when the platform has no probe or the
+    // read fails. Reading that as "different process" would break a live
+    // holder's guard on a technicality, which is the same two-writer bug by a
+    // quieter route.
+    const held = putTicket(lock(), "guard-a", {
+      pid: 999_001,
+      pid_start: "token-then",
+    });
+    await age(held, 600_000);
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW, isAlive: () => true, startToken: () => null },
     );
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(existsSync(held)).toBe(true);
   });
 
-  test("releasing a guard cannot delete its SUCCESSOR", async () => {
-    // The second half of the same bug: the release closure unlinked by
-    // pathname. So after a guard was broken and recreated, the original
-    // holder's release deleted the NEW holder's guard, and two critical
-    // sections ran at once.
-    const first = takeGuard(dir, fileFor(WS));
+  test("a half-written ticket is invisible: it neither blocks nor is deleted", () => {
+    // Publication is write-then-rename, so a ticket under its staging name is
+    // not published at all. The old design created the guard first and wrote
+    // its contents second, which is exactly how an unidentifiable "holder"
+    // appeared - and recovery then deleted it without any liveness check,
+    // while the process that created it was alive and about to continue.
+    const staging = join(dir, `${lock()}.guard.half-written.tmp`);
+    writeFileSync(staging, "");
+    const result = acquireWorkspace(
+      { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+      { now: NOW },
+    );
+    expect(result.ok).toBe(true);
+    expect(existsSync(staging)).toBe(true);
+  });
+
+  test("an ownerless ticket blocks, and is only ignored as long-dead garbage", async () => {
+    // Nothing this module writes can produce one, so it is corruption or a
+    // leftover from an older format. It cannot be liveness-checked at all, so
+    // it gets the one thing liveness cannot give it: a timeout.
+    const junk = putTicket(lock(), "junk", "not json");
+    expect(
+      acquireWorkspace(
+        { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+        { now: NOW },
+      ).ok,
+    ).toBe(false);
+
+    await age(junk, 61_000);
+    expect(
+      acquireWorkspace(
+        { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
+        { now: NOW },
+      ).ok,
+    ).toBe(true);
+  });
+
+  test("releasing a guard cannot delete its SUCCESSOR", () => {
+    // The removal window, driven in the order that used to break it: the
+    // predecessor's ticket is swept by a recoverer, the recoverer takes the
+    // section, and only THEN does the predecessor run its cleanup. With one
+    // contested pathname that cleanup deleted the successor's guard by name and
+    // two critical sections ran at once. A ticket name belongs to exactly one
+    // acquisition and is never reused, so there is nothing for it to hit.
+    const first = takeGuard(dir, lock());
     expect(first.ok).toBe(true);
 
-    // Someone else recovers the guard and takes it.
-    writeFileSync(
-      guardPath(),
-      JSON.stringify({ token: "successor", pid: 2, at: NOW.toISOString() }),
-    );
+    // A recoverer decides `first` is dead, sweeps its ticket, and takes the
+    // section for itself.
+    for (const name of ticketsFor(lock())) unlinkSync(join(dir, name));
+    const successor = putLiveTicket(lock(), "successor");
 
     if (first.ok) first.release();
 
-    expect(existsSync(guardPath())).toBe(true);
-    expect(JSON.parse(readFileSync(guardPath(), "utf8")).token).toBe(
-      "successor",
-    );
+    expect(existsSync(successor)).toBe(true);
+    expect(JSON.parse(readFileSync(successor, "utf8")).token).toBe("successor");
   });
 
   test("releasing a guard does delete its own", () => {
-    const guard = takeGuard(dir, fileFor(WS));
+    const guard = takeGuard(dir, lock());
     expect(guard.ok).toBe(true);
-    expect(existsSync(guardPath())).toBe(true);
+    expect(ticketsFor(lock())).toHaveLength(1);
     if (guard.ok) guard.release();
-    expect(existsSync(guardPath())).toBe(false);
+    expect(ticketsFor(lock())).toEqual([]);
+  });
+
+  test("recovering a dead ticket does not let two callers in at once", () => {
+    // Two recoverers can agree a ticket is dead and both sweep it - the sweep
+    // is idempotent, and deliberately not the thing that grants the section.
+    // Entry is decided by the ticket ORDER afterwards, so the second caller
+    // sees the first's live ticket and is contended.
+    putTicket(lock(), "corpse", { pid: 999_001 });
+    const first = takeGuard(dir, lock());
+    expect(first.ok).toBe(true);
+
+    const second = takeGuard(dir, lock());
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toBe("contended");
+
+    if (first.ok) first.release();
+    const third = takeGuard(dir, lock());
+    expect(third.ok).toBe(true);
+    if (third.ok) third.release();
+  });
+
+  test("mutual exclusion holds across real, concurrent processes", async () => {
+    // The property everything above is in service of, checked the only way it
+    // can really be checked: separate processes, released off a barrier, each
+    // doing a read-modify-write that is only correct if exactly one of them is
+    // inside the section at a time. A lost update here means two callers held
+    // the guard at once, whatever the unit tests say.
+    const MODULE = join(import.meta.dir, "../src/lib/workspaceLock.ts");
+    const barrier = join(dir, "go");
+    const counter = join(dir, "counter");
+    writeFileSync(counter, "0");
+    const children = Array.from({ length: 6 }, () =>
+      Bun.spawn(
+        [
+          "bun",
+          "-e",
+          [
+            `const fs = require("fs");`,
+            `while (!fs.existsSync(${JSON.stringify(barrier)})) Bun.sleepSync(1);`,
+            `const { takeGuard } = require(${JSON.stringify(MODULE)});`,
+            `let entered = 0;`,
+            `for (let i = 0; i < 20; i++) {`,
+            `  const g = takeGuard(${JSON.stringify(dir)}, "counted.json");`,
+            `  if (!g.ok) { Bun.sleepSync(2); continue; }`,
+            `  const v = Number(fs.readFileSync(${JSON.stringify(counter)}, "utf8"));`,
+            `  Bun.sleepSync(1);`,
+            `  fs.writeFileSync(${JSON.stringify(counter)}, String(v + 1));`,
+            `  entered++;`,
+            `  g.release();`,
+            `}`,
+            `process.stdout.write(String(entered));`,
+          ].join("\n"),
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      ),
+    );
+
+    writeFileSync(barrier, "go");
+
+    let entered = 0;
+    for (const child of children) {
+      entered += Number(await new Response(child.stdout).text());
+      await child.exited;
+    }
+
+    // Every successful entry is accounted for: no two overlapped and lost one.
+    expect(entered).toBeGreaterThan(0);
+    expect(Number(readFileSync(counter, "utf8"))).toBe(entered);
+    // And nobody left a ticket behind.
+    expect(ticketsFor("counted.json")).toEqual([]);
+  }, 60_000);
+
+  test("the older ticket holds the section, not the newer one", () => {
+    // Ordering is by the instant a ticket became VISIBLE, so a scan can only
+    // miss tickets younger than itself - which is what makes two simultaneous
+    // winners impossible.
+    const first = takeGuard(dir, lock());
+    expect(first.ok).toBe(true);
+    const older = putLiveTicket(lock(), "older");
+    // Published after ours, so it does not displace us mid-section.
+    expect(ticketsFor(lock())).toHaveLength(2);
+    if (first.ok) first.release();
+    expect(existsSync(older)).toBe(true);
   });
 });
 
@@ -728,7 +884,7 @@ describe("a broken state directory is not contention", () => {
   });
 
   test("real contention is still reported as contention", () => {
-    writeFileSync(join(dir, `${fileFor(WS)}.guard`), "999999");
+    putLiveTicket(fileFor(WS));
     const result = acquireWorkspace(
       { workspace: WS, persona: "robbie", conversation: "c", turnId: "t1" },
       { now: NOW },
@@ -801,7 +957,7 @@ describe("pruning cannot delete a claim published while it was deciding", () => 
 
   test("pruning does not run while another caller holds the guard", async () => {
     await put({ turn_id: "old" });
-    writeFileSync(join(dir, `${fileFor(WS)}.guard`), "999999");
+    putLiveTicket(fileFor(WS));
     workspaceHolder(WS, { now: NOW, ...finished });
     // Guard held by someone else: the file is left for the next reader rather
     // than deleted on a race we cannot serialise against.

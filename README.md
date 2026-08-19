@@ -1357,21 +1357,31 @@ elsewhere and is bounded by that hour, `unlock`, and `--force`. A lock taken by
 hand from a shell carries no turn id and follows the same age rule — held until
 someone releases it.
 
-Concurrent `lock` calls are serialised by an exclusive-create guard file next to
-the lock, so two turns claiming the same tree at the same instant cannot both
-read "free" and both win.
+Concurrent `lock` calls are serialised by a guard beside the lock file, so two
+turns claiming the same tree at the same instant cannot both read "free" and
+both win. The guard is a **ticket queue, not one contested pathname**: each
+caller publishes its own uniquely named ticket (written to a temp name and
+renamed into place, so a ticket that exists is always complete), and the oldest
+live ticket holds the section. Everyone else reports contention and moves on.
 
-A stale guard is broken on **liveness**, not on age alone. A guard that has
-existed for a few seconds and whose holder process is still running is a slow
-critical section — a loaded box, a cold filesystem — and breaking it puts two
-acquires inside the section at once, which is the failure the guard exists to
-prevent. So past a few seconds we check whether the holder is alive (pid plus
-start token, so a recycled pid can't impersonate it) and only break it if not,
-with a one-minute ceiling as the backstop for a holder that is alive but not
-progressing (SIGSTOPped, or hung on IO). A guard is only ever deleted by the
-unique token it carries: unlinking by pathname is how a recovered guard's
-*successor* gets destroyed, which puts two critical sections back inside the
-same lock via the cleanup meant to protect it.
+That shape is what makes the guard's own cleanup safe. A single well-known
+guard path has to be *deleted* to be freed, and a delete by pathname can always
+land on a *successor* — the guard is recovered, a new holder creates its own,
+and the previous holder's cleanup removes it, putting two callers inside the
+section via the code meant to protect it. POSIX has no compare-and-delete to
+close that with. A ticket name belongs to exactly one acquisition and is never
+reused, so no delete can reach anyone else's claim.
+
+A ticket is surrendered on **ownership, never on age**. A holder that is still
+running is a slow critical section — a loaded box, a cold filesystem, a paused
+VM — and it can resume at any moment, so its ticket is honoured for as long as
+its process lives, however old it gets. A ticket is only ignored when the
+kernel says its owner is gone: no such pid, or a pid now held by a different
+process (start tokens differ). A start token that can't be read is *not*
+evidence of death. The one timeout left applies to a ticket with no readable
+owner at all — corruption, or a leftover from an older format, since nothing
+this code writes can produce one — which is ignored after a minute because
+liveness can't be asked about it.
 
 Pruning a stale lock also happens **under that guard**, and deletes only if the
 file's exact bytes are unchanged since they were read. Deciding a lock is stale
