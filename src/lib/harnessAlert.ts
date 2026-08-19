@@ -93,6 +93,29 @@ export function classifyFailure(
   return "other";
 }
 
+/**
+ * Legend appended to every alert.
+ *
+ * These messages are read by owners who do not necessarily read English, so
+ * the payload above carries meaning in symbols, proper nouns and numbers —
+ * harness ids, hostname, counts, HTTP status, the chain arrow. None of that
+ * needs translating. What symbols alone cannot do is TEACH themselves, so a
+ * legend rides along: the first alert someone ever receives should be
+ * readable without a search. It costs a few lines in a message that fires at
+ * most once per incident.
+ *
+ * Kept as one block so the glyph vocabulary has a single source of truth —
+ * a symbol added to a message and not to the legend is a puzzle, and a
+ * symbol reused for two causes is worse than prose.
+ */
+const LEGEND = [
+  "\u2139\ufe0f  \u26a0\ufe0f degraded \u00b7 \ud83d\udea8 outage",
+  "\ud83d\udd11\u2716 auth \u00b7 \u23f3\u2716 rate limit \u00b7 \ud83d\udca5 other",
+  "\u00d7N failed turns \u00b7 \ud83d\udda5 host \u00b7 \u23f1 UTC",
+  "\u2705\u2190\ud83d\udcac now answering \u00b7 \u26d4 chain exhausted, 0 replies",
+  "\ud83d\udd27 fix \u00b7 \ud83d\udcc4 raw error",
+].join("\n");
+
 /** Sends one alert line to the owner. Injected so this module never
  *  imports a channel. Contracted to never throw. */
 export type AlertSender = (message: string) => Promise<void> | void;
@@ -190,14 +213,16 @@ export class HarnessAlerter {
     await this.emit(
       input.harnessId,
       "degraded",
-      `⚠️ ${input.harnessId} has failed authentication ` +
-        `${state.consecutiveFailures} turns in a row${this.hostSuffix()}.\n\n` +
-        `I'm still answering — replies are coming from ${input.servedBy} ` +
-        `instead, so nothing is lost, but ${input.harnessId} won't recover ` +
-        `on its own and the fallback may be billed per token.\n\n` +
-        `Fix: re-authenticate ${input.harnessId} on that host ` +
-        `(\`${input.harnessId} /login\`), then it picks itself back up.\n\n` +
-        `Last error: ${truncate(input.error)}`,
+      [
+        `\u26a0\ufe0f ${input.harnessId} \ud83d\udd11\u2716 \u00d7${state.consecutiveFailures}${this.hostTag()}`,
+        `\u2705 ${input.servedBy} \u2190 \ud83d\udcac`,
+        `\ud83d\udd27 ${input.harnessId} /login`,
+        `\u23f1 ${this.stamp()}`,
+        "",
+        LEGEND,
+        "",
+        `\ud83d\udcc4 ${truncate(input.error)}`,
+      ].join("\n"),
     );
   }
 
@@ -214,21 +239,30 @@ export class HarnessAlerter {
     chain: string[];
   }): Promise<void> {
     const cause = classifyFailure(input.error, input.httpStatus);
-    const headline =
+    const causeGlyph =
       cause === "rate_limit"
-        ? `🚨 ${input.harnessId} is rate limited and there's no fallback left`
-        : `🚨 no harness could answer${this.hostSuffix()}`;
+        ? "\u23f3\u2716"
+        : cause === "auth"
+          ? "\ud83d\udd11\u2716"
+          : "\ud83d\udca5";
+    const detail =
+      cause === "rate_limit" && input.httpStatus
+        ? ` ${input.httpStatus}`
+        : cause === "rate_limit"
+          ? " 429"
+          : "";
     await this.emit(
       input.harnessId,
       "exhausted",
-      `${headline}.\n\n` +
-        `Chain tried: ${input.chain.join(" → ")}. ` +
-        `The turn produced no reply at all.\n\n` +
-        (cause === "rate_limit"
-          ? `This clears on its own when the window resets. To keep serving ` +
-            `through the next one, configure a fallback harness.`
-          : `Check the harness on that host.`) +
-        `\n\nLast error: ${truncate(input.error)}`,
+      [
+        `\ud83d\udea8 ${input.harnessId} ${causeGlyph}${detail}${this.hostTag()}`,
+        `\u26d4 ${input.chain.join(" \u2192 ")} \u2192 \u2716  (0 \ud83d\udcac)`,
+        `\u23f1 ${this.stamp()}`,
+        "",
+        LEGEND,
+        "",
+        `\ud83d\udcc4 ${truncate(input.error)}`,
+      ].join("\n"),
     );
   }
 
@@ -237,8 +271,15 @@ export class HarnessAlerter {
     this.incidents.clear();
   }
 
-  private hostSuffix(): string {
-    return this.host ? ` on ${this.host}` : "";
+  /** ` \ud83d\udda5 <host>` — omitted entirely when the host is unknown. */
+  private hostTag(): string {
+    return this.host ? ` \ud83d\udda5 ${this.host}` : "";
+  }
+
+  /** `YYYY-MM-DD HH:MMZ`. UTC on purpose: the reader and the broken box are
+   *  routinely in different timezones, and Z is unambiguous in every locale. */
+  private stamp(): string {
+    return new Date(this.now()).toISOString().slice(0, 16).replace("T", " ") + "Z";
   }
 
   /**

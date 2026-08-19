@@ -56,6 +56,7 @@ import {
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { harnessAlerter } from "../lib/harnessAlert.ts";
+import { runNotify } from "./notify.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { currentPlatform, logsCommand, statusCommand } from "../lib/platform.ts";
@@ -427,15 +428,19 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // how Robbie spent 3.5 days on pi. Install a sender here, at the daemon,
   // where an owner channel actually exists; every other entry point (`ask`,
   // tick, tests) leaves the alerter unconfigured and therefore silent.
+  //
+  // Send through `runNotify` rather than a transport of our own: it is the
+  // single writer that broadcasts across the persona bot, the default bot and
+  // phantomchat (deduped), honours reply-mode, and — the part that matters
+  // here — PERSISTS the alert into the conversation. Without that an owner
+  // who replies "why did that fire?" is asking about a message no turn can
+  // see.
   if (adminListener) {
-    const alertAccount = adminListener.account;
-    const alertTransport = new HttpTelegramTransport(alertAccount.token);
+    const alertPersona = adminListener.persona;
     harnessAlerter.configure({
       host: hostname(),
       send: async (message: string) => {
-        for (const chatId of alertAccount.allowedUserIds) {
-          await alertTransport.sendMessage(String(chatId), message);
-        }
+        await runNotify({ config, message, persona: alertPersona });
       },
     });
   }

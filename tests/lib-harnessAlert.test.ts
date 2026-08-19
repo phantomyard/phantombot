@@ -145,8 +145,10 @@ describe("exhausted alert", () => {
       chain: ["claude"],
     });
     expect(sent.length).toBe(1);
-    expect(sent[0]).toContain("rate limited");
-    expect(sent[0]).toContain("no fallback left");
+    // Rate limit glyph + the status, and a chain that dead-ends: the two
+    // facts a reader needs in any language.
+    expect(sent[0].split("\n")[0]).toContain("\u23f3\u2716 429");
+    expect(sent[0]).toContain("\u26d4 claude \u2192 \u2716");
   });
 
   test("fires for a non-rate-limit outage too — no reply was delivered", async () => {
@@ -157,8 +159,14 @@ describe("exhausted alert", () => {
       chain: ["claude", "pi"],
     });
     expect(sent.length).toBe(1);
-    expect(sent[0]).toContain("no harness could answer");
-    expect(sent[0]).toContain("claude → pi");
+    // Not auth, not a rate limit — the generic failure glyph, and the full
+    // chain so the reader can see everything was tried. Assert the CAUSE on
+    // the headline line alone: the legend below it names every glyph, so a
+    // whole-message match would pass no matter what cause we classified.
+    const headline = sent[0].split("\n")[0];
+    expect(headline).toContain("\ud83d\udca5");
+    expect(headline).not.toContain("\u23f3\u2716");
+    expect(sent[0]).toContain("claude \u2192 pi \u2192 \u2716");
   });
 
   test("is silent with no sender configured", async () => {
