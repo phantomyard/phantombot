@@ -13,6 +13,19 @@ import {
   HarnessAlerter,
   REALERT_MS,
 } from "../src/lib/harnessAlert.ts";
+import { killCauseToErrorChunk } from "../src/lib/harnessRunner.ts";
+
+/**
+ * The exact text the runner stamps for a kill cause. Derived from
+ * killCauseToErrorChunk() rather than copied, so a reworded kill string
+ * fails these tests instead of silently de-classifying every wedged
+ * harness back to "other".
+ */
+function killText(cause: "timeout" | "idle" | "startup"): string {
+  const chunk = killCauseToErrorChunk(cause, "pi", 300_000, 300_000, 60_000);
+  if (!chunk) throw new Error(`no error chunk for kill cause '${cause}'`);
+  return chunk.error;
+}
 
 function newAlerter(now: () => number = () => 0) {
   const sent: string[] = [];
@@ -57,23 +70,12 @@ describe("classifyFailure", () => {
     expect(classifyFailure("something vague", 401)).toBe("auth");
   });
 
-  // The three strings below are copied verbatim from killCauseToErrorChunk()
-  // in src/lib/harnessRunner.ts. If that wording changes, these fail — which
-  // is the point: the classifier matches on its text.
+  // Inputs come from the runner itself, not from copies of its wording: the
+  // classifier matches on that text, so a rewording there must fail here.
   test("recognises every wedged-harness kill the runner emits", () => {
-    expect(
-      classifyFailure("claude timed out after 300000ms (hard wall-clock cap)"),
-    ).toBe("timeout");
-    expect(
-      classifyFailure(
-        "pi timed out after 300000ms with no output (likely wedged on a tool call)",
-      ),
-    ).toBe("timeout");
-    expect(
-      classifyFailure(
-        "pi produced no output within 60000ms of startup (likely wedged on the MCP/init handshake)",
-      ),
-    ).toBe("timeout");
+    for (const cause of ["timeout", "idle", "startup"] as const) {
+      expect(classifyFailure(killText(cause))).toBe("timeout");
+    }
   });
 
   test("a real auth failure still wins over the word 'timed out'", () => {
@@ -152,6 +154,17 @@ describe("degraded alert", () => {
     await failNTimes(alerter, 1, err);
     expect(sent.length).toBe(2);
   });
+
+  test("a wedged harness a fallback absorbed stays silent", async () => {
+    const { alerter, sent } = newAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES + 2; i++) {
+      alerter.noteFailure("claude", killText("idle"));
+    }
+    await alerter.noteDegraded({ harnessId: "claude", servedBy: "pi" });
+    // Only `auth` pages: a timeout the chain routed around is #284's
+    // deliberate silence, and splitting it out of `other` must not change that.
+    expect(sent).toEqual([]);
+  });
 });
 
 describe("mixed causes in one incident", () => {
@@ -223,19 +236,6 @@ describe("send deadline", () => {
     // Settled, and settled by the deadline rather than by the send.
     expect(Date.now() - started).toBeLessThan(2000);
   });
-  test("a wedged harness a fallback absorbed stays silent", async () => {
-    const { alerter, sent } = newAlerter();
-    for (let i = 0; i < DEGRADE_AFTER_FAILURES + 2; i++) {
-      alerter.noteFailure(
-        "claude",
-        "claude timed out after 300000ms with no output (likely wedged on a tool call)",
-      );
-    }
-    await alerter.noteDegraded({ harnessId: "claude", servedBy: "pi" });
-    // Only `auth` pages: a timeout the chain routed around is #284's
-    // deliberate silence, and splitting it out of `other` must not change that.
-    expect(sent).toEqual([]);
-  });
 });
 
 describe("exhausted alert", () => {
@@ -251,7 +251,7 @@ describe("exhausted alert", () => {
     expect(sent[0]).not.toContain("\n");
     expect(sent[0]).toContain("\ud83d\udea8 claude rate limited 429");
     // One harness: nothing was ever configured to fall back to.
-    expect(sent[0]).toContain("no fallback configured [claude]");
+    expect(sent[0]).toContain("no usable fallback configured [claude]");
   });
 
   test("fires for a non-rate-limit outage too — no reply was delivered", async () => {
@@ -274,14 +274,14 @@ describe("exhausted alert", () => {
     await alerter.noteExhausted({
       harnessId: "pi",
       error:
-        "pi timed out after 300000ms with no output (likely wedged on a tool call)",
+        killText("idle"),
       chain: ["pi"],
     });
     expect(sent.length).toBe(1);
     expect(sent[0]).toContain("\ud83d\udea8 pi timed out");
     expect(sent[0]).not.toContain("harness error");
     // A one-harness chain never had a fallback to lose.
-    expect(sent[0]).toContain("no fallback configured [pi]");
+    expect(sent[0]).toContain("no usable fallback configured [pi]");
     expect(sent[0]).not.toContain("no fallback left");
   });
 
@@ -293,7 +293,7 @@ describe("exhausted alert", () => {
       chain: ["claude", "pi"],
     });
     expect(sent[0]).toContain("no fallback left [claude \u2192 pi]");
-    expect(sent[0]).not.toContain("no fallback configured");
+    expect(sent[0]).not.toContain("no usable fallback configured");
   });
 
   test("is silent with no sender configured", async () => {

@@ -269,10 +269,15 @@ export class HarnessAlerter {
     // my harnesses are down".
     const chain = input.chain.length > 0 ? ` [${input.chain.join(" \u2192 ")}]` : "";
     // "no fallback left" implies one was tried and also failed. With a
-    // single-harness chain nothing was ever configured to try, and that is a
+    // single-entry chain nothing was ever available to try, and that is a
     // different fix (add a fallback, not debug two harnesses), so say so.
+    // "usable", because a chain of one is also what a typo'd or unresolvable
+    // harness id leaves behind — the owner may well have configured a
+    // fallback that never made it into the chain.
     const exhaustion =
-      input.chain.length <= 1 ? "no fallback configured" : "no fallback left";
+      input.chain.length <= 1
+        ? "no usable fallback configured"
+        : "no fallback left";
     await this.emit(
       input.harnessId,
       "exhausted",
