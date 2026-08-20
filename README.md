@@ -1853,7 +1853,10 @@ Drawers are measured and reported but **never candidates**: their dedupe and
 lifecycle work moves to the database, where it is a uniqueness constraint rather
 than an LLM pass over prose. Selecting them would buy a turn whose own prompt
 tells it to change nothing. `--no-compact` skips the stage; a `--date` backfill
-never runs it.
+never runs it; and a sweep in which **any date stage failed** skips it too — a
+failed distill can leave MEMORY.md half-rewritten, so the archive would preserve
+the damage instead of the clean pre-sweep file. Over-budget files simply wait
+for the next clean sweep.
 
 The two stages run **concurrently**: they read the same daily file and write
 disjoint targets. Neither writes back to the daily file, which is what keeps

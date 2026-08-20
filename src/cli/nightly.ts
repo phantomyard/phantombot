@@ -562,8 +562,26 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     // running it per date would rewrite MEMORY.md N times in a backlog drain.
     // Skipped for `--date` backfills and for personas with a monolithic
     // prompt override, which owns its own contract.
+    //
+    // Also skipped whenever any date stage failed this sweep. A failed distill
+    // turn can still have partially rewritten MEMORY.md before erroring, so the
+    // archive compaction takes would capture that damaged state rather than the
+    // clean pre-sweep one — and a second model rewrite on top of it would bury
+    // the damage. Leave over-budget files alone and compact on the next clean
+    // sweep instead.
     // ---------------------------------------------------------------------
-    if (!input.skipCompaction && !input.today && !monolithic) {
+    const compactionEligible =
+      !input.skipCompaction && !input.today && !monolithic;
+    if (compactionEligible && errors.length > 0) {
+      out.write(
+        `nightly: compaction skipped — ${errors.length} stage error(s) this sweep; ` +
+          `over-budget files are left untouched until a clean sweep\n`,
+      );
+      log.warn("nightly: compaction skipped after stage failure", {
+        persona,
+        errors: errors.length,
+      });
+    } else if (compactionEligible) {
       // Keep the beat fresh across a stage that can outlive the stall timer.
       await holdSweep(todayStamp, queue.length);
       const compaction = await runCompaction({
@@ -647,7 +665,7 @@ export default defineCommand({
   meta: {
     name: "nightly",
     description:
-      "Run the cognitive distillation sweep — every unprocessed or changed daily file is distilled into the drawers, MEMORY.md and the KB. Idempotent: re-running with nothing pending does nothing.",
+      "Run the cognitive distillation sweep — every unprocessed or changed daily file is distilled into the drawers, MEMORY.md and the KB. The date sweep is idempotent: re-running with nothing pending distills nothing. The once-per-sweep compaction check still runs, and rewrites a file only if it is over budget (skip it with --no-compact).",
   },
   args: {
     persona: {

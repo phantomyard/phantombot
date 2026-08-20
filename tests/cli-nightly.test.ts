@@ -932,6 +932,40 @@ describe("runNightly — compaction stage (#410)", () => {
     expect(b.calls).not.toContain("compact");
   });
 
+  test("a failed date stage stops compaction from touching the file", async () => {
+    // Regression: compaction ran even when distill had errored. A distill turn
+    // can partially rewrite MEMORY.md before failing, so the archive would have
+    // captured the damaged state, and a second model rewrite would sit on top
+    // of it. No compact turn, and no compaction ledger.
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const calls: string[] = [];
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: (async (a: { stage: string }) => {
+        calls.push(a.stage);
+        if (a.stage === "distill") {
+          // partial rewrite, then failure
+          await writeFile(join(personaDir, "MEMORY.md"), "half-written", "utf8");
+          return { finalReply: "", errored: "timeout", durationMs: 1 };
+        }
+        if (a.stage === "compact") {
+          await writeFile(join(personaDir, "MEMORY.md"), "x", "utf8");
+        }
+        return { finalReply: "done", durationMs: 1 };
+      }) as never,
+      refreshIndex: async () => {},
+    });
+    expect(code).toBe(1);
+    expect(calls).not.toContain("compact");
+    expect((await loadNightlyState(personaDir)).compaction).toBeUndefined();
+    expect(await Bun.file(join(personaDir, "MEMORY.md")).text()).toBe(
+      "half-written",
+    );
+    expect(out.text).toContain("compaction skipped");
+  });
+
   test("a failed compact turn still settles the file and is reported", async () => {
     await daily("2026-05-01");
     await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
