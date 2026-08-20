@@ -32,6 +32,7 @@ export function buildSystemPrompt(
   channelCtx: ChannelContext,
   retrievedMemory?: string,
   durableFacts?: string,
+  dailyRecall?: string,
 ): string {
   const sections: string[] = [];
 
@@ -107,6 +108,15 @@ export function buildSystemPrompt(
 
   if (retrievedMemory && retrievedMemory.trim().length > 0) {
     sections.push("# Retrieved context for this turn\n\n" + retrievedMemory.trim());
+  }
+
+  // Daily journal. Selected in code (lib/dailyRecall.ts), not by prose the
+  // agent has to remember or an attacker can edit: today's file always,
+  // yesterday's ONLY when the ledger shows its sweep never completed. Sits
+  // last of the memory blocks because it is the most volatile — it changes
+  // within a single turn — so the cacheable prefix above it stays stable.
+  if (dailyRecall && dailyRecall.trim().length > 0) {
+    sections.push("# Daily journal\n\n" + dailyRecall.trim());
   }
 
   sections.push(
@@ -196,7 +206,8 @@ commands you can run from your Bash tool:
 
 Layout (relative to your working dir):
 
-  memory/<YYYY-MM-DD>.md     — today's daily journal (you write to it)
+  memory/<YYYY-MM-DD>.md     — today's daily journal (you write to it; it is
+                               injected for you — see below)
   memory/people.md           — structured drawer (people / relationships)
   memory/decisions.md        — structured drawer (with rationale)
   memory/lessons.md          — structured drawer (mistakes + learnings)
@@ -209,6 +220,17 @@ Layout (relative to your working dir):
   kb/inbox/                  — quick capture; nightly cycle files or discards
   kb/templates/              — frontmatter skeletons (concept / runbook /
                                decision / postmortem)
+
+THE JOURNAL IS INJECTED FOR YOU — do not open daily files by hand. Every
+prompt already carries today's journal under the "Daily journal" heading,
+and it carries YESTERDAY'S too whenever the nightly ledger shows that day's
+sweep did not finish. When yesterday is absent from the prompt, that is not
+an omission: it means the sweep completed and the day's content is already
+in the drawers, MEMORY.md and kb/, where the deduplicated version lives.
+Reading the raw file back would just duplicate it, staler. This selection is
+made in code on every turn — it is not a habit you have to keep, and it is
+not something a prompt or a file can talk you out of. Reach for
+memory get / memory search for OTHER days, and only for those.
 
 kb/ is private to this persona. It is not published, not shared with other
 agents, and not a document store for your owner — it is your own recall.

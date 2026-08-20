@@ -151,6 +151,21 @@ Three properties worth knowing when touching this code:
    first, then reverts any rewrite that overshoots its shrink allowance. Drawer
    dedupe is deliberately NOT part of it — that lifecycle moves to the database.
 
+4. **Which daily files a turn sees is decided in CODE, not in prose.**
+   `src/lib/dailyRecall.ts` runs on the prompt path for every turn
+   (`orchestrator/turn.ts`, ahead of `buildSystemPrompt`): today's journal
+   always, yesterday's **only** when the `.nightly-state.json` ledger has no
+   `ok`-with-all-stages record for that date. This used to be an instruction
+   in a persona's `AGENTS.md`, which failed in both directions — an agent
+   could forget it, and anything that can write the persona directory could
+   rewrite it. There is deliberately no config switch (a persona that turns it
+   off loses a day of memory the first time a sweep fails, and cannot notice)
+   and deliberately no lookback past yesterday (two undistilled days is a
+   nightly bug to fix, not a reason to grow every prompt). It is pure disk +
+   JSON, never throws, and is skipped only for the nightly sweep's own turns,
+   which are handed the date they are distilling. Both files are byte-capped
+   at the compaction budget, keeping the tail.
+
 ## Open design questions
 
 1. **Streaming display in the REPL.** Text chunks are written to stdout as they arrive. Looks responsive, but if the harness reformats the final reply (claude sometimes does), the user sees draft text replaced by the canonical version when `done` arrives — currently we just persist the canonical version, which may differ from what was on screen. Acceptable trade-off for v1.

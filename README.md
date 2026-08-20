@@ -1638,6 +1638,26 @@ The flow:
 3. Nightly distills drawers and `kb/inbox/` into durable KB notes.
 4. `MEMORY.md` stays lean and always-loaded.
 
+#### Which daily journals reach the prompt
+
+Your phantom does not decide this, and neither does a line of prose in a
+persona file — it is fixed in the memory system itself:
+
+| File | In the prompt? |
+|---|---|
+| **Today's journal** | Always. The day is still open, so nothing has been distilled out of it yet — if it is not in the prompt, it is not in the turn. |
+| **Yesterday's journal** | Only when the nightly ledger shows that date's sweep did **not** finish. |
+| **Older journals** | Never automatically. Reachable with `memory search` / `memory get`. |
+
+The asymmetry is the point. Once a day has been swept, its content already
+lives in the drawers, `MEMORY.md` and `kb/` in deduplicated, weighted form —
+re-injecting the raw file would only add a staler copy of the same day. So the
+raw journal is a **fallback for a failed distillation**, and in the healthy
+case the only journal in context is the open one.
+
+Injected journals are framed as data, not instructions: earlier turns wrote
+them, and some of those turns were driven by untrusted input.
+
 Useful commands:
 
 ```bash

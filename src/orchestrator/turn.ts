@@ -50,6 +50,7 @@ import {
   PRE_TOOL_NARRATION_INSTRUCTION,
 } from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
+import { buildDailyRecall } from "../lib/dailyRecall.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
@@ -410,6 +411,22 @@ async function* runTurnBody(
     }
   }
 
+  // Daily journal: today's file always, yesterday's only when the nightly
+  // ledger says its sweep never completed. Deliberately NOT a caller-supplied
+  // hook like `retrieve`/`pullFacts` — which daily files a turn sees is part
+  // of the memory system itself, so no channel, config or persona file gets a
+  // say in it (issue #410). Skipped only for the nightly sweep's own turns,
+  // which are handed the exact date they are distilling and would otherwise
+  // read the same content twice. Pure disk + JSON, no LLM, never throws.
+  let dailyRecall: string | undefined;
+  if (!input.conversation.startsWith("system:nightly:")) {
+    try {
+      dailyRecall = (await buildDailyRecall(input.agentDir)).block;
+    } catch {
+      dailyRecall = undefined;
+    }
+  }
+
   const baseSystemPrompt = buildSystemPrompt(
     persona,
     {
@@ -420,6 +437,7 @@ async function* runTurnBody(
     },
     retrievedMemory,
     durableFacts,
+    dailyRecall,
   );
   // Channel-layer overlays in append order:
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's

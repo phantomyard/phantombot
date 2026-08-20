@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
@@ -1580,5 +1580,70 @@ describe("runTurn — background-turn visibility (#405)", () => {
     // Second turn: the overflow, still there because nobody had read it.
     expect(prompts[1]).toContain(`Bash: touch /tmp/job-${total - 1}`);
     expect(prompts[1]).not.toContain("Bash: touch /tmp/job-0");
+  });
+});
+
+describe("runTurn — daily journal reflex (#410)", () => {
+  /** Write today's daily into the persona dir the turn will read. */
+  async function writeToday(body: string): Promise<void> {
+    const date = new Date().toISOString().slice(0, 10);
+    await mkdir(join(agentDir, "memory"), { recursive: true });
+    await writeFile(join(agentDir, "memory", `${date}.md`), body, "utf8");
+  }
+
+  function capturing(): {
+    harness: ScriptedHarness;
+    get: () => HarnessRequest | undefined;
+  } {
+    let captured: HarnessRequest | undefined;
+    const harness = new ScriptedHarness(
+      "fake",
+      [{ type: "done", finalText: "ok" }],
+      (req) => {
+        captured = req;
+      },
+    );
+    return { harness, get: () => captured };
+  }
+
+  test("today's journal is injected with no caller opt-in", async () => {
+    await writeToday("- 08:00 MARKER-TODAY-JOURNAL");
+    const { harness, get } = capturing();
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    const prompt = get()?.systemPrompt ?? "";
+    expect(prompt).toContain("# Daily journal");
+    expect(prompt).toContain("MARKER-TODAY-JOURNAL");
+  });
+
+  test("nightly's own turns are skipped — they are handed their date", async () => {
+    await writeToday("- 08:00 MARKER-TODAY-JOURNAL");
+    const { harness, get } = capturing();
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        conversation: "system:nightly:2026-08-20:distill",
+        userMessage: "distill",
+        harnesses: [harness],
+      }),
+    );
+
+    const prompt = get()?.systemPrompt ?? "";
+    expect(prompt).not.toContain("# Daily journal");
+    expect(prompt).not.toContain("MARKER-TODAY-JOURNAL");
+  });
+
+  test("no journal on disk leaves the section out entirely", async () => {
+    const { harness, get } = capturing();
+
+    await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [harness] }),
+    );
+
+    expect(get()?.systemPrompt ?? "").not.toContain("# Daily journal");
   });
 });
