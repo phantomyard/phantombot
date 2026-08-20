@@ -116,7 +116,12 @@ picture. From an architecture standpoint:
   should be designed assuming old turns survive. `capture_log` is append-only and
   exists purely as an observability trail.
 - **Markdown (the persona dir)** is the durable memory: `memory/<date>.md` daily
-  journals → four structured drawers → `kb/` atomic notes → `MEMORY.md`.
+  journals → five structured drawers → `kb/` atomic notes → `MEMORY.md`.
+- **The drawers are moving out of markdown into `drawer_entries`** — content-derived
+  ids (so dedupe is a UNIQUE constraint, not a prompt instruction), supersession,
+  per-kind lifecycle, and decay for the three *belief* drawers only. See
+  [`memory-drawers.md`](memory-drawers.md); the split that keeps `commitments` and
+  `people` out of decay is load-bearing, not an omission.
 
 Three properties worth knowing when touching this code:
 

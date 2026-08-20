@@ -1,0 +1,211 @@
+/**
+ * One-way ingest of the markdown drawers into `drawer_entries` (issue #410).
+ *
+ * The five drawers were written by hand and by four years of nightly sweeps, so
+ * the shape is not uniform. Two entry forms exist in the wild and both are
+ * supported:
+ *
+ *   ### A heading                    <- an entry whose body runs to the next
+ *   body line                           `###` or `##`
+ *   - detail bullet
+ *
+ *   - - [norm] one-line capture      <- the flat bullets the heartbeat appends
+ *
+ * `## 2026-06-04` section headers date everything under them; a non-date
+ * section header (`## Family`) carries no date, so those entries fall back to
+ * the file's mtime. Blockquote preamble and `---` rules are skipped.
+ *
+ * THE INGEST NEVER DELETES OR REWRITES THE MARKDOWN. It reads, files rows, and
+ * stops. Retiring the file is a separate, later step gated on a re-verify —
+ * the same "archive, never rm" rule stage one runs on. Because every id is
+ * derived from normalized content, re-running the ingest is a no-op that
+ * reaffirms rather than duplicates, so it is safe to run on every startup while
+ * the two representations live side by side.
+ */
+
+import { readFile, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { existsSync } from "node:fs";
+import {
+  DRAWER_KINDS,
+  drawerEntryId,
+  type DrawerKind,
+  type DrawerStore,
+} from "./drawers.ts";
+
+export interface ParsedDrawerEntry {
+  content: string;
+  /** Section date if the enclosing `## ` header was a date, else undefined. */
+  date?: string;
+}
+
+export interface IngestResult {
+  kind: DrawerKind;
+  path: string;
+  /** Entries parsed out of the file. */
+  parsed: number;
+  /** Rows newly inserted (first ever sighting). */
+  inserted: number;
+  /** Rows that already existed and were reaffirmed instead of duplicated. */
+  reaffirmed: number;
+}
+
+const DATE_HEADER = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/;
+const SECTION_HEADER = /^##\s+(?!#)/;
+const ENTRY_HEADER = /^###\s+(.*)$/;
+const FLAT_BULLET = /^-\s+(.*)$/;
+
+/**
+ * Split one drawer file into entries.
+ *
+ * Pure and exported so the parser can be tested against real drawer text
+ * without a database — the risky half of this migration is the parse, not the
+ * insert.
+ */
+export function parseDrawer(text: string): ParsedDrawerEntry[] {
+  const out: ParsedDrawerEntry[] = [];
+  let date: string | undefined;
+  let heading: string | undefined;
+  let body: string[] = [];
+
+  const flush = () => {
+    if (heading === undefined) return;
+    const content = [heading, ...body].join("\n").trim();
+    if (content) out.push({ content, date });
+    heading = undefined;
+    body = [];
+  };
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    const dateHeader = DATE_HEADER.exec(line);
+    if (dateHeader) {
+      flush();
+      date = dateHeader[1];
+      continue;
+    }
+    if (SECTION_HEADER.test(line)) {
+      flush();
+      // A non-date section (`## Family`) groups entries but dates nothing.
+      date = undefined;
+      continue;
+    }
+    const entryHeader = ENTRY_HEADER.exec(line);
+    if (entryHeader) {
+      flush();
+      heading = entryHeader[1]!.trim();
+      continue;
+    }
+    if (heading !== undefined) {
+      body.push(line);
+      continue;
+    }
+    // Outside any `###` block: a top-level bullet is an entry on its own. The
+    // heartbeat writes `- - [norm] …`, so strip the doubled dash.
+    const bullet = FLAT_BULLET.exec(line.trim());
+    if (bullet) {
+      const content = bullet[1]!.replace(/^-\s+/, "").trim();
+      if (content) out.push({ content, date });
+      continue;
+    }
+    // Anything else at top level (preamble blockquote, `---`, `# Title`,
+    // blank) is not an entry.
+  }
+  flush();
+  return out;
+}
+
+/** `memory/<kind>.md` for a drawer kind. */
+export function drawerPath(kind: DrawerKind): string {
+  return join("memory", `${kind}.md`);
+}
+
+/**
+ * Ingest one drawer file into rows. Returns counts; writes nothing to disk.
+ *
+ * `now` bounds a section date from the future (a typo'd header must not park
+ * an entry's decay clock in 2027) and stands in for an undated entry only when
+ * the file has no usable mtime.
+ */
+export async function ingestDrawerFile(
+  store: DrawerStore,
+  personaDir: string,
+  persona: string,
+  kind: DrawerKind,
+  now: Date = new Date(),
+): Promise<IngestResult> {
+  const rel = drawerPath(kind);
+  const abs = join(personaDir, rel);
+  const result: IngestResult = {
+    kind,
+    path: rel,
+    parsed: 0,
+    inserted: 0,
+    reaffirmed: 0,
+  };
+  if (!existsSync(abs)) return result;
+
+  const text = await readFile(abs, "utf8");
+  const fallback = await fileDate(abs, now);
+  const entries = parseDrawer(text);
+  result.parsed = entries.length;
+
+  for (const entry of entries) {
+    const assertedAt = entryDate(entry.date, fallback, now);
+    // Ask by id rather than diffing list() lengths: a drawer runs to ~1400
+    // entries, and re-listing per entry would make the migration quadratic.
+    const existed = store.get(drawerEntryId(persona, kind, entry.content));
+    store.file({
+      persona,
+      kind,
+      content: entry.content,
+      origin: rel,
+      assertedAt,
+    });
+    if (existed) result.reaffirmed += 1;
+    else result.inserted += 1;
+  }
+  return result;
+}
+
+/** Ingest all five drawers. */
+export async function ingestDrawers(
+  store: DrawerStore,
+  personaDir: string,
+  persona: string,
+  now: Date = new Date(),
+): Promise<IngestResult[]> {
+  const out: IngestResult[] = [];
+  for (const kind of DRAWER_KINDS) {
+    out.push(await ingestDrawerFile(store, personaDir, persona, kind, now));
+  }
+  return out;
+}
+
+function entryDate(
+  date: string | undefined,
+  fallback: Date,
+  now: Date,
+): Date {
+  if (!date) return fallback;
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed > now ? now : parsed;
+}
+
+async function fileDate(abs: string, now: Date): Promise<Date> {
+  try {
+    const s = await stat(abs);
+    return s.mtime > now ? now : s.mtime;
+  } catch {
+    return now;
+  }
+}
+
+/** Human label for a result line, e.g. `decisions.md: 1411 parsed, 1347 new`. */
+export function describeIngest(r: IngestResult): string {
+  return (
+    `${basename(r.path)}: ${r.parsed} parsed, ${r.inserted} new, ` +
+    `${r.reaffirmed} already filed`
+  );
+}
