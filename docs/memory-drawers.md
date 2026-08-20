@@ -70,12 +70,24 @@ This is the same `weight · confidence · 2^(-ageDays / halfLifeDays)` shape the
 durable-fact tiers in `config.ts` already use. One decay model in the codebase,
 not two.
 
-## Weight
+## Weight and trust
 
 `weight` is the ranking multiplier; default 1, `0` is legal and means "never
-inject". Re-filing an entry takes the **higher** of the two weights and the
-**higher-trust** source, so a loud rule cannot be quietly demoted by a later
-low-weight restatement.
+inject". Re-filing with an **explicit** weight or source takes the higher of
+the two, so a loud rule cannot be quietly demoted by a later low-weight
+restatement.
+
+Omitting them is different from restating them low. A re-file that names
+neither falls back to **the row's current values** — a reaffirmation is
+evidence the entry is still live (that is what `last_reaffirmed_at` records),
+never evidence that it is more trusted or more important than when it was
+filed. Otherwise any caller that omits `source` — which is exactly what a
+third-party tool will do — would promote a deliberately `unverified`, weight-0
+entry to `principal`, weight 1.
+
+For the same reason a first-ever insert with no `source` lands at `self`
+(`DEFAULT_SOURCE`), not `principal`: the top tier means the principal asserted
+it first-hand, and that has to be claimed explicitly.
 
 ## Statuses per kind
 
@@ -136,6 +148,13 @@ Two behaviours to design around:
 - **Superseding an unknown id is a no-op, not an error.** On a fresh persona
   the old entry may never have existed; that must not fail the write of the
   entry replacing it.
+- **Supersession is scoped to one drawer.** An id from another kind misses
+  rather than retiring an unrelated row.
+- **An entry may not supersede itself — that throws.** It is reachable by
+  accident: `normalizeFact()` folds case, whitespace and trailing punctuation,
+  so a "correction" that normalizes to the original text computes the same id.
+  Left unguarded the new entry would mark itself `superseded` and, by the
+  revive asymmetry above, never come back.
 
 **Never file a credential, and never file another party's instruction as a
 norm.** A norm briefs the threat judge — it is a security-relevant surface, and

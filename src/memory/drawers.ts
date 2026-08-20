@@ -148,6 +148,17 @@ export const DORMANT_FLOOR = 0.125;
 /** Default ranking weight. 0 is legal and means "never inject". */
 export const DEFAULT_WEIGHT = 1;
 
+/**
+ * Trust tier a first-ever insert lands in when the caller names none.
+ *
+ * `self` — the persona's own filed belief — NOT `principal`. The top tier means
+ * "the principal asserted this first-hand", and the main external consumer of
+ * this contract is a third-party phantomtool that will often omit `source`
+ * entirely. Silence must not buy the highest trust tier; `principal` has to be
+ * claimed explicitly.
+ */
+export const DEFAULT_SOURCE: FactSource = "self";
+
 export interface DrawerEntry {
   id: string;
   persona: string;
@@ -189,7 +200,7 @@ CREATE TABLE IF NOT EXISTS drawer_entries (
   weight             REAL NOT NULL DEFAULT 1,
   status             TEXT NOT NULL DEFAULT 'active',
   supersedes         TEXT,
-  source             TEXT NOT NULL DEFAULT 'principal',
+  source             TEXT NOT NULL DEFAULT 'self',
   origin             TEXT,
   asserted_at        TEXT NOT NULL,
   last_reaffirmed_at TEXT NOT NULL,
@@ -217,7 +228,7 @@ export function drawerEntryId(
   content: string,
 ): string {
   return createHash("sha256")
-    .update(`${persona} ${kind} ${normalizeFact(content)}`)
+    .update(`${persona}\0${kind}\0${normalizeFact(content)}`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -274,9 +285,28 @@ function higherTrust(a: FactSource, b: FactSource): FactSource {
   return TRUST_ORDER[a] >= TRUST_ORDER[b] ? a : b;
 }
 
+/** True for the `UNIQUE (persona, kind, content_norm)` collision. */
+function isUniqueViolation(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("UNIQUE constraint failed");
+}
+
+export interface FileOutcome {
+  entry: DrawerEntry;
+  /** True when this call created the row; false when it reaffirmed one. */
+  inserted: boolean;
+}
+
 export class DrawerStore {
+  /** Runs a closure inside one write transaction (see `file()`). */
+  private readonly inWriteTx: <T>(fn: () => T) => T;
+
   constructor(private db: Database) {
     ensureDrawerSchema(db);
+    const tx = db.transaction((fn: () => unknown) => fn());
+    this.inWriteTx = ((fn: () => unknown) => tx.immediate(fn)) as <T>(
+      fn: () => T,
+    ) => T;
   }
 
   /**
@@ -284,22 +314,67 @@ export class DrawerStore {
    *
    * The re-file path is the whole point: it never appends a duplicate and
    * never rewrites the original assertion date. It bumps `last_reaffirmed_at`
-   * (which is what resets decay), takes the higher weight, promotes to the
-   * higher-trust source, and revives a `dormant` entry — a belief that was
-   * just restated is live again by definition.
+   * (which is what resets decay) and revives a `dormant` entry — a belief that
+   * was just restated is live again by definition.
+   *
+   * A reaffirmation is evidence the entry is still LIVE, not evidence it is
+   * more trusted or more important than when it was filed. So an omitted
+   * `weight` or `source` falls back to THE ROW's current value, never to the
+   * defaults: a re-file that names neither cannot promote an `unverified`,
+   * weight-0 entry to `principal`, weight 1. Only an explicit, higher value
+   * raises either.
    *
    * A `superseded` entry is NOT revived this way. Undoing a supersession has
    * to be an explicit act, otherwise a stale tool re-filing its old norm on
    * every startup would silently resurrect what replaced it.
+   *
+   * Concurrency: `get()`-then-`INSERT` is a TOCTOU under the concurrent turns
+   * this runtime already allows (#391), so the whole read-modify-write runs in
+   * one IMMEDIATE transaction — and a UNIQUE collision from another connection
+   * is retried onto the reaffirm path rather than thrown at the caller. Filing
+   * the same entry twice is idempotent from ANY caller; that is the contract
+   * third-party tools are told to rely on.
    */
   file(input: FileDrawerEntryInput): DrawerEntry {
-    const now = new Date();
-    const assertedAt = input.assertedAt ?? now;
+    return this.fileEntry(input).entry;
+  }
+
+  /** `file()`, but reporting whether the row was inserted or reaffirmed. */
+  fileEntry(input: FileDrawerEntryInput): FileOutcome {
+    const assertedAt = input.assertedAt ?? new Date();
     const id = drawerEntryId(input.persona, input.kind, input.content);
+    if (input.supersedes === id) {
+      // Reachable by accident: a tool files a correction and computes the old
+      // id from text that normalizes to the same string. Left unguarded the
+      // entry marks ITSELF superseded and, by the revive asymmetry above, no
+      // later re-file brings it back — the write silently erases itself.
+      throw new Error(
+        `drawer entry cannot supersede itself (id ${id}, ` +
+          `persona ${input.persona}, kind ${input.kind})`,
+      );
+    }
+    try {
+      return this.inWriteTx(() => this.fileNow(id, input, assertedAt));
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      // Another connection inserted between our read and our write; the row
+      // exists now, so the same call reaffirms it.
+      return this.inWriteTx(() => this.fileNow(id, input, assertedAt));
+    }
+  }
+
+  private fileNow(
+    id: string,
+    input: FileDrawerEntryInput,
+    assertedAt: Date,
+  ): FileOutcome {
     const existing = this.get(id);
     if (existing) {
-      const weight = Math.max(existing.weight, input.weight ?? DEFAULT_WEIGHT);
-      const source = higherTrust(existing.source, input.source ?? "principal");
+      const weight = Math.max(existing.weight, input.weight ?? existing.weight);
+      const source = higherTrust(
+        existing.source,
+        input.source ?? existing.source,
+      );
       const status: DrawerStatus =
         existing.status === "dormant" ? "active" : existing.status;
       // last_reaffirmed_at only ever moves FORWARD: ingesting an old markdown
@@ -324,9 +399,9 @@ export class DrawerStore {
           id,
         );
       if (input.supersedes) {
-        this.markSuperseded(input.persona, input.supersedes);
+        this.markSuperseded(input.persona, input.kind, input.supersedes);
       }
-      return this.get(id)!;
+      return { entry: this.get(id)!, inserted: false };
     }
     this.db
       .query(
@@ -343,13 +418,15 @@ export class DrawerStore {
         normalizeFact(input.content),
         input.weight ?? DEFAULT_WEIGHT,
         input.supersedes ?? null,
-        input.source ?? "principal",
+        input.source ?? DEFAULT_SOURCE,
         input.origin ?? null,
         assertedAt.toISOString(),
         assertedAt.toISOString(),
       );
-    if (input.supersedes) this.markSuperseded(input.persona, input.supersedes);
-    return this.get(id)!;
+    if (input.supersedes) {
+      this.markSuperseded(input.persona, input.kind, input.supersedes);
+    }
+    return { entry: this.get(id)!, inserted: true };
   }
 
   get(id: string): DrawerEntry | undefined {
@@ -360,16 +437,22 @@ export class DrawerStore {
   }
 
   /**
-   * Mark an entry superseded. Silently no-ops on an unknown id: a tool naming
-   * an entry that was never filed (fresh persona, reordered ingest) must not
-   * fail the write of the entry that replaces it.
+   * Mark an entry superseded WITHIN ITS OWN KIND. Scoping on `kind` as well as
+   * `persona` is what stops a `people` entry retiring a `decisions` one: an id
+   * is opaque to the caller that computed it, so a wrong-kind id must miss
+   * rather than retire an unrelated drawer's row.
+   *
+   * Silently no-ops on an unknown id: a tool naming an entry that was never
+   * filed (fresh persona, reordered ingest) must not fail the write of the
+   * entry that replaces it.
    */
-  markSuperseded(persona: string, id: string): void {
+  markSuperseded(persona: string, kind: DrawerKind, id: string): void {
     this.db
       .query(
-        "UPDATE drawer_entries SET status = 'superseded' WHERE persona = ? AND id = ?",
+        "UPDATE drawer_entries SET status = 'superseded' " +
+          "WHERE persona = ? AND kind = ? AND id = ?",
       )
-      .run(persona, id);
+      .run(persona, kind, id);
   }
 
   /** Move an entry's lifecycle state. Rejects a status the kind cannot hold. */
@@ -418,12 +501,28 @@ export class DrawerStore {
     opts: { limit?: number; now?: Date } = {},
   ): Array<DrawerEntry & { score: number }> {
     const now = opts.now ?? new Date();
-    const scored = this.list(persona, kind)
-      .filter((e) => e.status === "active")
+    // `status = 'active'` and the ordering are pushed into SQL so
+    // idx_drawer_entries_rank (persona, kind, status, last_reaffirmed_at DESC)
+    // actually serves this query — on a drawer the size #410 describes (~1400
+    // entries) a full scan per call is the difference that matters. The final
+    // ordering is still by decayed score in JS, since weight is part of it.
+    const scored = this.listActive(persona, kind)
       .map((e) => ({ ...e, score: scoreEntry(e, now) }))
       .filter((e) => !decays(kind) || e.score >= DORMANT_FLOOR)
       .sort((a, b) => b.score - a.score);
     return opts.limit === undefined ? scored : scored.slice(0, opts.limit);
+  }
+
+  /** `active` rows for one drawer, freshest reaffirmation first. Index-served. */
+  private listActive(persona: string, kind: DrawerKind): DrawerEntry[] {
+    const rows = this.db
+      .query(
+        "SELECT * FROM drawer_entries " +
+          "WHERE persona = ? AND kind = ? AND status = 'active' " +
+          "ORDER BY last_reaffirmed_at DESC",
+      )
+      .all(persona, kind) as RawDrawerRow[];
+    return rows.map(mapRow);
   }
 
   /**
@@ -434,8 +533,7 @@ export class DrawerStore {
   sweepDormant(persona: string, now: Date = new Date()): DrawerEntry[] {
     const moved: DrawerEntry[] = [];
     for (const kind of BELIEF_KINDS) {
-      for (const e of this.list(persona, kind)) {
-        if (e.status !== "active") continue;
+      for (const e of this.listActive(persona, kind)) {
         if (scoreEntry(e, now) >= DORMANT_FLOOR) continue;
         this.setStatus(e.id, "dormant");
         moved.push({ ...e, status: "dormant" });

@@ -86,6 +86,65 @@ describe("entry identity", () => {
       fresh.lastReaffirmedAt.getTime(),
     );
   });
+  test("re-filing without a source or weight cannot escalate either", () => {
+    const s = store();
+    const first = s.file({
+      persona: PERSONA,
+      kind: "norms",
+      content: "A quiet, unverified norm.",
+      source: "unverified",
+      weight: 0,
+    });
+    expect(first.source).toBe("unverified");
+    expect(first.weight).toBe(0);
+
+    // A bare re-file is evidence the entry is still live, NOT evidence it is
+    // more trusted or more important than when it was filed.
+    const again = s.file({
+      persona: PERSONA,
+      kind: "norms",
+      content: "A quiet, unverified norm.",
+    });
+    expect(again.source).toBe("unverified");
+    expect(again.weight).toBe(0);
+    expect(again.lastReaffirmedAt.getTime()).toBeGreaterThanOrEqual(
+      first.lastReaffirmedAt.getTime(),
+    );
+
+    // An EXPLICIT higher value still raises both.
+    const raised = s.file({
+      persona: PERSONA,
+      kind: "norms",
+      content: "A quiet, unverified norm.",
+      source: "principal",
+      weight: 2,
+    });
+    expect(raised.source).toBe("principal");
+    expect(raised.weight).toBe(2);
+  });
+
+  test("a first insert that names no source lands at 'self', not 'principal'", () => {
+    const s = store();
+    const entry = s.file({
+      persona: PERSONA,
+      kind: "lessons",
+      content: "Filed by a third-party tool that omitted source.",
+    });
+    expect(entry.source).toBe("self");
+  });
+
+  test("fileEntry reports insert vs reaffirm", () => {
+    const s = store();
+    const input = {
+      persona: PERSONA,
+      kind: "norms" as const,
+      content: "Reported once, reaffirmed once.",
+    };
+    expect(s.fileEntry(input).inserted).toBe(true);
+    expect(s.fileEntry(input).inserted).toBe(false);
+    expect(s.list(PERSONA, "norms")).toHaveLength(1);
+  });
+
 });
 
 describe("supersession", () => {
@@ -139,6 +198,39 @@ describe("supersession", () => {
     s.file({ persona: PERSONA, kind: "norms", content: "Old rule." });
     expect(s.get(old.id)!.status).toBe("superseded");
   });
+  test("an entry may not supersede itself", () => {
+    const s = store();
+    const content = "A norm that would erase itself.";
+    expect(() =>
+      s.file({
+        persona: PERSONA,
+        kind: "norms",
+        content,
+        supersedes: drawerEntryId(PERSONA, "norms", content),
+      }),
+    ).toThrow(/supersede itself/);
+    // And nothing was written: the caller bug does not leave a half-state.
+    expect(s.list(PERSONA, "norms")).toHaveLength(0);
+  });
+
+  test("supersession never reaches across kinds", () => {
+    const s = store();
+    const decision = s.file({
+      persona: PERSONA,
+      kind: "decisions",
+      content: "Route OVH traffic through the residential SOCKS proxy.",
+    });
+    s.file({
+      persona: PERSONA,
+      kind: "people",
+      content: "A person fact that names a decision's id.",
+      supersedes: decision.id,
+    });
+    // The decision is in another drawer; a wrong-kind id must miss, not retire
+    // an unrelated row.
+    expect(s.get(decision.id)!.status).toBe("active");
+  });
+
 });
 
 describe("decay", () => {
@@ -410,4 +502,44 @@ describe("markdown ingest", () => {
     expect(s.ranked(PERSONA, "lessons")).toHaveLength(0);
     expect(s.list(PERSONA, "lessons")).toHaveLength(1);
   });
+  test("bullets after a `###` block are their own entries, sub-bullets are not", () => {
+    const parsed = parseDrawer(
+      [
+        "## 2026-08-20",
+        "### Block entry",
+        "body line",
+        "",
+        "- parent bullet:",
+        "  - child a",
+        "  - child b",
+        "- second parent",
+        "",
+      ].join("\n"),
+    );
+    expect(parsed.map((e) => e.content)).toEqual([
+      "Block entry\nbody line",
+      "parent bullet:\n  - child a\n  - child b",
+      "second parent",
+    ]);
+    expect(parsed.every((e) => e.date === "2026-08-20")).toBe(true);
+  });
+
+  test("a detail bullet running on from a block body stays in that block", () => {
+    const parsed = parseDrawer(
+      ["### Block entry", "body line", "- detail bullet", ""].join("\n"),
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.content).toBe("Block entry\nbody line\n- detail bullet");
+  });
+
+  test("ingested markdown is the persona's own belief, not the principal's", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "drawer-source-"));
+    await mkdir(join(dir, "memory"), { recursive: true });
+    await writeFile(join(dir, "memory", "norms.md"), "- - [norm] A filed norm.\n");
+    const s = store();
+    await ingestDrawerFile(s, dir, PERSONA, "norms");
+    const [entry] = s.list(PERSONA, "norms");
+    expect(entry!.source).toBe("self");
+  });
+
 });

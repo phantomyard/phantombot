@@ -26,12 +26,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { existsSync } from "node:fs";
-import {
-  DRAWER_KINDS,
-  drawerEntryId,
-  type DrawerKind,
-  type DrawerStore,
-} from "./drawers.ts";
+import { DRAWER_KINDS, type DrawerKind, type DrawerStore } from "./drawers.ts";
 
 export interface ParsedDrawerEntry {
   content: string;
@@ -65,19 +60,22 @@ const FLAT_BULLET = /^-\s+(.*)$/;
 export function parseDrawer(text: string): ParsedDrawerEntry[] {
   const out: ParsedDrawerEntry[] = [];
   let date: string | undefined;
-  let heading: string | undefined;
-  let body: string[] = [];
+  /** The entry being accumulated, if any, and which shape it came from. */
+  let open: { lines: string[]; date?: string; block: boolean } | undefined;
 
   const flush = () => {
-    if (heading === undefined) return;
-    const content = [heading, ...body].join("\n").trim();
-    if (content) out.push({ content, date });
-    heading = undefined;
-    body = [];
+    if (!open) return;
+    const content = open.lines.join("\n").trim();
+    if (content) out.push({ content, date: open.date });
+    open = undefined;
   };
 
+  let prevBlank = true;
   for (const raw of text.split("\n")) {
     const line = raw.trimEnd();
+    const blank = line.trim() === "";
+    const wasBlank = prevBlank;
+    prevBlank = blank;
     const dateHeader = DATE_HEADER.exec(line);
     if (dateHeader) {
       flush();
@@ -93,19 +91,39 @@ export function parseDrawer(text: string): ParsedDrawerEntry[] {
     const entryHeader = ENTRY_HEADER.exec(line);
     if (entryHeader) {
       flush();
-      heading = entryHeader[1]!.trim();
+      open = { lines: [entryHeader[1]!.trim()], date, block: true };
       continue;
     }
-    if (heading !== undefined) {
-      body.push(line);
-      continue;
-    }
-    // Outside any `###` block: a top-level bullet is an entry on its own. The
-    // heartbeat writes `- - [norm] …`, so strip the doubled dash.
-    const bullet = FLAT_BULLET.exec(line.trim());
-    if (bullet) {
+    // A bullet at COLUMN 0 starts an entry of its own. Matching on the
+    // untrimmed line is what keeps an indented sub-bullet attached to the
+    // bullet it qualifies, instead of promoting it to a standalone entry with
+    // its own id and decay clock.
+    //
+    // Inside a `###` block it takes a BLANK LINE first to break out: a bullet
+    // running straight on from the block body is one of that entry's detail
+    // bullets (the dominant shape in the drawers), while a bullet after a
+    // blank line is the flat capture shape and would otherwise be swallowed
+    // into whatever block happened to precede it.
+    const bullet = FLAT_BULLET.exec(line);
+    if (bullet && (!open?.block || wasBlank)) {
+      flush();
+      // The heartbeat writes `- - [norm] …`, so strip the doubled dash.
       const content = bullet[1]!.replace(/^-\s+/, "").trim();
-      if (content) out.push({ content, date });
+      if (content) open = { lines: [content], date, block: false };
+      continue;
+    }
+    if (open?.block) {
+      // Inside a `###` block: everything up to the next header or column-0
+      // bullet is body.
+      open.lines.push(line);
+      continue;
+    }
+    if (open) {
+      // Continuation of a flat bullet: indented lines belong to it, a blank
+      // line or column-0 prose ends it.
+      if (blank) flush();
+      else if (/^\s/.test(raw)) open.lines.push(line);
+      else flush();
       continue;
     }
     // Anything else at top level (preamble blockquote, `---`, `# Title`,
@@ -152,18 +170,24 @@ export async function ingestDrawerFile(
 
   for (const entry of entries) {
     const assertedAt = entryDate(entry.date, fallback, now);
-    // Ask by id rather than diffing list() lengths: a drawer runs to ~1400
-    // entries, and re-listing per entry would make the migration quadratic.
-    const existed = store.get(drawerEntryId(persona, kind, entry.content));
-    store.file({
+    // `self`, not `principal`: these lines are the persona's own filed beliefs,
+    // and the nightly promoted a good number of them out of `origin: "task"`
+    // turns that the fact pool deliberately holds at `unverified`. Defaulting
+    // them to the top trust tier would flatten that distinction in one pass,
+    // with nothing left on disk to recover it from.
+    //
+    // `fileEntry` reports insert-vs-reaffirm, so the counts cost no extra read
+    // — a pre-`get()` per entry would double the queries across ~4500 rows.
+    const { inserted } = store.fileEntry({
       persona,
       kind,
       content: entry.content,
+      source: "self",
       origin: rel,
       assertedAt,
     });
-    if (existed) result.reaffirmed += 1;
-    else result.inserted += 1;
+    if (inserted) result.inserted += 1;
+    else result.reaffirmed += 1;
   }
   return result;
 }
@@ -182,11 +206,7 @@ export async function ingestDrawers(
   return out;
 }
 
-function entryDate(
-  date: string | undefined,
-  fallback: Date,
-  now: Date,
-): Date {
+function entryDate(date: string | undefined, fallback: Date, now: Date): Date {
   if (!date) return fallback;
   const parsed = new Date(`${date}T00:00:00Z`);
   if (Number.isNaN(parsed.getTime())) return fallback;
