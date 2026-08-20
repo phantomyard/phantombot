@@ -62,7 +62,7 @@ async function daily(date: string, body = `notes for ${date}`): Promise<void> {
 
 interface StageCall {
   date: string;
-  stage: NightlyStage | "override";
+  stage: NightlyStage | "override" | "compact";
   prompt: string;
   startedAt: number;
   endedAt: number;
@@ -77,7 +77,7 @@ function harness(opts: { fail?: string[]; delayMs?: number } = {}) {
   const calls: StageCall[] = [];
   const runStage = async (a: {
     date: string;
-    stage: NightlyStage | "override";
+    stage: NightlyStage | "override" | "compact";
     prompt: string;
   }) => {
     const startedAt = Date.now();
@@ -641,5 +641,130 @@ describe("runNightlyTurn — trusted prompt, untrusted provenance", () => {
     expect(pairCalls).toHaveLength(1);
     expect(pairCalls[0]!.user.source).toBe("other");
     expect(pairCalls[0]!.assistant.source).toBe("other");
+  });
+});
+
+describe("runNightly — compaction stage (#410)", () => {
+  const over = "x".repeat(20 * 1024);
+
+  /** A stage stub that rewrites MEMORY.md to `after` when compaction runs. */
+  function compactHarness(after: string | null) {
+    const calls: string[] = [];
+    return {
+      calls,
+      runStage: async (a: { stage: string; prompt: string }) => {
+        calls.push(a.stage);
+        if (a.stage === "compact") {
+          const p = join(personaDir, "MEMORY.md");
+          if (after === null) await rm(p);
+          else await writeFile(p, after, "utf8");
+        }
+        return { finalReply: "done", durationMs: 1 };
+      },
+    };
+  }
+
+  test("runs once per sweep, not once per date, and only over budget", async () => {
+    await daily("2026-05-01");
+    await daily("2026-05-02");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const h = compactHarness("x".repeat(15 * 1024));
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: h.runStage as never,
+      refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(h.calls.filter((s) => s === "compact")).toHaveLength(1);
+    // and it runs after every date's stages
+    expect(h.calls[h.calls.length - 1]).toBe("compact");
+
+    const state = await loadNightlyState(personaDir);
+    expect(state.compaction?.files).toHaveLength(1);
+    expect(state.compaction?.bytes_before).toBe(20 * 1024);
+    expect(state.compaction?.bytes_after).toBe(15 * 1024);
+    expect(state.compaction?.files[0]!.status).toBe("compacted");
+    expect(out.text).toContain("compaction");
+  });
+
+  test("nothing over budget → no compact turn at all", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), "small", "utf8");
+    const h = compactHarness("x");
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage as never,
+      refreshIndex: async () => {},
+    });
+    expect(h.calls).not.toContain("compact");
+    expect((await loadNightlyState(personaDir)).compaction).toBeUndefined();
+  });
+
+  test("an over-eager pass is reverted and recorded", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const h = compactHarness("gone");
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage as never,
+      refreshIndex: async () => {},
+    });
+    const state = await loadNightlyState(personaDir);
+    expect(state.compaction?.files[0]!.status).toBe("reverted");
+    expect(state.compaction?.bytes_after).toBe(20 * 1024);
+    const live = await Bun.file(join(personaDir, "MEMORY.md")).text();
+    expect(live).toBe(over);
+  });
+
+  test("a file deleted by the pass comes back from the archive", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const h = compactHarness(null);
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage as never,
+      refreshIndex: async () => {},
+    });
+    expect(await Bun.file(join(personaDir, "MEMORY.md")).text()).toBe(over);
+  });
+
+  test("--no-compact and --date backfills skip it", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+
+    const a = compactHarness("x");
+    await runNightly({
+      config, now, out: new CaptureStream(), skipCompaction: true,
+      runStage: a.runStage as never, refreshIndex: async () => {},
+    });
+    expect(a.calls).not.toContain("compact");
+
+    const b = compactHarness("x");
+    await runNightly({
+      config, now, out: new CaptureStream(), today: "2026-05-01",
+      runStage: b.runStage as never, refreshIndex: async () => {},
+    });
+    expect(b.calls).not.toContain("compact");
+  });
+
+  test("a failed compact turn still settles the file and is reported", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const code = await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: (async (a: { stage: string }) => {
+        if (a.stage === "compact") {
+          await writeFile(join(personaDir, "MEMORY.md"), "wrecked", "utf8");
+          return { finalReply: "", errored: "timeout", durationMs: 1 };
+        }
+        return { finalReply: "done", durationMs: 1 };
+      }) as never,
+      refreshIndex: async () => {},
+    });
+    expect(code).toBe(1);
+    expect(await Bun.file(join(personaDir, "MEMORY.md")).text()).toBe(over);
+    const state = await loadNightlyState(personaDir);
+    expect(state.errors?.some((e) => e.startsWith("compaction:"))).toBe(true);
   });
 });

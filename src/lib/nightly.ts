@@ -42,6 +42,10 @@ import {
   type ProcessStartProbe,
 } from "./processLiveness.ts";
 import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "./okf.ts";
+import type {
+  CompactionCandidate,
+  CompactionOutcome,
+} from "./nightlyCompact.ts";
 
 const NIGHTLY_PROMPT_OVERRIDE = "nightly-prompt.md";
 
@@ -132,6 +136,23 @@ export interface NightlyState {
   processed?: Record<string, NightlyDateRecord>;
   /** Set while a sweep is in flight; cleared when it finishes. */
   current?: NightlyCurrent | null;
+  /**
+   * What the last compaction pass did, per file (issue #410). Byte accounting
+   * lives in the ledger rather than only in the log so `doctor` and a human
+   * can both answer "is memory still growing?" without grepping journald.
+   */
+  compaction?: NightlyCompactionRecord;
+}
+
+/** Outcome of one whole compaction pass. */
+export interface NightlyCompactionRecord {
+  ran_at: string;
+  /** Where the pre-compaction copies of these files live. */
+  archive_dir: string;
+  files: CompactionOutcome[];
+  /** Total bytes before/after across every file the pass touched. */
+  bytes_before: number;
+  bytes_after: number;
 }
 
 /**
@@ -680,4 +701,79 @@ Run BOTH stages below, in order, in this single turn.
 ${NIGHTLY_STAGE_BODY.distill(today)}
 
 ${NIGHTLY_STAGE_BODY.kb(today)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Compaction prompt (issue #410)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-kind instructions for the compaction pass. Written as REMOVAL rules
+ * with an explicit "when in doubt, keep it" default, because the failure mode
+ * that matters is losing a fact, not leaving a file 5% too big.
+ *
+ * Drawers get a measure-and-report instruction rather than a rewrite: their
+ * dedupe/merge lifecycle moves to the database in the follow-up work, and an
+ * LLM pass over them now would be built twice.
+ */
+const COMPACTION_KIND_BODY: Record<CompactionCandidate["kind"], string> = {
+  memory: `MEMORY.md is loaded into context on EVERY turn, so every byte is
+    rent. Prune it: drop "## Recent" bullets that are stale, superseded, or now
+    have a permanent home in a drawer or KB note; collapse anything that has
+    bloated into prose down to one line plus a [[pointer]]. Do NOT remove
+    standing facts about your owner, trust rules, or infrastructure state that
+    has no home elsewhere — move those, don't delete them.`,
+  drawer: `Do NOT rewrite this file. Its dedupe and lifecycle work is moving to
+    the database, so an edit here would be undone. Report its size and the
+    three largest sources of duplication you can see, and move on.`,
+  daily: `This day is CLOSED and fully distilled — every stage completed and its
+    contents are already filed in the drawers and the KB. Reduce it to: the
+    date heading, the items that were promoted (one line each), and any
+    capture lines. Drop transcript-shaped narration, tool output and
+    working-notes. If you cannot tell whether something was promoted, keep it.`,
+};
+
+/**
+ * Build the compaction stage prompt. Runs ONCE per sweep (not once per date)
+ * because its inputs are whole-file sizes, not a day's events.
+ */
+export function buildCompactionPrompt(
+  personaName: string,
+  today: string,
+  candidates: CompactionCandidate[],
+  archiveDir: string,
+): string {
+  const list = candidates
+    .map(
+      (c) =>
+        `  - ${c.path} — ${c.sizeBytes} bytes (budget ${c.budgetBytes})\n` +
+        `    ${COMPACTION_KIND_BODY[c.kind].replace(/\s+/g, " ").trim()}`,
+    )
+    .join("\n");
+  return `${nightlyPreamble(personaName, today)}
+
+STAGE: COMPACT (shrink what has grown past its budget)
+
+The distill and kb stages only append. This stage is the other half: it removes
+what is dead, duplicated, or has a permanent home elsewhere. It runs alone —
+no sibling stage is writing right now.
+
+Every file below has ALREADY been copied verbatim to ${archiveDir}, so a
+mistake is recoverable. Do not read, write or clean up that directory.
+
+Files over budget:
+${list}
+
+Rules that apply to all of them:
+  - Rewrite a file IN PLACE. Never delete a file, never move one, never create
+    a new file to replace one.
+  - Keep the file's existing shape: same headings, same ordering, same style.
+    A reader should see the same document with less in it.
+  - A pass that removes more than its allowance is automatically reverted by
+    phantombot, so aim to prune, not to rebuild from scratch.
+  - When you are unsure whether something is still live, KEEP IT. Another
+    night will get it.
+
+Finish with one line per file: path, roughly what you removed, and what you
+deliberately kept.`;
 }

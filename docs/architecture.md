@@ -35,7 +35,8 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/persona/loader.ts` | Reads BOOT.md / SOUL.md / IDENTITY.md (required) + MEMORY.md / tools.md / AGENTS.md (optional). | filesystem |
 | `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |
 | `src/memory/store.ts` | bun:sqlite wrapper. `turns` table (`appendTurn`, `recentTurns`, …) + `capture_log` table (`appendCapture`, `lastCaptureAt`, `countCapturesSince`, turn counters for the nudge/doctor). | `bun:sqlite` |
-| `src/lib/nightly.ts` | Two-stage model + prompt bodies, the `.nightly-state.json` ledger (`sweepDailyFiles`, `dateRecord`), and `nightlyHealth` for `/status` + doctor. | filesystem |
+| `src/lib/nightly.ts` | Stage model + prompt bodies, the `.nightly-state.json` ledger (`sweepDailyFiles`, `dateRecord`), and `nightlyHealth` for `/status` + doctor. | filesystem |
+| `src/lib/nightlyCompact.ts` | Compaction budgets, candidate selection, the pre-pass archive under `memory/archive/<date>/`, and the shrink-guard verdict that reverts an over-eager pass. | filesystem, `lib/nightly` |
 | `src/lib/nightlyTrigger.ts` | When the sweep runs: `dayRolledOver` (heartbeat trigger) + `spawnNightlySweep` (detached fire, also used by `run` at startup). | `node:child_process` |
 | `src/lib/indexRefresh.ts` | `refreshPersonaIndex`: incremental FTS + embedding refresh, called in code by the nightly after both stages join. | `lib/memoryIndex`, `lib/embedJob` |
 | `src/cli/doctor.ts` | `phantombot doctor`: reports the nightly ledger (read-only) + `capture_log`, repairs units/timers/connectors. | `memory/store`, `lib/nightly` |
@@ -139,7 +140,11 @@ Three properties worth knowing when touching this code:
    (`refreshPersonaIndex`), which both guarantees it and orders it after the
    writes. There is no `--resume` and no catch-up mode: a half-done date is just
    a date the ledger doesn't call done. `doctor` reports this state; it no longer
-   repairs it, so the job has one owner.
+   repairs it, so the job has one owner. A third stage, `compact`, runs ONCE per
+   sweep (its inputs are whole-file sizes, not one day's events) and is the only
+   stage that removes anything: it archives every over-budget file verbatim
+   first, then reverts any rewrite that overshoots its shrink allowance. Drawer
+   dedupe is deliberately NOT part of it — that lifecycle moves to the database.
 
 ## Open design questions
 

@@ -36,11 +36,13 @@ import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
+  buildCompactionPrompt,
   buildNightlyPromptForPersona,
   buildNightlyStagePrompt,
   dateRecord,
   loadNightlyState,
   NIGHTLY_STAGES,
+  type NightlyState,
   type NightlyStage,
   nightlyConversationKey,
   type PendingDate,
@@ -51,6 +53,15 @@ import {
   selfStartToken,
   sweepLiveness,
 } from "../lib/nightly.ts";
+import {
+  archiveDirPath,
+  archiveForCompaction,
+  type CompactionCandidate,
+  type CompactionOutcome,
+  compactionCandidates,
+  formatCompactionSummary,
+  settleCompaction,
+} from "../lib/nightlyCompact.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
 
@@ -97,6 +108,14 @@ export interface RunNightlyInput {
   maxDates?: number;
   /** Run even if another sweep holds the in-flight marker. */
   force?: boolean;
+  /**
+   * Skip the compaction stage (issue #410). Set by `--no-compact`, and always
+   * true for a `--date` backfill: reprocessing one old day should not also
+   * rewrite MEMORY.md.
+   */
+  skipCompaction?: boolean;
+  /** Test seam — override the daily-file age gate. */
+  compactMinAgeDays?: number;
   out?: WriteSink;
   err?: WriteSink;
   /** Test seam — override the clock. */
@@ -105,7 +124,7 @@ export interface RunNightlyInput {
   runStage?: (args: {
     persona: string;
     date: string;
-    stage: NightlyStage | "override";
+    stage: NightlyStage | "override" | "compact";
     prompt: string;
   }) => Promise<TurnResult>;
   /** Test seam — skip the real index refresh. */
@@ -201,6 +220,63 @@ export async function runNightlyTurn(opts: {
     errored = (e as Error).message;
   }
   return { finalReply, errored, durationMs: Date.now() - startedAt };
+}
+
+
+/**
+ * Run the compaction pass over whatever is currently over budget.
+ *
+ * The safety property lives here, not in the prompt: every candidate is
+ * copied into `memory/archive/<today>/` BEFORE the stage runs, and each file
+ * is re-stat-ed and judged afterwards. A pass that overshoots its shrink
+ * allowance, empties a file or loses one is rolled back from that copy. The
+ * stage itself is never trusted to have done the right thing.
+ *
+ * Returns null when nothing is over budget — the common case, and free.
+ */
+export async function runCompaction(opts: {
+  personaDir: string;
+  persona: string;
+  today: string;
+  state: NightlyState;
+  minAgeDays?: number;
+  runOne: (prompt: string) => Promise<TurnResult>;
+  out: WriteSink;
+}): Promise<{ outcomes: CompactionOutcome[]; error?: string } | null> {
+  const candidates = await compactionCandidates(opts.personaDir, opts.state, {
+    today: opts.today,
+    ...(opts.minAgeDays !== undefined ? { minAgeDays: opts.minAgeDays } : {}),
+  });
+  if (candidates.length === 0) return null;
+
+  const archiveDir = archiveDirPath(opts.personaDir, opts.today);
+  const archived = new Map<CompactionCandidate, string>();
+  for (const c of candidates) {
+    archived.set(c, await archiveForCompaction(opts.personaDir, c, opts.today));
+  }
+
+  const r = await opts.runOne(
+    buildCompactionPrompt(opts.persona, opts.today, candidates, archiveDir),
+  );
+
+  // Settle regardless of how the turn ended: a stage that timed out may still
+  // have half-rewritten a file, and that is exactly what the guard is for.
+  const outcomes: CompactionOutcome[] = [];
+  for (const c of candidates) {
+    outcomes.push(await settleCompaction(c, archived.get(c)!));
+  }
+  opts.out.write(formatCompactionSummary(outcomes));
+
+  await saveNightlyState(opts.personaDir, {
+    compaction: {
+      ran_at: new Date().toISOString(),
+      archive_dir: archiveDir,
+      files: outcomes,
+      bytes_before: outcomes.reduce((n, o) => n + o.bytesBefore, 0),
+      bytes_after: outcomes.reduce((n, o) => n + o.bytesAfter, 0),
+    },
+  });
+  return { outcomes, ...(r.errored ? { error: r.errored } : {}) };
 }
 
 export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
@@ -329,7 +405,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
       });
 
       const runOne = async (
-        stage: NightlyStage | "override",
+        stage: NightlyStage | "override" | "compact",
         prompt: string,
       ): Promise<TurnResult> =>
         input.runStage
@@ -415,6 +491,49 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
         out.write(`nightly: ${pending.date} ok (${Date.now() - t0}ms)\n`);
       }
     }
+
+    // ---------------------------------------------------------------------
+    // Stage three: compaction (issue #410).
+    //
+    // Runs ONCE per sweep, after every date has been distilled, because its
+    // inputs are whole-file sizes rather than one day's events — and because
+    // running it per date would rewrite MEMORY.md N times in a backlog drain.
+    // Skipped for `--date` backfills and for personas with a monolithic
+    // prompt override, which owns its own contract.
+    // ---------------------------------------------------------------------
+    if (!input.skipCompaction && !input.today && !monolithic) {
+      const compaction = await runCompaction({
+        personaDir: dir,
+        persona,
+        today: now.toISOString().slice(0, 10),
+        state: await loadNightlyState(dir),
+        minAgeDays: input.compactMinAgeDays,
+        runOne: async (prompt) =>
+          input.runStage
+            ? await input.runStage({
+                persona,
+                date: now.toISOString().slice(0, 10),
+                stage: "compact",
+                prompt,
+              })
+            : await runNightlyTurn({
+                persona,
+                conversation: `${nightlyConversationKey(now.toISOString().slice(0, 10))}:compact`,
+                userMessage: prompt,
+                agentDir: dir,
+                harnesses,
+                memory: memory!,
+              }),
+        out,
+      });
+      if (compaction?.error) {
+        errors.push(`compaction: ${compaction.error}`);
+        log.error("nightly: compaction stage failed", {
+          persona,
+          error: compaction.error,
+        });
+      }
+    }
   } finally {
     await memory?.close();
   }
@@ -466,6 +585,12 @@ export default defineCommand({
       description: "Run even if another sweep holds the in-flight marker.",
       default: false,
     },
+    "no-compact": {
+      type: "boolean",
+      description:
+        "Skip the compaction stage (leave over-budget files untouched).",
+      default: false,
+    },
   },
   async run({ args }) {
     const max = args["max-dates"] ? Number(args["max-dates"]) : undefined;
@@ -474,6 +599,7 @@ export default defineCommand({
       today: args.date ? String(args.date) : undefined,
       maxDates: Number.isFinite(max) ? max : undefined,
       force: Boolean(args.force),
+      skipCompaction: Boolean(args["no-compact"]),
     });
   },
 });
