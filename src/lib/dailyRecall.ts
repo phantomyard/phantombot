@@ -31,7 +31,8 @@
  *
  *   - No config switch. A persona cannot turn this off, because a persona
  *     that turns it off loses a day of memory the first time a sweep fails
- *     and has no way to notice. The only tuning is the byte cap.
+ *     and has no way to notice. There is no byte cap either: an open
+ *     day goes in whole.
  *   - No older days. Two days back with a failed sweep is a nightly bug to
  *     fix (the sweep retries unprocessed dates on its own), not something to
  *     paper over by growing every prompt.
@@ -54,25 +55,28 @@ import {
   recordDistilled,
   type NightlyDateRecord,
 } from "./nightly.js";
-import {
-  DAILY_BUDGET_BYTES,
-  resolveDailyBudgetBytes,
-} from "./nightlyCompact.js";
 import { inertBlock } from "./promptSafeText.js";
 
 /**
- * Per-file byte cap, defaulting to the persona's DAILY COMPACTION BUDGET (see
- * `resolveDailyBudgetBytes`) so the two numbers cannot drift and raising the
- * budget raises this too.
+ * The journal reaches the prompt WHOLE. There is no default cap.
  *
- * It is a real cap, not a backstop: the sweep only ever compacts a daily file
- * that is fully distilled AND at least `DAILY_MIN_AGE_DAYS` old, so neither of
- * the two files this module reads is ever shrunk by it. A persona that writes
- * more than the budget in a day loses the START of that day from the prompt —
- * hence the `log.warn` on every truncation, so the loss is visible rather than
- * silent, and the recovery command inside the block itself.
+ * There used to be one, pinned to the persona's daily COMPACTION budget
+ * (8KB). Those two numbers were never measuring the same thing: the
+ * compaction budget is how large a CLOSED, fully distilled day may stay on
+ * disk, while this is how much of an ACTIVE day a turn is allowed to see. A
+ * heavy day silently lost its morning — 26KB of 34KB clipped off the front in
+ * one observed case — and what fell out was the tagged captures on their way
+ * to the drawers, i.e. the load-bearing part.
+ *
+ * Recovering a clipped entry costs a search plus a file read, and only when
+ * the turn RECOGNISES something is missing; it usually does not. Injecting a
+ * whole day costs a known, bounded number of tokens: the largest daily ever
+ * written across this fleet is ~62KB (~15k tokens), and the day is reset every
+ * midnight UTC. Paying that reliably beats paying nothing and being wrong.
+ *
+ * Callers that genuinely need a ceiling pass `maxBytes` explicitly; the
+ * tail-keeping behaviour and its warning are unchanged for them.
  */
-export const DAILY_RECALL_MAX_BYTES = DAILY_BUDGET_BYTES;
 
 /** Why yesterday's file was or was not included. Surfaced for tests + logs. */
 export type YesterdayReason =
@@ -109,13 +113,14 @@ function whyNotDistilled(rec: NightlyDateRecord | undefined): YesterdayReason {
 }
 
 /**
- * Read a daily file, capped. Keeps the TAIL when over cap: a journal is
+ * Read a daily file. With no `maxBytes` the file is returned whole, which is
+ * the default. Keeps the TAIL when over an explicit cap: a journal is
  * append-ordered, so the newest entries are the ones a turn is most likely to
  * need, and the older ones are the ones distillation will have reached first.
  */
 async function readCapped(
   path: string,
-  maxBytes: number,
+  maxBytes: number | undefined,
 ): Promise<
   { text: string; bytes: number; truncated: boolean } | "unreadable" | undefined
 > {
@@ -132,7 +137,7 @@ async function readCapped(
   }
   if (raw.trim().length === 0) return undefined;
   const buf = Buffer.from(raw, "utf8");
-  if (buf.byteLength <= maxBytes) {
+  if (maxBytes === undefined || buf.byteLength <= maxBytes) {
     return { text: raw.trim(), bytes: buf.byteLength, truncated: false };
   }
   // Cut on a character boundary, then forward to the next newline so the
@@ -164,7 +169,7 @@ export async function buildDailyRecall(
 ): Promise<DailyRecallDecision> {
   const todayKey = dateKey(now, 0);
   const yKey = dateKey(now, 1);
-  const cap = maxBytes ?? (await resolveDailyBudgetBytes(personaDir));
+  const cap = maxBytes;
 
   let ledger: Record<string, NightlyDateRecord> = {};
   try {

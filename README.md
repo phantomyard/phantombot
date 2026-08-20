@@ -1661,12 +1661,13 @@ them, and some of those turns were driven by untrusted input. They are also
 journal can render as a section of the system prompt, and control, bidi and
 zero-width characters are stripped.
 
-Each journal is capped at your daily compaction budget (8 KB by default,
-overridable per persona with `{"memory/*.md": <bytes>}` in
-`memory/.compaction-budgets.json`). Over-cap files keep the **tail** — the
-newest entries — say so in the block, name `phantombot memory get
-memory/<date>.md` for the rest, and log a warning so the loss is never
-silent.
+A journal that reaches the prompt goes in **whole** — there is no byte cap.
+It used to be capped at the daily *compaction* budget (8 KB), but those two
+numbers measure different things: the compaction budget is how large a closed,
+fully-distilled day may stay on disk, while an open day is the only place its
+content exists. A heavy day silently lost its morning, and what fell out was
+the tagged captures on their way to the drawers. The compaction budget is
+unchanged and still applies on disk.
 
 Useful commands:
 
