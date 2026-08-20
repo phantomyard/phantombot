@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises";
 import { writeFileAtomic } from "./io.ts";
 import { log } from "./logger.ts";
 import type { NightlyState } from "./nightly.ts";
-import { recordDistilled } from "./nightly.ts";
+import { isDailyDistilled } from "./nightly.ts";
 
 /** What kind of file a compaction target is — drives the prompt wording. */
 export type CompactionKind = "memory" | "drawer" | "daily";
@@ -218,10 +218,11 @@ function daysBetween(a: string, b: string): number {
 /**
  * Which files are over budget right now.
  *
- * Daily files carry two extra conditions on top of the byte budget: the
- * ledger must show BOTH stages complete with status `ok` (so everything worth
- * keeping is already in a drawer or a KB note), and the date must be at least
- * `minAgeDays` old. Anything else is left alone.
+ * Daily files carry two extra conditions on top of the byte budget: the day
+ * must be distilled by the same fingerprint-aware test the sweep and daily
+ * recall apply (so everything worth keeping really is in a drawer or a KB
+ * note, including anything appended after the sweep), and the date must be at
+ * least `minAgeDays` old. Anything else is left alone.
  */
 export async function compactionCandidates(
   personaDir: string,
@@ -258,7 +259,6 @@ export async function compactionCandidates(
     if (!m) continue;
     const date = m[1]!;
     const rec = ledger[date];
-    if (!recordDistilled(rec)) continue;
     if (daysBetween(date, opts.today) < minAge) continue;
     const absPath = join(memDir, file);
     let size: number;
@@ -267,6 +267,11 @@ export async function compactionCandidates(
     } catch {
       continue;
     }
+    // Fingerprint-aware, not just the ledger record: a day APPENDED TO after
+    // its sweep holds content that was never promoted to a drawer or a note,
+    // and truncating it here would be the only place that tail ever existed.
+    // Same predicate the sweep and daily recall use, or the three disagree.
+    if (!(await isDailyDistilled(absPath, rec))) continue;
     if (size <= dailyBudget) continue;
     out.push({
       path: join("memory", file),
