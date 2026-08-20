@@ -31,8 +31,8 @@
  *
  *   - No config switch. A persona cannot turn this off, because a persona
  *     that turns it off loses a day of memory the first time a sweep fails
- *     and has no way to notice. There is no byte cap either: an open
- *     day goes in whole.
+ *     and has no way to notice. The only tuning is the byte cap, and it is
+ *     a sanity ceiling well above any real day, not a budget.
  *   - No older days. Two days back with a failed sweep is a nightly bug to
  *     fix (the sweep retries unprocessed dates on its own), not something to
  *     paper over by growing every prompt.
@@ -58,25 +58,33 @@ import {
 import { inertBlock } from "./promptSafeText.js";
 
 /**
- * The journal reaches the prompt WHOLE. There is no default cap.
+ * Sanity ceiling on a single injected journal — 256KB, roughly 64k tokens.
  *
- * There used to be one, pinned to the persona's daily COMPACTION budget
- * (8KB). Those two numbers were never measuring the same thing: the
- * compaction budget is how large a CLOSED, fully distilled day may stay on
- * disk, while this is how much of an ACTIVE day a turn is allowed to see. A
- * heavy day silently lost its morning — 26KB of 34KB clipped off the front in
- * one observed case — and what fell out was the tagged captures on their way
- * to the drawers, i.e. the load-bearing part.
+ * This used to be pinned to the persona's daily COMPACTION budget (8KB).
+ * Those two numbers were never measuring the same thing: the compaction
+ * budget is how large a CLOSED, fully distilled day may stay on disk, while
+ * this is how much of an ACTIVE day a turn is allowed to see. At 8KB a heavy
+ * day silently lost its morning — 26KB of 34KB clipped off the front in one
+ * observed case — and what fell out was the tagged captures on their way to
+ * the drawers, i.e. the load-bearing part.
  *
  * Recovering a clipped entry costs a search plus a file read, and only when
- * the turn RECOGNISES something is missing; it usually does not. Injecting a
- * whole day costs a known, bounded number of tokens: the largest daily ever
- * written across this fleet is ~62KB (~15k tokens), and the day is reset every
- * midnight UTC. Paying that reliably beats paying nothing and being wrong.
+ * the turn RECOGNISES something is missing; it usually does not. So the cap
+ * is set above the real ceiling rather than at the typical size: the largest
+ * daily ever written across this fleet is ~62KB, and the file resets every
+ * midnight UTC. 256KB therefore never fires on a normal day — it exists so
+ * that a runaway writer (`memory capture` is unbounded) cannot oversize every
+ * subsequent prompt with no recovery path.
  *
- * Callers that genuinely need a ceiling pass `maxBytes` explicitly; the
- * tail-keeping behaviour and its warning are unchanged for them.
+ * Deliberately a plain constant, NOT derived from the compaction budget:
+ * raising how much a closed day may keep on disk must not change how much of
+ * an open day reaches the prompt. The one production caller
+ * (`orchestrator/turn.ts`) passes no `maxBytes` and so gets this ceiling;
+ * `maxBytes` exists for tests and for any future caller that wants a tighter
+ * one. Tail-keeping, the `log.warn` with `droppedBytes` and the
+ * `memory get memory/<date>.md` recovery line are unchanged.
  */
+export const DAILY_RECALL_CEILING_BYTES = 256 * 1024;
 
 /** Why yesterday's file was or was not included. Surfaced for tests + logs. */
 export type YesterdayReason =
@@ -113,14 +121,13 @@ function whyNotDistilled(rec: NightlyDateRecord | undefined): YesterdayReason {
 }
 
 /**
- * Read a daily file. With no `maxBytes` the file is returned whole, which is
- * the default. Keeps the TAIL when over an explicit cap: a journal is
+ * Read a daily file, capped. Keeps the TAIL when over cap: a journal is
  * append-ordered, so the newest entries are the ones a turn is most likely to
  * need, and the older ones are the ones distillation will have reached first.
  */
 async function readCapped(
   path: string,
-  maxBytes: number | undefined,
+  maxBytes: number,
 ): Promise<
   { text: string; bytes: number; truncated: boolean } | "unreadable" | undefined
 > {
@@ -137,7 +144,7 @@ async function readCapped(
   }
   if (raw.trim().length === 0) return undefined;
   const buf = Buffer.from(raw, "utf8");
-  if (maxBytes === undefined || buf.byteLength <= maxBytes) {
+  if (buf.byteLength <= maxBytes) {
     return { text: raw.trim(), bytes: buf.byteLength, truncated: false };
   }
   // Cut on a character boundary, then forward to the next newline so the
@@ -169,7 +176,7 @@ export async function buildDailyRecall(
 ): Promise<DailyRecallDecision> {
   const todayKey = dateKey(now, 0);
   const yKey = dateKey(now, 1);
-  const cap = maxBytes;
+  const cap = maxBytes ?? DAILY_RECALL_CEILING_BYTES;
 
   let ledger: Record<string, NightlyDateRecord> = {};
   try {

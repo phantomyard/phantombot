@@ -167,8 +167,10 @@ Three properties worth knowing when touching this code:
    nightly bug to fix, not a reason to grow every prompt). It is pure disk +
    JSON, never throws, and is skipped only for the nightly sweep's own turns
    (`skipDailyRecall`), which are handed the date they are distilling. Both
-   files are byte-capped at the persona's daily compaction budget, keeping the
-   tail and warning when they trim. Journal text is run through `inertBlock`
+   files are byte-capped at `DAILY_RECALL_CEILING_BYTES` (256 KB) — a sanity
+   ceiling far above any real day, deliberately NOT the persona's daily
+   compaction budget, which measures how large a closed day may stay on disk —
+   keeping the tail and warning when they trim. Journal text is run through `inertBlock`
    first: leading `#` escaped, control/bidi/zero-width stripped, so a journal
    line cannot forge a section of the system prompt (invariant 20).
 

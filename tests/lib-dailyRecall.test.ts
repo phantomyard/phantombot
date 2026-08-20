@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildDailyRecall,
+  DAILY_RECALL_CEILING_BYTES,
 } from "../src/lib/dailyRecall.ts";
 import {
   NIGHTLY_STAGES,
@@ -243,17 +244,40 @@ describe("containment — a journal line cannot forge a prompt section", () => {
 });
 
 describe("size cap", () => {
-  test("a large file lands WHOLE — there is no default cap", async () => {
+  test("a heavy but realistic day lands WHOLE — the cap is a ceiling, not a budget", async () => {
+    // ~40KB: far over the 8KB compaction budget the cap used to be pinned to,
+    // and still under the sanity ceiling. This is the shape of a busy day.
     const body =
       "## first entry\nthe oldest thing that happened\n" +
-      "filler\n".repeat(20_000) +
+      "filler\n".repeat(5_000) +
       "## last entry\nthe newest thing that happened\n";
     await writeDaily(TODAY, body);
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(32 * 1024);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(
+      DAILY_RECALL_CEILING_BYTES,
+    );
     const out = await buildDailyRecall(dir, NOW);
     expect(out.today?.truncated).toBe(false);
     expect(out.block).toContain("the oldest thing that happened");
     expect(out.block).toContain("the newest thing that happened");
     expect(out.block).not.toContain("trimmed");
+  });
+
+  test("a runaway day is still cut at the 256KB sanity ceiling", async () => {
+    expect(DAILY_RECALL_CEILING_BYTES).toBe(256 * 1024);
+    const body =
+      "## first entry\nthe oldest thing that happened\n" +
+      "filler\n".repeat(45_000) +
+      "## last entry\nthe newest thing that happened\n";
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(
+      DAILY_RECALL_CEILING_BYTES,
+    );
+    await writeDaily(TODAY, body);
+    const out = await buildDailyRecall(dir, NOW);
+    expect(out.today?.truncated).toBe(true);
+    expect(out.block).toContain("the newest thing that happened");
+    expect(out.block).not.toContain("the oldest thing that happened");
+    expect(out.block).toContain("trimmed");
   });
 
   test("the daily COMPACTION budget no longer clips the prompt", async () => {

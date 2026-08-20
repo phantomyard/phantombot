@@ -1661,13 +1661,18 @@ them, and some of those turns were driven by untrusted input. They are also
 journal can render as a section of the system prompt, and control, bidi and
 zero-width characters are stripped.
 
-A journal that reaches the prompt goes in **whole** — there is no byte cap.
-It used to be capped at the daily *compaction* budget (8 KB), but those two
-numbers measure different things: the compaction budget is how large a closed,
-fully-distilled day may stay on disk, while an open day is the only place its
-content exists. A heavy day silently lost its morning, and what fell out was
-the tagged captures on their way to the drawers. The compaction budget is
-unchanged and still applies on disk.
+A journal that reaches the prompt goes in whole up to a **sanity ceiling of
+256 KB** (`DAILY_RECALL_CEILING_BYTES`, ~64k tokens). It used to be capped at the
+daily *compaction* budget (8 KB), but those two numbers measure different
+things: the compaction budget is how large a closed, fully-distilled day may
+stay on disk, while an open day is the only place its content exists. A heavy
+day silently lost its morning, and what fell out was the tagged captures on
+their way to the drawers. The new ceiling is deliberately set far above the
+largest daily ever written across the fleet (~62 KB), so it never fires on a
+real day — it exists only so that a runaway writer (`memory capture` is
+unbounded) cannot oversize every subsequent prompt with no recovery path. When
+it does fire it keeps the tail and warns. The compaction budget is unchanged
+and still applies on disk.
 
 Useful commands:
 
