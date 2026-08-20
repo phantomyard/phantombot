@@ -100,6 +100,29 @@ describe("walkMarkdown", () => {
     ].sort());
   });
 
+  test("never indexes memory/archive/ — rollback copies are not memory", async () => {
+    // The nightly compaction stage copies a file's PRE-compaction bytes into
+    // memory/archive/<date>/ before rewriting it. Indexing those would put the
+    // stale, superseded facts compaction just removed straight back into
+    // search as live documents, ranked next to the current ones.
+    await note("memory/people.md", "current");
+    await mkdir(join(personaDir, "memory/archive/2026-08-20"), { recursive: true });
+    await note("memory/archive/2026-08-20/memory__people.md", "stale pre-image");
+    await note("memory/archive/2026-08-20/MEMORY.md", "stale pre-image");
+    const paths = walkMarkdown(personaDir).map((f) => f.path);
+    expect(paths).toEqual(["memory/people.md"]);
+  });
+
+  test("a kb note nested under an archive/ folder is still indexed", async () => {
+    // The exclusion is the scope root only — a persona that files notes under
+    // kb/something/archive/ wrote those on purpose.
+    await mkdir(join(personaDir, "kb/projects/archive"), { recursive: true });
+    await note("kb/projects/archive/Old Project.md", "kept");
+    expect(walkMarkdown(personaDir).map((f) => f.path)).toEqual([
+      "kb/projects/archive/Old Project.md",
+    ]);
+  });
+
   test("records nested paths posix-style, never with backslashes", async () => {
     await note("kb/concepts/Foo.md", "foo");
     const paths = walkMarkdown(personaDir).map((f) => f.path);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { NIGHTLY_TOOLS, runNightly, runNightlyTurn } from "../src/cli/nightly.ts";
@@ -686,6 +686,100 @@ describe("runNightly — compaction stage (#410)", () => {
     expect(state.compaction?.bytes_after).toBe(15 * 1024);
     expect(state.compaction?.files[0]!.status).toBe("compacted");
     expect(out.text).toContain("compaction");
+  });
+
+  test("STEADY STATE: runs with an empty queue, the night it matters most", async () => {
+    // Regression: the sweep used to return as soon as no date was pending, so
+    // compaction never reached the one shape that is the norm — a box whose
+    // backlog is drained. It was reachable only during a backfill.
+    await daily("2026-05-01");
+    const first = compactHarness("x".repeat(15 * 1024));
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: first.runStage as never, refreshIndex: async () => {},
+    });
+
+    // Second sweep: the date is in the ledger and unchanged, so nothing pends.
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const h = compactHarness("x".repeat(15 * 1024));
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: h.runStage as never, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("nothing pending");
+    expect(h.calls).toEqual(["compact"]);
+    expect((await loadNightlyState(personaDir)).compaction?.files[0]!.status).toBe(
+      "compacted",
+    );
+  });
+
+  test("a rewritten daily is re-ledgered so the next sweep does not re-bill it", async () => {
+    // Compaction rewrites the daily file, which changes the mtime/size/hash the
+    // ledger keys on. Without reconciliation the next sweep sees `changed`,
+    // re-queues the date and pays for both LLM stages again — every night.
+    await daily("2026-05-01", "y".repeat(20 * 1024));
+    const first = {
+      calls: [] as string[],
+      runStage: async (a: { stage: string }) => {
+        first.calls.push(a.stage);
+        if (a.stage === "compact") {
+          await writeFile(
+            join(personaDir, "memory", "2026-05-01.md"),
+            "y".repeat(4 * 1024),
+            "utf8",
+          );
+        }
+        return { finalReply: "done", durationMs: 1 };
+      },
+    };
+    // `now` is well past the daily age gate for 2026-05-01.
+    await runNightly({
+      config, now, out: new CaptureStream(), compactMinAgeDays: 1,
+      runStage: first.runStage as never, refreshIndex: async () => {},
+    });
+    const state = await loadNightlyState(personaDir);
+    expect(state.compaction?.files.some((f) => f.kind === "daily")).toBe(true);
+    const rec = state.processed?.["2026-05-01"]!;
+    const st = await stat(join(personaDir, "memory", "2026-05-01.md"));
+    expect(rec.size).toBe(st.size);
+    expect(rec.status).toBe("ok");
+    expect(rec.stages_done).toEqual([...NIGHTLY_STAGES]);
+
+    // Next sweep: nothing pending, so no distill/kb turn is spent on it again.
+    const second = compactHarness("x");
+    const out = new CaptureStream();
+    await runNightly({
+      config, now, out, compactMinAgeDays: 1,
+      runStage: second.runStage as never, refreshIndex: async () => {},
+    });
+    expect(out.text).toContain("nothing pending");
+    expect(second.calls).not.toContain("distill");
+  });
+
+  test("index is refreshed again after a rewrite, never before it", async () => {
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const events: string[] = [];
+    const h = {
+      runStage: async (a: { stage: string }) => {
+        events.push(`stage:${a.stage}`);
+        if (a.stage === "compact") {
+          await writeFile(join(personaDir, "MEMORY.md"), "x".repeat(15 * 1024), "utf8");
+        }
+        return { finalReply: "done", durationMs: 1 };
+      },
+    };
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage as never,
+      refreshIndex: async () => {
+        events.push("index");
+      },
+    });
+    expect(events[events.length - 1]).toBe("index");
+    expect(events.filter((e) => e === "index")).toHaveLength(2);
   });
 
   test("nothing over budget → no compact turn at all", async () => {

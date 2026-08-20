@@ -1658,6 +1658,19 @@ export function resolveMdLink(srcPath: string, target: string): string | null {
   return rel;
 }
 
+/**
+ * Directories under a scope root that are never indexed.
+ *
+ * `memory/archive/` holds pre-image copies the nightly compaction stage takes
+ * before it rewrites a file. Indexing them would put the PRE-compaction text
+ * back into FTS and vector search as a live document — so the stale, dead or
+ * superseded facts compaction just removed would be retrieved again, ranked
+ * alongside the current ones, and with a rollback copy for every pass the
+ * duplicates would compound nightly. The archive is a recovery artefact for a
+ * human with `cp`, not memory.
+ */
+const UNINDEXED_DIRS = new Set(["archive"]);
+
 /** Walk personaDir/memory/ and personaDir/kb/ for .md files. Synchronous. */
 export function walkMarkdown(personaDir: string): IndexedFile[] {
   const out: IndexedFile[] = [];
@@ -1691,6 +1704,9 @@ function walk(
     if (entry.name.startsWith(".")) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
+      // Only at the scope root: a KB note filed under `kb/foo/archive/` is a
+      // note the persona chose to write, not a rollback copy.
+      if (dir === root && UNINDEXED_DIRS.has(entry.name)) continue;
       walk(root, full, scope, out);
       continue;
     }

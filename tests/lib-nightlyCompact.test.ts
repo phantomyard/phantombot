@@ -11,6 +11,7 @@ import {
   DAILY_BUDGET_BYTES,
   defaultBudgets,
   formatCompactionSummary,
+  measureDrawers,
   resolveBudgets,
   settleCompaction,
 } from "../src/lib/nightlyCompact.ts";
@@ -50,6 +51,24 @@ describe("compactionCandidates", () => {
   test("ignores drawers that do not exist", async () => {
     const got = await compactionCandidates(dir, {}, { today: "2026-08-20" });
     expect(got).toEqual([]);
+  });
+
+  test("an over-budget drawer is NEVER a candidate", async () => {
+    // Drawers are measured, not rewritten: their dedupe lifecycle moves to the
+    // database, so selecting one here would buy a paid LLM turn whose prompt
+    // then tells it to change nothing — every sweep, forever.
+    await writeFile(join(dir, "memory", "commitments.md"), big(700 * 1024));
+    await writeFile(join(dir, "memory", "decisions.md"), big(700 * 1024));
+    expect(await compactionCandidates(dir, {}, { today: "2026-08-20" })).toEqual([]);
+    expect(defaultBudgets().map((b) => b.path)).toEqual(["MEMORY.md"]);
+  });
+
+  test("measureDrawers reports the overage without making a candidate", async () => {
+    await writeFile(join(dir, "memory", "commitments.md"), big(700 * 1024));
+    await writeFile(join(dir, "memory", "norms.md"), big(10));
+    const got = await measureDrawers(dir);
+    expect(got.map((d) => d.path)).toEqual(["memory/commitments.md"]);
+    expect(got[0]!.sizeBytes).toBe(700 * 1024);
   });
 
   test("daily file needs BOTH stages ok before it is a candidate", async () => {
@@ -168,6 +187,30 @@ describe("archive + settle", () => {
     expect(outcome.status).toBe("reverted");
     expect(outcome.bytesAfter).toBe(outcome.bytesBefore);
     expect(await readFile(p, "utf8")).toBe("keep me".repeat(20));
+  });
+
+  test("a second same-day pass archives its OWN pre-image, not the first's", async () => {
+    // Regression: reusing the first pass's copy rolls a later pass back PAST
+    // its own starting point, resurrecting content the first pass correctly
+    // removed. Each pass must be recoverable to the state it began from.
+    const p = join(dir, "MEMORY.md");
+    await writeFile(p, "A".repeat(100));
+    const first = await archiveForCompaction(dir, candidate(p, 100), "2026-08-20");
+
+    // pass one prunes down to 70 bytes, legitimately
+    await writeFile(p, "B".repeat(70));
+    const c2 = candidate(p, 70);
+    const second = await archiveForCompaction(dir, c2, "2026-08-20");
+    expect(second).not.toBe(first);
+    expect(await readFile(second, "utf8")).toBe("B".repeat(70));
+    // the first pre-image survives — nothing in the archive is ever deleted
+    expect(await readFile(first, "utf8")).toBe("A".repeat(100));
+
+    // pass two overshoots and is rolled back to 70 bytes, NOT to 100
+    await writeFile(p, "C");
+    const outcome = await settleCompaction(c2, second);
+    expect(outcome.status).toBe("reverted");
+    expect(await readFile(p, "utf8")).toBe("B".repeat(70));
   });
 
   test("a file deleted by the pass is restored", async () => {

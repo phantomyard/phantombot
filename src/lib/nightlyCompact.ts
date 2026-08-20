@@ -20,18 +20,21 @@
  *   3. ONLY OVER-BUDGET FILES ARE TOUCHED. A file inside its budget costs one
  *      `stat` and is left alone, so a healthy persona pays nothing.
  *
- * Deliberately NOT in scope here: drawer dedupe/merge. `commitments.md`,
+ * Deliberately NOT in scope here: the drawers. `commitments.md`,
  * `decisions.md` and `lessons.md` are append-only logs with a lifecycle —
  * they become database rows in the follow-up work, at which point dedupe is a
  * uniqueness constraint rather than an LLM pass over prose. Building the LLM
- * version first would be throwaway. What this stage does to the drawers is
- * measure them and report the overage.
+ * version first would be throwaway, so they are never CANDIDATES at all:
+ * `measureDrawers()` reports the overage for one `stat` each and no turn is
+ * spent. (Selecting them and telling the prompt "do not change this file" is
+ * worse than not selecting them — it pays for a no-op turn every sweep.)
  */
 
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { writeFileAtomic } from "./io.ts";
 import { log } from "./logger.ts";
 import type { NightlyState } from "./nightly.ts";
 import { NIGHTLY_STAGES } from "./nightly.ts";
@@ -89,13 +92,40 @@ export function defaultBudgets(): CompactionBudget[] {
       budgetBytes: MEMORY_BUDGET_BYTES,
       maxShrinkPct: 40,
     },
-    ...DRAWER_FILES.map((f) => ({
-      path: join("memory", f),
-      kind: "drawer" as const,
-      budgetBytes: DRAWER_BUDGET_BYTES,
-      maxShrinkPct: 40,
-    })),
   ];
+}
+
+/**
+ * Drawer sizes, for reporting only.
+ *
+ * Drawers are deliberately NOT compaction candidates. Their dedupe/merge
+ * lifecycle moves to the database in the follow-up work, so the only thing an
+ * LLM pass could do here today is get thrown away — and a candidate whose
+ * prompt says "do not change this file" is a paid no-op turn every single
+ * sweep, forever. Measuring them costs one `stat` each and still surfaces the
+ * overage in the sweep output.
+ */
+export interface DrawerMeasurement {
+  path: string;
+  sizeBytes: number;
+  budgetBytes: number;
+}
+
+export async function measureDrawers(
+  personaDir: string,
+  budgetBytes: number = DRAWER_BUDGET_BYTES,
+): Promise<DrawerMeasurement[]> {
+  const out: DrawerMeasurement[] = [];
+  for (const f of DRAWER_FILES) {
+    const path = join("memory", f);
+    try {
+      const size = (await stat(join(personaDir, path))).size;
+      if (size > budgetBytes) out.push({ path, sizeBytes: size, budgetBytes });
+    } catch {
+      continue;
+    }
+  }
+  return out;
 }
 
 /**
@@ -223,11 +253,16 @@ export function archiveDirPath(personaDir: string, stamp: string): string {
 
 /**
  * Copy a file's exact bytes into `memory/archive/<stamp>/` and return the
- * archive path. Copies rather than moves: the live file must stay in place
- * for the stage to rewrite, and a half-applied pass must never leave a gap
- * where memory used to be. A second pass on the same day overwrites its own
- * earlier copy, which is correct — the archive holds the pre-compaction state
- * for that DATE, not every intermediate.
+ * archive path. Copies rather than moves: the live file must stay in place for
+ * the stage to rewrite, and a half-applied pass must never leave a gap where
+ * memory used to be.
+ *
+ * Every pass gets its OWN copy, even a second pass on the same day. Reusing
+ * the first pass's copy would be actively wrong: rollback restores the bytes
+ * in the archive, so a second pass that overshoots would be rolled back past
+ * its own starting point and resurrect content the FIRST pass had correctly
+ * removed. The archive holds a pre-image per pass, not per date — and since
+ * nothing here is ever deleted, the earlier pre-image stays alongside it.
  */
 export async function archiveForCompaction(
   personaDir: string,
@@ -238,17 +273,29 @@ export async function archiveForCompaction(
   await mkdir(dir, { recursive: true });
   // Flatten the persona-relative path so `memory/decisions.md` and a future
   // `kb/decisions.md` can't collide inside one archive dir.
-  const dest = join(dir, candidate.path.replace(/[\\/]/g, "__"));
-  if (!existsSync(dest)) await copyFile(candidate.absPath, dest);
+  const base = candidate.path.replace(/[\\/]/g, "__");
+  let dest = join(dir, base);
+  // A same-day repeat pass lands next to its predecessor rather than over it.
+  for (let n = 2; existsSync(dest) && n < 1000; n++) {
+    dest = join(dir, base.replace(/(\.md)?$/, `.${n}$1`));
+  }
+  await copyFile(candidate.absPath, dest);
   return dest;
 }
 
-/** Put the archived bytes back over the live file. */
+/**
+ * Put the archived bytes back over the live file.
+ *
+ * Atomic, via tempfile + fsync + rename. A plain `copyFile` over the live path
+ * truncates the target first, so a crash mid-restore leaves MEMORY.md or a
+ * daily file half-written — turning a recoverable bad pass into real data
+ * loss, in the exact code path whose whole job is to prevent that.
+ */
 export async function restoreFromArchive(
   archivePath: string,
   absPath: string,
 ): Promise<void> {
-  await copyFile(archivePath, absPath);
+  await writeFileAtomic(absPath, await readFile(archivePath, "utf8"));
 }
 
 // ---------------------------------------------------------------------------

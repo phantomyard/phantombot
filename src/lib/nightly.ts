@@ -712,9 +712,11 @@ ${NIGHTLY_STAGE_BODY.kb(today)}`;
  * with an explicit "when in doubt, keep it" default, because the failure mode
  * that matters is losing a fact, not leaving a file 5% too big.
  *
- * Drawers get a measure-and-report instruction rather than a rewrite: their
- * dedupe/merge lifecycle moves to the database in the follow-up work, and an
- * LLM pass over them now would be built twice.
+ * The `drawer` entry is defensive only — drawers are not selected as
+ * candidates (see measureDrawers), because their dedupe/merge lifecycle moves
+ * to the database in the follow-up work and an LLM pass over them now would be
+ * built twice. It survives so a hand-built candidate can never reach the
+ * prompt without an instruction.
  */
 const COMPACTION_KIND_BODY: Record<CompactionCandidate["kind"], string> = {
   memory: `MEMORY.md is loaded into context on EVERY turn, so every byte is
@@ -723,9 +725,9 @@ const COMPACTION_KIND_BODY: Record<CompactionCandidate["kind"], string> = {
     bloated into prose down to one line plus a [[pointer]]. Do NOT remove
     standing facts about your owner, trust rules, or infrastructure state that
     has no home elsewhere — move those, don't delete them.`,
-  drawer: `Do NOT rewrite this file. Its dedupe and lifecycle work is moving to
-    the database, so an edit here would be undone. Report its size and the
-    three largest sources of duplication you can see, and move on.`,
+  drawer: `Do NOT rewrite this file, and do not read it. Its dedupe and
+    lifecycle work is moving to the database, so any edit here would be undone.
+    Leave it exactly as it is.`,
   daily: `This day is CLOSED and fully distilled — every stage completed and its
     contents are already filed in the drawers and the KB. Reduce it to: the
     date heading, the items that were promoted (one line each), and any

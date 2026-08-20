@@ -42,6 +42,7 @@ import {
   dateRecord,
   loadNightlyState,
   NIGHTLY_STAGES,
+  type NightlyDateRecord,
   type NightlyState,
   type NightlyStage,
   nightlyConversationKey,
@@ -60,6 +61,7 @@ import {
   type CompactionOutcome,
   compactionCandidates,
   formatCompactionSummary,
+  measureDrawers,
   settleCompaction,
 } from "../lib/nightlyCompact.ts";
 import { openMemoryStore } from "../memory/store.ts";
@@ -241,6 +243,8 @@ export async function runCompaction(opts: {
   state: NightlyState;
   minAgeDays?: number;
   runOne: (prompt: string) => Promise<TurnResult>;
+  /** Re-index after files were rewritten. Skipped when nothing changed. */
+  reconcileIndex?: () => Promise<void>;
   out: WriteSink;
 }): Promise<{ outcomes: CompactionOutcome[]; error?: string } | null> {
   const candidates = await compactionCandidates(opts.personaDir, opts.state, {
@@ -267,6 +271,34 @@ export async function runCompaction(opts: {
   }
   opts.out.write(formatCompactionSummary(outcomes));
 
+  // Reconcile the ledger for every daily file this pass touched.
+  //
+  // The ledger keys "has this date been distilled?" on mtime + size + hash of
+  // the daily file. Compaction rewrites that file — and so does a rollback —
+  // so leaving the pre-compaction record in place makes the NEXT sweep see the
+  // date as `changed`, re-queue it, and pay for both LLM stages again on a day
+  // whose content was only ever removed. Left alone it re-bills every single
+  // night, forever. The distillation verdict (stages_done/status) is carried
+  // over untouched: what changed is the file's fingerprint, not its history.
+  const touched = outcomes.filter(
+    (o) => o.kind === "daily" && o.bytesAfter !== o.bytesBefore,
+  ).length;
+  const rewritten = outcomes.some((o) => o.status !== "unchanged");
+  const ledgerPatch: Record<string, NightlyDateRecord> = {};
+  for (const c of candidates) {
+    if (c.kind !== "daily" || c.date === undefined) continue;
+    const prev = opts.state.processed?.[c.date];
+    if (!prev) continue;
+    const fresh = await pendingForDate(opts.personaDir, c.date);
+    if (!fresh) continue;
+    ledgerPatch[c.date] = {
+      ...prev,
+      mtime_ms: fresh.mtime_ms,
+      size: fresh.size,
+      hash: fresh.hash,
+    };
+  }
+
   await saveNightlyState(opts.personaDir, {
     compaction: {
       ran_at: new Date().toISOString(),
@@ -275,6 +307,16 @@ export async function runCompaction(opts: {
       bytes_before: outcomes.reduce((n, o) => n + o.bytesBefore, 0),
       bytes_after: outcomes.reduce((n, o) => n + o.bytesAfter, 0),
     },
+    ...(Object.keys(ledgerPatch).length > 0 ? { processed: ledgerPatch } : {}),
+  });
+
+  // The sweep's index refresh ran BEFORE this stage, so any file compaction
+  // rewrote is still indexed at its old contents until this runs.
+  if (rewritten && opts.reconcileIndex) await opts.reconcileIndex();
+  log.info("nightly: compaction settled", {
+    persona: opts.persona,
+    files: outcomes.length,
+    dailies_reledgered: touched,
   });
   return { outcomes, ...(r.errored ? { error: r.errored } : {}) };
 }
@@ -367,22 +409,21 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     cap !== undefined && cap > 0 ? Math.max(0, queue.length - cap) : 0;
   if (deferred > 0) queue = queue.slice(0, cap);
 
+  // An empty queue is NOT an early return. Compaction's inputs are whole-file
+  // sizes, not a day's events, so the night it most needs to run is exactly
+  // the steady-state night where nothing new is pending — which is every night
+  // once the backlog is drained. Returning here made the stage permanently
+  // inert outside a backfill. The date loop below simply does nothing instead.
   if (queue.length === 0) {
     out.write(`nightly: persona='${persona}' — nothing pending\n`);
-    await saveNightlyState(dir, {
-      last_run: now.toISOString(),
-      last_status: "ok",
-      current: null,
-    });
-    return 0;
+  } else {
+    out.write(
+      `nightly: persona='${persona}' — ${queue.length} date(s) to process ` +
+        `[${queue.map((q) => `${q.date}:${q.reason}`).join(", ")}]` +
+        (deferred > 0 ? ` (+${deferred} deferred to the next run)` : "") +
+        `\n`,
+    );
   }
-
-  out.write(
-    `nightly: persona='${persona}' — ${queue.length} date(s) to process ` +
-      `[${queue.map((q) => `${q.date}:${q.reason}`).join(", ")}]` +
-      (deferred > 0 ? ` (+${deferred} deferred to the next run)` : "") +
-      `\n`,
-  );
 
   const monolithic = existsSync(join(dir, "nightly-prompt.md"));
   const memory = input.runStage ? null : await openMemoryStore(config.memoryDbPath);
@@ -524,8 +565,28 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
                 harnesses,
                 memory: memory!,
               }),
+        reconcileIndex: async () => {
+          if (input.refreshIndex) {
+            await input.refreshIndex(dir);
+            return;
+          }
+          const ix = await refreshPersonaIndex({
+            config,
+            personaDir: dir,
+            indexPath: memoryIndexPath(persona),
+          });
+          if (ix.error) {
+            err.write(`nightly: post-compaction index refresh failed — ${ix.error}\n`);
+          }
+        },
         out,
       });
+      for (const d of await measureDrawers(dir)) {
+        out.write(
+          `nightly: drawer over budget — ${d.path}: ${d.sizeBytes} bytes ` +
+            `(budget ${d.budgetBytes}); compaction does not rewrite drawers\n`,
+        );
+      }
       if (compaction?.error) {
         errors.push(`compaction: ${compaction.error}`);
         log.error("nightly: compaction stage failed", {
