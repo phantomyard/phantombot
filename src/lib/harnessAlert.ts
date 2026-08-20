@@ -68,9 +68,14 @@ export const ALERT_SEND_TIMEOUT_MS = 20_000;
  *
  * `auth` is the sticky one: unlike a 429 it will never clear on its own,
  * so it is worth waking the owner. `rate_limit` is transient by nature and
- * only escalates when it takes the whole chain down with it.
+ * only escalates when it takes the whole chain down with it. `timeout` is
+ * split out of `other` purely so the outage alert can NAME it: a wedged
+ * harness and a crashed one both rendered as "harness error", which sent
+ * the reader to the journals to find out which (observed on
+ * kw-phantombot 2026-08-20 — a 300s idle kill on a single-harness chain).
+ * It changes no policy: like `other` it never fires the degraded alert.
  */
-export type HarnessFailureCause = "auth" | "rate_limit" | "other";
+export type HarnessFailureCause = "auth" | "rate_limit" | "timeout" | "other";
 
 /**
  * Statuses the claude CLI stamps that mean "this credential/account is not
@@ -89,6 +94,16 @@ const AUTH_MARKERS = [
 const RATE_LIMIT_MARKERS = ["rate_limit", "quota", "resource_exhausted"];
 
 /**
+ * Text `killCauseToErrorChunk` (src/lib/harnessRunner.ts) stamps when it
+ * kills a harness for producing nothing — the hard wall-clock cap, the idle
+ * window, and the startup handshake window respectively. Kept as substrings
+ * of those exact strings so a reworded suffix does not silently
+ * de-classify; if that function's wording changes, this list changes with
+ * it and the tests below say so.
+ */
+const TIMEOUT_MARKERS = ["timed out after", "produced no output within"];
+
+/**
  * Classify a harness error chunk. Matching is on lowercased substrings
  * because the text is harness-authored and varies by CLI ("claude api
  * error: authentication_failed", "pi: 401 unauthorized"). HTTP status
@@ -105,6 +120,7 @@ export function classifyFailure(
   const text = error.toLowerCase();
   if (AUTH_MARKERS.some((m) => text.includes(m))) return "auth";
   if (RATE_LIMIT_MARKERS.some((m) => text.includes(m))) return "rate_limit";
+  if (TIMEOUT_MARKERS.some((m) => text.includes(m))) return "timeout";
   return "other";
 }
 
@@ -239,7 +255,9 @@ export class HarnessAlerter {
         ? "rate limited"
         : cause === "auth"
           ? "auth failure"
-          : "harness error";
+          : cause === "timeout"
+            ? "timed out"
+            : "harness error";
     const detail =
       cause === "rate_limit" && input.httpStatus
         ? ` ${input.httpStatus}`
@@ -250,10 +268,15 @@ export class HarnessAlerter {
     // and the answer is the difference between "add a fallback" and "both of
     // my harnesses are down".
     const chain = input.chain.length > 0 ? ` [${input.chain.join(" \u2192 ")}]` : "";
+    // "no fallback left" implies one was tried and also failed. With a
+    // single-harness chain nothing was ever configured to try, and that is a
+    // different fix (add a fallback, not debug two harnesses), so say so.
+    const exhaustion =
+      input.chain.length <= 1 ? "no fallback configured" : "no fallback left";
     await this.emit(
       input.harnessId,
       "exhausted",
-      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 no fallback left${chain}, turn undelivered`,
+      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 ${exhaustion}${chain}, turn undelivered`,
     );
   }
 

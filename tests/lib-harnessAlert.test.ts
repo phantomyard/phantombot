@@ -57,10 +57,32 @@ describe("classifyFailure", () => {
     expect(classifyFailure("something vague", 401)).toBe("auth");
   });
 
-  test("anything else is 'other' — a timeout must not page the owner", () => {
+  // The three strings below are copied verbatim from killCauseToErrorChunk()
+  // in src/lib/harnessRunner.ts. If that wording changes, these fail — which
+  // is the point: the classifier matches on its text.
+  test("recognises every wedged-harness kill the runner emits", () => {
     expect(
       classifyFailure("claude timed out after 300000ms (hard wall-clock cap)"),
-    ).toBe("other");
+    ).toBe("timeout");
+    expect(
+      classifyFailure(
+        "pi timed out after 300000ms with no output (likely wedged on a tool call)",
+      ),
+    ).toBe("timeout");
+    expect(
+      classifyFailure(
+        "pi produced no output within 60000ms of startup (likely wedged on the MCP/init handshake)",
+      ),
+    ).toBe("timeout");
+  });
+
+  test("a real auth failure still wins over the word 'timed out'", () => {
+    expect(
+      classifyFailure("claude timed out after 5ms: authentication_failed"),
+    ).toBe("auth");
+  });
+
+  test("anything else is 'other'", () => {
     expect(classifyFailure("claude exited with code 1")).toBe("other");
   });
 });
@@ -201,6 +223,19 @@ describe("send deadline", () => {
     // Settled, and settled by the deadline rather than by the send.
     expect(Date.now() - started).toBeLessThan(2000);
   });
+  test("a wedged harness a fallback absorbed stays silent", async () => {
+    const { alerter, sent } = newAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES + 2; i++) {
+      alerter.noteFailure(
+        "claude",
+        "claude timed out after 300000ms with no output (likely wedged on a tool call)",
+      );
+    }
+    await alerter.noteDegraded({ harnessId: "claude", servedBy: "pi" });
+    // Only `auth` pages: a timeout the chain routed around is #284's
+    // deliberate silence, and splitting it out of `other` must not change that.
+    expect(sent).toEqual([]);
+  });
 });
 
 describe("exhausted alert", () => {
@@ -215,9 +250,8 @@ describe("exhausted alert", () => {
     // One line: siren, harness, cause, and that nothing answered.
     expect(sent[0]).not.toContain("\n");
     expect(sent[0]).toContain("\ud83d\udea8 claude rate limited 429");
-    expect(sent[0]).toContain("no fallback left");
-    // The chain answers "out of what?" — one harness means "add a fallback".
-    expect(sent[0]).toContain("[claude]");
+    // One harness: nothing was ever configured to fall back to.
+    expect(sent[0]).toContain("no fallback configured [claude]");
   });
 
   test("fires for a non-rate-limit outage too — no reply was delivered", async () => {
@@ -233,6 +267,33 @@ describe("exhausted alert", () => {
     expect(sent[0]).toContain("harness error");
     expect(sent[0]).not.toContain("rate limited");
     expect(sent[0]).toContain("[claude \u2192 pi]");
+  });
+
+  test("names a wedged harness instead of the generic 'harness error'", async () => {
+    const { alerter, sent } = newAlerter();
+    await alerter.noteExhausted({
+      harnessId: "pi",
+      error:
+        "pi timed out after 300000ms with no output (likely wedged on a tool call)",
+      chain: ["pi"],
+    });
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("\ud83d\udea8 pi timed out");
+    expect(sent[0]).not.toContain("harness error");
+    // A one-harness chain never had a fallback to lose.
+    expect(sent[0]).toContain("no fallback configured [pi]");
+    expect(sent[0]).not.toContain("no fallback left");
+  });
+
+  test("says 'no fallback left' only when the chain actually had one", async () => {
+    const { alerter, sent } = newAlerter();
+    await alerter.noteExhausted({
+      harnessId: "pi",
+      error: "pi exited with code 1",
+      chain: ["claude", "pi"],
+    });
+    expect(sent[0]).toContain("no fallback left [claude \u2192 pi]");
+    expect(sent[0]).not.toContain("no fallback configured");
   });
 
   test("is silent with no sender configured", async () => {
