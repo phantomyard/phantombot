@@ -715,6 +715,96 @@ describe("runNightly — compaction stage (#410)", () => {
     );
   });
 
+  test("STEADY STATE: the sweep marker is held across an empty-queue compaction", async () => {
+    // Regression: the in-flight marker was written only inside the date loop,
+    // so the steady-state path — no date pending, compaction still running —
+    // held no lock at all. Two sweeps would both reach `compact`, archive the
+    // same pre-image and point concurrent LLM writers at the same files.
+    await daily("2026-05-01");
+    const drain = compactHarness("x".repeat(15 * 1024));
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: drain.runStage as never, refreshIndex: async () => {},
+    });
+
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    let release: () => void = () => {};
+    const blocked = new Promise<void>((r) => {
+      release = r;
+    });
+    let compactEntered: () => void = () => {};
+    const entered = new Promise<void>((r) => {
+      compactEntered = r;
+    });
+    const first = {
+      calls: [] as string[],
+      runStage: async (a: { stage: string }) => {
+        first.calls.push(a.stage);
+        if (a.stage === "compact") {
+          compactEntered();
+          await blocked;
+        }
+        return { finalReply: "done", durationMs: 1 };
+      },
+    };
+    const firstRun = runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: first.runStage as never, refreshIndex: async () => {},
+    });
+
+    // With the first sweep parked inside compaction, a second one must see the
+    // marker and stand down rather than start its own pass.
+    await entered;
+    const second = compactHarness("x".repeat(15 * 1024));
+    const out = new CaptureStream();
+    const code = await runNightly({
+      config, now, out,
+      runStage: second.runStage as never, refreshIndex: async () => {},
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("already in flight");
+    expect(second.calls).not.toContain("compact");
+
+    release();
+    await firstRun;
+    // …and the marker is cleared on the way out, so the next sweep is free.
+    expect((await loadNightlyState(personaDir)).current ?? null).toBeNull();
+  });
+
+  test("a same-size rewrite still reconciles the index", async () => {
+    // `unchanged` is a SIZE verdict. The stage can replace a file with
+    // different content of exactly the same byte length; keying the
+    // post-compaction index refresh on the byte count left FTS/vector serving
+    // the pre-compaction text for a file that had in fact changed.
+    await daily("2026-05-01");
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const rewrite = "y".repeat(20 * 1024);
+    const events: string[] = [];
+    const h = {
+      runStage: async (a: { stage: string }) => {
+        events.push(`stage:${a.stage}`);
+        if (a.stage === "compact") {
+          await writeFile(join(personaDir, "MEMORY.md"), rewrite, "utf8");
+        }
+        return { finalReply: "done", durationMs: 1 };
+      },
+    };
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: h.runStage as never,
+      refreshIndex: async () => {
+        events.push("index");
+      },
+    });
+    // Same byte count, different bytes: the verdict says `unchanged`…
+    const state = await loadNightlyState(personaDir);
+    expect(state.compaction?.files[0]!.status).toBe("unchanged");
+    expect(await Bun.file(join(personaDir, "MEMORY.md")).text()).toBe(rewrite);
+    // …but the index is still reconciled afterwards.
+    expect(events[events.length - 1]).toBe("index");
+    expect(events.filter((e) => e === "index")).toHaveLength(2);
+  });
+
   test("a rewritten daily is re-ledgered so the next sweep does not re-bill it", async () => {
     // Compaction rewrites the daily file, which changes the mtime/size/hash the
     // ledger keys on. Without reconciliation the next sweep sees `changed`,

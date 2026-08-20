@@ -243,7 +243,7 @@ export async function runCompaction(opts: {
   state: NightlyState;
   minAgeDays?: number;
   runOne: (prompt: string) => Promise<TurnResult>;
-  /** Re-index after files were rewritten. Skipped when nothing changed. */
+  /** Re-index after the stage ran. Always called: see the call site. */
   reconcileIndex?: () => Promise<void>;
   out: WriteSink;
 }): Promise<{ outcomes: CompactionOutcome[]; error?: string } | null> {
@@ -283,7 +283,14 @@ export async function runCompaction(opts: {
   const touched = outcomes.filter(
     (o) => o.kind === "daily" && o.bytesAfter !== o.bytesBefore,
   ).length;
-  const rewritten = outcomes.some((o) => o.status !== "unchanged");
+  // NOT `status !== "unchanged"`: `unchanged` is a SIZE verdict, and the stage
+  // can rewrite a file to different content of exactly the same byte length —
+  // in which case the index kept serving the pre-compaction text for a file
+  // that had in fact changed, which is the one outcome this stage exists to
+  // prevent. The stage only runs when there were candidates at all (the
+  // no-candidate case returned above), so reconcile unconditionally: a refresh
+  // over genuinely untouched files is a stat-cheap no-op, a missed one is
+  // stale memory that stays searchable.
   const ledgerPatch: Record<string, NightlyDateRecord> = {};
   for (const c of candidates) {
     if (c.kind !== "daily" || c.date === undefined) continue;
@@ -312,7 +319,7 @@ export async function runCompaction(opts: {
 
   // The sweep's index refresh ran BEFORE this stage, so any file compaction
   // rewrote is still indexed at its old contents until this runs.
-  if (rewritten && opts.reconcileIndex) await opts.reconcileIndex();
+  if (opts.reconcileIndex) await opts.reconcileIndex();
   log.info("nightly: compaction settled", {
     persona: opts.persona,
     files: outcomes.length,
@@ -429,21 +436,35 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   const memory = input.runStage ? null : await openMemoryStore(config.memoryDbPath);
   const startedAt = new Date().toISOString();
   const errors: string[] = [];
+  const todayStamp = now.toISOString().slice(0, 10);
+
+  // The in-flight marker covers the WHOLE sweep, not just the date loop.
+  // Compaction runs even when the queue is empty — which, once the backlog is
+  // drained, is every night — so a marker written only per date left exactly
+  // that path unlocked: two sweeps would both pass the liveness check, archive
+  // the same pre-image and point concurrent LLM writers at the same files.
+  // Acquired before any work, refreshed as each date starts and again before
+  // compaction so a long stage never reads as stalled, cleared in the finally.
+  const holdSweep = async (date: string, index: number): Promise<void> => {
+    await saveNightlyState(dir, {
+      current: {
+        date,
+        index,
+        total: queue.length,
+        started_at: startedAt,
+        updated_at: new Date().toISOString(),
+        pid: process.pid,
+        pid_start: selfStartToken() ?? undefined,
+      },
+    });
+  };
 
   try {
+    await holdSweep(queue[0]?.date ?? todayStamp, 0);
+
     for (const [i, pending] of queue.entries()) {
       const conversation = nightlyConversationKey(pending.date);
-      await saveNightlyState(dir, {
-        current: {
-          date: pending.date,
-          index: i + 1,
-          total: queue.length,
-          started_at: startedAt,
-          updated_at: new Date().toISOString(),
-          pid: process.pid,
-          pid_start: selfStartToken() ?? undefined,
-        },
-      });
+      await holdSweep(pending.date, i + 1);
 
       const runOne = async (
         stage: NightlyStage | "override" | "compact",
@@ -543,6 +564,8 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     // prompt override, which owns its own contract.
     // ---------------------------------------------------------------------
     if (!input.skipCompaction && !input.today && !monolithic) {
+      // Keep the beat fresh across a stage that can outlive the stall timer.
+      await holdSweep(todayStamp, queue.length);
       const compaction = await runCompaction({
         personaDir: dir,
         persona,
