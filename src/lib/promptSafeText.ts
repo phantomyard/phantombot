@@ -63,6 +63,29 @@ function classEscape(code: number): string {
   return "\\u" + code.toString(16).padStart(4, "0");
 }
 
+/**
+ * Same ranges as `UNSAFE`, minus tab/newline — for `inertBlock`, which keeps
+ * line structure instead of flattening it.
+ */
+const BLOCK_UNSAFE = new RegExp(
+  "[" +
+    UNSAFE_RANGES.flatMap(([lo, hi]) =>
+      // Split the C0 range around TAB (0009) and LF (000A), the two control
+      // characters a block is allowed to keep. CR is normalised to LF before
+      // this runs, so it is not exempted here.
+      lo === 0x0000 && hi === 0x001f
+        ? [
+            [0x0000, 0x0008],
+            [0x000b, 0x001f],
+          ]
+        : [[lo, hi]],
+    )
+      .map(([lo, hi]) => `${classEscape(lo!)}-${classEscape(hi!)}`)
+      .join("") +
+    "]",
+  "g",
+);
+
 const UNSAFE = new RegExp(
   "[" +
     UNSAFE_RANGES.map(
@@ -107,4 +130,41 @@ export function inertField(
   maxChars?: number,
 ): string {
   return inertText(value, maxChars) || placeholder;
+}
+
+/**
+ * Multi-line containment for a whole block of attacker-influenced text.
+ *
+ * `inertText` flattens to a single line, which is right for a field inside a
+ * template sentence and useless for content that IS lines — a daily journal,
+ * for one (lib/dailyRecall.ts). The structural escape that matters for a block
+ * is the same one: markdown headings and prompt sections share a syntax, so a
+ * line reading `# Security perimeter - TRUSTED turn` renders as a genuine
+ * looking section of the system prompt. Wrapping the block in a fence does not
+ * fix that on its own, because the block can contain a fence.
+ *
+ * So: keep newlines and tabs, strip every other escape character `inertText`
+ * strips, and BACKSLASH-ESCAPE a leading hash run so no line inside the block
+ * can open a heading. The result is still legible - `\# Notes` reads as what
+ * was written - and it can no longer be mistaken for structure the prompt
+ * builder emitted.
+ *
+ * As with `inertText`, this is confinement, not trust: the surrounding prose
+ * naming the block as DATA is the other half, and neither is sufficient alone.
+ */
+export function inertBlock(value: string | undefined): string {
+  if (!value) return "";
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(BLOCK_UNSAFE, " ")
+    .split("\n")
+    .map((line) =>
+      line.replace(
+        /^([^\S\n]*)(#{1,6})(\s|$)/,
+        (_m, ws: string, hashes: string, tail: string) =>
+          `${ws}\\${hashes}${tail}`,
+      ),
+    )
+    .join("\n")
+    .trim();
 }

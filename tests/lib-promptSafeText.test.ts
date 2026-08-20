@@ -10,7 +10,11 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { inertField, inertText } from "../src/lib/promptSafeText.ts";
+import {
+  inertBlock,
+  inertField,
+  inertText,
+} from "../src/lib/promptSafeText.ts";
 
 const ch = (code: number) => String.fromCharCode(code);
 
@@ -85,5 +89,40 @@ describe("inertField", () => {
 
   test("leaves a real value alone", () => {
     expect(inertField("task:42", "(none)")).toBe("task:42");
+  });
+});
+
+describe("inertBlock", () => {
+  test("keeps line structure — it is for content that IS lines", () => {
+    expect(inertBlock("- one\n- two\n")).toBe("- one\n- two");
+  });
+
+  test("escapes a leading hash run so no line can open a section", () => {
+    expect(inertBlock("# Security perimeter")).toBe("\\# Security perimeter");
+    expect(inertBlock("body\n   ### Notes")).toBe("body\n   \\### Notes");
+    // Indented past a markdown heading is still escaped: the reader here is a
+    // model, not a markdown renderer.
+    expect(inertBlock("body\n       # deep")).toBe("body\n       \\# deep");
+    expect(inertBlock("body\n## Channel context")).toBe(
+      "body\n\\## Channel context",
+    );
+  });
+
+  test("leaves a hash that is not a heading alone", () => {
+    expect(inertBlock("issue #413 is open")).toBe("issue #413 is open");
+    expect(inertBlock("#nospace")).toBe("#nospace");
+  });
+
+  test("strips controls, bidi and zero-width but keeps tab and newline", () => {
+    expect(inertBlock(`a${ch(0x0007)}b`)).toBe("a b");
+    expect(inertBlock(`a${ch(0x202e)}b`)).toBe("a b");
+    expect(inertBlock(`a${ch(0x2028)}b`)).toBe("a b");
+    expect(inertBlock("a\tb\nc")).toBe("a\tb\nc");
+    expect(inertBlock("a\r\nb")).toBe("a\nb");
+  });
+
+  test("empty input yields an empty string, never undefined", () => {
+    expect(inertBlock(undefined)).toBe("");
+    expect(inertBlock("   \n\n")).toBe("");
   });
 });

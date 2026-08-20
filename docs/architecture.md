@@ -155,16 +155,22 @@ Three properties worth knowing when touching this code:
    `src/lib/dailyRecall.ts` runs on the prompt path for every turn
    (`orchestrator/turn.ts`, ahead of `buildSystemPrompt`): today's journal
    always, yesterday's **only** when the `.nightly-state.json` ledger has no
-   `ok`-with-all-stages record for that date. This used to be an instruction
+   `ok`-with-all-stages record for that date whose mtime+size still match the
+   file (`isDailyDistilled` in `lib/nightly.ts` — one predicate, shared with
+   the sweep and the compactor, so they cannot disagree about what "done"
+   means). This used to be an instruction
    in a persona's `AGENTS.md`, which failed in both directions — an agent
    could forget it, and anything that can write the persona directory could
    rewrite it. There is deliberately no config switch (a persona that turns it
    off loses a day of memory the first time a sweep fails, and cannot notice)
    and deliberately no lookback past yesterday (two undistilled days is a
    nightly bug to fix, not a reason to grow every prompt). It is pure disk +
-   JSON, never throws, and is skipped only for the nightly sweep's own turns,
-   which are handed the date they are distilling. Both files are byte-capped
-   at the compaction budget, keeping the tail.
+   JSON, never throws, and is skipped only for the nightly sweep's own turns
+   (`skipDailyRecall`), which are handed the date they are distilling. Both
+   files are byte-capped at the persona's daily compaction budget, keeping the
+   tail and warning when they trim. Journal text is run through `inertBlock`
+   first: leading `#` escaped, control/bidi/zero-width stripped, so a journal
+   line cannot forge a section of the system prompt (invariant 20).
 
 ## Open design questions
 

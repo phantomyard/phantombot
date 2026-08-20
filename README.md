@@ -1646,7 +1646,7 @@ persona file — it is fixed in the memory system itself:
 | File | In the prompt? |
 |---|---|
 | **Today's journal** | Always. The day is still open, so nothing has been distilled out of it yet — if it is not in the prompt, it is not in the turn. |
-| **Yesterday's journal** | Only when the nightly ledger shows that date's sweep did **not** finish. |
+| **Yesterday's journal** | Only when the nightly ledger shows that date's sweep did **not** finish — including a file that was appended to *after* its sweep, since the new part was never promoted. |
 | **Older journals** | Never automatically. Reachable with `memory search` / `memory get`. |
 
 The asymmetry is the point. Once a day has been swept, its content already
@@ -1656,7 +1656,17 @@ raw journal is a **fallback for a failed distillation**, and in the healthy
 case the only journal in context is the open one.
 
 Injected journals are framed as data, not instructions: earlier turns wrote
-them, and some of those turns were driven by untrusted input.
+them, and some of those turns were driven by untrusted input. They are also
+*contained*: a leading `#` on any journal line is escaped, so nothing in a
+journal can render as a section of the system prompt, and control, bidi and
+zero-width characters are stripped.
+
+Each journal is capped at your daily compaction budget (8 KB by default,
+overridable per persona with `{"memory/*.md": <bytes>}` in
+`memory/.compaction-budgets.json`). Over-cap files keep the **tail** — the
+newest entries — say so in the block, name `phantombot memory get
+memory/<date>.md` for the rest, and log a warning so the loss is never
+silent.
 
 Useful commands:
 

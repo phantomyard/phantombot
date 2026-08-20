@@ -28,7 +28,12 @@ import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  memoryIndexPath,
+  personaDir,
+} from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
@@ -179,6 +184,9 @@ export async function runNightlyTurn(opts: {
       // `internal` — the same column disagreeing with itself either side of
       // an upgrade.
       origin: "internal",
+      // Each stage is handed the exact date it is distilling; injecting the
+      // same journals again is duplication in the prompt of every stage.
+      skipDailyRecall: true,
       // Nightly's whole job is editing its OWN memory/kb — the operation the
       // UNTRUSTED security-perimeter block explicitly tells a turn to
       // escalate instead of doing. Without this, a harness that reads that
@@ -223,7 +231,6 @@ export async function runNightlyTurn(opts: {
   }
   return { finalReply, errored, durationMs: Date.now() - startedAt };
 }
-
 
 /**
  * Run the compaction pass over whatever is currently over budget.
@@ -375,7 +382,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     out.write(
       liveness === "dead"
         ? `nightly: taking over a dead sweep (owner pid ${state.current.pid} is gone ` +
-          `or has been reused, last beat ${state.current.updated_at})\n`
+            `or has been reused, last beat ${state.current.updated_at})\n`
         : `nightly: taking over a stalled sweep (last beat ${state.current.updated_at})\n`,
     );
   }
@@ -402,7 +409,8 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
       const patch: Record<string, ReturnType<typeof dateRecord>> = {};
       for (const t of sweep.touched) {
         const prev = state.processed?.[t.date];
-        if (prev) patch[t.date] = { ...prev, mtime_ms: t.mtime_ms, size: t.size };
+        if (prev)
+          patch[t.date] = { ...prev, mtime_ms: t.mtime_ms, size: t.size };
       }
       await saveNightlyState(dir, { processed: patch });
     }
@@ -433,7 +441,9 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   }
 
   const monolithic = existsSync(join(dir, "nightly-prompt.md"));
-  const memory = input.runStage ? null : await openMemoryStore(config.memoryDbPath);
+  const memory = input.runStage
+    ? null
+    : await openMemoryStore(config.memoryDbPath);
   const startedAt = new Date().toISOString();
   const errors: string[] = [];
   const todayStamp = now.toISOString().slice(0, 10);
@@ -535,7 +545,8 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
           personaDir: dir,
           indexPath: memoryIndexPath(persona),
         });
-        if (ix.error) err.write(`nightly: index refresh failed — ${ix.error}\n`);
+        if (ix.error)
+          err.write(`nightly: index refresh failed — ${ix.error}\n`);
       }
 
       await saveNightlyState(dir, {
@@ -617,7 +628,9 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
             indexPath: memoryIndexPath(persona),
           });
           if (ix.error) {
-            err.write(`nightly: post-compaction index refresh failed — ${ix.error}\n`);
+            err.write(
+              `nightly: post-compaction index refresh failed — ${ix.error}\n`,
+            );
           }
         },
         out,

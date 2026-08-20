@@ -217,8 +217,57 @@ export function sweepLiveness(
   return fresh ? "running" : "stalled";
 }
 
+/** Conversation-key namespace for the sweep's own turns. */
+export const NIGHTLY_CONVERSATION_PREFIX = "system:nightly:";
+
 export function nightlyConversationKey(date: string): string {
-  return `system:nightly:${date}`;
+  return `${NIGHTLY_CONVERSATION_PREFIX}${date}`;
+}
+
+/** Is this conversation one of the nightly sweep's own (any stage suffix)? */
+export function isNightlyConversation(conversation: string): boolean {
+  return conversation.startsWith(NIGHTLY_CONVERSATION_PREFIX);
+}
+
+/**
+ * Does the LEDGER RECORD claim this date is fully distilled? `ok` plus every
+ * stage. Says nothing about whether the file has changed since — see
+ * `isDailyDistilled` for the fingerprint-aware answer.
+ */
+export function recordDistilled(
+  rec: NightlyDateRecord | undefined,
+): rec is NightlyDateRecord {
+  return (
+    rec !== undefined &&
+    rec.status === "ok" &&
+    NIGHTLY_STAGES.every((s) => rec.stages_done.includes(s))
+  );
+}
+
+/**
+ * Is this date's content actually represented in the drawers/KB right now?
+ *
+ * The record alone is not enough: a daily file APPENDED TO after its sweep
+ * (`memory capture --date`, a late tick) holds content that was never
+ * promoted anywhere, and the sweep itself re-queues exactly that case off the
+ * mtime+size fingerprint. Every consumer of "is this day done?" must apply
+ * the same test or they disagree — the prompt would drop a day the sweep
+ * still considers unfinished. One predicate, three callers.
+ *
+ * A file that cannot be stat'ed (gone, unreadable) is NOT distilled: there is
+ * nothing to inject either way, and the callers report that case themselves.
+ */
+export async function isDailyDistilled(
+  path: string,
+  rec: NightlyDateRecord | undefined,
+): Promise<boolean> {
+  if (!recordDistilled(rec)) return false;
+  try {
+    const st = await stat(path);
+    return rec.mtime_ms === Math.floor(st.mtimeMs) && rec.size === st.size;
+  } catch {
+    return false;
+  }
 }
 
 export function nightlyStatePath(personaDir: string): string {
@@ -297,7 +346,9 @@ export interface SweepResult {
 }
 
 async function sha256File(path: string): Promise<string> {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
 }
 
 /**
@@ -344,10 +395,7 @@ export async function sweepDailyFiles(
       continue; // vanished between readdir and stat — nothing to process
     }
     const rec = ledger[date];
-    const done =
-      rec !== undefined &&
-      rec.status === "ok" &&
-      NIGHTLY_STAGES.every((s) => rec.stages_done.includes(s));
+    const done = recordDistilled(rec);
 
     // Fast path: mtime AND size both unchanged. Size is the belt to mtime's
     // braces — an append landing inside the same millisecond as the last
@@ -690,10 +738,7 @@ ${NIGHTLY_STAGE_BODY[stage](today)}`;
  * `nightly-prompt.md` is absent but the override machinery still asks for a
  * single-turn prompt. Same two jobs, one turn.
  */
-export function buildNightlyPrompt(
-  personaName: string,
-  today: string,
-): string {
+export function buildNightlyPrompt(personaName: string, today: string): string {
   return `${nightlyPreamble(personaName, today)}
 
 Run BOTH stages below, in order, in this single turn.

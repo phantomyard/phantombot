@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises";
 import { writeFileAtomic } from "./io.ts";
 import { log } from "./logger.ts";
 import type { NightlyState } from "./nightly.ts";
-import { NIGHTLY_STAGES } from "./nightly.ts";
+import { recordDistilled } from "./nightly.ts";
 
 /** What kind of file a compaction target is — drives the prompt wording. */
 export type CompactionKind = "memory" | "drawer" | "daily";
@@ -83,6 +83,13 @@ export const DAILY_MIN_AGE_DAYS = 30;
 
 /** Optional per-persona override, e.g. `{"memory/MEMORY.md": 32768}`. */
 export const BUDGET_OVERRIDE_FILE = "memory/.compaction-budgets.json";
+
+/**
+ * Override key for the daily-file budget. Daily files are per-date, so they
+ * cannot be keyed by their own path like the drawers are — one glob-shaped
+ * key covers them all.
+ */
+export const DAILY_BUDGET_KEY = "memory/*.md";
 
 export function defaultBudgets(): CompactionBudget[] {
   return [
@@ -140,7 +147,10 @@ export async function resolveBudgets(
   const p = join(personaDir, BUDGET_OVERRIDE_FILE);
   if (!existsSync(p)) return base;
   try {
-    const raw = JSON.parse(await readFile(p, "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(await readFile(p, "utf8")) as Record<
+      string,
+      unknown
+    >;
     return base.map((b) => {
       const v = raw[b.path];
       return typeof v === "number" && Number.isFinite(v) && v > 0
@@ -153,6 +163,39 @@ export async function resolveBudgets(
       error: (e as Error).message,
     });
     return base;
+  }
+}
+
+/**
+ * The persona's daily-file byte budget: the default, or their override.
+ *
+ * Read by BOTH the sweep (what to compact) and daily recall (how much journal
+ * reaches the prompt), so raising it can never leave the two disagreeing about
+ * what "at budget" means.
+ */
+export async function resolveDailyBudgetBytes(
+  personaDir: string,
+): Promise<number> {
+  const p = join(personaDir, BUDGET_OVERRIDE_FILE);
+  if (!existsSync(p)) return DAILY_BUDGET_BYTES;
+  try {
+    const raw = JSON.parse(await readFile(p, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const v = raw[DAILY_BUDGET_KEY];
+    return typeof v === "number" && Number.isFinite(v) && v > 0
+      ? Math.floor(v)
+      : DAILY_BUDGET_BYTES;
+  } catch (e) {
+    log.warn(
+      "nightly: budget override unreadable; using default daily budget",
+      {
+        path: p,
+        error: (e as Error).message,
+      },
+    );
+    return DAILY_BUDGET_BYTES;
   }
 }
 
@@ -192,7 +235,8 @@ export async function compactionCandidates(
 ): Promise<CompactionCandidate[]> {
   const budgets = opts.budgets ?? (await resolveBudgets(personaDir));
   const minAge = opts.minAgeDays ?? DAILY_MIN_AGE_DAYS;
-  const dailyBudget = opts.dailyBudgetBytes ?? DAILY_BUDGET_BYTES;
+  const dailyBudget =
+    opts.dailyBudgetBytes ?? (await resolveDailyBudgetBytes(personaDir));
   const out: CompactionCandidate[] = [];
 
   for (const b of budgets) {
@@ -214,11 +258,7 @@ export async function compactionCandidates(
     if (!m) continue;
     const date = m[1]!;
     const rec = ledger[date];
-    const distilled =
-      rec !== undefined &&
-      rec.status === "ok" &&
-      NIGHTLY_STAGES.every((s) => rec.stages_done.includes(s));
-    if (!distilled) continue;
+    if (!recordDistilled(rec)) continue;
     if (daysBetween(date, opts.today) < minAge) continue;
     const absPath = join(memDir, file);
     let size: number;
@@ -386,7 +426,8 @@ export async function settleCompaction(
 
 /** One line per file, for the sweep's stdout. */
 export function formatCompactionSummary(outcomes: CompactionOutcome[]): string {
-  if (outcomes.length === 0) return "nightly: compaction — nothing over budget\n";
+  if (outcomes.length === 0)
+    return "nightly: compaction — nothing over budget\n";
   const before = outcomes.reduce((n, o) => n + o.bytesBefore, 0);
   const after = outcomes.reduce((n, o) => n + o.bytesAfter, 0);
   const lines = outcomes.map(

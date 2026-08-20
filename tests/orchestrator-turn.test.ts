@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { DEFAULT_HISTORY_LIMIT, runTurn } from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import { MAX_DIGESTS_PER_TURN } from "../src/lib/turnDigest.ts";
+import { nightlyConversationKey } from "../src/lib/nightly.ts";
 import type {
   Harness,
   HarnessChunk,
@@ -1619,6 +1620,22 @@ describe("runTurn — daily journal reflex (#410)", () => {
     expect(prompt).toContain("MARKER-TODAY-JOURNAL");
   });
 
+  test("skipDailyRecall suppresses the section — stated intent, not a string", async () => {
+    await writeToday("- 08:00 MARKER-TODAY-JOURNAL");
+    const { harness, get } = capturing();
+
+    await collect(
+      runTurn({
+        ...baseInput(),
+        skipDailyRecall: true,
+        userMessage: "distill",
+        harnesses: [harness],
+      }),
+    );
+
+    expect(get()?.systemPrompt ?? "").not.toContain("MARKER-TODAY-JOURNAL");
+  });
+
   test("nightly's own turns are skipped — they are handed their date", async () => {
     await writeToday("- 08:00 MARKER-TODAY-JOURNAL");
     const { harness, get } = capturing();
@@ -1626,7 +1643,7 @@ describe("runTurn — daily journal reflex (#410)", () => {
     await collect(
       runTurn({
         ...baseInput(),
-        conversation: "system:nightly:2026-08-20:distill",
+        conversation: `${nightlyConversationKey("2026-08-20")}:distill`,
         userMessage: "distill",
         harnesses: [harness],
       }),
