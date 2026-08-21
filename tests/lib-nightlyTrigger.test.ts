@@ -11,6 +11,7 @@ import {
   type NightlyHostEnv,
   nightlyUnitName,
 } from "../src/lib/nightlyTrigger.ts";
+import { PHANTOMBOT_SERVICE_PATH } from "../src/lib/systemd.ts";
 
 describe("dailyFileDate", () => {
   test("uses the same basis the daily-file writer uses (UTC)", () => {
@@ -104,6 +105,17 @@ describe("buildNightlyLaunch", () => {
     expect(path).toBeDefined();
     expect(path).not.toContain("%h");
     expect(path).toContain("/home/robbie/.local/bin");
+  });
+
+  test("the pinned PATH stays in lockstep with the installed units", () => {
+    // Derived, not restated: if the service PATH gains an entry, the transient
+    // nightly unit has to gain it too, or the sweep resolves binaries against
+    // a different lookup path than every other phantombot unit.
+    const l = buildNightlyLaunch(bare, "robbie", systemd);
+    const path = l.args.find((a) => a.startsWith("--property=Environment=PATH="));
+    expect(path).toBe(
+      `--property=Environment=PATH=${PHANTOMBOT_SERVICE_PATH.replaceAll("%h", "/home/robbie")}`,
+    );
   });
 
   test("no secrets are passed on the command line", () => {

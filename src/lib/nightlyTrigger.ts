@@ -33,6 +33,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { log } from "./logger.ts";
+import { PHANTOMBOT_SERVICE_PATH } from "./systemd.ts";
 
 /** Why a sweep was fired. Logged, and useful in tests. */
 export type NightlyTriggerReason = "startup" | "rollover" | "manual";
@@ -193,20 +194,14 @@ export function buildNightlyLaunch(
  * The same PATH the installed units pin, with `%h` resolved here: unit-file
  * specifiers are expanded by the unit-file parser, and transient properties
  * go over D-Bus where they are not.
+ *
+ * Derived from {@link PHANTOMBOT_SERVICE_PATH} rather than restated, so a
+ * future entry added to the service PATH cannot silently skip the transient
+ * nightly unit and leave the sweep resolving binaries against a different
+ * lookup path than every other phantombot unit.
  */
 function nightlyUnitPath(home: string): string {
-  return [
-    `${home}/.local/share/pi-node/bin`,
-    `${home}/.local/share/pi-node/current/bin`,
-    `${home}/.pi/agent/bin`,
-    `${home}/.local/bin`,
-    "/usr/local/sbin",
-    "/usr/local/bin",
-    "/usr/sbin",
-    "/usr/bin",
-    "/sbin",
-    "/bin",
-  ].join(":");
+  return PHANTOMBOT_SERVICE_PATH.replaceAll("%h", home);
 }
 
 /** The bare `phantombot nightly` argv for this build (dev script vs binary). */
