@@ -198,20 +198,32 @@ function parseGroupBots(v: unknown): PhantomchatGroupBot[] {
 }
 
 /**
- * Read the raw on-disk JSON object, or `{}` when the file is absent or
- * unparseable. Deliberately NOT `loadPhantomchatPersonaConfig`: the save path
- * needs the file's literal keys (including ones this build does not know about)
- * and must work even for a file that has no usable nsec, which `load` rejects.
+ * Read the raw on-disk JSON object, or `{}` when the file is ABSENT.
+ * Deliberately NOT `loadPhantomchatPersonaConfig`: the save path needs the
+ * file's literal keys (including ones this build does not know about) and must
+ * work even for a file that has no usable nsec, which `load` rejects.
+ *
+ * A file that EXISTS but will not parse (or is not a JSON object) THROWS: it
+ * is corrupt-but-populated, and the caller must not treat it as an empty
+ * base — otherwise a save would silently discard every existing key
+ * (allowlist, relays, group_bots) that merge semantics were supposed to
+ * preserve (#419 item 4).
  */
 function readRawFileShape(path: string): PhantomchatFileShape {
   if (!existsSync(path)) return {};
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as PhantomchatFileShape;
-  } catch {
-    return {};
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    throw new Error(
+      `phantomchat: ${path} exists but is not parseable JSON`,
+      { cause: e },
+    );
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`phantomchat: ${path} exists but is not a JSON object`);
+  }
+  return parsed as PhantomchatFileShape;
 }
 
 /**
@@ -326,7 +338,21 @@ export async function savePhantomchatPersonaConfig(
   }
   // Start from whatever is on disk so unknown keys survive, then overwrite the
   // fields this caller actually supplied (see MERGE SEMANTICS above).
-  const existing = readRawFileShape(path);
+  // A corrupt-but-populated file is backed up BEFORE the overwrite instead of
+  // being read as `{}` — a warn-and-destroy would still lose the allowlist and
+  // relay tiers, and the backup keeps them recoverable by hand (#419 item 4).
+  let existing: PhantomchatFileShape;
+  try {
+    existing = readRawFileShape(path);
+  } catch (e) {
+    const backup = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    await rename(path, backup);
+    log.warn(
+      `phantomchat: ${path} is unparseable — moved to ${backup}; continuing with an empty base`,
+      { error: (e as Error).message },
+    );
+    existing = {};
+  }
   const body: PhantomchatFileShape = { ...existing };
   delete body.nsec; // promoted to identity.json — never written back here
   body.relays = data.relays;

@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -535,5 +535,70 @@ describe("relay tier + save merge semantics", () => {
     const loaded = loadPhantomchatPersonaConfig(agentDir)!;
     expect(loaded.relays).toEqual(["wss://new.example"]);
     expect(loaded.relayNpubs).toEqual([relay]);
+  });
+});
+
+describe("corrupt-but-populated phantomchat.json — #419 item 4", () => {
+  test("save backs up an unparseable file instead of silently wiping it", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    const path = phantomchatConfigPath(agentDir);
+    // A truncated/corrupt file that WAS populated — the exact data-loss case.
+    const corrupt = '{"relays": ["wss://a.example"], "allowed_npubs": ["npub1brok';
+    await writeFile(path, corrupt, "utf8");
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://fresh.example"],
+      allowedNpubs: [],
+    });
+
+    // The corrupt original survived, byte-identical, under .corrupt-*.
+    const dir = await readdir(agentDir);
+    const backups = dir.filter((f) => f.startsWith("phantomchat.json.corrupt-"));
+    expect(backups.length).toBe(1);
+    const backup = await readFile(join(agentDir, backups[0]!), "utf8");
+    expect(backup).toBe(corrupt);
+
+    // The new file is valid and carries what the save supplied.
+    const loaded = loadPhantomchatPersonaConfig(agentDir);
+    expect(loaded).toBeDefined();
+    expect(loaded!.relays).toEqual(["wss://fresh.example"]);
+  });
+
+  test("a file that parses to a non-object is treated as corrupt too", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "kai");
+    await mkdir(agentDir, { recursive: true });
+    const path = phantomchatConfigPath(agentDir);
+    await writeFile(path, "[1, 2, 3]", "utf8");
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://fresh.example"],
+      allowedNpubs: [],
+    });
+
+    const dir = await readdir(agentDir);
+    const backups = dir.filter((f) => f.startsWith("phantomchat.json.corrupt-"));
+    expect(backups.length).toBe(1);
+    expect(loadPhantomchatPersonaConfig(agentDir)).toBeDefined();
+  });
+
+  test("an absent file still saves clean — no backup, no warn path", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "salvador");
+    await mkdir(agentDir, { recursive: true });
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+
+    const dir = await readdir(agentDir);
+    expect(dir.filter((f) => f.includes("corrupt"))).toEqual([]);
+    expect(loadPhantomchatPersonaConfig(agentDir)).toBeDefined();
   });
 });
