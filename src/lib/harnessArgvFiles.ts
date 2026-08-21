@@ -40,6 +40,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { log } from "./logger.ts";
 
 /**
  * Linux's per-argv-string ceiling: MAX_ARG_STRLEN = 32 * PAGE_SIZE = 131,072
@@ -198,12 +199,27 @@ export function cleanupPersonaTmpDir(
  * MUST call `cleanup()` in a `finally` once the child process has exited, so a
  * thrown error or an early generator return still removes the files.
  *
- * `baseDir` (issue #365) is the persona-owned tmp root; when omitted we fall
- * back to the system `os.tmpdir()` for tests and degraded/no-persona paths.
+ * `baseDir` (issue #365) is the persona-owned tmp root, and EVERY production
+ * caller passes one: the turn orchestrator, the threat judge and the durable-
+ * fact extractor all resolve `<personaDir>/tmp`. Spilled payloads are persona
+ * data — a system prompt carries memory, drawers and conversation — so they
+ * must not land in a world-readable shared `/tmp` alongside other personas'.
+ *
+ * The `os.tmpdir()` fallback exists only for tests and for a caller that
+ * genuinely has no persona dir. It is WARNED about rather than silently taken,
+ * because a production spill landing there is a plumbing regression, not a
+ * configuration choice. It is still a fallback and not a throw: writing a
+ * persona's prompt to a less private directory is bad, refusing the turn on a
+ * headless box is worse.
  */
 export async function createHarnessTempDir(
   baseDir?: string,
 ): Promise<HarnessTempDir> {
+  if (!baseDir) {
+    log.warn("createHarnessTempDir: no persona tmp base given, falling back to the shared system tmp", {
+      fallback: tmpdir(),
+    });
+  }
   const base = baseDir ?? tmpdir();
   // Ensure the persona tmp root exists before mkdtemp (first use on a fresh
   // box). Harmless for the os.tmpdir() fallback, which always exists.

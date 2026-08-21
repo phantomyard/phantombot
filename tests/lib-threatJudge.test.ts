@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 import {
   JUDGE_NARROWING,
@@ -260,6 +261,21 @@ describe("makeHarnessJudgeComplete", () => {
     const floored = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
     await makeHarnessJudgeComplete(floored.harness, 1000, 2000)("s", "u");
     expect(floored.seen.req?.workingDir).toBe(homedir());
+  });
+
+  it("spills harness temp files under the persona dir, not the shared /tmp (#426)", async () => {
+    // A spilled system prompt is persona data. The judge screens untrusted
+    // input for a specific persona, so its argv spill belongs under that
+    // persona's own tmp - never a shared system tmp other personas can read.
+    const scoped = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
+    await makeHarnessJudgeComplete(scoped.harness, 1000, 2000, "/srv/personas/robbie")("s", "u");
+    expect(scoped.seen.req?.tmpBaseDir).toBe("/srv/personas/robbie/tmp");
+
+    // Degenerate config (no persona dir): follows the homedir() floor that
+    // workingDir already uses - still user-owned, still not shared /tmp.
+    const floored = recordingHarness("codex", '{"score": 1, "reason": "", "question": ""}');
+    await makeHarnessJudgeComplete(floored.harness, 1000, 2000)("s", "u");
+    expect(floored.seen.req?.tmpBaseDir).toBe(join(homedir(), "tmp"));
   });
 
   it("propagates a harness error chunk as a thrown error (screener fails open)", async () => {

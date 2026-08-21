@@ -34,6 +34,7 @@
  */
 
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type {
   Config,
@@ -403,6 +404,15 @@ export function makeExtractionComplete(
       userMessage,
       history: [],
       workingDir: cwd,
+      // Harness temp files (the argv spill, #426) belong under the spawning
+      // persona's OWN dir, never the shared system /tmp: `cwd` here is the
+      // persona dir, so `<cwd>/tmp` inherits its ownership, permissions and
+      // free space, and one persona can never read or starve another's
+      // spill. In the degenerate case where the caller had no persona dir to
+      // give us, `cwd` is already floored at homedir() and this follows it -
+      // still a directory owned by the running user, still not shared /tmp.
+      // The dir is created lazily, only if a payload actually spills.
+      tmpBaseDir: join(cwd, "tmp"),
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
       toolsMode: "none",

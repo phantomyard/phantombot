@@ -7,15 +7,21 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DEFAULT_DURABLE_FACTS, type Config } from "../src/config.ts";
+import type {
+  Harness,
+  HarnessChunk,
+  HarnessRequest,
+} from "../src/harnesses/types.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
 import {
   extractDurableFactsOnEviction,
   formatDurableFacts,
   makeDurableFactPuller,
+  makeExtractionComplete,
   makeFactExtractor,
   parseExtractedFacts,
   pullDurableFacts,
@@ -769,5 +775,36 @@ describe("factory gating", () => {
         [],
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("makeExtractionComplete", () => {
+  /** Minimal harness that records the request it was invoked with. */
+  function recording(): { harness: Harness; seen: { req?: HarnessRequest } } {
+    const seen: { req?: HarnessRequest } = {};
+    const harness: Harness = {
+      id: "codex",
+      available: async () => true,
+      async *invoke(req: HarnessRequest) {
+        seen.req = req;
+        yield { type: "done", finalText: "[]" } as HarnessChunk;
+      },
+    };
+    return { harness, seen };
+  }
+
+  const cfg = { harnessIdleTimeoutMs: 1000, harnessHardTimeoutMs: 2000 };
+
+  test("spills harness temp files under the persona dir, not the shared /tmp (#426)", async () => {
+    // Extraction reads a persona's own conversation window, so the argv spill
+    // of that prompt must stay inside the persona's tmp.
+    const scoped = recording();
+    await makeExtractionComplete([scoped.harness], cfg, "/srv/personas/robbie")!("s", "u");
+    expect(scoped.seen.req?.tmpBaseDir).toBe("/srv/personas/robbie/tmp");
+
+    // No persona dir given: follows the same homedir() floor as workingDir.
+    const floored = recording();
+    await makeExtractionComplete([floored.harness], cfg)!("s", "u");
+    expect(floored.seen.req?.tmpBaseDir).toBe(join(homedir(), "tmp"));
   });
 });

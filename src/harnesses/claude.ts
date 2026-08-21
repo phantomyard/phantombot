@@ -135,8 +135,35 @@ export class ClaudeHarness implements Harness {
     let temp: HarnessTempDir | undefined;
     let systemPromptFile: string | undefined;
     if (useTempFiles) {
-      temp = await createHarnessTempDir(req.tmpBaseDir);
-      systemPromptFile = await temp.file("system-prompt.md", req.systemPrompt);
+      // The spill is a best-effort OPTIMISATION, never a precondition. It
+      // touches the filesystem (mkdir + write under the persona's own tmp), and
+      // a filesystem can say no: disk full, read-only mount, a persona dir
+      // whose perms drifted. None of those are a reason to refuse the turn, and
+      // on a headless box nobody is watching to fix it, so a throw here must
+      // degrade to the inline argument rather than propagate.
+      //
+      // What the degraded path costs is honest and bounded: on Linux the inline
+      // `--system-prompt` still spawns fine for anything under MAX_ARG_STRLEN,
+      // so a prompt in the 96 KB-128 KB spill band simply works. Above it (or on
+      // Windows, where the whole command line is the budget) the spawn fails
+      // with E2BIG / "command line is too long" - which runWithFallback now
+      // catches and rolls to the next harness. Worst case is a slower turn on a
+      // fallback harness; never a dead daemon.
+      try {
+        temp = await createHarnessTempDir(req.tmpBaseDir);
+        systemPromptFile = await temp.file("system-prompt.md", req.systemPrompt);
+      } catch (err) {
+        log.warn("claude.invoke could not spill the system prompt to a file; passing it inline", {
+          tmpBaseDir: req.tmpBaseDir,
+          systemPromptBytes,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // mkdtemp may have succeeded and only the write failed - drop the dir
+        // rather than leak it. cleanup() never throws.
+        await temp?.cleanup();
+        temp = undefined;
+        systemPromptFile = undefined;
+      }
     }
     try {
 
