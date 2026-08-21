@@ -67,7 +67,6 @@ import {
   type CompactionOutcome,
   compactionCandidates,
   formatCompactionSummary,
-  measureDrawers,
   settleCompaction,
 } from "../lib/nightlyCompact.ts";
 import { openMemoryStore } from "../memory/store.ts";
@@ -636,16 +635,6 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
         },
         out,
       });
-      for (const d of await measureDrawers(dir)) {
-        // Since #417 a drawer file only still exists when retirement HELD it
-        // back, so an overage here is a signal about that drawer, not about
-        // compaction's scope.
-        out.write(
-          `nightly: drawer file still on disk and over budget — ${d.path}: ` +
-            `${d.sizeBytes} bytes (budget ${d.budgetBytes}); check ` +
-            `'phantombot memory drawers --retire' for why it was held back\n`,
-        );
-      }
       if (compaction?.error) {
         errors.push(`compaction: ${compaction.error}`);
         log.error("nightly: compaction stage failed", {

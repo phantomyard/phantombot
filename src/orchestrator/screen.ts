@@ -167,7 +167,7 @@ export const BRIEFING_KINDS: readonly DrawerKind[] = [
 ];
 
 /**
- * The same three drawers as file paths.
+ * The same three drawers as file paths — the per-drawer FILE FALLBACK only.
  *
  * DERIVED from BRIEFING_KINDS rather than restated, so the scaffold coupling
  * test below cannot pass while the row path and the file path disagree about
@@ -176,7 +176,8 @@ export const BRIEFING_KINDS: readonly DrawerKind[] = [
  * Exported so the scaffold can be tested against it: a drawer the judge briefs
  * from but `ensurePersonaScaffold` never seeds is invisible on a fresh persona
  * (missing files are silently skipped below), so the coupling is asserted in
- * tests rather than left to memory.
+ * tests rather than left to memory. These paths never appear in prompt text
+ * (issue #419): the briefing heading is the bare drawer kind.
  */
 export const BRIEFING_DRAWERS: readonly string[] =
   BRIEFING_KINDS.map(drawerPath);
@@ -610,13 +611,18 @@ async function fileSection(
  * (an entry is one line — see renderEntry) with an explicit marker. Two passes
  * over at most three drawers; the redistribution is not iterated to a fixed
  * point because the win is almost entirely in the first give-back.
+ *
+ * Section headers are the bare drawer KIND (`## decisions`), never a file
+ * path: the drawers are database rows since #418, and telling the judge its
+ * briefing came from a `memory/decisions.md` that no longer exists is a small
+ * lie in prompt text (issue #419).
  */
 export function packBriefing(
   sections: DrawerBriefingSection[],
   capBytes: number,
 ): string | undefined {
   if (sections.length === 0) return undefined;
-  const rendered = sections.map((s) => `## ${drawerPath(s.kind)}\n\n${s.text}`);
+  const rendered = sections.map((s) => `## ${s.kind}\n\n${s.text}`);
   const total = rendered.reduce((n, t) => n + Buffer.byteLength(t, "utf8"), 0);
   const joinCost = 2 * (rendered.length - 1);
   if (total + joinCost <= capBytes) return rendered.join("\n\n");

@@ -320,7 +320,10 @@ describe("packBriefing", () => {
 
   test("passes everything through when it fits", () => {
     const out = packBriefing([section("norms", 2, "n")], 16 * 1024)!;
-    expect(out).toContain("## memory/norms.md");
+    expect(out).toContain("## norms");
+    // Issue #419: the heading is the bare drawer kind, never a file path —
+    // the judge must not be told its briefing came from memory/norms.md.
+    expect(out).not.toContain("norms.md");
     expect(out).not.toContain("trimmed at cap");
   });
 
@@ -331,7 +334,7 @@ describe("packBriefing", () => {
       [section("decisions", 4000, "decision"), section("norms", 3, "norm")],
       2048,
     )!;
-    expect(out).toContain("## memory/norms.md");
+    expect(out).toContain("## norms");
     expect(out).toContain("- norm 0");
     expect(out).toContain("- norm 2");
     expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(2048);
@@ -354,7 +357,7 @@ describe("packBriefing", () => {
     const alone = packBriefing([big], 2048)!;
     // decisions gets its own share PLUS what norms did not need, so it is
     // longer than an even 50/50 split would have allowed.
-    const decisionsPart = withSmall.split("## memory/norms.md")[0]!;
+    const decisionsPart = withSmall.split("## norms")[0]!;
     expect(Buffer.byteLength(decisionsPart, "utf8")).toBeGreaterThan(1024);
     expect(Buffer.byteLength(alone, "utf8")).toBeLessThanOrEqual(2048);
   });
