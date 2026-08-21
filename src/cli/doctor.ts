@@ -17,8 +17,8 @@
  */
 
 import { defineCommand } from "citty";
-import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import {
@@ -73,6 +73,9 @@ import {
   type TimerLastFired,
 } from "../lib/timerHealth.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import { checkIntegrity, listRestorePoints } from "../memory/dbBackup.ts";
+import { DRAWER_KINDS } from "../memory/drawers.ts";
+import { drawerPath } from "../memory/drawerIngest.ts";
 
 /** Window for the capture-health check: a "dry day" is judged over 24h. */
 const CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -104,6 +107,25 @@ export interface DoctorReport {
     /** Daily files still awaiting a pass. */
     backlog: number;
     oldest_pending?: string;
+  };
+  /**
+   * The memory DATABASE itself (#417). Since the drawers stopped being
+   * markdown files, `memory.sqlite` holds memory that exists nowhere else on
+   * disk, so "is it readable, and what could I restore from" became a health
+   * question rather than an implementation detail.
+   */
+  memory_db: {
+    path: string;
+    /** `PRAGMA integrity_check` verdict on the live database. */
+    healthy: boolean;
+    detail: string;
+    bytes: number;
+    /** Verified snapshots available, newest first. */
+    restore_points: Array<{ taken_at: string; bytes: number; path: string }>;
+    /** Newest restore point that passes its own integrity check. */
+    newest_good?: string;
+    /** Drawer files still on disk because retirement held them back. */
+    unretired_drawers: string[];
   };
   capture: {
     window_hours: number;
@@ -291,20 +313,38 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     ? null
     : (Date.now() - lastRunMs) / 3_600_000;
 
-  // Capture health — compare real user turns vs captures over 24h.
+  // Memory database integrity FIRST, before anything opens it. `doctor` used
+  // to open the store unguarded here and die with a raw SQLiteError on a
+  // corrupt file — the one condition it most needs to report, and the only
+  // check that can tell the operator which restore point to use.
+  // A database that does not exist yet is NOT a fault: phantombot creates it
+  // on first use, so a box installed this afternoon has none, and reporting
+  // that as broken would teach an operator to ignore this line.
+  const dbPresent = existsSync(config.memoryDbPath);
+  const dbHealth = dbPresent
+    ? checkIntegrity(config.memoryDbPath)
+    : { ok: true, detail: "not created yet" };
+
+  // Capture health — compare real user turns vs captures over 24h. Skipped
+  // when the database is unhealthy: the counts would be meaningless and the
+  // open would throw over the top of the fault we are here to print.
   const since = new Date(Date.now() - CAPTURE_WINDOW_MS).toISOString();
-  const memory = await openMemoryStore(config.memoryDbPath);
   let userTurns = 0;
   let captures = 0;
-  try {
-    userTurns = await memory.countUserTurnsForPersonaSince(
-      persona,
-      "telegram:",
-      since,
-    );
-    captures = await memory.countCapturesSince(persona, since);
-  } finally {
-    await memory.close();
+  if (dbHealth.ok) {
+    // Opens (and, on a fresh box, creates) the database — the pre-#417
+    // behaviour, kept for every case except the corrupt one.
+    const memory = await openMemoryStore(config.memoryDbPath);
+    try {
+      userTurns = await memory.countUserTurnsForPersonaSince(
+        persona,
+        "telegram:",
+        since,
+      );
+      captures = await memory.countCapturesSince(persona, since);
+    } finally {
+      await memory.close();
+    }
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
 
@@ -437,6 +477,23 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     });
   }
 
+  // Restore points for the database checked above (#417).
+  const restorePoints = await listRestorePoints(config.memoryDbPath);
+  // Only the newest point is integrity-checked in the common case: each check
+  // reads the whole file, and walking five 300 MB snapshots on every doctor
+  // run would turn a diagnostic into an I/O event. When the newest one is bad
+  // we DO walk back, because that is precisely the moment the operator needs
+  // to know which point is still good.
+  let newestGood: string | undefined;
+  for (const point of restorePoints) {
+    if (!checkIntegrity(point.path).ok) continue;
+    newestGood = point.path;
+    break;
+  }
+  const unretiredDrawers = DRAWER_KINDS.map(drawerPath).filter((rel) =>
+    existsSync(join(dir, rel)),
+  );
+
   const report: DoctorReport = {
     persona,
     nightly: {
@@ -452,6 +509,21 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       ...(health.oldest_pending
         ? { oldest_pending: health.oldest_pending }
         : {}),
+    },
+    memory_db: {
+      path: config.memoryDbPath,
+      healthy: dbHealth.ok,
+      detail: dbHealth.detail,
+      bytes: existsSync(config.memoryDbPath)
+        ? statSync(config.memoryDbPath).size
+        : 0,
+      restore_points: restorePoints.map((p) => ({
+        taken_at: p.takenAt.toISOString(),
+        bytes: p.bytes,
+        path: p.path,
+      })),
+      ...(newestGood ? { newest_good: newestGood } : {}),
+      unretired_drawers: unretiredDrawers,
     },
     capture: {
       window_hours: CAPTURE_WINDOW_MS / 3_600_000,
@@ -503,8 +575,16 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // successful heals, not failures.
   const editorConnectorsBroken =
     !!editorConnectors && editorConnectors.some(editorConnectorBroken);
+  // An unreadable memory database is the most serious thing doctor can find:
+  // every other check is about a process that can be restarted, this one is
+  // about the data. No restore point at all is NOT a failure on its own — a
+  // box installed this afternoon has none yet, and crying WARN there would
+  // teach an operator to ignore the line that matters.
+  const memoryDbBroken = dbPresent && !dbHealth.ok;
   const exitCode =
-    health.status === "error"
+    memoryDbBroken
+      ? 1
+      : health.status === "error"
       ? 1
       : systemdBroken
         ? 1
@@ -554,6 +634,38 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       (dryDay ? " — DRY DAY: turns but no captures" : "") +
       "\n",
   );
+  const points = report.memory_db.restore_points;
+  out.write(
+    `  memory db: ${tick(dbHealth.ok)} — ` +
+      (dbHealth.ok
+        ? `${Math.round(report.memory_db.bytes / 1024 / 1024)} MB, ` +
+          `${points.length} restore point(s)` +
+          (points[0] ? `, newest ${points[0].taken_at}` : "")
+        : `integrity check FAILED: ${dbHealth.detail}`) +
+      "\n",
+  );
+  if (!dbHealth.ok) {
+    // The recovery instruction is printed WITH the fault, not left in a
+    // runbook: this is read by someone whose memory database just failed, and
+    // the next two commands should not require finding documentation.
+    out.write(
+      newestGood
+        ? `  → stop phantombot, then: phantombot memory restore --from ${newestGood} --yes\n`
+        : "  → no healthy restore point found; check `phantombot memory backup --list` " +
+          "before overwriting anything\n",
+    );
+  } else if (points.length === 0) {
+    out.write(
+      "  → no restore points yet; the next nightly sweep takes one " +
+        "(or run `phantombot memory backup`)\n",
+    );
+  }
+  if (unretiredDrawers.length > 0) {
+    out.write(
+      `  → markdown drawer(s) still on disk: ${unretiredDrawers.join(", ")} — ` +
+        "run `phantombot memory drawers --retire` to see what held them back\n",
+    );
+  }
   // Embeddings line is deliberately neutral — no ok/WARN marker, never an
   // exit-code input. Vector search is an optional enhancement, not a
   // requirement; absence is a valid, fully-working configuration.

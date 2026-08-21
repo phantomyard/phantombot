@@ -981,3 +981,55 @@ describe("runDoctor — editor connectors", () => {
     expect(out.text).toContain("not parseable");
   });
 });
+
+describe("runDoctor — memory database (#417)", () => {
+  test("a corrupt memory database is exit 1, with the recovery command", async () => {
+    // The drawers live here now, so this is the most serious thing doctor can
+    // find: every other check is about a process, this one is about the data.
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writeFile(config.memoryDbPath, "not a database", "utf8");
+    // A restore point taken while it was healthy.
+    const { mkdir: mk } = await import("node:fs/promises");
+    await mk(join(workdir, "backups"), { recursive: true });
+    const point = join(workdir, "memory.20260821T000000Z.sqlite");
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(join(workdir, "backups", "memory.20260821T000000Z.sqlite"), { create: true });
+    db.exec("CREATE TABLE t (v TEXT)");
+    db.close();
+    void point;
+
+    const out = new CaptureStream();
+    expect(await runDoctor({ config, out, checkEditorConnectors: false })).toBe(1);
+    expect(out.text).toMatch(/memory db: WARN/);
+    expect(out.text).toContain("phantombot memory restore --from");
+  });
+
+  test("a healthy database with no restore points is ok, and says so", async () => {
+    // NOT a failure: a box installed this afternoon has none yet, and crying
+    // WARN there teaches the operator to ignore the line that matters.
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(config.memoryDbPath, { create: true });
+    db.exec("CREATE TABLE t (v TEXT)");
+    db.close();
+
+    const out = new CaptureStream();
+    expect(await runDoctor({ config, out, checkEditorConnectors: false })).toBe(0);
+    expect(out.text).toMatch(/memory db: ok/);
+    expect(out.text).toContain("no restore points yet");
+  });
+
+  test("a markdown drawer still on disk is surfaced, not silently ignored", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(config.memoryDbPath, { create: true });
+    db.exec("CREATE TABLE t (v TEXT)");
+    db.close();
+    await writeFile(join(personaMemoryDir, "norms.md"), "# Norms\n", "utf8");
+
+    const out = new CaptureStream();
+    await runDoctor({ config, out, checkEditorConnectors: false });
+    expect(out.text).toContain("memory/norms.md");
+    expect(out.text).toContain("--retire");
+  });
+});

@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -226,7 +227,12 @@ describe("heartbeat drawer projection", () => {
       join(dir, "memory", "2026-06-04.md"),
       "# 2026-06-04\n- [norm] Nightly restarts are routine.\n",
     );
-    await writeFile(join(dir, "memory", "norms.md"), "# Norms\n");
+    // A legacy markdown drawer, mid-migration: its content must survive into
+    // rows before the same run retires it.
+    await writeFile(
+      join(dir, "memory", "norms.md"),
+      "# Norms\n\n## 2026-06-01\n\n- [norm] Friday deploys are routine.\n",
+    );
     const dbPath = join(dir, "memory.sqlite");
 
     const r = await runHeartbeat({
@@ -242,17 +248,46 @@ describe("heartbeat drawer projection", () => {
     try {
       const contents = store.list(PERSONA, "norms").map((e) => e.content);
       expect(contents.some((c) => c.includes("Nightly restarts are routine"))).toBe(true);
+      // The legacy file's entry is in the table too...
+      expect(contents.some((c) => c.includes("Friday deploys are routine"))).toBe(true);
     } finally {
       close();
     }
+    // ...which is what let the same heartbeat retire the file (#417).
+    expect(
+      r.drawerRetirement?.find((x) => x.kind === "norms")?.status,
+    ).toBe("retired");
+    expect(existsSync(join(dir, "memory", "norms.md"))).toBe(false);
   });
 
-  test("without a db path the heartbeat behaves exactly as before", async () => {
+  test("a drawer whose entries are not all filed keeps its file", async () => {
+    // The retirement gate, exercised through the heartbeat: rows are written
+    // by the sync, so the only way to be short is for the ingest to have
+    // missed something. Simulated by pointing the sync at an unreadable file
+    // — the ingest fails, and the retirement must NOT take that as licence.
+    const dir = await persona();
+    await mkdir(join(dir, "memory", "decisions.md"), { recursive: true });
+    const r = await runHeartbeat({
+      personaDir: dir,
+      today: "2026-06-04",
+      memoryDbPath: join(dir, "memory.sqlite"),
+      persona: PERSONA,
+    });
+    expect(r.drawerRetirement?.find((x) => x.kind === "decisions")?.status).toBe(
+      "held",
+    );
+    expect(existsSync(join(dir, "memory", "decisions.md"))).toBe(true);
+  });
+
+  test("without a db path nothing is promoted and no markdown is written", async () => {
+    // Deliberately not the old behaviour: with no store there is no write
+    // path at all. The daily file keeps the lines for the next heartbeat.
     const dir = await persona();
     await writeFile(join(dir, "memory", "2026-06-04.md"), "- [norm] No database here.\n");
     const r = await runHeartbeat({ personaDir: dir, today: "2026-06-04" });
-    expect(r.promoted).toHaveLength(1);
+    expect(r.promoted).toEqual([]);
     expect(r.drawerSync).toBeUndefined();
+    expect(existsSync(join(dir, "memory", "norms.md"))).toBe(false);
   });
 });
 

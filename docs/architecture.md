@@ -115,17 +115,21 @@ picture. From an architecture standpoint:
   context buffer, deliberately pruned — it is not a transcript archive, and nothing
   should be designed assuming old turns survive. `capture_log` is append-only and
   exists purely as an observability trail.
-- **Markdown (the persona dir)** is the durable memory: `memory/<date>.md` daily
-  journals → five structured drawers → `kb/` atomic notes → `MEMORY.md`.
-- **The drawers are projected from markdown into `drawer_entries`** — content-derived
+- **Markdown (the persona dir)** holds the daily journals (`memory/<date>.md`),
+  `kb/` atomic notes and `MEMORY.md`. The five structured drawers are NOT here:
+  since #417 they are rows (see below).
+- **The drawers are rows in `drawer_entries`** — content-derived
   ids (so dedupe is a UNIQUE constraint, not a prompt instruction), supersession,
   per-kind lifecycle, and decay for the three *belief* drawers only. See
   [`memory-drawers.md`](memory-drawers.md); the split that keeps `commitments` and
   `people` out of decay is load-bearing, not an omission. The heartbeat runs the
-  projection (`memory/drawerSync.ts`, skipped per drawer on an unchanged content
-  hash) and the threat judge's briefing reads the ranked rows, falling back to
-  the markdown file for any drawer that has none yet. Markdown stays the source
-  of truth; the table is rebuildable from it at any time.
+  ingest of any legacy markdown drawer still on disk (`memory/drawerSync.ts`),
+  files today's tagged lines as rows, and then RETIRES the markdown once it has
+  proved the content is filed and re-renderable (`memory/drawerRetire.ts`). The
+  threat judge's briefing reads the ranked rows. Markdown is an artefact you can
+  regenerate (`memory drawers --export`), not a second copy of the truth — which
+  is why `memory.sqlite` now carries verified, rotating restore points
+  (`memory/dbBackup.ts`) and `doctor` checks its integrity.
 
 Three properties worth knowing when touching this code:
 

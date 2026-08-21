@@ -27,7 +27,7 @@
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import {
@@ -51,6 +51,17 @@ import {
 } from "../memory/drawers.ts";
 import { describeIngest } from "../memory/drawerIngest.ts";
 import { openDrawerStore, syncDrawers } from "../memory/drawerSync.ts";
+import {
+  describeRoundTrip,
+  verifyDrawerRoundTrip,
+} from "../memory/drawerExport.ts";
+import { describeRetirement, retireDrawers } from "../memory/drawerRetire.ts";
+import {
+  backupMemoryDb,
+  checkIntegrity,
+  listRestorePoints,
+  restoreMemoryDb,
+} from "../memory/dbBackup.ts";
 import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
 
 function resolvePersonaDir(config: Config, persona?: string): {
@@ -520,6 +531,12 @@ export async function runMemoryDrawers(input: {
   limit?: number;
   sync?: boolean;
   force?: boolean;
+  /** File one entry into a drawer. Requires --kind. */
+  file?: string;
+  /** Render drawers back to markdown: a directory, or `-` for stdout. */
+  export?: string;
+  /** Archive and remove any markdown drawer whose content is proven filed. */
+  retire?: boolean;
   json?: boolean;
   out?: WriteSink;
 }): Promise<number> {
@@ -538,8 +555,57 @@ export async function runMemoryDrawers(input: {
     ? [input.kind as DrawerKind]
     : DRAWER_KINDS;
 
+  if (input.file !== undefined && input.kind === undefined) {
+    write("--file needs --kind (which drawer the entry belongs in)\n");
+    return 1;
+  }
+
   const { store, db, close } = await openDrawerStore(config.memoryDbPath);
   try {
+    if (input.file !== undefined) {
+      const entry = store.file({
+        persona,
+        kind: kinds[0]!,
+        content: input.file,
+        // `self`: the persona filed it. The principal's own assertions are
+        // filed by the code paths that can prove who is speaking, never by a
+        // CLI flag anyone in a nightly turn could pass.
+        source: "self",
+        origin: "cli",
+      });
+      write(`filed ${entry.kind} ${entry.id}\n`);
+      return 0;
+    }
+
+    if (input.export !== undefined) {
+      for (const kind of kinds) {
+        const trip = verifyDrawerRoundTrip(store, persona, kind);
+        if (input.export === "-") {
+          write(trip.markdown);
+          continue;
+        }
+        await mkdir(input.export, { recursive: true });
+        const dest = join(input.export, `${kind}.md`);
+        await writeFile(dest, trip.markdown, "utf8");
+        write(`${dest}: ${describeRoundTrip(trip)}\n`);
+      }
+      return 0;
+    }
+
+    if (input.retire) {
+      const results = await retireDrawers({
+        store,
+        personaDir: dir,
+        persona,
+        kinds,
+      });
+      for (const r of results) write(`${describeRetirement(r)}\n`);
+      // A held drawer is a FAILED retirement, not a quiet skip: it means the
+      // markdown still holds something the table does not, which is the one
+      // outcome an operator must not scroll past.
+      return results.some((r) => r.status === "held") ? 1 : 0;
+    }
+
     if (input.sync || input.force) {
       const result = await syncDrawers({
         store,
@@ -594,6 +660,124 @@ export async function runMemoryDrawers(input: {
     return 0;
   } finally {
     close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+/**
+ * Restore points for the memory database (#417).
+ *
+ * `--list` is the first thing an operator runs after `doctor` says the
+ * database is unhealthy, so it prints the integrity verdict of EACH point, not
+ * just the filenames: "which of these can I actually restore from" is the only
+ * question being asked, and answering it with a directory listing would leave
+ * them to find out by trying.
+ */
+export async function runMemoryBackup(input: {
+  list?: boolean;
+  keep?: number;
+  out?: WriteSink;
+}): Promise<number> {
+  const sink = input.out ?? process.stdout;
+  const write = (t: string) => sink.write(t);
+  const config = await loadConfig();
+
+  if (input.list) {
+    const health = checkIntegrity(config.memoryDbPath);
+    write(
+      `live: ${config.memoryDbPath} — ${health.ok ? "ok" : `UNHEALTHY (${health.detail})`}\n`,
+    );
+    const points = await listRestorePoints(config.memoryDbPath);
+    if (points.length === 0) {
+      write("no restore points yet — the nightly takes one per sweep\n");
+      return 0;
+    }
+    for (const p of points) {
+      const v = checkIntegrity(p.path);
+      write(
+        `${p.takenAt.toISOString()}  ${Math.round(p.bytes / 1024)} KB  ` +
+          `${v.ok ? "ok" : `UNHEALTHY (${v.detail})`}  ${p.path}\n`,
+      );
+    }
+    return 0;
+  }
+
+  const result = await backupMemoryDb({
+    dbPath: config.memoryDbPath,
+    keep: input.keep,
+  });
+  switch (result.status) {
+    case "taken":
+      write(
+        `snapshot ${result.path} (${Math.round((result.bytes ?? 0) / 1024)} KB)` +
+          (result.pruned.length > 0
+            ? `, ${result.pruned.length} rotated out`
+            : "") +
+          `\n`,
+      );
+      return 0;
+    case "skipped":
+      write(`no memory database at ${config.memoryDbPath}\n`);
+      return 1;
+    case "refused":
+      write(
+        `REFUSED: ${config.memoryDbPath} fails its integrity check ` +
+          `(${result.integrity.detail}).\n` +
+          `Existing restore points were left untouched — recover with ` +
+          `'phantombot memory restore --list'.\n`,
+      );
+      return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+/**
+ * Put a restore point back over the live memory database.
+ *
+ * Refuses without `--yes`. Phantombot holds the database open for its whole
+ * life, so swapping the file under a running daemon leaves it writing into a
+ * deleted inode — the restore appears to work and every turn after it is lost
+ * on the next restart. The confirmation exists to make the operator stop the
+ * service first, and the message says so rather than just demanding a flag.
+ */
+export async function runMemoryRestore(input: {
+  from?: string;
+  list?: boolean;
+  yes?: boolean;
+  out?: WriteSink;
+}): Promise<number> {
+  const sink = input.out ?? process.stdout;
+  const write = (t: string) => sink.write(t);
+  if (input.list || !input.from) {
+    if (!input.list) {
+      write("--from <restore point> is required. Available points:\n");
+    }
+    return await runMemoryBackup({ list: true, out: sink });
+  }
+  const config = await loadConfig();
+  if (!input.yes) {
+    write(
+      `This replaces ${config.memoryDbPath} with ${input.from}.\n` +
+        `Stop phantombot first ('phantombot stop'), then re-run with --yes.\n` +
+        `The current database is moved aside, not deleted.\n`,
+    );
+    return 1;
+  }
+  try {
+    const r = await restoreMemoryDb({
+      dbPath: config.memoryDbPath,
+      from: input.from,
+    });
+    write(
+      `restored ${config.memoryDbPath} from ${r.restoredFrom} ` +
+        `(${Math.round(r.bytes / 1024)} KB)\n` +
+        (r.previousAt ? `previous database kept at ${r.previousAt}\n` : "") +
+        `start phantombot again with 'phantombot start'\n`,
+    );
+    return 0;
+  } catch (e) {
+    write(`restore failed: ${(e as Error).message}\n`);
+    return 1;
   }
 }
 
@@ -725,6 +909,57 @@ const captureCmd = defineCommand({
   },
 });
 
+const backupCmd = defineCommand({
+  meta: {
+    name: "backup",
+    description:
+      "Take a verified snapshot of the memory database, or --list the restore points that exist.",
+  },
+  args: {
+    list: {
+      type: "boolean",
+      description: "List restore points with each one's integrity verdict.",
+      default: false,
+    },
+    keep: { type: "string", description: "How many restore points to keep." },
+  },
+  async run({ args }) {
+    const keep = Number(args.keep);
+    process.exitCode = await runMemoryBackup({
+      list: Boolean(args.list),
+      keep: Number.isFinite(keep) && keep > 0 ? Math.floor(keep) : undefined,
+    });
+  },
+});
+
+const restoreCmd = defineCommand({
+  meta: {
+    name: "restore",
+    description:
+      "Restore the memory database from a snapshot (stop phantombot first).",
+  },
+  args: {
+    from: { type: "string", description: "Restore point to restore from." },
+    list: {
+      type: "boolean",
+      description: "List restore points instead of restoring.",
+      default: false,
+    },
+    yes: {
+      type: "boolean",
+      description: "Confirm the swap. Without it, nothing is written.",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    process.exitCode = await runMemoryRestore({
+      from: args.from ? String(args.from) : undefined,
+      list: Boolean(args.list),
+      yes: Boolean(args.yes),
+    });
+  },
+});
+
 const drawersCmd = defineCommand({
   meta: {
     name: "drawers",
@@ -748,6 +983,22 @@ const drawersCmd = defineCommand({
       description: "Re-ingest even when a drawer's content hash is unchanged.",
       default: false,
     },
+    file: {
+      type: "string",
+      description:
+        "File one entry into the drawer named by --kind. Idempotent: re-filing the same text reaffirms it.",
+    },
+    export: {
+      type: "string",
+      description:
+        "Render the drawer(s) back to markdown into this directory, or '-' for stdout.",
+    },
+    retire: {
+      type: "boolean",
+      description:
+        "Archive and remove the markdown drawer file(s) whose content is proven filed and re-renderable.",
+      default: false,
+    },
     json: { type: "boolean", description: "JSON output.", default: false },
   },
   async run({ args }) {
@@ -758,6 +1009,9 @@ const drawersCmd = defineCommand({
       limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined,
       sync: Boolean(args.sync),
       force: Boolean(args.force),
+      file: args.file === undefined ? undefined : String(args.file),
+      export: args.export === undefined ? undefined : String(args.export),
+      retire: Boolean(args.retire),
       json: Boolean(args.json),
     });
   },
@@ -777,5 +1031,7 @@ export default defineCommand({
     index: indexCmd,
     capture: captureCmd,
     drawers: drawersCmd,
+    backup: backupCmd,
+    restore: restoreCmd,
   },
 });

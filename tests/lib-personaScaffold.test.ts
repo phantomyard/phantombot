@@ -25,7 +25,9 @@ afterEach(async () => {
 describe("ensurePersonaScaffold", () => {
   test("creates the full memory/ + kb/ tree on a fresh persona", async () => {
     const r = await ensurePersonaScaffold(workdir);
-    // Drawers
+    // Drawers are NOT seeded: since #417 they are rows in `drawer_entries`,
+    // created by the first entry filed. A seeded file would be archived by the
+    // first heartbeat's retirement pass.
     for (const f of [
       "memory/people.md",
       "memory/decisions.md",
@@ -33,8 +35,8 @@ describe("ensurePersonaScaffold", () => {
       "memory/commitments.md",
       "memory/norms.md",
     ]) {
-      expect(existsSync(join(workdir, f))).toBe(true);
-      expect(r.created).toContain(f);
+      expect(existsSync(join(workdir, f))).toBe(false);
+      expect(r.created).not.toContain(f);
     }
     // KB seeds
     for (const f of [
@@ -74,18 +76,24 @@ describe("ensurePersonaScaffold", () => {
   });
 
   test("does NOT overwrite existing files (preserves user content)", async () => {
-    await mkdir(join(workdir, "memory"), { recursive: true });
-    await writeFile(
-      join(workdir, "memory", "people.md"),
-      "# my people\n\n- Alice\n- Bob\n",
-    );
+    await mkdir(join(workdir, "kb"), { recursive: true });
+    await writeFile(join(workdir, "kb", "Home.md"), "# my home\n\n- Alice\n");
     const r = await ensurePersonaScaffold(workdir);
-    expect(r.skipped).toContain("memory/people.md");
-    const content = await readFile(
-      join(workdir, "memory", "people.md"),
-      "utf8",
-    );
-    expect(content).toBe("# my people\n\n- Alice\n- Bob\n");
+    expect(r.skipped).toContain("kb/Home.md");
+    const content = await readFile(join(workdir, "kb", "Home.md"), "utf8");
+    expect(content).toBe("# my home\n\n- Alice\n");
+  });
+
+  test("an existing drawer file is left exactly where it is", async () => {
+    // The scaffold does not seed drawers any more, and it must not tidy one
+    // away either: removing `memory/people.md` is retirement's job, and
+    // retirement only does it after proving the content is in the table.
+    await mkdir(join(workdir, "memory"), { recursive: true });
+    await writeFile(join(workdir, "memory", "people.md"), "# my people\n");
+    await ensurePersonaScaffold(workdir);
+    expect(
+      await readFile(join(workdir, "memory", "people.md"), "utf8"),
+    ).toBe("# my people\n");
   });
 
   test("Home.md has correct frontmatter dating to today", async () => {
@@ -132,86 +140,30 @@ describe("scaffolded templates carry full OKF frontmatter", () => {
   });
 });
 
-describe("the scaffold seeds every drawer the rest of the system writes to", () => {
-  test("every heartbeat promotion target exists after scaffolding", async () => {
-    // Regression: `norms.md` was reachable via `--tag norm` but never seeded,
-    // so the heartbeat's appendFile created it on first capture — a drawer
-    // with no title and no intro, unlike every other one.
+describe("the scaffold does not seed the drawers", () => {
+  test("no drawer file is created for any promotion target", async () => {
+    // The inverse of the old guarantee, and it matters just as much: a seeded
+    // `memory/norms.md` on a fresh persona would be ingested (empty), archived
+    // and removed by the first heartbeat, which is a baffling thing to watch
+    // happen to a file the scaffold just wrote.
     await ensurePersonaScaffold(workdir);
-    for (const rel of new Set(Object.values(TAG_TO_DRAWER))) {
-      expect(existsSync(join(workdir, rel))).toBe(true);
-      const body = await readFile(join(workdir, rel), "utf8");
-      expect(body.startsWith("# ")).toBe(true);
+    for (const kind of new Set(Object.values(TAG_TO_DRAWER))) {
+      expect(existsSync(join(workdir, "memory", `${kind}.md`))).toBe(false);
     }
   });
 
-  test("every threat-judge briefing drawer exists after scaffolding", async () => {
-    // A briefing drawer the scaffold skips is silently absent on a fresh
-    // persona: readBriefingDrawers swallows the ENOENT, so the judge briefs
-    // on a partial worldview with nothing logged anywhere.
+  test("the briefing drawer paths are labels now, not seeded files", async () => {
+    // BRIEFING_DRAWERS still names `memory/norms.md` — it is the HEADING the
+    // judge's briefing prints and the path the per-drawer file fallback tries.
+    // Neither requires the file to exist, and on a retired persona it does not.
     await ensurePersonaScaffold(workdir);
     for (const rel of BRIEFING_DRAWERS) {
-      expect(existsSync(join(workdir, rel))).toBe(true);
+      expect(existsSync(join(workdir, rel))).toBe(false);
     }
   });
 
-  test("the norms drawer explains that the threat judge reads it", async () => {
-    // The drawer's own text is the only place an agent learns this drawer is
-    // security-load-bearing rather than another notes file.
+  test("memory/archive still exists — retirement writes pre-images there", async () => {
     await ensurePersonaScaffold(workdir);
-    const norms = await readFile(join(workdir, "memory", "norms.md"), "utf8");
-    expect(norms).toContain("# Norms");
-    expect(norms).toContain("threat judge");
-    expect(norms).toContain("--tag norm");
-    // Accuracy, not decoration: the briefing shares a byte cap with the other
-    // two drawers, and promotion is the heartbeat's deterministic job. A
-    // drawer that claims otherwise teaches every fresh persona the wrong
-    // model of the one file its threat scoring depends on.
-    expect(norms).toContain("cap");
-    expect(norms).toContain("heartbeat");
-    expect(norms).not.toContain("IN FULL");
-    // Since #410 the cap is SHARED OUT rather than consumed front-to-back, so
-    // this drawer is no longer simply "the first thing dropped" — but it is
-    // still bounded, and each entry is ranked and injected on its own. The
-    // drawer has to say both, or "be exhaustive" looks free.
-    expect(norms).toContain("shared out");
-    expect(norms).toContain("RANKED");
-  });
-
-  test("no seeded drawer overstates what the briefing preserves", async () => {
-    // `packBriefing` trims a drawer LINE BY LINE, which is a real guarantee
-    // for the ranked-row path (one entry is one line) and only a partial one
-    // for the file fallback, where a multi-line markdown entry can still lose
-    // its tail lines. "IN FULL" was the first way this got overstated and
-    // "whole entries, not snippets" the second, weaker way; both promise more
-    // than the runtime gives. Assert against the class of claim, not one
-    // wording.
-    await ensurePersonaScaffold(workdir);
-    for (const rel of BRIEFING_DRAWERS) {
-      const body = await readFile(join(workdir, rel), "utf8");
-      expect(body).not.toMatch(/in full/i);
-      expect(body).not.toMatch(/whole (entries|rulings)/i);
-      expect(body).not.toMatch(/full fidelity/i);
-      expect(body).not.toMatch(/not snippets/i);
-    }
-    // And the norms drawer must say what actually happens instead.
-    const norms = await readFile(join(workdir, "memory", "norms.md"), "utf8");
-    expect(norms).toContain("LINE boundaries");
-  });
-
-  test("no seeded drawer credits the nightly cycle with promotion", async () => {
-    // Promotion is the heartbeat's deterministic every-30-min pass
-    // (TAG_TO_DRAWER lives in heartbeat.ts); the nightly cycle is the
-    // cognitive catch-up for what the heartbeat could not file. Four drawer
-    // intros shipped the reverse for long enough that it was copied into a
-    // fifth, so assert the attribution rather than trusting review to catch
-    // the next copy.
-    await ensurePersonaScaffold(workdir);
-    for (const rel of new Set(Object.values(TAG_TO_DRAWER))) {
-      const body = await readFile(join(workdir, rel), "utf8");
-      expect(body).toContain("heartbeat promotes");
-      expect(body).not.toMatch(/nightly cycle promotes/i);
-      expect(body).not.toMatch(/promoted from daily files by the nightly/i);
-    }
+    expect(existsSync(join(workdir, "memory", "archive"))).toBe(true);
   });
 });

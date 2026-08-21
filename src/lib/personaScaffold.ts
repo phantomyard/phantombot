@@ -5,13 +5,8 @@
  * memory system expects:
  *
  *   <personaDir>/
- *   ├── memory/
- *   │   ├── people.md
- *   │   ├── decisions.md
- *   │   ├── lessons.md
- *   │   ├── commitments.md
- *   │   ├── norms.md
- *   │   └── archive/
+ *   ├── memory/          (daily journals; the five drawers are rows, not files —
+ *   │   └── archive/      see `src/memory/drawers.ts` and issue #417)
  *   └── kb/
  *       ├── Home.md
  *       ├── inbox/
@@ -94,11 +89,12 @@ export async function ensurePersonaScaffold(
 
 function seedFiles(today: string): Array<[string, string]> {
   return [
-    ["memory/people.md", drawer("People", "Contacts, relationships, dynamics. The heartbeat promotes [person]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed. The threat judge is briefed from this drawer, so a sender documented here reads as known rather than unfamiliar.")],
-    ["memory/decisions.md", drawer("Decisions", `Choices with rationale. "We chose X because Y." The heartbeat promotes [decision]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed. The threat judge is briefed from this drawer, so a prior ruling recorded here is what stops it re-litigating something you already approved.`)],
-    ["memory/lessons.md", drawer("Lessons", "Mistakes and learnings. Grows, never shrinks. The heartbeat promotes [lesson]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed.")],
-    ["memory/commitments.md", drawer("Commitments", "Deadlines and obligations. The heartbeat promotes [commitment]-tagged lines from the daily file into this drawer; the nightly cycle files whatever it missed.")],
-    ["memory/norms.md", drawer("Norms", "What is ROUTINE in your owner's world. Before scoring untrusted input the threat judge is briefed from this drawer alongside decisions and people — as RANKED entries (highest decayed score first, superseded and dormant ones excluded), within a ~16 KiB cap shared out across the three drawers and trimmed at LINE boundaries, never mid-line — so entries here are what stop it flagging ordinary operations as attacks. Keep entries short and self-contained: each one is ranked and injected on its own, so a long entry buys its ranking at the cost of the entries below it. `phantombot memory drawers --kind norms` shows exactly what the judge will see. Capture with `--tag norm`; the heartbeat promotes [norm]-tagged lines from the daily file into this drawer.")],
+    // The five drawers are NOT seeded as files. Since #417 they are rows in
+    // `drawer_entries`, created on demand by the first entry filed — a seeded
+    // `memory/norms.md` would be archived by the first heartbeat's retirement
+    // pass, which is a confusing way to say "this file is not a thing anymore".
+    // The guidance those seed files carried now lives in the persona prompt
+    // (see `src/persona/builder.ts`), where every turn reads it.
 
     ["kb/Home.md", kbHome(today)],
 
@@ -109,9 +105,6 @@ function seedFiles(today: string): Array<[string, string]> {
   ];
 }
 
-function drawer(title: string, intro: string): string {
-  return `# ${title}\n\n${intro}\n\n## (no entries yet)\n`;
-}
 
 function kbHome(today: string): string {
   return `---

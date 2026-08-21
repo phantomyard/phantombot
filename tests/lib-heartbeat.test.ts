@@ -3,7 +3,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
@@ -14,6 +14,8 @@ import {
   runHeartbeat,
 } from "../src/lib/heartbeat.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
+import { openDrawerStore } from "../src/memory/drawerSync.ts";
+import { existsSync } from "node:fs";
 
 let workdir: string;
 let personaDir: string;
@@ -34,7 +36,11 @@ async function file(rel: string, content: string) {
 }
 
 describe("promoteTaggedLines", () => {
-  test("appends [decision] / [lesson] / [person] / [commitment] / [norm] lines to the right drawers", async () => {
+  async function store(dir: string) {
+    return openDrawerStore(join(dir, "memory.sqlite"));
+  }
+
+  test("files [decision] / [lesson] / [person] / [commitment] / [norm] lines into the right drawers", async () => {
     await file(
       "memory/2026-05-02.md",
       [
@@ -49,61 +55,72 @@ describe("promoteTaggedLines", () => {
         "[unrelated] not a recognized tag — should be skipped",
       ].join("\n"),
     );
-    // Empty drawer files (the scaffold would normally make them with placeholders)
-    for (const d of ["decisions.md", "lessons.md", "people.md", "commitments.md", "norms.md"]) {
-      await file(`memory/${d}`, `# ${d}\n\n## (no entries yet)\n`);
+
+    const { store: drawers, close } = await store(workdir);
+    try {
+      const r = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+      });
+      expect(r.map((p) => p.drawer).sort()).toEqual([
+        "commitments",
+        "decisions",
+        "lessons",
+        "norms",
+        "people",
+      ]);
+
+      const decisions = drawers.list("robbie", "decisions");
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]!.content).toContain("Switched to deepseek");
+      // The daily file it came from is recorded, so an entry can always be
+      // traced back to the day it was captured.
+      expect(decisions[0]!.origin).toBe("memory/2026-05-02.md");
+      // Dated from the daily file's own date, not from the clock: a heartbeat
+      // that runs a day late must not park the entry on the wrong day.
+      expect(decisions[0]!.assertedAt.toISOString()).toStartWith("2026-05-02");
+
+      expect(
+        drawers.list("robbie", "norms")[0]!.content,
+      ).toContain("Plane dashboards trigger deploys");
+      // The unrecognized tag is not a drawer and files nothing.
+      expect(drawers.list("robbie").map((e) => e.kind)).not.toContain(
+        "unrelated" as never,
+      );
+    } finally {
+      close();
     }
-
-    const r = await promoteTaggedLines(personaDir, "2026-05-02");
-    const drawers = r.map((p) => p.drawer).sort();
-    expect(drawers).toEqual([
-      "memory/commitments.md",
-      "memory/decisions.md",
-      "memory/lessons.md",
-      "memory/norms.md",
-      "memory/people.md",
-    ]);
-
-    const decisions = await readFile(
-      join(personaDir, "memory/decisions.md"),
-      "utf8",
-    );
-    expect(decisions).toContain("[decision] Switched to deepseek");
-    expect(decisions).toContain("## 2026-05-02");
-
-    // The judge's worldview drawer gets the norm.
-    const norms = await readFile(
-      join(personaDir, "memory/norms.md"),
-      "utf8",
-    );
-    expect(norms).toContain("Plane dashboards trigger deploys");
   });
 
-  test("dedups against existing drawer content (no double-promotion)", async () => {
+  test("re-promoting the same line reaffirms rather than duplicating", async () => {
     await file(
       "memory/2026-05-02.md",
-      "[decision] Use SQLite WAL for memory store",
+      "- [decision] Use SQLite WAL for memory store\n",
     );
-    await file(
-      "memory/decisions.md",
-      "# Decisions\n\n## 2026-05-02\n\n- [decision] Use SQLite WAL for memory store\n",
-    );
-    const r = await promoteTaggedLines(personaDir, "2026-05-02");
-    expect(r).toEqual([]);
-    const after = await readFile(
-      join(personaDir, "memory/decisions.md"),
-      "utf8",
-    );
-    // Still only one occurrence
-    expect(
-      after.match(/Use SQLite WAL for memory store/g)?.length,
-    ).toBe(1);
+    const { store: drawers, close } = await store(workdir);
+    try {
+      const first = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+      });
+      expect(first).toHaveLength(1);
+
+      // Second heartbeat over the same daily file. Nothing NEW is reported —
+      // the row is reaffirmed, and there is still exactly one of it. Before
+      // #417 this was a substring search over a 684KB markdown file; now the
+      // content-derived id makes it a constraint.
+      const second = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+      });
+      expect(second).toEqual([]);
+      expect(drawers.list("robbie", "decisions")).toHaveLength(1);
+    } finally {
+      close();
+    }
   });
 
-  test("strips the daily line's leading bullet (no `- - [tag]` double-bullet)", async () => {
-    // Real daily captures are written as `- [tag] …`. TAG_PATTERN matches
-    // the leading dash, so the drawer append must not blindly prepend
-    // another bullet.
+  test("strips the daily line's leading bullet before filing", async () => {
     await file(
       "memory/2026-05-02.md",
       [
@@ -113,38 +130,48 @@ describe("promoteTaggedLines", () => {
         "- [norm] Nightly deploys at 03:00 are routine",
       ].join("\n"),
     );
-    for (const d of ["decisions.md", "norms.md"]) {
-      await file(`memory/${d}`, `# ${d}\n\n## (no entries yet)\n`);
+    const { store: drawers, close } = await store(workdir);
+    try {
+      const r = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+      });
+      expect(r.map((p) => p.line)).toEqual([
+        "[decision] Pin bun to 1.1.x in CI",
+        "[norm] Nightly deploys at 03:00 are routine",
+      ]);
+      for (const e of drawers.list("robbie")) {
+        expect(e.content).not.toStartWith("- ");
+      }
+    } finally {
+      close();
     }
-
-    const r = await promoteTaggedLines(personaDir, "2026-05-02");
-    expect(r.map((p) => p.line)).toEqual([
-      "[decision] Pin bun to 1.1.x in CI",
-      "[norm] Nightly deploys at 03:00 are routine",
-    ]);
-
-    const decisions = await readFile(
-      join(personaDir, "memory/decisions.md"),
-      "utf8",
-    );
-    expect(decisions).toContain("- [decision] Pin bun to 1.1.x in CI");
-    expect(decisions).not.toContain("- - [decision]");
-
-    const norms = await readFile(join(personaDir, "memory/norms.md"), "utf8");
-    expect(norms).toContain("- [norm] Nightly deploys at 03:00 are routine");
-    expect(norms).not.toContain("- - [norm]");
   });
 
-  test("returns [] when today's daily file is missing", async () => {
-    expect(await promoteTaggedLines(personaDir, "2026-05-02")).toEqual([]);
+  test("writes no markdown drawer at all", async () => {
+    // The point of #417: there is exactly one write path. A heartbeat that
+    // also appended to memory/decisions.md would resurrect the two-copies
+    // problem the migration exists to end.
+    await file("memory/2026-05-02.md", "- [decision] One write path only\n");
+    const { store: drawers, close } = await store(workdir);
+    try {
+      await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+      });
+      expect(existsSync(join(personaDir, "memory", "decisions.md"))).toBe(false);
+    } finally {
+      close();
+    }
   });
 
-  test("ignores non-tag lines + unknown tags", async () => {
-    await file(
-      "memory/2026-05-02.md",
-      "## morning\n\nplain text line\n[unknown] not a real tag\n",
-    );
+  test("without a store, tagged lines are left for the next heartbeat", async () => {
+    // Deliberately NOT a markdown fallback: the lines stay in the daily file,
+    // which is append-only and still there, so the next heartbeat that has a
+    // database files them. Nothing is lost and nothing is written twice.
+    await file("memory/2026-05-02.md", "- [decision] No database on this call\n");
     expect(await promoteTaggedLines(personaDir, "2026-05-02")).toEqual([]);
+    expect(existsSync(join(personaDir, "memory", "decisions.md"))).toBe(false);
   });
 });
 
@@ -211,7 +238,6 @@ describe("runHeartbeat (integration)", () => {
       "memory/2026-05-02.md",
       "[decision] Promote me",
     );
-    await file("memory/decisions.md", "# Decisions\n");
     await file(
       "MEMORY.md",
       `# memory
@@ -228,6 +254,8 @@ describe("runHeartbeat (integration)", () => {
       today: "2026-05-02",
       now: new Date("2026-05-02T10:00:00Z"),
       index: ix,
+      memoryDbPath: join(workdir, "memory.sqlite"),
+      persona: "robbie",
     });
     expect(r.promoted).toHaveLength(1);
     expect(r.staleRecent).toHaveLength(1);

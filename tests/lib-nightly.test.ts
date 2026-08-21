@@ -615,8 +615,16 @@ describe("buildNightlyStagePrompt", () => {
 
   test("distill fills AND trims MEMORY.md, and files the drawers", () => {
     const p = buildNightlyStagePrompt("robbie", "2026-05-18", "distill");
-    expect(p).toContain("memory/decisions.md");
-    expect(p).toContain("memory/commitments.md");
+    // Since #417 the drawers are rows: the stage files with the CLI and must
+    // not be told to append to a markdown drawer, because a stage that writes
+    // `memory/decisions.md` recreates a file the next heartbeat archives —
+    // and its content is only saved by the ingest catching it first.
+    expect(p).toContain("memory drawers --file");
+    expect(p).toContain("DATABASE ROWS");
+    // No instruction anywhere to APPEND to a drawer file.
+    expect(p).not.toMatch(/→ memory\/\w+\.md/);
+    expect(p).not.toMatch(/Append under a "## /);
+    expect(p).toContain("there is no memory/decisions.md");
     expect(p).toContain("FILL");
     expect(p).toContain("TRIM");
     expect(p).toContain("## Recent");

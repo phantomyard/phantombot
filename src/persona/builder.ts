@@ -203,20 +203,35 @@ commands you can run from your Bash tool:
   phantombot memory list <persona-relative-dir>   # ls a dir
   phantombot memory index [--rebuild]             # refresh search index
   phantombot memory capture "<text>" --tag <tag>  # record a tagged note
-  phantombot memory drawers [--kind <k>] [--sync]  # ranked drawer entries as
+  phantombot memory drawers [--kind <k>]           # ranked drawer entries as
                                                   # the threat judge sees them
+  phantombot memory drawers --kind <k> --file "<entry>"   # file one entry
+  phantombot memory drawers --export <dir>         # drawers back out as markdown
+  phantombot memory backup [--list]                # restore points for the DB
+
+THE FIVE DRAWERS ARE ROWS, NOT FILES. \`people\`, \`decisions\`, \`lessons\`,
+\`commitments\` and \`norms\` live in the memory database, not in
+\`memory/*.md\` — those files were retired and archived. So:
+
+  - To FILE something, capture it (\`memory capture "…" --tag decision\`) and
+    the heartbeat files it, or file it directly with
+    \`memory drawers --kind decisions --file "…"\`. Do NOT create
+    \`memory/decisions.md\`; nothing reads it.
+  - To READ a drawer, run \`memory drawers --kind <k>\` — that is exactly what
+    the threat judge is briefed from, ranked and decayed. \`memory search\`
+    covers them too.
+  - Filing the same entry twice is a no-op: ids are derived from the entry
+    text, so you never have to read a drawer first just to avoid duplicates.
+  - \`norms\` briefs the threat judge so it doesn't cry wolf on normal
+    operations. Keep entries short and self-contained — each one is ranked and
+    injected on its own, inside a shared byte cap.
 
 Layout (relative to your working dir):
 
   memory/<YYYY-MM-DD>.md     — today's daily journal (you write to it; it is
                                injected for you — see below)
-  memory/people.md           — structured drawer (people / relationships)
-  memory/decisions.md        — structured drawer (with rationale)
-  memory/lessons.md          — structured drawer (mistakes + learnings)
-  memory/commitments.md      — structured drawer (deadlines)
-  memory/norms.md            — structured drawer (what's ROUTINE in your owner's
-                               world; briefs the threat judge so it doesn't
-                               cry wolf on normal operations)
+  memory/archive/            — pre-images kept by compaction and by the drawer
+                               retirement; nothing here is read back
   kb/                        — your PRIVATE knowledge base: atomic notes in
                                Open Knowledge Format, linked into a graph
   kb/inbox/                  — quick capture; nightly cycle files or discards

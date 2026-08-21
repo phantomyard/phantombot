@@ -641,7 +641,7 @@ You have access to phantombot's memory tools via Bash:
   phantombot memory get <persona-relative-path> # cat a file
   phantombot memory list <persona-relative-dir> # ls a dir
 
-You also have your normal Read / Write / Edit tools — use them on files inside this persona's working directory. The structured drawers are under memory/ and the KB vault under kb/.
+You also have your normal Read / Write / Edit tools — use them on files inside this persona's working directory. The KB vault is under kb/ and MEMORY.md is at the root. The five structured drawers are NOT files: they are rows in the memory database, written with \`phantombot memory drawers --file\` and read with \`phantombot memory drawers\`.
 
 Two rules that apply to every stage:
   - NEVER write to memory/${today}.md. Daily files are append-only inputs; phantombot tracks them by content hash and an edit here makes the day look unprocessed forever.
@@ -658,14 +658,19 @@ now, so do not touch kb/ files.
 
 1. Read the daily file (memory/${today}.md). If it is missing or empty, say so
    and make no edits.
-2. FILE the promote-able items the heartbeat has not already picked up:
-     - People / relationships   → memory/people.md
-     - Decisions with rationale → memory/decisions.md
-     - Mistakes and learnings   → memory/lessons.md
-     - Deadlines / obligations  → memory/commitments.md
-     - What is ROUTINE in your owner's world → memory/norms.md
-   Append under a "## ${today}" header. Do not duplicate what is already filed —
-   read the drawer first.
+2. FILE the promote-able items the heartbeat has not already picked up, with
+   \`phantombot memory drawers --file --kind <kind> "<one entry>"\`:
+     - People / relationships   → people
+     - Decisions with rationale → decisions
+     - Mistakes and learnings   → lessons
+     - Deadlines / obligations  → commitments
+     - What is ROUTINE in your owner's world → norms
+   The drawers are DATABASE ROWS, not files: there is no memory/decisions.md to
+   append to, and you must not create one. Filing the same entry twice is a
+   no-op (ids are derived from the entry text), so you do NOT need to read the
+   drawer first to avoid duplicates — but do keep each entry short and
+   self-contained, because entries are ranked and injected individually.
+   \`phantombot memory drawers --kind <kind>\` shows what is already filed.
 3. MAINTAIN MEMORY.md — the always-in-context orientation layer. Fill AND trim:
      - FILL: add a few SHORT one-line bullets under "## Recent" for durable,
        still-relevant facts worth having in context every turn. Summarise and

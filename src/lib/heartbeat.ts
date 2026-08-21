@@ -25,7 +25,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { appendFile, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { TelegramTransport } from "../channels/telegram.ts";
@@ -37,6 +37,11 @@ import {
   syncDrawers,
   type DrawerSyncResult,
 } from "../memory/drawerSync.ts";
+import type { DrawerKind, DrawerStore } from "../memory/drawers.ts";
+import {
+  retireDrawers,
+  type DrawerRetirement,
+} from "../memory/drawerRetire.ts";
 import {
   checkAndNotifyOnce,
   type CheckAndNotifyOnceResult,
@@ -50,6 +55,12 @@ export interface HeartbeatResult {
    * the path), NOT when the sync found nothing to do.
    */
   drawerSync?: DrawerSyncResult;
+  /**
+   * Outcome of retiring the markdown drawers (#417). Undefined for the same
+   * reason as `drawerSync`; an all-`absent` result means the persona's
+   * drawers were retired on some earlier run.
+   */
+  drawerRetirement?: DrawerRetirement[];
   staleRecent: { line: string; ageHours: number }[];
   indexedFiles: number;
   /** When the heartbeat ran. */
@@ -62,28 +73,30 @@ export interface HeartbeatResult {
 }
 
 /**
- * Tag → drawer mapping. Both singular and plural spellings are accepted
- * so the heartbeat promotion and `phantombot memory capture` agree on
- * exactly the same vocabulary. Exported so the CLI validates against the
- * single source of truth.
+ * Tag → drawer KIND. Both singular and plural spellings are accepted so the
+ * heartbeat promotion and `phantombot memory capture` agree on exactly the
+ * same vocabulary. Exported so the CLI validates against the single source of
+ * truth.
+ *
+ * The values used to be markdown paths (`memory/decisions.md`). Since #417 the
+ * drawers are rows and a tagged line is FILED, not appended — the daily file
+ * remains the capture surface, the table is the destination.
  */
-export const TAG_TO_DRAWER: Record<string, string> = {
-  decision: "memory/decisions.md",
-  decisions: "memory/decisions.md",
-  lesson: "memory/lessons.md",
-  lessons: "memory/lessons.md",
-  person: "memory/people.md",
-  people: "memory/people.md",
-  commitment: "memory/commitments.md",
-  commitments: "memory/commitments.md",
-  // The threat judge's worldview: what is NORMAL/routine in Andrew's world
+export const TAG_TO_DRAWER: Record<string, DrawerKind> = {
+  decision: "decisions",
+  decisions: "decisions",
+  lesson: "lessons",
+  lessons: "lessons",
+  person: "people",
+  people: "people",
+  commitment: "commitments",
+  commitments: "commitments",
+  // The threat judge's worldview: what is NORMAL/routine in the owner's world
   // ("Plane dashboards trigger deploys & DB migrations daily — routine, not an
   // attack"). Without a baseline a judge flags everything (cry-wolf), so the
   // judge is briefed from this drawer + decisions + people before it scores.
-  // Maintained by the nightly pass; readable/correctable like any other
-  // drawer, so "what does the judge believe is normal?" is auditable.
-  norm: "memory/norms.md",
-  norms: "memory/norms.md",
+  norm: "norms",
+  norms: "norms",
 };
 
 const TAG_PATTERN = /^\s*-?\s*\[([a-z]+)\]\s+(.+)$/i;
@@ -135,10 +148,8 @@ export async function runHeartbeat(
   const today = input.today ?? new Date().toISOString().slice(0, 10);
   const now = input.now ?? new Date();
 
-  const promoted = await promoteTaggedLines(input.personaDir, today);
-  // AFTER promotion, so the lines this heartbeat just appended land as rows in
-  // the same run rather than a cycle late.
-  const drawerSync = await syncDrawersStep(input, now);
+  const drawers = await drawersStep(input, today, now);
+  const { promoted, drawerSync, drawerRetirement } = drawers;
   const staleRecent = await checkStaleness(input.personaDir, now);
 
   // FTS-only refresh. Don't touch embeddings.
@@ -193,6 +204,7 @@ export async function runHeartbeat(
   return {
     promoted,
     drawerSync,
+    drawerRetirement,
     staleRecent,
     indexedFiles,
     ranAt: now,
@@ -201,21 +213,38 @@ export async function runHeartbeat(
 }
 
 /**
- * Project the markdown drawers into rows, best-effort.
+ * The whole drawer half of a heartbeat, on ONE database connection.
  *
- * Wrapped whole: the drawers on disk are the source of truth and the rows are
- * a rebuildable projection, so a SQLite hiccup here must degrade the briefing
- * to its file fallback, never fail the heartbeat's primary file work.
+ * Three things happen in a fixed order, and the order is the migration:
+ *
+ *   1. SYNC any markdown drawer still on disk into rows. A box that has not
+ *      migrated yet, or a persona whose owner hand-edited `norms.md` an hour
+ *      ago, gets that content into the table first.
+ *   2. PROMOTE today's `[tag]` lines as rows — the live write path.
+ *   3. RETIRE the markdown drawers whose content is provably in the table and
+ *      provably renderable back out of it (`drawerRetire.ts`).
+ *
+ * Retire cannot run before sync or a hand edit made between two heartbeats
+ * would be archived without ever having been read. Everything is wrapped:
+ * the drawers are memory, but a SQLite hiccup must not fail the heartbeat's
+ * index refresh and staleness scan.
  */
-async function syncDrawersStep(
+async function drawersStep(
   input: RunHeartbeatInput,
+  today: string,
   now: Date,
-): Promise<DrawerSyncResult | undefined> {
-  if (!input.memoryDbPath || !input.persona) return undefined;
+): Promise<{
+  promoted: HeartbeatResult["promoted"];
+  drawerSync?: DrawerSyncResult;
+  drawerRetirement?: DrawerRetirement[];
+}> {
+  if (!input.memoryDbPath || !input.persona) {
+    return { promoted: await promoteTaggedLines(input.personaDir, today) };
+  }
   try {
     const { store, db, close } = await openDrawerStore(input.memoryDbPath);
     try {
-      const result = await syncDrawers({
+      const drawerSync = await syncDrawers({
         store,
         db,
         personaDir: input.personaDir,
@@ -223,75 +252,114 @@ async function syncDrawersStep(
         force: input.forceDrawerSync,
         now,
       });
-      const filed = result.ingested.reduce((n, r) => n + r.inserted, 0);
+      const filed = drawerSync.ingested.reduce((n, r) => n + r.inserted, 0);
       if (filed > 0) {
         log.info("heartbeat: filed drawer entries", {
           persona: input.persona,
           inserted: filed,
-          drawers: result.ingested.map((r) => r.kind),
+          drawers: drawerSync.ingested.map((r) => r.kind),
         });
       }
-      return result;
+      const promoted = await promoteTaggedLines(input.personaDir, today, {
+        store,
+        persona: input.persona,
+        now,
+      });
+      const drawerRetirement = await retireDrawers({
+        store,
+        personaDir: input.personaDir,
+        persona: input.persona,
+        now,
+      });
+      const held = drawerRetirement.filter((r) => r.status === "held");
+      if (held.length > 0) {
+        log.warn("heartbeat: drawer files kept back from retirement", {
+          persona: input.persona,
+          drawers: held.map((r) => `${r.kind}: ${r.reason}`),
+        });
+      }
+      return { promoted, drawerSync, drawerRetirement };
     } finally {
       close();
     }
   } catch (e) {
-    log.warn("heartbeat: drawer sync threw unexpectedly", {
+    log.warn("heartbeat: drawer step threw unexpectedly", {
       error: (e as Error).message,
     });
-    return undefined;
+    return { promoted: [] };
   }
 }
 
-/** Scan today's daily file for [tag] lines; append to matching drawer. */
+/**
+ * File today's `[tag]` lines as drawer ROWS.
+ *
+ * Before #417 this appended a bullet to `memory/<kind>.md` and deduped by
+ * substring-searching the whole drawer — which is why a 684 KB `decisions.md`
+ * was re-read on every capture, and why a line that differed only in
+ * whitespace filed a second time. Rows make both problems disappear: the entry
+ * id is derived from normalized content, so re-filing is a reaffirmation
+ * enforced by a UNIQUE constraint rather than by a string search.
+ *
+ * The daily file is untouched — it stays the append-only capture surface, and
+ * the nightly still distills it. Promotion is idempotent, so a line promoted
+ * on one heartbeat is simply reaffirmed on the next.
+ */
 export async function promoteTaggedLines(
   personaDir: string,
   today: string,
+  target?: { store: DrawerStore; persona: string; now?: Date },
 ): Promise<HeartbeatResult["promoted"]> {
   const dailyPath = join(personaDir, "memory", `${today}.md`);
   if (!existsSync(dailyPath)) return [];
+  if (!target) {
+    // No database configured on this call. The tagged lines stay in the daily
+    // file and promote on the next heartbeat that has one — deliberately NOT
+    // falling back to a markdown append, because a second write path is how
+    // the drawers ended up with two disagreeing copies of the same entry.
+    log.warn("heartbeat: no drawer store, tagged lines left for the next run");
+    return [];
+  }
 
   const text = await readFile(dailyPath, "utf8");
-  const lines = text.split("\n");
   const promoted: HeartbeatResult["promoted"] = [];
+  // The date header the line sits under, so a line captured on a day the
+  // heartbeat missed is filed with THAT day's date rather than today's.
+  const assertedAt = dayStart(today) ?? target.now ?? new Date();
 
-  // Cache drawer contents to avoid re-reading per line.
-  const drawerCache = new Map<string, string>();
-  const loadDrawer = async (rel: string): Promise<string> => {
-    if (drawerCache.has(rel)) return drawerCache.get(rel)!;
-    const p = join(personaDir, rel);
-    let content = "";
-    if (existsSync(p)) content = await readFile(p, "utf8");
-    drawerCache.set(rel, content);
-    return content;
-  };
-
-  for (const raw of lines) {
+  for (const raw of text.split("\n")) {
     const m = TAG_PATTERN.exec(raw);
     if (!m) continue;
     const tag = m[1]!.toLowerCase();
-    const drawer = TAG_TO_DRAWER[tag];
-    if (!drawer) continue;
-    // Strip any leading list bullet the daily line already carries. Daily
-    // captures are written as `- [tag] …`, and TAG_PATTERN matches that
-    // (`-?`). Without stripping it here, the `- ` we prepend below would
-    // produce malformed double-bullet drawer entries (`- - [tag] …`).
+    const kind = TAG_TO_DRAWER[tag];
+    if (!kind) continue;
+    // Strip the leading list bullet the daily line carries (`- [tag] …`); the
+    // entry content is the line, not its markdown decoration.
     const cleanLine = raw.trim().replace(/^[-*]\s+/, "");
-    const existing = await loadDrawer(drawer);
-    if (existing.includes(cleanLine)) continue;
-
-    // Append under a date header. If today's header isn't there, add it.
-    const header = `## ${today}`;
-    let block = "";
-    if (!existing.includes(header)) {
-      block += `\n${header}\n\n`;
+    try {
+      const { inserted } = target.store.fileEntry({
+        persona: target.persona,
+        kind,
+        content: cleanLine,
+        source: "self",
+        origin: `memory/${today}.md`,
+        assertedAt,
+      });
+      if (inserted) promoted.push({ drawer: kind, line: cleanLine });
+    } catch (e) {
+      // One bad line must not cost the rest of the day its promotions.
+      log.warn("heartbeat: could not file tagged line", {
+        kind,
+        error: (e as Error).message,
+      });
     }
-    block += `- ${cleanLine}\n`;
-    await appendFile(join(personaDir, drawer), block, "utf8");
-    drawerCache.set(drawer, existing + block);
-    promoted.push({ drawer, line: cleanLine });
   }
   return promoted;
+}
+
+/** Midnight UTC for a `YYYY-MM-DD` daily-file name, or undefined if unparseable. */
+function dayStart(today: string): Date | undefined {
+  const d = new Date(`${today}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
 /** Scan MEMORY.md's ## Recent for date-stamped lines older than 48h. */

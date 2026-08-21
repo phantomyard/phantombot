@@ -1,14 +1,27 @@
 # Drawer entries: weight, supersession and decay
 
 The five drawers — `people`, `decisions`, `lessons`, `commitments`, `norms` —
-are append-only markdown on disk AND rows in `drawer_entries`
-(`src/memory/drawers.ts`). This page is the contract: what a row means, how an
-entry is retired, and **how a third-party tool files or corrects a norm**.
+are rows in `drawer_entries` (`src/memory/drawers.ts`). This page is the
+contract: what a row means, how an entry is retired, and **how a third-party
+tool files or corrects a norm**.
 
-**The markdown files remain the source of truth. The rows are a derived,
-rebuildable projection of them** — see [How rows get filled and
-read](#how-rows-get-filled-and-read). Delete the table and the next heartbeat
-rebuilds it; nothing in the row path ever writes markdown.
+**Since #417 the rows ARE the source of truth.** `memory/people.md` and the
+other four no longer exist on a migrated persona: they were ingested, verified,
+archived under `memory/archive/<date>/` and removed. Markdown is now an
+*artefact* you can ask for — `phantombot memory drawers --export <dir>` renders
+the table back out, and the round-trip is verified entry-for-entry before any
+file is ever archived (`src/memory/drawerExport.ts`).
+
+There is exactly one write path: the heartbeat FILES a `[tag]` line as a row,
+and `phantombot memory drawers --kind <k> --file "<entry>"` is how anything
+else files one. Nothing appends to a drawer file — if you find code that does,
+it is a regression, not a fallback.
+
+Because the drawers now live only in `memory.sqlite`, that database has
+verified, rotating restore points: the nightly takes one per sweep, `doctor`
+checks integrity and names the recovery command, and `phantombot memory
+backup --list` / `memory restore --from <point>` are the operator surface. See
+[Restore points](#restore-points).
 
 Read [`architecture.md`](architecture.md#memory-subsystem) first for where the
 drawers sit in the memory pipeline.
@@ -31,6 +44,33 @@ Four things rows give that a flat file cannot:
 | lifecycle | `status` — so a discharged commitment stops ranking against a live one |
 
 Dedupe stops being a prompt instruction and becomes a database constraint.
+
+## Restore points
+
+`src/memory/dbBackup.ts`. One snapshot per nightly sweep, taken LAST, after the
+distill, kb and compaction stages have settled — a restore point should
+represent a finished night, not a database mid-rewrite.
+
+- **Integrity is checked BEFORE the snapshot is taken.** A database that fails
+  `PRAGMA integrity_check` is not snapshotted at all. Without that ordering the
+  nightly would rotate corruption into all five restore points over five nights
+  and delete the last good one.
+- **`VACUUM INTO`, never `cp`.** A live WAL-mode database is three files;
+  copying the main one mid-transaction yields a torn snapshot that
+  `integrity_check` will happily call clean.
+- **Restore moves the live file aside** to `<name>.pre-restore-<stamp>` and
+  removes the `-wal`/`-shm` sidecars. A stale WAL replayed over a restored file
+  turns a recovery into a corruption. Stop phantombot first; the CLI requires
+  `--yes` and says so.
+- **A missing database is not a fault.** It is created on first use, so a fresh
+  box has none, and reporting that as broken teaches operators to ignore the
+  line that matters.
+
+```bash
+phantombot memory backup            # take one now
+phantombot memory backup --list     # points + each one's integrity verdict
+phantombot memory restore --from /path/to/point.sqlite --yes
+```
 
 ## Nothing is ever deleted
 
@@ -185,13 +225,22 @@ judge like a whole one, so a shorter briefing beats a truncated entry.
 ## How rows get filled and read
 
 ```
-memory/<kind>.md  --(heartbeat, every 30 min)-->  drawer_entries  --> judge briefing
-     ^ source of truth              syncDrawers()        ^ ranked, decayed
-     |                                                   |
-     `-- nightly / heartbeat / owner / phantomtools      `-- file fallback if empty
+memory/<date>.md --[tag] line--\
+phantombot memory drawers --file-+--> drawer_entries --> judge briefing
+phantomtools drawers.file() -----/     ^ source of truth   ^ ranked, decayed
+                                       |
+        memory drawers --export <dir> <-'   (markdown as an artefact)
 ```
 
-- **Fill.** `src/memory/drawerSync.ts::syncDrawers()` runs in the heartbeat
+- **Fill.** The heartbeat (`src/lib/heartbeat.ts`) files each `[tag]` line in
+  today's daily journal as a row, dated from the journal's own date so a
+  heartbeat that runs a day late does not park the entry on the wrong day.
+  Re-filing is a reaffirmation enforced by a UNIQUE constraint, so a line is
+  promoted once however many times the heartbeat sees it. With no database
+  configured, nothing is written at all and the line waits for the next
+  heartbeat — deliberately not a markdown fallback, because a second write path
+  is what produced two disagreeing copies of the same entry before #417.
+- **Migrate.** `src/memory/drawerSync.ts::syncDrawers()` also runs in the heartbeat
   (`src/lib/heartbeat.ts`), immediately *after* tagged lines are promoted into
   the markdown, so a line captured this cycle is a row by the end of the same
   cycle. It is skipped per drawer when the file's **content hash** is unchanged
@@ -200,8 +249,15 @@ memory/<kind>.md  --(heartbeat, every 30 min)-->  drawer_entries  --> judge brie
   is exactly when a skipped sync would strand the rows on stale text. The sync
   marker is written only after a successful ingest, so a crash re-runs that
   drawer rather than marking stale text done.
+- **Retire.** Once a drawer's file content is provably in the table AND the
+  table provably renders back out to the same entries, the heartbeat archives
+  the file to `memory/archive/<date>/` — original bytes and regenerated export,
+  side by side — and removes it (`src/memory/drawerRetire.ts`). A drawer that
+  fails either gate keeps its file and is reported as `held`; the other four
+  still retire.
 - **Read.** `drawerSection()` returns ranked rows, and falls back to the raw
-  markdown file **per drawer** when that drawer has no rows yet. A fresh
+  markdown file **per drawer** when that drawer has no rows yet — which on a
+  retired persona means "nothing", and on a mid-migration one means the file. A fresh
   install, a first boot before the first heartbeat, or a wiped database
   therefore degrades to the old verbatim behaviour instead of briefing the
   judge on an empty `norms` — failing open to "no norms at all" is exactly what
@@ -222,5 +278,20 @@ appends — dating each entry from its enclosing `## YYYY-MM-DD` section header.
 
 The ingest **never rewrites or deletes the markdown**. It reads, files rows,
 and stops; re-running it reaffirms rather than duplicates, so it is safe on
-every startup while both representations exist. Retiring the files is a
-separate later step, gated on a re-verify, and archives rather than deletes.
+every startup while both representations exist.
+
+Retirement is the separate step that follows it (`drawerRetire.ts`), and it is
+gated on evidence rather than on a flag:
+
+1. **Coverage** — every entry parsed out of the live file exists as a row,
+   checked by an independent re-parse rather than by trusting the ingest's own
+   counts. A parser bug that silently drops an entry shape fails here, before
+   anything is removed.
+2. **Recoverability** — the rows render back to markdown that re-parses to the
+   same id set (`verifyDrawerRoundTrip`). A drawer that cannot be regenerated
+   keeps its file.
+
+Only then is the file copied to `memory/archive/<date>/` and unlinked. `rm` is
+not a step; `copy, verify, unlink` is. Run it by hand with `phantombot memory
+drawers --retire` — it exits non-zero if any drawer was held back, and prints
+why.

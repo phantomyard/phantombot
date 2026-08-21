@@ -40,6 +40,7 @@ import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import { refreshPersonaIndex } from "../lib/indexRefresh.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
+import { runMemoryMaintenance } from "../lib/nightlyMaintenance.ts";
 import {
   buildCompactionPrompt,
   buildNightlyPromptForPersona,
@@ -636,9 +637,13 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
         out,
       });
       for (const d of await measureDrawers(dir)) {
+        // Since #417 a drawer file only still exists when retirement HELD it
+        // back, so an overage here is a signal about that drawer, not about
+        // compaction's scope.
         out.write(
-          `nightly: drawer over budget — ${d.path}: ${d.sizeBytes} bytes ` +
-            `(budget ${d.budgetBytes}); compaction does not rewrite drawers\n`,
+          `nightly: drawer file still on disk and over budget — ${d.path}: ` +
+            `${d.sizeBytes} bytes (budget ${d.budgetBytes}); check ` +
+            `'phantombot memory drawers --retire' for why it was held back\n`,
         );
       }
       if (compaction?.error) {
@@ -649,6 +654,25 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
         });
       }
     }
+
+    // ---------------------------------------------------------------------
+    // Stage four: database housekeeping (issue #417).
+    //
+    // Retire decayed beliefs and take a verified restore point. Runs on EVERY
+    // sweep, including `--date` backfills and monolithic-prompt personas and
+    // including sweeps that had stage errors: unlike compaction it never
+    // rewrites content, and a night that went wrong is precisely the night a
+    // snapshot is worth having. Its own integrity gate is what decides whether
+    // the snapshot may be taken.
+    // ---------------------------------------------------------------------
+    await holdSweep(todayStamp, queue.length);
+    const maintenance = await runMemoryMaintenance({
+      dbPath: config.memoryDbPath,
+      persona,
+      now,
+      out,
+    });
+    for (const e of maintenance.errors) errors.push(`maintenance: ${e}`);
   } finally {
     await memory?.close();
   }
