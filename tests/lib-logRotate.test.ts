@@ -1,16 +1,26 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, open, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 import {
+  acquireLock,
   configuredKeep,
   configuredMaxBytes,
   DEFAULT_KEEP,
   DEFAULT_MAX_BYTES,
   inspectLogDir,
   LOCK_STALE_MS,
+  releaseLock,
   rotateLogDir,
   rotateServiceLogs,
 } from "../src/lib/logRotate.ts";
@@ -103,13 +113,20 @@ describe("rotateLogDir", () => {
     expect((await readFile(join(dir, "a.log.1"), "utf8")).length).toBe(200);
   });
 
-  test("keep 0 truncates without keeping a copy", async () => {
+  test("keep 0 truncates and discards every existing generation", async () => {
     await writeLog("a.log", 200);
+    // Lowering keep to 0 must DISCARD retained history, not freeze it on disk
+    // forever: nothing would ever rotate or delete these again.
+    await writeFile(join(dir, "a.log.1"), "gen1");
+    await writeFile(join(dir, "a.log.2"), "gen2");
+    await writeFile(join(dir, "a.log.3"), "gen3");
 
     await rotateLogDir({ dir, maxBytes: 100, keep: 0 });
 
     expect((await stat(join(dir, "a.log"))).size).toBe(0);
     expect(existsSync(join(dir, "a.log.1"))).toBe(false);
+    expect(existsSync(join(dir, "a.log.2"))).toBe(false);
+    expect(existsSync(join(dir, "a.log.3"))).toBe(false);
   });
 
   test("an already-rotated generation is never itself a candidate", async () => {
@@ -150,6 +167,47 @@ describe("rotateLogDir", () => {
     expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
   });
 
+  /**
+   * The stale-takeover race. Every contender reads the SAME stale timestamp,
+   * so a plain overwrite lets all of them conclude they own the directory and
+   * rotate at once — the exact interleaved generation shift the lock exists to
+   * prevent. Exactly one may enter; the rest must report `lockedOut`.
+   */
+  test("only one of many concurrent passes steals a stale lock", async () => {
+    await writeLog("a.log", 200);
+    const stale = new Date(Date.now() - LOCK_STALE_MS - 1_000).toISOString();
+    await writeFile(join(dir, ".rotate.lock"), `999999 ${stale}\n`);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => rotateLogDir({ dir, maxBytes: 100 })),
+    );
+
+    expect(results.filter((r) => !r.lockedOut).length).toBe(1);
+    // …and the one that entered did the rotation, exactly once.
+    expect(results.flatMap((r) => r.rotated).map((f) => f.file)).toEqual([
+      "a.log",
+    ]);
+    expect(existsSync(join(dir, "a.log.2"))).toBe(false);
+  });
+
+  test("a pass whose lock was stolen cannot release its successor's", async () => {
+    const stale = new Date(Date.now() - LOCK_STALE_MS - 1_000).toISOString();
+    await writeFile(join(dir, ".rotate.lock"), `999999 ${stale}\n`);
+
+    const successor = await acquireLock(dir, new Date());
+    expect(successor).toBeString();
+
+    // The crashed/stale owner finally reaches its own release.
+    await releaseLock(dir, "the-stale-owners-token");
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(true);
+    const held = await readFile(join(dir, ".rotate.lock"), "utf8");
+    expect(held).toContain(successor as string);
+
+    // The real owner still can.
+    await releaseLock(dir, successor as string);
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
+  });
+
   test("the lock file itself is never rotated", async () => {
     await writeFile(join(dir, ".rotate.lock"), "x".repeat(500));
     const r = await rotateLogDir({ dir, maxBytes: 100 });
@@ -179,6 +237,38 @@ describe("rotateLogDir", () => {
       // Failed rotation must not have destroyed the original.
       await chmod(join(dir, "a-locked.log"), 0o600);
       expect((await stat(join(dir, "a-locked.log"))).size).toBe(200);
+    },
+  );
+
+  /**
+   * The copy is the step most likely to fail (Windows EBUSY/EACCES on a live
+   * log held by the writing `cmd`). If generations were pruned and shifted
+   * first, every heartbeat would age them one more step without ever writing a
+   * new snapshot, so a permanently unrotatable file quietly erases ALL of its
+   * retained history. Nothing may move until the bytes are safely copied.
+   */
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a failed live copy leaves every retained generation untouched",
+    async () => {
+      await writeLog("a.log", 200);
+      await writeFile(join(dir, "a.log.1"), "gen1");
+      await writeFile(join(dir, "a.log.2"), "gen2");
+      await writeFile(join(dir, "a.log.3"), "gen3");
+      await chmod(join(dir, "a.log"), 0o000);
+
+      const r = await rotateLogDir({ dir, maxBytes: 100, keep: 3 });
+
+      expect(r.rotated).toEqual([]);
+      expect(r.skipped.map((f) => f.file)).toEqual(["a.log"]);
+      expect(await readFile(join(dir, "a.log.1"), "utf8")).toBe("gen1");
+      expect(await readFile(join(dir, "a.log.2"), "utf8")).toBe("gen2");
+      expect(await readFile(join(dir, "a.log.3"), "utf8")).toBe("gen3");
+      await chmod(join(dir, "a.log"), 0o600);
+      expect((await stat(join(dir, "a.log"))).size).toBe(200);
+      // No half-written snapshot left behind for the next pass to trip on.
+      expect(
+        (await readdir(dir)).filter((n) => n.includes(".rotating-")),
+      ).toEqual([]);
     },
   );
 });

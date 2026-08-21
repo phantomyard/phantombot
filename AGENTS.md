@@ -230,6 +230,36 @@ Leading `-` makes both optional (no error if either file is absent). The merged 
 
 Service units also set a deterministic `PATH` that includes `~/.local/bin` plus stable user harness shim locations such as `~/.local/share/pi-node/bin` and `~/.local/share/pi-node/current/bin`. Do not rely on interactive shell startup files for service harness discovery. When Phantombot finds a harness in PATH or common npm/pi-node versioned locations, it saves the absolute path in `state.json` and executes that path directly on later starts. `phantombot run` must never fail startup just because a harness binary is missing; log loudly, keep the headless service alive, and let `phantombot doctor` report/repair the configured chain. Windows keep-alive tasks invoke `phantombot run --if-not-running`, which treats an existing run lock as a silent success; foreground invocations retain the diagnostic error.
 
+**Service log retention (`src/lib/logRotate.ts`, #428).** Only macOS and Windows
+need it: on Linux the units log to journald, which owns retention, so
+`serviceLogDir()` returns `null` there and rotation is a no-op. Everywhere else
+phantombot writes plain files (`~/Library/Logs/phantombot/`,
+`<data>/phantombot/logs/`) that nothing ever capped — one macOS box reached
+~700 MB. The **heartbeat** rotates them (every 30 min), because it is already
+the host maintenance pass that heals units and scheduled tasks, so this needs no
+new timer and inherits the same platform dispatch. Defaults are 16 MiB per file
+and 3 retained generations (~64 MB per log worst case), overridable with
+`PHANTOMBOT_LOG_MAX_BYTES` and `PHANTOMBOT_LOG_KEEP`; a junk or negative value
+falls back to the default rather than disabling rotation, and `keep=0` discards
+existing generations instead of stranding them. Three invariants that look like
+tidy-up candidates and are not. **Rotation is COPY-TRUNCATE, never rename** —
+the live file is held open by a process we do not control (launchd, the Windows
+`cmd >>` wrapper) with an O_APPEND descriptor, and a descriptor follows the
+INODE, so renaming the live file leaves the writer appending to the renamed
+inode forever while the new log stays empty. **The live copy is staged to a
+temporary file in the same directory BEFORE any generation is pruned or
+shifted**, and published with a rename: the copy is the step that fails
+(Windows EBUSY/EACCES on a log held by its writer), and pruning first means a
+permanently unrotatable file ages its generations away on every heartbeat
+without ever writing a new snapshot — retained history destroyed by the thing
+meant to retain it. **The directory lock is ownership-aware**: takeover of a
+stale lock is serialised by a second exclusive `wx` create and re-validated
+under it, because every contender reads the same stale timestamp and a plain
+overwrite lets all of them decide they won; release is gated on the token the
+holder wrote, so a pass whose lock was stolen cannot delete its successor's.
+The whole thing is guarded on `isPhantombotBinary`, so a dev run or a stray test
+cannot truncate a developer's real logs.
+
 If you change a unit body (any `generate*` function in `src/lib/systemd.ts`), `ensureUnitCurrent` will detect the on-disk unit as stale on the next `phantombot voice` / `phantombot harness` / etc. run and rewrite it automatically. The previous body is preserved as `${unitPath}.bak` for rollback.
 
 ## Credentials

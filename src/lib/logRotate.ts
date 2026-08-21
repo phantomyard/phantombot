@@ -34,11 +34,13 @@ import {
   readdir,
   readFile,
   rename,
+  rm,
   stat,
   truncate,
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
 import { serviceLogDir } from "./platform.ts";
@@ -51,6 +53,12 @@ export const DEFAULT_KEEP = 3;
 export const LOCK_STALE_MS = 5 * 60_000;
 
 const LOCK_FILE = ".rotate.lock";
+/**
+ * Second lock, taken ONLY to serialise the takeover of a stale {@link
+ * LOCK_FILE}. Every mutation of the real lock happens while holding this, so
+ * "is it still stale?" can be re-checked without a race.
+ */
+const STEAL_FILE = ".rotate.lock.steal";
 
 export interface RotateLogDirInput {
   /** Directory of `*.log` files to rotate. */
@@ -110,44 +118,110 @@ export function configuredKeep(): number {
   return numericEnv("PHANTOMBOT_LOG_KEEP", DEFAULT_KEEP);
 }
 
+/** Contents of a held lock: owner pid, when it was taken, and its token. */
+interface LockHolder {
+  heldAt?: number;
+  token?: string;
+}
+
+async function readLock(path: string): Promise<LockHolder | null> {
+  let body: string;
+  try {
+    body = await readFile(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // Unreadable but present — treat it as a holder with no timestamp, which
+    // makes it stale (and therefore stealable) rather than permanent.
+    return {};
+  }
+  const [, iso, token] = body.trim().split(/\s+/);
+  const t = iso ? Date.parse(iso) : Number.NaN;
+  return { heldAt: Number.isFinite(t) ? t : undefined, token };
+}
+
+function isStale(holder: LockHolder, now: Date): boolean {
+  if (holder.heldAt === undefined) return true;
+  return now.getTime() - holder.heldAt >= LOCK_STALE_MS;
+}
+
+/** Create the lock exclusively. Returns our token, or null if it exists. */
+async function createLock(path: string, now: Date): Promise<string | null> {
+  const token = randomUUID();
+  try {
+    await writeFile(path, `${process.pid} ${now.toISOString()} ${token}\n`, {
+      flag: "wx",
+    });
+    return token;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    return null;
+  }
+}
+
 /**
  * Take the directory lock. Two personas' heartbeats can fire at the same
  * second and both target the same shared log directory; without this they can
  * interleave the generation shift and lose (or duplicate) a generation.
- * Returns false when a FRESH lock is already held — a stale one is stolen, so
- * a crashed rotation cannot wedge rotation forever.
+ * Returns the owner token, or null when a FRESH lock is already held.
+ *
+ * Takeover of a STALE lock (left by a crashed pass, so rotation cannot wedge
+ * forever) is the delicate part: a plain overwrite lets every contender that
+ * read the same stale timestamp decide it won. So the steal is serialised by a
+ * SECOND exclusive create — `wx` is atomic on every supported platform — and
+ * the winner re-reads the lock while holding it. A contender that was looking
+ * at a now-superseded stale lock therefore sees the successor's FRESH lock and
+ * backs out instead of clobbering it. Exactly one contender enters.
  */
-async function acquireLock(dir: string, now: Date): Promise<boolean> {
+export async function acquireLock(dir: string, now: Date): Promise<string | null> {
   const path = join(dir, LOCK_FILE);
+  const stealPath = join(dir, STEAL_FILE);
+
+  const direct = await createLock(path, now);
+  if (direct) return direct;
+
+  const holder = await readLock(path);
+  // Vanished between the create and the read — one more uncontended attempt.
+  if (!holder) return await createLock(path, now);
+  if (!isStale(holder, now)) return null;
+
+  // Serialise the steal. Only the winner of this create may touch the lock.
+  if (!(await createLock(stealPath, now))) {
+    // Someone else is stealing right now, or crashed mid-steal. A steal lock
+    // that is itself stale is cleared here so the NEXT pass can proceed;
+    // clearing and stealing in one pass would reintroduce the race.
+    const stealHolder = await readLock(stealPath);
+    if (stealHolder && isStale(stealHolder, now)) {
+      await rm(stealPath, { force: true });
+    }
+    return null;
+  }
   try {
-    await writeFile(path, `${process.pid} ${now.toISOString()}\n`, {
-      flag: "wx",
-    });
-    return true;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    // Re-check under the steal lock: this is the read that cannot be raced.
+    const current = await readLock(path);
+    if (current && !isStale(current, now)) return null;
+    await rm(path, { force: true });
+    return await createLock(path, now);
+  } finally {
+    await rm(stealPath, { force: true });
   }
-  let heldAt: number | undefined;
-  try {
-    const body = await readFile(path, "utf8");
-    const iso = body.trim().split(/\s+/)[1];
-    const t = iso ? Date.parse(iso) : Number.NaN;
-    if (Number.isFinite(t)) heldAt = t;
-  } catch {
-    // Unreadable lock — fall through and treat it as stale.
-  }
-  if (heldAt !== undefined && now.getTime() - heldAt < LOCK_STALE_MS) {
-    return false;
-  }
-  await writeFile(path, `${process.pid} ${now.toISOString()}\n`);
-  return true;
 }
 
-async function releaseLock(dir: string): Promise<void> {
+/**
+ * Release a lock we own. Ownership is checked against the token we wrote: a
+ * pass whose lock was stolen as stale must not delete the successor's lock and
+ * hand a third pass the directory mid-rotation.
+ *
+ * Exported (with {@link acquireLock}) so the lock protocol itself can be
+ * driven directly from tests; nothing outside this module calls it.
+ */
+export async function releaseLock(dir: string, token: string): Promise<void> {
+  const path = join(dir, LOCK_FILE);
+  const holder = await readLock(path);
+  if (!holder || holder.token !== token) return;
   try {
-    await unlink(join(dir, LOCK_FILE));
+    await unlink(path);
   } catch {
-    // Already gone (stolen as stale by another pass) — nothing to release.
+    // Already gone — nothing to release.
   }
 }
 
@@ -170,28 +244,52 @@ async function generationsAtLeast(
 }
 
 /**
- * Shift `<path>.1 … .N` up by one, dropping the oldest, then copy the live
- * file into `.1` and truncate it in place.
+ * Snapshot the live file into `.1` and truncate it in place, shifting the
+ * existing generations up by one and dropping anything beyond `keep`.
+ *
+ * ORDER MATTERS. The copy is the step most likely to fail (on Windows the live
+ * log can be held by the writing `cmd`, which surfaces as EBUSY/EACCES), and
+ * pruning/shifting first would mean a file that never manages to copy loses a
+ * generation on every heartbeat until all retained history is gone — without
+ * ever producing a new snapshot. So the copy goes to a temporary file in the
+ * same directory FIRST; only once those bytes are safely on disk are the
+ * existing generations touched, and the snapshot is published with a rename.
+ * Every failure path removes the temporary and leaves the live file and all
+ * generations exactly as they were.
+ *
+ * `keep === 0` means "discard", not "keep what is already there": every
+ * numbered generation is pruned and no new snapshot is taken.
  */
 async function rotateOne(path: string, keep: number): Promise<void> {
   if (keep > 0) {
-    // Prune every generation at or beyond `keep` before shifting. `.${keep}`
-    // alone would be handled by the rename below overwriting it, but a keep
-    // that was LOWERED (or a leftover from an older install) strands `.4`,
-    // `.5`, … on disk forever — files nothing rotates and nothing ever
-    // deletes, which is the same unbounded growth one directory deeper. Scan
-    // rather than counting up from `keep`, so a GAP in the sequence cannot
-    // hide everything above it.
-    for (const dead of await generationsAtLeast(path, keep)) {
+    // Not `*.log`, and not a numeric generation, so neither the rotation scan
+    // nor the prune scan can ever mistake it for a log.
+    const tmp = `${path}.rotating-${randomUUID()}`;
+    try {
+      await copyFile(path, tmp);
+      // Prune every generation at or beyond `keep` before shifting. `.${keep}`
+      // alone would be handled by the rename below overwriting it, but a keep
+      // that was LOWERED (or a leftover from an older install) strands `.4`,
+      // `.5`, … on disk forever — files nothing rotates and nothing ever
+      // deletes, which is the same unbounded growth one directory deeper. Scan
+      // rather than counting up from `keep`, so a GAP in the sequence cannot
+      // hide everything above it.
+      for (const dead of await generationsAtLeast(path, keep)) {
+        await unlink(dead);
+      }
+      for (let i = keep - 1; i >= 1; i--) {
+        const from = `${path}.${i}`;
+        if (existsSync(from)) await rename(from, `${path}.${i + 1}`);
+      }
+      await rename(tmp, `${path}.1`);
+    } catch (e) {
+      await rm(tmp, { force: true });
+      throw e;
+    }
+  } else {
+    for (const dead of await generationsAtLeast(path, 1)) {
       await unlink(dead);
     }
-    for (let i = keep - 1; i >= 1; i--) {
-      const from = `${path}.${i}`;
-      if (existsSync(from)) await rename(from, `${path}.${i + 1}`);
-    }
-    // Copy BEFORE truncating: if the copy fails we throw with the live file
-    // still intact, which is the direction we want to fail in.
-    await copyFile(path, `${path}.1`);
   }
   await truncate(path, 0);
 }
@@ -220,7 +318,8 @@ export async function rotateLogDir(
   };
   if (!existsSync(dir)) return result;
 
-  if (!(await acquireLock(dir, now))) {
+  const token = await acquireLock(dir, now);
+  if (!token) {
     result.lockedOut = true;
     return result;
   }
@@ -239,7 +338,7 @@ export async function rotateLogDir(
       }
     }
   } finally {
-    await releaseLock(dir);
+    await releaseLock(dir, token);
   }
   return result;
 }
