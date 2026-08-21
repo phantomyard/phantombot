@@ -15,23 +15,21 @@
 #   argv     — echo argv (joined) as a text_delta, exit 0 (arg-shape test)
 #   env      — echo the PHANTOMBOT_*_MODEL env vars + the PI provider/api-key
 #              as a text_delta, exit 0 (routing env-projection test)
+#   modelgate — append each invocation's argv (one line) to $FAKE_PI_ARGV_LOG,
+#              then exit 1 when argv contains `--model $FAKE_PI_FAIL_MODEL`,
+#              else behave like `normal`. Lets a test make ONE configured
+#              model fail while the other succeeds — the coder-swap retry
+#              ladder / primary-fallback tests.
 
 mode="${FAKE_PI_MODE:-normal}"
 
-case "$mode" in
-  argv)
-    joined="$*"
-    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"
-    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
-    exit 0
-    ;;
-  env)
-    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-}"
-    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
-    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
-    exit 0
-    ;;
-  normal)
+# Record this invocation's argv (one line) when a test asks for it — used by
+# the coder-swap retry-ladder tests to COUNT attempts across modes.
+if [ -n "${FAKE_PI_ARGV_LOG-}" ]; then
+  printf '%s\n' "$*" >>"$FAKE_PI_ARGV_LOG"
+fi
+
+emit_normal() {
     printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
     printf '%s\n' '{"type":"agent_start"}'
     printf '%s\n' '{"type":"turn_start"}'
@@ -48,6 +46,34 @@ case "$mode" in
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     printf '%s\n' '{"type":"agent_end","messages":[]}'
     exit 0
+}
+
+
+case "$mode" in
+  argv)
+    joined="$*"
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"argv: ${joined}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
+  env)
+    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-}"
+    printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
+    printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
+    exit 0
+    ;;
+  normal)
+    emit_normal
+    ;;
+  modelgate)
+    for arg in "$@"; do
+      if [ "${FAKE_PI_FAIL_MODEL-}" = "*" ] ||
+         { [ -n "${FAKE_PI_FAIL_MODEL-}" ] && [ "$arg" = "$FAKE_PI_FAIL_MODEL" ]; }; then
+        echo "simulated failure for model $arg" >&2
+        exit 1
+      fi
+    done
+    emit_normal
     ;;
   nofinish)
     printf '%s\n' '{"type":"session","version":3,"id":"abc"}'

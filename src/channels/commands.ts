@@ -432,6 +432,18 @@ async function handleCoderSwap(
     };
   }
 
+  // The swap subsystem is skipped entirely when there is no DISTINCT coding
+  // model (unset, or the same as the primary) — an override would be a silent
+  // no-op, so say so instead of pretending it took effect.
+  const routing = ctx.config?.harnesses?.pi?.routing;
+  if (!routing?.codingModel || routing.codingModel === routing.primaryModel) {
+    return {
+      reply:
+        "coding brain: inactive — no coding model configured (or it matches the primary). " +
+        "Set one with /model coding <slug> or the `phantombot harness` wizard.",
+    };
+  }
+
   await applyCoderSwapRequest({
     persona: ctx.persona,
     conversation: ctx.conversation,

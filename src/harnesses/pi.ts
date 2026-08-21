@@ -45,7 +45,7 @@ import type {
   HarnessRequest,
 } from "./types.ts";
 import { ENV_PHANTOMBOT_TMP_DIR, ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
-import { getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
+import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
@@ -124,7 +124,7 @@ export class PiHarness implements Harness {
     const payloadArg = `@${await temp.file("payload.md", payload)}`;
     try {
 
-    const args = [
+    const baseArgs = [
       "--print",
       "--mode", "json",
       "--system-prompt", systemPromptArg,
@@ -156,8 +156,21 @@ export class PiHarness implements Harness {
     // flips back to the primary the moment the work stops being code. We never
     // swap the tool-less threat judge (toolsMode "none") — it must stay on the
     // configured primary and never gain capability.
-    let primaryModel = this.config.routing?.primaryModel;
-    if (req.toolsMode !== "none" && this.config.routing?.codingModel) {
+    //
+    // SKIP the whole swap subsystem — no override read, no scoring, no retry
+    // ladder — when the coding model is unset OR THE SAME as the primary:
+    // there is no distinct brain to swap to, so consulting the override store
+    // and the scorer would be pure I/O and log noise (and a "swapped" turn on
+    // an equal model would activate the retry ladder for nothing).
+    const primaryModel = this.config.routing?.primaryModel;
+    const codingModel = this.config.routing?.codingModel;
+    const coderSwapEligible =
+      req.toolsMode !== "none" &&
+      !!codingModel &&
+      codingModel !== primaryModel;
+    let swapped = false;
+    let swapModel = primaryModel;
+    if (coderSwapEligible) {
       const override =
         req.persona && req.conversation
           ? await getCoderSwapOverride({
@@ -168,15 +181,16 @@ export class PiHarness implements Harness {
       const decision = resolveSwapModel({
         text: req.userMessage,
         override,
-        primaryModel: this.config.routing.primaryModel,
-        codingModel: this.config.routing.codingModel,
+        primaryModel,
+        codingModel,
         // Pass conversation history so the current message is judged IN CONTEXT
         // (recency-decayed ratio over recent USER turns) rather than alone — a
         // natural-language follow-up mid-review no longer drops the coding brain.
         // History is already rebuilt for buildPayload() below, so this is free.
         history: req.history,
       });
-      primaryModel = decision.model;
+      swapped = decision.swapped;
+      swapModel = decision.model;
       if (decision.swapped) {
         log.info("pi.invoke coder-swap active", {
           persona: req.persona,
@@ -195,18 +209,6 @@ export class PiHarness implements Harness {
     // config (like the model), not per-turn env, since the provider is a config
     // choice that pairs with the saved models.
     const provider = this.config.routing?.provider;
-    if (provider) {
-      args.push("--provider", provider);
-    }
-    if (primaryModel) {
-      args.push("--model", primaryModel);
-    }
-    // Tool-less threat-judge mode. Per `pi --help`, `--no-tools` disables all
-    // tools (built-in, extension, and custom) — true zero-tools, native flag,
-    // no deny-list to maintain.
-    if (req.toolsMode === "none") {
-      args.push("--no-tools");
-    }
 
     // Re-source the legacy/runtime env files so file-backed model and routing
     // settings changed on the previous turn are visible without a daemon
@@ -225,14 +227,37 @@ export class PiHarness implements Harness {
     // installs working); neither ⇒ Pi errors as usual. Must precede the
     // positional payload below.
     const piApiKey = process.env[ENV_PI_API_KEY]?.trim();
-    if (piApiKey) {
-      args.push("--api-key", piApiKey);
-    }
 
-    // Payload is the LAST positional arg (pi reads it from argv, not stdin).
-    // This is always `@<tempfile>` so pi loads the payload from disk instead
-    // of the length-limited command line.
-    args.push(payloadArg);
+    /**
+     * Assemble the full argv for ONE attempt. `model` is the brain this
+     * attempt runs on — the swapped coding model or, after the swap's retries
+     * are exhausted, the primary. Everything else (system prompt file, provider,
+     * api-key, payload file) is model-independent and rebuilt identically per
+     * attempt so the ladder only ever varies `--model`.
+     */
+    const buildArgs = (model: string | undefined): string[] => {
+      const argv = [...baseArgs];
+      if (provider) {
+        argv.push("--provider", provider);
+      }
+      if (model) {
+        argv.push("--model", model);
+      }
+      // Tool-less threat-judge mode. Per `pi --help`, `--no-tools` disables all
+      // tools (built-in, extension, and custom) — true zero-tools, native flag,
+      // no deny-list to maintain.
+      if (req.toolsMode === "none") {
+        argv.push("--no-tools");
+      }
+      if (piApiKey) {
+        argv.push("--api-key", piApiKey);
+      }
+      // Payload is the LAST positional arg (pi reads it from argv, not stdin).
+      // This is always `@<tempfile>` so pi loads the payload from disk instead
+      // of the length-limited command line.
+      argv.push(payloadArg);
+      return argv;
+    };
     log.debug("pi.invoke spawning", {
       bin: this.config.bin,
       payloadBytes: totalBytes,
@@ -263,45 +288,144 @@ export class PiHarness implements Harness {
     // processes (Kai's review point). spawnPi.ts falls back to os.tmpdir() when
     // it's unset (degraded/no-persona paths).
     if (req.tmpBaseDir) childEnv[ENV_PHANTOMBOT_TMP_DIR] = req.tmpBaseDir;
-    const proc = spawnInNewSession([this.config.bin, ...args], {
-      cwd: req.workingDir,
-      env: childEnv,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
 
-    // Shared engine. Pi delivers its payload via argv (stdin ignored, so no
-    // stdinPayload), and the terminal `done` meta records the argv byte count.
-    yield* runHarnessProcess({
-      proc,
-      req,
-      harnessId: this.id,
-      parseEvent: parsePiEvent,
-      activity: piActivity,
-      buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
-      // pi is the only harness with no native terminal `done` in its stream —
-      // it derives completion from turn_end (mapped to a `done` marker in
-      // parsePiEvent). Require that marker before accepting an exit-0 run as a
-      // finished answer, so a narration-only mid-task exit falls through to the
-      // next harness rather than being stored as the reply (issue #352).
-      requireCompletion: true,
-      // Bound how long a single contiguous tool-run may keep the idle watchdog
-      // alive via tool_execution_* activity alone, with no user-facing text. pi
-      // only emits tool_execution_update on genuine new output (bash streams
-      // stdout, the coder delegate forwards its child's progress) so a healthy
-      // turn is rarely affected — but a tool that trickles output forever (a
-      // stalled auto-router, a hung network retry that keeps logging) could
-      // otherwise reset the idle timer up to the 60-min hard cap with no
-      // fallback (issue #351). This is a GENEROUS last-resort net: comfortably
-      // above any realistic tool-run yet well under the hard cap, so a
-      // wedged-but-chattery turn fails over in minutes, not an hour. Derived
-      // from the idle window, floored at 20 min, and never above the hard cap.
-      toolTimeoutMs: Math.min(
-        req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
-        Math.max(req.idleTimeoutMs * 4, 1_200_000),
-      ),
-    });
+    /**
+     * Spawn ONE pi attempt on the given model and stream its chunks. Fresh
+     * subprocess per attempt (the shared engine arms its own kill coordinator
+     * per spawn), same temp payload files (model-independent) and child env.
+     */
+    const runAttempt = async function* (
+      this: PiHarness,
+      model: string | undefined,
+    ): AsyncGenerator<HarnessChunk> {
+      const proc = spawnInNewSession([this.config.bin, ...buildArgs(model)], {
+        cwd: req.workingDir,
+        env: childEnv,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      // Shared engine. Pi delivers its payload via argv (stdin ignored, so no
+      // stdinPayload), and the terminal `done` meta records the argv byte count.
+      yield* runHarnessProcess({
+        proc,
+        req,
+        harnessId: this.id,
+        parseEvent: parsePiEvent,
+        activity: piActivity,
+        buildDoneMeta: () => ({ harnessId: this.id, payloadBytes: totalBytes }),
+        // pi is the only harness with no native terminal `done` in its stream —
+        // it derives completion from turn_end (mapped to a `done` marker in
+        // parsePiEvent). Require that marker before accepting an exit-0 run as a
+        // finished answer, so a narration-only mid-task exit falls through to the
+        // next harness rather than being stored as the reply (issue #352).
+        requireCompletion: true,
+        // Bound how long a single contiguous tool-run may keep the idle watchdog
+        // alive via tool_execution_* activity alone, with no user-facing text. pi
+        // only emits tool_execution_update on genuine new output (bash streams
+        // stdout, the coder delegate forwards its child's progress) so a healthy
+        // turn is rarely affected — but a tool that trickles output forever (a
+        // stalled auto-router, a hung network retry that keeps logging) could
+        // otherwise reset the idle timer up to the 60-min hard cap with no
+        // fallback (issue #351). This is a GENEROUS last-resort net: comfortably
+        // above any realistic tool-run yet well under the hard cap, so a
+        // wedged-but-chattery turn fails over in minutes, not an hour. Derived
+        // from the idle window, floored at 20 min, and never above the hard cap.
+        toolTimeoutMs: Math.min(
+          req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+          Math.max(req.idleTimeoutMs * 4, 1_200_000),
+        ),
+      });
+    }.bind(this);
+
+    if (!swapped) {
+      yield* runAttempt(swapModel);
+    } else {
+      // ─────────────────────────────────────────────────────────────────
+      // Coder-swap retry ladder (the "brain swap" fix).
+      //
+      // A swapped turn rides a DIFFERENT provider model than the primary —
+      // and an intermittent provider hang (stream never starts, zero output
+      // for the whole idle window) used to cost the turn outright: pi is
+      // usually the LAST harness in the chain, so an idle kill had no
+      // fallback and the user's message was silently lost. Now a swapped
+      // turn gets up to CODER_SWAP_MAX_ATTEMPTS attempts on the coding
+      // model, and when they're all exhausted the turn is re-run once on
+      // the PRIMARY — a possibly-slower but known-good brain beats a lost
+      // turn.
+      //
+      // Retry discipline (each rule exists for a reason):
+      //   - Only when NOTHING was streamed to the user yet this attempt —
+      //     retrying after visible text would duplicate bubbles on screen
+      //     (the streaming-first trade-off documented in fallback.ts).
+      //   - Only recoverable, non-terminal errors — a policy violation or
+      //     user /stop must not be retried onto another model.
+      //   - Errors from the final PRIMARY attempt are yielded as-is so the
+      //     orchestrator's normal harness chain still applies afterwards.
+      // ─────────────────────────────────────────────────────────────────
+      let lastFailure:
+        | { error: string; recoverable?: boolean; httpStatus?: number }
+        | undefined;
+      for (
+        let attempt = 1;
+        attempt <= CODER_SWAP_MAX_ATTEMPTS && !req.signal?.aborted;
+        attempt++
+      ) {
+        let streamedText = false;
+        let failure:
+          | (HarnessChunk & { type: "error"; error: string })
+          | undefined;
+        for await (const chunk of runAttempt(swapModel)) {
+          if (chunk.type === "error") {
+            // Terminal in the shared engine: yielded last, generator returns
+            // right after. Hold it back while a retry is still possible.
+            failure = chunk;
+            break;
+          }
+          if (chunk.type === "text") streamedText = true;
+          yield chunk;
+        }
+        if (!failure) return; // completed (or the consumer stopped us)
+        lastFailure = failure;
+        const retryable =
+          failure.recoverable !== false &&
+          !failure.terminal &&
+          !streamedText &&
+          !req.signal?.aborted;
+        // Not retryable — surface the error exactly as the single-attempt
+        // path always did: a policy violation, a /stop, or a failure AFTER
+        // visible text must not be re-run on another model (that would
+        // duplicate bubbles on screen, the very trade-off fallback.ts
+        // warns against re-litigating).
+        if (!retryable) {
+          yield failure;
+          return;
+        }
+        if (attempt < CODER_SWAP_MAX_ATTEMPTS) {
+          log.warn("pi.invoke coder-swap attempt failed — retrying", {
+            persona: req.persona,
+            conversation: req.conversation,
+            model: swapModel,
+            attempt,
+            of: CODER_SWAP_MAX_ATTEMPTS,
+            error: failure.error,
+          });
+        }
+      }
+      // All swapped attempts failed CLEANLY (nothing ever streamed), so the
+      // primary attempt starts from a blank screen — no duplicated text.
+      // (If the loop exited early because the user aborted, stop here too.)
+      if (req.signal?.aborted) return;
+      log.warn("pi.invoke coder-swap exhausted — falling back to primary", {
+        persona: req.persona,
+        conversation: req.conversation,
+        model: swapModel,
+        fallbackModel: primaryModel ?? "(pi default)",
+        error: lastFailure?.error,
+      });
+      yield* runAttempt(primaryModel);
+    }
 
     } finally {
       // Remove the temp payload/system-prompt files once the child has exited

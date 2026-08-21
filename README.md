@@ -1002,6 +1002,20 @@ then releases it the moment the topic moves off code — stateless and
 self-correcting, no sticky mode. Force it with `/coder`, disable with
 `/coder off`, or clear back to scoring with `/coder default`.
 
+Two safety rails keep a swapped turn from ever being *lost*:
+
+- **No distinct coder → no swap system.** When the coding model is unset — or
+  set to the same model as the primary — the whole swap subsystem is skipped:
+  no override store, no scorer, no retry ladder. `/coder` says so instead of
+  silently pretending.
+- **Retry, then fall back.** A swapped turn that fails before producing any
+  output (the intermittent provider-hang case: stream never starts, the idle
+  watchdog kills it) is retried up to three times on the coding model, and when
+  those are exhausted the turn is re-run once on the **primary** — a slower but
+  known-good brain beats a lost turn. Failures after visible text is streamed
+  are surfaced as normal harness errors instead, so a reply is never duplicated
+  on screen.
+
 Configure all three roles with the `phantombot harness` wizard; the choices are
 mirrored into `config.toml` under `[harnesses.pi.routing]` and visible to
 `phantombot doctor`. They can also be changed live from chat with

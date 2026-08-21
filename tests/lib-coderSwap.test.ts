@@ -223,6 +223,33 @@ describe("resolveSwapModel", () => {
     });
     expect(d.swapped).toBe(false);
     expect(d.model).toBe(PRIMARY);
+    expect(d.reason).toBe("no-coding-model");
+  });
+
+  test("coding model EQUAL to primary → swap subsystem skipped entirely", () => {
+    // Swapping to the same model is not a swap: no scorer, no override, no
+    // retry ladder. Even a forced /coder override must not claim a swap.
+    const d = resolveSwapModel({
+      text: "refactor the whole codebase in src",
+      primaryModel: PRIMARY,
+      codingModel: PRIMARY,
+    });
+    expect(d.swapped).toBe(false);
+    expect(d.model).toBe(PRIMARY);
+    expect(d.reason).toBe("coder-equals-primary");
+    expect(d.score).toBe(0);
+  });
+
+  test("coding model EQUAL to primary → override:on is also a no-swap", () => {
+    const d = resolveSwapModel({
+      text: "hi there",
+      override: "on",
+      primaryModel: PRIMARY,
+      codingModel: PRIMARY,
+    });
+    expect(d.swapped).toBe(false);
+    expect(d.model).toBe(PRIMARY);
+    expect(d.reason).toBe("coder-equals-primary");
   });
 
   test("score trips → coding model", () => {

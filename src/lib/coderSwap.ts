@@ -56,6 +56,14 @@ import { writeFileAtomic } from "./io.ts";
 export const CODER_SWAP_THRESHOLD = 3;
 
 /**
+ * How many times the Pi harness will attempt a turn on the SWAPPED coding
+ * model before giving up on the swap and re-running the turn on the primary
+ * (issue: intermittent provider hangs on the swapped model produced a silent
+ * 5-minute idle kill with the turn lost). Three attempts, then primary.
+ */
+export const CODER_SWAP_MAX_ATTEMPTS = 3;
+
+/**
  * Weight that, on its own, meets any reasonable threshold. Used for HARD
  * signals (an unambiguous PR/MR URL or "pull request"/"merge request" phrase)
  * so a single one trips the swap regardless of threshold tuning.
@@ -396,8 +404,12 @@ export interface ConversationTurn {
  * Decide which model the Pi harness should pin for this turn.
  *
  * Precedence: a manual `/coder`/`/nocoder` override always wins; otherwise the
- * scorer decides. With NO coding model configured there is nothing to swap to,
- * so we always return the primary (and never claim a swap).
+ * scorer decides. With NO coding model configured — or a coding model that is
+ * THE SAME as the primary — there is nothing to swap to, so the whole swap
+ * subsystem is skipped and we always return the primary (never claim a swap).
+ * The equal-models case is a deliberate skip, not a no-op swap: callers use
+ * `swapped` to gate the retry ladder and the override store, so a "swap" to the
+ * same model must not activate either.
  *
  * Two scoring paths:
  *   - `history` PROVIDED ⇒ context-window scoring (scoreCodingContext): the
@@ -425,8 +437,13 @@ export function resolveSwapModel(input: {
 }): SwapDecision {
   const { text, override, primaryModel, codingModel, history } = input;
 
-  if (!codingModel) {
-    return { model: primaryModel, swapped: false, reason: "no-coding-model", score: 0 };
+  if (!codingModel || codingModel === primaryModel) {
+    return {
+      model: primaryModel,
+      swapped: false,
+      reason: codingModel ? "coder-equals-primary" : "no-coding-model",
+      score: 0,
+    };
   }
   if (override === "off") {
     return { model: primaryModel, swapped: false, reason: "override:off", score: 0 };
