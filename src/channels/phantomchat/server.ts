@@ -36,7 +36,7 @@ import {
   makeDurableFactPuller,
   makeFactExtractor,
 } from "../../orchestrator/durableFacts.ts";
-import { makeScreener } from "../../orchestrator/screen.ts";
+import { makeScreener, type ScreenVerdict } from "../../orchestrator/screen.ts";
 import { makeTurnIndexer } from "../../orchestrator/turnIndexer.ts";
 import {
   type ActiveTurnHandle,
@@ -86,8 +86,19 @@ import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import { warmSymmetricKeyCache } from "../../lib/nostrCrypto.ts";
 import { fetchAndDecryptBlossom } from "./blossomFetch.ts";
 import { inboxDir } from "../telegram/parse.ts";
+import { renderRelayMessage } from "./relayEnvelope.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+/**
+ * Outcome of the auth gate for one inbound message (#400).
+ *
+ *   "trusted" — an allow-listed principal: commands are commands.
+ *   "relay"   — an allow-listed bridge: answered, but threat-screened and
+ *               never granted principal authority.
+ *   "drop"    — not allowed at all: ignored silently.
+ */
+export type SenderTier = "trusted" | "relay" | "drop";
 
 // Don't download absurdly large attachments. The harness reads from the inbox;
 // a multi-hundred-MB blob would blow memory + disk for little benefit.
@@ -150,6 +161,29 @@ export interface RunPhantomchatServerInput {
    * bot. Non-empty = only these are answered. Empty = see `tofu`.
    */
   allowedHex: string[];
+  /**
+   * OPTIONAL relay tier (#400): hex pubkeys of BRIDGE bots that forward traffic
+   * from other networks (Matrix, Slack, a meeting room) into phantomchat.
+   *
+   * A relay npub is answered but is NOT a principal. Its cryptographic identity
+   * proves only which bridge sent the bytes — it says nothing about who spoke on
+   * the far side, and that far side is open to strangers. So a relay sender runs
+   * every turn UNTRUSTED: threat-screened, untrusted perimeter prompt, no slash
+   * commands, no TOFU, no reaction turns, and a `shared` reply audience so
+   * persona-private digests are never injected into a reply that goes back to a
+   * room. An npub in BOTH lists resolves to relay — least privilege wins.
+   */
+  relayHex?: string[];
+  /**
+   * TEST SEAM: replace the threat screen used by UNTRUSTED (relay) turns.
+   * Production leaves it undefined and the server builds the real screener via
+   * `makeScreener`. Tests inject a stub so a relay-tier assertion doesn't have
+   * to stand up a judge model.
+   */
+  screen?: (
+    content: string,
+    signal?: AbortSignal,
+  ) => Promise<ScreenVerdict | undefined>;
   /**
    * OPTIONAL config seed for the group-addressing roster: persona names of other
    * bots that share groups with this one. Normally the roster is derived
@@ -233,6 +267,9 @@ export async function runPhantomchatServer(
   // Decoded allowlist as a set for O(1) membership. Mutable: TOFU adds the
   // first sender at runtime, after which the set is non-empty and locked.
   const allowedSet = new Set(input.allowedHex.map((h) => h.toLowerCase()));
+  // RELAY tier (#400) — bridges. Immutable: TOFU never adds to this set, and
+  // nothing promotes a relay into `allowedSet`.
+  const relaySet = new Set((input.relayHex ?? []).map((h) => h.toLowerCase()));
   // TOFU is armed only when we start with an empty allowlist and tofu is on.
   let tofuArmed = allowedSet.size === 0 && input.tofu === true;
 
@@ -396,19 +433,38 @@ export async function runPhantomchatServer(
   // The envelope `from` field is NEVER consulted here: it's attacker-
   // controllable plaintext. A sender not in the allowlist is dropped SILENTLY
   // (info log only) — no reply, so the bot doesn't become an oracle that
-  // confirms its own pubkey is live to strangers. Returns false to drop.
-  // Factored out so both the regular turn path (`handle`) and the inline slash
-  // path (`runSlash`) apply the identical gate.
-  const authorize = (msg: ChannelMessage): boolean => {
+  // confirms its own pubkey is live to strangers.
+  //
+  // Returns a TIER rather than a boolean (#400), because "may this sender talk
+  // to us" and "does this sender command us" are different questions:
+  //
+  //   "trusted" — an allow-listed principal (or TOFU/open-bot). Runs with the
+  //               trusted SECURITY_PERIMETER block and skips the threat screen.
+  //   "relay"   — an allow-listed BRIDGE. Answered, but every turn is untrusted
+  //               and threat-screened; see the `relayHex` field doc.
+  //   "drop"    — stranger. Silently ignored.
+  //
+  // RELAY IS CHECKED FIRST, so an npub present in both lists resolves to relay:
+  // least privilege wins, and a mistaken double-entry can only ever de-escalate.
+  // Factored out so the regular turn path (`handle`), the inline slash path
+  // (`runSlash`) and the reaction path apply the identical gate.
+  const authorize = (msg: ChannelMessage): SenderTier => {
     const senderHex = msg.senderId;
     const lowerHex = senderHex.toLowerCase();
+    if (relaySet.has(lowerHex)) {
+      log.info("phantomchat: relay-tier sender — untrusted turn", {
+        persona: input.persona,
+        sender: senderHex.slice(0, 12) + "…",
+      });
+      return "relay";
+    }
     if (allowedSet.size > 0) {
       // Locked allowlist (configured, or already claimed by TOFU).
       if (!allowedSet.has(lowerHex)) {
         log.info("phantomchat: dropping message from non-allowed sender", {
           sender: senderHex.slice(0, 12) + "…",
         });
-        return false;
+        return "drop";
       }
     } else if (tofuArmed) {
       // TRUST-ON-FIRST-USE. Claim this sender SYNCHRONOUSLY (before any await)
@@ -432,13 +488,14 @@ export async function runPhantomchatServer(
       }
     }
     // else: empty set + tofu off = open bot — answer anyone (caller warned).
-    return true;
+    return "trusted";
   };
 
   const handle = async (msg: ChannelMessage): Promise<void> => {
     const senderHex = msg.senderId;
 
-    if (!authorize(msg)) return;
+    const tier = authorize(msg);
+    if (tier === "drop") return;
 
     // ===================== PROFILE RESOLUTION + BOT GATE =====================
     // Resolve the kind-0 profiles this decision needs: always the sender (for the
@@ -677,9 +734,16 @@ export async function runPhantomchatServer(
           : groupContext;
     }
 
+    // RELAY tier: the text carries a PhantomBridge attribution header naming the
+    // far-side network / room / speaker. Re-render it from sanitised fields (see
+    // relayEnvelope.ts) so attacker-controlled bytes can't fake prompt structure;
+    // a message without a valid header passes through unchanged.
+    if (tier === "relay") userMessage = renderRelayMessage(userMessage);
+
     // A sender that PASSES the allowlist is a trusted principal — exactly the
     // same trust grant Telegram's allowlisted users get. This selects the
     // trusted SECURITY_PERIMETER prompt block and skips the threat screen.
+    // A RELAY sender does not get that grant: it runs untrusted and is screened.
     //
     // The conversation key threads the turn. A GROUP message is keyed by the
     // group (so HQ has its own memory/turn-ordering thread, distinct from the
@@ -886,24 +950,28 @@ export async function runPhantomchatServer(
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
         startupTimeoutMs: input.config.harnessStartupTimeoutMs,
         signal: turnSignal,
-        // The trust grant — see the auth gate above. Always true here because
-        // we already dropped non-allowlisted senders.
-        trusted: true,
+        // The trust grant — see the auth gate above. False for a relay bridge,
+        // which selects the UNTRUSTED perimeter block and arms the screen below.
+        trusted: tier === "trusted",
         // Audience: a group reply is broadcast to every member, so
         // persona-private state (pending digests) must neither be injected
         // nor consumed here — it stays pending for the principal's next DM.
-        replyAudience: msg.groupId ? "shared" : "private",
-        // Trusted turns never screen, but pass the screener for parity/future
-        // open-bot use (empty allowlist → trusted: true still, matching
-        // Telegram's "answer anyone" semantics, so the screen is effectively
-        // unused; kept for symmetry with the Telegram call site).
-        screen: makeScreener(
-          input.config,
-          input.persona,
-          conversationKey,
-          harnesses,
-          input.memory,
-        ),
+        // A RELAY reply is broadcast too: it goes back out to a room full of
+        // people on another network, so it is `shared` even in a 1:1 DM with
+        // the bridge. The bridge's own DM is a pipe, not a private channel.
+        replyAudience: msg.groupId || tier === "relay" ? "shared" : "private",
+        // Trusted turns never screen; this is what actually screens a RELAY
+        // turn. Also passed for open-bot parity (empty allowlist → trusted
+        // still, matching Telegram's "answer anyone" semantics).
+        screen:
+          input.screen ??
+          makeScreener(
+            input.config,
+            input.persona,
+            conversationKey,
+            harnesses,
+            input.memory,
+          ),
         retrieve: makeRetriever(
           input.config,
           input.persona,
@@ -1126,7 +1194,16 @@ export async function runPhantomchatServer(
   // Unknown commands (handleSlashCommand → null) also fall through to a normal
   // turn, since some personas treat e.g. /remember as plain input.
   const runSlash = async (msg: ChannelMessage): Promise<void> => {
-    if (!authorize(msg)) return;
+    const tier = authorize(msg);
+    if (tier === "drop") return;
+    // Slash commands are PRIVILEGED — /restart, /update, /reset destroy state or
+    // control the process. Only a principal may take that path. A relay's "/…"
+    // line is not a command from the bridge, it is text somebody typed on
+    // another network, so it falls through to an ordinary screened turn.
+    if (tier === "relay") {
+      enqueue(msg);
+      return;
+    }
     const senderHex = msg.senderId;
     const result = await handleSlashCommand(msg.text, {
       chatId: msg.conversationId,
@@ -1279,7 +1356,9 @@ export async function runPhantomchatServer(
       // oneShot drains it. Gated by the SAME auth gate as messages: the
       // reaction turn writes memory (the capture), so only an allow-listed
       // principal may run it. A non-allowed reactor is dropped silently.
-      if (!authorize(msg)) continue;
+      // Trusted-only: a reaction turn writes memory (the capture) and takes no
+      // screened input, so a relay bridge never gets one either.
+      if (authorize(msg) !== "trusted") continue;
       const reaction = msg.reaction;
       const conversationKey = `phantomchat:${reaction.conversationId}`;
       const targetText = recentOutbound.lookup(
