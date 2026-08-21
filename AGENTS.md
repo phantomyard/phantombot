@@ -238,9 +238,10 @@ Credentials live in the per-persona encrypted vault. The agent NEVER appends
 secrets to `.env` or puts literal secret values in command arguments. It uses
 `printf '%s' "$VALUE" | phantombot vault set NAME`; the positional
 `phantombot vault set NAME "value"` form also remains available for backward
-compatibility. The full credential discovery + hygiene rules are baked into
-every persona's system prompt via `CREDENTIALS_SECTION` in
-`src/persona/builder.ts`. If you change those rules, update both
+compatibility. Empty stdin is rejected unless `--allow-empty` is explicit, so a
+failed pipe cannot silently erase an existing credential. The full credential
+discovery + hygiene rules are baked into every persona's system prompt via
+`CREDENTIALS_SECTION` in `src/persona/builder.ts`. If you change those rules, update both
 `CREDENTIALS_SECTION` and the README's [Credentials](README.md#credentials)
 section.
 

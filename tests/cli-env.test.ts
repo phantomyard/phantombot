@@ -190,6 +190,40 @@ describe("vault runners (forward target)", () => {
     expect(vault.get("POSITIONAL_TOKEN")).toBe("legacy-value\n");
   });
 
+  test.each([
+    ["empty stdin", Readable.from([])],
+    ["newline-only stdin", Readable.from(["\n"])],
+  ])("%s is rejected without overwriting an existing secret", async (_label, stdin) => {
+    vault.set("TOKEN", "existing-value");
+    const err = new CaptureStream();
+    expect(await runVaultSet({ name: "TOKEN", vault, stdin, err })).toBe(2);
+    expect(err.text).toContain("stdin was empty");
+    expect(err.text).toContain("--allow-empty");
+    expect(vault.get("TOKEN")).toBe("existing-value");
+  });
+
+  test("--allow-empty permits an intentional empty stdin value", async () => {
+    vault.set("TOKEN", "existing-value");
+    expect(
+      await runVaultSet({
+        name: "TOKEN",
+        vault,
+        stdin: Readable.from([]),
+        allowEmpty: true,
+        out: new CaptureStream(),
+      }),
+    ).toBe(0);
+    expect(vault.get("TOKEN")).toBe("");
+  });
+
+  test("an explicit empty positional value remains supported", async () => {
+    vault.set("TOKEN", "existing-value");
+    expect(
+      await runVaultSet({ name: "TOKEN", value: "", vault, out: new CaptureStream() }),
+    ).toBe(0);
+    expect(vault.get("TOKEN")).toBe("");
+  });
+
   test("omitted value refuses a TTY instead of hanging", async () => {
     const err = new CaptureStream();
     const stdin = Object.assign(Readable.from([]), { isTTY: true });
@@ -211,9 +245,10 @@ describe("vault set command contract", () => {
   test("the value positional is optional so omission reaches stdin handling", () => {
     const subCommands = vaultCommand.subCommands as unknown as Record<
       string,
-      { args?: Record<string, { required?: boolean }> }
+      { args?: Record<string, { required?: boolean; type?: string }> }
     >;
     const setCommand = subCommands.set!;
     expect(setCommand.args?.value?.required).toBe(false);
+    expect(setCommand.args?.allowEmpty?.type).toBe("boolean");
   });
 });

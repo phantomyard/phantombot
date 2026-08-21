@@ -542,6 +542,7 @@ Agent-facing tools:
 | Command | Purpose |
 |---|---|
 | `printf '%s' "$VALUE" \| phantombot vault set NAME` | Save a credential without exposing it in argv |
+| `phantombot vault set NAME --allow-empty </dev/null` | Explicitly store an empty credential from stdin |
 | `phantombot notify --message "..."` | Send a Telegram text notification |
 | `phantombot notify --voice "..."` | Send a Telegram voice notification |
 | `phantombot task add "<prompt>" "<description>" --every 1h` | Schedule an LLM-backed task |
@@ -1536,9 +1537,13 @@ phantombot vault unset GITHUB_TOKEN
 ```
 
 When the value positional is omitted, `vault set` reads stdin and removes one
-trailing LF or CRLF. The existing `phantombot vault set NAME "value"` form is
-still supported for compatibility, but exposes the value in process arguments
-and potentially shell history. `phantombot env` remains a deprecated alias.
+trailing LF or CRLF. Empty or newline-only stdin is rejected to prevent a
+failed pipe from silently overwriting an existing credential; pass
+`--allow-empty` to store an intentionally empty stdin value. The existing
+`phantombot vault set NAME "value"` form is still supported unchanged for
+compatibility, including empty values, but exposes the value in process
+arguments and potentially shell history. `phantombot env` remains a deprecated
+alias.
 
 ## Security
 

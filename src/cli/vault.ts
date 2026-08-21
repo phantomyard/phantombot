@@ -54,6 +54,7 @@ async function resolveVault(input: {
 export interface VaultSetInput {
   name: string;
   value?: string;
+  allowEmpty?: boolean;
   persona?: string;
   personaDir?: string;
   vault?: Vault;
@@ -71,9 +72,12 @@ export type VaultInputStream = AsyncIterable<string | Uint8Array> & {
  * so an accidentally omitted positional value fails instead of hanging until
  * Ctrl-D. Strip exactly one trailing line ending: this makes ordinary shell
  * pipes convenient without changing intentional whitespace inside the value.
+ * Refuse an empty result unless the caller explicitly allows it, protecting an
+ * existing credential when an upstream pipe fails without producing output.
  */
 export async function readVaultValueFromStdin(
   stdin: VaultInputStream = process.stdin,
+  allowEmpty = false,
 ): Promise<string> {
   if (stdin.isTTY) {
     throw new Error(
@@ -84,7 +88,13 @@ export async function readVaultValueFromStdin(
   for await (const chunk of stdin) {
     chunks.push(Buffer.from(chunk));
   }
-  return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  const value = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  if (value === "" && !allowEmpty) {
+    throw new Error(
+      "stdin was empty; refusing to overwrite with an empty value (use --allow-empty if that is intended, or `vault unset NAME` to remove it)",
+    );
+  }
+  return value;
 }
 
 export async function runVaultSet(input: VaultSetInput): Promise<number> {
@@ -99,7 +109,7 @@ export async function runVaultSet(input: VaultSetInput): Promise<number> {
   let value = input.value;
   if (value === undefined) {
     try {
-      value = await readVaultValueFromStdin(input.stdin);
+      value = await readVaultValueFromStdin(input.stdin, input.allowEmpty);
     } catch (e) {
       err.write(`phantombot vault set: ${(e as Error).message}\n`);
       return 2;
@@ -211,12 +221,17 @@ export default defineCommand({
           required: false,
           description: "Value to store; omit to read from stdin",
         },
+        allowEmpty: {
+          type: "boolean",
+          description: "Allow omitted-value stdin to store an empty value",
+        },
         persona: { type: "string", description: "Persona whose vault to use. Defaults to PHANTOMBOT_PERSONA / default persona." },
       },
       async run({ args }) {
         process.exitCode = await runVaultSet({
           name: args.name as string,
           value: typeof args.value === "string" ? args.value : undefined,
+          allowEmpty: args.allowEmpty === true,
           persona: args.persona ? String(args.persona) : undefined,
         });
       },

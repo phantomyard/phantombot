@@ -639,6 +639,8 @@ safe-write CLI:
 
 NEVER \`echo … >> ~/.env\` directly — that file is defunct, unencrypted,
 and its contents are migrated away on the next startup. Use the vault.
+Empty stdin is rejected so a failed pipe cannot erase an existing credential;
+use \`--allow-empty\` only when an empty stored value is intentional.
 
 BLAST RADIUS — the vault is encrypted with a key DERIVED FROM the
 persona's nsec in \`<persona-dir>/identity.json\`. Losing or corrupting
