@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -601,4 +601,39 @@ describe("corrupt-but-populated phantomchat.json — #419 item 4", () => {
     expect(dir.filter((f) => f.includes("corrupt"))).toEqual([]);
     expect(loadPhantomchatPersonaConfig(agentDir)).toBeDefined();
   });
+
+  // chmod is meaningless on Windows (and on root, which ignores mode bits),
+  // so the read-failure path can't be exercised there — POSIX only.
+  test.skipIf(process.platform === "win32")(
+    "an unreadable file is a read failure, not corruption — save rejects, no backup",
+    async () => {
+      if (process.getuid?.() === 0) return; // root ignores the mode bits
+      const id = generateIdentity();
+      const agentDir = join(workdir, "robbie");
+      await mkdir(agentDir, { recursive: true });
+      const path = phantomchatConfigPath(agentDir);
+      // A perfectly VALID config the process cannot read (EACCES) — the exact
+      // case where a .corrupt-* rename would destroy a good file.
+      const valid = JSON.stringify({
+        relays: ["wss://a.example"],
+        allowed_npubs: ["npub1ok"],
+      });
+      await writeFile(path, valid, "utf8");
+      await chmod(path, 0o000);
+
+      await expect(
+        savePhantomchatPersonaConfig(agentDir, {
+          nsec: id.nsec,
+          relays: ["wss://fresh.example"],
+          allowedNpubs: [],
+        }),
+      ).rejects.toThrow(/could not be read/);
+
+      // No backup was made and the valid file is untouched — bytes preserved.
+      const dir = await readdir(agentDir);
+      expect(dir.filter((f) => f.includes("corrupt"))).toEqual([]);
+      await chmod(path, 0o644); // restore read access, then verify the bytes
+      expect(await readFile(path, "utf8")).toBe(valid);
+    },
+  );
 });

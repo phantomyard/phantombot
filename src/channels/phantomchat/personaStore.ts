@@ -208,12 +208,27 @@ function parseGroupBots(v: unknown): PhantomchatGroupBot[] {
  * base — otherwise a save would silently discard every existing key
  * (allowlist, relays, group_bots) that merge semantics were supposed to
  * preserve (#419 item 4).
+ *
+ * A file that exists but cannot be READ (permissions, I/O) throws
+ * `ConfigReadError` instead: the bytes were never inspected, so the file may
+ * be perfectly valid. Callers must never treat a read failure as corruption.
  */
+class ConfigReadError extends Error {}
+
 function readRawFileShape(path: string): PhantomchatFileShape {
   if (!existsSync(path)) return {};
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    throw new ConfigReadError(
+      `phantomchat: ${path} exists but could not be read`,
+      { cause: e },
+    );
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(raw);
   } catch (e) {
     throw new Error(
       `phantomchat: ${path} exists but is not parseable JSON`,
@@ -345,6 +360,11 @@ export async function savePhantomchatPersonaConfig(
   try {
     existing = readRawFileShape(path);
   } catch (e) {
+    // A READ failure (EACCES/EIO/…) is not corruption — the file may be valid
+    // and we simply could not inspect it. Renaming it to .corrupt-* would
+    // misdiagnose and discard a good config, so the failure propagates: never
+    // overwrite data you couldn't read.
+    if (e instanceof ConfigReadError) throw e;
     const backup = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     await rename(path, backup);
     log.warn(
