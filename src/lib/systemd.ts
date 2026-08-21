@@ -36,9 +36,9 @@ export const TICK_TIMER_NAME = "phantombot-tick.timer";
  * Both .env files we source into every phantombot unit:
  *   ~/.config/phantombot/.env  — phantombot's own runtime secrets
  *                                 (TTS keys; written by `phantombot voice`).
- *   ~/.env                     — the agent's general-purpose credentials
- *                                 (GITHUB_TOKEN, ssh passphrases, etc.;
- *                                 written via `phantombot env set`).
+ *   ~/.env                     — legacy credentials plus file-backed harness
+ *                                 routing settings; credentials migrate into
+ *                                 the encrypted persona vault at startup.
  *
  * Leading `-` makes both optional — a fresh install with neither file
  * present still starts cleanly. The merged process.env is what spawned

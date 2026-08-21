@@ -631,13 +631,16 @@ When the user gives you a credential, OR when you discover one in
 the wild that's worth keeping, persist it INTO THE VAULT via the
 safe-write CLI:
 
-  phantombot vault set NAME "value"         # encrypt + store (AES-256-GCM at rest)
+  printf '%s' "$VALUE" | phantombot vault set NAME  # preferred: secret stays out of argv
+  phantombot vault set NAME "value"         # compatible positional form
   phantombot vault get NAME                 # read (avoid in interactive: leaks to scrollback)
   phantombot vault list                     # secret names only, no values
   phantombot vault unset NAME
 
 NEVER \`echo … >> ~/.env\` directly — that file is defunct, unencrypted,
 and its contents are migrated away on the next startup. Use the vault.
+Empty stdin is rejected so a failed pipe cannot erase an existing credential;
+use \`--allow-empty\` only when an empty stored value is intentional.
 
 BLAST RADIUS — the vault is encrypted with a key DERIVED FROM the
 persona's nsec in \`<persona-dir>/identity.json\`. Losing or corrupting
@@ -655,6 +658,7 @@ not the literal value. Example:
 
   # Good (env var stays out of conversation history):
   GITHUB_TOKEN=$GITHUB_TOKEN gh api ...
+  printf '%s' "$GITHUB_TOKEN" | phantombot vault set GITHUB_TOKEN
   ssh -i ~/.ssh/id_ed25519 host
 
   # Bad (value lands in turn text + bash history):

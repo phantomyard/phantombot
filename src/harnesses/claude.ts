@@ -151,10 +151,9 @@ export class ClaudeHarness implements Harness {
       tempFiles: useTempFiles,
     });
 
-    // Re-source ~/.env / ~/.config/phantombot/.env so secrets the agent
-    // saved on the previous turn (`phantombot env set FOO bar`) are
-    // visible in this turn's env without needing a daemon restart.
-    // Shell-exported keys remain sticky — see envBootstrap.ts header.
+    // Re-source the legacy/runtime env files so file-backed model, routing,
+    // and voice settings changed on the previous turn are visible without a
+    // daemon restart. Shell-exported keys remain sticky — see envBootstrap.ts.
     await reloadEnvFiles();
     // Then reconcile THIS persona's encrypted vault into the env (the canonical
     // credential store; the .env files above are only the legacy transitional
@@ -400,9 +399,9 @@ export const PHANTOMBOT_INJECTED_CLAUDE_SETTINGS = {
  * Denylisting individual names (the old behaviour, which only stripped
  * ANTHROPIC_API_KEY) is fragile: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL,
  * CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK, etc. all silently flip
- * claude off the Max-subscription OAuth path. reloadEnvFiles() re-sources
- * ~/.env into process.env right before this runs, so a stray
- * `phantombot env set ANTHROPIC_AUTH_TOKEN …` would leak straight through.
+ * claude off the Max-subscription OAuth path. The env files and active persona
+ * vault are reconciled into process.env right before this runs, so a stray
+ * `phantombot vault set ANTHROPIC_AUTH_TOKEN …` would leak straight through.
  * Allow-listing the namespace closes the whole family at once.
  */
 const AUTH_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_"] as const;

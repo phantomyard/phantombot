@@ -208,10 +208,9 @@ export class PiHarness implements Harness {
       args.push("--no-tools");
     }
 
-    // Re-source ~/.env so secrets saved by the agent on the previous turn
-    // (`phantombot env set FOO bar`) are visible here without a daemon
-    // restart — and so the Pi API key below is read fresh. See envBootstrap.ts
-    // for the sticky-vs-reloadable rules.
+    // Re-source the legacy/runtime env files so file-backed model and routing
+    // settings changed on the previous turn are visible without a daemon
+    // restart. See envBootstrap.ts for the sticky-vs-reloadable rules.
     await reloadEnvFiles();
     // Reconcile this persona's encrypted vault into the env BEFORE the Pi API
     // key is read below — the key is a vault secret post-migration. See claude.ts.

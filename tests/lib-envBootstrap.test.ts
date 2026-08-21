@@ -7,9 +7,9 @@
  *      persisted in ~/.env.
  *
  *   2. reloadEnvFiles (per-spawn) — the harnesses call this before each
- *      agent subprocess so a credential the agent saved on the previous
- *      turn (`phantombot env set FOO bar`) is visible without restarting
- *      the daemon. The contract: file-sourced keys are reloadable, but
+ *      agent subprocess so a file-backed runtime setting changed on the
+ *      previous turn is visible without restarting the daemon. The contract:
+ *      file-sourced keys are reloadable, but
  *      keys that were already in process.env at boot (shell-export,
  *      systemd) stay sticky — reload never touches them.
  */
@@ -98,7 +98,7 @@ describe("reloadEnvFiles", () => {
     const statCache = new Map();
     await preloadEnvFiles({ files: [path], env, tracked, statCache });
 
-    // Agent runs `phantombot env set BAR world` mid-session.
+    // A runtime writer persists BAR mid-session.
     await writeFile(path, "FOO=hello\nBAR=world\n", "utf8");
     const r = await reloadEnvFiles({ files: [path], env, tracked, statCache });
 
@@ -117,7 +117,7 @@ describe("reloadEnvFiles", () => {
     expect(env.FOO).toBe("old");
 
     // Use a different-length value so the size dimension of the cache key
-    // invalidates the entry. In production `phantombot env set` does atomic
+    // invalidates the entry. In production updateEnvFile does atomic
     // tempfile+rename, so the post-edit mtime always advances even for
     // same-length values; raw `writeFile` here truncates in place and can
     // coalesce sub-millisecond mtime ticks on some filesystems.
@@ -158,7 +158,7 @@ describe("reloadEnvFiles", () => {
     await preloadEnvFiles({ files: [path], env, tracked, statCache });
     expect(env.BAR).toBe("world");
 
-    // Agent runs `phantombot env unset BAR`.
+    // A runtime writer removes BAR from the file.
     await writeFile(path, "FOO=hello\n", "utf8");
     const r = await reloadEnvFiles({ files: [path], env, tracked, statCache });
 
@@ -211,7 +211,7 @@ describe("reloadEnvFiles", () => {
     expect(env.FOO).toBe("from-file");
     expect(env.OTHER).toBe("shell");
 
-    // Mid-session, someone runs `phantombot env set OTHER from-file`. The
+    // Mid-session, a runtime writer persists OTHER=from-file. The
     // shell already had OTHER, so reload must NOT clobber it — there's no
     // way to distinguish a brand-new file key from a collision against an
     // existing shell key, so the shell-wins rule wins by default.

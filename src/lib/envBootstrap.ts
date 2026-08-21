@@ -1,7 +1,7 @@
 /**
  * Self-load `~/.env` and `~/.config/phantombot/.env` into process.env at
  * startup, with a `reloadEnvFiles()` re-source path used by the harnesses
- * before each agent spawn so `phantombot env set` takes effect mid-session.
+ * before each agent spawn for the remaining file-backed runtime settings.
  *
  * Why startup load: launchd has no equivalent of systemd's `EnvironmentFile=`
  * plist key, so on macOS phantombot has to source these files itself before
@@ -9,11 +9,11 @@
  * sources both files, so this is a (cheap) no-op there — the `existing-wins`
  * policy below means anything systemd already set keeps its value.
  *
- * Why reload-on-spawn: `phantombot env set NAME value` writes atomically to
- * disk but does NOT mutate the running phantombot daemon's `process.env`.
- * Without re-sourcing, a freshly-saved secret is invisible to the harnessed
- * agent until the daemon restarts. Each harness calls `reloadEnvFiles()`
- * right before spawning so the agent sees the latest file state.
+ * Why reload-on-spawn: model, routing, voice, and transitional migration paths
+ * can still write these files without mutating the running daemon's
+ * `process.env`. Each harness calls `reloadEnvFiles()` right before spawning so
+ * the agent sees the latest file state, then separately reloads the active
+ * persona's encrypted vault.
  *
  * Sticky-vs-reloadable semantics:
  *   - At boot we track which keys were FILLED IN FROM A FILE. Those keys
@@ -51,7 +51,7 @@ function envFilesToLoad(): string[] {
  *     filesystems on Linux/macOS update it on every write.
  *   - `size` is the belt to the mtime suspenders. Some VFS layers (overlayfs,
  *     tmpfs under heavy load, NFS) coalesce same-millisecond writes onto a
- *     single mtime tick, and a `phantombot env set` flow in tests can land
+ *     single mtime tick, and a runtime env-file update in tests can land
  *     two writes inside that window. Almost any real-world content change
  *     also changes the byte length, so combining them is reliable in
  *     practice without ever reading the file body.
@@ -194,9 +194,9 @@ export async function preloadEnvFiles(
  *   - new key in file (not tracked, not in env) → load + track
  *   - new key in file but already in env (shell-export) → leave alone
  *
- * The harnesses call this right before spawning the agent so a freshly
- * persisted credential (`phantombot env set FOO bar`) is visible to the
- * subprocess on the very next turn — no daemon restart required.
+ * The harnesses call this right before spawning the agent so freshly persisted
+ * file-backed runtime settings are visible to the subprocess on the very next
+ * turn. They reload the encrypted persona vault separately immediately after.
  *
  * Returns the keys that changed and the keys that were removed, in case
  * the caller wants to log the reconciliation.
