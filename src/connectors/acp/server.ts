@@ -127,7 +127,7 @@ export async function runAcpServer(
   let harnesses = options.harnesses;
   if (!harnesses) {
     ({ config } = await resolveHarnessBinsForConfig(config, { err: logErr }));
-    harnesses = buildHarnessChain(config, logErr);
+    harnesses = buildHarnessChain(config, logErr, persona);
   }
   if (harnesses.length === 0) {
     logErr.write(

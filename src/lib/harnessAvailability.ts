@@ -192,7 +192,13 @@ export async function checkConfiguredHarnesses(
 ): Promise<HarnessAvailability[]> {
   const seen = new Set<string>();
   const out: HarnessAvailability[] = [];
-  for (const id of config.harnesses.chain) {
+  const configuredIds = [
+    ...config.harnesses.chain,
+    ...Object.values(config.harnesses.personas ?? {}).flatMap(
+      (entry) => entry.chain,
+    ),
+  ];
+  for (const id of configuredIds) {
     if (seen.has(id)) continue;
     seen.add(id);
     const bin = harnessBin(config, id);

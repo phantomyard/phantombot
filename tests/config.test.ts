@@ -320,6 +320,52 @@ model = "gpt-5.3-codex"
     expect(c.harnesses.codex!.model).toBe("gpt-5.3-codex");
   });
 
+  test("reads per-persona harness chain overrides", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses]
+chain = ["codex", "claude"]
+
+[harnesses.personas.amanda]
+chain = ["claude", "codex"]
+
+[harnesses.personas.miles]
+chain = ["codex"]
+`,
+      "utf8",
+    );
+
+    const c = await loadConfig();
+    expect(c.harnesses.chain).toEqual(["codex", "claude"]);
+    expect(c.harnesses.personas).toEqual({
+      amanda: { chain: ["claude", "codex"] },
+      miles: { chain: ["codex"] },
+    });
+  });
+
+  test("omits empty per-persona chains so they use the global chain", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses]
+chain = ["codex"]
+
+[harnesses.personas.amanda]
+chain = []
+
+[harnesses.personas.legacy]
+chain = ["gemini"]
+`,
+      "utf8",
+    );
+
+    const c = await loadConfig();
+    expect(c.harnesses.personas).toBeUndefined();
+  });
+
   test("uses persisted harness bins when no explicit bin is configured", async () => {
     await writeFile(
       join(workdir, "state.json"),

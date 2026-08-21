@@ -124,6 +124,21 @@ describe("checkConfiguredHarnesses", () => {
     expect(missingPi?.resolved).toBeUndefined();
   });
 
+  test("checks harnesses used only by persona overrides", async () => {
+    const personaConfig = {
+      harnesses: {
+        chain: ["claude"],
+        personas: { amanda: { chain: ["codex", "claude"] } },
+        claude: { bin: "definitely-missing-claude" },
+        pi: { bin: "pi" },
+        codex: { bin: "definitely-missing-codex", model: "" },
+      },
+    } as unknown as Config;
+
+    const results = await checkConfiguredHarnesses(personaConfig, "");
+    expect(results.map((result) => result.id)).toEqual(["claude", "codex"]);
+  });
+
   test("falls back to discovery when a cached absolute harness path is stale", async () => {
     const dir = await mkdtemp(join(tmpdir(), "phantombot-harness-"));
     const pi = join(dir, "pi");

@@ -578,6 +578,11 @@ export interface Config {
   harnesses: {
     /** Order = primary → fallback. Recognized ids: "claude", "pi", "codex". */
     chain: string[];
+    /**
+     * Optional chain overrides keyed by persona name. A persona without an
+     * entry uses the global `chain` above.
+     */
+    personas?: Record<string, { chain: string[] }>;
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
       bin: string;
@@ -746,6 +751,10 @@ export async function loadConfig(): Promise<Config> {
     warnPiMaxPayloadDeprecated();
   }
   const tomlCodex = (tomlHarnesses.codex ?? {}) as Record<string, unknown>;
+  const tomlHarnessPersonas = (tomlHarnesses.personas ?? {}) as Record<
+    string,
+    unknown
+  >;
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlP2p = (toml.p2p ?? {}) as Record<string, unknown>;
@@ -848,6 +857,7 @@ export async function loadConfig(): Promise<Config> {
 
     harnesses: {
       chain: migratedChain,
+      personas: buildHarnessPersonasConfig(tomlHarnessPersonas),
 
       claude: {
         bin:
@@ -1356,6 +1366,25 @@ function buildPiRoutingConfig(
     return undefined;
   }
   return resolved;
+}
+
+/**
+ * Parse `[harnesses.personas.<name>]` chain overrides. Empty chains and chains
+ * that only name the removed Gemini harness are omitted, so those personas use
+ * the global chain. Unknown ids remain intact and are reported by the shared
+ * chain builder in the same way as unknown ids in the global chain.
+ */
+function buildHarnessPersonasConfig(
+  tomlPersonas: Record<string, unknown>,
+): Record<string, { chain: string[] }> | undefined {
+  const personas: Record<string, { chain: string[] }> = {};
+  for (const [persona, raw] of Object.entries(tomlPersonas)) {
+    const configured = asStringArray(asRecord(raw).chain);
+    if (!configured) continue;
+    const chain = configured.filter((id) => id !== "gemini");
+    if (chain.length > 0) personas[persona] = { chain };
+  }
+  return Object.keys(personas).length > 0 ? personas : undefined;
 }
 
 function buildEmbeddingsConfig(

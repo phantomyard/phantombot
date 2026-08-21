@@ -111,7 +111,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   let harnesses = input.harnesses;
   if (!harnesses) {
     ({ config } = await resolveHarnessBinsForConfig(config, { err }));
-    harnesses = buildHarnessChain(config, err);
+    harnesses = buildHarnessChain(config, err, persona);
   }
   if (harnesses.length === 0) {
     err.write(

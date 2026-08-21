@@ -106,7 +106,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   const taskStore =
     input.taskStore ?? (await openTaskStore(config.memoryDbPath));
   const memory = input.memory ?? (await openMemoryStore(config.memoryDbPath));
-  let harnesses = input.harnesses;
+  let harnessBinsResolved = input.harnesses !== undefined;
 
   try {
     // Expire any tasks past their expires_at before processing due.
@@ -212,7 +212,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             runError = `command exited ${result.exitCode}`;
           }
         } else {
-          if (!harnesses) {
+          if (!harnessBinsResolved) {
             // Resolve harness binaries against the live filesystem the same
             // way the `run` daemon does — the tick oneshot otherwise relied
             // solely on the systemd unit's narrow Environment=PATH, so a
@@ -220,9 +220,11 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             // Done lazily (only when an agent-backed task is actually due) so
             // a tick with no agent work doesn't pay the filesystem search.
             ({ config } = await resolveHarnessBinsForConfig(config, { err }));
-            harnesses = buildHarnessChain(config, err);
+            harnessBinsResolved = true;
           }
-          if (harnesses.length === 0) {
+          const taskHarnesses =
+            input.harnesses ?? buildHarnessChain(config, err, task.persona);
+          if (taskHarnesses.length === 0) {
             throw new Error("no harnesses configured");
           }
           for await (const chunk of runTurn({
@@ -234,7 +236,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             // home dir, so home stays the cwd. Explicit since #387 removed the
             // silent homedir() default in runTurn.
             workingDir: homedir(),
-            harnesses,
+            harnesses: taskHarnesses,
             memory,
             idleTimeoutMs: config.harnessIdleTimeoutMs,
             hardTimeoutMs: BACKGROUND_WAKE_HARD_TIMEOUT_MS,
@@ -259,7 +261,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
               task.persona,
               conversation,
               memory,
-              harnesses,
+              taskHarnesses,
               agentDir,
             ),
             // Provenance: an autonomous task wake can ingest UNTRUSTED content

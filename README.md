@@ -473,6 +473,10 @@ default_persona = "phantom"
 [harnesses]
 chain = ["pi", "claude", "codex"]
 
+# Optional. Amanda uses this chain. Other personas use the global chain above.
+[harnesses.personas.amanda]
+chain = ["claude", "codex"]
+
 [channels.telegram]
 token = "123456:telegram-bot-token"
 allowed_user_ids = [123456789]
@@ -493,6 +497,9 @@ Harness notes:
 - Gemini remains available for optional semantic-memory embeddings via `phantombot embedding`; it is not an agent harness.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
+- A `[harnesses.personas.<name>]` `chain` overrides the global chain for that
+  persona. If the block is absent or its chain is empty, the persona uses the
+  global chain. Run `phantombot harness --persona <name>` to set an override.
 - Falling back is silent in chat, but not silent to you: if the primary
   harness fails authentication several turns running, phantombot sends you
   one Telegram alert naming the host and which harness is covering for it
@@ -508,7 +515,8 @@ Interactive setup:
 | Command | Purpose |
 |---|---|
 | `phantombot persona` | Create, import, restore, or switch personas |
-| `phantombot harness` | Choose harness chain |
+| `phantombot harness` | Choose the global harness chain |
+| `phantombot harness --persona <name>` | Choose one persona's harness chain |
 | `phantombot telegram` | Configure Telegram token and allowlist |
 | `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel |
 | `phantombot voice` | Configure TTS/STT providers |

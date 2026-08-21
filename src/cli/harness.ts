@@ -46,6 +46,7 @@ import { updateEnvFile } from "../lib/envFile.ts";
 import { writePiApiKey } from "../lib/piAuthStore.ts";
 import { userEnvPath } from "./env.ts";
 import { saveHarnessBins } from "../state.ts";
+import { harnessChainIds } from "../harnesses/buildChain.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
 
@@ -102,9 +103,16 @@ export async function detectAvailability(
 export async function applyHarnessChain(
   configPath: string,
   chain: readonly HarnessId[],
+  persona?: string,
 ): Promise<void> {
   await updateConfigToml(configPath, (toml) => {
-    setIn(toml, ["harnesses", "chain"], [...chain]);
+    setIn(
+      toml,
+      persona
+        ? ["harnesses", "personas", persona, "chain"]
+        : ["harnesses", "chain"],
+      [...chain],
+    );
   });
 }
 
@@ -180,6 +188,8 @@ function setRoutingKey(
 }
 
 interface RunInput {
+  /** Write a persona override. Omit to configure the global fallback chain. */
+  persona?: string;
   config?: Config;
   serviceControl?: ServiceControl;
   /**
@@ -192,6 +202,8 @@ interface RunInput {
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
+  const persona = input.persona?.trim() || undefined;
+  const currentChain = harnessChainIds(config, persona);
   const availability = input.availability ?? (await detectAvailability(config));
   await saveHarnessBins(availability);
   const svc = input.serviceControl ?? defaultServiceControl();
@@ -224,7 +236,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     })),
     // Pi is the default (SUPPORTED_HARNESSES[0]); an existing config wins.
     initialValue:
-      (config.harnesses.chain[0] as HarnessId) ?? SUPPORTED_HARNESSES[0],
+      (currentChain[0] as HarnessId) ?? SUPPORTED_HARNESSES[0],
   });
   if (p.isCancel(primary)) {
     p.cancel("cancelled");
@@ -258,7 +270,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const fallbackPick = await p.select<HarnessId | "none">({
     message: "Fallback harness",
     options: fallbackOptions,
-    initialValue: (config.harnesses.chain[1] as HarnessId | undefined) ?? "none",
+    initialValue: (currentChain[1] as HarnessId | undefined) ?? "none",
   });
   if (p.isCancel(fallbackPick)) {
     p.cancel("cancelled");
@@ -281,9 +293,9 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const chain: HarnessId[] = [primary as HarnessId];
   if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
 
-  await applyHarnessChain(config.configPath, chain);
+  await applyHarnessChain(config.configPath, chain, persona);
   p.note(
-    `harness chain: ${chain.join(" → ")}\nsaved to ${config.configPath}`,
+    `harness chain${persona ? ` for '${persona}'` : ""}: ${chain.join(" → ")}\nsaved to ${config.configPath}`,
     "Saved",
   );
 
@@ -838,8 +850,16 @@ export default defineCommand({
     name: "harness",
     description: "Set the harness chain (primary → fallback). Detects which binaries are on PATH.",
   },
-  async run() {
-    const code = await runHarness();
+  args: {
+    persona: {
+      type: "string",
+      description: "Set the chain for one persona. Omit for the global chain.",
+    },
+  },
+  async run({ args }) {
+    const code = await runHarness({
+      persona: args.persona ? String(args.persona) : undefined,
+    });
     process.exitCode = code;
   },
 });

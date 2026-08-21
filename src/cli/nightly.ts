@@ -356,7 +356,9 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     ({ config } = await resolveHarnessBinsForConfig(config, { err }));
   }
 
-  const harnesses = input.runStage ? [] : buildHarnessChain(config, err);
+  const harnesses = input.runStage
+    ? []
+    : buildHarnessChain(config, err, persona);
   if (!input.runStage && harnesses.length === 0) {
     err.write("no harnesses configured\n");
     return 2;

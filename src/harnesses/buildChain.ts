@@ -16,9 +16,21 @@ import { PiHarness } from "./pi.ts";
 import { CodexHarness } from "./codex.ts";
 import type { Harness } from "./types.ts";
 
-export function buildHarnessChain(config: Config, err: WriteSink): Harness[] {
+export function harnessChainIds(config: Config, persona?: string): string[] {
+  if (persona) {
+    const override = config.harnesses.personas?.[persona]?.chain;
+    if (override && override.length > 0) return override;
+  }
+  return config.harnesses.chain;
+}
+
+export function buildHarnessChain(
+  config: Config,
+  err: WriteSink,
+  persona?: string,
+): Harness[] {
   const out: Harness[] = [];
-  for (const id of config.harnesses.chain) {
+  for (const id of harnessChainIds(config, persona)) {
     if (id === "claude") {
       out.push(new ClaudeHarness(config.harnesses.claude));
     } else if (id === "pi") {

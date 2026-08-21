@@ -622,7 +622,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       startTelegram({
         config,
         memory,
-        harnesses,
+        harnesses: buildHarnessChain(config, err, l.persona),
         agentDir: l.agentDir,
         persona: l.persona,
         account: l.account,
@@ -673,6 +673,13 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       const p2pSettings = config.p2p ?? DEFAULT_P2P;
 
       for (const spec of phantomchatPersonas) {
+        const personaHarnesses = buildHarnessChain(config, err, spec.persona);
+        if (personaHarnesses.length === 0) {
+          err.write(
+            `warning: phantomchat persona '${spec.persona}' has no usable harnesses — skipping\n`,
+          );
+          continue;
+        }
         const { identity, allowedHex, relayHex, tofu, groupBots } = spec.config;
 
         // Group addressing (multi-bot groups). From the configured sibling bots
@@ -832,7 +839,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
           startPhantomchat({
             config,
             memory,
-            harnesses,
+            harnesses: personaHarnesses,
             agentDir,
             persona: spec.persona,
             channel,
@@ -883,7 +890,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             const greeting = await resolvePersonaGreeting({
               agentDir,
               persona: greetSpec.persona,
-              harnesses,
+              harnesses: personaHarnesses,
               idleTimeoutMs: config.harnessIdleTimeoutMs,
               hardTimeoutMs: config.harnessHardTimeoutMs,
               startupTimeoutMs: config.harnessStartupTimeoutMs,

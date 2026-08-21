@@ -67,7 +67,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 
 ```
 phantombot ask "what's on my calendar?"
-  → ask.ts: load config, resolve persona, open memory, build harness chain
+  → ask.ts: load config, resolve persona, open memory, build that persona's harness chain
   → orchestrator.turn.runTurn({ noHistory: true, conversation: "cli:ask", ... })
        → loadPersona(agentDir) → { boot, memory, tools, identitySource, ... }
        → memory.recentTurns(persona, "cli:ask", 20) → [] (skipped: noHistory)
@@ -199,7 +199,10 @@ Three properties worth knowing when touching this code:
 
 4. **Conversation history import from OpenClaw.** Skipped in v1 because OpenClaw's transcript format isn't formally documented. Add `phantombot import-history <path>` once we have the schema.
 
-5. **Per-persona harness chains.** Today the chain is global. If different personas should use different defaults (Robbie via claude, alt-persona via pi-only), add `[personas.<name>]` overrides in config.toml.
+5. **More than two harnesses in the setup wizard.** The config and fallback
+   runner accept longer chains, but `phantombot harness` currently asks for one
+   primary and one fallback. Operators can set a longer global or per-persona
+   chain directly in `config.toml`.
 
 ## Non-goals
 

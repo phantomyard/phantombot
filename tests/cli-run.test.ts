@@ -267,6 +267,43 @@ describe("runRun — early exits", () => {
 });
 
 describe("runRun — multi-persona telegram", () => {
+  test("passes each listener its effective persona harness chain", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "amanda"), { recursive: true });
+    await writeFile(join(workdir, "personas", "amanda", "BOOT.md"), "# Amanda");
+    const chains: Record<string, string[]> = {};
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: {
+          ...config.harnesses,
+          chain: ["codex"],
+          personas: { amanda: { chain: ["claude", "codex"] } },
+          codex: { bin: "codex", model: "" },
+        },
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            amanda: { token: "amanda-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      checkHarnesses: false,
+      runTelegramServer: async (input) => {
+        chains[input.persona] = input.harnesses.map((h) => h.id);
+      },
+      out,
+      err,
+    });
+
+    expect(code).toBe(0);
+    expect(chains.phantom).toEqual(["codex"]);
+    expect(chains.amanda).toEqual(["claude", "codex"]);
+  });
+
   test("starts when only [channels.telegram.personas.*] is configured (no default block)", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();

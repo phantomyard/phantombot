@@ -84,4 +84,14 @@ describe("applyHarnessChain", () => {
     const text = await readFile(path, "utf8");
     expect(text).toContain('chain = [ "pi" ]');
   });
+
+  test("writes a persona override without changing the global chain", async () => {
+    const path = join(workdir, "config.toml");
+    await applyHarnessChain(path, ["codex", "pi"]);
+    await applyHarnessChain(path, ["claude", "codex"], "amanda");
+    const text = await readFile(path, "utf8");
+    expect(text).toContain('chain = [ "codex", "pi" ]');
+    expect(text).toContain("[harnesses.personas.amanda]");
+    expect(text).toContain('chain = [ "claude", "codex" ]');
+  });
 });
