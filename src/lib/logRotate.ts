@@ -233,10 +233,15 @@ export interface ReleaseLockOptions {
  * alike — happens while holding it, which makes the check and the unlink
  * atomic with respect to each other.
  *
- * If the steal lock cannot be taken, a takeover is in flight right now. It
- * will replace our lock itself, so we simply return: not deleting is always
- * safe (a leftover lock is stale within {@link LOCK_STALE_MS} and stealable),
- * whereas deleting under a racing takeover is the bug this guards.
+ * If the steal lock cannot be taken, a takeover is in flight right now (or a
+ * pass crashed mid-steal). Either way we return WITHOUT deleting: not deleting
+ * is always safe (a leftover lock is stale within {@link LOCK_STALE_MS} and
+ * stealable by the next pass), whereas deleting under a racing takeover is the
+ * bug this guards. A steal lock that is itself stale is cleared on the way out
+ * so it cannot wedge later passes — but, exactly as in {@link acquireLock},
+ * clearing and then taking it in the same pass would reintroduce the race: the
+ * original steal holder may be paused just before its own mutation of the real
+ * lock, and would install its successor into the window we just opened.
  *
  * Exported (with {@link acquireLock}) so the lock protocol itself can be
  * driven directly from tests; nothing outside this module calls it.
@@ -250,17 +255,17 @@ export async function releaseLock(
   const path = join(dir, LOCK_FILE);
   const stealPath = join(dir, STEAL_FILE);
 
-  let held = await createLock(stealPath, now);
+  const held = await createLock(stealPath, now);
   if (!held) {
-    // A steal lock left behind by a crashed pass must not wedge releases
-    // forever; clear it once it is itself stale, then try again.
+    // A steal lock left behind by a crashed pass must not wedge later passes,
+    // so clear it once it is itself stale — but do NOT take it here. Leaving
+    // our own lock in place is safe; it goes stale and the next pass steals it.
     const stealHolder = await readLock(stealPath);
     if (stealHolder && isStale(stealHolder, now)) {
       await rm(stealPath, { force: true });
-      held = await createLock(stealPath, now);
     }
+    return;
   }
-  if (!held) return;
 
   try {
     const holder = await readLock(path);

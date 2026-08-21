@@ -246,15 +246,45 @@ describe("rotateLogDir", () => {
     expect(existsSync(join(dir, ".rotate.lock.steal"))).toBe(false);
   });
 
-  test("release is not wedged by a stale steal lock", async () => {
+  /**
+   * A steal lock we cannot take means a takeover may be in flight, and its
+   * holder can be paused just before it mutates the real lock. Release must
+   * therefore return WITHOUT deleting — deleting would open exactly the window
+   * the steal holder is about to install its successor into. Stale or fresh,
+   * the real lock is left alone; only a STALE steal lock is cleared, so later
+   * passes are not wedged.
+   */
+  test("release never deletes the real lock while a steal lock is held", async () => {
     const token = await acquireLock(dir, new Date());
-    const stale = new Date(Date.now() - LOCK_STALE_MS - 1_000).toISOString();
-    await writeFile(join(dir, ".rotate.lock.steal"), `999999 ${stale}\n`);
+    // A contender that is mid-steal (its steal lock is fresh).
+    await writeFile(
+      join(dir, ".rotate.lock.steal"),
+      `999999 ${new Date().toISOString()} contender\n`,
+    );
 
     await releaseLock(dir, token as string);
 
-    expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
+    // Ours survives: the paused steal holder is still entitled to replace it.
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(true);
+    // A fresh steal lock belongs to the contender — we must not clear it.
+    expect(existsSync(join(dir, ".rotate.lock.steal"))).toBe(true);
+  });
+
+  test("release clears a stale steal lock but still leaves the real lock", async () => {
+    const token = await acquireLock(dir, new Date());
+    const stale = new Date(Date.now() - LOCK_STALE_MS - 1_000).toISOString();
+    await writeFile(join(dir, ".rotate.lock.steal"), `999999 ${stale} old\n`);
+
+    await releaseLock(dir, token as string);
+
+    // Not deleted: clearing the steal lock and taking it in the same pass is
+    // the race — the old steal holder may resume and install a successor.
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(true);
+    // But the stale steal lock is gone, so nothing is wedged...
     expect(existsSync(join(dir, ".rotate.lock.steal"))).toBe(false);
+    // ...and the leftover real lock is recoverable by the next pass once stale.
+    const later = new Date(Date.now() + LOCK_STALE_MS + 1_000);
+    expect(await acquireLock(dir, later)).toBeString();
   });
 
   test("the lock file itself is never rotated", async () => {
