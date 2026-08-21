@@ -831,6 +831,71 @@ describe("PiHarness coder-swap retry ladder", () => {
     expect(error?.recoverable).toBe(true);
   });
 
+  test("no retry after a TOOL ran, even with zero text (tools aren't idempotent)", async () => {
+    // `toolthenfail` runs one tool (progress chunk, NOT text) and then dies
+    // exit-1 (recoverable). The old gate keyed on streamed TEXT only, so this
+    // read as "nothing happened yet" and re-ran the attempt — replaying
+    // side-effecting tools (bash, notify, vault) up to four times.
+    process.env.FAKE_PI_MODE = "toolthenfail";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    // The tool run surfaced as a progress chunk before the error.
+    expect(chunks.some((c) => c.type === "progress")).toBe(true);
+    const error = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable?: boolean }
+      | undefined;
+    expect(error?.recoverable).toBe(true);
+    // Exactly ONE invocation — no retry on the coder model, no primary
+    // fallback. The tool's side effects must never be replayed.
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
+  test("terminal error (exit 127) → exactly one attempt, no ladder (locks the non-retryable rule)", async () => {
+    // notfound exits 127 → recoverable: false. A /stop, a missing binary, or
+    // a policy tripwire must never be re-run on a second brain — this test
+    // locks in the discipline the whole ladder rests on.
+    process.env.FAKE_PI_MODE = "notfound";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(newRequest({ userMessage: PR_MSG })),
+    );
+    const error = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable?: boolean }
+      | undefined;
+    expect(error?.recoverable).toBe(false);
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
+  test("hard wall-clock cap kill is FINAL — no ladder, no primary fallback", async () => {
+    // `hang` with a hard cap far SHORTER than the idle window kills via the
+    // hard timer: "timed out after Nms (hard wall-clock cap)". The cap is the
+    // one timer that is supposed to be final — retrying it 3x would turn one
+    // 60-min cap into four hours. The error is still recoverable (the
+    // orchestrator's harness chain applies) but the ladder must not touch it.
+    process.env.FAKE_PI_MODE = "hang";
+    const chunks = await collect(
+      new PiHarness({
+        bin: FAKE_PI,
+        routing: { primaryModel: "mimo-v2.5", codingModel: "z-ai/glm-5.2" },
+      }).invoke(
+        newRequest({ userMessage: PR_MSG, idleTimeoutMs: 10_000, hardTimeoutMs: 300 }),
+      ),
+    );
+    const error = chunks.find((c) => c.type === "error") as
+      | { type: "error"; error: string; recoverable?: boolean }
+      | undefined;
+    expect(error?.error).toContain("hard wall-clock cap");
+    expect(error?.recoverable).toBe(true);
+    // Exactly ONE invocation — no retries, no primary fallback.
+    expect(await loggedArgv()).toHaveLength(1);
+  });
+
   test("successful swapped turn → single attempt, no ladder", async () => {
     process.env.FAKE_PI_MODE = "modelgate";
     const chunks = await collect(

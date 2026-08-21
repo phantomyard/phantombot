@@ -51,6 +51,7 @@ import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
 import { reloadVaultForPersona } from "../lib/vault.ts";
 import {
   type HarnessActivity,
+  isHardCapError,
   runHarnessProcess,
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
@@ -356,11 +357,23 @@ export class PiHarness implements Harness {
       // turn.
       //
       // Retry discipline (each rule exists for a reason):
-      //   - Only when NOTHING was streamed to the user yet this attempt —
-      //     retrying after visible text would duplicate bubbles on screen
-      //     (the streaming-first trade-off documented in fallback.ts).
+      //   - Only when NOTHING happened yet this attempt — no text streamed AND
+      //     no tool run. Text is not the only non-idempotent thing here: pi's
+      //     tool executions surface as progress chunks, not text, and a retry
+      //     after a bash/notify/vault tool ran would replay those side effects
+      //     wholesale. `producedOutput` flips on any non-heartbeat chunk
+      //     (heartbeat is payload-less by contract), which keeps the genuine
+      //     "provider never started streaming" case — the one this ladder
+      //     exists for — fully retryable while everything that got anywhere
+      //     stays single-shot. Retrying after visible text would ALSO duplicate
+      //     bubbles on screen (the streaming-first trade-off documented in
+      //     fallback.ts).
       //   - Only recoverable, non-terminal errors — a policy violation or
       //     user /stop must not be retried onto another model.
+      //   - NEVER on a hard wall-clock cap kill. The hard cap is the one timer
+      //     that is supposed to be FINAL: a turn that legitimately kept the
+      //     idle timer fed but never converged is exactly what it exists to
+      //     kill. The ladder would multiply one 60-min cap into four hours.
       //   - Errors from the final PRIMARY attempt are yielded as-is so the
       //     orchestrator's normal harness chain still applies afterwards.
       // ─────────────────────────────────────────────────────────────────
@@ -372,7 +385,12 @@ export class PiHarness implements Harness {
         attempt <= CODER_SWAP_MAX_ATTEMPTS && !req.signal?.aborted;
         attempt++
       ) {
-        let streamedText = false;
+        // Tracks whether this attempt produced output of ANY kind (text,
+        // progress from a tool run, done). heartbeat is payload-less by
+        // contract and is excluded, so a provider that never starts streaming
+        // stays retryable — but an attempt that got as far as running a tool
+        // is NOT, because tools have side effects and a re-run is a re-do.
+        let producedOutput = false;
         let failure:
           | (HarnessChunk & { type: "error"; error: string })
           | undefined;
@@ -383,7 +401,7 @@ export class PiHarness implements Harness {
             failure = chunk;
             break;
           }
-          if (chunk.type === "text") streamedText = true;
+          if (chunk.type !== "heartbeat") producedOutput = true;
           yield chunk;
         }
         if (!failure) return; // completed (or the consumer stopped us)
@@ -391,13 +409,15 @@ export class PiHarness implements Harness {
         const retryable =
           failure.recoverable !== false &&
           !failure.terminal &&
-          !streamedText &&
+          !producedOutput &&
+          !isHardCapError(failure.error) &&
           !req.signal?.aborted;
         // Not retryable — surface the error exactly as the single-attempt
-        // path always did: a policy violation, a /stop, or a failure AFTER
-        // visible text must not be re-run on another model (that would
-        // duplicate bubbles on screen, the very trade-off fallback.ts
-        // warns against re-litigating).
+        // path always did: a policy violation, a /stop, a hard-cap kill (the
+        // final timer must stay final), or a failure AFTER the attempt got
+        // somewhere (streamed text OR ran a tool — a re-run would duplicate
+        // bubbles and replay side-effecting tools, the very trade-off
+        // fallback.ts warns against re-litigating).
         if (!retryable) {
           yield failure;
           return;
@@ -413,8 +433,9 @@ export class PiHarness implements Harness {
           });
         }
       }
-      // All swapped attempts failed CLEANLY (nothing ever streamed), so the
-      // primary attempt starts from a blank screen — no duplicated text.
+      // All swapped attempts failed CLEANLY (nothing ever happened — no text,
+      // no tools), so the primary attempt starts from a blank slate: no
+      // duplicated bubbles, no replayed tool side effects.
       // (If the loop exited early because the user aborted, stop here too.)
       if (req.signal?.aborted) return;
       log.warn("pi.invoke coder-swap exhausted — falling back to primary", {

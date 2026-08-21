@@ -227,6 +227,18 @@ export function createKillCoordinator(
   };
 }
 
+/*
+ * Suffix marking the hard wall-clock cap error message, and the matcher for
+ * it. Exported so callers that act on error chunks (e.g. the pi coder-swap
+ * retry ladder) can recognise "the FINAL timer killed this run" without
+ * re-hardcoding the string in two places.
+ */
+export const HARD_CAP_ERROR_SUFFIX = "(hard wall-clock cap)";
+
+export function isHardCapError(error: string): boolean {
+  return error.endsWith(HARD_CAP_ERROR_SUFFIX);
+}
+
 /**
  * Render the standard "killed by X" HarnessChunk for a kill cause.
  * Returns undefined if the process exited naturally (no kill).
@@ -252,7 +264,7 @@ export function killCauseToErrorChunk(
   if (cause === "timeout") {
     return {
       type: "error",
-      error: `${harnessId} timed out after ${hardTimeoutMs ?? "unknown"}ms (hard wall-clock cap)`,
+      error: `${harnessId} timed out after ${hardTimeoutMs ?? "unknown"}ms ${HARD_CAP_ERROR_SUFFIX}`,
       recoverable: true,
     };
   }

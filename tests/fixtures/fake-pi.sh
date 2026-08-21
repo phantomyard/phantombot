@@ -12,6 +12,10 @@
 #   error    — exit 1
 #   notfound — exit 127
 #   hang     — sleep forever (for the timeout test)
+#   toolthenfail — run one tool (tool_execution_start → progress chunk), then
+#              exit 1 like a provider death: an attempt that DID real,
+#              side-effecting work before dying. Drives the producedOutput
+#              ladder test (tools aren't idempotent → no retry).
 #   argv     — echo argv (joined) as a text_delta, exit 0 (arg-shape test)
 #   env      — echo the PHANTOMBOT_*_MODEL env vars + the PI provider/api-key
 #              as a text_delta, exit 0 (routing env-projection test)
@@ -84,6 +88,16 @@ case "$mode" in
     printf '%s\n' '{"type":"tool_execution_start","toolName":"bash","args":{}}'
     # Process exits 0 mid-task with no turn_end completion signal.
     exit 0
+    ;;
+  toolthenfail)
+    printf '%s\n' '{"type":"session","version":3,"id":"abc"}'
+    printf '%s\n' '{"type":"agent_start"}'
+    printf '%s\n' '{"type":"turn_start"}'
+    # One real tool run — surfaces as a PROGRESS chunk (not text) in the
+    # harness stream, exactly like a bash/notify/vault side effect.
+    printf '%s\n' '{"type":"tool_execution_start","toolName":"bash","args":{"command":"echo side-effect"}}'
+    printf '%s\n' '{"type":"tool_execution_end","toolName":"bash","result":{}}'
+    exit 1
     ;;
   error)
     echo "simulated pi error" >&2
