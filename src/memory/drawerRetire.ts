@@ -32,6 +32,8 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { Database } from "bun:sqlite";
+
 import { log } from "../lib/logger.ts";
 import { archiveDirPath } from "../lib/nightlyCompact.ts";
 import {
@@ -42,6 +44,7 @@ import {
 } from "./drawers.ts";
 import { drawerPath, ingestDrawerFile, parseDrawer } from "./drawerIngest.ts";
 import { verifyDrawerRoundTrip } from "./drawerExport.ts";
+import { clearDrawerHold, noteDrawerHold } from "./drawerSync.ts";
 
 export interface DrawerRetirement {
   kind: DrawerKind;
@@ -54,6 +57,15 @@ export interface DrawerRetirement {
   archivedTo?: string;
   /** Why the drawer was held back. Set only on `held`. */
   reason?: string;
+  /**
+   * Whether this hold is new — first time held, or held for a NEW reason.
+   * Only set when a `db` was supplied; that is what remembers across fires.
+   * Callers that log on a schedule use this to warn on the transition and
+   * stay quiet on the repeat.
+   */
+  firstHold?: boolean;
+  /** When this hold started, ISO. Set alongside `firstHold`. */
+  heldSince?: string;
 }
 
 /**
@@ -65,6 +77,12 @@ export interface DrawerRetirement {
  */
 export async function retireDrawers(input: {
   store: DrawerStore;
+  /**
+   * The same connection the store was opened on. Optional: without it
+   * retirement still works, it just cannot tell a first hold from the four
+   * hundredth, so every outcome reports as new.
+   */
+  db?: Database;
   personaDir: string;
   persona: string;
   kinds?: readonly DrawerKind[];
@@ -78,22 +96,60 @@ export async function retireDrawers(input: {
     const rel = drawerPath(kind);
     const abs = join(input.personaDir, rel);
     if (!existsSync(abs)) {
-      out.push({ kind, path: rel, status: "absent" });
+      out.push(track(input, { kind, path: rel, status: "absent" }, now));
       continue;
     }
     try {
-      out.push(await retireOne(input, kind, rel, abs, stamp, now));
+      out.push(track(input, await retireOne(input, kind, rel, abs, stamp, now), now));
     } catch (e) {
       // A drawer that throws keeps its file. Every failure mode here — a
       // read error, a locked database, a full disk mid-archive — resolves to
       // "the markdown stays", because the file is still the only copy the
       // moment we cannot prove otherwise.
       const reason = (e as Error).message;
-      log.warn("drawerRetire: held back", { kind, error: reason });
-      out.push({ kind, path: rel, status: "held", reason });
+      const held = track(
+        input,
+        { kind, path: rel, status: "held", reason },
+        now,
+      );
+      // Same rule as the heartbeat's aggregate line: the transition is a
+      // warning, the standing condition is not. `doctor` is where a drawer
+      // that has been stuck for a week gets reported.
+      if (held.firstHold === false) {
+        log.info("drawerRetire: still held back", { kind, error: reason });
+      } else {
+        log.warn("drawerRetire: held back", { kind, error: reason });
+      }
+      out.push(held);
     }
   }
   return out;
+}
+
+/**
+ * Persist the hold/clear side of an outcome and stamp it with `firstHold`.
+ *
+ * A no-op without a `db` — the outcome is returned untouched, which keeps
+ * every existing caller (and the tests) working on a store alone.
+ */
+function track(
+  input: { db?: Database; persona: string },
+  r: DrawerRetirement,
+  now: Date,
+): DrawerRetirement {
+  if (!input.db) return r;
+  if (r.status !== "held") {
+    clearDrawerHold(input.db, input.persona, r.path);
+    return r;
+  }
+  const { firstHold, heldSince } = noteDrawerHold(
+    input.db,
+    input.persona,
+    r.path,
+    r.reason ?? "",
+    now,
+  );
+  return { ...r, firstHold, heldSince };
 }
 
 async function retireOne(

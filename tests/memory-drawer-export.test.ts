@@ -10,7 +10,11 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { openDrawerStore, syncDrawers } from "../src/memory/drawerSync.ts";
+import {
+  noteDrawerHold,
+  openDrawerStore,
+  syncDrawers,
+} from "../src/memory/drawerSync.ts";
 import {
   exportDrawerMarkdown,
   renderEntryMarkdown,
@@ -259,6 +263,132 @@ describe("retireDrawers", () => {
       });
       expect(result!.status).toBe("held");
       expect(existsSync(join(dir, "memory", "lessons.md"))).toBe(true);
+    } finally {
+      close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("retirement hold state", () => {
+  // Lena's #418 review: retirement runs on every heartbeat, and a held drawer
+  // stays held until a human fixes it — so the hold must be reported on the
+  // TRANSITION, not on every fire.
+  test("the first hold is news, the second consecutive one is not", async () => {
+    const dir = await persona();
+    await mkdir(join(dir, "memory", "lessons.md"), { recursive: true });
+    const { store, db, close } = await opened(dir);
+    try {
+      const args = {
+        store,
+        db,
+        personaDir: dir,
+        persona: PERSONA,
+        kinds: ["lessons"] as const,
+      };
+      const [first] = await retireDrawers({
+        ...args,
+        now: new Date("2026-08-21T09:00:00Z"),
+      });
+      expect(first!.status).toBe("held");
+      expect(first!.firstHold).toBe(true);
+      expect(first!.heldSince).toBe("2026-08-21T09:00:00.000Z");
+
+      const [second] = await retireDrawers({
+        ...args,
+        now: new Date("2026-08-21T09:30:00Z"),
+      });
+      expect(second!.status).toBe("held");
+      expect(second!.firstHold).toBe(false);
+      // The clock on the condition starts when it started, not when it was
+      // last observed — otherwise "held since" always reads as just now.
+      expect(second!.heldSince).toBe("2026-08-21T09:00:00.000Z");
+    } finally {
+      close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a hold for a NEW reason is news again", async () => {
+    const dir = await persona();
+    const { db, close } = await opened(dir);
+    try {
+      const path = join("memory", "lessons.md");
+      const first = noteDrawerHold(
+        db,
+        PERSONA,
+        path,
+        "unreadable",
+        new Date("2026-08-21T09:00:00Z"),
+      );
+      expect(first.firstHold).toBe(true);
+      const changed = noteDrawerHold(
+        db,
+        PERSONA,
+        path,
+        "round-trip lost 2 entries",
+        new Date("2026-08-21T09:30:00Z"),
+      );
+      expect(changed.firstHold).toBe(true);
+      expect(changed.heldSince).toBe("2026-08-21T09:00:00.000Z");
+    } finally {
+      close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("retiring clears the hold, so a later relapse warns again", async () => {
+    const dir = await persona();
+    const lessons = join(dir, "memory", "lessons.md");
+    await mkdir(lessons, { recursive: true });
+    const { store, db, close } = await opened(dir);
+    try {
+      const args = {
+        store,
+        db,
+        personaDir: dir,
+        persona: PERSONA,
+        kinds: ["lessons"] as const,
+        now: new Date("2026-08-21T09:00:00Z"),
+      };
+      expect((await retireDrawers(args))[0]!.firstHold).toBe(true);
+      expect((await retireDrawers(args))[0]!.firstHold).toBe(false);
+
+      // Fix it: a real file that retires cleanly.
+      await rm(lessons, { recursive: true, force: true });
+      await writeFile(
+        lessons,
+        "# Lessons\n\n## 2026-06-01\n\n- [lesson] Verify before asserting.\n",
+      );
+      const [fixed] = await retireDrawers(args);
+      expect(fixed!.status).toBe("retired");
+
+      // Relapse. The operator who read the first warning never read this one.
+      await mkdir(lessons, { recursive: true });
+      const [again] = await retireDrawers(args);
+      expect(again!.status).toBe("held");
+      expect(again!.firstHold).toBe(true);
+    } finally {
+      close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("without a db the outcome carries no hold state at all", async () => {
+    const dir = await persona();
+    await mkdir(join(dir, "memory", "lessons.md"), { recursive: true });
+    const { store, close } = await opened(dir);
+    try {
+      const [r] = await retireDrawers({
+        store,
+        personaDir: dir,
+        persona: PERSONA,
+        kinds: ["lessons"],
+      });
+      expect(r!.status).toBe("held");
+      // undefined, not false: a caller with no memory of previous fires must
+      // report every hold rather than silently swallow the first one.
+      expect(r!.firstHold).toBeUndefined();
     } finally {
       close();
       await rm(dir, { recursive: true, force: true });

@@ -279,6 +279,26 @@ describe("heartbeat drawer projection", () => {
     expect(existsSync(join(dir, "memory", "decisions.md"))).toBe(true);
   });
 
+  test("a drawer held on two consecutive heartbeats is only news once", async () => {
+    // The whole point of the hold state: retirement fires 48 times a day and
+    // the condition it reports is, by construction, a persistent one.
+    const dir = await persona();
+    await mkdir(join(dir, "memory", "decisions.md"), { recursive: true });
+    const args = {
+      personaDir: dir,
+      today: "2026-06-04",
+      memoryDbPath: join(dir, "memory.sqlite"),
+      persona: PERSONA,
+    };
+    const first = await runHeartbeat(args);
+    const second = await runHeartbeat(args);
+    const held = (r: Awaited<ReturnType<typeof runHeartbeat>>) =>
+      r.drawerRetirement?.find((x) => x.kind === "decisions");
+    expect(held(first)?.firstHold).toBe(true);
+    expect(held(second)?.status).toBe("held");
+    expect(held(second)?.firstHold).toBe(false);
+  });
+
   test("without a db path nothing is promoted and no markdown is written", async () => {
     // Deliberately not the old behaviour: with no store there is no write
     // path at all. The daily file keeps the lines for the next heartbeat.

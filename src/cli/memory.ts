@@ -595,6 +595,7 @@ export async function runMemoryDrawers(input: {
     if (input.retire) {
       const results = await retireDrawers({
         store,
+        db,
         personaDir: dir,
         persona,
         kinds,

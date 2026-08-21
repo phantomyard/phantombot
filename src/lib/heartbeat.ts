@@ -267,15 +267,30 @@ async function drawersStep(
       });
       const drawerRetirement = await retireDrawers({
         store,
+        db,
         personaDir: input.personaDir,
         persona: input.persona,
         now,
       });
       const held = drawerRetirement.filter((r) => r.status === "held");
-      if (held.length > 0) {
+      // A held drawer needs a human, and a human will not get one any faster
+      // for being told 48 times a day. In the ONLY case this line fires at all
+      // the condition is persistent — a drawer that retires cleanly never logs
+      // — so warning on the state rather than the change is a guarantee of
+      // noise, not a risk of it. Warn on the transition; keep the repeat at
+      // info so the condition is still greppable, and leave the standing
+      // report to `doctor`, which already prints `unretired_drawers`.
+      const fresh = held.filter((r) => r.firstHold !== false);
+      if (fresh.length > 0) {
         log.warn("heartbeat: drawer files kept back from retirement", {
           persona: input.persona,
-          drawers: held.map((r) => `${r.kind}: ${r.reason}`),
+          drawers: fresh.map((r) => `${r.kind}: ${r.reason}`),
+        });
+      } else if (held.length > 0) {
+        log.info("heartbeat: drawer files still held back", {
+          persona: input.persona,
+          drawers: held.map((r) => r.kind),
+          since: held[0]?.heldSince,
         });
       }
       return { promoted, drawerSync, drawerRetirement };

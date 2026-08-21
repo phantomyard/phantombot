@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS drawer_sync_state (
   synced_at   TEXT NOT NULL,
   PRIMARY KEY (persona, path)
 );
+
+CREATE TABLE IF NOT EXISTS drawer_hold_state (
+  persona       TEXT NOT NULL,
+  path          TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  first_held_at TEXT NOT NULL,
+  PRIMARY KEY (persona, path)
+);
 `;
 
 export interface DrawerSyncResult {
@@ -112,6 +120,65 @@ export async function openDrawerStore(
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Remember that a drawer is currently held back from retirement, and say
+ * whether this is NEWS.
+ *
+ * Retirement runs on every heartbeat — 48 times a day — and a drawer that
+ * fails a gate keeps failing it until a human intervenes. So the interesting
+ * event is the TRANSITION into held (or into a different reason), not the
+ * condition itself: warning on the condition guarantees the log fills with the
+ * same line forever, which is how a real signal gets scrolled past. The
+ * steady state is still reported, by `doctor`, where a standing condition
+ * belongs.
+ *
+ * `first_held_at` is preserved across repeats so the caller can say how long
+ * this has been true rather than just that it still is.
+ */
+export function noteDrawerHold(
+  db: Database,
+  persona: string,
+  path: string,
+  reason: string,
+  now: Date,
+): { firstHold: boolean; heldSince: string } {
+  const prev = db
+    .query(
+      "SELECT reason, first_held_at FROM drawer_hold_state WHERE persona = ? AND path = ?",
+    )
+    .get(persona, path) as { reason: string; first_held_at: string } | null;
+  // A CHANGED reason is a new fact, not a repeat: the drawer that was held for
+  // an unreadable file and is now held for a failed round-trip has moved, and
+  // the operator who already read the first warning has not read this one.
+  if (prev && prev.reason === reason) {
+    return { firstHold: false, heldSince: prev.first_held_at };
+  }
+  const heldSince = prev?.first_held_at ?? now.toISOString();
+  db.query(
+    `INSERT INTO drawer_hold_state (persona, path, reason, first_held_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (persona, path) DO UPDATE
+       SET reason = excluded.reason`,
+  ).run(persona, path, reason, heldSince);
+  return { firstHold: true, heldSince };
+}
+
+/**
+ * Forget any hold on a drawer that has now retired (or was never there).
+ *
+ * Without this a drawer that is fixed and retired would never warn again if it
+ * somehow came back — the second failure would look like the same old one.
+ */
+export function clearDrawerHold(
+  db: Database,
+  persona: string,
+  path: string,
+): void {
+  db.query(
+    "DELETE FROM drawer_hold_state WHERE persona = ? AND path = ?",
+  ).run(persona, path);
 }
 
 function lastSyncedSha(
