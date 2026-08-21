@@ -170,6 +170,24 @@ describe("drawerSection", () => {
     }
   });
 
+  test("a row query that throws still falls back to the file", async () => {
+    const dir = await persona();
+    await writeFile(join(dir, "memory", "norms.md"), "- only on disk\n");
+    const { store, close } = await opened(dir);
+    try {
+      const broken = Object.assign(Object.create(Object.getPrototypeOf(store)), store, {
+        ranked: () => {
+          throw new Error("malformed database disk image");
+        },
+      }) as typeof store;
+      const section = await drawerSection(broken, dir, PERSONA, "norms");
+      expect(section?.from).toBe("file");
+      expect(section?.text).toBe("- only on disk");
+    } finally {
+      close();
+    }
+  });
+
   test("nothing on disk and nothing in rows yields nothing", async () => {
     const dir = await persona();
     const { store, close } = await opened(dir);

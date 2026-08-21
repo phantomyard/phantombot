@@ -252,7 +252,20 @@ export async function drawerSection(
   kind: DrawerKind,
   opts: { limit?: number; now?: Date } = {},
 ): Promise<DrawerBriefingSection | undefined> {
-  const rows = renderDrawer(store, persona, kind, opts);
+  let rows: string | undefined;
+  try {
+    rows = renderDrawer(store, persona, kind, opts);
+  } catch (e) {
+    // The store opened but this drawer's query did not survive it (corrupt
+    // page, schema older than the code). Every other failure here degrades to
+    // the markdown file, and so does this one — a broken row query must not be
+    // the one path that briefs the judge on nothing.
+    log.warn("drawerSection: row query failed, falling back to the file", {
+      kind,
+      persona,
+      error: (e as Error).message,
+    });
+  }
   if (rows) return { kind, text: rows, from: "rows" };
   try {
     const text = (
