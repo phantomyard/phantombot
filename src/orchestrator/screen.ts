@@ -116,6 +116,13 @@ import {
   type JudgeResult,
 } from "../lib/threatJudge.ts";
 import { runNotify } from "../cli/notify.ts";
+import type { DrawerKind } from "../memory/drawers.ts";
+import { drawerPath } from "../memory/drawerIngest.ts";
+import {
+  drawerSection,
+  openDrawerStore,
+  type DrawerBriefingSection,
+} from "../memory/drawerSync.ts";
 
 export interface ScreenVerdict {
   /** "pass" → run the turn normally; "hold" → already escalated, stop. */
@@ -141,23 +148,38 @@ const PASS_ON_ERROR = (score: number, reason: string): ScreenVerdict => ({
  * rulings), people (known senders), norms (what's routine in the principal's
  * world). Scoping the persona-as-judge briefing to these three keeps it
  * threat-relevant and keeps sensitive operational memory (finances, inbox,
- * daily dumps, commitments) out of the judge entirely. Read verbatim now
- * rather than as FTS snippets, but NOT unbounded: the three are concatenated
- * IN THIS ORDER and the result is hard-truncated at DRAWERS_CAP_BYTES — a raw
- * byte slice, so the cut can land mid-entry — and the last drawer listed here
- * is the first content dropped when the briefing runs long. Paths are
- * relative to the persona dir.
+ * daily dumps, commitments) out of the judge entirely.
+ *
+ * Since #410 the briefing is built from RANKED `drawer_entries` rows: highest
+ * decayed score first, superseded and dormant entries excluded. The markdown
+ * file is the fallback for a drawer with no rows yet (fresh persona, first
+ * heartbeat not yet run, wiped database), so the judge is never briefed on an
+ * empty drawer just because the projection is cold.
+ *
+ * The order still matters — the three are concatenated IN THIS ORDER — but a
+ * long early drawer no longer starves a later one: each gets a share of the
+ * byte budget and gives its unused share back (see `packBriefing`).
+ */
+export const BRIEFING_KINDS: readonly DrawerKind[] = [
+  "decisions",
+  "people",
+  "norms",
+];
+
+/**
+ * The same three drawers as file paths.
+ *
+ * DERIVED from BRIEFING_KINDS rather than restated, so the scaffold coupling
+ * test below cannot pass while the row path and the file path disagree about
+ * which drawers the judge briefs from.
  *
  * Exported so the scaffold can be tested against it: a drawer the judge briefs
  * from but `ensurePersonaScaffold` never seeds is invisible on a fresh persona
  * (missing files are silently skipped below), so the coupling is asserted in
  * tests rather than left to memory.
  */
-export const BRIEFING_DRAWERS: readonly string[] = [
-  "memory/decisions.md",
-  "memory/people.md",
-  "memory/norms.md",
-];
+export const BRIEFING_DRAWERS: readonly string[] =
+  BRIEFING_KINDS.map(drawerPath);
 
 /**
  * Cap on the concatenated drawer text injected into the judge's prompt.
@@ -502,16 +524,19 @@ export function resolveNotifyPersona(
 }
 
 /**
- * Read the briefing drawers (decisions/people/norms) from the persona dir,
- * concatenate them under short headers IN BRIEFING_DRAWERS ORDER, and cap the
- * TOTAL at DRAWERS_CAP_BYTES (truncating with a marker if larger). This
- * replaces the old truncated FTS snippets — verbatim text fixes concern #1's
- * "nuance lost to truncation" — but the cap is shared AND applied as a raw
- * byte slice, so an oversized early drawer can crowd a later one out of the
- * briefing entirely and the cut itself can land mid-entry. Best-effort per
- * file (missing files are skipped); never throws.
- * Returns undefined when no drawer exists, so buildSystemPrompt omits the
- * retrieved-context slot entirely.
+ * Build the threat judge's drawer briefing.
+ *
+ * Ranked rows first (`drawer_entries`, highest decayed score, `active` only),
+ * markdown file as the per-drawer fallback. Sections are concatenated in
+ * BRIEFING_KINDS order and packed into DRAWERS_CAP_BYTES by `packBriefing`.
+ *
+ * Best-effort throughout: a database that will not open, a missing drawer, an
+ * unreadable file — each degrades to less briefing, never to a throw. This
+ * runs ahead of every untrusted turn, so a failure here must not be able to
+ * take the screen down with it.
+ *
+ * Returns undefined when no drawer yields anything, so buildSystemPrompt omits
+ * the retrieved-context slot entirely.
  */
 async function readBriefingDrawers(
   config: Config,
@@ -523,25 +548,112 @@ async function readBriefingDrawers(
   } catch {
     return undefined;
   }
-  const sections: string[] = [];
-  for (const rel of BRIEFING_DRAWERS) {
-    try {
-      const content = (await readFile(join(dir, rel), "utf8")).trim();
-      if (content.length > 0) {
-        sections.push(`## ${rel}\n\n${content}`);
-      }
-    } catch {
-      // Missing/unreadable drawer — skip it; the judge briefs on what exists.
-    }
-  }
+
+  const sections = await collectBriefingSections(config, dir, persona);
   if (sections.length === 0) return undefined;
-  let text = sections.join("\n\n");
-  if (Buffer.byteLength(text, "utf8") > DRAWERS_CAP_BYTES) {
-    // Truncate to the cap (byte-safe slice via Buffer) and mark it so the
-    // judge knows the briefing was clipped rather than silently ending.
-    text =
-      Buffer.from(text, "utf8").subarray(0, DRAWERS_CAP_BYTES).toString("utf8") +
-      "\n\n[briefing truncated at cap]";
+  return packBriefing(sections, DRAWERS_CAP_BYTES);
+}
+
+async function collectBriefingSections(
+  config: Config,
+  dir: string,
+  persona: string,
+): Promise<DrawerBriefingSection[]> {
+  let opened: Awaited<ReturnType<typeof openDrawerStore>> | undefined;
+  try {
+    opened = await openDrawerStore(config.memoryDbPath);
+  } catch (e) {
+    log.warn("screen: drawer rows unavailable, briefing from files", {
+      error: (e as Error).message,
+    });
   }
-  return text;
+  try {
+    const sections: DrawerBriefingSection[] = [];
+    for (const kind of BRIEFING_KINDS) {
+      try {
+        const section = opened
+          ? await drawerSection(opened.store, dir, persona, kind)
+          : await fileSection(dir, kind);
+        if (section) sections.push(section);
+      } catch {
+        // Missing/unreadable drawer — skip it; the judge briefs on what exists.
+      }
+    }
+    return sections;
+  } finally {
+    opened?.close();
+  }
+}
+
+/** File-only section, for when the row store could not be opened at all. */
+async function fileSection(
+  dir: string,
+  kind: DrawerKind,
+): Promise<DrawerBriefingSection | undefined> {
+  const text = (await readFile(join(dir, drawerPath(kind)), "utf8")).trim();
+  return text.length > 0 ? { kind, text, from: "file" } : undefined;
+}
+
+/**
+ * Fit the sections into `capBytes`, dropping whole ENTRIES rather than slicing
+ * bytes.
+ *
+ * The old reader concatenated everything and cut the result at the cap, which
+ * had two failure modes that both hurt exactly when the briefing mattered
+ * most: a 663 KB `decisions.md` consumed the entire budget and `norms` — the
+ * drawer that stops the judge crying wolf — never reached the prompt at all;
+ * and the cut landed mid-entry, so the judge read half a ruling as if it were
+ * the whole one.
+ *
+ * So: each section gets an equal share, any section that needs less hands the
+ * remainder back, and a section that still overflows is trimmed line by line
+ * (an entry is one line — see renderEntry) with an explicit marker. Two passes
+ * over at most three drawers; the redistribution is not iterated to a fixed
+ * point because the win is almost entirely in the first give-back.
+ */
+export function packBriefing(
+  sections: DrawerBriefingSection[],
+  capBytes: number,
+): string | undefined {
+  if (sections.length === 0) return undefined;
+  const rendered = sections.map((s) => `## ${drawerPath(s.kind)}\n\n${s.text}`);
+  const total = rendered.reduce((n, t) => n + Buffer.byteLength(t, "utf8"), 0);
+  const joinCost = 2 * (rendered.length - 1);
+  if (total + joinCost <= capBytes) return rendered.join("\n\n");
+
+  const budget = capBytes - joinCost;
+  const even = Math.floor(budget / rendered.length);
+  const sizes = rendered.map((t) => Buffer.byteLength(t, "utf8"));
+  // Give-back pass: everything under its share frees the difference, and the
+  // over-share sections split the freed bytes evenly.
+  const spare = sizes.reduce((n, size) => n + Math.max(0, even - size), 0);
+  const overflowing = sizes.filter((size) => size > even).length;
+  const bonus = overflowing > 0 ? Math.floor(spare / overflowing) : 0;
+
+  const out = rendered.map((text, i) =>
+    sizes[i]! <= even ? text : trimToBytes(text, even + bonus),
+  );
+  return out.join("\n\n");
+}
+
+/**
+ * Trim text to `limit` bytes on a LINE boundary, marking the cut.
+ *
+ * Never returns a partial line: a half-entry reads to the judge as a complete
+ * one, which is worse than a shorter briefing. If even the header line does
+ * not fit, the section is dropped to its header alone plus the marker.
+ */
+function trimToBytes(text: string, limit: number): string {
+  const marker = "\n[drawer trimmed at cap]";
+  const room = limit - Buffer.byteLength(marker, "utf8");
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const cost = Buffer.byteLength(line, "utf8") + (kept.length > 0 ? 1 : 0);
+    if (used + cost > room) break;
+    kept.push(line);
+    used += cost;
+  }
+  return kept.join("\n") + marker;
 }

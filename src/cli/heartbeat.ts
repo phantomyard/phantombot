@@ -109,6 +109,9 @@ export async function runHeartbeatCli(
   const r = await runHeartbeat({
     personaDir: dir,
     indexPath: indexPath(persona),
+    // Drawer rows (#410) live in the shared memory database, keyed by persona.
+    memoryDbPath: config.memoryDbPath,
+    persona,
     // Pass config + version so the heartbeat can hit GitHub for new
     // releases and dispatch a one-time Telegram notification when a
     // newer version has aged past the auto-notify delay. See

@@ -19,6 +19,10 @@
  *   phantombot memory capture "<text>" --tag <tag> [--tag <tag> ...]
  *                              append a tagged line to today's daily file
  *                              and record the capture in capture_log
+ *   phantombot memory drawers [--kind <k>] [--limit N] [--sync] [--json]
+ *                              show the RANKED drawer rows the threat judge is
+ *                              briefed from, and optionally project the
+ *                              markdown drawers into rows first
  */
 
 import { defineCommand } from "citty";
@@ -39,6 +43,14 @@ import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
 import { openMemoryStore } from "../memory/store.ts";
+import {
+  DRAWER_KINDS,
+  isDrawerKind,
+  scoreEntry,
+  type DrawerKind,
+} from "../memory/drawers.ts";
+import { describeIngest } from "../memory/drawerIngest.ts";
+import { openDrawerStore, syncDrawers } from "../memory/drawerSync.ts";
 import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
 
 function resolvePersonaDir(config: Config, persona?: string): {
@@ -494,6 +506,97 @@ export async function indexAfterCapture(
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * Show the ranked drawer rows — the projection the threat judge actually reads.
+ *
+ * This is the operator's answer to "is #410 live on this box, or is the table
+ * still empty?", which for two PRs had no answer short of opening SQLite by
+ * hand. `--sync` runs the same markdown→rows projection the heartbeat runs, so
+ * a fresh box does not have to wait up to 30 minutes to find out.
+ */
+export async function runMemoryDrawers(input: {
+  persona?: string;
+  kind?: string;
+  limit?: number;
+  sync?: boolean;
+  force?: boolean;
+  json?: boolean;
+  out?: WriteSink;
+}): Promise<number> {
+  const sink = input.out ?? process.stdout;
+  const write = (t: string) => sink.write(t);
+  const config = await loadConfig();
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
+
+  if (input.kind !== undefined && !isDrawerKind(input.kind)) {
+    write(
+      `unknown drawer '${input.kind}' (expected: ${DRAWER_KINDS.join(", ")})\n`,
+    );
+    return 1;
+  }
+  const kinds: readonly DrawerKind[] = input.kind
+    ? [input.kind as DrawerKind]
+    : DRAWER_KINDS;
+
+  const { store, db, close } = await openDrawerStore(config.memoryDbPath);
+  try {
+    if (input.sync || input.force) {
+      const result = await syncDrawers({
+        store,
+        db,
+        personaDir: dir,
+        persona,
+        force: input.force,
+      });
+      if (!input.json) {
+        for (const r of result.ingested) write(`${describeIngest(r)}\n`);
+        if (result.unchanged.length > 0) {
+          write(`unchanged: ${result.unchanged.join(", ")}\n`);
+        }
+        if (result.missing.length > 0) {
+          write(`no file: ${result.missing.join(", ")}\n`);
+        }
+        write("\n");
+      }
+    }
+
+    const now = new Date();
+    const payload = kinds.map((kind) => ({
+      kind,
+      entries: store.ranked(persona, kind, { limit: input.limit }).map((e) => ({
+        id: e.id,
+        content: e.content,
+        score: Number(scoreEntry(e, now).toFixed(4)),
+        weight: e.weight,
+        source: e.source,
+        assertedAt: e.assertedAt.toISOString(),
+        lastReaffirmedAt: e.lastReaffirmedAt.toISOString(),
+      })),
+      // Total INCLUDING superseded/dormant rows: "12 of 1411 shown" is the
+      // number that tells an operator the projection ran, where a ranked count
+      // alone cannot distinguish an empty table from a fully decayed drawer.
+      total: store.list(persona, kind).length,
+    }));
+
+    if (input.json) {
+      write(`${JSON.stringify({ persona, drawers: payload }, null, 2)}\n`);
+      return 0;
+    }
+    for (const drawer of payload) {
+      write(
+        `## ${drawer.kind} — ${drawer.entries.length} injectable of ${drawer.total} filed\n`,
+      );
+      for (const e of drawer.entries) {
+        write(`  [${e.score.toFixed(3)}] ${e.content.replace(/\s*\n\s*/g, " ")}\n`);
+      }
+      write("\n");
+    }
+    return 0;
+  } finally {
+    close();
+  }
+}
+
 // Citty subcommand wiring
 // ---------------------------------------------------------------------------
 
@@ -622,11 +725,49 @@ const captureCmd = defineCommand({
   },
 });
 
+const drawersCmd = defineCommand({
+  meta: {
+    name: "drawers",
+    description:
+      "Show the ranked drawer rows the threat judge is briefed from (--sync to project the markdown drawers into rows first).",
+  },
+  args: {
+    persona: { type: "string", description: "Persona name." },
+    kind: {
+      type: "string",
+      description: `One drawer (${DRAWER_KINDS.join(" | ")}). Default: all five.`,
+    },
+    limit: { type: "string", description: "Max entries per drawer." },
+    sync: {
+      type: "boolean",
+      description: "Project the markdown drawers into rows before listing.",
+      default: false,
+    },
+    force: {
+      type: "boolean",
+      description: "Re-ingest even when a drawer's content hash is unchanged.",
+      default: false,
+    },
+    json: { type: "boolean", description: "JSON output.", default: false },
+  },
+  async run({ args }) {
+    const limit = Number(args.limit);
+    process.exitCode = await runMemoryDrawers({
+      persona: args.persona ? String(args.persona) : undefined,
+      kind: args.kind ? String(args.kind) : undefined,
+      limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined,
+      sync: Boolean(args.sync),
+      force: Boolean(args.force),
+      json: Boolean(args.json),
+    });
+  },
+});
+
 export default defineCommand({
   meta: {
     name: "memory",
     description:
-      "Memory tools the harness can call from its Bash loop (search, get, list, today, index, capture).",
+      "Memory tools the harness can call from its Bash loop (search, get, list, today, index, capture, drawers).",
   },
   subCommands: {
     search: searchCmd,
@@ -635,5 +776,6 @@ export default defineCommand({
     today: todayCmd,
     index: indexCmd,
     capture: captureCmd,
+    drawers: drawersCmd,
   },
 });

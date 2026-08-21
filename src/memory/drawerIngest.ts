@@ -133,9 +133,18 @@ export function parseDrawer(text: string): ParsedDrawerEntry[] {
   return out;
 }
 
-/** `memory/<kind>.md` for a drawer kind. */
+/**
+ * `memory/<kind>.md` for a drawer kind.
+ *
+ * POSIX separator on every platform, deliberately: this string is compared
+ * against the persona-scaffold paths and the threat judge's BRIEFING_DRAWERS,
+ * both of which are written with forward slashes, and `join()` on Windows
+ * would return `memory\\decisions.md` and quietly break that equality. Every
+ * consumer either joins it onto the persona dir (which normalizes) or displays
+ * it, so a forward slash is correct in both.
+ */
 export function drawerPath(kind: DrawerKind): string {
-  return join("memory", `${kind}.md`);
+  return `memory/${kind}.md`;
 }
 
 /**

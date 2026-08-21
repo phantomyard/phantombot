@@ -1669,12 +1669,17 @@ function mapDisplayRows(rows: RawDisplayRow[]): Turn[] {
  * `tick` tasks aligned on boot) against a brand-new memory.sqlite: one wins
  * the conversion, the other throws and crash-loops the daemon.
  *
+ * Exported so the drawer connection (`memory/drawerSync.ts`) opens the shared
+ * file with the SAME pragma sequence rather than a second, subtly different
+ * copy of it — on a fresh install either connection may be the one that
+ * creates the database.
+ *
  * So we retry on our own deadline instead of relying on busy_timeout. Once
  * the file is in WAL mode (the steady state after first boot) this pragma is
  * a lock-free no-op and the first attempt returns immediately, even while
  * another process holds a write lock.
  */
-async function enableWalMode(db: Database, deadlineMs = 5000): Promise<void> {
+export async function enableWalMode(db: Database, deadlineMs = 5000): Promise<void> {
   const deadline = Date.now() + deadlineMs;
   for (;;) {
     try {

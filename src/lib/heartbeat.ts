@@ -8,7 +8,11 @@
  *   2. Staleness scan of MEMORY.md's `## Recent` section — flag lines
  *      whose embedded date is older than 48h. Logs warnings; does not
  *      mutate.
- *   3. Refresh the FTS5 index so newly-written notes are searchable
+ *   3. Project the markdown drawers into `drawer_entries` rows (#410). The
+ *      heartbeat is the right home for this: it is mechanical, idempotent and
+ *      already runs right after the promotion step that changed the files.
+ *      Skipped per drawer when the content hash is unchanged.
+ *   4. Refresh the FTS5 index so newly-written notes are searchable
  *      without waiting for the next manual `memory index`. The caller
  *      (`cli/heartbeat.ts`) then runs an incremental embed pass over
  *      chunks whose text_sha changed, so fresh notes are semantically
@@ -29,12 +33,23 @@ import type { Config } from "../config.ts";
 import { log } from "./logger.ts";
 import { MemoryIndex } from "./memoryIndex.ts";
 import {
+  openDrawerStore,
+  syncDrawers,
+  type DrawerSyncResult,
+} from "../memory/drawerSync.ts";
+import {
   checkAndNotifyOnce,
   type CheckAndNotifyOnceResult,
 } from "./updateNotify.ts";
 
 export interface HeartbeatResult {
   promoted: { drawer: string; line: string }[];
+  /**
+   * Outcome of the markdown→rows drawer projection. Undefined when the
+   * heartbeat was not given a database path (tests that keep SQLite out of
+   * the path), NOT when the sync found nothing to do.
+   */
+  drawerSync?: DrawerSyncResult;
   staleRecent: { line: string; ageHours: number }[];
   indexedFiles: number;
   /** When the heartbeat ran. */
@@ -84,6 +99,16 @@ export interface RunHeartbeatInput {
   /** Path to the FTS index file (used only if index isn't passed). */
   indexPath?: string;
   /**
+   * Path to the shared memory database. When set, the heartbeat projects the
+   * markdown drawers into `drawer_entries` after promoting tagged lines.
+   * Omitted in tests that assert only the file-level behaviour.
+   */
+  memoryDbPath?: string;
+  /** Persona name for the drawer rows. Required alongside memoryDbPath. */
+  persona?: string;
+  /** Re-ingest drawers even when their content hash is unchanged. */
+  forceDrawerSync?: boolean;
+  /**
    * Loaded config — required to enable the once-per-version update
    * notification. When omitted the heartbeat skips the GitHub check
    * entirely. The CLI entry point passes this; tests can omit it to
@@ -111,6 +136,9 @@ export async function runHeartbeat(
   const now = input.now ?? new Date();
 
   const promoted = await promoteTaggedLines(input.personaDir, today);
+  // AFTER promotion, so the lines this heartbeat just appended land as rows in
+  // the same run rather than a cycle late.
+  const drawerSync = await syncDrawersStep(input, now);
   const staleRecent = await checkStaleness(input.personaDir, now);
 
   // FTS-only refresh. Don't touch embeddings.
@@ -162,7 +190,57 @@ export async function runHeartbeat(
     }
   }
 
-  return { promoted, staleRecent, indexedFiles, ranAt: now, updateCheck };
+  return {
+    promoted,
+    drawerSync,
+    staleRecent,
+    indexedFiles,
+    ranAt: now,
+    updateCheck,
+  };
+}
+
+/**
+ * Project the markdown drawers into rows, best-effort.
+ *
+ * Wrapped whole: the drawers on disk are the source of truth and the rows are
+ * a rebuildable projection, so a SQLite hiccup here must degrade the briefing
+ * to its file fallback, never fail the heartbeat's primary file work.
+ */
+async function syncDrawersStep(
+  input: RunHeartbeatInput,
+  now: Date,
+): Promise<DrawerSyncResult | undefined> {
+  if (!input.memoryDbPath || !input.persona) return undefined;
+  try {
+    const { store, db, close } = await openDrawerStore(input.memoryDbPath);
+    try {
+      const result = await syncDrawers({
+        store,
+        db,
+        personaDir: input.personaDir,
+        persona: input.persona,
+        force: input.forceDrawerSync,
+        now,
+      });
+      const filed = result.ingested.reduce((n, r) => n + r.inserted, 0);
+      if (filed > 0) {
+        log.info("heartbeat: filed drawer entries", {
+          persona: input.persona,
+          inserted: filed,
+          drawers: result.ingested.map((r) => r.kind),
+        });
+      }
+      return result;
+    } finally {
+      close();
+    }
+  } catch (e) {
+    log.warn("heartbeat: drawer sync threw unexpectedly", {
+      error: (e as Error).message,
+    });
+    return undefined;
+  }
 }
 
 /** Scan today's daily file for [tag] lines; append to matching drawer. */
