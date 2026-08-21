@@ -153,9 +153,11 @@ describe("the scaffold does not seed the drawers", () => {
   });
 
   test("the briefing drawer paths are labels now, not seeded files", async () => {
-    // BRIEFING_DRAWERS still names `memory/norms.md` — it is the HEADING the
-    // judge's briefing prints and the path the per-drawer file fallback tries.
-    // Neither requires the file to exist, and on a retired persona it does not.
+    // BRIEFING_DRAWERS still names `memory/norms.md` — but only as the path
+    // the per-drawer FILE FALLBACK tries; since #419 the briefing heading is
+    // the bare drawer kind, so the path never reaches prompt text. The
+    // fallback does not require the file to exist, and on a retired persona
+    // it does not.
     await ensurePersonaScaffold(workdir);
     for (const rel of BRIEFING_DRAWERS) {
       expect(existsSync(join(workdir, rel))).toBe(false);

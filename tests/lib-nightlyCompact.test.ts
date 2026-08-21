@@ -11,7 +11,6 @@ import {
   DAILY_BUDGET_BYTES,
   defaultBudgets,
   formatCompactionSummary,
-  measureDrawers,
   resolveBudgets,
   settleCompaction,
 } from "../src/lib/nightlyCompact.ts";
@@ -63,22 +62,15 @@ describe("compactionCandidates", () => {
     expect(got).toEqual([]);
   });
 
-  test("an over-budget drawer is NEVER a candidate", async () => {
-    // Drawers are measured, not rewritten: their dedupe lifecycle moves to the
-    // database, so selecting one here would buy a paid LLM turn whose prompt
-    // then tells it to change nothing — every sweep, forever.
+  test("an over-budget drawer file is NEVER a candidate", async () => {
+    // Drawers are database rows now (#417/#418); a drawer file on disk is a
+    // retirement hold, reported by the heartbeat and `doctor`. Compaction
+    // must never select or rewrite it, and since #419 it does not even
+    // measure it — there is no drawer budget left to report.
     await writeFile(join(dir, "memory", "commitments.md"), big(700 * 1024));
     await writeFile(join(dir, "memory", "decisions.md"), big(700 * 1024));
     expect(await compactionCandidates(dir, {}, { today: "2026-08-20" })).toEqual([]);
     expect(defaultBudgets().map((b) => b.path)).toEqual(["MEMORY.md"]);
-  });
-
-  test("measureDrawers reports the overage without making a candidate", async () => {
-    await writeFile(join(dir, "memory", "commitments.md"), big(700 * 1024));
-    await writeFile(join(dir, "memory", "norms.md"), big(10));
-    const got = await measureDrawers(dir);
-    expect(got.map((d) => d.path)).toEqual(["memory/commitments.md"]);
-    expect(got[0]!.sizeBytes).toBe(700 * 1024);
   });
 
   test("daily file needs BOTH stages ok before it is a candidate", async () => {

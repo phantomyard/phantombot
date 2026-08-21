@@ -20,14 +20,12 @@
  *   3. ONLY OVER-BUDGET FILES ARE TOUCHED. A file inside its budget costs one
  *      `stat` and is left alone, so a healthy persona pays nothing.
  *
- * Deliberately NOT in scope here: the drawers. `commitments.md`,
- * `decisions.md` and `lessons.md` are append-only logs with a lifecycle —
- * they become database rows in the follow-up work, at which point dedupe is a
- * uniqueness constraint rather than an LLM pass over prose. Building the LLM
- * version first would be throwaway, so they are never CANDIDATES at all:
- * `measureDrawers()` reports the overage for one `stat` each and no turn is
- * spent. (Selecting them and telling the prompt "do not change this file" is
- * worse than not selecting them — it pays for a no-op turn every sweep.)
+ * The drawers are NOT in scope here either, and no longer even measured:
+ * `commitments.md`, `decisions.md` and `lessons.md` were append-only logs
+ * whose dedupe/merge lifecycle has since moved into `drawer_entries` rows
+ * (see `nightlyMaintenance`). The files are retired and archived; any still
+ * on disk were HELD by retirement, which the heartbeat and `doctor` already
+ * report, so there is nothing left for compaction to say about them.
  */
 
 import { existsSync } from "node:fs";
@@ -40,7 +38,7 @@ import type { NightlyState } from "./nightly.ts";
 import { isDailyDistilled } from "./nightly.ts";
 
 /** What kind of file a compaction target is — drives the prompt wording. */
-export type CompactionKind = "memory" | "drawer" | "daily";
+export type CompactionKind = "memory" | "daily";
 
 export interface CompactionBudget {
   /** Persona-relative path, e.g. `memory/MEMORY.md`. */
@@ -57,19 +55,8 @@ export interface CompactionBudget {
   maxShrinkPct: number;
 }
 
-/** Drawers, in the order the distill stage writes them. */
-export const DRAWER_FILES = [
-  "people.md",
-  "decisions.md",
-  "lessons.md",
-  "commitments.md",
-  "norms.md",
-] as const;
-
 /** 16KB of orientation text is already ~4k tokens on EVERY turn. */
 export const MEMORY_BUDGET_BYTES = 16 * 1024;
-/** A drawer is read by search, not by the prompt — it can afford more. */
-export const DRAWER_BUDGET_BYTES = 128 * 1024;
 /** A closed day that has been fully distilled should be a summary, not a log. */
 export const DAILY_BUDGET_BYTES = 8 * 1024;
 
@@ -100,39 +87,6 @@ export function defaultBudgets(): CompactionBudget[] {
       maxShrinkPct: 40,
     },
   ];
-}
-
-/**
- * Drawer sizes, for reporting only.
- *
- * Drawers are deliberately NOT compaction candidates. Their dedupe/merge
- * lifecycle moves to the database in the follow-up work, so the only thing an
- * LLM pass could do here today is get thrown away — and a candidate whose
- * prompt says "do not change this file" is a paid no-op turn every single
- * sweep, forever. Measuring them costs one `stat` each and still surfaces the
- * overage in the sweep output.
- */
-export interface DrawerMeasurement {
-  path: string;
-  sizeBytes: number;
-  budgetBytes: number;
-}
-
-export async function measureDrawers(
-  personaDir: string,
-  budgetBytes: number = DRAWER_BUDGET_BYTES,
-): Promise<DrawerMeasurement[]> {
-  const out: DrawerMeasurement[] = [];
-  for (const f of DRAWER_FILES) {
-    const path = join("memory", f);
-    try {
-      const size = (await stat(join(personaDir, path))).size;
-      if (size > budgetBytes) out.push({ path, sizeBytes: size, budgetBytes });
-    } catch {
-      continue;
-    }
-  }
-  return out;
 }
 
 /**
