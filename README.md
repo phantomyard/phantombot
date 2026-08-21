@@ -1735,17 +1735,29 @@ journal can render as a section of the system prompt, and control, bidi and
 zero-width characters are stripped.
 
 A journal that reaches the prompt goes in whole up to a **sanity ceiling of
-256 KB** (`DAILY_RECALL_CEILING_BYTES`, ~64k tokens). It used to be capped at the
-daily *compaction* budget (8 KB), but those two numbers measure different
-things: the compaction budget is how large a closed, fully-distilled day may
-stay on disk, while an open day is the only place its content exists. A heavy
-day silently lost its morning, and what fell out was the tagged captures on
-their way to the drawers. The new ceiling is deliberately set far above the
-largest daily ever written across the fleet (~62 KB), so it never fires on a
-real day — it exists only so that a runaway writer (`memory capture` is
-unbounded) cannot oversize every subsequent prompt with no recovery path. When
-it does fire it keeps the tail and warns. The compaction budget is unchanged
-and still applies on disk.
+32 KB** (`DAILY_RECALL_CEILING_BYTES`), and today plus yesterday together are
+held under **48 KB** (`DAILY_RECALL_COMBINED_CEILING_BYTES`). Today is served
+first and may use the whole per-file ceiling; yesterday gets the remainder,
+which the two numbers guarantee is never nothing.
+
+Both numbers come from a hard limit rather than from taste. The assembled
+system prompt is handed to the harness as a single command-line argument, and
+Linux caps one argument at 131,071 bytes — not the ~2 MB `getconf ARG_MAX`
+that bounds argv and the environment in total, and not raisable. The rest of
+the prompt is already bounded (persona, `MEMORY.md` at 16 KB, the drawers
+briefing at 16 KB, retrieved context), which leaves roughly 50 KB before a
+journal puts the turn at risk. A persona that reached 82 KB in one day stopped
+answering entirely: every turn died at spawn with `E2BIG`.
+
+The cap used to be the daily *compaction* budget (8 KB), which was wrong for a
+different reason: those two numbers measure different things — the compaction
+budget is how large a closed, fully-distilled day may stay on disk, while an
+open day is the only place its content exists. A heavy day silently lost its
+morning, and what fell out was the tagged captures on their way to the
+drawers. A day over 32 KB still loses its morning today, so the trim is loud:
+it keeps the tail, warns with the dropped byte count, and the injected block
+tells the turn to run `phantombot memory get memory/<date>.md` for the rest.
+The compaction budget is unchanged and still applies on disk.
 
 Useful commands:
 

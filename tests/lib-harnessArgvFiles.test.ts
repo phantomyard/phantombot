@@ -1,8 +1,8 @@
 /**
- * Tests for the Windows argv-length workaround helper.
+ * Tests for the argv-length workaround helper.
  *
- *   - argvNeedsTempFiles() gates ONLY on win32 (so POSIX behavior is
- *     untouched and the branch is testable on a Linux CI runner).
+ *   - argvNeedsTempFiles() is unconditional on win32 and size-gated
+ *     everywhere else (both branches testable on a Linux CI runner).
  *   - createHarnessTempDir() writes files and cleanup() removes the dir.
  */
 
@@ -12,6 +12,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ARGV_SPILL_THRESHOLD_BYTES,
+  MAX_ARG_STRLEN_BYTES,
   argvNeedsTempFiles,
   cleanupPersonaTmpDir,
   createHarnessTempDir,
@@ -19,11 +21,46 @@ import {
 } from "../src/lib/harnessArgvFiles.ts";
 
 describe("argvNeedsTempFiles", () => {
-  test("true only on win32", () => {
+  test("win32 spills unconditionally, whatever the payload size", () => {
+    // Windows' limit is on the WHOLE command line, so no per-payload size
+    // test can clear it — the other args share the same 8,191-char budget.
     expect(argvNeedsTempFiles("win32")).toBe(true);
-    expect(argvNeedsTempFiles("linux")).toBe(false);
-    expect(argvNeedsTempFiles("darwin")).toBe(false);
-    expect(argvNeedsTempFiles("freebsd")).toBe(false);
+    expect(argvNeedsTempFiles("win32", 0)).toBe(true);
+    expect(argvNeedsTempFiles("win32", 10)).toBe(true);
+  });
+
+  test("a small payload still rides on argv everywhere else", () => {
+    for (const platform of ["linux", "darwin", "freebsd"] as const) {
+      expect(argvNeedsTempFiles(platform, 0)).toBe(false);
+      expect(argvNeedsTempFiles(platform, 8 * 1024)).toBe(false);
+      // No size given: the caller has no single dominant payload, so keep
+      // the old platform-only answer.
+      expect(argvNeedsTempFiles(platform)).toBe(false);
+    }
+  });
+
+  test("an oversized payload spills on POSIX too (#426)", () => {
+    for (const platform of ["linux", "darwin", "freebsd"] as const) {
+      expect(argvNeedsTempFiles(platform, ARGV_SPILL_THRESHOLD_BYTES)).toBe(
+        false,
+      );
+      expect(argvNeedsTempFiles(platform, ARGV_SPILL_THRESHOLD_BYTES + 1)).toBe(
+        true,
+      );
+      // The size that actually wedged a persona: a 140KB system prompt.
+      expect(argvNeedsTempFiles(platform, 140_659)).toBe(true);
+    }
+  });
+
+  test("the threshold leaves real headroom under the kernel's per-string cap", () => {
+    // MAX_ARG_STRLEN is 32 pages minus the NUL. It is NOT `getconf ARG_MAX`
+    // (~2MB, which bounds argv+envp in total) and cannot be raised, so the
+    // spill threshold has to sit under it with room to spare.
+    expect(MAX_ARG_STRLEN_BYTES).toBe(32 * 4096 - 1);
+    expect(ARGV_SPILL_THRESHOLD_BYTES).toBeLessThan(MAX_ARG_STRLEN_BYTES);
+    expect(MAX_ARG_STRLEN_BYTES - ARGV_SPILL_THRESHOLD_BYTES).toBeGreaterThan(
+      30 * 1024,
+    );
   });
 });
 

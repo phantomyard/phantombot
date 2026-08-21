@@ -604,15 +604,17 @@ describe("ClaudeHarness subprocess invocation passes injected settings", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Windows argv-length workaround. Claude's conversation payload already goes
-// via stdin, but the persona system prompt still rides on argv via
-// `--system-prompt <text>` - and a large BOOT.md can exceed Windows' ~8,191
-// char command-line limit. On Windows the harness spills the system prompt to
-// a temp file and passes `--system-prompt-file <file>` instead. Platform is
-// injected so this runs on the Linux CI runner.
+// Argv-length workaround. Claude's conversation payload already goes via
+// stdin, but the persona system prompt still rides on argv via
+// `--system-prompt <text>`, and that one string can outgrow what execve takes:
+// a large BOOT.md exceeds Windows' ~8,191-char command-line limit, and a large
+// journal exceeds Linux's 131,071-byte per-argv-string MAX_ARG_STRLEN (#426).
+// Either way the harness spills the system prompt to a temp file and passes
+// `--system-prompt-file <file>` instead. Platform is injected so both branches
+// run on the Linux CI runner.
 // ---------------------------------------------------------------------------
 
-describe("ClaudeHarness Windows argv-length workaround", () => {
+describe("ClaudeHarness argv-length workaround", () => {
   const argvOf = (chunks: HarnessChunk[]): string =>
     chunks
       .filter((c): c is Extract<HarnessChunk, { type: "text" }> => c.type === "text")
@@ -649,7 +651,56 @@ describe("ClaudeHarness Windows argv-length workaround", () => {
     expect(existsSync(systemPromptFile!)).toBe(false);
   });
 
-  test("POSIX: system prompt stays inline via --system-prompt", async () => {
+  test("POSIX: an oversized system prompt spills to a file too (#426)", async () => {
+    // The wedge this fixes: every turn died at `posix_spawn` with `E2BIG`
+    // because the assembled prompt (~140KB, mostly journal) exceeded the
+    // kernel's per-argv-string cap. Spilling is what makes the size moot.
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "linux",
+    );
+    const huge = "OVERSIZED-CLAUDE-PERSONA\n" + "x".repeat(140_000);
+    const chunks = await collect(h.invoke(newRequest({ systemPrompt: huge })));
+    const argv = argvOf(chunks);
+    expect(argv).toContain("--system-prompt-file");
+    expect(argv).not.toContain("OVERSIZED-CLAUDE-PERSONA");
+  });
+
+  test("POSIX: the spill threshold is measured in BYTES, not characters", async () => {
+    // A journal full of em dashes / CJK is up to 3x its `.length` in UTF-8.
+    // Sizing on `.length` would leave such a prompt inline at ~270KB of argv
+    // and reproduce the exact spawn failure this guards against.
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "linux",
+    );
+    // 40k chars, but 120k+ bytes — under any char-based threshold, over ours.
+    const multibyte = "MULTIBYTE-CLAUDE-PERSONA" + "漢".repeat(40_000);
+    expect(multibyte.length).toBeLessThan(96 * 1024);
+    expect(Buffer.byteLength(multibyte, "utf8")).toBeGreaterThan(96 * 1024);
+    const chunks = await collect(
+      h.invoke(newRequest({ systemPrompt: multibyte })),
+    );
+    expect(argvOf(chunks)).toContain("--system-prompt-file");
+  });
+
+  test("POSIX: an oversized prompt's temp file is cleaned up after the run", async () => {
+    process.env.FAKE_CLAUDE_MODE = "argv";
+    const h = new ClaudeHarness(
+      { bin: FAKE_CLAUDE, model: "test", fallbackModel: "" },
+      "linux",
+    );
+    const chunks = await collect(
+      h.invoke(newRequest({ systemPrompt: "x".repeat(140_000) })),
+    );
+    const file = argvOf(chunks).match(/(\S*system-prompt\.md)/)?.[1];
+    expect(file).toBeTruthy();
+    expect(existsSync(file!)).toBe(false);
+  });
+
+  test("POSIX: a normal-sized system prompt stays inline via --system-prompt", async () => {
     process.env.FAKE_CLAUDE_MODE = "argv";
     // Force the POSIX branch so this holds on the Windows CI runner too.
     const h = new ClaudeHarness(

@@ -173,7 +173,18 @@ export async function* runWithFallback(
 
     let succeeded = false;
     let recoverableError = false;
+    // A harness that THROWS rather than yielding an error chunk. The most
+    // important case is a spawn failure — `Bun.spawn` throws E2BIG/ENOENT/
+    // EACCES synchronously, before the generator has produced anything — but
+    // any bug in an adapter lands here too. Without this catch the exception
+    // propagates straight out of runWithFallback and kills the turn, so the
+    // chain never advances: a single unspawnable primary silently disables
+    // every fallback behind it (#426). Catching it converts the throw into
+    // the recoverable error the rest of this loop already knows how to
+    // handle.
+    let thrown: unknown;
 
+    try {
     for await (const chunk of harness.invoke(req)) {
       if (chunk.type === "error") {
         if (chunk.recoverable && !isLast) {
@@ -276,6 +287,38 @@ export async function* runWithFallback(
       yield chunk;
       if (chunk.type === "done") succeeded = true;
     }
+    } catch (e) {
+      thrown = e;
+    }
+
+    if (thrown !== undefined) {
+      const error = describeInvokeThrow(harness.id, thrown);
+      if (!isLast) {
+        log.warn("orchestrator: harness threw, falling through", {
+          harnessId: harness.id,
+          error,
+        });
+        cooldown.markFailure(harness.id);
+        alerter.noteFailure(harness.id, error);
+        firstFailure ??= { harnessId: harness.id, error };
+        continue;
+      }
+      // Nowhere left to go: same outage shape as a recoverable error chunk on
+      // the last harness, so alert the owner rather than dying silently.
+      log.error("orchestrator: harness threw and chain is exhausted", {
+        harnessId: harness.id,
+        error,
+      });
+      cooldown.markFailure(harness.id);
+      alerter.noteFailure(harness.id, error);
+      await alerter.noteExhausted({
+        harnessId: harness.id,
+        error,
+        chain: chainIds,
+      });
+      yield { type: "error", error, recoverable: true };
+      return;
+    }
 
     if (succeeded) {
       // A clean turn — even if the text was empty and we're on the last
@@ -302,6 +345,25 @@ export async function* runWithFallback(
       return;
     }
   }
+}
+
+/**
+ * Render a thrown harness failure into an operator-legible error string.
+ *
+ * E2BIG gets an explicit gloss because the raw message ("argument list too
+ * long") points at the wrong limit: it is almost never the 2 MB `ARG_MAX` that
+ * `getconf` reports, but Linux's per-string MAX_ARG_STRLEN of 131,071 bytes,
+ * which no ulimit can raise. Saying so here is what turns a mystifying wedge
+ * into a one-line diagnosis in the log.
+ *
+ * Exported for testing.
+ */
+export function describeInvokeThrow(harnessId: string, e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e);
+  const hint = /E2BIG/i.test(message)
+    ? " (a single argv string exceeded the kernel's 131,071-byte MAX_ARG_STRLEN — the prompt should have been spilled to a temp file)"
+    : "";
+  return `harness ${harnessId} threw: ${message}${hint}`;
 }
 
 /**

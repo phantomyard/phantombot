@@ -64,7 +64,7 @@ A harness is a CLI binary that takes a system prompt + a user message (and optio
 
 `src/harnesses/claude.ts` carries over patches that were originally applied to a fork of `claude-max-api-proxy`:
 
-- **Prompt via stdin, not argv.** Linux `ARG_MAX` (~2 MB) is a real ceiling for large persona/memory contexts.
+- **Prompt via stdin, not argv.** The ceiling that bites is Linux's `MAX_ARG_STRLEN`: **131,071 bytes for a single argv string**, hard-coded in the kernel and not raisable. It is *not* the ~2 MB `getconf ARG_MAX`, which bounds argv plus the environment in total — a distinction that cost a persona several days of downtime (#426), since a 140 KB system prompt fails with `E2BIG` on a box with gigabytes free. If a payload must ride on argv anyway, spill it to a temp file past `ARGV_SPILL_THRESHOLD_BYTES` (see `lib/harnessArgvFiles.ts`).
 - **`--system-prompt` (not embedded in the prompt body).** Otherwise Claude Code interprets the persona as user-input data and often shortcuts to terse / sentinel responses.
 - **`--permission-mode bypassPermissions`.** In `--print` mode there's no human to approve tool use.
 - **`--fallback-model sonnet`.** When Opus rate-limits, Claude Code transparently retries on Sonnet within the same subprocess and same Max subscription.

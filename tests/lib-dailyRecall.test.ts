@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildDailyRecall,
   DAILY_RECALL_CEILING_BYTES,
+  DAILY_RECALL_COMBINED_CEILING_BYTES,
 } from "../src/lib/dailyRecall.ts";
 import {
   NIGHTLY_STAGES,
@@ -245,14 +246,14 @@ describe("containment — a journal line cannot forge a prompt section", () => {
 
 describe("size cap", () => {
   test("a heavy but realistic day lands WHOLE — the cap is a ceiling, not a budget", async () => {
-    // ~40KB: far over the 8KB compaction budget the cap used to be pinned to,
-    // and still under the sanity ceiling. This is the shape of a busy day.
+    // ~24KB: three times the 8KB compaction budget the cap used to be pinned
+    // to, and still under the sanity ceiling. This is the shape of a busy day.
     const body =
       "## first entry\nthe oldest thing that happened\n" +
-      "filler\n".repeat(5_000) +
+      "filler\n".repeat(3_000) +
       "## last entry\nthe newest thing that happened\n";
     await writeDaily(TODAY, body);
-    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(32 * 1024);
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(16 * 1024);
     expect(Buffer.byteLength(body, "utf8")).toBeLessThan(
       DAILY_RECALL_CEILING_BYTES,
     );
@@ -263,11 +264,11 @@ describe("size cap", () => {
     expect(out.block).not.toContain("trimmed");
   });
 
-  test("a runaway day is still cut at the 256KB sanity ceiling", async () => {
-    expect(DAILY_RECALL_CEILING_BYTES).toBe(256 * 1024);
+  test("a runaway day is still cut at the 32KB sanity ceiling", async () => {
+    expect(DAILY_RECALL_CEILING_BYTES).toBe(32 * 1024);
     const body =
       "## first entry\nthe oldest thing that happened\n" +
-      "filler\n".repeat(45_000) +
+      "filler\n".repeat(8_000) +
       "## last entry\nthe newest thing that happened\n";
     expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(
       DAILY_RECALL_CEILING_BYTES,
@@ -278,6 +279,66 @@ describe("size cap", () => {
     expect(out.block).toContain("the newest thing that happened");
     expect(out.block).not.toContain("the oldest thing that happened");
     expect(out.block).toContain("trimmed");
+  });
+
+  test("today + yesterday together stay inside the COMBINED ceiling (#426)", async () => {
+    // The bug this encodes: a per-file cap is not a budget. Both files can be
+    // injected in the same prompt, so two maximal days used to authorise 2x
+    // the number the constant advertised — which is how a journal block
+    // outgrew the kernel's 131,071-byte argv limit and wedged the persona.
+    const heavy = (marker: string) =>
+      `## ${marker} oldest\n` + "filler\n".repeat(9_000) + `## ${marker} newest\n`;
+    await writeDaily(TODAY, heavy("today"));
+    await writeDaily(YESTERDAY, heavy("yesterday"));
+    // No ledger entry ⇒ yesterday is undistilled ⇒ it gets injected too.
+    const out = await buildDailyRecall(dir, NOW);
+    expect(out.yesterday.included).toBe(true);
+
+    // The ceiling bounds journal CONTENT; the block adds the fixed framing
+    // paragraph, two headings and the two truncation notices on top. That
+    // scaffolding is constant (~1KB), so allow for it explicitly rather than
+    // loosening the assertion to something that would not catch a regression.
+    const FRAMING_ALLOWANCE_BYTES = 2 * 1024;
+    const injected = Buffer.byteLength(out.block ?? "", "utf8");
+    expect(injected).toBeLessThanOrEqual(
+      DAILY_RECALL_COMBINED_CEILING_BYTES + FRAMING_ALLOWANCE_BYTES,
+    );
+    // Both were over the per-file cap on their own, so both had to give.
+    expect(out.today?.truncated).toBe(true);
+  });
+
+  test("an undistilled yesterday is never starved to nothing by a huge today", async () => {
+    // The invariant that makes the combined ceiling safe: it is strictly
+    // greater than the per-file ceiling, so yesterday's remaining allowance
+    // is at least the difference. When yesterday IS injected it is the only
+    // copy of that day in the prompt, so "budget exhausted, drop it" would
+    // lose memory outright.
+    expect(DAILY_RECALL_COMBINED_CEILING_BYTES).toBeGreaterThan(
+      DAILY_RECALL_CEILING_BYTES,
+    );
+    await writeDaily(TODAY, "## today oldest\n" + "filler\n".repeat(9_000));
+    await writeDaily(
+      YESTERDAY,
+      "## yesterday oldest\n" +
+        "filler\n".repeat(9_000) +
+        "## yesterday newest\nthe thing only this prompt holds\n",
+    );
+    const out = await buildDailyRecall(dir, NOW);
+    expect(out.yesterday.included).toBe(true);
+    expect(out.block).toContain("the thing only this prompt holds");
+  });
+
+  test("the whole journal block fits well inside Linux's per-argv-string limit", async () => {
+    // The end-to-end property #426 is about: whatever the journal contributes
+    // to a system prompt passed as one argv element, it cannot on its own get
+    // near MAX_ARG_STRLEN (131,071). The rest of the prompt — persona,
+    // MEMORY.md, drawers, retrieved context — is separately bounded and adds
+    // roughly 55KB, so the journal must leave that much room.
+    const huge = "## oldest\n" + "filler\n".repeat(60_000) + "## newest\n";
+    await writeDaily(TODAY, huge);
+    await writeDaily(YESTERDAY, huge);
+    const out = await buildDailyRecall(dir, NOW);
+    expect(Buffer.byteLength(out.block ?? "", "utf8")).toBeLessThan(70 * 1024);
   });
 
   test("the daily COMPACTION budget no longer clips the prompt", async () => {

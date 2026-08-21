@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  describeInvokeThrow,
   estimatePayloadBytes,
   runWithFallback,
 } from "../src/orchestrator/fallback.ts";
@@ -34,6 +35,29 @@ class FakeHarness implements Harness {
   async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
     this.invocations++;
     for (const c of this.script) yield c;
+  }
+}
+
+/**
+ * A harness whose `invoke()` THROWS instead of yielding an error chunk —
+ * the shape of a spawn failure (`Bun.spawn` throws E2BIG/ENOENT/EACCES
+ * before the generator produces anything).
+ */
+class ThrowingHarness implements Harness {
+  invocations = 0;
+  constructor(
+    public readonly id: string,
+    private readonly error: Error,
+    /** Chunks to emit before throwing, to model a mid-stream failure. */
+    private readonly before: HarnessChunk[] = [],
+  ) {}
+  async available(): Promise<boolean> {
+    return true;
+  }
+  async *invoke(_req: HarnessRequest): AsyncGenerator<HarnessChunk> {
+    this.invocations++;
+    for (const c of this.before) yield c;
+    throw this.error;
   }
 }
 
@@ -511,5 +535,135 @@ describe("health alerting", () => {
       }),
     );
     expect(sent).toEqual([]);
+  });
+});
+
+describe("a harness that throws instead of yielding (#426)", () => {
+  const e2big = () =>
+    new Error(
+      "E2BIG: argument list too long, posix_spawn '/home/robbie/.local/bin/claude'",
+    );
+
+  test("falls through to the next harness instead of killing the turn", async () => {
+    // The wedge: a spawn failure propagated straight out of runWithFallback,
+    // so the chain never advanced. An unspawnable primary silently disabled
+    // every fallback behind it and the persona answered nothing at all.
+    const bad = new ThrowingHarness("claude", e2big());
+    const good = new FakeHarness("pi", [
+      { type: "done", finalText: "served by pi" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([bad, good], newRequest(), {
+        cooldown: new CooldownStore(),
+      }),
+    );
+    expect(good.invocations).toBe(1);
+    expect(chunks.at(-1)).toMatchObject({
+      type: "done",
+      finalText: "served by pi",
+    });
+  });
+
+  test("cools the thrower off so the next turn does not retry it first", async () => {
+    const cooldown = new CooldownStore();
+    const sent: string[] = [];
+    const alerter = new HarnessAlerter({
+      send: (m) => {
+        sent.push(m);
+      },
+    });
+    const bad = new ThrowingHarness("claude", e2big());
+    const good = new FakeHarness("pi", [{ type: "done", finalText: "ok" }]);
+    await collect(
+      runWithFallback([bad, good], newRequest(), { cooldown, alerter }),
+    );
+    expect(cooldown.isCooledDown("claude").consecutiveFailures).toBe(1);
+    // A one-off failure a fallback absorbed stays quiet — same policy as any
+    // other non-auth cause (#284). The cooldown, not an alert, is the effect.
+    expect(sent).toEqual([]);
+  });
+
+  test("a throw on the LAST harness wakes the owner — nothing else would", async () => {
+    const sent: string[] = [];
+    const alerter = new HarnessAlerter({
+      send: (m) => {
+        sent.push(m);
+      },
+    });
+    const bad = new ThrowingHarness("claude", e2big());
+    await collect(
+      runWithFallback([bad], newRequest(), {
+        cooldown: new CooldownStore(),
+        alerter,
+      }),
+    );
+    expect(sent.join("\n")).toContain("claude");
+  });
+
+  test("the last harness throwing yields an error chunk, it does not reject", async () => {
+    const bad = new ThrowingHarness("claude", e2big());
+    const chunks = await collect(
+      runWithFallback([bad], newRequest(), { cooldown: new CooldownStore() }),
+    );
+    const last = chunks.at(-1);
+    expect(last?.type).toBe("error");
+    expect((last as { error: string }).error).toContain("claude");
+    expect((last as { error: string }).error).toContain("E2BIG");
+  });
+
+  test("text already streamed is kept, then the next harness takes over", async () => {
+    // Same streaming-first trade-off as a mid-stream recoverable error: the
+    // partial text is already on the user's screen, so we do not try to
+    // retract it.
+    const bad = new ThrowingHarness("claude", new Error("boom"), [
+      { type: "text", text: "half a sen" },
+    ]);
+    const good = new FakeHarness("pi", [
+      { type: "done", finalText: "a whole reply" },
+    ]);
+    const chunks = await collect(
+      runWithFallback([bad, good], newRequest(), {
+        cooldown: new CooldownStore(),
+      }),
+    );
+    expect(chunks[0]).toMatchObject({ type: "text", text: "half a sen" });
+    expect(chunks.at(-1)).toMatchObject({ type: "done" });
+  });
+
+  test("a non-Error throw is still handled", async () => {
+    const bad = new ThrowingHarness("claude", "just a string" as never);
+    const good = new FakeHarness("pi", [{ type: "done", finalText: "ok" }]);
+    const chunks = await collect(
+      runWithFallback([bad, good], newRequest(), {
+        cooldown: new CooldownStore(),
+      }),
+    );
+    expect(chunks.at(-1)).toMatchObject({ type: "done", finalText: "ok" });
+  });
+});
+
+describe("describeInvokeThrow", () => {
+  test("names the harness and keeps the original message", () => {
+    const out = describeInvokeThrow("claude", new Error("ENOENT: no such file"));
+    expect(out).toContain("claude");
+    expect(out).toContain("ENOENT: no such file");
+  });
+
+  test("E2BIG gets the gloss that points at the RIGHT limit", () => {
+    // The raw message says "argument list too long", which sends operators to
+    // `getconf ARG_MAX` (~2MB) and a dead end. The limit that actually bit is
+    // the per-string MAX_ARG_STRLEN, which no ulimit can raise.
+    const out = describeInvokeThrow("claude", new Error("E2BIG: argument list too long"));
+    expect(out).toContain("131,071");
+    expect(out).not.toContain("ARG_MAX ");
+  });
+
+  test("an unrelated failure gets no misleading argv hint", () => {
+    const out = describeInvokeThrow("pi", new Error("EACCES: permission denied"));
+    expect(out).not.toContain("131,071");
+  });
+
+  test("survives a thrown non-Error", () => {
+    expect(describeInvokeThrow("pi", { weird: true })).toContain("pi");
   });
 });

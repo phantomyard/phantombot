@@ -1,27 +1,39 @@
 /**
- * Windows argv-length workaround for harnesses that carry large prompt data
- * on the command line.
+ * Argv-length workaround for harnesses that carry large prompt data on the
+ * command line.
  *
- * POSIX ARG_MAX is ~2 MB, so phantombot's rendered payloads (persona + memory
- * + conversation history - routinely tens of KB) pass fine as argv. Windows
- * caps a whole process command line at ~8,191 characters (the CreateProcess
- * lpCommandLine limit), so the same payload makes the child fail to spawn with
- * "The command line is too long." - the harness then exits 1 and the bot
- * replies with nothing.
+ * There are TWO limits, and they bite on different platforms:
  *
- * The fix is to spill the two oversized argv payloads - the system prompt and
+ *   - Windows caps a whole process command line at ~8,191 characters (the
+ *     CreateProcess lpCommandLine limit). Phantombot's rendered payloads
+ *     (persona + memory + conversation history) blow straight past it, so the
+ *     child fails to spawn with "The command line is too long."
+ *   - Linux caps a SINGLE argv string at 131,071 bytes (MAX_ARG_STRLEN, 32
+ *     pages, hard-coded in fs/exec.c). This is NOT the 2 MB `ARG_MAX` that
+ *     `getconf ARG_MAX` reports and that this file used to cite: ARG_MAX
+ *     bounds the total of argv+envp, MAX_ARG_STRLEN bounds each string on its
+ *     own and cannot be raised (no sysctl, no ulimit). A system prompt over
+ *     128 KB therefore fails with E2BIG on a box with gigabytes free.
+ *
+ * The second limit is not theoretical: a persona whose journal grew past
+ * ~128 KB wedged completely, every turn dying at `posix_spawn` with
+ * `E2BIG: argument list too long` (issue #426).
+ *
+ * The fix is to spill the oversized argv payloads - the system prompt and
  * the rendered conversation - into temp files and hand the child a short file
  * reference instead:
  *
  *   - pi:     `--system-prompt <file>` (pi reads a path's contents as the
  *             system prompt) and the positional `@<file>` (pi includes an
- *             `@file`'s contents in the initial message).
+ *             `@file`'s contents in the initial message). Pi spills
+ *             unconditionally on every platform.
  *   - claude: `--system-prompt-file <file>` (the conversation already travels
- *             on stdin, so only the system prompt needs spilling).
+ *             on stdin, so only the system prompt needs spilling). Claude
+ *             spills on Windows always, and on any platform once the prompt
+ *             is large enough to approach MAX_ARG_STRLEN.
  *
  * Both mechanisms were verified empirically against pi 0.80.3 and Claude Code
- * before this was written. POSIX keeps the existing argv path byte-for-byte
- * unchanged - the temp-file path is gated to Windows only.
+ * before this was written.
  */
 
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -30,15 +42,52 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
- * True when the platform's command line is short enough that large prompt
- * payloads must be spilled to temp files rather than passed as argv. Only
- * Windows today (~8,191-char limit). The `platform` arg is injectable so the
- * branch is unit-testable on a POSIX CI runner.
+ * Linux's per-argv-string ceiling: MAX_ARG_STRLEN = 32 * PAGE_SIZE = 131,072
+ * bytes, of which one byte is the NUL terminator, so 131,071 usable. Hard-coded
+ * in the kernel (fs/exec.c) - not tunable, and unrelated to `getconf ARG_MAX`.
+ * Exported so tests can assert the threshold sits below it.
+ */
+export const MAX_ARG_STRLEN_BYTES = 131_071;
+
+/**
+ * Spill a single argv payload to a temp file once it exceeds this many bytes.
+ *
+ * 96 KB leaves ~35 KB of headroom under MAX_ARG_STRLEN. The headroom is
+ * deliberately fat rather than snug because the number we measure and the
+ * number the kernel measures are not quite the same string: we size the
+ * payload itself, while `execve` sizes each argv element after the runtime has
+ * encoded it. Sizing on `Buffer.byteLength` already removes the UTF-8 surprise
+ * (a journal full of em dashes is 3x its `.length` in bytes); the remaining
+ * slack covers anything the spawn path adds around the value.
+ *
+ * The cost of spilling early is one small file write and one read in the
+ * child, so an over-eager spill is nearly free while an under-eager one wedges
+ * the persona entirely. When in doubt, spill.
+ */
+export const ARGV_SPILL_THRESHOLD_BYTES = 96 * 1024;
+
+/**
+ * True when this argv payload must be spilled to a temp file rather than
+ * passed inline.
+ *
+ * Windows: ALWAYS true. Its limit is on the whole command line (~8,191 chars),
+ * not one element, so no per-payload size test can be trusted - the other args
+ * and the payload share one budget. Keeping it unconditional preserves the
+ * behaviour that shipped in #277 and verified on the Alpha VM.
+ *
+ * Elsewhere: true once `payloadBytes` crosses ARGV_SPILL_THRESHOLD_BYTES.
+ * Callers that omit `payloadBytes` get the old platform-only answer, which is
+ * the correct default for a caller that has no single dominant payload.
+ *
+ * `platform` is injectable so both branches are unit-testable on a POSIX CI
+ * runner.
  */
 export function argvNeedsTempFiles(
   platform: NodeJS.Platform = process.platform,
+  payloadBytes?: number,
 ): boolean {
-  return platform === "win32";
+  if (platform === "win32") return true;
+  return payloadBytes !== undefined && payloadBytes > ARGV_SPILL_THRESHOLD_BYTES;
 }
 
 export interface HarnessTempDir {

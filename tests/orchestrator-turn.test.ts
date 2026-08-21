@@ -959,11 +959,16 @@ describe("runTurn — concurrent-turn awareness (issue #391)", () => {
       },
     };
 
-    await expect(
-      collect(
-        runTurn({ ...baseInput(), userMessage: "hi", harnesses: [exploding] }),
-      ),
-    ).rejects.toThrow();
+    // Since #426 a thrown harness no longer rejects the iterator: the chain
+    // catches it, so a one-harness chain ends in a terminal error chunk. That
+    // is the point — a spawn failure must not be able to kill the turn — but
+    // the release guarantee below still has to hold on this path.
+    const chunks = await collect(
+      runTurn({ ...baseInput(), userMessage: "hi", harnesses: [exploding] }),
+    );
+    const last = chunks.at(-1);
+    expect(last?.type).toBe("error");
+    expect((last as { error: string }).error).toContain("harness died");
 
     // A turn that blew up must not leave an entry that looks in-flight — that
     // is what would park every scheduled task behind a corpse.

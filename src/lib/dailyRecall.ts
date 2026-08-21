@@ -58,7 +58,7 @@ import {
 import { inertBlock } from "./promptSafeText.js";
 
 /**
- * Sanity ceiling on a single injected journal — 256KB, roughly 64k tokens.
+ * Sanity ceiling on a single injected journal — 32KB.
  *
  * This used to be pinned to the persona's daily COMPACTION budget (8KB).
  * Those two numbers were never measuring the same thing: the compaction
@@ -68,13 +68,32 @@ import { inertBlock } from "./promptSafeText.js";
  * observed case — and what fell out was the tagged captures on their way to
  * the drawers, i.e. the load-bearing part.
  *
- * Recovering a clipped entry costs a search plus a file read, and only when
- * the turn RECOGNISES something is missing; it usually does not. So the cap
- * is set above the real ceiling rather than at the typical size: the largest
- * daily ever written across this fleet is ~62KB, and the file resets every
- * midnight UTC. 256KB therefore never fires on a normal day — it exists so
- * that a runaway writer (`memory capture` is unbounded) cannot oversize every
- * subsequent prompt with no recovery path.
+ * It was then set to 256KB, on the reasoning that the cap should sit above
+ * the real ceiling rather than at the typical size, and that a runaway writer
+ * was the only thing it needed to stop. That reasoning had a hole: it treated
+ * "too big" as a memory-quality problem when it is also a HARD SPAWN limit.
+ * A persona reached 82KB in one day and wedged completely — every turn died
+ * at `posix_spawn` with `E2BIG`, because the assembled system prompt exceeded
+ * Linux's 131,071-byte per-argv-string cap (#426). 256KB per file, times the
+ * two files that can be injected at once, permitted a 512KB journal block in
+ * a prompt that cannot exceed 128KB inline.
+ *
+ * 32KB is derived from that limit rather than from observed sizes. The rest
+ * of the system prompt is already bounded — persona + soul ~6.5KB, MEMORY.md
+ * 16KB, drawers 16KB, boilerplate + retrieved context ~15KB — which leaves
+ * roughly 50KB of the 128KB before anything is at risk, and
+ * DAILY_RECALL_COMBINED_CEILING_BYTES holds the two files together inside it.
+ *
+ * This is a real behaviour change, not just a tightening: a day heavier than
+ * 32KB now loses its morning, which is exactly the failure the 8KB cap was
+ * raised to avoid. Three things make that the right trade here. The loss is
+ * loud (a `log.warn` with `droppedBytes`) rather than silent; the block tells
+ * the turn how to recover the rest (`memory get memory/<date>.md`); and the
+ * alternative is not "keep everything" but "spawn nothing at all", since past
+ * the kernel limit the persona stops answering entirely. Note also that the
+ * argv spill in harnessArgvFiles.ts is the primary fix for #426 — this cap is
+ * the belt to that spill's braces, so that the prompt stays a sane size even
+ * where a spill is available.
  *
  * Deliberately a plain constant, NOT derived from the compaction budget:
  * raising how much a closed day may keep on disk must not change how much of
@@ -84,7 +103,25 @@ import { inertBlock } from "./promptSafeText.js";
  * one. Tail-keeping, the `log.warn` with `droppedBytes` and the
  * `memory get memory/<date>.md` recovery line are unchanged.
  */
-export const DAILY_RECALL_CEILING_BYTES = 256 * 1024;
+export const DAILY_RECALL_CEILING_BYTES = 32 * 1024;
+
+/**
+ * Ceiling on today AND yesterday TOGETHER — 48KB.
+ *
+ * The per-file cap alone is not a budget: both files can be injected in the
+ * same prompt, so a per-file number always understates the worst case by 2x.
+ * That is how the old 256KB read as "a quarter megabyte" while actually
+ * authorising half of one.
+ *
+ * Today is served first and may use the full per-file cap; yesterday gets
+ * whatever remains, itself capped per-file. Because this ceiling is strictly
+ * GREATER than the per-file one, yesterday's remaining allowance is at least
+ * (48 - 32) = 16KB no matter how large today is — an undistilled yesterday
+ * can never be starved to nothing, which matters because when it is injected
+ * at all, the prompt is the only place that day exists. Keep that inequality
+ * if you retune either number.
+ */
+export const DAILY_RECALL_COMBINED_CEILING_BYTES = 48 * 1024;
 
 /** Why yesterday's file was or was not included. Surfaced for tests + logs. */
 export type YesterdayReason =
@@ -129,7 +166,9 @@ async function readCapped(
   path: string,
   maxBytes: number,
 ): Promise<
-  { text: string; bytes: number; truncated: boolean } | "unreadable" | undefined
+  | { text: string; bytes: number; keptBytes: number; truncated: boolean }
+  | "unreadable"
+  | undefined
 > {
   if (!existsSync(path)) return undefined;
   let raw: string;
@@ -145,7 +184,13 @@ async function readCapped(
   if (raw.trim().length === 0) return undefined;
   const buf = Buffer.from(raw, "utf8");
   if (buf.byteLength <= maxBytes) {
-    return { text: raw.trim(), bytes: buf.byteLength, truncated: false };
+    const text = raw.trim();
+    return {
+      text,
+      bytes: buf.byteLength,
+      keptBytes: Buffer.byteLength(text, "utf8"),
+      truncated: false,
+    };
   }
   // Cut on a character boundary, then forward to the next newline so the
   // block never opens mid-sentence.
@@ -160,7 +205,12 @@ async function readCapped(
     maxBytes,
     droppedBytes: buf.byteLength - Buffer.byteLength(text, "utf8"),
   });
-  return { text, bytes: buf.byteLength, truncated: true };
+  return {
+    text,
+    bytes: buf.byteLength,
+    keptBytes: Buffer.byteLength(text, "utf8"),
+    truncated: true,
+  };
 }
 
 /**
@@ -173,10 +223,12 @@ export async function buildDailyRecall(
   personaDir: string,
   now: Date = new Date(),
   maxBytes?: number,
+  combinedMaxBytes?: number,
 ): Promise<DailyRecallDecision> {
   const todayKey = dateKey(now, 0);
   const yKey = dateKey(now, 1);
   const cap = maxBytes ?? DAILY_RECALL_CEILING_BYTES;
+  const combinedCap = combinedMaxBytes ?? DAILY_RECALL_COMBINED_CEILING_BYTES;
 
   let ledger: Record<string, NightlyDateRecord> = {};
   try {
@@ -192,15 +244,22 @@ export async function buildDailyRecall(
   const yPath = dailyFilePath(personaDir, yKey);
   const todayRead = await readCapped(todayPath, cap);
   const today = todayRead === "unreadable" ? undefined : todayRead;
+  // Yesterday spends what today left of the COMBINED budget, never more than
+  // the per-file cap. See DAILY_RECALL_COMBINED_CEILING_BYTES: the two
+  // constants are chosen so this can't reach zero while a per-file cap
+  // applies, but clamp at zero anyway so a hand-passed `combinedMaxBytes`
+  // below `maxBytes` degrades to "drop yesterday" rather than going negative.
+  const yCap = Math.max(0, Math.min(cap, combinedCap - (today?.keptBytes ?? 0)));
 
   const yRec = ledger[yKey];
   let yReason: YesterdayReason;
   let yesterday:
-    { text: string; bytes: number; truncated: boolean } | undefined;
+    | { text: string; bytes: number; keptBytes: number; truncated: boolean }
+    | undefined;
   if (await isDailyDistilled(yPath, yRec)) {
     yReason = "distilled";
   } else {
-    const read = await readCapped(yPath, cap);
+    const read = await readCapped(yPath, yCap);
     if (read === "unreadable") {
       // Distinct from "empty": a whole day of memory is sitting on disk and
       // going missing, which "empty" would read as benign.
@@ -245,7 +304,7 @@ export async function buildDailyRecall(
         `been promoted to the drawers, MEMORY.md or kb/ yet. It is here in raw ` +
         `form because this is the only place it exists.\n\n` +
         (yesterday.truncated
-          ? `_Older entries trimmed; most recent ${cap} bytes only. Run ` +
+          ? `_Older entries trimmed; most recent ${yCap} bytes only. Run ` +
             `\`phantombot memory get memory/${yKey}.md\` for the full day._\n\n`
           : "") +
         inertBlock(yesterday.text),
