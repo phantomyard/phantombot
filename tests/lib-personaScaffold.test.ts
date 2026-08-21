@@ -170,20 +170,22 @@ describe("the scaffold seeds every drawer the rest of the system writes to", () 
     expect(norms).toContain("cap");
     expect(norms).toContain("heartbeat");
     expect(norms).not.toContain("IN FULL");
-    // The cap is shared and this drawer is concatenated last, so it is the
-    // first content dropped — the drawer has to say so, or "be exhaustive"
-    // looks free.
-    expect(norms).toContain("LAST");
+    // Since #410 the cap is SHARED OUT rather than consumed front-to-back, so
+    // this drawer is no longer simply "the first thing dropped" — but it is
+    // still bounded, and each entry is ranked and injected on its own. The
+    // drawer has to say both, or "be exhaustive" looks free.
+    expect(norms).toContain("shared out");
+    expect(norms).toContain("RANKED");
   });
 
-  test("no seeded drawer claims the briefing preserves entry boundaries", async () => {
-    // readBriefingDrawers truncates with a RAW BYTE SLICE
-    // (`Buffer.from(text).subarray(0, DRAWERS_CAP_BYTES)`) over the
-    // CONCATENATED drawers — there is no entry-boundary logic anywhere in it,
-    // so the cut can land mid-entry, mid-line, even mid-codepoint. "IN FULL"
-    // was the first way this got overstated and "whole entries, not snippets"
-    // was the second, weaker way; both promise a guarantee the runtime does
-    // not give. Assert against the class of claim, not the one wording.
+  test("no seeded drawer overstates what the briefing preserves", async () => {
+    // `packBriefing` trims a drawer LINE BY LINE, which is a real guarantee
+    // for the ranked-row path (one entry is one line) and only a partial one
+    // for the file fallback, where a multi-line markdown entry can still lose
+    // its tail lines. "IN FULL" was the first way this got overstated and
+    // "whole entries, not snippets" the second, weaker way; both promise more
+    // than the runtime gives. Assert against the class of claim, not one
+    // wording.
     await ensurePersonaScaffold(workdir);
     for (const rel of BRIEFING_DRAWERS) {
       const body = await readFile(join(workdir, rel), "utf8");
@@ -194,7 +196,7 @@ describe("the scaffold seeds every drawer the rest of the system writes to", () 
     }
     // And the norms drawer must say what actually happens instead.
     const norms = await readFile(join(workdir, "memory", "norms.md"), "utf8");
-    expect(norms).toContain("mid-entry");
+    expect(norms).toContain("LINE boundaries");
   });
 
   test("no seeded drawer credits the nightly cycle with promotion", async () => {

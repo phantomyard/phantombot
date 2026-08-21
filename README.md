@@ -549,6 +549,7 @@ Agent-facing tools:
 | `phantombot task list / show / cancel` | Inspect and manage scheduled tasks |
 | `phantombot memory today / search / get / list / index` | Inspect memory and KB |
 | `phantombot memory capture "<text>" --tag decision` | Append a tagged memory capture |
+| `phantombot memory drawers [--kind norms] [--sync]` | Show the ranked drawer entries the threat judge is briefed from |
 
 Maintenance:
 
@@ -1554,7 +1555,8 @@ dangerous, not less.
 
 **The judge's briefing.** A judge that knows nothing about your world flags
 *everything* — the cry-wolf failure mode. So before judging, the screener
-semantic-searches three drawers and feeds the judge a briefing:
+reads three drawers — as **ranked entries**, highest decayed score first, with
+superseded and dormant ones left out — and feeds the judge a briefing:
 
 - **decisions** — how you've ruled on similar matters before;
 - **people** — known, legitimate senders/contacts;
@@ -1567,7 +1569,13 @@ them out means they never land in a judge log either. A matching prior
 approval, a known sender, or a documented norm lowers scrutiny; the briefing
 **never clears** it — a genuinely catastrophic request re-escalates regardless.
 The `norm` drawer is maintained by the nightly pass and is readable/correctable
-like any other, so *what the judge believes is normal* is auditable.
+like any other, so *what the judge believes is normal* is auditable —
+`phantombot memory drawers --kind norms` prints exactly what the judge will
+see, with scores. The briefing is capped at ~16 KiB and the budget is **shared
+out** across the three drawers rather than consumed front-to-back, so a large
+`decisions` drawer can no longer starve `norms`; a drawer that overflows its
+share is trimmed line by line — one ranked entry is one line — rather than cut
+mid-entry.
 
 **Who can record a ruling.** Only *you*, from a trusted turn. The judge writes
 nothing; the untrusted turn writes nothing. An attacker can therefore never

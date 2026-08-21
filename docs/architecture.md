@@ -117,11 +117,15 @@ picture. From an architecture standpoint:
   exists purely as an observability trail.
 - **Markdown (the persona dir)** is the durable memory: `memory/<date>.md` daily
   journals → five structured drawers → `kb/` atomic notes → `MEMORY.md`.
-- **The drawers are moving out of markdown into `drawer_entries`** — content-derived
+- **The drawers are projected from markdown into `drawer_entries`** — content-derived
   ids (so dedupe is a UNIQUE constraint, not a prompt instruction), supersession,
   per-kind lifecycle, and decay for the three *belief* drawers only. See
   [`memory-drawers.md`](memory-drawers.md); the split that keeps `commitments` and
-  `people` out of decay is load-bearing, not an omission.
+  `people` out of decay is load-bearing, not an omission. The heartbeat runs the
+  projection (`memory/drawerSync.ts`, skipped per drawer on an unchanged content
+  hash) and the threat judge's briefing reads the ranked rows, falling back to
+  the markdown file for any drawer that has none yet. Markdown stays the source
+  of truth; the table is rebuildable from it at any time.
 
 Three properties worth knowing when touching this code:
 

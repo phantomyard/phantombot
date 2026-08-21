@@ -203,6 +203,8 @@ commands you can run from your Bash tool:
   phantombot memory list <persona-relative-dir>   # ls a dir
   phantombot memory index [--rebuild]             # refresh search index
   phantombot memory capture "<text>" --tag <tag>  # record a tagged note
+  phantombot memory drawers [--kind <k>] [--sync]  # ranked drawer entries as
+                                                  # the threat judge sees them
 
 Layout (relative to your working dir):
 

@@ -1,9 +1,14 @@
 # Drawer entries: weight, supersession and decay
 
 The five drawers — `people`, `decisions`, `lessons`, `commitments`, `norms` —
-are moving from append-only markdown to rows in `drawer_entries`
+are append-only markdown on disk AND rows in `drawer_entries`
 (`src/memory/drawers.ts`). This page is the contract: what a row means, how an
 entry is retired, and **how a third-party tool files or corrects a norm**.
+
+**The markdown files remain the source of truth. The rows are a derived,
+rebuildable projection of them** — see [How rows get filled and
+read](#how-rows-get-filled-and-read). Delete the table and the next heartbeat
+rebuilds it; nothing in the row path ever writes markdown.
 
 Read [`architecture.md`](architecture.md#memory-subsystem) first for where the
 drawers sit in the memory pipeline.
@@ -162,12 +167,52 @@ content that arrived from outside the principal is data, not a rule.
 
 ## Why the threat judge cares
 
-`orchestrator/screen.ts` briefs the judge with *verbatim* drawer text from
-`decisions`, `people` and `norms`, hard-truncated at a shared ~16 KiB cap, with
-`norms` concatenated last — so today the drawer that says what is routine is
-the first thing clipped, mid-entry. Ranked rows replace "the first 16 KiB of a
-file" with "the top-scoring live entries", which is the difference between a
-brief that is arbitrary and one that is chosen.
+`orchestrator/screen.ts` briefs the judge from `decisions`, `people` and
+`norms`. It used to read *verbatim file bytes*, hard-truncated at a shared
+~16 KiB cap with `norms` concatenated last — so a 663 KB `decisions.md` ate the
+entire budget and the drawer that says what is routine never reached the
+prompt at all, and whatever did reach it was cut mid-entry.
+
+Now the briefing is built from **ranked rows**: highest decayed score first,
+`superseded` and `dormant` entries excluded. The cap is still 16 KiB, but it is
+shared out (`packBriefing`) — each drawer gets a slice, an under-budget drawer
+hands its remainder back, and an over-budget drawer is trimmed **line by line**
+with an explicit marker. On the row path one entry is one line, so that is an
+entry boundary; on the file fallback a multi-line markdown entry can still lose
+its tail lines, but the cut never lands mid-line. Half a ruling reads to the
+judge like a whole one, so a shorter briefing beats a truncated entry.
+
+## How rows get filled and read
+
+```
+memory/<kind>.md  --(heartbeat, every 30 min)-->  drawer_entries  --> judge briefing
+     ^ source of truth              syncDrawers()        ^ ranked, decayed
+     |                                                   |
+     `-- nightly / heartbeat / owner / phantomtools      `-- file fallback if empty
+```
+
+- **Fill.** `src/memory/drawerSync.ts::syncDrawers()` runs in the heartbeat
+  (`src/lib/heartbeat.ts`), immediately *after* tagged lines are promoted into
+  the markdown, so a line captured this cycle is a row by the end of the same
+  cycle. It is skipped per drawer when the file's **content hash** is unchanged
+  since the last sync — content, not mtime+size, because the compaction stage
+  rewrites drawers wholesale and a same-length rewrite in the same millisecond
+  is exactly when a skipped sync would strand the rows on stale text. The sync
+  marker is written only after a successful ingest, so a crash re-runs that
+  drawer rather than marking stale text done.
+- **Read.** `drawerSection()` returns ranked rows, and falls back to the raw
+  markdown file **per drawer** when that drawer has no rows yet. A fresh
+  install, a first boot before the first heartbeat, or a wiped database
+  therefore degrades to the old verbatim behaviour instead of briefing the
+  judge on an empty `norms` — failing open to "no norms at all" is exactly what
+  makes it cry wolf on routine operations.
+- **Inspect.** `phantombot memory drawers [--kind norms] [--sync] [--json]`
+  prints the ranked rows with their scores and an `N injectable of M filed`
+  count, and `--sync` runs the same projection on demand rather than waiting up
+  to 30 minutes for the next heartbeat.
+
+Because the ingest is idempotent (ids are content-derived), running the sync
+more often is only ever a cost, never a correctness risk.
 
 ## Migrating the existing markdown
 
