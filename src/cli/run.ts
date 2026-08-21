@@ -673,7 +673,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       const p2pSettings = config.p2p ?? DEFAULT_P2P;
 
       for (const spec of phantomchatPersonas) {
-        const { identity, allowedHex, tofu, groupBots } = spec.config;
+        const { identity, allowedHex, relayHex, tofu, groupBots } = spec.config;
 
         // Group addressing (multi-bot groups). From the configured sibling bots
         // derive: the shared NAME roster (every bot's name + our own, so a bot
@@ -720,6 +720,14 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         if (groupBots.length > 0) {
           out.write(
             `  [phantomchat:${spec.persona}] group roster: ${groupPersonaNames.join(", ")} (${groupBots.length} sibling bot(s) ignored in groups)\n`,
+          );
+        }
+        if (relayHex.length > 0) {
+          // Visible at startup on purpose: a relay npub is a standing hole in
+          // the "only the principal talks to me" model, so the operator should
+          // see it every boot rather than have to remember the config file.
+          out.write(
+            `  [phantomchat:${spec.persona}] relay npubs: ${relayHex.length} (untrusted tier — screened, no slash commands)\n`,
           );
         }
         // enablePing: nostr-tools sends a keepalive (ws ping, or a dummy REQ for
@@ -830,6 +838,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             channel,
             secretKey: identity.secretKey,
             allowedHex,
+            relayHex,
             groupPersonaNames,
             siblingBotHex,
             // Auto bot-detection + name resolution: the server fetches members'

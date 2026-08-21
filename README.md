@@ -757,6 +757,54 @@ in `phantomchat.json`. It's merged with what's auto-detected:
 
 Most setups won't need it — the auto-detection covers them.
 
+### Bridges: the relay tier
+
+A **bridge** is a bot that forwards messages from another network — Matrix,
+Slack, a meeting room — into PhantomChat. It signs with its own npub, so putting
+it in `allowed_npubs` would be a serious mistake: **the allowlist is the
+principal list**. Anything that passes it is treated as the owner speaking, and a
+bridge speaks for whoever happens to be in a room somewhere else.
+
+So bridges get their own, lower tier — `relay_npubs`:
+
+```json
+{
+  "allowed_npubs": ["npub1owner…"],
+  "relay_npubs": ["npub1bridge…"]
+}
+```
+
+A relay npub is **answered, but never obeyed**:
+
+| | allow-listed npub | relay npub |
+|---|---|---|
+| Threat screen | skipped (principal) | **always screened** |
+| Perimeter prompt | trusted | **untrusted** |
+| Slash commands (`/restart`, `/reset`, …) | yes | **no** — run as ordinary text |
+| Trust-on-first-use | can claim it | **never** |
+| Emoji-reaction turns | yes | **no** |
+| Private post-turn digests | yes (1:1 DM) | **no** — reply audience is `shared` |
+
+An npub in **both** lists resolves to relay: least privilege wins, so a
+copy-paste slip can only ever de-escalate.
+
+Relay messages may carry an attribution header, which phantombot re-renders from
+sanitised fields (a far-side speaker name can't smuggle in newlines or fake
+prompt structure):
+
+```
+[phantombridge-relay:v1]
+origin: matrix
+room: #ops:example.org
+speaker: alice
+---
+can you check the deploy?
+```
+
+`relay_npubs` is **file-only** — the `phantombot phantomchat` wizard doesn't offer
+it, because adding a bridge is a security decision, not a setup step. Edit
+`phantomchat.json` directly; the wizard preserves the field.
+
 ## Relay-free P2P transport (preview)
 
 Normally every PhantomChat message round-trips through a public Nostr relay. That

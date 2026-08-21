@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -342,4 +342,298 @@ describe("listPhantomchatPersonas — multi-persona fan-out", () => {
     );
     expect(specs).toEqual([]);
   });
+});
+
+/**
+ * RELAY TIER + MERGE SEMANTICS (#400).
+ *
+ * `savePhantomchatPersonaConfig` rebuilds the file from scratch, so an omitted
+ * field used to be ERASED — the config wizard passes no `groupBots` and wiped a
+ * persona's whole sibling roster on every edit. Omitted must mean "keep what's
+ * on disk".
+ */
+describe("relay tier + save merge semantics", () => {
+  test("relay_npubs loads as its own tier, decoded to hex", async () => {
+    const id = generateIdentity();
+    const relay = generateIdentity().npub;
+    const owner = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [owner],
+      relayNpubs: [relay],
+    });
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.relayNpubs).toEqual([relay]);
+    expect(loaded.relayHex).toEqual([decodeNpubToHex(relay)]);
+    // Emphatically NOT merged into the principal list.
+    expect(loaded.allowedNpubs).toEqual([owner]);
+    expect(loaded.allowedHex).toEqual([decodeNpubToHex(owner)]);
+  });
+
+  test("a save that omits relay_npubs preserves it", async () => {
+    const id = generateIdentity();
+    const relay = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      relayNpubs: [relay],
+    });
+
+    // The wizard's shape: relays + allowlist only.
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://b.example"],
+      allowedNpubs: [generateIdentity().npub],
+    });
+
+    expect(loadPhantomchatPersonaConfig(agentDir)!.relayNpubs).toEqual([relay]);
+  });
+
+  test("a save that omits group_bots preserves it (the wizard-wipe bug)", async () => {
+    const id = generateIdentity();
+    const sibling = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      groupBots: [{ name: "kai", npub: sibling, hex: decodeNpubToHex(sibling) }],
+    });
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.groupBots.map((b) => b.name)).toEqual(["kai"]);
+  });
+
+  test("an omitted tofu keeps the current setting; an explicit false clears it", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      tofu: true,
+    });
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+    expect(loadPhantomchatPersonaConfig(agentDir)!.tofu).toBe(true);
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      tofu: false,
+    });
+    expect(loadPhantomchatPersonaConfig(agentDir)!.tofu).toBe(false);
+  });
+
+  test("an EXPLICIT empty array still clears a field", async () => {
+    const id = generateIdentity();
+    const relay = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      relayNpubs: [relay],
+    });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      relayNpubs: [],
+    });
+    expect(loadPhantomchatPersonaConfig(agentDir)!.relayNpubs).toEqual([]);
+    const raw = JSON.parse(
+      await readFile(phantomchatConfigPath(agentDir), "utf8"),
+    ) as Record<string, unknown>;
+    expect("relay_npubs" in raw).toBe(false);
+  });
+
+  test("keys this build doesn't know about survive a save", async () => {
+    // A persona folder is portable: it may have been written by a NEWER build.
+    // Dropping its unknown keys would silently downgrade the file.
+    const id = generateIdentity();
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      phantomchatConfigPath(agentDir),
+      JSON.stringify({ nsec: id.nsec, relays: [], future_setting: 42 }),
+      "utf8",
+    );
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+
+    const raw = JSON.parse(
+      await readFile(phantomchatConfigPath(agentDir), "utf8"),
+    ) as Record<string, unknown>;
+    expect(raw.future_setting).toBe(42);
+    // …but the secret is still dropped from this file.
+    expect("nsec" in raw).toBe(false);
+  });
+
+  test("recordTrustedNpub and recordGreeted preserve relay_npubs", async () => {
+    const id = generateIdentity();
+    const relay = generateIdentity().npub;
+    const newcomer = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      tofu: true,
+      relayNpubs: [relay],
+    });
+
+    await recordTrustedNpub(agentDir, newcomer);
+    await recordGreeted(agentDir, newcomer);
+
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.relayNpubs).toEqual([relay]);
+    expect(loaded.allowedNpubs).toEqual([newcomer]);
+    expect(loaded.greeted).toEqual([newcomer]);
+    expect(loaded.tofu).toBe(false);
+  });
+
+  test("cacheRelaysForPersona preserves relay_npubs", async () => {
+    const id = generateIdentity();
+    const relay = generateIdentity().npub;
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+      relayNpubs: [relay],
+    });
+
+    expect(await cacheRelaysForPersona(agentDir, ["wss://new.example"])).toBe(true);
+    const loaded = loadPhantomchatPersonaConfig(agentDir)!;
+    expect(loaded.relays).toEqual(["wss://new.example"]);
+    expect(loaded.relayNpubs).toEqual([relay]);
+  });
+});
+
+describe("corrupt-but-populated phantomchat.json — #419 item 4", () => {
+  test("save backs up an unparseable file instead of silently wiping it", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "lena");
+    await mkdir(agentDir, { recursive: true });
+    const path = phantomchatConfigPath(agentDir);
+    // A truncated/corrupt file that WAS populated — the exact data-loss case.
+    const corrupt = '{"relays": ["wss://a.example"], "allowed_npubs": ["npub1brok';
+    await writeFile(path, corrupt, "utf8");
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://fresh.example"],
+      allowedNpubs: [],
+    });
+
+    // The corrupt original survived, byte-identical, under .corrupt-*.
+    const dir = await readdir(agentDir);
+    const backups = dir.filter((f) => f.startsWith("phantomchat.json.corrupt-"));
+    expect(backups.length).toBe(1);
+    const backup = await readFile(join(agentDir, backups[0]!), "utf8");
+    expect(backup).toBe(corrupt);
+
+    // The new file is valid and carries what the save supplied.
+    const loaded = loadPhantomchatPersonaConfig(agentDir);
+    expect(loaded).toBeDefined();
+    expect(loaded!.relays).toEqual(["wss://fresh.example"]);
+  });
+
+  test("a file that parses to a non-object is treated as corrupt too", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "kai");
+    await mkdir(agentDir, { recursive: true });
+    const path = phantomchatConfigPath(agentDir);
+    await writeFile(path, "[1, 2, 3]", "utf8");
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://fresh.example"],
+      allowedNpubs: [],
+    });
+
+    const dir = await readdir(agentDir);
+    const backups = dir.filter((f) => f.startsWith("phantomchat.json.corrupt-"));
+    expect(backups.length).toBe(1);
+    expect(loadPhantomchatPersonaConfig(agentDir)).toBeDefined();
+  });
+
+  test("an absent file still saves clean — no backup, no warn path", async () => {
+    const id = generateIdentity();
+    const agentDir = join(workdir, "salvador");
+    await mkdir(agentDir, { recursive: true });
+
+    await savePhantomchatPersonaConfig(agentDir, {
+      nsec: id.nsec,
+      relays: ["wss://a.example"],
+      allowedNpubs: [],
+    });
+
+    const dir = await readdir(agentDir);
+    expect(dir.filter((f) => f.includes("corrupt"))).toEqual([]);
+    expect(loadPhantomchatPersonaConfig(agentDir)).toBeDefined();
+  });
+
+  // chmod is meaningless on Windows (and on root, which ignores mode bits),
+  // so the read-failure path can't be exercised there — POSIX only.
+  test.skipIf(process.platform === "win32")(
+    "an unreadable file is a read failure, not corruption — save rejects, no backup",
+    async () => {
+      if (process.getuid?.() === 0) return; // root ignores the mode bits
+      const id = generateIdentity();
+      const agentDir = join(workdir, "robbie");
+      await mkdir(agentDir, { recursive: true });
+      const path = phantomchatConfigPath(agentDir);
+      // A perfectly VALID config the process cannot read (EACCES) — the exact
+      // case where a .corrupt-* rename would destroy a good file.
+      const valid = JSON.stringify({
+        relays: ["wss://a.example"],
+        allowed_npubs: ["npub1ok"],
+      });
+      await writeFile(path, valid, "utf8");
+      await chmod(path, 0o000);
+
+      await expect(
+        savePhantomchatPersonaConfig(agentDir, {
+          nsec: id.nsec,
+          relays: ["wss://fresh.example"],
+          allowedNpubs: [],
+        }),
+      ).rejects.toThrow(/could not be read/);
+
+      // No backup was made and the valid file is untouched — bytes preserved.
+      const dir = await readdir(agentDir);
+      expect(dir.filter((f) => f.includes("corrupt"))).toEqual([]);
+      await chmod(path, 0o644); // restore read access, then verify the bytes
+      expect(await readFile(path, "utf8")).toBe(valid);
+    },
+  );
 });
