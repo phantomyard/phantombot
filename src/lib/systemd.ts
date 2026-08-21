@@ -519,9 +519,21 @@ export function defaultSystemdServiceControl(): ServiceControl {
     async restart() {
       const sysEnv = ensureUserSystemdEnv();
       if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
-      // Scoped to restart() on purpose: stop() is invoked by an EXTERNAL
-      // caller (the CLI, the installer), so a SIGTERM'd systemctl there is
-      // not self-teardown and stays a failure.
+      // Scoped to restart() vs stop() because restart() is the ONLY verb
+      // that can be issued from inside the unit it acts on: a self-stop
+      // would not come back, so nothing calls it that way. stop() is
+      // therefore always issued from outside the doomed cgroup and a
+      // SIGTERM'd systemctl there is a real interruption, not teardown.
+      // restart() is NOT internal-only — `phantombot update --restart`
+      // (src/cli/update.ts) and `phantombot harness` (src/cli/harness.ts)
+      // reach it from a terminal. 143 is still the right call for them:
+      // that CLI is usually itself spawned from inside the running service
+      // (an agent shelling out to `phantombot update`), so it shares the
+      // cgroup. The residual case — a genuinely detached CLI whose
+      // systemctl child is SIGTERM'd for an unrelated reason — reports a
+      // success it cannot distinguish from teardown. Accepted: it is rare,
+      // and the alternative was crying failure on EVERY successful update,
+      // which trains everyone to ignore the one line that should page.
       return runSelfRestart(new BunSystemctlRunner(buildSystemctlEnv(sysEnv)));
     },
     rerenderUnitIfStale: defaultRerenderUnitIfStale,

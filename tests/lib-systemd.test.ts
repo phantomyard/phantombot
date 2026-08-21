@@ -140,8 +140,11 @@ describe("generateSystemdUnit", () => {
   });
 
   test("isSelfRestartTeardown: an explicit SIGTERM signal counts even without 143", () => {
-    // Bun reports proc.exitCode === null for a signal-killed child; a runner
-    // that surfaces the signal name rather than 128+signum must classify too.
+    // SystemctlResult.exitCode is `await proc.exited` (143 for a SIGTERM'd
+    // child), never Bun's `proc.exitCode` (which is null there), so this
+    // shape is not what BunSystemctlRunner produces. It pins the OTHER half
+    // of the classifier: a runner that surfaces only the signal name must
+    // classify on `signal` alone, without the 128+signum arithmetic.
     expect(
       isSelfRestartTeardown({
         exitCode: 0,

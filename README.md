@@ -1980,7 +1980,11 @@ child comes back as exit 143 (128+SIGTERM), which is the restart **working**,
 not failing, and is treated as success. Only a genuine failure (a bad unit, an
 unreachable session bus) logs `restart failed after binary swap`; if you see
 that line, the update really did not come back and the pending-update marker is
-still on disk for the next start to report.
+still on disk for the next start to report. The signal is one-directional: its
+ABSENCE is not proof the update came back, because if `systemctl restart` is
+accepted and the *new* unit then fails to start (bad binary, unit rejected at
+load) the process that would log it is already gone. The pending-update marker
+on disk is the check that covers that case.
 
 The heartbeat checks for new releases automatically, waits 72 hours after a
 release, then sends a Telegram `/update` heads-up. Manual update commands are
