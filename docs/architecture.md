@@ -37,7 +37,7 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/memory/store.ts` | bun:sqlite wrapper. `turns` table (`appendTurn`, `recentTurns`, …) + `capture_log` table (`appendCapture`, `lastCaptureAt`, `countCapturesSince`, turn counters for the nudge/doctor). | `bun:sqlite` |
 | `src/lib/nightly.ts` | Stage model + prompt bodies, the `.nightly-state.json` ledger (`sweepDailyFiles`, `dateRecord`), and `nightlyHealth` for `/status` + doctor. | filesystem |
 | `src/lib/nightlyCompact.ts` | Compaction budgets, candidate selection, the pre-pass archive under `memory/archive/<date>/`, and the shrink-guard verdict that reverts an over-eager pass. | filesystem, `lib/nightly` |
-| `src/lib/nightlyTrigger.ts` | When the sweep runs: `dayRolledOver` (heartbeat trigger) + `spawnNightlySweep` (detached fire, also used by `run` at startup). | `node:child_process` |
+| `src/lib/nightlyTrigger.ts` | When the sweep runs: `dayRolledOver` (heartbeat trigger) + `spawnNightlySweep` (transient systemd unit on Linux, detached child elsewhere; also used by `run` at startup). | `node:child_process` |
 | `src/lib/indexRefresh.ts` | `refreshPersonaIndex`: incremental FTS + embedding refresh, called in code by the nightly after both stages join. | `lib/memoryIndex`, `lib/embedJob` |
 | `src/cli/doctor.ts` | `phantombot doctor`: reports the nightly ledger (read-only) + `capture_log`, repairs units/timers/connectors. | `memory/store`, `lib/nightly` |
 | `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
@@ -136,7 +136,12 @@ Three properties worth knowing when touching this code:
    run diffs the daily files against a ledger in `.nightly-state.json`
    (mtime + size, then content hash) and processes whatever is new, grew, or
    half-finished. It is triggered by startup and by the heartbeat detecting a
-   calendar-day rollover — there is no nightly timer. Per date it runs exactly
+   calendar-day rollover — there is no nightly timer. On systemd the sweep is
+   launched as its own transient `--user` unit rather than as a detached child:
+   the rollover trigger runs inside `phantombot-heartbeat.service`, which is
+   `Type=oneshot`, so its cgroup (and everything left in it) is torn down the
+   moment the heartbeat exits. `detached`/`unref` leaves Node's event loop, not
+   the cgroup. Per date it runs exactly
    two harness turns — `distill`
    (drawers + MEMORY.md) and `kb` — **concurrently**, because their write
    targets are disjoint; neither may write back to the daily file, or the hash
