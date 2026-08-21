@@ -15,15 +15,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import {
   runEnvGet,
   runEnvList,
   runEnvSet,
   runEnvUnset,
 } from "../src/cli/env.ts";
-import {
+import vaultCommand, {
   runVaultGet,
   runVaultList,
+  readVaultValueFromStdin,
   runVaultSet,
   runVaultUnset,
 } from "../src/cli/vault.ts";
@@ -168,5 +170,50 @@ describe("vault runners (forward target)", () => {
     const unsetOut = new CaptureStream();
     expect(await runVaultUnset({ name: "A", vault, out: unsetOut })).toBe(0);
     expect(vault.get("A")).toBeUndefined();
+  });
+
+  test("set reads an omitted value from stdin and trims one trailing newline", async () => {
+    const stdin = Readable.from(["first line\nsecond line\n\n"]);
+    expect(
+      await runVaultSet({ name: "PIPE_TOKEN", vault, stdin, out: new CaptureStream() }),
+    ).toBe(0);
+    expect(vault.get("PIPE_TOKEN")).toBe("first line\nsecond line\n");
+  });
+
+  test("an explicit positional value is unchanged, including trailing newlines", async () => {
+    await runVaultSet({
+      name: "POSITIONAL_TOKEN",
+      value: "legacy-value\n",
+      vault,
+      out: new CaptureStream(),
+    });
+    expect(vault.get("POSITIONAL_TOKEN")).toBe("legacy-value\n");
+  });
+
+  test("omitted value refuses a TTY instead of hanging", async () => {
+    const err = new CaptureStream();
+    const stdin = Object.assign(Readable.from([]), { isTTY: true });
+    expect(await runVaultSet({ name: "TOKEN", vault, stdin, err })).toBe(2);
+    expect(err.text).toContain("stdin is a TTY");
+    expect(vault.get("TOKEN")).toBeUndefined();
+  });
+});
+
+describe("readVaultValueFromStdin", () => {
+  test("strips one LF or CRLF but preserves content without a line ending", async () => {
+    expect(await readVaultValueFromStdin(Readable.from(["secret\n"]))).toBe("secret");
+    expect(await readVaultValueFromStdin(Readable.from(["secret\r\n"]))).toBe("secret");
+    expect(await readVaultValueFromStdin(Readable.from(["secret"]))).toBe("secret");
+  });
+});
+
+describe("vault set command contract", () => {
+  test("the value positional is optional so omission reaches stdin handling", () => {
+    const subCommands = vaultCommand.subCommands as unknown as Record<
+      string,
+      { args?: Record<string, { required?: boolean }> }
+    >;
+    const setCommand = subCommands.set!;
+    expect(setCommand.args?.value?.required).toBe(false);
   });
 });

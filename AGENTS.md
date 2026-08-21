@@ -234,12 +234,15 @@ If you change a unit body (any `generate*` function in `src/lib/systemd.ts`), `e
 
 ## Credentials
 
-Two .env files, two roles:
-
-- **`~/.config/phantombot/.env`** — phantombot-managed (TTS keys, written by `phantombot voice`).
-- **`~/.env`** — user-managed (`GITHUB_TOKEN` etc., written by `phantombot env set`).
-
-The agent NEVER `echo … >> ~/.env`. It uses `phantombot env set NAME "value"` (atomic write, mode 0o600). The full credential discovery + hygiene rules are baked into every persona's system prompt via `CREDENTIALS_SECTION` in `src/persona/builder.ts` — the agent inherits them automatically. If you change those rules, update both `CREDENTIALS_SECTION` and the README's [Credentials](README.md#credentials-phantombot-env) section.
+Credentials live in the per-persona encrypted vault. The agent NEVER appends
+secrets to `.env` or puts literal secret values in command arguments. It uses
+`printf '%s' "$VALUE" | phantombot vault set NAME`; the positional
+`phantombot vault set NAME "value"` form also remains available for backward
+compatibility. The full credential discovery + hygiene rules are baked into
+every persona's system prompt via `CREDENTIALS_SECTION` in
+`src/persona/builder.ts`. If you change those rules, update both
+`CREDENTIALS_SECTION` and the README's [Credentials](README.md#credentials)
+section.
 
 ## Release pipeline
 

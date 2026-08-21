@@ -541,7 +541,7 @@ Agent-facing tools:
 
 | Command | Purpose |
 |---|---|
-| `phantombot env set NAME "value"` | Save a credential atomically |
+| `printf '%s' "$VALUE" \| phantombot vault set NAME` | Save a credential without exposing it in argv |
 | `phantombot notify --message "..."` | Send a Telegram text notification |
 | `phantombot notify --voice "..."` | Send a Telegram voice notification |
 | `phantombot task add "<prompt>" "<description>" --every 1h` | Schedule an LLM-backed task |
@@ -1474,28 +1474,23 @@ user explicitly asked to be interrupted.
 
 ## Credentials
 
-Phantombot uses two environment files:
-
-| File | Purpose |
-|---|---|
-| `~/.config/phantombot/.env` | Phantombot runtime secrets, usually written by setup commands |
-| `~/.env` | General credentials for the harnessed agent |
-
-Systemd units load both files with optional `EnvironmentFile=` entries. The
-spawned harness inherits the merged environment, so agents can discover
-credentials through `process.env` without pasting secrets into commands.
+Phantombot stores secrets in a per-persona encrypted vault. Values are encrypted
+at rest with AES-256-GCM using a key derived from the persona identity and are
+loaded into the spawned harness environment at runtime.
 
 Agent-facing credential CLI:
 
 ```bash
-phantombot env set GITHUB_TOKEN "ghp_..."
-phantombot env list
-phantombot env get GITHUB_TOKEN
-phantombot env unset GITHUB_TOKEN
+printf '%s' "$GITHUB_TOKEN" | phantombot vault set GITHUB_TOKEN
+phantombot vault list
+phantombot vault get GITHUB_TOKEN
+phantombot vault unset GITHUB_TOKEN
 ```
 
-Use `phantombot env set` instead of appending to `.env` by hand. It writes
-atomically, preserves file permissions, and avoids duplicate entries.
+When the value positional is omitted, `vault set` reads stdin and removes one
+trailing LF or CRLF. The existing `phantombot vault set NAME "value"` form is
+still supported for compatibility, but exposes the value in process arguments
+and potentially shell history. `phantombot env` remains a deprecated alias.
 
 ## Security
 

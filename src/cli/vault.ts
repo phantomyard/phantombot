@@ -9,8 +9,9 @@
  *
  * The subcommands mirror `phantombot env` 1:1 (set/get/list/unset), including
  * the "saved NAME" ack that never echoes the value and the names-only listing.
- * The harnessed agent calls `phantombot vault set NAME value` — this is its
- * sanctioned, atomic, encrypted write path.
+ * The harnessed agent pipes a value to `phantombot vault set NAME` so the
+ * secret never appears in argv. The positional value remains supported for
+ * backward compatibility.
  */
 
 import { defineCommand } from "citty";
@@ -52,12 +53,38 @@ async function resolveVault(input: {
 
 export interface VaultSetInput {
   name: string;
-  value: string;
+  value?: string;
   persona?: string;
   personaDir?: string;
   vault?: Vault;
   out?: WriteSink;
   err?: WriteSink;
+  stdin?: VaultInputStream;
+}
+
+export type VaultInputStream = AsyncIterable<string | Uint8Array> & {
+  isTTY?: boolean;
+};
+
+/**
+ * Read a secret from stdin without ever reflecting it in output. Refuse a TTY
+ * so an accidentally omitted positional value fails instead of hanging until
+ * Ctrl-D. Strip exactly one trailing line ending: this makes ordinary shell
+ * pipes convenient without changing intentional whitespace inside the value.
+ */
+export async function readVaultValueFromStdin(
+  stdin: VaultInputStream = process.stdin,
+): Promise<string> {
+  if (stdin.isTTY) {
+    throw new Error(
+      "value omitted and stdin is a TTY; pipe the value or pass it as an argument",
+    );
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of stdin) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
 }
 
 export async function runVaultSet(input: VaultSetInput): Promise<number> {
@@ -69,9 +96,18 @@ export async function runVaultSet(input: VaultSetInput): Promise<number> {
     );
     return 2;
   }
+  let value = input.value;
+  if (value === undefined) {
+    try {
+      value = await readVaultValueFromStdin(input.stdin);
+    } catch (e) {
+      err.write(`phantombot vault set: ${(e as Error).message}\n`);
+      return 2;
+    }
+  }
   const { vault, owned } = await resolveVault(input);
   try {
-    vault.set(input.name, input.value);
+    vault.set(input.name, value);
   } finally {
     if (owned) vault.close();
   }
@@ -163,20 +199,24 @@ export default defineCommand({
   meta: {
     name: "vault",
     description:
-      "Manage the persona's encrypted secrets vault. AES-256-GCM at rest, key derived from the persona's identity. The harnessed agent should call `phantombot vault set NAME value` instead of editing files directly.",
+      "Manage the persona's encrypted secrets vault. AES-256-GCM at rest, key derived from the persona's identity. Pipe values to `phantombot vault set NAME` to keep secrets out of argv.",
   },
   subCommands: {
     set: defineCommand({
       meta: { name: "set", description: "Add or update the NAME=value entry in the vault." },
       args: {
         name: { type: "positional", required: true, description: "Secret name (e.g. GITHUB_TOKEN)" },
-        value: { type: "positional", required: true, description: "Value to store" },
+        value: {
+          type: "positional",
+          required: false,
+          description: "Value to store; omit to read from stdin",
+        },
         persona: { type: "string", description: "Persona whose vault to use. Defaults to PHANTOMBOT_PERSONA / default persona." },
       },
       async run({ args }) {
         process.exitCode = await runVaultSet({
           name: args.name as string,
-          value: args.value as string,
+          value: typeof args.value === "string" ? args.value : undefined,
           persona: args.persona ? String(args.persona) : undefined,
         });
       },
