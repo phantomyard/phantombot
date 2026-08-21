@@ -1973,6 +1973,15 @@ phantombot update --force --restart
 Updates download to a temporary file, verify SHA256, atomically rename over the
 live binary, and clean up after themselves.
 
+On Linux the restart runs `systemctl --user restart` from *inside* the service
+being restarted, so systemd tears down the whole cgroup — including the
+`systemctl` child phantombot just spawned — as soon as it accepts the job. That
+child comes back as exit 143 (128+SIGTERM), which is the restart **working**,
+not failing, and is treated as success. Only a genuine failure (a bad unit, an
+unreachable session bus) logs `restart failed after binary swap`; if you see
+that line, the update really did not come back and the pending-update marker is
+still on disk for the next start to report.
+
 The heartbeat checks for new releases automatically, waits 72 hours after a
 release, then sends a Telegram `/update` heads-up. Manual update commands are
 immediate.

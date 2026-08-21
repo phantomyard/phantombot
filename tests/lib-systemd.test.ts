@@ -19,8 +19,10 @@ import {
   generateSystemdUnit,
   generateTickService,
   installPhantombotUnit,
+  isSelfRestartTeardown,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
+  runSelfRestart,
   SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
   type SystemctlResult,
@@ -122,6 +124,89 @@ describe("generateSystemdUnit", () => {
     expect(SELF_RESTART_ARGS).toContain("--user");
     expect(SELF_RESTART_ARGS).toContain("restart");
     expect(SELF_RESTART_ARGS).toContain("phantombot.service");
+  });
+
+  // --- phantombot #408: exit 143 from the self-restart systemctl child ---
+  //
+  // restart() spawns systemctl INSIDE our own cgroup, so systemd SIGTERMs it
+  // as soon as it starts the stop job. --no-block shrinks that race but does
+  // not win it, so every successful /update on Linux logged
+  // `updateNotify: restart failed after binary swap` with stderr "exit 143".
+
+  test("isSelfRestartTeardown: exit 143 is our own cgroup teardown, not a failure", () => {
+    expect(
+      isSelfRestartTeardown({ exitCode: 143, stdout: "", stderr: "" }),
+    ).toBe(true);
+  });
+
+  test("isSelfRestartTeardown: an explicit SIGTERM signal counts even without 143", () => {
+    // Bun reports proc.exitCode === null for a signal-killed child; a runner
+    // that surfaces the signal name rather than 128+signum must classify too.
+    expect(
+      isSelfRestartTeardown({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        signal: "SIGTERM",
+      }),
+    ).toBe(true);
+  });
+
+  test("isSelfRestartTeardown: SIGKILL/137 is NOT swallowed — that's an OOM or hard kill", () => {
+    expect(
+      isSelfRestartTeardown({
+        exitCode: 137,
+        stdout: "",
+        stderr: "",
+        signal: "SIGKILL",
+      }),
+    ).toBe(false);
+  });
+
+  test("isSelfRestartTeardown: ordinary failures stay failures", () => {
+    for (const exitCode of [1, 4, 5, 127]) {
+      expect(isSelfRestartTeardown({ exitCode, stdout: "", stderr: "" })).toBe(
+        false,
+      );
+    }
+  });
+
+  test("runSelfRestart: exit 143 returns ok:true so updateNotify logs no error", async () => {
+    const fake = new FakeSystemctl();
+    fake.responses = [{ exitCode: 143, stdout: "", stderr: "", signal: "SIGTERM" }];
+    const r = await runSelfRestart(fake);
+    expect(r.ok).toBe(true);
+    expect(r.stderr).toBeUndefined();
+    // …and it really did ask systemd for the restart.
+    expect(fake.calls[0]).toEqual([...SELF_RESTART_ARGS]);
+  });
+
+  test("runSelfRestart: exit 0 is ok:true", async () => {
+    const fake = new FakeSystemctl();
+    fake.responses = [{ exitCode: 0, stdout: "", stderr: "" }];
+    expect((await runSelfRestart(fake)).ok).toBe(true);
+  });
+
+  test("runSelfRestart: a real systemctl error still fails, with its stderr", async () => {
+    const fake = new FakeSystemctl();
+    fake.responses = [
+      {
+        exitCode: 1,
+        stdout: "",
+        stderr: "Failed to restart phantombot.service: Unit not found.\n",
+      },
+    ];
+    const r = await runSelfRestart(fake);
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toBe("Failed to restart phantombot.service: Unit not found.");
+  });
+
+  test("runSelfRestart: non-zero with empty stderr still fails, reported as `exit N`", async () => {
+    const fake = new FakeSystemctl();
+    fake.responses = [{ exitCode: 5, stdout: "", stderr: "" }];
+    const r = await runSelfRestart(fake);
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toBe("exit 5");
   });
 
   test("declares SuccessExitStatus=143 so SIGTERM-on-self-restart isn't a failure", () => {

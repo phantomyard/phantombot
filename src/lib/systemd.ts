@@ -232,9 +232,23 @@ WantedBy=timers.target
 }
 
 export interface SystemctlResult {
+  /**
+   * Process exit status as Bun reports it from `proc.exited` — for a
+   * signal-terminated child that is 128+signum (SIGTERM => 143), never
+   * null. `signal` carries the signal name separately so callers can
+   * distinguish "systemctl chose to exit 143" from "systemctl was killed",
+   * without having to reverse the arithmetic.
+   */
   exitCode: number;
   stdout: string;
   stderr: string;
+  /**
+   * Signal name if the child was terminated by one, else null. Optional so
+   * the many existing test doubles for SystemctlRunner stay valid; the real
+   * BunSystemctlRunner always populates it, and isSelfRestartTeardown()
+   * falls back to the 143 exit code when it is absent.
+   */
+  signal?: string | null;
 }
 
 export interface SystemctlRunner {
@@ -261,7 +275,10 @@ export class BunSystemctlRunner implements SystemctlRunner {
     const stdout = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
     const exitCode = await proc.exited;
-    return { exitCode, stdout, stderr };
+    // proc.exitCode is null for a signal-terminated child; proc.exited
+    // still resolves to 128+signum. Surface the signal name too so
+    // isSelfRestartTeardown() doesn't have to infer it from 143 alone.
+    return { exitCode, stdout, stderr, signal: proc.signalCode ?? null };
   }
 }
 
@@ -291,10 +308,18 @@ export function buildSystemctlEnv(
  * waiting for the unit to come back up. The /restart and /update flows
  * call restart() from INSIDE the running service, so systemd kills our
  * whole cgroup the moment the stop begins — including the systemctl
- * child, which would otherwise be reported back as exit 143 ("commands:
- * /restart failed, stderr: exit 143"). With --no-block, systemctl exits
- * 0 cleanly before the kill arrives. Exported so the unit-test layer
- * can pin this without spawning a real subprocess.
+ * child.
+ *
+ * --no-block SHRINKS that window; it does not close it. Nothing orders
+ * "systemctl exits 0" before "systemd SIGTERMs the cgroup", so on a fast
+ * host systemctl loses the race and comes back as 143 (128+SIGTERM) even
+ * though the restart was already accepted. That was phantombot #408:
+ * every successful /update logged `restart failed after binary swap`.
+ * The classification fix lives in isSelfRestartTeardown() below — this
+ * flag is a latency optimisation, not the correctness guarantee.
+ *
+ * Exported so the unit-test layer can pin this without spawning a real
+ * subprocess.
  */
 export const SELF_RESTART_ARGS: readonly string[] = [
   "--user",
@@ -302,6 +327,45 @@ export const SELF_RESTART_ARGS: readonly string[] = [
   "restart",
   PHANTOMBOT_UNIT_NAME,
 ];
+
+/**
+ * True iff a self-restart `systemctl` result is our own cgroup teardown
+ * rather than a failure.
+ *
+ * `restart()` is called from INSIDE the running service, so the systemctl
+ * child we spawned lives in the cgroup systemd is about to tear down. Being
+ * SIGTERM'd mid-`systemctl restart` IS the restart working: systemd only
+ * sends that signal once it has accepted the job and begun the stop. Exit
+ * 143 is the same event seen through Bun's `proc.exited` (128+SIGTERM),
+ * which is what we get when the signal arrives before systemctl can exit 0.
+ *
+ * Deliberately narrow:
+ * - SIGKILL / 137 is NOT included — that's the OOM killer or a hard kill,
+ *   a real fault worth surfacing (same rule as the harness classifier).
+ * - Any other non-zero exit (bad unit name, no session bus, systemctl not
+ *   found) still classifies as a genuine failure.
+ *
+ * The unit template already declares `SuccessExitStatus=143` for exactly
+ * this reason (see generateSystemdUnit); this is the same judgement applied
+ * to the code path. See phantombot #408.
+ */
+export function isSelfRestartTeardown(r: SystemctlResult): boolean {
+  return r.signal === "SIGTERM" || r.exitCode === 128 + 15;
+}
+
+/**
+ * The whole body of `defaultSystemdServiceControl().restart()`, minus the
+ * env plumbing, so the classification above can be tested against a fake
+ * runner instead of a live user-systemd bus (which CI does not have).
+ */
+export async function runSelfRestart(
+  systemctl: SystemctlRunner,
+): Promise<{ ok: boolean; stderr?: string }> {
+  const r = await systemctl.run(SELF_RESTART_ARGS);
+  return r.exitCode === 0 || isSelfRestartTeardown(r)
+    ? { ok: true }
+    : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+}
 
 export interface ServiceControl {
   /** True iff `systemctl --user is-active phantombot.service` returns "active". */
@@ -455,12 +519,10 @@ export function defaultSystemdServiceControl(): ServiceControl {
     async restart() {
       const sysEnv = ensureUserSystemdEnv();
       if (!sysEnv.ready) return { ok: false, stderr: sysEnv.reason };
-      const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run(
-        SELF_RESTART_ARGS,
-      );
-      return r.exitCode === 0
-        ? { ok: true }
-        : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
+      // Scoped to restart() on purpose: stop() is invoked by an EXTERNAL
+      // caller (the CLI, the installer), so a SIGTERM'd systemctl there is
+      // not self-teardown and stays a failure.
+      return runSelfRestart(new BunSystemctlRunner(buildSystemctlEnv(sysEnv)));
     },
     rerenderUnitIfStale: defaultRerenderUnitIfStale,
   };

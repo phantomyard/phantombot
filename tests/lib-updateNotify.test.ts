@@ -348,6 +348,63 @@ describe("runUpdateFlow", () => {
     expect(calls).toContain("restart");
   });
 
+  // --- phantombot #408 ---
+  // The error log below is the fleet's only "the update did not come back"
+  // signal. Before #408 it fired on EVERY successful Linux /update (the
+  // systemctl child getting SIGTERM'd with our cgroup, reported as exit
+  // 143), which trained everyone to ignore it. The classification fix lives
+  // in systemd.ts (isSelfRestartTeardown); these two pin the contract this
+  // side of the boundary: ok:true is silent, ok:false still shouts and
+  // still leaves the marker for the manual-restart fallback.
+
+  async function runFlowAndRestart(
+    svc: ServiceControl,
+  ): Promise<{ stderrText: string }> {
+    const r = await runUpdateFlow({
+      config: baseConfig(),
+      currentVersion: "1.0.42",
+      chatId: 42,
+      fetchImpl: fakeReleaseFetch(),
+      serviceControl: svc,
+      runUpdateImpl: fakeRunUpdate(0),
+      pendingPath,
+      lastNotifiedPath: lastNotifiedPathLocal,
+      procPlatform: "linux",
+      procArch: "x64",
+    });
+    const chunks: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: unknown }).write = (
+      c: string | Uint8Array,
+    ) => {
+      chunks.push(typeof c === "string" ? c : new TextDecoder().decode(c));
+      return true;
+    };
+    try {
+      await r.restart!();
+    } finally {
+      (process.stderr as unknown as { write: unknown }).write = realWrite;
+    }
+    return { stderrText: chunks.join("") };
+  }
+
+  test("successful restart logs NO error — a quiet /update is the whole point of #408", async () => {
+    const { svc } = fakeSvc();
+    const { stderrText } = await runFlowAndRestart(svc);
+    expect(stderrText).not.toContain("restart failed after binary swap");
+    expect(stderrText).not.toContain('"level":"error"');
+  });
+
+  test("genuinely failed restart still logs error and keeps the pending marker", async () => {
+    const { svc } = fakeSvc({ restartOk: false });
+    const { stderrText } = await runFlowAndRestart(svc);
+    expect(stderrText).toContain("restart failed after binary swap");
+    expect(stderrText).toContain('"level":"error"');
+    expect(stderrText).toContain("fake fail");
+    // Marker survives so the manual-restart path can still surface it.
+    expect((await readPendingUpdate(pendingPath))?.targetVersion).toBe("1.0.99");
+  });
+
   test("update available from persona listener → stores persona in marker", async () => {
     const r = await runUpdateFlow({
       config: baseConfig(),
