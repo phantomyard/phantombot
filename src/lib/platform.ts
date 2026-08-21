@@ -29,6 +29,7 @@
 import {
   defaultLaunchdServiceControl,
   launchdLogPaths,
+  launchdLogsDir,
 } from "./launchd.ts";
 import {
   defaultSystemdServiceControl,
@@ -39,6 +40,7 @@ import {
   defaultTaskSchedulerServiceControl,
   scheduleWindowsRelaunch,
   taskLogPaths,
+  taskLogsDir,
   taskNames,
 } from "./taskScheduler.ts";
 
@@ -265,6 +267,26 @@ export function logsCommand(): string {
     case "linux":
     default:
       return "journalctl --user -u phantombot -f";
+  }
+}
+
+/**
+ * Directory of file-based service logs phantombot itself must keep bounded,
+ * or null when the platform's service manager already does it.
+ *
+ * Linux returns null ON PURPOSE: the systemd --user units log to journald,
+ * which applies its own retention. Rotating there would mean rotating files
+ * nothing writes to. macOS and Windows both append to plain files with no cap
+ * (#428), so those are the two that need the pass.
+ */
+export function serviceLogDir(over?: HintOverrides): string | null {
+  switch (over?.platform ?? currentPlatform()) {
+    case "darwin":
+      return launchdLogsDir();
+    case "windows":
+      return taskLogsDir();
+    default:
+      return null;
   }
 }
 

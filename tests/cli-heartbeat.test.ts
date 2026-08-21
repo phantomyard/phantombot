@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
@@ -301,5 +301,62 @@ describe("runHeartbeatCli", () => {
     expect(code).toBe(0);
     expect(out.text).toContain("heartbeat ok");
     expect(out.text).not.toContain("embedded");
+  });
+  test("rotateLogs seam runs and its result is swallowed on failure", async () => {
+    let called = 0;
+    const out = new CaptureStream();
+    const code = await runHeartbeatCli({
+      config,
+      out,
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      rotateLogs: async () => {
+        called++;
+        throw new Error("disk on fire");
+      },
+    });
+    // A rotation failure is logged, never fatal: the heartbeat's primary work
+    // must complete on a box whose log directory is unwritable.
+    expect(called).toBe(1);
+    expect(code).toBe(0);
+    expect(out.text).toContain("heartbeat ok");
+  });
+
+  test("rotateLogs: false skips the pass", async () => {
+    const code = await runHeartbeatCli({
+      config,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      // `false` short-circuits the pass entirely.
+      rotateLogs: false,
+    });
+    expect(code).toBe(0);
+  });
+
+  test("the production pass never touches logs from a dev (non-binary) run", async () => {
+    // Windows resolves the service log dir under XDG_DATA_HOME, which this
+    // suite redirects into the workdir — so without the isPhantombotBinary
+    // guard this test's file would be truncated by a plain `bun test` run.
+    const logs = join(workdir, "phantombot", "logs");
+    await mkdir(logs, { recursive: true });
+    const live = join(logs, "phantombot.out.log");
+    await writeFile(live, "x".repeat(64));
+    process.env.PHANTOMBOT_LOG_MAX_BYTES = "8";
+
+    const code = await runHeartbeatCli({
+      config,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+    });
+
+    delete process.env.PHANTOMBOT_LOG_MAX_BYTES;
+    expect(code).toBe(0);
+    expect((await readFile(live, "utf8")).length).toBe(64);
+    expect(existsSync(`${live}.1`)).toBe(false);
   });
 });

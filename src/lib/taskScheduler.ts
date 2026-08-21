@@ -43,8 +43,9 @@
  * process's stdout/stderr, so the action is run through `cmd /c` with the
  * streams redirected (append) to per-task .out.log / .err.log under the
  * phantombot data dir's logs\ folder - the same out/err split launchd writes
- * to ~/Library/Logs. Log ROTATION is not yet handled here (documented
- * limitation; WinSW is the upgrade path for rotation + richer supervision).
+ * to ~/Library/Logs. Task Scheduler does not rotate them either, so the
+ * heartbeat caps these files itself every 30 min (see src/lib/logRotate.ts);
+ * WinSW remains the upgrade path for richer supervision.
  *
  * No console flash: a task whose Command is cmd.exe pops a visible console
  * window every time it fires - intolerable for the tick task that runs every
@@ -277,8 +278,17 @@ export function bootSchemaNeedsMigration(installedVersion: number): boolean {
 /** Short label used for the per-task log filenames. */
 type TaskLabel = "phantombot" | "heartbeat" | "tick" | "login";
 
-function logsDir(): string {
+/**
+ * Directory the scheduled tasks redirect their stdout/stderr into. Exported
+ * so the log-rotation pass (#428) can cap files that `cmd >>` appends to
+ * forever.
+ */
+export function taskLogsDir(): string {
   return join(xdgDataHome(), "phantombot", "logs");
+}
+
+function logsDir(): string {
+  return taskLogsDir();
 }
 
 /** Absolute path of a task's stdout / stderr log files. */

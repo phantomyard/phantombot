@@ -25,6 +25,10 @@ import {
   type NightlyTriggerReason,
   spawnNightlySweep,
 } from "../lib/nightlyTrigger.ts";
+import {
+  rotateServiceLogs,
+  type RotateLogDirResult,
+} from "../lib/logRotate.ts";
 import { currentPlatform } from "../lib/platform.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
@@ -83,6 +87,12 @@ export interface RunHeartbeatCliInput {
   triggerNightly?:
     | false
     | ((persona: string, reason: NightlyTriggerReason) => void);
+  /**
+   * Test seam for the service-log rotation pass. Pass `false` to skip it, or
+   * a function to substitute a fake. Production passes undefined → rotate the
+   * host's service log directory (null on Linux, where journald owns it).
+   */
+  rotateLogs?: false | (() => Promise<RotateLogDirResult | null>);
 }
 
 /** Outcome of the heartbeat's incremental note-embed pass. */
@@ -197,6 +207,39 @@ export async function runHeartbeatCli(
       }
     } catch (e) {
       log.warn("heartbeat: service self-heal threw unexpectedly", {
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  // Cap the service logs on the same cadence. launchd and the Windows task
+  // wrapper append to plain files forever — one macOS box reached ~700 MB
+  // before anyone noticed (#428). The heartbeat is already the host
+  // maintenance pass (it heals systemd units and scheduled tasks above), so
+  // rotation needs no new timer and inherits the same platform dispatch.
+  // Wrapped in try/catch: a rotation hiccup must never break the primary
+  // heartbeat work.
+  if (input.rotateLogs !== false) {
+    try {
+      const r = input.rotateLogs
+        ? await input.rotateLogs()
+        : await rotateServiceLogs();
+      if (r && r.rotated.length > 0) {
+        log.info("heartbeat: rotated service logs", {
+          dir: r.dir,
+          rotated: r.rotated.map((f) => `${f.file}: ${f.bytes}`),
+        });
+      }
+      // A log that is over the cap and could NOT be rotated is the case this
+      // whole pass exists to prevent, so it warns rather than staying silent.
+      if (r && r.skipped.length > 0) {
+        log.warn("heartbeat: service logs could not be rotated", {
+          dir: r.dir,
+          skipped: r.skipped.map((f) => `${f.file}: ${f.reason}`),
+        });
+      }
+    } catch (e) {
+      log.warn("heartbeat: log rotation threw unexpectedly", {
         error: (e as Error).message,
       });
     }

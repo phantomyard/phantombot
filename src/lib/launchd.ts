@@ -14,7 +14,9 @@
  *   ~/Library/LaunchAgents/dev.phantombot.tick.plist
  *
  * Logs go to ~/Library/Logs/phantombot/<unit>.{out,err}.log (no journald
- * on Mac, and `log show` is a poor fit for free-form bot output).
+ * on Mac, and `log show` is a poor fit for free-form bot output). launchd
+ * appends to them forever with no size cap, so the heartbeat rotates them
+ * itself — see src/lib/logRotate.ts.
  *
  * Note on env files: launchd's `EnvironmentVariables` plist key only
  * accepts inline static values — it has no equivalent of systemd's
@@ -46,8 +48,16 @@ function launchAgentsDir(): string {
   return join(homedir(), "Library", "LaunchAgents");
 }
 
-function logsDir(): string {
+/**
+ * Directory launchd writes every unit's stdout/stderr into. Exported so the
+ * log-rotation pass (#428) can cap the files launchd itself never rotates.
+ */
+export function launchdLogsDir(): string {
   return join(homedir(), "Library", "Logs", "phantombot");
+}
+
+function logsDir(): string {
+  return launchdLogsDir();
 }
 
 export function defaultPlistPath(): string {

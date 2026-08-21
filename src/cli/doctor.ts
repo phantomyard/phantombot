@@ -41,7 +41,13 @@ import {
   routingExtensionStatus,
 } from "../lib/piExtensionProvision.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
-import { currentPlatform } from "../lib/platform.ts";
+import {
+  configuredKeep,
+  configuredMaxBytes,
+  inspectLogDir,
+  type LogDirStats,
+} from "../lib/logRotate.ts";
+import { currentPlatform, serviceLogDir } from "../lib/platform.ts";
 import {
   editorConnectorBroken,
   reconcileEditorConnectors,
@@ -126,6 +132,20 @@ export interface DoctorReport {
     newest_good?: string;
     /** Drawer files still on disk because retirement held them back. */
     unretired_drawers: string[];
+  };
+  /**
+   * File-based service logs (#428). Absent on Linux, where the units log to
+   * journald and phantombot owns no files to cap.
+   */
+  service_logs?: {
+    dir: string;
+    bytes: number;
+    /** Per-file cap rotation applies, in bytes. */
+    max_bytes: number;
+    /** Retained generations per log file. */
+    keep: number;
+    /** Live logs currently over the cap (rotated on the next heartbeat). */
+    over_cap: string[];
   };
   capture: {
     window_hours: number;
@@ -254,6 +274,12 @@ export interface RunDoctorInput {
   checkSystemd?:
     | false
     | ((staleTimers: string[]) => Promise<DoctorReport["systemd"] | undefined>);
+  /**
+   * Test seam for the service-log section (#428). `null` models a platform
+   * with no file logs (Linux/journald); a path models macOS/Windows. In
+   * production this is undefined and doctor resolves the real directory.
+   */
+  serviceLogDir?: string | null;
   /**
    * Test seam for the timer-fired marker check. Pass `false` to skip
    * (used by tests that don't care about staleness). Pass a function
@@ -477,6 +503,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     });
   }
 
+  // File-based service logs (#428). Null on Linux: journald owns retention
+  // there, so there is nothing for phantombot to measure or cap.
+  const logDir =
+    input.serviceLogDir !== undefined ? input.serviceLogDir : serviceLogDir();
+  let logStats: LogDirStats | undefined;
+  if (logDir) {
+    try {
+      logStats = await inspectLogDir(logDir);
+    } catch {
+      // An unreadable log directory is not a reason to fail `doctor`; the
+      // section is simply omitted.
+    }
+  }
+
   // Restore points for the database checked above (#417).
   const restorePoints = await listRestorePoints(config.memoryDbPath);
   // Only the newest point is integrity-checked in the common case: each check
@@ -510,6 +550,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         ? { oldest_pending: health.oldest_pending }
         : {}),
     },
+    ...(logDir && logStats
+      ? {
+          service_logs: {
+            dir: logDir,
+            bytes: logStats.bytes,
+            max_bytes: configuredMaxBytes(),
+            keep: configuredKeep(),
+            over_cap: logStats.overCap,
+          },
+        }
+      : {}),
     memory_db: {
       path: config.memoryDbPath,
       healthy: dbHealth.ok,
@@ -658,6 +709,19 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     out.write(
       "  → no restore points yet; the next nightly sweep takes one " +
         "(or run `phantombot memory backup`)\n",
+    );
+  }
+  if (report.service_logs) {
+    const sl = report.service_logs;
+    out.write(
+      `  service logs: ${tick(sl.over_cap.length === 0)} — ` +
+        `${Math.round((sl.bytes / 1024 / 1024) * 10) / 10} MB in ${sl.dir} ` +
+        `(cap ${Math.round(sl.max_bytes / 1024 / 1024)} MB/file, ` +
+        `keep ${sl.keep})` +
+        (sl.over_cap.length > 0
+          ? ` — over cap: ${sl.over_cap.join(", ")}`
+          : "") +
+        "\n",
     );
   }
   if (unretiredDrawers.length > 0) {

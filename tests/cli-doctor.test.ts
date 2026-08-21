@@ -1032,4 +1032,62 @@ describe("runDoctor — memory database (#417)", () => {
     expect(out.text).toContain("memory/norms.md");
     expect(out.text).toContain("--retire");
   });
+  describe("service logs (#428)", () => {
+    async function logDir(): Promise<string> {
+      const d = join(workdir, "logs");
+      await mkdir(d, { recursive: true });
+      return d;
+    }
+
+    test("reports size and flags a log over the cap", async () => {
+      const d = await logDir();
+      await writeFile(join(d, "tick.out.log"), "x".repeat(2048));
+      await writeFile(join(d, "tick.out.log.1"), "x".repeat(1024));
+      process.env.PHANTOMBOT_LOG_MAX_BYTES = "1000";
+      const out = new CaptureStream();
+
+      const code = await runDoctor({ config, out, serviceLogDir: d });
+
+      delete process.env.PHANTOMBOT_LOG_MAX_BYTES;
+      expect(code).toBe(0);
+      expect(out.text).toContain("service logs:");
+      // Rotated generations count toward the footprint …
+      expect(out.text).toContain("0 MB in ");
+      // … but only the live log is named as a rotation candidate.
+      expect(out.text).toContain("over cap: tick.out.log");
+      expect(out.text).not.toContain("tick.out.log.1");
+    });
+
+    test("no over-cap log → no over-cap list", async () => {
+      const d = await logDir();
+      await writeFile(join(d, "tick.out.log"), "x".repeat(10));
+      const out = new CaptureStream();
+
+      expect(await runDoctor({ config, out, serviceLogDir: d })).toBe(0);
+      expect(out.text).toContain("service logs:");
+      expect(out.text).not.toContain("over cap");
+    });
+
+    test("a platform with no file logs omits the section entirely", async () => {
+      const out = new CaptureStream();
+      expect(await runDoctor({ config, out, serviceLogDir: null })).toBe(0);
+      expect(out.text).not.toContain("service logs:");
+    });
+
+    test("json report carries the same numbers", async () => {
+      const d = await logDir();
+      await writeFile(join(d, "tick.out.log"), "x".repeat(2048));
+      process.env.PHANTOMBOT_LOG_MAX_BYTES = "1000";
+      const out = new CaptureStream();
+
+      await runDoctor({ config, out, json: true, serviceLogDir: d });
+
+      delete process.env.PHANTOMBOT_LOG_MAX_BYTES;
+      const report = JSON.parse(out.text);
+      expect(report.service_logs.dir).toBe(d);
+      expect(report.service_logs.bytes).toBe(2048);
+      expect(report.service_logs.max_bytes).toBe(1000);
+      expect(report.service_logs.over_cap).toEqual(["tick.out.log"]);
+    });
+  });
 });
