@@ -694,7 +694,7 @@ describe("PiHarness routing (subprocess)", () => {
   test("invoke re-sources env files each turn (reloadEnvFiles is called)", async () => {
     // The reload is stubbed for hermeticity (see top-of-file note), so lock in
     // the guarantee it stands for: phantombot re-sources ~/.env per turn so a
-    // secret saved last turn (`phantombot env set`) is visible without a daemon
+    // file-backed runtime setting changed last turn is visible without a daemon
     // restart. If a refactor ever drops the call, this fails instead of silently
     // regressing behind the stub.
     process.env.FAKE_PI_MODE = "argv";

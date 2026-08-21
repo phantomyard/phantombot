@@ -34,9 +34,9 @@
  * The same values are mirrored into config.toml under
  * `[harnesses.pi.routing]` (primary_model / image_model / coding_model) so the
  * choice survives a fresh shell and is visible to `phantombot doctor`. config
- * loading (config.ts) and the env file (~/.env, written via the same path as
- * `phantombot env set`) keep the env vars and TOML in sync; env wins, matching
- * every other setting in phantombot.
+ * loading (config.ts) and the legacy/runtime env file (~/.env, updated by the
+ * harness routing wizard) keep the env vars and TOML in sync; env wins,
+ * matching every other setting in phantombot.
  *
  * Why env vars at all (vs. the extension reading config.toml)? The extension
  * runs INSIDE the `pi` subprocess that phantombot spawns. phantombot already
@@ -230,7 +230,7 @@ export interface RoutingWrites {
   };
   /**
    * Env vars to write to ~/.env. A value of "" means UNSET (delete the key) —
-   * matching `phantombot env unset` / updateEnvFile's empty-string semantics,
+   * matching updateEnvFile's empty-string unset semantics,
    * so a previously-set image model is cleared when the new primary is
    * multimodal.
    */
