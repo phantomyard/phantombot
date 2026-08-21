@@ -206,22 +206,73 @@ export async function acquireLock(dir: string, now: Date): Promise<string | null
   }
 }
 
+/** Options for {@link releaseLock}. */
+export interface ReleaseLockOptions {
+  /** Injectable clock, for staleness of the steal lock. Default `new Date()`. */
+  now?: Date;
+  /**
+   * Test hook, awaited between the ownership read and the unlink, i.e. exactly
+   * at the interleave a check-then-unlink release would lose. Not used in
+   * production.
+   */
+  afterOwnershipRead?: () => Promise<void>;
+}
+
 /**
  * Release a lock we own. Ownership is checked against the token we wrote: a
  * pass whose lock was stolen as stale must not delete the successor's lock and
  * hand a third pass the directory mid-rotation.
  *
+ * The token check alone is not enough, because reading the token and deleting
+ * the file are two syscalls. A pass that overran {@link LOCK_STALE_MS} still
+ * holds a lock any contender may steal, so the steal can land BETWEEN our read
+ * (which still returns our own token) and our unlink (which would then remove
+ * the successor's fresh lock, letting a third pass in mid-rotation). So the
+ * release runs under the same {@link STEAL_FILE} lock that serialises takeover
+ * in {@link acquireLock}: every mutation of the real lock — steal and release
+ * alike — happens while holding it, which makes the check and the unlink
+ * atomic with respect to each other.
+ *
+ * If the steal lock cannot be taken, a takeover is in flight right now. It
+ * will replace our lock itself, so we simply return: not deleting is always
+ * safe (a leftover lock is stale within {@link LOCK_STALE_MS} and stealable),
+ * whereas deleting under a racing takeover is the bug this guards.
+ *
  * Exported (with {@link acquireLock}) so the lock protocol itself can be
  * driven directly from tests; nothing outside this module calls it.
  */
-export async function releaseLock(dir: string, token: string): Promise<void> {
+export async function releaseLock(
+  dir: string,
+  token: string,
+  options: ReleaseLockOptions = {},
+): Promise<void> {
+  const now = options.now ?? new Date();
   const path = join(dir, LOCK_FILE);
-  const holder = await readLock(path);
-  if (!holder || holder.token !== token) return;
+  const stealPath = join(dir, STEAL_FILE);
+
+  let held = await createLock(stealPath, now);
+  if (!held) {
+    // A steal lock left behind by a crashed pass must not wedge releases
+    // forever; clear it once it is itself stale, then try again.
+    const stealHolder = await readLock(stealPath);
+    if (stealHolder && isStale(stealHolder, now)) {
+      await rm(stealPath, { force: true });
+      held = await createLock(stealPath, now);
+    }
+  }
+  if (!held) return;
+
   try {
-    await unlink(path);
-  } catch {
-    // Already gone — nothing to release.
+    const holder = await readLock(path);
+    if (options.afterOwnershipRead) await options.afterOwnershipRead();
+    if (!holder || holder.token !== token) return;
+    try {
+      await unlink(path);
+    } catch {
+      // Already gone — nothing to release.
+    }
+  } finally {
+    await rm(stealPath, { force: true });
   }
 }
 

@@ -208,6 +208,55 @@ describe("rotateLogDir", () => {
     expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
   });
 
+  /**
+   * The release race Kai flagged: the token check and the unlink are two
+   * syscalls, so a pass that overran LOCK_STALE_MS can have its lock stolen
+   * BETWEEN them and then delete the successor's fresh lock. The hook fires at
+   * exactly that point; a contender must not be able to install a successor
+   * there, and the resumed release must leave whatever lock is present alone
+   * unless it is still ours.
+   */
+  test("release cannot delete a successor installed mid-release", async () => {
+    // Our own lock, taken long enough ago that any contender sees it as stale.
+    const staleNow = new Date(Date.now() - LOCK_STALE_MS - 1_000);
+    const token = await acquireLock(dir, staleNow);
+    expect(token).toBeString();
+
+    let takeover: string | null = "not-attempted";
+    await releaseLock(dir, token as string, {
+      afterOwnershipRead: async () => {
+        // A contender tries to steal our (now stale) lock at the worst moment.
+        takeover = await acquireLock(dir, new Date());
+      },
+    });
+
+    // Takeover is serialised against release, so it cannot land in the window.
+    expect(takeover).toBeNull();
+    // Our own lock is gone, so the contender's next pass gets in cleanly.
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
+    const next = await acquireLock(dir, new Date());
+    expect(next).toBeString();
+    await releaseLock(dir, next as string);
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
+  });
+
+  test("release leaves no steal lock behind", async () => {
+    const token = await acquireLock(dir, new Date());
+    await releaseLock(dir, token as string);
+    expect(existsSync(join(dir, ".rotate.lock.steal"))).toBe(false);
+  });
+
+  test("release is not wedged by a stale steal lock", async () => {
+    const token = await acquireLock(dir, new Date());
+    const stale = new Date(Date.now() - LOCK_STALE_MS - 1_000).toISOString();
+    await writeFile(join(dir, ".rotate.lock.steal"), `999999 ${stale}\n`);
+
+    await releaseLock(dir, token as string);
+
+    expect(existsSync(join(dir, ".rotate.lock"))).toBe(false);
+    expect(existsSync(join(dir, ".rotate.lock.steal"))).toBe(false);
+  });
+
   test("the lock file itself is never rotated", async () => {
     await writeFile(join(dir, ".rotate.lock"), "x".repeat(500));
     const r = await rotateLogDir({ dir, maxBytes: 100 });
