@@ -20,6 +20,10 @@
  *                                       //   canonical /relays.json on startup;
  *                                       //   falls back to the PWA seed set
  *     "allowed_npubs": ["npub1…", …],   // optional — the trust allowlist
+ *     "relay_npubs": ["npub1…", …],     // optional — RELAY tier: bridges that
+ *                                       //   forward other networks' traffic in.
+ *                                       //   Answered, but NEVER as a principal:
+ *                                       //   every message is threat-screened
  *     "tofu": true,                     // optional — trust-on-first-use: when the
  *                                       //   allowlist is empty, the FIRST npub to
  *                                       //   DM is trusted, appended here, and the
@@ -44,6 +48,14 @@
  *     is the incident-notification target.
  *   - allowed_npubs empty + tofu true → TOFU: first DMer is trusted + locked.
  *   - allowed_npubs empty + tofu false/absent → open bot (answer anyone), warned.
+ *
+ * Relay semantics:
+ *   - relay_npubs is a SEPARATE, LOWER tier — never merged into the allowlist.
+ *     An npub in both lists resolves to RELAY (least privilege wins).
+ *   - A relay npub is answered, but its turns run untrusted: threat-screened,
+ *     no slash commands, no TOFU, no reaction turns, no private digests.
+ *   - File-only, like group_bots: the config wizard does not offer it, because
+ *     adding one is a security decision, not a setup step.
  */
 
 import {
@@ -104,6 +116,13 @@ export interface PhantomchatPersonaConfig {
   /** Decoded lowercase 64-char hex pubkeys — the auth-gate comparison form. */
   allowedHex: string[];
   /**
+   * Raw npub strings from `relay_npubs` — the RELAY tier. These senders are
+   * answered but never treated as principals; see the file-shape doc above.
+   */
+  relayNpubs: string[];
+  /** Decoded lowercase 64-char hex pubkeys for the relay tier. */
+  relayHex: string[];
+  /**
    * Trust-on-first-use. When true AND the allowlist is empty, the first npub to
    * DM is trusted, appended to allowed_npubs, and the bot locks to it. Ignored
    * once allowed_npubs is non-empty.
@@ -137,6 +156,7 @@ interface PhantomchatFileShape {
   nsec?: string;
   relays?: unknown;
   allowed_npubs?: unknown;
+  relay_npubs?: unknown;
   tofu?: unknown;
   greeted?: unknown;
   group_bots?: unknown;
@@ -175,6 +195,23 @@ function parseGroupBots(v: unknown): PhantomchatGroupBot[] {
     out.push({ name, npub, hex });
   }
   return out;
+}
+
+/**
+ * Read the raw on-disk JSON object, or `{}` when the file is absent or
+ * unparseable. Deliberately NOT `loadPhantomchatPersonaConfig`: the save path
+ * needs the file's literal keys (including ones this build does not know about)
+ * and must work even for a file that has no usable nsec, which `load` rejects.
+ */
+function readRawFileShape(path: string): PhantomchatFileShape {
+  if (!existsSync(path)) return {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as PhantomchatFileShape;
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -224,11 +261,14 @@ export function loadPhantomchatPersonaConfig(
   const relays =
     relaysFromFile.length > 0 ? relaysFromFile : [...DEFAULT_PHANTOMCHAT_RELAYS];
   const allowedNpubs = asStringArray(parsed.allowed_npubs);
+  const relayNpubs = asStringArray(parsed.relay_npubs);
   return {
     identity,
     relays,
     allowedNpubs,
     allowedHex: decodeAllowedNpubs(allowedNpubs),
+    relayNpubs,
+    relayHex: decodeAllowedNpubs(relayNpubs),
     tofu: parsed.tofu === true,
     greeted: asStringArray(parsed.greeted),
     groupBots: parseGroupBots(parsed.group_bots),
@@ -248,6 +288,18 @@ export function loadPhantomchatPersonaConfig(
  * on the first save that follows a migration; it is persisted there
  * (create-if-absent, never clobbering an existing identity) and then kept OUT of
  * phantomchat.json, which now carries channel settings only.
+ *
+ * MERGE SEMANTICS — an OMITTED optional field falls back to what is ALREADY IN
+ * THE FILE, never to a constant. This function rebuilds the file from scratch,
+ * so before this rule a caller that simply did not know about a field silently
+ * ERASED it: the config wizard passes relays/allowedNpubs/greeted and no
+ * `groupBots`, which wiped a persona's whole `group_bots` roster on every edit
+ * (and would do the same to `relay_npubs`). Unrecognised top-level keys are
+ * preserved verbatim for the same reason — a file written by a NEWER build must
+ * survive a save by an older one. `nsec` is the one deliberate exception: it is
+ * promoted to identity.json and then dropped.
+ *
+ * To CLEAR a field, pass it explicitly as empty; omission means "leave alone".
  */
 export async function savePhantomchatPersonaConfig(
   agentDir: string,
@@ -258,6 +310,7 @@ export async function savePhantomchatPersonaConfig(
     tofu?: boolean;
     greeted?: string[];
     groupBots?: PhantomchatGroupBot[];
+    relayNpubs?: string[];
   },
 ): Promise<string> {
   const path = phantomchatConfigPath(agentDir);
@@ -271,19 +324,32 @@ export async function savePhantomchatPersonaConfig(
   if (data.nsec) {
     await createPersonaIdentityIfAbsent(agentDir, data.nsec);
   }
-  const body: PhantomchatFileShape = {
-    relays: data.relays,
-    allowed_npubs: data.allowedNpubs,
-  };
-  // Only persist tofu when explicitly enabled — keep the file clean otherwise.
-  if (data.tofu) body.tofu = true;
-  // Only persist greeted when non-empty — keep fresh files clean.
-  if (data.greeted && data.greeted.length > 0) body.greeted = data.greeted;
+  // Start from whatever is on disk so unknown keys survive, then overwrite the
+  // fields this caller actually supplied (see MERGE SEMANTICS above).
+  const existing = readRawFileShape(path);
+  const body: PhantomchatFileShape = { ...existing };
+  delete body.nsec; // promoted to identity.json — never written back here
+  body.relays = data.relays;
+  body.allowed_npubs = data.allowedNpubs;
+  // Only persist tofu when enabled — keep the file clean otherwise. Omitted
+  // means "keep the current setting", which is why this reads `existing`.
+  const tofu = data.tofu ?? existing.tofu === true;
+  if (tofu) body.tofu = true;
+  else delete body.tofu;
+  // Only persist greeted / group_bots / relay_npubs when non-empty, so a fresh
+  // file stays clean; omitted keeps whatever the file already had.
+  const greeted = data.greeted ?? asStringArray(existing.greeted);
+  if (greeted.length > 0) body.greeted = greeted;
+  else delete body.greeted;
   // Persist group_bots verbatim ({name, npub}) — the hex is derived on load, so
-  // it never goes to disk. Only written when non-empty to keep fresh files clean.
-  if (data.groupBots && data.groupBots.length > 0) {
-    body.group_bots = data.groupBots.map((b) => ({ name: b.name, npub: b.npub }));
-  }
+  // it never goes to disk.
+  const groupBots = data.groupBots ?? parseGroupBots(existing.group_bots);
+  if (groupBots.length > 0) {
+    body.group_bots = groupBots.map((b) => ({ name: b.name, npub: b.npub }));
+  } else delete body.group_bots;
+  const relayNpubs = data.relayNpubs ?? asStringArray(existing.relay_npubs);
+  if (relayNpubs.length > 0) body.relay_npubs = relayNpubs;
+  else delete body.relay_npubs;
   const tmp = `${path}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + "\n", {
