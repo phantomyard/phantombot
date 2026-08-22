@@ -88,6 +88,21 @@ function baseConfig(): Config {
   };
 }
 
+/**
+ * Exact hostname match — `URL.hostname` is the parsed host, so
+ * `https://api.github.com.evil.example/...` and
+ * `https://evil.example/?u=api.github.com` are both correctly rejected.
+ * A substring `u.includes("api.github.com")` tripped CodeQL "incomplete
+ * URL substring sanitization". Invalid URLs are non-matches, not throws.
+ */
+function isGitHubApiUrl(u: string): boolean {
+  try {
+    return new URL(u).hostname === "api.github.com";
+  } catch {
+    return false;
+  }
+}
+
 const ASSET = "phantombot-v1.0.99-linux-x64";
 const NEW_BYTES = Buffer.from("NEW_BINARY_VERIFIED");
 const NEW_SHA = createHash("sha256").update(NEW_BYTES).digest("hex");
@@ -1323,7 +1338,7 @@ describe("release rings (#432) — the heartbeat follows the host's channel", ()
     };
     const fetchImpl = (async (url: string | URL | Request) => {
       const u = String(url);
-      if (u.includes("api.github.com")) {
+      if (isGitHubApiUrl(u)) {
         apiUrls.push(u);
         const body = u.includes("/releases/latest") ? release : [release];
         return new Response(JSON.stringify(body), {
