@@ -94,8 +94,9 @@ describe("installJetbrains — JSON preservation", () => {
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
     expect(parsed.agent_servers.Phantombot.args).toEqual(["acp"]);
     // Same absolute PHANTOMBOT_CONFIG insurance as Zed; never PERSONAS_DIR.
+    // Per persona since #435.
     expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_CONFIG).toMatch(
-      /\/phantombot\/config\.toml$/,
+      /\/personas\/[^/]+\/config\.toml$/,
     );
     expect(
       parsed.agent_servers.Phantombot.env.PHANTOMBOT_PERSONAS_DIR,

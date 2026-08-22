@@ -33,8 +33,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
-import { xdgConfigHome } from "../../config.ts";
 import type { WriteSink } from "../../lib/io.ts";
+import { personaConfigPath } from "../../lib/personaPaths.ts";
 
 export interface InstallZedOptions {
   /** Override the settings path (tests). Default: platform Zed settings. */
@@ -77,7 +77,7 @@ export function phantombotEnvOverrides(): {
   PHANTOMBOT_CONFIG: string;
 } {
   return {
-    PHANTOMBOT_CONFIG: join(xdgConfigHome(), "phantombot", "config.toml"),
+    PHANTOMBOT_CONFIG: personaConfigPath(),
   };
 }
 

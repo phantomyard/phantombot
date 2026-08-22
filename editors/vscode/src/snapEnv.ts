@@ -33,8 +33,9 @@
  *   `realHomeFor`. When we detect a snap, we PIN phantombot's store resolution
  *   back to the real home with two complementary moves:
  *
- *     1. PHANTOMBOT_CONFIG = <real home>/.config/phantombot/config.toml
- *        — so loadConfig reads the REAL config.toml, not the empty redirected one.
+ *     1. PHANTOMBOT_GLOBAL_CONFIG = <real home>/.local/share/phantombot/personas/config.toml
+ *        — so the real default persona and release ring are read, not the empty
+ *        redirected ones.
  *
  *     2. XDG_DATA_HOME  = <real home>/.local/share
  *        XDG_CONFIG_HOME = <real home>/.config
@@ -141,7 +142,14 @@ export function isHomeRedirected(env: EnvMap): boolean {
 
 /** Absolute config.toml under a given home, per phantombot's default layout. */
 export function configPathFor(realHome: string): string {
-  return posix.join(realHome, ".config", "phantombot", "config.toml");
+  return posix.join(
+    realHome,
+    ".local",
+    "share",
+    "phantombot",
+    "personas",
+    "config.toml",
+  );
 }
 
 /** Absolute `$XDG_DATA_HOME` under a given home (phantombot's default layout). */
@@ -159,7 +167,9 @@ export function configHomeFor(realHome: string): string {
  * spawned with. Outside a snap this is the input unchanged. Inside a snap we pin
  * phantombot's store resolution back to the REAL home (`$SNAP_REAL_HOME`):
  *
- *   - PHANTOMBOT_CONFIG → real config.toml (respecting an explicit override).
+ *   - PHANTOMBOT_GLOBAL_CONFIG → the real global config (respecting an explicit
+ *     override). Since #435 the per-persona config.toml is derived from
+ *     XDG_DATA_HOME, so it needs no pin of its own.
  *   - XDG_DATA_HOME / XDG_CONFIG_HOME → real home, FORCED over snapd's redirected
  *     sandbox values, so loadConfig's DEFAULT personasDir/memoryDbPath/state/
  *     memory-index (all derived from xdgDataHome()) point at the real, populated
@@ -179,10 +189,17 @@ export function snapAwareSpawnEnv(env: EnvMap): EnvMap {
 
   const next: EnvMap = { ...env };
 
-  // Respect an explicit PHANTOMBOT_CONFIG — snapd never sets it, so its presence
-  // means the user/wrapper chose it on purpose.
-  if (!next.PHANTOMBOT_CONFIG || !next.PHANTOMBOT_CONFIG.trim()) {
-    next.PHANTOMBOT_CONFIG = configPathFor(realHome);
+  // Respect an explicit PHANTOMBOT_GLOBAL_CONFIG — snapd never sets it, so its
+  // presence means the user/wrapper chose it on purpose.
+  //
+  // Since #435 there is no host config.toml to pin: the config file lives
+  // inside the persona directory, which is derived from XDG_DATA_HOME below.
+  // Pinning PHANTOMBOT_CONFIG here would now be actively WRONG — it would
+  // force every persona to read one file. What still needs pinning is the
+  // small GLOBAL file (default persona + release ring) that sits beside the
+  // persona directories.
+  if (!next.PHANTOMBOT_GLOBAL_CONFIG || !next.PHANTOMBOT_GLOBAL_CONFIG.trim()) {
+    next.PHANTOMBOT_GLOBAL_CONFIG = configPathFor(realHome);
   }
 
   // Force the XDG dirs back to the real home. snapd ALWAYS redirects these into

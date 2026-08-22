@@ -110,7 +110,7 @@ describe("voice save flow rewrites stale systemd unit before restart", () => {
   test("on-disk unit lacking EnvironmentFile= is rewritten and restart sees the upgraded unit", async () => {
     // Pre-create a stale unit (no EnvironmentFile=). This is the exact
     // shape of an install from before Phase 29 — the bug the PR fixes.
-    const unitPath = join(workdir, "phantombot.service");
+    const unitPath = join(workdir, "phantombot-phantom.service");
     const BIN = "/home/kai/.local/bin/phantombot";
     const stale = `[Unit]
 Description=Phantombot — personality-first chat agent
@@ -160,7 +160,7 @@ WantedBy=default.target
     // The on-disk unit now has EnvironmentFile= — the actual fix.
     const rewritten = await readFile(unitPath, "utf8");
     expect(rewritten).toContain(
-      "EnvironmentFile=-%h/.config/phantombot/.env",
+      "EnvironmentFile=-%h/.local/share/phantombot/personas/phantom/.env",
     );
     expect(rewritten).toBe(generateSystemdUnit({ binPath: BIN, args: ["run"] }));
 
@@ -172,12 +172,12 @@ WantedBy=default.target
     // what was missing from the previous version of this test.
     expect(callOrder).toEqual(["rerender", "restart"]);
     expect(unitContentAtRestart).toContain(
-      "EnvironmentFile=-%h/.config/phantombot/.env",
+      "EnvironmentFile=-%h/.local/share/phantombot/personas/phantom/.env",
     );
   });
 
   test("maybePromptRestart skips restart when confirm returns false", async () => {
-    const unitPath = join(workdir, "phantombot.service");
+    const unitPath = join(workdir, "phantombot-phantom.service");
     const callOrder: string[] = [];
     const fakeSystemctl: SystemctlRunner = {
       async run(_args: readonly string[]): Promise<SystemctlResult> {

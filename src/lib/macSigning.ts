@@ -57,8 +57,9 @@
 
 import { randomBytes } from "node:crypto";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { ensurePersonaTmpDir } from "./personaPaths.ts";
 
 /** Common Name of the self-signed code-signing certificate. */
 export const SIGNING_CERT_CN = "phantombot-codesign";
@@ -506,7 +507,7 @@ async function createSigningIdentity(args: {
     return { ok: false, failedStep: "unlock-keychain", keychainCreated };
 
   // Generate key + self-signed codesigning cert + p12 in a temp dir we scrub.
-  const workdir = await mkdtemp(join(tmpdir(), "phantombot-signing-"));
+  const workdir = await mkdtemp(join(ensurePersonaTmpDir(), "phantombot-signing-"));
   const keyPem = join(workdir, "key.pem");
   const certPem = join(workdir, "cert.pem");
   const p12 = join(workdir, "identity.p12");

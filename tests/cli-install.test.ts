@@ -101,16 +101,16 @@ let installPaths: {
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
-  unitPath = join(workdir, "phantombot.service");
+  unitPath = join(workdir, "phantombot-phantom.service");
   // Without these, runInstall would write companion units into the real
   // ~/.config/systemd/user/ on the test runner — see #44.
   installPaths = {
-    heartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
-    heartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
+    heartbeatServicePath: join(workdir, "phantombot-phantom-heartbeat.service"),
+    heartbeatTimerPath: join(workdir, "phantombot-phantom-heartbeat.timer"),
     nightlyServicePath: join(workdir, "phantombot-nightly.service"),
     nightlyTimerPath: join(workdir, "phantombot-nightly.timer"),
-    tickServicePath: join(workdir, "phantombot-tick.service"),
-    tickTimerPath: join(workdir, "phantombot-tick.timer"),
+    tickServicePath: join(workdir, "phantombot-phantom-tick.service"),
+    tickTimerPath: join(workdir, "phantombot-phantom-tick.timer"),
   };
 });
 
@@ -208,12 +208,12 @@ describe("runInstall (linux/systemd)", () => {
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
       "--user daemon-reload",
-      "--user enable phantombot.service",
-      "--user start phantombot.service",
-      "--user enable phantombot-heartbeat.timer",
-      "--user start phantombot-heartbeat.timer",
-      "--user enable phantombot-tick.timer",
-      "--user start phantombot-tick.timer",
+      "--user enable phantombot-phantom.service",
+      "--user start phantombot-phantom.service",
+      "--user enable phantombot-phantom-heartbeat.timer",
+      "--user start phantombot-phantom-heartbeat.timer",
+      "--user enable phantombot-phantom-tick.timer",
+      "--user start phantombot-phantom-tick.timer",
     ]);
     // The trailing manage block advertises the clean subcommands (identical
     // on every OS), not the raw systemctl/schtasks incantations.
@@ -459,14 +459,14 @@ describe("runUninstall (linux/systemd)", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
-      "--user stop phantombot-tick.timer",
-      "--user disable phantombot-tick.timer",
+      "--user stop phantombot-phantom-tick.timer",
+      "--user disable phantombot-phantom-tick.timer",
       "--user stop phantombot-nightly.timer",
       "--user disable phantombot-nightly.timer",
-      "--user stop phantombot-heartbeat.timer",
-      "--user disable phantombot-heartbeat.timer",
-      "--user stop phantombot.service",
-      "--user disable phantombot.service",
+      "--user stop phantombot-phantom-heartbeat.timer",
+      "--user disable phantombot-phantom-heartbeat.timer",
+      "--user stop phantombot-phantom.service",
+      "--user disable phantombot-phantom.service",
       "--user daemon-reload",
     ]);
     expect(out.text).toContain("uninstall complete");

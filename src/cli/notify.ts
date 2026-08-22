@@ -129,7 +129,10 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     return 2;
   }
 
-  const config = input.config ?? (await loadConfig());
+  // Load the config belonging to the persona we are ACTING ON, not the
+  // default one (#436): the persona dir and its config.toml are one unit, so
+  // reading the default's file while writing another's dir mixes two personas.
+  const config = input.config ?? (await loadConfig(input.persona));
   const persona = input.persona ?? config.defaultPersona;
 
   // ── Resolve the configured channels for this persona ──────────────────

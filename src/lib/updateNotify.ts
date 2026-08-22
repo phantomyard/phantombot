@@ -36,7 +36,6 @@ import {
 import {
   type Config,
   type TelegramAccount,
-  xdgConfigHome,
 } from "../config.ts";
 import { runUpdate } from "../cli/update.ts";
 import {
@@ -50,17 +49,18 @@ import {
   selfRestart,
   type ServiceControl,
 } from "./platform.ts";
+import { personaRunDir } from "./personaPaths.ts";
 
 /* -------------------------------------------------------------------------- *
  * Marker + dedup file paths
  * -------------------------------------------------------------------------- */
 
 export function pendingUpdatePath(): string {
-  return join(xdgConfigHome(), "phantombot", ".pending-update.json");
+  return join(personaRunDir(), "pending-update.json");
 }
 
 export function lastNotifiedPath(): string {
-  return join(xdgConfigHome(), "phantombot", ".last-update-notified");
+  return join(personaRunDir(), "last-update-notified");
 }
 
 export const AUTO_UPDATE_NOTIFY_DELAY_MS = 72 * 60 * 60 * 1000;

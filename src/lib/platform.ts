@@ -256,7 +256,9 @@ export async function statusCommand(over?: HintOverrides): Promise<string> {
 export function logsCommand(): string {
   switch (currentPlatform()) {
     case "darwin":
-      return `tail -f ~/Library/Logs/phantombot/dev.phantombot.phantombot.{out,err}.log`;
+      // Derived, not hard-coded: logs are per persona since #436, so the hint
+      // has to name the persona's own dir and label.
+      return `tail -f ${launchdLogPaths().out.replace(/\.out\.log$/, "")}.{out,err}.log`;
     case "windows": {
       // Derive the log path from the same resolver the scheduler writes to
       // (taskLogPaths -> xdgDataHome), so an XDG_DATA_HOME override points the

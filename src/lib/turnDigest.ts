@@ -58,12 +58,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
 import { inertField, inertText } from "./promptSafeText.ts";
 import { redactForLog } from "./redact.ts";
 import type { ToolCallDetail, ToolKind } from "../harnesses/toolNote.ts";
 import type { TurnOrigin } from "../memory/store.ts";
+import { personaRunDir } from "./personaPaths.ts";
 
 /**
  * Tool kinds that CHANGE something. A background turn that only read files and
@@ -167,7 +167,7 @@ export function digestEnabled(): boolean {
 export function defaultDigestDir(): string {
   return (
     process.env.PHANTOMBOT_TURN_DIGEST_DIR ??
-    join(xdgStateHome(), "phantombot", "digests")
+    join(personaRunDir(), "digests")
   );
 }
 

@@ -31,7 +31,10 @@ export async function resolveVaultPersonaDir(
   explicitPersona?: string,
   config?: Config,
 ): Promise<string> {
-  const cfg = config ?? (await loadConfig());
+  // Load the config belonging to the persona we are ACTING ON, not the
+  // default one (#436): the persona dir and its config.toml are one unit, so
+  // reading the default's file while writing another's dir mixes two personas.
+  const cfg = config ?? (await loadConfig(explicitPersona));
   const persona =
     explicitPersona || process.env.PHANTOMBOT_PERSONA || cfg.defaultPersona;
   return personaDir(cfg, persona);

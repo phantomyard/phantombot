@@ -422,7 +422,7 @@ phantombot logs --no-follow --lines 200   # dump the last 200 lines and exit
 
 **Log rotation.** On Linux the units log to journald, which applies its own
 retention. On macOS and Windows phantombot writes plain files
-(`~/Library/Logs/phantombot/`, `<data>/phantombot/logs/`), so the heartbeat
+(`<personas-root>/<persona>/logs/` on both since #436), so the heartbeat
 caps them every 30 minutes: any log over 16 MB is copied to `<name>.log.1` and
 truncated in place, keeping 3 generations (~64 MB per log, worst case).
 Override with `PHANTOMBOT_LOG_MAX_BYTES` and `PHANTOMBOT_LOG_KEEP`;
@@ -449,31 +449,50 @@ service from inside itself.
 
 ## Configuration
 
+**Configuration belongs to a persona, not to a machine.** Everything phantombot
+reads or writes at runtime lives under `~/.local/share/phantombot/personas/<name>/`.
+That is what lets several personas run side by side in one user account — a
+setup that used to corrupt itself, because two personas shared one config file,
+one state file, one database, one tick lock and one log directory.
+
 Phantombot resolves configuration in this order:
 
 1. `PHANTOMBOT_*` environment variables.
-2. TOML at `$XDG_CONFIG_HOME/phantombot/config.toml` or `PHANTOMBOT_CONFIG`.
+2. TOML at `<persona>/config.toml` (override the path with `PHANTOMBOT_CONFIG`).
 3. Built-in defaults.
+
+Which persona? `PHANTOMBOT_PERSONA` if set — every service unit sets it — else
+`default_persona` from the global file, else `phantom`.
 
 Common paths:
 
 | Path | Purpose |
 |---|---|
-| `~/.config/phantombot/config.toml` | Main config |
-| `~/.config/phantombot/.env` | Phantombot runtime secrets, such as voice provider keys |
+| `~/.local/share/phantombot/personas/<name>/config.toml` | That persona's config: channels, voice, harnesses, MCP |
+| `~/.local/share/phantombot/personas/<name>/.env` | That persona's runtime secrets, such as voice provider keys |
+| `~/.local/share/phantombot/personas/<name>/memory.sqlite` | That persona's rolling turns, tasks, capture log |
+| `~/.local/share/phantombot/personas/<name>/{run,logs,tmp}/` | Locks and markers, logs, and temp files — including every subprocess's `TMPDIR` |
+| `~/.local/share/phantombot/personas/config.toml` | The **only** global file: `default_persona` and `update_channel` |
 | `~/.env` | General credentials available to the harness |
-| `~/.local/share/phantombot/memory.sqlite` | Rolling turns, tasks, capture log |
-| `~/.local/share/phantombot/personas/<name>/` | Persona markdown memory and KB |
 
-Minimal config example:
+Two things, and only two, sit outside a persona directory. The global file
+above, because *which* persona you mean cannot itself be a persona setting and
+because there is one binary per box (so personas cannot follow different release
+rings). And the service definitions — systemd user units, launchd plists,
+Windows scheduled tasks — because the OS insists on owning those; each is named
+for one persona and pins `PHANTOMBOT_PERSONA`.
+
+Upgrading from an older layout needs no action: the first run after the upgrade
+moves `~/.config/phantombot/` and the shared state/data directories into the
+persona directories, renames the originals to `*.pre-435-<timestamp>` rather
+than deleting them, and copies the old host config verbatim into every persona
+so behaviour is unchanged. The shared database, secrets and logs follow the
+persona that was using them (the default one); the others start with an empty
+task database, which the migration logs rather than hiding.
+
+Minimal config example (`<persona>/config.toml`):
 
 ```toml
-default_persona = "phantom"
-
-# Release ring this host follows: "stable" (default) or "preview".
-# See "Release rings" under Maintenance.
-update_channel = "stable"
-
 [harnesses]
 chain = ["pi", "claude", "codex"]
 
@@ -884,7 +903,7 @@ the relay, and the node relays only the opaque gift-wrap between peers — it ne
 holds a key for your message contents. The advert is inert until a peer's PWA
 reads it.
 
-**Tuning** (all optional) in `~/.config/phantombot/config.toml`:
+**Tuning** (all optional) in `<persona>/config.toml`:
 
 ```toml
 [p2p]
@@ -2077,7 +2096,10 @@ Every merge to `main` is published as a GitHub **prerelease**. GitHub's
 default host resolves — so a merge does not reach the fleet until a human
 presses the promote button on it.
 
-Pick a ring per host in `config.toml`:
+Pick a ring per host in the global file,
+`~/.local/share/phantombot/personas/config.toml` — the ring lives there rather
+than in a persona's config because there is one phantombot binary per box, so
+two personas on one machine cannot follow different rings:
 
 ```toml
 # "stable" (default) — install only releases a human promoted.

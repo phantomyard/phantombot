@@ -33,6 +33,7 @@ import { basename, join } from "node:path";
 import { xdgConfigHome } from "../config.ts";
 import { completionScript, type CompletionShell } from "./completion.ts";
 import { writeFileAtomic, type WriteSink } from "./io.ts";
+import { personasRoot } from "./personaPaths.ts";
 
 const BLOCK_BEGIN = "# >>> phantombot completion >>>";
 const BLOCK_END = "# <<< phantombot completion <<<";
@@ -42,6 +43,11 @@ export interface CompletionInstallOptions {
   home?: string;
   /** XDG config home. Defaults to xdgConfigHome(). Tests override. */
   configHome?: string;
+  /**
+   * Personas root — where our own completion stubs live since #435. Defaults
+   * to personasRoot(). Tests override.
+   */
+  personasDir?: string;
   /** The user's login shell path ($SHELL). Defaults to process.env.SHELL. */
   shell?: string;
   /** Host platform. Defaults to process.platform. */
@@ -63,7 +69,10 @@ interface Paths {
 function resolvePaths(opts: CompletionInstallOptions): Paths {
   const home = opts.home ?? homedir();
   const configHome = opts.configHome ?? xdgConfigHome();
-  const stubDir = join(configHome, "phantombot", "completions");
+  // Our own completion stubs live beside the global config in the personas
+  // root (#435), not in `~/.config/phantombot` — that directory is gone. The
+  // fish path below is fish's own directory, which we do not own and so leave.
+  const stubDir = join(opts.personasDir ?? personasRoot(), "completions");
   return {
     home,
     bashrc: join(home, ".bashrc"),

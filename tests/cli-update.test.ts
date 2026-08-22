@@ -22,6 +22,7 @@ import type { ServiceControl } from "../src/lib/systemd.ts";
 let workdir: string;
 let binPath: string;
 let savedConfigEnv: string | undefined;
+let savedGlobalEnv: string | undefined;
 let savedChannelEnv: string | undefined;
 
 class CaptureStream {
@@ -44,14 +45,19 @@ beforeEach(async () => {
   // suite resolves "stable" deterministically instead of inheriting whatever
   // ring the developer's own box happens to be on.
   savedConfigEnv = process.env.PHANTOMBOT_CONFIG;
+  savedGlobalEnv = process.env.PHANTOMBOT_GLOBAL_CONFIG;
   savedChannelEnv = process.env.PHANTOMBOT_UPDATE_CHANNEL;
   process.env.PHANTOMBOT_CONFIG = join(workdir, "no-such-config.toml");
+  // The ring lives in the global config since #435; same reasoning.
+  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "no-such-global.toml");
   delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
 });
 
 afterEach(async () => {
   if (savedConfigEnv === undefined) delete process.env.PHANTOMBOT_CONFIG;
   else process.env.PHANTOMBOT_CONFIG = savedConfigEnv;
+  if (savedGlobalEnv === undefined) delete process.env.PHANTOMBOT_GLOBAL_CONFIG;
+  else process.env.PHANTOMBOT_GLOBAL_CONFIG = savedGlobalEnv;
   if (savedChannelEnv === undefined) {
     delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
   } else {
@@ -620,15 +626,15 @@ describe("runUpdate post-swap systemd heal", () => {
       force: true,
       refreshCompletions: false,
       healSystemdUnits: async () => ({
-        rewrote: ["phantombot-tick.timer", "phantombot.service"],
+        rewrote: ["phantombot-phantom-tick.timer", "phantombot-phantom.service"],
         backups: [],
-        repairedTimers: ["phantombot-tick.timer"],
+        repairedTimers: ["phantombot-phantom-tick.timer"],
         removedRetired: [],
       }),
     });
     expect(code).toBe(0);
-    expect(out.text).toContain("re-rendered systemd units: phantombot-tick.timer, phantombot.service");
-    expect(out.text).toContain("re-armed timers: phantombot-tick.timer");
+    expect(out.text).toContain("re-rendered systemd units: phantombot-phantom-tick.timer, phantombot-phantom.service");
+    expect(out.text).toContain("re-armed timers: phantombot-phantom-tick.timer");
   });
 
   test("heal failure is non-fatal: binary swap still succeeds, warning logged", async () => {
@@ -931,16 +937,17 @@ describe("runUpdate — release rings (#432)", () => {
     expect(apiUrls[0]).toContain("/releases/latest");
   });
 
-  test("update_channel = preview in config makes the CLI resolve the list", async () => {
+  test("update_channel = preview in the global config makes the CLI resolve the list", async () => {
     // Exercises the real config path, not the `channel` test seam: this is
-    // the wire between what an operator writes in config.toml and which
-    // endpoint the updater actually hits.
+    // the wire between what an operator writes and which endpoint the updater
+    // actually hits. The ring lives in the GLOBAL file since #435 — one binary
+    // per box means personas cannot follow different rings.
     await writeFile(
-      join(workdir, "config.toml"),
+      join(workdir, "global.toml"),
       'update_channel = "preview"\n',
       "utf8",
     );
-    process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
+    process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
     const { fetchImpl, apiUrls } = ringFetch();
     const code = await runUpdate({
       binPath,

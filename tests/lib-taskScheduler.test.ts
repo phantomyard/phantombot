@@ -134,7 +134,7 @@ afterEach(async () => {
 });
 
 describe("taskLogPaths", () => {
-  test("honours XDG_DATA_HOME so the log hint matches where tasks write", () => {
+  test("resolves into the persona's own log dir under XDG_DATA_HOME (#435)", () => {
     const prev = process.env.XDG_DATA_HOME;
     try {
       process.env.XDG_DATA_HOME = join("/tmp", "xdg-data-override");
@@ -142,10 +142,10 @@ describe("taskLogPaths", () => {
       // Both the scheduler action and platform.ts logsCommand() resolve
       // through this function, so an override must flow into both.
       expect(out).toBe(
-        join("/tmp", "xdg-data-override", "phantombot", "logs", "phantombot.out.log"),
+        join("/tmp", "xdg-data-override", "phantombot", "personas", "phantom", "logs", "phantombot.out.log"),
       );
       expect(err).toBe(
-        join("/tmp", "xdg-data-override", "phantombot", "logs", "phantombot.err.log"),
+        join("/tmp", "xdg-data-override", "phantombot", "personas", "phantom", "logs", "phantombot.err.log"),
       );
     } finally {
       if (prev === undefined) delete process.env.XDG_DATA_HOME;

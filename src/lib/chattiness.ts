@@ -29,7 +29,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { xdgStateHome } from "../config.ts";
+import { personaRunDir } from "./personaPaths.ts";
 
 /** Persisted override. "default" is represented as the absence of an entry. */
 export type ChattinessMode = "on" | "off";
@@ -81,7 +81,7 @@ type StoredOverrides = Record<string, StoredOverride>;
 export function chattinessStatePath(): string {
   return (
     process.env.PHANTOMBOT_CHATTINESS_STATE ??
-    join(xdgStateHome(), "phantombot", "chattiness-overrides.json")
+    join(personaRunDir(), "chattiness-overrides.json")
   );
 }
 

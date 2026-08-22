@@ -54,7 +54,9 @@ describe("hint commands shape per platform", () => {
     if (process.platform !== "win32") return;
     expect(await restartCommand()).toContain("schtasks /End");
     expect(await statusCommand()).toContain("schtasks /Query");
-    expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
+    // Per persona since #435: `<persona>\\logs\\phantombot.out.log`.
+    expect(logsCommand()).toContain("logs\\phantombot.out.log");
+    expect(logsCommand()).toContain("personas\\");
   });
 });
 

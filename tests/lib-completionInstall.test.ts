@@ -41,6 +41,7 @@ afterEach(async () => {
 const opts = (extra: Record<string, unknown>) => ({
   home,
   configHome,
+  personasDir: configHome,
   out: sink,
   platform: "linux" as const,
   ...extra,
@@ -95,7 +96,7 @@ describe("installCompletions", () => {
     expect(installed).toEqual(["bash"]);
 
     const stub = await readFile(
-      join(configHome, "phantombot", "completions", "phantombot.bash"),
+      join(configHome, "completions", "phantombot.bash"),
       "utf8",
     );
     expect(stub).toContain("complete -F _phantombot_complete phantombot");
@@ -103,7 +104,7 @@ describe("installCompletions", () => {
     const rc = await readFile(join(home, ".bashrc"), "utf8");
     expect(rc).toContain("export EXISTING=1");
     expect(rc).toContain("# >>> phantombot completion >>>");
-    expect(rc).toContain('/phantombot/completions/phantombot.bash"');
+    expect(rc).toContain('/completions/phantombot.bash"');
   });
 
   test("zsh: sources the stub and runs compinit before it", async () => {
@@ -114,7 +115,7 @@ describe("installCompletions", () => {
 
     const rc = await readFile(join(home, ".zshrc"), "utf8");
     expect(rc).toContain("compinit");
-    expect(rc).toContain('/phantombot/completions/phantombot.zsh"');
+    expect(rc).toContain('/completions/phantombot.zsh"');
   });
 
   test("fish: drops an auto-loaded completion file, no rc edit", async () => {
@@ -169,7 +170,7 @@ describe("uninstallCompletions", () => {
 
     // Stub file is gone.
     await expect(
-      readFile(join(configHome, "phantombot", "completions", "phantombot.bash"), "utf8"),
+      readFile(join(configHome, "completions", "phantombot.bash"), "utf8"),
     ).rejects.toThrow();
   });
 });

@@ -271,17 +271,17 @@ describe("runDoctor systemd health check", () => {
       config,
       out,
       checkSystemd: async () => ({
-        missing_unit_files: ["phantombot-tick.timer"],
+        missing_unit_files: ["phantombot-phantom-tick.timer"],
         drifted_unit_files: [],
-        inactive_timers: ["phantombot-tick.timer"],
+        inactive_timers: ["phantombot-phantom-tick.timer"],
         repaired: false,
       }),
     });
     // Nightly is healthy, but systemd has unrepaired damage → exit 1.
     expect(code).toBe(1);
     expect(out.text).toContain("systemd: WARN");
-    expect(out.text).toContain("missing: phantombot-tick.timer");
-    expect(out.text).toContain("inactive: phantombot-tick.timer");
+    expect(out.text).toContain("missing: phantombot-phantom-tick.timer");
+    expect(out.text).toContain("inactive: phantombot-phantom-tick.timer");
     expect(out.text).toContain("run `phantombot install` to repair");
   });
 
@@ -295,7 +295,7 @@ describe("runDoctor systemd health check", () => {
       config,
       out,
       checkSystemd: async () => ({
-        missing_unit_files: ["phantombot-tick.timer"],
+        missing_unit_files: ["phantombot-phantom-tick.timer"],
         drifted_unit_files: [],
         inactive_timers: [],
         repaired: true,
@@ -333,7 +333,7 @@ describe("runDoctor systemd health check", () => {
       checkSystemd: async () => ({
         missing_unit_files: [],
         drifted_unit_files: [],
-        inactive_timers: ["phantombot-tick.timer"],
+        inactive_timers: ["phantombot-phantom-tick.timer"],
         repaired: false,
       }),
     });
@@ -341,7 +341,7 @@ describe("runDoctor systemd health check", () => {
     expect(report.systemd).toEqual({
       missing_unit_files: [],
       drifted_unit_files: [],
-      inactive_timers: ["phantombot-tick.timer"],
+      inactive_timers: ["phantombot-phantom-tick.timer"],
       repaired: false,
     });
   });
@@ -362,14 +362,14 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: [],
-        drifted_unit_files: ["phantombot-heartbeat.timer"],
+        drifted_unit_files: ["phantombot-phantom-heartbeat.timer"],
         inactive_timers: [],
         repaired: false,
       }),
     });
     expect(code).toBe(1);
     expect(out.text).toContain("systemd: WARN");
-    expect(out.text).toContain("drifted: phantombot-heartbeat.timer");
+    expect(out.text).toContain("drifted: phantombot-phantom-heartbeat.timer");
     expect(out.text).toContain("run `phantombot install` to repair");
   });
 
@@ -384,7 +384,7 @@ describe("runDoctor systemd health check", () => {
       out,
       checkSystemd: async () => ({
         missing_unit_files: [],
-        drifted_unit_files: ["phantombot-heartbeat.timer"],
+        drifted_unit_files: ["phantombot-phantom-heartbeat.timer"],
         inactive_timers: [],
         repaired: true,
       }),
@@ -580,7 +580,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
       }),
     });
     // The stale heartbeat (with a real last_fired) was passed down.
-    expect(receivedStale).toEqual(["phantombot-heartbeat.timer"]);
+    expect(receivedStale).toEqual(["phantombot-phantom-heartbeat.timer"]);
     // Marker is still stale this run, so exit 1 (visibility) — the
     // re-arm fires a catch-up that refreshes the marker for next time.
     expect(code).toBe(1);
@@ -652,7 +652,7 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         },
       }),
     });
-    expect(receivedStale).toEqual(["phantombot-tick.timer"]);
+    expect(receivedStale).toEqual(["phantombot-phantom-tick.timer"]);
   });
 });
 

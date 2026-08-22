@@ -19,15 +19,17 @@ let prevState: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-timerhealth-"));
-  prevState = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = workdir;
+  // Markers live in `<persona>/run/` since #435, so isolating XDG_STATE_HOME
+  // is no longer enough — pin the personas root instead.
+  prevState = process.env.PHANTOMBOT_PERSONAS_DIR;
+  process.env.PHANTOMBOT_PERSONAS_DIR = workdir;
 });
 
 afterEach(async () => {
   if (prevState === undefined) {
-    delete process.env.XDG_STATE_HOME;
+    delete process.env.PHANTOMBOT_PERSONAS_DIR;
   } else {
-    process.env.XDG_STATE_HOME = prevState;
+    process.env.PHANTOMBOT_PERSONAS_DIR = prevState;
   }
   await rm(workdir, { recursive: true, force: true });
 });

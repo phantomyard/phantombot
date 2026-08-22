@@ -6,7 +6,7 @@
  * Background (see src/snapEnv.ts): a STRICT SNAP VS Code (Ubuntu App Center)
  * redirects `$HOME` into the snap sandbox, whose phantombot persona store is
  * empty, so plain `phantombot acp` exits 2 ("no other personas exist"). The fix
- * pins ONLY PHANTOMBOT_CONFIG back to the REAL home via `$SNAP_REAL_HOME`;
+ * pins ONLY PHANTOMBOT_GLOBAL_CONFIG back to the REAL home via `$SNAP_REAL_HOME`;
  * loadConfig then resolves personas_dir from that config (default OR custom), so
  * PHANTOMBOT_PERSONAS_DIR is deliberately left unset to avoid overriding a custom
  * persona root.
@@ -120,7 +120,7 @@ describe("snapAwareSpawnEnv — the fix", () => {
     const out = snapAwareSpawnEnv(env);
     expect(out).toBe(env); // same reference, untouched
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
-    expect(out.PHANTOMBOT_CONFIG).toBeUndefined();
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBeUndefined();
   });
 
   test("strict-snap env pins config + XDG dirs to the REAL home", () => {
@@ -129,15 +129,15 @@ describe("snapAwareSpawnEnv — the fix", () => {
     // The fix: config resolution is pinned back to the REAL home, NOT the empty
     // redirected snap home — this is what prevents the exit-2 crash. loadConfig
     // then resolves personas_dir from that config.
-    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBe(configPathFor(REAL_HOME));
 
     // PHANTOMBOT_PERSONAS_DIR is deliberately NOT set: it would override a custom
     // `personas_dir` in config.toml and silently break custom persona roots.
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
 
     // The config is absolute and under the real home, NOT under the snap sandbox.
-    expect(out.PHANTOMBOT_CONFIG!.startsWith(REAL_HOME + "/")).toBe(true);
-    expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG!.startsWith(REAL_HOME + "/")).toBe(true);
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).not.toContain("/snap/");
   });
 
   test("CLASSIC-snap env pins config + XDG dirs to the REAL home via $HOME — the X1 Carbon exit-2 repro", () => {
@@ -146,19 +146,19 @@ describe("snapAwareSpawnEnv — the fix", () => {
     // The old isSnapConfined skipped this (no $SNAP_REAL_HOME) → no fix → exit 2.
     const out = snapAwareSpawnEnv(classicSnapEnv());
 
-    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBe(configPathFor(REAL_HOME));
     expect(out.XDG_DATA_HOME).toBe(dataHomeFor(REAL_HOME));
     expect(out.XDG_CONFIG_HOME).toBe(configHomeFor(REAL_HOME));
 
     // Resolved store is the real, populated one — NOT the snap sandbox.
     expect(out.XDG_DATA_HOME).not.toContain("/snap/");
     expect(out.XDG_CONFIG_HOME).not.toContain("/snap/");
-    expect(out.PHANTOMBOT_CONFIG).not.toContain("/snap/");
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).not.toContain("/snap/");
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
   test("DEFAULT install (no personas_dir): restores XDG_DATA_HOME so loadConfig's default store resolves to the REAL home — the blocker Kai flagged", () => {
-    // This is the case PHANTOMBOT_CONFIG alone did NOT cover: a config.toml with
+    // This is the case PHANTOMBOT_GLOBAL_CONFIG alone did NOT cover: a config.toml with
     // no explicit personas_dir falls back to join(xdgDataHome(),"phantombot",
     // "personas") in loadConfig. Under strict snap XDG_DATA_HOME is redirected to
     // the empty sandbox store → exit 2. We must hand the child a real XDG_DATA_HOME.
@@ -193,25 +193,25 @@ describe("snapAwareSpawnEnv — the fix", () => {
     const env = strictSnapEnv();
     const out = snapAwareSpawnEnv(env);
     expect(out).not.toBe(env);
-    expect(env.PHANTOMBOT_CONFIG).toBeUndefined();
+    expect(env.PHANTOMBOT_GLOBAL_CONFIG).toBeUndefined();
     expect(env.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
-  test("respects an explicit PHANTOMBOT_CONFIG override — does not clobber it", () => {
+  test("respects an explicit PHANTOMBOT_GLOBAL_CONFIG override — does not clobber it", () => {
     const out = snapAwareSpawnEnv(
       strictSnapEnv({
-        PHANTOMBOT_CONFIG: "/custom/config.toml",
+        PHANTOMBOT_GLOBAL_CONFIG: "/custom/config.toml",
       }),
     );
-    expect(out.PHANTOMBOT_CONFIG).toBe("/custom/config.toml");
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBe("/custom/config.toml");
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
-  test("a blank/whitespace PHANTOMBOT_CONFIG is treated as unset and gets pinned", () => {
+  test("a blank/whitespace PHANTOMBOT_GLOBAL_CONFIG is treated as unset and gets pinned", () => {
     const out = snapAwareSpawnEnv(
-      strictSnapEnv({ PHANTOMBOT_CONFIG: "" }),
+      strictSnapEnv({ PHANTOMBOT_GLOBAL_CONFIG: "" }),
     );
-    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBe(configPathFor(REAL_HOME));
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBeUndefined();
   });
 
@@ -222,12 +222,12 @@ describe("snapAwareSpawnEnv — the fix", () => {
       strictSnapEnv({ PHANTOMBOT_PERSONAS_DIR: "/custom/personas" }),
     );
     expect(out.PHANTOMBOT_PERSONAS_DIR).toBe("/custom/personas");
-    expect(out.PHANTOMBOT_CONFIG).toBe(configPathFor(REAL_HOME));
+    expect(out.PHANTOMBOT_GLOBAL_CONFIG).toBe(configPathFor(REAL_HOME));
   });
 
-  test("config path helper builds phantombot's default absolute layout", () => {
+  test("global config path helper builds phantombot's default absolute layout (#435)", () => {
     expect(configPathFor(REAL_HOME)).toBe(
-      "/home/alice/.config/phantombot/config.toml",
+      "/home/alice/.local/share/phantombot/personas/config.toml",
     );
   });
 
