@@ -304,6 +304,42 @@ describe("runRun — multi-persona telegram", () => {
     expect(chains.amanda).toEqual(["claude", "codex"]);
   });
 
+  test("fails startup when a telegram persona override has no usable harness", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "amanda"), { recursive: true });
+    await writeFile(join(workdir, "personas", "amanda", "BOOT.md"), "# Amanda");
+    let listenerStarted = false;
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: {
+          ...config.harnesses,
+          personas: { amanda: { chain: ["claudee"] } },
+        },
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            amanda: { token: "amanda-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      checkHarnesses: false,
+      runTelegramServer: async () => {
+        listenerStarted = true;
+      },
+      out,
+      err,
+    });
+
+    expect(code).toBe(2);
+    expect(listenerStarted).toBe(false);
+    expect(err.text).toContain("unknown harness 'claudee'");
+    expect(err.text).toContain("telegram persona 'amanda' has no usable harnesses");
+  });
+
   test("starts when only [channels.telegram.personas.*] is configured (no default block)", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();

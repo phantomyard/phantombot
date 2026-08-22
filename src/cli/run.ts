@@ -314,6 +314,26 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     return 2;
   }
 
+  // Resolve every Telegram listener before the daemon acquires its lock or
+  // starts any channel. A typo in a persona override can otherwise produce an
+  // empty chain for just that bot, leaving a listener that accepts messages
+  // but fails every turn. Fail the whole startup and name the broken persona;
+  // a partial multi-bot daemon is harder to diagnose than a clear boot error.
+  const telegramListeners = plan.listeners.map((listener) => ({
+    ...listener,
+    harnesses: buildHarnessChain(config, err, listener.persona),
+  }));
+  const unusableTelegramListener = telegramListeners.find(
+    (listener) => listener.harnesses.length === 0,
+  );
+  if (unusableTelegramListener) {
+    err.write(
+      `telegram persona '${unusableTelegramListener.persona}' has no usable harnesses. ` +
+        "Fix its harness override or remove the override to use the global chain.\n",
+    );
+    return 2;
+  }
+
   const lockPath = input.lockPath ?? defaultLockPath();
   const lock = acquireRunLock(lockPath);
   if (!isLockHandle(lock)) {
@@ -618,11 +638,11 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     // Fan-out: one listener per (persona, account). Shared AbortSignal
     // so Ctrl-C cleanly tears all of them down together.
     const startTelegram = input.runTelegramServer ?? runTelegramServer;
-    const tasks = plan.listeners.map((l) =>
+    const tasks = telegramListeners.map((l) =>
       startTelegram({
         config,
         memory,
-        harnesses: buildHarnessChain(config, err, l.persona),
+        harnesses: l.harnesses,
         agentDir: l.agentDir,
         persona: l.persona,
         account: l.account,

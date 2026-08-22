@@ -77,6 +77,8 @@ export interface RunTickInput {
   taskStore?: TaskStore;
   memory?: MemoryStore;
   harnesses?: Harness[];
+  /** Build a task's effective chain (test seam for persona routing). */
+  buildHarnesses?: typeof buildHarnessChain;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -223,7 +225,8 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             harnessBinsResolved = true;
           }
           const taskHarnesses =
-            input.harnesses ?? buildHarnessChain(config, err, task.persona);
+            input.harnesses ??
+            (input.buildHarnesses ?? buildHarnessChain)(config, err, task.persona);
           if (taskHarnesses.length === 0) {
             throw new Error("no harnesses configured");
           }

@@ -177,6 +177,41 @@ describe("runTick — no-op cases", () => {
 });
 
 describe("runTick — normal task fire", () => {
+  test("builds the scheduled task chain for its persona", async () => {
+    await mkdir(join(workdir, "personas", "amanda"), { recursive: true });
+    await writeFile(join(workdir, "personas", "amanda", "BOOT.md"), "# Amanda");
+    const created = store.add({
+      persona: "amanda",
+      description: "Amanda check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    const harness = new ScriptedHarness("amanda-primary", [
+      { type: "done", finalText: "done" },
+    ]);
+    const resolvedPersonas: Array<string | undefined> = [];
+
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      buildHarnesses: (_config, _err, persona) => {
+        resolvedPersonas.push(persona);
+        return [harness];
+      },
+      lockPath,
+      out: { write() {} },
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+
+    expect(code).toBe(0);
+    expect(resolvedPersonas).toEqual(["amanda"]);
+    expect(harness.invocations).toBe(1);
+  });
+
   test("background agent wake logs lifecycle and stream chunks without Telegram delivery", async () => {
     const created = store.add({
       persona: "phantom",
