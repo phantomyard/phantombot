@@ -40,12 +40,20 @@ jobs:
   promote:
     runs-on: ubuntu-latest
 
+    # Job-wide so no step can forget it. This workflow never checks out the
+    # repo (promotion touches only the GitHub API), so `gh` has no git remote
+    # to infer the repository from: without GH_REPO it dies with
+    # "fatal: not a git repository". Setting it here rather than per step is
+    # deliberate — the original bug was one step out of four missing it.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      REPO: ${{ github.repository }}
+
     steps:
       - name: Resolve the tag to promote
         id: resolve
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -67,8 +75,6 @@ jobs:
 
       - name: Verify the release is promotable
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           set -euo pipefail
@@ -114,7 +120,6 @@ jobs:
 
       - name: Promote to stable
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           set -euo pipefail
@@ -122,13 +127,11 @@ jobs:
           # is by publish date among non-prereleases, and we want the pointer
           # to land on the tag we just promoted even when an older release is
           # flipped (a rollback promotion).
-          gh release edit "$TAG" --prerelease=false --latest
+          gh release edit "$TAG" --repo "$REPO" --prerelease=false --latest
           echo "promoted $TAG to stable"
 
       - name: Confirm and summarize
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
           TAG: ${{ steps.resolve.outputs.tag }}
           SERVER_URL: ${{ github.server_url }}
         run: |
