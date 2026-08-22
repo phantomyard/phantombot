@@ -32,10 +32,13 @@ import {
   type ResignAfterUpdateResult,
 } from "../lib/macSigning.ts";
 import {
+  DEFAULT_UPDATE_CHANNEL,
   detectSupportedTarget,
   findLatestRelease,
   type LatestRelease,
+  type UpdateChannel,
 } from "../lib/githubReleases.ts";
+import { loadConfig } from "../config.ts";
 import {
   defaultServiceControl,
   restartCommand,
@@ -70,6 +73,13 @@ export interface RunUpdateInput {
   procPlatform?: string;
   /** Defaults to VERSION constant. Tests override. */
   currentVersion?: string;
+  /**
+   * Release ring to install from (#432). Defaults to the host's configured
+   * channel (`update_channel` in config.toml / PHANTOMBOT_UPDATE_CHANNEL),
+   * falling back to "stable" if the config cannot be read — an update must
+   * never be blocked by an unreadable config, and stable is the safe ring.
+   */
+  channel?: UpdateChannel;
   /** Inject for testing. */
   fetchImpl?: typeof fetch;
   serviceControl?: ServiceControl;
@@ -125,6 +135,7 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   const procArch = input.procArch ?? process.arch;
   const procPlatform = input.procPlatform ?? process.platform;
   const target = detectSupportedTarget(procPlatform, procArch);
+  const channel = input.channel ?? (await resolveHostChannel());
 
   if (!target) {
     err.write(
@@ -161,23 +172,31 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
   // 1. Discover latest release.
   const r = await findLatestRelease({
     target,
+    channel,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {
-    err.write(`update check failed: ${r.error}\n`);
+    err.write(`update check failed (${channel} channel): ${r.error}\n`);
     return 1;
   }
   const release = r.release;
 
-  // 2. Compare versions.
+  // 2. Compare versions. Deliberately EQUALITY, not "is newer": on the
+  //    preview ring a host that wants out flips update_channel back to
+  //    stable, and the stable release it should land on has a LOWER version
+  //    number than the preview build it is running. A `>` compare here would
+  //    strand that host on the bad build. See lib/githubReleases.ts.
   if (release.version === currentVersion) {
-    out.write(`Already on ${release.tag}.\n`);
+    out.write(`Already on ${release.tag}${channelSuffix(channel, release)}.\n`);
     return 0;
   }
 
   // 3. --check just reports.
   if (input.check) {
-    out.write(`Update available: ${currentVersion} → ${release.version}\n`);
+    out.write(
+      `Update available: ${currentVersion} → ${release.version}` +
+        `${channelSuffix(channel, release)}\n`,
+    );
     out.write(`  asset:  ${release.binary.name} (${formatBytes(release.binary.size)})\n`);
     return 2;
   }
@@ -478,6 +497,34 @@ async function defaultConfirmRestart(): Promise<boolean> {
     initialValue: true,
   });
   return !p.isCancel(r) && r === true;
+}
+
+/**
+ * Read the host's release ring from config. An unreadable or absent config
+ * must never block an update, so any failure degrades to the stable ring
+ * (which is also what every pre-#432 host effectively followed).
+ */
+async function resolveHostChannel(): Promise<UpdateChannel> {
+  try {
+    const cfg = await loadConfig();
+    return cfg.updateChannel ?? DEFAULT_UPDATE_CHANNEL;
+  } catch {
+    return DEFAULT_UPDATE_CHANNEL;
+  }
+}
+
+/**
+ * " (preview)" / " (preview — promoted to stable)" annotation for the
+ * version lines, so a preview host's output always says which ring the
+ * number came from. Silent on stable, where it would be noise on every
+ * existing install.
+ */
+function channelSuffix(
+  channel: UpdateChannel,
+  release: LatestRelease,
+): string {
+  if (channel !== "preview") return "";
+  return release.prerelease ? " (preview)" : " (preview — already promoted)";
 }
 
 function formatBytes(n: number): string {

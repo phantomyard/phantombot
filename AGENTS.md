@@ -277,19 +277,59 @@ section.
 
 ## Release pipeline
 
-Every merged PR auto-releases `v1.0.<PR_NUMBER>`. The workflow at `.github/workflows/release.yml`:
+Every merge to `main` auto-releases `v1.1.<RUN_NUMBER>` as a **prerelease**. The
+workflow at `.github/workflows/release.yml`:
 
-1. Triggers on `pull_request: closed` + `merged == true` + `branches: main`.
-2. Checks out the merge-commit SHA (not main HEAD; pins to exactly the code that merged).
+1. Triggers on `push: main` (branch protection means a push IS a merge), minus a
+   narrow `paths-ignore` denylist of docs/website surfaces. NOT
+   `pull_request: closed` — a fork-merged PR runs that with a read-only token and
+   `gh release create` 403s.
+2. Checks out `github.sha` (the merge commit), so the tag pins to exactly the
+   code that merged.
 3. Runs `bun tsc --noEmit` and `bun test` as gates.
-4. `sed -i "s/0.1.0-dev/1.0.${PR_NUMBER}/" src/version.ts` (replaces only the literal placeholder, preserves the doc comment block).
-5. Cross-compiles `bun-linux-x64-baseline` and `bun-linux-arm64`.
-6. Computes `SHA256SUMS`.
-7. `gh release create v1.0.<PR_NUMBER> --target <merge_commit_sha> …` so the git tag is pinned to the commit, not the moving HEAD.
+4. `sed -i "s/0.1.0-dev/1.1.${RUN_NUMBER}/" src/version.ts` (replaces only the
+   literal placeholder, preserves the doc comment block).
+5. Regenerates + version-stamps the embedded VS Code extension.
+6. Cross-compiles linux x64-baseline/arm64, darwin x64/arm64, windows x64/arm64.
+7. Computes `SHA256SUMS`.
+8. `gh release create v1.1.<RUN_NUMBER> --prerelease --target <sha> …`.
 
-`phantombot update` reads this feed via the GitHub Releases API.
+**Release rings (#432).** `--prerelease` in step 8 is the whole gate. GitHub's
+`/releases/latest` excludes prereleases, and that is what a `stable` host
+resolves (`src/lib/githubReleases.ts`); a host with `update_channel = "preview"`
+resolves the `/releases` LIST instead and takes its newest non-draft entry. So a
+merge reaches only the preview ring until a human runs the
+`.github/workflows/promote.yml` workflow_dispatch, which flips
+`--prerelease=false --latest` on an **existing** release.
 
-**Versioning is intentionally not semver.** `1.0.<PR_NUMBER>` — patch is the PR number, ordered by merge time, not semantic impact. Don't bolt semver-aware logic on (`phantombot update --major-only` etc.); the version string can't carry that information.
+Four things here look like tidy-up candidates and are not:
+
+- **Promotion must never rebuild.** The point of a ring is that the bytes the
+  fleet installs are the bytes that soaked. A promotion that rebuilt would ship
+  an artifact nobody ran, and the soak would be theatre.
+- **CI must not decide stable.** Green tests are the bar for MERGING. If they
+  were also the bar for promotion the two rings would be one ring. Stable means
+  a human watched a real host run it.
+- **The updater compares versions for EQUALITY, not `>`** (`src/cli/update.ts`).
+  This is what makes rollback free: a host stranded on preview `1.1.291` flips
+  `update_channel` back to `stable` and installs `1.1.280`, a LOWER number.
+  Turning that into a "newer than" compare strands every preview host on
+  whatever build broke; `tests/cli-update.test.ts` has a test that goes red if
+  you do.
+- **An unrecognised `update_channel` falls back to `stable`, not preview**
+  (`resolveUpdateChannel` in `src/config.ts`). A typo must never opt a box into
+  a ring its operator did not choose.
+
+`phantombot update`, the `/update` chat command and the heartbeat update-check
+all resolve through the host's configured ring, and `phantombot doctor` reports
+it — a bug report that does not say which ring it came from is uninterpretable
+once `latest` stops meaning "newest build".
+
+**Versioning is intentionally not semver.** `1.1.<RUN_NUMBER>` — patch is the
+release workflow's monotonic run number, not semantic impact and not the PR
+number (PR numbers can regress; the PR is recorded in the release title/notes).
+Don't bolt semver-aware logic on (`phantombot update --major-only` etc.); the
+version string can't carry that information.
 
 ## How to add a new subcommand
 

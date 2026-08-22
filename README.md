@@ -470,6 +470,10 @@ Minimal config example:
 ```toml
 default_persona = "phantom"
 
+# Release ring this host follows: "stable" (default) or "preview".
+# See "Release rings" under Maintenance.
+update_channel = "stable"
+
 [harnesses]
 chain = ["pi", "claude", "codex"]
 
@@ -2066,6 +2070,43 @@ phantombot update --force --restart
 Updates download to a temporary file, verify SHA256, atomically rename over the
 live binary, and clean up after themselves.
 
+### Release rings: stable and preview
+
+Every merge to `main` is published as a GitHub **prerelease**. GitHub's
+`/releases/latest` endpoint excludes prereleases, and that is the endpoint a
+default host resolves — so a merge does not reach the fleet until a human
+presses the promote button on it.
+
+Pick a ring per host in `config.toml`:
+
+```toml
+# "stable" (default) — install only releases a human promoted.
+# "preview"          — install every merge to main.
+update_channel = "preview"
+```
+
+`PHANTOMBOT_UPDATE_CHANNEL` overrides the file. An unrecognised value falls
+back to `stable` with a warning, so a typo can never move a host onto a ring
+you did not pick. `phantombot doctor` prints the active ring and version, so a
+bug report from a preview host is interpretable without asking which build it
+is on.
+
+The intended shape: put **one** host on `preview`, let it run the new build for
+a few days, then promote. Promotion is the "Promote a release to stable"
+workflow in Actions — it flips the `prerelease` flag on a release that already
+exists, so the binaries stable hosts install are bit-identical to the ones that
+soaked. Nothing is rebuilt.
+
+**Rolling back needs no special command.** The updater compares versions for
+*equality*, not "is newer", so a host on a bad preview build flips
+`update_channel` back to `stable` and the next `phantombot update` installs the
+current stable — even though its version number is lower. Same for a bad
+*promoted* release: promote the last good tag and every stable host follows it
+back down.
+
+A side effect worth naming: stable hosts stop updating on every merge. Fewer,
+deliberate updates instead of one per PR.
+
 On Linux the restart runs `systemctl --user restart` from *inside* the service
 being restarted, so systemd tears down the whole cgroup — including the
 `systemctl` child phantombot just spawned — as soon as it accepts the job. That
@@ -2213,11 +2254,16 @@ block. Pass `--no-telegram` to skip that.
 
 ## Versioning
 
-Versions use `major.minor.patch`, where `patch` is the GitHub PR number.
-Merged PR #142 publishes `v1.0.142`.
+Versions use `major.minor.patch`, where `patch` is the release workflow's run
+number — a per-workflow counter that only ever grows. It is *not* the PR
+number: PR numbers can regress when a later PR merges first. The originating PR
+is recorded in the release title and notes instead.
 
 This is intentionally not semantic versioning. Do not add semver-aware update
-logic.
+logic — in particular, do not turn the updater's version *equality* check into
+a "newer than" comparison. That equality is what lets a host move DOWN a
+version when it switches from the preview ring back to stable; see
+[Release rings](#release-rings-stable-and-preview).
 
 ## Design Principles
 

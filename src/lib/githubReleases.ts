@@ -14,6 +14,45 @@
 
 const DEFAULT_REPO = "phantomyard/phantombot";
 
+/**
+ * Which release ring a host follows (#432).
+ *
+ *   "stable"  — GitHub's `/releases/latest`, which EXCLUDES prereleases by
+ *               design. Every merge to main is cut as a prerelease, so a
+ *               stable host only moves when a human presses the promote
+ *               button (`.github/workflows/promote.yml` flips that same
+ *               release to `--prerelease=false --latest`). No rebuild: the
+ *               bytes a stable host installs are the exact bytes that soaked
+ *               on the preview ring.
+ *   "preview" — the `/releases` LIST, newest first, prereleases included.
+ *               A preview host therefore picks up every merge to main.
+ *
+ * Rollback needs no version arithmetic: the updater gates on
+ * `release.version === currentVersion` (plain string equality, not `>` — see
+ * cli/update.ts), so flipping a bad-preview host back to `stable` installs
+ * the current stable even though its number is LOWER.
+ */
+export type UpdateChannel = "stable" | "preview";
+
+/** Ring a host follows when nothing says otherwise. Fail-closed: stable. */
+export const DEFAULT_UPDATE_CHANNEL: UpdateChannel = "stable";
+
+/**
+ * Narrow an arbitrary value (TOML key, env var) to an UpdateChannel.
+ * Returns undefined for anything else so callers can warn + fall back
+ * rather than silently following a ring the operator did not ask for.
+ */
+export function asUpdateChannel(v: unknown): UpdateChannel | undefined {
+  return v === "stable" || v === "preview" ? v : undefined;
+}
+
+/**
+ * How many releases to pull when resolving the preview ring. The list is
+ * newest-first and we only ever want its first non-draft entry, so this is
+ * just headroom for a run of drafts — not a page we walk.
+ */
+const PREVIEW_PAGE_SIZE = 20;
+
 /** What kind of host arch the running phantombot needs an asset for. */
 export type SupportedArch = "x64" | "arm64";
 
@@ -61,6 +100,13 @@ export interface LatestRelease {
   binary: ReleaseAsset;
   /** The SHA256SUMS file alongside it. */
   checksums: ReleaseAsset;
+  /**
+   * True when GitHub has this release flagged as a prerelease — i.e. it is
+   * on the preview ring and has not been promoted. Always false for a
+   * release resolved via the stable channel, because `/releases/latest`
+   * cannot return one.
+   */
+  prerelease: boolean;
 }
 
 export type FindLatestResult =
@@ -68,20 +114,33 @@ export type FindLatestResult =
   | { ok: false; error: string };
 
 /**
- * Hit GitHub's `/releases/latest` endpoint, find the binary asset that
- * matches the requested target + the SHA256SUMS file beside it, and
+ * Resolve the newest release on the requested ring, find the binary asset
+ * that matches the requested target + the SHA256SUMS file beside it, and
  * return everything `phantombot update` needs to download and verify.
+ *
+ * Stable hits `/releases/latest` (prereleases excluded by GitHub); preview
+ * hits the `/releases` list and takes its first non-draft entry. Both paths
+ * share the auth-retry and asset-resolution logic below, so the two rings
+ * can never disagree about what "has a usable binary" means.
  */
 export async function findLatestRelease(opts: {
   target: SupportedTarget;
+  /** Release ring to resolve against. Default: stable. */
+  channel?: UpdateChannel;
   /** Override the upstream repo. Default: env var or DEFAULT_REPO. */
   repo?: string;
   fetchImpl?: typeof fetch;
 }): Promise<FindLatestResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const channel = opts.channel ?? DEFAULT_UPDATE_CHANNEL;
   const repo =
     opts.repo ?? process.env.PHANTOMBOT_UPDATE_REPO ?? DEFAULT_REPO;
-  const url = `https://api.github.com/repos/${repo}/releases/latest`;
+  // Preview asks for the LIST (newest first, prereleases included); stable
+  // asks for the single endpoint that filters prereleases out for us.
+  const url =
+    channel === "preview"
+      ? `https://api.github.com/repos/${repo}/releases?per_page=${PREVIEW_PAGE_SIZE}`
+      : `https://api.github.com/repos/${repo}/releases/latest`;
 
   const hadToken = !!process.env.GITHUB_TOKEN;
 
@@ -138,14 +197,42 @@ export async function findLatestRelease(opts: {
     return { ok: false, error: `GitHub API HTTP ${res.status} from ${url}` };
   }
 
-  let body: GithubReleaseResponse;
+  let payload: unknown;
   try {
-    body = (await res.json()) as GithubReleaseResponse;
+    payload = await res.json();
   } catch (e) {
     return {
       ok: false,
       error: `GitHub API returned non-JSON: ${(e as Error).message}`,
     };
+  }
+
+  // Preview: pick the newest non-draft entry off the list. A DRAFT has no
+  // public assets and no tag on the repo, so installing one is impossible —
+  // skip past it rather than failing the whole check. Prereleases are
+  // exactly what we are here for, so they are NOT skipped.
+  let body: GithubReleaseResponse;
+  if (channel === "preview") {
+    if (!Array.isArray(payload)) {
+      return {
+        ok: false,
+        error: `GitHub API returned a non-array release list from ${url}`,
+      };
+    }
+    const releases = payload as GithubReleaseResponse[];
+    const candidate = releases.find((r) => r && r.draft !== true);
+    if (!candidate) {
+      return {
+        ok: false,
+        error:
+          releases.length === 0
+            ? `no releases found at ${repo}. Has the workflow ever produced one?`
+            : `the newest ${releases.length} release(s) at ${repo} are all drafts`,
+      };
+    }
+    body = candidate;
+  } else {
+    body = payload as GithubReleaseResponse;
   }
 
   if (typeof body.tag_name !== "string" || !Array.isArray(body.assets)) {
@@ -183,6 +270,7 @@ export async function findLatestRelease(opts: {
       publishedAt:
         typeof body.published_at === "string" ? body.published_at : undefined,
       body: typeof body.body === "string" ? body.body : "",
+      prerelease: body.prerelease === true,
       binary: {
         name: binary.name,
         url: binary.browser_download_url,
@@ -255,6 +343,10 @@ interface GithubReleaseResponse {
   tag_name?: string;
   published_at?: string;
   body?: string;
+  /** GitHub's prerelease flag — true until someone presses promote. */
+  prerelease?: boolean;
+  /** Unpublished draft: no tag, no downloadable assets. Preview skips these. */
+  draft?: boolean;
   assets?: Array<{
     name: string;
     browser_download_url: string;

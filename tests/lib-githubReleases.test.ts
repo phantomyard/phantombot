@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  asUpdateChannel,
   detectSupportedArch,
   detectSupportedTarget,
   findLatestRelease,
@@ -326,5 +327,185 @@ describe("findLatestRelease", () => {
     }) as unknown as typeof fetch;
     await findLatestRelease({ target: "linux-x64", fetchImpl: recordingFetch });
     expect(seenUrl).toContain("fakeorg/fakerepo");
+  });
+});
+
+/**
+ * Release rings (#432). A stable host resolves `/releases/latest` — which
+ * GitHub filters prereleases out of — while a preview host resolves the
+ * `/releases` LIST and takes its newest non-draft entry.
+ */
+describe("findLatestRelease — release channels", () => {
+  /** A prerelease as release.yml now cuts it. */
+  const PRERELEASE = {
+    ...SAMPLE_RELEASE,
+    tag_name: "v1.1.291",
+    prerelease: true,
+    assets: SAMPLE_RELEASE.assets.map((a) => ({
+      ...a,
+      name: a.name.replace("v1.0.43", "v1.1.291"),
+    })),
+  };
+  /** A promoted release: same shape, prerelease flag cleared. */
+  const PROMOTED = { ...SAMPLE_RELEASE, prerelease: false };
+
+  function recordingFetch(body: unknown): {
+    fetchImpl: typeof fetch;
+    urls: string[];
+  } {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, urls };
+  }
+
+  test("default channel is stable and hits /releases/latest", async () => {
+    const { fetchImpl, urls } = recordingFetch(PROMOTED);
+    const r = await findLatestRelease({ target: "linux-x64", fetchImpl });
+    expect(r.ok).toBe(true);
+    expect(urls[0]).toContain("/releases/latest");
+    expect(urls[0]).not.toContain("per_page");
+  });
+
+  test("stable channel reports prerelease:false even without the field", async () => {
+    // /releases/latest cannot return a prerelease, so absence of the flag
+    // must read as "not a prerelease", never as undefined leaking out.
+    const { fetchImpl } = recordingFetch(SAMPLE_RELEASE);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "stable",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.prerelease).toBe(false);
+  });
+
+  test("preview channel hits the releases LIST, not /releases/latest", async () => {
+    const { fetchImpl, urls } = recordingFetch([PRERELEASE]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(urls[0]).toContain("/releases?per_page=");
+    expect(urls[0]).not.toContain("/releases/latest");
+    expect(r.release.version).toBe("1.1.291");
+    expect(r.release.prerelease).toBe(true);
+    expect(r.release.binary.name).toBe("phantombot-v1.1.291-linux-x64");
+  });
+
+  test("preview takes the NEWEST entry — the list is already newest-first", async () => {
+    const { fetchImpl } = recordingFetch([PRERELEASE, PROMOTED]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.tag).toBe("v1.1.291");
+  });
+
+  test("preview skips drafts — they have no public assets to install", async () => {
+    const draft = { ...PRERELEASE, tag_name: "v1.1.292", draft: true };
+    const { fetchImpl } = recordingFetch([draft, PRERELEASE]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.tag).toBe("v1.1.291");
+  });
+
+  test("preview accepts an already-promoted release as newest", async () => {
+    // Right after a promotion the newest entry is no longer a prerelease.
+    // A preview host must still install it, not skip past it looking for
+    // one — otherwise promotion would strand the preview ring behind.
+    const { fetchImpl } = recordingFetch([PROMOTED]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.release.tag).toBe("v1.0.43");
+    expect(r.release.prerelease).toBe(false);
+  });
+
+  test("preview errors on an empty release list", async () => {
+    const { fetchImpl } = recordingFetch([]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("no releases found");
+  });
+
+  test("preview errors when every candidate is a draft", async () => {
+    const { fetchImpl } = recordingFetch([{ ...PRERELEASE, draft: true }]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("drafts");
+  });
+
+  test("preview errors when the API returns an object instead of a list", async () => {
+    const { fetchImpl } = recordingFetch(PRERELEASE);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("non-array");
+  });
+
+  test("preview enforces the same asset requirements as stable", async () => {
+    const noChecksums = {
+      ...PRERELEASE,
+      assets: PRERELEASE.assets.filter((a) => a.name !== "SHA256SUMS"),
+    };
+    const { fetchImpl } = recordingFetch([noChecksums]);
+    const r = await findLatestRelease({
+      target: "linux-x64",
+      channel: "preview",
+      fetchImpl,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("SHA256SUMS");
+  });
+});
+
+describe("asUpdateChannel", () => {
+  test("accepts exactly the two ring names", () => {
+    expect(asUpdateChannel("stable")).toBe("stable");
+    expect(asUpdateChannel("preview")).toBe("preview");
+  });
+  test("rejects everything else so callers can fail closed", () => {
+    expect(asUpdateChannel("prevew")).toBeUndefined();
+    expect(asUpdateChannel("PREVIEW")).toBeUndefined();
+    expect(asUpdateChannel(true)).toBeUndefined();
+    expect(asUpdateChannel("")).toBeUndefined();
+    expect(asUpdateChannel(undefined)).toBeUndefined();
   });
 });

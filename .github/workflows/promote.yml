@@ -1,0 +1,152 @@
+name: Promote a release to stable
+
+# The manual half of the release rings (#432).
+#
+# release.yml cuts EVERY merge to main as a prerelease, which GitHub keeps out
+# of `/releases/latest`. That endpoint is what a stable host resolves against
+# (src/lib/githubReleases.ts), so a merge reaches only hosts running
+# `update_channel = "preview"`. This workflow is the button that ships a build
+# to everyone else.
+#
+# What it does NOT do: rebuild. Promotion flips the `prerelease` flag on a
+# release that already exists, so the binaries and SHA256SUMS a stable host
+# downloads are bit-identical to the ones that soaked on the preview ring. A
+# promotion that rebuilt would ship an artifact nobody had actually run, which
+# would make the soak meaningless.
+#
+# Rollback needs nothing from this workflow: `phantombot update` gates on
+# `release.version === currentVersion` (string equality, not a `>` compare), so
+# a host stuck on a bad preview build flips `update_channel` back to "stable"
+# and installs the current stable even though its version number is LOWER.
+# If a PROMOTED release turns out bad, promote the previous good tag — GitHub
+# lets `--latest` move backwards, and the same equality gate lets hosts follow.
+#
+# Usage: Actions → "Promote a release to stable" → Run workflow. Leave `tag`
+# empty to promote the newest prerelease (the usual case), or name a tag
+# explicitly to promote an older one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to promote (e.g. v1.1.291). Empty = newest prerelease.'
+        required: false
+        type: string
+
+permissions:
+  contents: write        # edit the release (flip prerelease -> latest)
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve the tag to promote
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            # Newest prerelease, excluding drafts (a draft has no public
+            # assets and no git tag, so it cannot be promoted). The releases
+            # list is newest-first, same ordering a preview host sees.
+            TAG=$(gh api "repos/${REPO}/releases?per_page=20" \
+              --jq '[.[] | select(.draft == false) | select(.prerelease == true)][0].tag_name // ""')
+            if [ -z "$TAG" ]; then
+              echo "::error::no prerelease found to promote — is everything already stable?"
+              exit 1
+            fi
+            echo "No tag given; newest prerelease is $TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release is promotable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Fail closed on every precondition. A promotion is the one action
+          # in this repo that changes what the WHOLE fleet installs, so it
+          # refuses on anything it does not fully understand rather than
+          # flipping a half-built release to latest.
+          REL=$(gh api "repos/${REPO}/releases/tags/${TAG}" 2>/dev/null || echo '')
+          if [ -z "$REL" ]; then
+            echo "::error::release ${TAG} does not exist in ${REPO}"
+            exit 1
+          fi
+          if [ "$(echo "$REL" | jq -r '.draft')" = "true" ]; then
+            echo "::error::release ${TAG} is a DRAFT — publish it before promoting"
+            exit 1
+          fi
+
+          # Every asset a client needs must be present. `phantombot update`
+          # refuses to install without SHA256SUMS, and a host whose target is
+          # missing gets a hard error — so a release short of assets must
+          # never become latest.
+          ASSETS=$(echo "$REL" | jq -r '.assets[].name')
+          MISSING=""
+          for NAME in \
+            "phantombot-${TAG}-linux-x64" \
+            "phantombot-${TAG}-linux-arm64" \
+            "phantombot-${TAG}-darwin-x64" \
+            "phantombot-${TAG}-darwin-arm64" \
+            "phantombot-${TAG}-windows-x64.exe" \
+            "phantombot-${TAG}-windows-arm64.exe" \
+            "SHA256SUMS"; do
+            echo "$ASSETS" | grep -qx -- "$NAME" || MISSING="${MISSING} ${NAME}"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::release ${TAG} is missing assets:${MISSING}"
+            exit 1
+          fi
+
+          if [ "$(echo "$REL" | jq -r '.prerelease')" = "false" ]; then
+            echo "::notice::${TAG} is already stable — re-running to re-assert --latest"
+          fi
+          echo "OK: ${TAG} has all 7 assets and is publishable"
+
+      - name: Promote to stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # --latest is explicit and load-bearing: GitHub's "latest" pointer
+          # is by publish date among non-prereleases, and we want the pointer
+          # to land on the tag we just promoted even when an older release is
+          # flipped (a rollback promotion).
+          gh release edit "$TAG" --prerelease=false --latest
+          echo "promoted $TAG to stable"
+
+      - name: Confirm and summarize
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          # Read back from the API rather than trusting the edit's exit code:
+          # this is the line that proves stable hosts will now resolve it.
+          LATEST=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name')
+          if [ "$LATEST" != "$TAG" ]; then
+            echo "::error::promoted ${TAG} but /releases/latest still reports ${LATEST}"
+            exit 1
+          fi
+          {
+            echo "### Promoted \`${TAG}\` to stable"
+            echo ""
+            echo "\`/releases/latest\` now resolves to **${TAG}**, so every host on"
+            echo "the stable ring installs it on its next \`phantombot update\`."
+            echo "No rebuild happened — these are the same binaries that ran on"
+            echo "the preview ring."
+            echo ""
+            echo "[Release notes](${SERVER_URL}/${REPO}/releases/tag/${TAG})"
+          } >> "$GITHUB_STEP_SUMMARY"

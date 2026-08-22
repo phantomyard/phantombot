@@ -21,6 +21,8 @@ import type { ServiceControl } from "../src/lib/systemd.ts";
 
 let workdir: string;
 let binPath: string;
+let savedConfigEnv: string | undefined;
+let savedChannelEnv: string | undefined;
 
 class CaptureStream {
   chunks: string[] = [];
@@ -37,9 +39,24 @@ beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-update-"));
   binPath = join(workdir, "phantombot");
   await writeFile(binPath, "OLD_BINARY", { mode: 0o755 });
+  // runUpdate reads the host's release ring from config when the caller
+  // doesn't pass one (#432). Point it at a path that does not exist so the
+  // suite resolves "stable" deterministically instead of inheriting whatever
+  // ring the developer's own box happens to be on.
+  savedConfigEnv = process.env.PHANTOMBOT_CONFIG;
+  savedChannelEnv = process.env.PHANTOMBOT_UPDATE_CHANNEL;
+  process.env.PHANTOMBOT_CONFIG = join(workdir, "no-such-config.toml");
+  delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
 });
 
 afterEach(async () => {
+  if (savedConfigEnv === undefined) delete process.env.PHANTOMBOT_CONFIG;
+  else process.env.PHANTOMBOT_CONFIG = savedConfigEnv;
+  if (savedChannelEnv === undefined) {
+    delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
+  } else {
+    process.env.PHANTOMBOT_UPDATE_CHANNEL = savedChannelEnv;
+  }
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -844,5 +861,170 @@ describe("runUpdate installs the bundled editor extensions", () => {
     });
     expect(code).toBe(0);
     expect(err.text).toContain("code CLI wedged");
+  });
+});
+
+describe("runUpdate — release rings (#432)", () => {
+  /**
+   * Records which GitHub API URL the updater asked for, then answers with a
+   * body shaped for that endpoint: an object for /releases/latest, an array
+   * for the preview list.
+   */
+  function ringFetch(opts: { prerelease?: boolean } = {}): {
+    fetchImpl: typeof fetch;
+    apiUrls: string[];
+  } {
+    const apiUrls: string[] = [];
+    const release = {
+      tag_name: "v1.0.99",
+      body: "test release",
+      prerelease: opts.prerelease ?? true,
+      assets: [
+        {
+          name: ASSET,
+          browser_download_url: "https://example/" + ASSET,
+          size: NEW_BYTES.byteLength,
+        },
+        {
+          name: "SHA256SUMS",
+          browser_download_url: "https://example/SHA256SUMS",
+          size: 256,
+        },
+      ],
+    };
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (isGitHubApiUrl(u)) {
+        apiUrls.push(u);
+        const body = u.includes("/releases/latest") ? release : [release];
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("SHA256SUMS")) {
+        return new Response(`${NEW_SHA}  ${ASSET}\n`, {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      return new Response(NEW_BYTES, {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, apiUrls };
+  }
+
+  test("default (no config) resolves the stable endpoint", async () => {
+    const { fetchImpl, apiUrls } = ringFetch();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.99",
+      fetchImpl,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      check: true,
+    });
+    expect(code).toBe(0);
+    expect(apiUrls[0]).toContain("/releases/latest");
+  });
+
+  test("update_channel = preview in config makes the CLI resolve the list", async () => {
+    // Exercises the real config path, not the `channel` test seam: this is
+    // the wire between what an operator writes in config.toml and which
+    // endpoint the updater actually hits.
+    await writeFile(
+      join(workdir, "config.toml"),
+      'update_channel = "preview"\n',
+      "utf8",
+    );
+    process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
+    const { fetchImpl, apiUrls } = ringFetch();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      currentVersion: "1.0.99",
+      fetchImpl,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      check: true,
+    });
+    expect(code).toBe(0);
+    expect(apiUrls[0]).toContain("/releases?per_page=");
+  });
+
+  test("preview labels the version lines so a bug report is interpretable", async () => {
+    const out = new CaptureStream();
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      channel: "preview",
+      currentVersion: "1.0.42",
+      fetchImpl: ringFetch().fetchImpl,
+      out,
+      err: new CaptureStream(),
+      check: true,
+    });
+    expect(code).toBe(2);
+    expect(out.text).toContain("1.0.42 → 1.0.99 (preview)");
+  });
+
+  test("stable output is unchanged — no ring annotation on existing installs", async () => {
+    const out = new CaptureStream();
+    await runUpdate({
+      binPath,
+      procArch: "x64",
+      channel: "stable",
+      currentVersion: "1.0.42",
+      fetchImpl: ringFetch({ prerelease: false }).fetchImpl,
+      out,
+      err: new CaptureStream(),
+      check: true,
+    });
+    expect(out.text).toContain("1.0.42 → 1.0.99");
+    expect(out.text).not.toContain("preview");
+  });
+
+  test("a failed check names the ring it was checking", async () => {
+    const err = new CaptureStream();
+    const failing = (async () => {
+      throw new Error("ENETUNREACH");
+    }) as unknown as typeof fetch;
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      channel: "preview",
+      currentVersion: "1.0.42",
+      fetchImpl: failing,
+      out: new CaptureStream(),
+      err,
+      force: true,
+    });
+    expect(code).toBe(1);
+    expect(err.text).toContain("preview channel");
+  });
+
+  test("switching back to stable INSTALLS A LOWER VERSION (rollback path)", async () => {
+    // The whole rollback story rests on the version gate being equality and
+    // not `>`: a host stranded on preview 1.1.291 must be able to fall back
+    // to stable 1.0.99. If someone "fixes" that compare, this goes red.
+    const code = await runUpdate({
+      binPath,
+      procArch: "x64",
+      channel: "stable",
+      currentVersion: "1.1.291",
+      fetchImpl: ringFetch({ prerelease: false }).fetchImpl,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      force: true,
+      healSystemdUnits: false,
+      refreshCompletions: false,
+      installEditorExtensions: false,
+      resignBinary: false,
+    });
+    expect(code).toBe(0);
+    expect(await readFile(binPath, "utf8")).toBe("NEW_BINARY_VERIFIED");
   });
 });

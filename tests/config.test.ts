@@ -91,6 +91,7 @@ const ENV_KEYS = [
   "PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS",
   "PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES",
   "PHANTOMBOT_CHATTINESS",
+  "PHANTOMBOT_UPDATE_CHANNEL",
   "PHANTOMBOT_P2P_ENABLED",
   "PHANTOMBOT_P2P_PORT",
   "PHANTOMBOT_P2P_STUN",
@@ -1102,5 +1103,80 @@ describe("loadConfig — p2p (phantombot#258, #61)", () => {
     process.env.PHANTOMBOT_P2P_STUN = "";
     const c = await loadConfig();
     expect(c.p2p!.stunServers).toEqual([]);
+  });
+});
+
+describe("loadConfig — update_channel (release rings, #432)", () => {
+  async function writeConfig(body: string): Promise<void> {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), body, "utf8");
+  }
+
+  test("no config file → stable, so an untouched host never moves ring", async () => {
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("config.toml omitting the key → stable", async () => {
+    await writeConfig(`default_persona = "robbie"\n`);
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("explicit update_channel = \"preview\" is honored", async () => {
+    await writeConfig(`update_channel = "preview"\n`);
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("preview");
+  });
+
+  test("explicit update_channel = \"stable\" is honored", async () => {
+    await writeConfig(`update_channel = "stable"\n`);
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("a typo'd channel falls back to stable, not to preview", async () => {
+    // Fail closed: a misspelt ring must never leave a box following a
+    // ring the operator did not choose.
+    await writeConfig(`update_channel = "prevew"\n`);
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("a non-string channel falls back to stable", async () => {
+    await writeConfig(`update_channel = true\n`);
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("PHANTOMBOT_UPDATE_CHANNEL env wins over the default", async () => {
+    process.env.PHANTOMBOT_UPDATE_CHANNEL = "preview";
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("preview");
+  });
+
+  test("PHANTOMBOT_UPDATE_CHANNEL env wins over config.toml", async () => {
+    await writeConfig(`update_channel = "preview"\n`);
+    process.env.PHANTOMBOT_UPDATE_CHANNEL = "stable";
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("an invalid env value falls back to stable and does NOT read the TOML", async () => {
+    // An explicit-but-broken env override is still an explicit override:
+    // silently falling through to a `preview` TOML key would put the host
+    // on a ring the (broken) env var was trying to move it off.
+    await writeConfig(`update_channel = "preview"\n`);
+    process.env.PHANTOMBOT_UPDATE_CHANNEL = "nightly";
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("stable");
+  });
+
+  test("an empty env value defers to config.toml", async () => {
+    await writeConfig(`update_channel = "preview"\n`);
+    process.env.PHANTOMBOT_UPDATE_CHANNEL = "";
+    const c = await loadConfig();
+    expect(c.updateChannel).toBe("preview");
   });
 });

@@ -52,6 +52,26 @@ name: Release on PR merge
 # --restart` from cron and wants always-fresh binaries. If a PR shouldn't
 # release, we'll add a `release:skip` label gate later.
 #
+# RELEASE RINGS (#432) — every release cut here is a PRERELEASE.
+#
+# `gh release create --prerelease` below is the whole mechanism. GitHub's
+# `/releases/latest` endpoint EXCLUDES prereleases by design, and that is the
+# endpoint a stable host resolves against (src/lib/githubReleases.ts), so a
+# merge to main now reaches only hosts that opted in with
+# `update_channel = "preview"` — they resolve the `/releases` LIST instead and
+# take its newest entry.
+#
+# Promotion to stable is a HUMAN act, not a CI outcome: run the
+# "Promote a release to stable" workflow (promote.yml) and press the button.
+# It flips `--prerelease=false --latest` on a release that ALREADY EXISTS —
+# no rebuild, no re-tag. The bytes a stable host installs are byte-for-byte
+# the ones that soaked on the preview ring, which is the entire point; a
+# promotion that rebuilt would ship something nobody had run.
+#
+# Why CI cannot decide this: green tests are the bar for MERGING. If they
+# were also the bar for stable, the two rings would be the same ring and the
+# soak would be decoration. Stable means a human watched a real host run it.
+#
 # Why bun-linux-x64-baseline (and not plain bun-linux-x64): one of the
 # deploy targets (the `kw-openclaw` supervisor box that runs kai) is older
 # silicon without AVX2. The non-baseline target SIGILLs on launch there.
@@ -327,6 +347,13 @@ jobs:
 
           Install with: phantombot update
 
+          Release ring: PREVIEW. This is a prerelease, so it is served only to
+          hosts running \`update_channel = "preview"\`; \`/releases/latest\`
+          does not return it and stable hosts will not see it. To ship it to
+          everyone, run the "Promote a release to stable" workflow against
+          ${TAG} — that flips this exact release (same binaries, same
+          checksums) to latest without rebuilding.
+
           macOS note: the darwin binaries are cross-compiled and unsigned.
           install.sh handles the xattr / ad-hoc codesign dance for you. If
           you download the binary directly, clear the Gatekeeper quarantine
@@ -359,7 +386,13 @@ jobs:
           else
             TITLE="$TAG"
           fi
+          # --prerelease is the release-ring gate (#432): it keeps this build
+          # out of /releases/latest, so only preview hosts resolve it until a
+          # human promotes it via promote.yml. Do NOT drop this flag to "fix"
+          # an update that isn't arriving — that ships an unsoaked build to
+          # the whole fleet. Promote the tag instead.
           gh release create "$TAG" \
+            --prerelease \
             --target "$SHA" \
             --title "$TITLE" \
             --notes-file release-notes.md \

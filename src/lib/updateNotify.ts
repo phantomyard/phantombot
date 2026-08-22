@@ -40,6 +40,7 @@ import {
 } from "../config.ts";
 import { runUpdate } from "../cli/update.ts";
 import {
+  DEFAULT_UPDATE_CHANNEL,
   detectSupportedTarget,
   findLatestRelease,
 } from "./githubReleases.ts";
@@ -329,8 +330,12 @@ export async function runUpdateFlow(
 
   // 1. Ask GitHub what's latest. Reuse the same client `update --check`
   //    uses so the version comparison agrees byte-for-byte.
+  // Same ring the `update` CLI would install from, so `/update` can never
+  // pull a build the host's configured channel would not have offered.
+  const channel = input.config.updateChannel ?? DEFAULT_UPDATE_CHANNEL;
   const r = await findLatestRelease({
     target,
+    channel,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {
@@ -368,6 +373,10 @@ export async function runUpdateFlow(
   const exitCode = await updateImpl({
     force: true,
     restart: false,
+    // Pass the ring we just resolved rather than letting runUpdate re-read
+    // config: the marker above was written for the release THIS ring
+    // resolved, so the swap must not be free to pick a different one.
+    channel,
     fetchImpl: input.fetchImpl,
     currentVersion: input.currentVersion,
     serviceControl: input.serviceControl,
@@ -477,6 +486,7 @@ export async function checkAndNotifyOnce(
 
   const r = await findLatestRelease({
     target,
+    channel: input.config.updateChannel ?? DEFAULT_UPDATE_CHANNEL,
     fetchImpl: input.fetchImpl,
   });
   if (!r.ok) {

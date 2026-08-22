@@ -42,6 +42,11 @@ import {
 } from "../lib/piExtensionProvision.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import {
+  DEFAULT_UPDATE_CHANNEL,
+  type UpdateChannel,
+} from "../lib/githubReleases.ts";
+import { VERSION } from "../version.ts";
+import {
   configuredKeep,
   configuredMaxBytes,
   inspectLogDir,
@@ -166,6 +171,17 @@ export interface DoctorReport {
     provider: "gemini" | "none";
     /** gemini provider AND a key present = vector/semantic search is live. */
     semantic_search: boolean;
+  };
+  /**
+   * Release ring this host follows (#432) plus the version it is on now.
+   * Reported so a bug report from a preview box is interpretable without
+   * asking: "which build is this?" is the first question on any report, and
+   * on the preview ring the answer is no longer "whatever is latest".
+   * Informational — never an exit-code input; both rings are valid.
+   */
+  update: {
+    channel: UpdateChannel;
+    version: string;
   };
   /**
    * Linux-only — undefined on macOS and dev hosts without a user-systemd
@@ -377,6 +393,8 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Embeddings status — informational only. Vector search is live only when
   // the provider is gemini AND a key is actually present; everything else
   // (provider "none", or "gemini" with an empty key) means keyword-only.
+  const updateChannel = config.updateChannel ?? DEFAULT_UPDATE_CHANNEL;
+
   const embProvider = config.embeddings.provider;
   const semanticSearch =
     embProvider === "gemini" && !!config.embeddings.gemini?.apiKey;
@@ -586,6 +604,10 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       provider: embProvider,
       semantic_search: semanticSearch,
     },
+    update: {
+      channel: updateChannel,
+      version: VERSION,
+    },
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
@@ -738,6 +760,14 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       ? `  embeddings: semantic (vector) search ON — provider '${embProvider}'\n`
       : "  embeddings: semantic (vector) search off — OKF field-weighted BM25 " +
         "+ link-graph expansion active. Optional: add Gemini with `phantombot embedding`\n",
+  );
+  // Same neutrality as the embeddings line: a ring is a choice, not a fault.
+  out.write(
+    `  update: on ${VERSION}, ${updateChannel} channel — ` +
+      (updateChannel === "preview"
+        ? "installs every merge to main (`update_channel` in config.toml)"
+        : "installs only promoted releases") +
+      "\n",
   );
   if (health.backlog > 0) {
     out.write(

@@ -189,6 +189,33 @@ describe("runDoctor", () => {
     expect(JSON.parse(out.text).nightly.errors).toBeUndefined();
   });
 
+  test("reports the release ring so a preview bug report is interpretable", async () => {
+    // A config with no updateChannel is a pre-#432 host: it followed
+    // /releases/latest, which IS the stable ring, so that is what doctor
+    // must say — not "unknown".
+    const out = new CaptureStream();
+    await runDoctor({ config, json: true, out });
+    const report = JSON.parse(out.text);
+    expect(report.update.channel).toBe("stable");
+    expect(report.update.version).toBeTypeOf("string");
+
+    const human = new CaptureStream();
+    await runDoctor({ config, out: human });
+    expect(human.text).toContain("stable channel");
+    expect(human.text).toContain("installs only promoted releases");
+  });
+
+  test("a preview host says so, and says where the setting lives", async () => {
+    const previewConfig = { ...config, updateChannel: "preview" as const };
+    const out = new CaptureStream();
+    const code = await runDoctor({ config: previewConfig, out });
+    // Informational only — a ring is a choice, never a health failure.
+    expect(code).toBe(0);
+    expect(out.text).toContain("preview channel");
+    expect(out.text).toContain("every merge to main");
+    expect(out.text).toContain("update_channel");
+  });
+
   test("json mode emits a parseable report with ledger-derived health", async () => {
     await writeDaily("2026-05-01");
     await writeState({

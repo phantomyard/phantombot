@@ -18,6 +18,11 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { log } from "./lib/logger.ts";
 import {
+  asUpdateChannel,
+  DEFAULT_UPDATE_CHANNEL,
+  type UpdateChannel,
+} from "./lib/githubReleases.ts";
+import {
   type PiRoutingConfig,
   resolveRouting,
 } from "./lib/piRouting.ts";
@@ -637,6 +642,19 @@ export interface Config {
    */
   chattiness?: boolean;
 
+  /**
+   * Release ring this HOST follows (#432): "stable" (default) or "preview".
+   *
+   * Host-level, not per-persona, because it selects which BINARY the box
+   * installs — every persona on a host necessarily runs the same one.
+   * "preview" picks up every merge to main; "stable" only moves when a
+   * human presses the promote button on a release. See lib/githubReleases.ts.
+   *
+   * Optional on the type so partial test fixtures need no update; loadConfig
+   * always populates it, and read sites default to DEFAULT_UPDATE_CHANNEL.
+   */
+  updateChannel?: UpdateChannel;
+
   embeddings: {
     /** "gemini" | "none". "none" = FTS5-only search. */
     provider: "gemini" | "none";
@@ -915,6 +933,14 @@ export async function loadConfig(): Promise<Config> {
       asBool(toml.chattiness) ??
       DEFAULT_CHATTINESS,
 
+    // Which release ring this host follows. Env wins over TOML wins over
+    // the default, same precedence as everything else. An UNRECOGNISED
+    // value falls back to "stable" with a warning rather than being treated
+    // as opt-in: a typo (`update_channel = "prevew"`) must never leave a
+    // box quietly following a ring the operator did not choose, and stable
+    // is the fail-closed direction.
+    updateChannel: resolveUpdateChannel(toml.update_channel),
+
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
@@ -927,6 +953,34 @@ export async function loadConfig(): Promise<Config> {
 
     p2p: buildP2PConfig(tomlP2p),
   };
+}
+
+/**
+ * Resolve the host's release ring: `PHANTOMBOT_UPDATE_CHANNEL` env, then
+ * `update_channel` in config.toml, then the stable default. Anything that
+ * is not exactly "stable" or "preview" is rejected with a warning and
+ * treated as stable — see the call site for why we fail closed.
+ */
+function resolveUpdateChannel(tomlValue: unknown): UpdateChannel {
+  const fromEnv = process.env.PHANTOMBOT_UPDATE_CHANNEL;
+  if (fromEnv !== undefined && fromEnv !== "") {
+    const parsed = asUpdateChannel(fromEnv);
+    if (parsed) return parsed;
+    log.warn("config: ignoring unrecognized PHANTOMBOT_UPDATE_CHANNEL", {
+      value: fromEnv,
+      using: DEFAULT_UPDATE_CHANNEL,
+    });
+    return DEFAULT_UPDATE_CHANNEL;
+  }
+  if (tomlValue !== undefined) {
+    const parsed = asUpdateChannel(tomlValue);
+    if (parsed) return parsed;
+    log.warn("config: ignoring unrecognized update_channel in config.toml", {
+      value: String(tomlValue),
+      using: DEFAULT_UPDATE_CHANNEL,
+    });
+  }
+  return DEFAULT_UPDATE_CHANNEL;
 }
 
 /**
