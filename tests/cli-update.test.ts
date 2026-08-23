@@ -22,7 +22,6 @@ import type { ServiceControl } from "../src/lib/systemd.ts";
 let workdir: string;
 let binPath: string;
 let savedConfigEnv: string | undefined;
-let savedGlobalEnv: string | undefined;
 let savedChannelEnv: string | undefined;
 
 class CaptureStream {
@@ -45,19 +44,14 @@ beforeEach(async () => {
   // suite resolves "stable" deterministically instead of inheriting whatever
   // ring the developer's own box happens to be on.
   savedConfigEnv = process.env.PHANTOMBOT_CONFIG;
-  savedGlobalEnv = process.env.PHANTOMBOT_GLOBAL_CONFIG;
   savedChannelEnv = process.env.PHANTOMBOT_UPDATE_CHANNEL;
   process.env.PHANTOMBOT_CONFIG = join(workdir, "no-such-config.toml");
-  // The ring lives in the global config since #435; same reasoning.
-  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "no-such-global.toml");
   delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
 });
 
 afterEach(async () => {
   if (savedConfigEnv === undefined) delete process.env.PHANTOMBOT_CONFIG;
   else process.env.PHANTOMBOT_CONFIG = savedConfigEnv;
-  if (savedGlobalEnv === undefined) delete process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  else process.env.PHANTOMBOT_GLOBAL_CONFIG = savedGlobalEnv;
   if (savedChannelEnv === undefined) {
     delete process.env.PHANTOMBOT_UPDATE_CHANNEL;
   } else {
@@ -162,42 +156,6 @@ function makeSvc(opts: { active?: boolean; restartOk?: boolean } = {}) {
       rerenderUnitIfStale: async () => ({ rerendered: false }),
     } as ServiceControl,
   };
-}
-
-
-/** Release feed shaped for a darwin/arm64 host (asset + matching SHA256SUMS). */
-function fakeDarwinReleaseFetch(): typeof fetch {
-  const DARWIN_ASSET = "phantombot-v1.0.99-darwin-arm64";
-  const DARWIN_BYTES = Buffer.from("DARWIN_BINARY_VERIFIED");
-  const DARWIN_SHA = createHash("sha256").update(DARWIN_BYTES).digest("hex");
-  return (async (url: string | URL | Request) => {
-    const u = String(url);
-    if (isGitHubApiUrl(u)) {
-      return new Response(
-        JSON.stringify({
-          tag_name: "v1.0.99",
-          body: "",
-          assets: [
-            {
-              name: DARWIN_ASSET,
-              browser_download_url: "https://example/" + DARWIN_ASSET,
-              size: DARWIN_BYTES.byteLength,
-            },
-            {
-              name: "SHA256SUMS",
-              browser_download_url: "https://example/SHA256SUMS",
-              size: 256,
-            },
-          ],
-        }),
-        { status: 200 },
-      );
-    }
-    if (u.includes("SHA256SUMS")) {
-      return new Response(`${DARWIN_SHA}  ${DARWIN_ASSET}\n`, { status: 200 });
-    }
-    return new Response(DARWIN_BYTES, { status: 200 });
-  }) as unknown as typeof fetch;
 }
 
 describe("runUpdate exit codes (cron contract)", () => {
@@ -324,7 +282,6 @@ describe("runUpdate refusals", () => {
     const code = await runUpdate({
       binPath,
       procPlatform: "darwin",
-      healLaunchdAgents: false,
       procArch: "x64",
       currentVersion: "1.0.42",
       fetchImpl: fakeReleaseFetch(),
@@ -391,7 +348,6 @@ describe("runUpdate on darwin-arm64", () => {
     const code = await runUpdate({
       binPath,
       procPlatform: "darwin",
-      healLaunchdAgents: false,
       procArch: "arm64",
       currentVersion: "1.0.42",
       fetchImpl: darwinFetch(),
@@ -415,7 +371,6 @@ describe("runUpdate on darwin-arm64", () => {
     const code = await runUpdate({
       binPath,
       procPlatform: "darwin",
-      healLaunchdAgents: false,
       procArch: "arm64",
       currentVersion: "1.0.42",
       fetchImpl: darwinFetch(),
@@ -440,7 +395,6 @@ describe("runUpdate on darwin-arm64", () => {
     const code = await runUpdate({
       binPath,
       procPlatform: "darwin",
-      healLaunchdAgents: false,
       procArch: "arm64",
       currentVersion: "1.0.42",
       fetchImpl: darwinFetch(),
@@ -666,15 +620,15 @@ describe("runUpdate post-swap systemd heal", () => {
       force: true,
       refreshCompletions: false,
       healSystemdUnits: async () => ({
-        rewrote: ["phantombot-phantom-tick.timer", "phantombot-phantom.service"],
+        rewrote: ["phantombot-tick.timer", "phantombot.service"],
         backups: [],
-        repairedTimers: ["phantombot-phantom-tick.timer"],
+        repairedTimers: ["phantombot-tick.timer"],
         removedRetired: [],
       }),
     });
     expect(code).toBe(0);
-    expect(out.text).toContain("re-rendered systemd units: phantombot-phantom-tick.timer, phantombot-phantom.service");
-    expect(out.text).toContain("re-armed timers: phantombot-phantom-tick.timer");
+    expect(out.text).toContain("re-rendered systemd units: phantombot-tick.timer, phantombot.service");
+    expect(out.text).toContain("re-armed timers: phantombot-tick.timer");
   });
 
   test("heal failure is non-fatal: binary swap still succeeds, warning logged", async () => {
@@ -703,89 +657,6 @@ describe("runUpdate post-swap systemd heal", () => {
     expect(err.text).toContain("dbus is missing");
     // Binary was still swapped.
     expect((await readFile(binPath)).equals(NEW_BYTES)).toBe(true);
-  });
-
-  test("calls healLaunchdAgents with the swapped binPath on darwin", async () => {
-    // The macOS analogue of the systemd heal above, and the reason it exists:
-    // #435 renamed the launchd labels per persona, so an in-place update that
-    // never reconciles leaves the retired host-global agents loaded while
-    // start/restart/status/logs all target the new label.
-    const called: string[] = [];
-    const out = new CaptureStream();
-    const code = await runUpdate({
-      binPath,
-      procPlatform: "darwin",
-      procArch: "arm64",
-      currentVersion: "1.0.42",
-      fetchImpl: fakeDarwinReleaseFetch(),
-      out,
-      err: new CaptureStream(),
-      force: true,
-      refreshCompletions: false,
-      healSystemdUnits: false,
-      healLaunchdAgents: async (bin) => {
-        called.push(bin);
-        return {
-          rewrote: [`${"dev.phantombot.phantom.phantombot"}.plist`],
-          backups: [],
-          reloaded: ["dev.phantombot.phantom.phantombot"],
-          removedRetired: ["/Users/a/Library/LaunchAgents/dev.phantombot.phantombot.plist"],
-          failures: [],
-          rolledBack: [],
-        };
-      },
-    });
-    expect(code).toBe(0);
-    expect(called).toEqual([binPath]);
-    expect(out.text).toContain("re-rendered launchd plists");
-    expect(out.text).toContain("reloaded launchd agents: dev.phantombot.phantom.phantombot");
-    expect(out.text).toContain("removed retired launchd agents");
-  });
-
-  test("launchd heal failure is non-fatal: binary swap still succeeds", async () => {
-    const err = new CaptureStream();
-    const code = await runUpdate({
-      binPath,
-      procPlatform: "darwin",
-      procArch: "arm64",
-      currentVersion: "1.0.42",
-      fetchImpl: fakeDarwinReleaseFetch(),
-      out: new CaptureStream(),
-      err,
-      force: true,
-      refreshCompletions: false,
-      healSystemdUnits: false,
-      healLaunchdAgents: async () => {
-        throw new Error("launchctl exploded");
-      },
-    });
-    expect(code).toBe(0);
-    expect(err.text).toContain("could not reconcile launchd agents");
-    expect(err.text).toContain("launchctl exploded");
-  });
-
-  test("launchd heal is skipped on linux (systemd host)", async () => {
-    let called = false;
-    const { svc } = makeSvc({ active: false });
-    const code = await runUpdate({
-      binPath,
-      procPlatform: "linux",
-      procArch: "x64",
-      currentVersion: "1.0.42",
-      fetchImpl: fakeReleaseFetch(),
-      serviceControl: svc,
-      out: new CaptureStream(),
-      err: new CaptureStream(),
-      force: true,
-      refreshCompletions: false,
-      healSystemdUnits: false,
-      healLaunchdAgents: async () => {
-        called = true;
-        return null;
-      },
-    });
-    expect(code).toBe(0);
-    expect(called).toBe(false);
   });
 
   test("skipped entirely on darwin (launchd, not systemd)", async () => {
@@ -832,7 +703,6 @@ describe("runUpdate post-swap systemd heal", () => {
     const code = await runUpdate({
       binPath,
       procPlatform: "darwin",
-      healLaunchdAgents: false,
       procArch: "arm64",
       currentVersion: "1.0.42",
       fetchImpl,
@@ -1061,17 +931,16 @@ describe("runUpdate — release rings (#432)", () => {
     expect(apiUrls[0]).toContain("/releases/latest");
   });
 
-  test("update_channel = preview in the global config makes the CLI resolve the list", async () => {
+  test("update_channel = preview in config makes the CLI resolve the list", async () => {
     // Exercises the real config path, not the `channel` test seam: this is
-    // the wire between what an operator writes and which endpoint the updater
-    // actually hits. The ring lives in the GLOBAL file since #435 — one binary
-    // per box means personas cannot follow different rings.
+    // the wire between what an operator writes in config.toml and which
+    // endpoint the updater actually hits.
     await writeFile(
-      join(workdir, "global.toml"),
+      join(workdir, "config.toml"),
       'update_channel = "preview"\n',
       "utf8",
     );
-    process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
+    process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
     const { fetchImpl, apiUrls } = ringFetch();
     const code = await runUpdate({
       binPath,

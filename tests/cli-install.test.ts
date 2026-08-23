@@ -11,10 +11,9 @@ import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
 import { runInstall } from "../src/cli/install.ts";
 import { runUninstall } from "../src/cli/uninstall.ts";
-import {
-  RETIRED_PLIST_LABELS,
-  type LaunchctlResult,
-  type LaunchctlRunner,
+import type {
+  LaunchctlResult,
+  LaunchctlRunner,
 } from "../src/lib/launchd.ts";
 import type {
   SchtasksResult,
@@ -102,16 +101,16 @@ let installPaths: {
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
-  unitPath = join(workdir, "phantombot-phantom.service");
+  unitPath = join(workdir, "phantombot.service");
   // Without these, runInstall would write companion units into the real
   // ~/.config/systemd/user/ on the test runner — see #44.
   installPaths = {
-    heartbeatServicePath: join(workdir, "phantombot-phantom-heartbeat.service"),
-    heartbeatTimerPath: join(workdir, "phantombot-phantom-heartbeat.timer"),
+    heartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
+    heartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
     nightlyServicePath: join(workdir, "phantombot-nightly.service"),
     nightlyTimerPath: join(workdir, "phantombot-nightly.timer"),
-    tickServicePath: join(workdir, "phantombot-phantom-tick.service"),
-    tickTimerPath: join(workdir, "phantombot-phantom-tick.timer"),
+    tickServicePath: join(workdir, "phantombot-tick.service"),
+    tickTimerPath: join(workdir, "phantombot-tick.timer"),
   };
 });
 
@@ -209,12 +208,12 @@ describe("runInstall (linux/systemd)", () => {
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
       "--user daemon-reload",
-      "--user enable phantombot-phantom.service",
-      "--user start phantombot-phantom.service",
-      "--user enable phantombot-phantom-heartbeat.timer",
-      "--user start phantombot-phantom-heartbeat.timer",
-      "--user enable phantombot-phantom-tick.timer",
-      "--user start phantombot-phantom-tick.timer",
+      "--user enable phantombot.service",
+      "--user start phantombot.service",
+      "--user enable phantombot-heartbeat.timer",
+      "--user start phantombot-heartbeat.timer",
+      "--user enable phantombot-tick.timer",
+      "--user start phantombot-tick.timer",
     ]);
     // The trailing manage block advertises the clean subcommands (identical
     // on every OS), not the raw systemctl/schtasks incantations.
@@ -245,11 +244,8 @@ describe("runInstall (darwin/launchd)", () => {
     });
     expect(code).toBe(0);
     // bootouts of nothing × 3, then bootstrap each plist × 3 (the retired
-    // nightly agent is neither written nor bootstrapped), then one bootout per
-    // retired identity — the #436 upgrade sweep, which runs unconditionally
-    // because a legacy agent can be loaded with its plist already deleted. We
-    // check the verb sequence rather than full strings so the test stays
-    // readable.
+    // nightly agent is neither written nor bootstrapped). We check the verb
+    // sequence rather than full strings so the test stays readable.
     const verbs = lc.calls.map((c) => c[0]);
     expect(verbs).toEqual([
       "bootout",
@@ -258,7 +254,6 @@ describe("runInstall (darwin/launchd)", () => {
       "bootstrap",
       "bootstrap",
       "bootstrap",
-      ...RETIRED_PLIST_LABELS.map(() => "bootout"),
     ]);
     // bootstraps target the correct domain.
     for (const c of lc.calls.filter((c) => c[0] === "bootstrap")) {
@@ -464,14 +459,14 @@ describe("runUninstall (linux/systemd)", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
-      "--user stop phantombot-phantom-tick.timer",
-      "--user disable phantombot-phantom-tick.timer",
+      "--user stop phantombot-tick.timer",
+      "--user disable phantombot-tick.timer",
       "--user stop phantombot-nightly.timer",
       "--user disable phantombot-nightly.timer",
-      "--user stop phantombot-phantom-heartbeat.timer",
-      "--user disable phantombot-phantom-heartbeat.timer",
-      "--user stop phantombot-phantom.service",
-      "--user disable phantombot-phantom.service",
+      "--user stop phantombot-heartbeat.timer",
+      "--user disable phantombot-heartbeat.timer",
+      "--user stop phantombot.service",
+      "--user disable phantombot.service",
       "--user daemon-reload",
     ]);
     expect(out.text).toContain("uninstall complete");
@@ -514,8 +509,7 @@ describe("runUninstall (darwin/launchd)", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls).toEqual([]);
-    // three live labels + every retired identity (#436).
-    expect(lc.calls.length).toBe(3 + RETIRED_PLIST_LABELS.length);
+    expect(lc.calls.length).toBe(4);
     expect(lc.calls.every((c) => c[0] === "bootout")).toBe(true);
     expect(out.text).toContain("uninstall complete");
   });

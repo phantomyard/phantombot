@@ -66,13 +66,13 @@ import {
   driftedUnitNames,
   ensureSystemdUnitsCurrent,
   ensureUserSystemdEnv,
-  heartbeatTimerName,
+  HEARTBEAT_TIMER_NAME,
   heartbeatServicePath,
   heartbeatTimerPath,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
   type SystemctlRunner,
-  tickTimerName,
+  TICK_TIMER_NAME,
   tickServicePath,
   tickTimerPath,
 } from "../lib/systemd.ts";
@@ -339,10 +339,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const repair = input.repair ?? true;
 
-  // Load the config belonging to the persona we are ACTING ON, not the
-  // default one (#436): the persona dir and its config.toml are one unit, so
-  // reading the default's file while writing another's dir mixes two personas.
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
   const dir = personaDir(config, persona);
   if (!existsSync(dir)) {
@@ -431,13 +428,13 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       timersReport.heartbeat.stale &&
       timersReport.heartbeat.last_fired !== undefined
     ) {
-      staleTimerUnits.push(heartbeatTimerName());
+      staleTimerUnits.push(HEARTBEAT_TIMER_NAME);
     }
     if (
       timersReport.tick.stale &&
       timersReport.tick.last_fired !== undefined
     ) {
-      staleTimerUnits.push(tickTimerName());
+      staleTimerUnits.push(TICK_TIMER_NAME);
     }
   }
 
@@ -1083,7 +1080,7 @@ async function listInactiveTimers(
   // Two timers, not three: the nightly timer is retired (the sweep runs on
   // startup and on the heartbeat's day-rollover check), so an absent one is
   // correct rather than a fault to repair.
-  for (const t of [heartbeatTimerName(), tickTimerName()]) {
+  for (const t of [HEARTBEAT_TIMER_NAME, TICK_TIMER_NAME]) {
     const r = await systemctl.run(["--user", "is-active", t]);
     if (r.exitCode !== 0 || r.stdout.trim() !== "active") {
       out.push(t);

@@ -47,7 +47,6 @@ let personasDir: string;
 let configPath: string;
 let stateDir: string;
 let savedPersonaEnv: string | undefined;
-let savedGlobalConfig: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-persona-cli-"));
@@ -59,10 +58,6 @@ beforeEach(async () => {
   stateDir = join(workdir, "data");
   await mkdir(stateDir, { recursive: true });
   process.env.PHANTOMBOT_STATE = join(stateDir, "state.json");
-  // `default_persona` moved to the global config in #435; give each test its
-  // own so switches neither leak between tests nor touch the real box.
-  savedGlobalConfig = process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
   // Isolate PHANTOMBOT_PERSONA: the normal agent runtime sets it, which
   // would make every non-agent test hit the scope-refusal path (3/13
   // failures). Preserve the ambient value and restore it in afterEach so
@@ -73,8 +68,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.PHANTOMBOT_STATE;
-  if (savedGlobalConfig === undefined) delete process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  else process.env.PHANTOMBOT_GLOBAL_CONFIG = savedGlobalConfig;
   if (savedPersonaEnv === undefined) {
     delete process.env.PHANTOMBOT_PERSONA;
   } else {
@@ -83,17 +76,6 @@ afterEach(async () => {
   mock.restore();
   await rm(workdir, { recursive: true, force: true });
 });
-
-/**
- * The persisted default persona. Since #435 a switch writes it to the GLOBAL
- * config (`<personas-root>/config.toml`), not to the per-persona state file —
- * a default that lived inside one persona's state could only ever be seen by
- * that persona.
- */
-async function persistedDefault(): Promise<string | undefined> {
-  const text = await Bun.file(process.env.PHANTOMBOT_GLOBAL_CONFIG!).text();
-  return /^\s*default_persona\s*=\s*"([^"]*)"/m.exec(text)?.[1];
-}
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -173,7 +155,10 @@ describe("runSwitchPersona", () => {
     });
     expect(code).toBe(0);
     expect(out.text).toContain("→ 'robbie'");
-    expect(await persistedDefault()).toBe("robbie");
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("robbie");
   });
 
   test("non-TTY without --yes → refuses, no state write (regression #371)", async () => {
@@ -325,7 +310,10 @@ describe("runSwitchPersona", () => {
     });
     expect(code).toBe(0);
     expect(promptedMessage).toContain("robbie");
-    expect(await persistedDefault()).toBe("robbie");
+    const state = JSON.parse(
+      await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
+    );
+    expect(state.default_persona).toBe("robbie");
   });
 
   test("interactive TTY confirm=false → cancelled, no state write", async () => {
@@ -397,7 +385,7 @@ describe("runSwitchPersona", () => {
     const state = JSON.parse(
       await Bun.file(process.env.PHANTOMBOT_STATE!).text(),
     );
-    expect(await persistedDefault()).toBe("robbie");
+    expect(state.default_persona).toBe("robbie");
     // The concurrent write must survive: re-loading fresh state before the
     // commit preserves fields we didn't touch.
     expect(state.harness_bins).toEqual({ claude: "/opt/new/claude" });

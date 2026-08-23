@@ -4,20 +4,12 @@
  *
  * Resolution priority (highest wins):
  *   1. Env vars (PHANTOMBOT_*)
- *   2. TOML config at `<personas-root>/<persona>/config.toml`
+ *   2. TOML config at $XDG_CONFIG_HOME/phantombot/config.toml
  *      (override path with PHANTOMBOT_CONFIG)
  *   3. Built-in defaults
  *
  * The config file is optional — phantombot runs with built-in defaults if
  * it doesn't exist.
- *
- * Since #435 the config file is PER PERSONA, not per host: the persona this
- * process is acting as (PHANTOMBOT_PERSONA, else the global default) decides
- * which file is read. Channels, voice, harnesses, MCP and every other
- * behaviour knob therefore belong to the persona, which is what lets several
- * personas run side by side in one user account. Only `default_persona` and
- * `update_channel` — the two things that genuinely cannot differ per persona —
- * live in the single global file at `<personas-root>/config.toml`.
  */
 
 import { readFile } from "node:fs/promises";
@@ -35,14 +27,6 @@ import {
   resolveRouting,
 } from "./lib/piRouting.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "./lib/voice.ts";
-import {
-  activePersona,
-  loadGlobalConfig,
-  personaConfigPath,
-  personaDbPath,
-  personaMemoryIndexPath,
-  personasRoot,
-} from "./lib/personaPaths.ts";
 import { loadState } from "./state.ts";
 
 /**
@@ -759,16 +743,15 @@ export function xdgStateHome(): string {
 
 const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 
-export async function loadConfig(persona?: string): Promise<Config> {
-  // The persona decides which config file we read. An explicit argument wins
-  // (a CLI command acting on another persona), then PHANTOMBOT_PERSONA, then
-  // the global default.
-  const personaName = persona?.trim() || activePersona();
-  const configPath = personaConfigPath(personaName);
+export async function loadConfig(): Promise<Config> {
+  const configPath =
+    process.env.PHANTOMBOT_CONFIG ??
+    join(xdgConfigHome(), "phantombot", "config.toml");
 
   const toml = await tryReadToml(configPath);
-  const state = await loadState(personaName);
-  const globalConfig = loadGlobalConfig();
+  const state = await loadState();
+
+  const dataDir = join(xdgDataHome(), "phantombot");
 
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
@@ -833,11 +816,11 @@ export async function loadConfig(persona?: string): Promise<Config> {
     3_600_000;
 
   return {
-    // The persona whose config THIS object was loaded from. Callers that used
-    // to read `defaultPersona` to decide who to act as keep working: for the
-    // ambient case it resolves to exactly the same name, and for an explicit
-    // `loadConfig("lena")` it correctly reports lena.
-    defaultPersona: personaName,
+    defaultPersona:
+      process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+      state.default_persona ??
+      asString(toml.default_persona) ??
+      "phantom",
 
     // Legacy alias: pre-PR-#56 configs only had `turn_timeout_s`, which
     // meant "kill at this wall-clock with no other constraints." The new
@@ -878,13 +861,15 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     harnessHardTimeoutMs,
 
-    personasDir: personasRoot(),
+    personasDir:
+      process.env.PHANTOMBOT_PERSONAS_DIR ??
+      asString(toml.personas_dir) ??
+      join(dataDir, "personas"),
 
-    // Per persona since #435: two personas sharing one tasks/turns database
-    // was the single worst piece of OpenClaw inheritance — concurrent writes,
-    // cross-persona leakage in recall, and no way to move one persona to
-    // another box without dragging the others along.
-    memoryDbPath: personaDbPath(personaName),
+    memoryDbPath:
+      process.env.PHANTOMBOT_MEMORY_DB ??
+      asString(toml.memory_db) ??
+      join(dataDir, "memory.sqlite"),
 
     configPath,
 
@@ -954,9 +939,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     // as opt-in: a typo (`update_channel = "prevew"`) must never leave a
     // box quietly following a ring the operator did not choose, and stable
     // is the fail-closed direction.
-    // Read from the GLOBAL file, not the persona's: there is one phantombot
-    // binary per box, so two personas cannot follow different release rings.
-    updateChannel: resolveUpdateChannel(globalConfig.update_channel),
+    updateChannel: resolveUpdateChannel(toml.update_channel),
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
@@ -974,8 +957,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
 /**
  * Resolve the host's release ring: `PHANTOMBOT_UPDATE_CHANNEL` env, then
- * `update_channel` in the global `<personas-root>/config.toml`, then the
- * stable default. Anything that
+ * `update_channel` in config.toml, then the stable default. Anything that
  * is not exactly "stable" or "preview" is rejected with a warning and
  * treated as stable — see the call site for why we fail closed.
  */
@@ -993,7 +975,7 @@ function resolveUpdateChannel(tomlValue: unknown): UpdateChannel {
   if (tomlValue !== undefined) {
     const parsed = asUpdateChannel(tomlValue);
     if (parsed) return parsed;
-    log.warn("config: ignoring unrecognized update_channel in the global config", {
+    log.warn("config: ignoring unrecognized update_channel in config.toml", {
       value: String(tomlValue),
       using: DEFAULT_UPDATE_CHANNEL,
     });
@@ -1626,11 +1608,7 @@ function asIntArray(v: unknown): number[] | undefined {
   return out;
 }
 
-/**
- * Resolve the on-disk directory for a named persona. Since #435 this is the
- * boundary for EVERYTHING that persona owns — config, state, database, index,
- * logs, secrets, locks and temp files — see lib/personaPaths.ts.
- */
+/** Resolve the on-disk directory for a named persona. */
 export function personaDir(config: Config, name: string): string {
   return join(config.personasDir, name);
 }
@@ -1642,7 +1620,7 @@ export function personaDir(config: Config, name: string): string {
  * write the same index file.
  */
 export function memoryIndexPath(persona: string): string {
-  return personaMemoryIndexPath(persona);
+  return join(xdgDataHome(), "phantombot", "memory-index", `${persona}.sqlite`);
 }
 
 /** Read + parse config.toml; a missing file parses as an empty config. */

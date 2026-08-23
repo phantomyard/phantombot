@@ -201,10 +201,7 @@ interface RunInput {
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
-  // Load the config belonging to the persona we are ACTING ON, not the
-  // default one (#436): the persona dir and its config.toml are one unit, so
-  // reading the default's file while writing another's dir mixes two personas.
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const persona = input.persona?.trim() || undefined;
   const currentChain = harnessChainIds(config, persona);
   const availability = input.availability ?? (await detectAvailability(config));

@@ -1,9 +1,7 @@
 /**
  * Tiny .env reader/writer for phantombot's secrets file.
  *
- * Lives at `<persona>/.env` (#435) — one secrets file per persona, so a
- * persona's TTS/API keys never leak sideways into another persona on the same
- * box. Distinct from config.toml
+ * Lives at $XDG_CONFIG_HOME/phantombot/.env. Distinct from config.toml
  * (user-managed, may have comments) — secrets here are phantombot-managed
  * (set/cleared by `phantombot voice` and similar). Mode 600 on write.
  *
@@ -22,13 +20,16 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname } from "node:path";
-import { personaEnvPath } from "./personaPaths.ts";
+import { dirname, join } from "node:path";
+import { xdgConfigHome } from "../config.ts";
 
 export type EnvVars = Record<string, string>;
 
 export function defaultEnvFilePath(): string {
-  return personaEnvPath();
+  return (
+    process.env.PHANTOMBOT_ENV_FILE ??
+    join(xdgConfigHome(), "phantombot", ".env")
+  );
 }
 
 export async function loadEnvFile(path: string): Promise<EnvVars> {

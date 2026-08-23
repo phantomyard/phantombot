@@ -13,9 +13,9 @@
 
 import { join } from "node:path";
 
+import { xdgDataHome } from "../../config.ts";
 import type { ChannelMessage } from "../core/types.ts";
 import type { ChannelReaction } from "../core/reactions.ts";
-import { personaRunDir } from "../../lib/personaPaths.ts";
 
 /**
  * Telegram bot-API hard cap on file downloads. `getFile` rejects requests
@@ -51,9 +51,7 @@ export function sanitizePathSegment(id: string): string {
  * path is creatable on every platform.
  */
 export function inboxDir(conversationId: string): string {
-  // Per persona (#435): attachments a user sent to one persona are that
-  // persona's data and must not be readable from another persona's tree.
-  return join(personaRunDir(), "inbox", sanitizePathSegment(conversationId));
+  return join(xdgDataHome(), "phantombot", "inbox", sanitizePathSegment(conversationId));
 }
 
 /**

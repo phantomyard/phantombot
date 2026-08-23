@@ -24,15 +24,15 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
-import { personaRunDir } from "./personaPaths.ts";
 
 export function heartbeatMarkerPath(): string {
-  return join(personaRunDir(), "heartbeat.last-fired");
+  return join(xdgStateHome(), "phantombot", "heartbeat.last-fired");
 }
 
 export function tickMarkerPath(): string {
-  return join(personaRunDir(), "tick.last-fired");
+  return join(xdgStateHome(), "phantombot", "tick.last-fired");
 }
 
 interface MarkerPayload {

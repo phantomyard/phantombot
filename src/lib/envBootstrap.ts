@@ -35,7 +35,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { defaultEnvFilePath, loadEnvFile } from "./envFile.ts";
-import { tmpEnvOverlay } from "./personaPaths.ts";
 
 /** Files to source, in priority order (first file wins on key collision). */
 function envFilesToLoad(): string[] {
@@ -264,16 +263,6 @@ export async function reloadEnvFiles(
  * (notably the global `process.env`). When no context is provided the base is
  * returned untouched — degraded paths that don't carry it just don't get vars.
  *
- * When a persona IS known this also pins the child's temp directory to
- * `<persona>/tmp` — TMPDIR on POSIX, TMP/TEMP on Windows (#435). Every tool
- * the harness then runs (git, ripgrep, the pi delegate, the user's own
- * scripts) inherits it, so a turn's scratch files stay inside the persona
- * boundary instead of landing in a world-readable shared /tmp that a cleaner
- * can sweep mid-turn. Deliberately applied to the CHILD env only: one
- * phantombot process serves several personas over its lifetime, so mutating
- * the ambient TMPDIR would leak the wrong persona's directory into whatever
- * ran next.
- *
  * One helper, shared by all harnesses, so the var names can't drift.
  */
 export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
@@ -285,7 +274,6 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   if (!persona && !conversation && !turnId) return base;
   return {
     ...base,
-    ...(persona ? tmpEnvOverlay(persona) : {}),
     ...(persona ? { PHANTOMBOT_PERSONA: persona } : {}),
     ...(conversation ? { PHANTOMBOT_CONVERSATION: conversation } : {}),
     ...(turnId ? { PHANTOMBOT_TURN_ID: turnId } : {}),

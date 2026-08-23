@@ -105,8 +105,7 @@ export async function runMemorySearch(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   if (!existsSync(dir)) {
@@ -173,8 +172,7 @@ export interface RunGetInput extends RunMemoryInput {
 export async function runMemoryGet(input: RunGetInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { dir } = resolvePersonaDir(config, input.persona);
 
   const target = safeJoin(dir, input.path);
@@ -199,8 +197,7 @@ export interface RunListInput extends RunMemoryInput {
 export async function runMemoryList(input: RunListInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { dir } = resolvePersonaDir(config, input.persona);
 
   const target = safeJoin(dir, input.path);
@@ -232,8 +229,7 @@ export async function runMemoryToday(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   if (!existsSync(dir)) {
@@ -273,8 +269,7 @@ export async function runMemoryIndex(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   if (!existsSync(dir)) {
@@ -408,8 +403,7 @@ export async function runMemoryCapture(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  // Config of the persona being acted on, not the default (#436).
-  const config = input.config ?? (await loadConfig(input.persona));
+  const config = input.config ?? (await loadConfig());
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   if (!existsSync(dir)) {
@@ -532,7 +526,6 @@ export async function indexAfterCapture(
  * a fresh box does not have to wait up to 30 minutes to find out.
  */
 export async function runMemoryDrawers(input: {
-  /** Persona whose drawers to act on. Defaults to the active persona. */
   persona?: string;
   kind?: string;
   limit?: number;
@@ -549,8 +542,7 @@ export async function runMemoryDrawers(input: {
 }): Promise<number> {
   const sink = input.out ?? process.stdout;
   const write = (t: string) => sink.write(t);
-  // Acts on ONE persona's store, so load that persona's config (#436).
-  const config = await loadConfig(input.persona);
+  const config = await loadConfig();
   const { persona, dir } = resolvePersonaDir(config, input.persona);
 
   if (input.kind !== undefined && !isDrawerKind(input.kind)) {
@@ -683,16 +675,13 @@ export async function runMemoryDrawers(input: {
  * them to find out by trying.
  */
 export async function runMemoryBackup(input: {
-  /** Persona whose database to back up. Defaults to the active persona. */
-  persona?: string;
   list?: boolean;
   keep?: number;
   out?: WriteSink;
 }): Promise<number> {
   const sink = input.out ?? process.stdout;
   const write = (t: string) => sink.write(t);
-  // Acts on ONE persona's store, so load that persona's config (#436).
-  const config = await loadConfig(input.persona);
+  const config = await loadConfig();
 
   if (input.list) {
     const health = checkIntegrity(config.memoryDbPath);
@@ -753,8 +742,6 @@ export async function runMemoryBackup(input: {
  * service first, and the message says so rather than just demanding a flag.
  */
 export async function runMemoryRestore(input: {
-  /** Persona whose database to restore. Defaults to the active persona. */
-  persona?: string;
   from?: string;
   list?: boolean;
   yes?: boolean;
@@ -766,10 +753,9 @@ export async function runMemoryRestore(input: {
     if (!input.list) {
       write("--from <restore point> is required. Available points:\n");
     }
-    return await runMemoryBackup({ list: true, out: sink, persona: input.persona });
+    return await runMemoryBackup({ list: true, out: sink });
   }
-  // Acts on ONE persona's store, so load that persona's config (#436).
-  const config = await loadConfig(input.persona);
+  const config = await loadConfig();
   if (!input.yes) {
     write(
       `This replaces ${config.memoryDbPath} with ${input.from}.\n` +

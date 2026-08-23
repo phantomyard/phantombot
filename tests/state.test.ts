@@ -18,10 +18,6 @@ import { auditPath, loadState, saveHarnessBins, saveState } from "../src/state.t
 const ENV_KEYS = [
   "PHANTOMBOT_STATE",
   "PHANTOMBOT_STATE_AUDIT",
-  // Since #435 `default_persona` is written to the GLOBAL config, not the
-  // per-persona state file, so each test needs its own or they leak into one
-  // another (and, unredirected, into the developer's real box).
-  "PHANTOMBOT_GLOBAL_CONFIG",
   "XDG_DATA_HOME",
 ];
 const SAVED_ENV: Record<string, string | undefined> = {};
@@ -36,7 +32,6 @@ beforeEach(async () => {
     delete process.env[k];
   }
   process.env.XDG_DATA_HOME = join(workdir, "data");
-  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
   stateFile = join(workdir, "state.json");
   process.env.PHANTOMBOT_STATE = stateFile;
 });

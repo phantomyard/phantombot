@@ -96,10 +96,7 @@ export async function runAcpServer(
   const output = options.output ?? process.stdout;
   const logErr: WriteSink = options.logErr ?? process.stderr;
 
-  // Load the config belonging to the persona we are ACTING ON, not the
-  // default one (#436): the persona dir and its config.toml are one unit, so
-  // reading the default's file while writing another's dir mixes two personas.
-  let config = options.config ?? (await loadConfig(options.persona));
+  let config = options.config ?? (await loadConfig());
   // Resolve the persona. An explicit `--persona NAME` is honored verbatim and
   // hard-errors if missing (the user named a specific one). When no persona is
   // given we fall back to `config.defaultPersona`, and if that dir doesn't exist

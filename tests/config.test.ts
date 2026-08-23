@@ -27,11 +27,6 @@ import {
 const SAVED_ENV: Record<string, string | undefined> = {};
 const ENV_KEYS = [
   "PHANTOMBOT_CONFIG",
-  // Since #435 the ACTIVE PERSONA picks the config file, so a developer's real
-  // PHANTOMBOT_PERSONA (or a phantombot-spawned test run, which always sets it)
-  // would otherwise redirect every assertion below at the wrong directory.
-  "PHANTOMBOT_PERSONA",
-  "PHANTOMBOT_GLOBAL_CONFIG",
   "PHANTOMBOT_DEFAULT_PERSONA",
   "PHANTOMBOT_PERSONAS_DIR",
   "PHANTOMBOT_MEMORY_DB",
@@ -104,15 +99,6 @@ const ENV_KEYS = [
 ];
 
 let workdir: string;
-
-/**
- * The active persona's config directory. Since #435 loadConfig() reads
- * `<personas-root>/<persona>/config.toml`, not a host-global file — with no
- * global config on disk the active persona is the built-in "phantom".
- */
-function personaCfgDir(): string {
-  return join(workdir, "data", "phantombot", "personas", "phantom");
-}
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-config-"));
@@ -195,16 +181,14 @@ describe("loadConfig — defaults (no file)", () => {
   test("XDG paths resolve to ~/.config and ~/.local/share by default", async () => {
     const c = await loadConfig();
     expect(c.personasDir).toBe(join(workdir, "data", "phantombot", "personas"));
-    // Per persona since #435 — one database per persona, not one per box.
-    expect(c.memoryDbPath).toBe(join(personaCfgDir(), "memory.sqlite"));
-    // Per persona since #435: the config file lives inside the persona dir.
-    expect(c.configPath).toBe(join(personaCfgDir(), "config.toml"));
+    expect(c.memoryDbPath).toBe(join(workdir, "data", "phantombot", "memory.sqlite"));
+    expect(c.configPath).toBe(join(workdir, "config", "phantombot", "config.toml"));
   });
 });
 
 describe("loadConfig — chattiness default", () => {
   async function writeConfig(body: string): Promise<void> {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(join(cfgDir, "config.toml"), body, "utf8");
   }
@@ -256,7 +240,7 @@ describe("loadConfig — chattiness default", () => {
 
 describe("loadConfig — TOML overlay", () => {
   test("migrates a legacy Gemini CLI chain without touching embeddings", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -293,7 +277,7 @@ dims = 1536
   });
 
   test("reads values from config.toml when present", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -318,9 +302,7 @@ model = "gpt-5.3-codex"
       "utf8",
     );
     const c = await loadConfig();
-    // `defaultPersona` now reports the persona this config BELONGS to, not a
-    // key inside the file — the file is that persona's.
-    expect(c.defaultPersona).toBe("phantom");
+    expect(c.defaultPersona).toBe("robbie");
     // Legacy turn_timeout_s preserves pre-PR-#56 semantics: a single
     // wall-clock cap with no separate idle ceiling. Aliases to BOTH
     // idle and hard so an unmodified legacy config doesn't get the
@@ -340,7 +322,7 @@ model = "gpt-5.3-codex"
   });
 
   test("reads per-persona harness chain overrides", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -365,7 +347,7 @@ chain = ["codex"]
   });
 
   test("omits empty per-persona chains so they use the global chain", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -405,7 +387,7 @@ chain = ["gemini"]
   });
 
   test("explicit TOML harness bins override persisted discoveries", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -427,7 +409,7 @@ bin = "/opt/pi"
   });
 
   test("reads [harnesses.pi.routing] capability-routing models", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -447,7 +429,7 @@ coding_model = "gpt-5.2-codex"
   });
 
   test("PHANTOMBOT_*_MODEL env vars override [harnesses.pi.routing]", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -469,7 +451,7 @@ image_model = "toml-image"
   });
 
   test("reads Telegram streaming knobs from [channels.telegram.streaming]", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -494,7 +476,7 @@ voice_max_sentences = 2
   });
 
   test("clamps Telegram streaming knobs to sane bounds", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -521,7 +503,7 @@ voice_max_sentences = 99
 
 describe("loadConfig — env overrides", () => {
   test("env vars take priority over TOML", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -531,9 +513,10 @@ model = "from-toml"
 `,
       "utf8",
     );
+    process.env.PHANTOMBOT_DEFAULT_PERSONA = "from-env";
     process.env.PHANTOMBOT_CLAUDE_MODEL = "from-env";
     const c = await loadConfig();
-    expect(c.defaultPersona).toBe("phantom");
+    expect(c.defaultPersona).toBe("from-env");
     expect(c.harnesses.claude.model).toBe("from-env");
   });
 
@@ -544,7 +527,7 @@ model = "from-toml"
   });
 
   test("Telegram streaming env vars override TOML", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -575,7 +558,7 @@ voice_max_sentences = 2
   });
 
   test("durable-facts env vars override TOML; min_confidence stays fractional", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -616,7 +599,7 @@ max_extract_per_turn = 4
   });
 
   test("lease is floored above the harness hard timeout even if configured lower", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     // A hand-set 60s lease is DANGEROUS: a slow extraction (up to the hard
     // timeout) would outlive it, letting a concurrent pass re-claim the same
@@ -637,7 +620,7 @@ lease_ms = 60000
   });
 
   test("durable-facts min_confidence from TOML survives as a float", async () => {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(
       join(cfgDir, "config.toml"),
@@ -652,11 +635,10 @@ min_confidence = 0.65
 
   test("PHANTOMBOT_CONFIG overrides the config file path", async () => {
     const altPath = join(workdir, "alt-config.toml");
-    await writeFile(altPath, `[harnesses]\nchain = ["codex"]\n`, "utf8");
+    await writeFile(altPath, `default_persona = "from-alt"`, "utf8");
     process.env.PHANTOMBOT_CONFIG = altPath;
     const c = await loadConfig();
-    expect(c.configPath).toBe(altPath);
-    expect(c.harnesses.chain).toEqual(["codex"]);
+    expect(c.defaultPersona).toBe("from-alt");
     expect(c.configPath).toBe(altPath);
   });
 });
@@ -673,7 +655,7 @@ describe("personaDir", () => {
 
 describe("loadConfig — telegramPersonas", () => {
   async function writeToml(toml: string): Promise<void> {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(join(cfgDir, "config.toml"), toml, "utf8");
   }
@@ -826,7 +808,7 @@ poll_timeout_s = 10
 
 describe("loadConfig — retrieval", () => {
   async function writeToml(toml: string): Promise<void> {
-    const cfgDir = personaCfgDir();
+    const cfgDir = join(workdir, "config", "phantombot");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(join(cfgDir, "config.toml"), toml, "utf8");
   }
@@ -1074,10 +1056,10 @@ flush_after_hours = 0.5
     expect((await loadConfig()).retrieval!.enabled).toBe(true);
   });
 
-  test("memoryIndexPath resolves inside the persona directory (#435)", () => {
+  test("memoryIndexPath resolves under XDG_DATA_HOME", () => {
     // beforeEach sets XDG_DATA_HOME to <workdir>/data.
     expect(memoryIndexPath("phantom")).toBe(
-      join(personaCfgDir(), "memory-index.sqlite"),
+      join(workdir, "data", "phantombot", "memory-index", "phantom.sqlite"),
     );
   });
 });
@@ -1102,7 +1084,7 @@ describe("loadConfig — p2p (phantombot#258, #61)", () => {
   });
 
   test("TOML sets p2p, env still wins", async () => {
-    const configDir = personaCfgDir();
+    const configDir = join(workdir, "config", "phantombot");
     await mkdir(configDir, { recursive: true });
     await writeFile(
       join(configDir, "config.toml"),
@@ -1125,15 +1107,10 @@ describe("loadConfig — p2p (phantombot#258, #61)", () => {
 });
 
 describe("loadConfig — update_channel (release rings, #432)", () => {
-  /**
-   * Since #435 the ring lives in the GLOBAL file, not a persona's config:
-   * there is one phantombot binary per box, so two personas cannot follow
-   * different rings.
-   */
   async function writeConfig(body: string): Promise<void> {
-    const root = join(workdir, "data", "phantombot", "personas");
-    await mkdir(root, { recursive: true });
-    await writeFile(join(root, "config.toml"), body, "utf8");
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), body, "utf8");
   }
 
   test("no config file → stable, so an untouched host never moves ring", async () => {
@@ -1141,8 +1118,8 @@ describe("loadConfig — update_channel (release rings, #432)", () => {
     expect(c.updateChannel).toBe("stable");
   });
 
-  test("the global config omitting the key → stable", async () => {
-    await writeConfig(`default_persona = "phantom"\n`);
+  test("config.toml omitting the key → stable", async () => {
+    await writeConfig(`default_persona = "robbie"\n`);
     const c = await loadConfig();
     expect(c.updateChannel).toBe("stable");
   });
@@ -1179,7 +1156,7 @@ describe("loadConfig — update_channel (release rings, #432)", () => {
     expect(c.updateChannel).toBe("preview");
   });
 
-  test("PHANTOMBOT_UPDATE_CHANNEL env wins over the global config", async () => {
+  test("PHANTOMBOT_UPDATE_CHANNEL env wins over config.toml", async () => {
     await writeConfig(`update_channel = "preview"\n`);
     process.env.PHANTOMBOT_UPDATE_CHANNEL = "stable";
     const c = await loadConfig();
@@ -1196,7 +1173,7 @@ describe("loadConfig — update_channel (release rings, #432)", () => {
     expect(c.updateChannel).toBe("stable");
   });
 
-  test("an empty env value defers to the global config", async () => {
+  test("an empty env value defers to config.toml", async () => {
     await writeConfig(`update_channel = "preview"\n`);
     process.env.PHANTOMBOT_UPDATE_CHANNEL = "";
     const c = await loadConfig();

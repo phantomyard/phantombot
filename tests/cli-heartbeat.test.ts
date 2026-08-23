@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
-import { healHandlerFor, runHeartbeatCli } from "../src/cli/heartbeat.ts";
+import { runHeartbeatCli } from "../src/cli/heartbeat.ts";
 import type { Config } from "../src/config.ts";
 import { heartbeatMarkerPath } from "../src/lib/timerHealth.ts";
 
@@ -358,21 +358,5 @@ describe("runHeartbeatCli", () => {
     expect(code).toBe(0);
     expect((await readFile(live, "utf8")).length).toBe(64);
     expect(existsSync(`${live}.1`)).toBe(false);
-  });
-});
-
-
-describe("healHandlerFor (service self-heal dispatch)", () => {
-  test("every platform phantombot installs units on has a heal handler", () => {
-    // macOS included: KeepAlive restarts an agent that is already loaded, it
-    // cannot install one under the persona-scoped label #435 introduced, so a
-    // no-op here strands an upgraded Mac on the retired host-global agents.
-    expect(healHandlerFor("linux")).not.toBeNull();
-    expect(healHandlerFor("windows")).not.toBeNull();
-    expect(healHandlerFor("darwin")).not.toBeNull();
-  });
-
-  test("unsupported platforms have none", () => {
-    expect(healHandlerFor("unsupported")).toBeNull();
   });
 });

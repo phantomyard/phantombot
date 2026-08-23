@@ -8,7 +8,6 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { phantombotUnitName } from "../src/lib/systemd.ts";
 import {
   currentPlatform,
   defaultServiceControl,
@@ -38,15 +37,15 @@ describe("currentPlatform", () => {
 describe("hint commands shape per platform", () => {
   test("on linux: systemctl/journalctl strings", async () => {
     if (process.platform !== "linux") return; // guard for CI on darwin
-    expect(await restartCommand()).toContain("systemctl --user restart phantombot-");
-    expect(await statusCommand()).toContain("systemctl --user status phantombot-");
-    expect(logsCommand()).toContain("journalctl --user -u phantombot-");
+    expect(await restartCommand()).toContain("systemctl --user restart phantombot");
+    expect(await statusCommand()).toContain("systemctl --user status phantombot");
+    expect(logsCommand()).toContain("journalctl --user -u phantombot");
   });
 
   test("on darwin: launchctl strings", async () => {
     if (process.platform !== "darwin") return;
     expect(await restartCommand()).toContain("launchctl kickstart -k");
-    expect(await restartCommand()).toMatch(/dev\.phantombot\.[^.]+\.phantombot/);
+    expect(await restartCommand()).toContain("dev.phantombot.phantombot");
     expect(await statusCommand()).toContain("launchctl print");
     expect(logsCommand()).toContain("Library/Logs/phantombot");
   });
@@ -55,23 +54,21 @@ describe("hint commands shape per platform", () => {
     if (process.platform !== "win32") return;
     expect(await restartCommand()).toContain("schtasks /End");
     expect(await statusCommand()).toContain("schtasks /Query");
-    // Per persona since #435: `<persona>\\logs\\phantombot.out.log`.
-    expect(logsCommand()).toContain("logs\\phantombot.out.log");
-    expect(logsCommand()).toContain("personas\\");
+    expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
   });
 });
 
 describe("start/stop hint commands per platform", () => {
   test("on linux: systemctl start/stop", async () => {
     if (process.platform !== "linux") return;
-    expect(await startCommand()).toMatch(/^systemctl --user start phantombot-\S+\.service$/);
-    expect(await stopCommand()).toMatch(/^systemctl --user stop phantombot-\S+\.service$/);
+    expect(await startCommand()).toBe("systemctl --user start phantombot");
+    expect(await stopCommand()).toBe("systemctl --user stop phantombot");
   });
 
   test("on darwin: launchctl bootstrap/bootout", async () => {
     if (process.platform !== "darwin") return;
     expect(await startCommand()).toContain("launchctl bootstrap");
-    expect(await startCommand()).toMatch(/dev\.phantombot\.[^.]+\.phantombot\.plist/);
+    expect(await startCommand()).toContain("dev.phantombot.phantombot");
     expect(await stopCommand()).toContain("launchctl bootout");
   });
 
@@ -123,48 +120,13 @@ describe("windows hints name the persona-scoped task", () => {
   });
 });
 
-/**
- * #436: install writes `phantombot-<persona>.service` and
- * `dev.phantombot.<persona>.phantombot`, so every operational hint has to name
- * the persona-scoped identity. A hint that still says `restart phantombot`
- * either fails outright on an upgraded box or — worse, where a retired
- * host-global unit is still lying around — bounces the WRONG daemon.
- */
-describe("POSIX hints target the persona-scoped service identity (#436)", () => {
-  test("linux hints name phantombot-<persona>.service, never the retired unit", async () => {
-    const over = { platform: "linux" as const, persona: "megan" };
-    for (const cmd of [
-      await restartCommand(over),
-      await startCommand(over),
-      await stopCommand(over),
-      await statusCommand(over),
-    ]) {
-      expect(cmd).toContain("phantombot-megan.service");
-      expect(cmd).not.toMatch(/(restart|start|stop|status) phantombot$/);
-    }
-  });
-
-  test("darwin hints name dev.phantombot.<persona>.phantombot", async () => {
-    const over = { platform: "darwin" as const, persona: "megan" };
-    for (const cmd of [
-      await restartCommand(over),
-      await startCommand(over),
-      await stopCommand(over),
-      await statusCommand(over),
-    ]) {
-      expect(cmd).toContain("dev.phantombot.megan.phantombot");
-      expect(cmd).not.toContain("gui/$(id -u)/dev.phantombot.phantombot");
-    }
-  });
-});
-
 describe("logsSpec", () => {
   test("follow default is true, lines default 50", () => {
     const spec = logsSpec();
     if (process.platform === "linux") {
       expect(spec).toEqual({
         cmd: "journalctl",
-        args: ["--user", "-u", phantombotUnitName(), "-n", "50", "-f"],
+        args: ["--user", "-u", "phantombot", "-n", "50", "-f"],
       });
     } else if (process.platform === "darwin") {
       expect(spec?.cmd).toBe("tail");
@@ -181,9 +143,7 @@ describe("logsSpec", () => {
     const spec = logsSpec({ follow: false, lines: 10 });
     if (process.platform === "linux") {
       expect(spec?.args).not.toContain("-f");
-      expect(spec?.args).toEqual(["--user", "-u", phantombotUnitName(), "-n", "10"]);
-      // Persona-scoped, not the retired host-global unit (#436).
-      expect(spec?.args).not.toContain("phantombot");
+      expect(spec?.args).toEqual(["--user", "-u", "phantombot", "-n", "10"]);
     } else if (process.platform === "darwin") {
       expect(spec?.args).not.toContain("-f");
       expect(spec?.args).toContain("10");

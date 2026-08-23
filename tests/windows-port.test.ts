@@ -10,13 +10,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { xdgConfigHome, xdgDataHome, xdgStateHome } from "../src/config.ts";
 import { currentPlatform } from "../src/lib/platform.ts";
 import { defaultLockPath } from "../src/lib/runLock.ts";
-import { ensurePersonaTmpDir } from "../src/lib/personaPaths.ts";
 import { isReadOnlyInvocation } from "../src/lib/cliInvocation.ts";
 
 /** Temporarily override process.platform for one synchronous assertion. */
@@ -100,15 +99,10 @@ describe("xdg* path resolvers on Windows", () => {
 });
 
 describe("defaultLockPath on Windows", () => {
-  test("falls back to the persona's own tmp dir when XDG_RUNTIME_DIR is unset", () => {
-    // Per persona since #435: a single %TEMP%\phantombot.run.lock let two
-    // personas in one Windows account fight over one daemon token, so persona
-    // B silently refused to start while A held it.
+  test("falls back to per-user %TEMP% when XDG_RUNTIME_DIR is unset", () => {
     withEnv({ XDG_RUNTIME_DIR: undefined }, () => {
       withPlatform("win32", () => {
-        expect(defaultLockPath("robbie")).toBe(
-          join(ensurePersonaTmpDir("robbie"), "phantombot.run.lock"),
-        );
+        expect(defaultLockPath()).toBe(join(tmpdir(), "phantombot.run.lock"));
       });
     });
   });
@@ -116,9 +110,7 @@ describe("defaultLockPath on Windows", () => {
   test("XDG_RUNTIME_DIR still wins if somehow set", () => {
     withEnv({ XDG_RUNTIME_DIR: "R:\\run" }, () => {
       withPlatform("win32", () => {
-        expect(defaultLockPath("robbie")).toBe(
-          join("R:\\run", "phantombot-robbie.run.lock"),
-        );
+        expect(defaultLockPath()).toBe(join("R:\\run", "phantombot.run.lock"));
       });
     });
   });

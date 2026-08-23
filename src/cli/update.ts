@@ -45,12 +45,6 @@ import {
   type ServiceControl,
 } from "../lib/platform.ts";
 import {
-  BunLaunchctlRunner,
-  ensureLaunchdAgentsCurrent,
-  type EnsureLaunchdAgentsResult,
-  guiDomain,
-} from "../lib/launchd.ts";
-import {
   BunSystemctlRunner,
   buildSystemctlEnv,
   ensureSystemdUnitsCurrent,
@@ -102,15 +96,6 @@ export interface RunUpdateInput {
   healSystemdUnits?:
     | false
     | ((binPath: string) => Promise<EnsureUnitsCurrentResult | null>);
-  /**
-   * Test seam — override the macOS analogue of the step above: reconcile the
-   * launchd agents so the persona-scoped labels introduced in #435 are actually
-   * installed and loaded after an in-place binary swap, and the retired
-   * host-global ones are booted out. Pass `false` to skip.
-   */
-  healLaunchdAgents?:
-    | false
-    | ((binPath: string) => Promise<EnsureLaunchdAgentsResult | null>);
   /**
    * Override, or disable with `false`, the shell-completion refresh that runs
    * after a successful binary swap. Defaults to installCompletions.
@@ -291,57 +276,6 @@ export async function runUpdate(input: RunUpdateInput = {}): Promise<number> {
       err.write(
         `warning: could not re-stitch systemd units: ${(e as Error).message} — ` +
           `run 'phantombot install' manually if scheduled tasks stop firing.\n`,
-      );
-      // Non-fatal — fall through to restart handling.
-    }
-  }
-
-  // 7.51. macOS analogue of the step above. Since #435 the launchd labels are
-  // persona-scoped, so an upgraded Mac whose LaunchAgents still hold the
-  // pre-#435 host-global agents would keep running the OLD ones while every
-  // command (`start`, `restart`, `status`, `logs`) targets the NEW label.
-  // Reconciling here means an in-place update needs no manual reinstall —
-  // exactly what README's "upgrading needs no action" promises. Idempotent and
-  // non-fatal, same as the systemd branch.
-  if (input.healLaunchdAgents !== false && procPlatform === "darwin") {
-    try {
-      const heal = input.healLaunchdAgents
-        ? await input.healLaunchdAgents(binPath)
-        : await defaultHealLaunchdAgents(binPath);
-      if (heal) {
-        if (heal.rewrote.length > 0) {
-          out.write(`re-rendered launchd plists: ${heal.rewrote.join(", ")}\n`);
-        }
-        if (heal.reloaded.length > 0) {
-          out.write(`reloaded launchd agents: ${heal.reloaded.join(", ")}\n`);
-        }
-        if (heal.removedRetired.length > 0) {
-          out.write(
-            `removed retired launchd agents: ${heal.removedRetired.join(", ")}\n`,
-          );
-        }
-        if (heal.failures.length > 0) {
-          // Loud on stderr: the operator's box is running on whatever agents
-          // survived, and the retired ones were deliberately left in place.
-          for (const f of heal.failures) {
-            err.write(`warning: launchd agent ${f.label} failed to load: ${f.error}\n`);
-          }
-          err.write(
-            "retired launchd agents were left in place so the box keeps a running " +
-              "daemon — run 'phantombot install' to finish the migration.\n",
-          );
-        } else if (
-          heal.rewrote.length === 0 &&
-          heal.reloaded.length === 0 &&
-          heal.removedRetired.length === 0
-        ) {
-          out.write("launchd agents already current.\n");
-        }
-      }
-    } catch (e) {
-      err.write(
-        `warning: could not reconcile launchd agents: ${(e as Error).message} — ` +
-          `run 'phantombot install' manually if the service does not come back.\n`,
       );
       // Non-fatal — fall through to restart handling.
     }
@@ -535,27 +469,6 @@ async function defaultHealUnits(
   if (!sysEnv.ready) return null;
   const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
   return ensureSystemdUnitsCurrent({ binPath, systemctl });
-}
-
-/**
- * Production wiring for the post-swap "reconcile launchd agents" step. Returns
- * null when the gui domain can't be resolved (no uid), which on a Mac means
- * there is nothing loadable to repair.
- */
-async function defaultHealLaunchdAgents(
-  binPath: string,
-): Promise<EnsureLaunchdAgentsResult | null> {
-  let domain: string;
-  try {
-    domain = guiDomain();
-  } catch {
-    return null;
-  }
-  return ensureLaunchdAgentsCurrent({
-    binPath,
-    domain,
-    launchctl: new BunLaunchctlRunner(),
-  });
 }
 
 async function defaultConfirmInstall(

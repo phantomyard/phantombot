@@ -605,8 +605,7 @@ describe("ACP server — session/prompt", () => {
       const m = req.userMessage.match(/\[attached: (.*\.png)\]/);
       expect(m).not.toBeNull();
       const savedPath = m![1]!;
-      // Per persona since #435 — inbound attachments are that persona's data.
-      expect(savedPath).toContain(join("run", "inbox", sanitizePathSegment(conversation)));
+      expect(savedPath).toContain(join("phantombot", "inbox", sanitizePathSegment(conversation)));
       const { readFile } = await import("node:fs/promises");
       expect((await readFile(savedPath)).toString()).toBe("hello-image-bytes");
 

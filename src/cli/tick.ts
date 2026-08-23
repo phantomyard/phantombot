@@ -37,7 +37,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
@@ -59,15 +59,12 @@ import {
   makeDurableFactPuller,
   makeFactExtractor,
 } from "../orchestrator/durableFacts.ts";
-import { personaRunDir, tmpEnvOverlay } from "../lib/personaPaths.ts";
 
 const WAKE_STREAM_PREVIEW_CHARS = 2000;
 const BACKGROUND_WAKE_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function defaultTickLockPath(): string {
-  // Per persona (#435). A host-wide tick lock meant persona B's scheduler
-  // silently skipped its run because persona A happened to be ticking.
-  return join(personaRunDir(), "tick.lock");
+  return join(xdgStateHome(), "phantombot", "tick.lock");
 }
 
 export interface RunTickInput {
@@ -209,7 +206,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
           const result = await runCommandTask(task.command!, {
             timeoutMs: config.harnessHardTimeoutMs,
             cwd: agentDir,
-            env: buildCommandEnv(task.commandSecrets, task.persona),
+            env: buildCommandEnv(task.commandSecrets),
           });
           finalText = result.output;
           exitCode = result.exitCode;
@@ -422,18 +419,7 @@ async function runCommandTask(
   });
 }
 
-/**
- * Minimal env for a `--command` task.
- *
- * The persona is part of that minimum (#436): a command-backed task is the one
- * subprocess that routinely calls BACK into phantombot (`phantombot ask`,
- * `phantombot notify`). Without PHANTOMBOT_PERSONA the child resolves the
- * global default persona instead of the one whose task just fired, so a
- * poller belonging to persona B notifies persona A. The tmp overlay is here
- * for the same reason every other spawn gets it — scratch files stay inside
- * the persona boundary rather than in the shared system temp dir.
- */
-function buildCommandEnv(secretNames: string[], persona?: string): NodeJS.ProcessEnv {
+function buildCommandEnv(secretNames: string[]): NodeJS.ProcessEnv {
   const allowlist = [
     "HOME",
     "PATH",
@@ -478,12 +464,6 @@ function buildCommandEnv(secretNames: string[], persona?: string): NodeJS.Proces
   }
   for (const name of secretNames) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
-  }
-  if (persona) {
-    env.PHANTOMBOT_PERSONA = persona;
-    // Applied AFTER the allowlist copy so the persona's tmp dir wins over an
-    // inherited TMPDIR/TEMP/TMP rather than being overwritten by it.
-    Object.assign(env, tmpEnvOverlay(persona));
   }
   return env;
 }

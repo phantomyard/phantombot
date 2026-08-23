@@ -10,54 +10,11 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
-import { activePersona, dataHome, FALLBACK_PERSONA, personasRoot } from "./personaPaths.ts";
 import type { WriteSink } from "./io.ts";
 
-/**
- * Unit names are PERSONA-SCOPED since #435: `phantombot-<persona>.service`,
- * not `phantombot.service`. That is what lets several personas run as services
- * side by side in one user account — with a single shared unit name, installing
- * persona B silently overwrote persona A's unit and left one daemon serving the
- * wrong persona.
- *
- * The persona is baked into the unit at install time (Environment=
- * PHANTOMBOT_PERSONA) so the daemon resolves its own config, state, database
- * and tmp dir from `<persona>/` with no ambient default to get wrong.
- *
- * Persona names come from directory names we created, but a unit filename is
- * still sanitized: systemd unit names may not contain `/`, and letting one
- * through would write outside the unit directory.
- */
-function unitSlug(persona?: string): string {
-  const name = (persona ?? activePersona()).trim() || FALLBACK_PERSONA;
-  return name.replace(/[^A-Za-z0-9_.-]/g, "_");
-}
-
-export function phantombotUnitName(persona?: string): string {
-  return `phantombot-${unitSlug(persona)}.service`;
-}
-export function heartbeatServiceName(persona?: string): string {
-  return `phantombot-${unitSlug(persona)}-heartbeat.service`;
-}
-export function heartbeatTimerName(persona?: string): string {
-  return `phantombot-${unitSlug(persona)}-heartbeat.timer`;
-}
-export function tickServiceName(persona?: string): string {
-  return `phantombot-${unitSlug(persona)}-tick.service`;
-}
-export function tickTimerName(persona?: string): string {
-  return `phantombot-${unitSlug(persona)}-tick.timer`;
-}
-
-/**
- * Pre-#435 unshared unit names. Kept ONLY so an upgrade can stop, disable and
- * delete what an older install left behind — nothing installs them any more.
- */
-export const LEGACY_UNIT_NAME = "phantombot.service";
-export const LEGACY_HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
-export const LEGACY_HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
-export const LEGACY_TICK_SERVICE_NAME = "phantombot-tick.service";
-export const LEGACY_TICK_TIMER_NAME = "phantombot-tick.timer";
+export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
+export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
+export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
 /**
  * RETIRED units. The nightly no longer runs on a clock — it is triggered by
  * startup and by the heartbeat noticing the calendar day rolled over (see
@@ -67,29 +24,17 @@ export const LEGACY_TICK_TIMER_NAME = "phantombot-tick.timer";
  */
 export const NIGHTLY_SERVICE_NAME = "phantombot-nightly.service";
 export const NIGHTLY_TIMER_NAME = "phantombot-nightly.timer";
-export const RETIRED_TIMER_NAMES = [
-  NIGHTLY_TIMER_NAME,
-  LEGACY_HEARTBEAT_TIMER_NAME,
-  LEGACY_TICK_TIMER_NAME,
-] as const;
+export const RETIRED_TIMER_NAMES = [NIGHTLY_TIMER_NAME] as const;
 export const RETIRED_UNIT_NAMES = [
   NIGHTLY_TIMER_NAME,
   NIGHTLY_SERVICE_NAME,
-  // Pre-#435 host-global units. Removing them on upgrade is what stops an old
-  // `phantombot.service` from racing the new persona-scoped one for the run
-  // lock — two daemons on the same persona is precisely the bug #435 exists
-  // to end.
-  LEGACY_HEARTBEAT_TIMER_NAME,
-  LEGACY_HEARTBEAT_SERVICE_NAME,
-  LEGACY_TICK_TIMER_NAME,
-  LEGACY_TICK_SERVICE_NAME,
-  LEGACY_UNIT_NAME,
 ] as const;
-
+export const TICK_SERVICE_NAME = "phantombot-tick.service";
+export const TICK_TIMER_NAME = "phantombot-tick.timer";
 
 /**
  * Both .env files we source into every phantombot unit:
- *   <persona>/.env             — this persona's own runtime secrets
+ *   ~/.config/phantombot/.env  — phantombot's own runtime secrets
  *                                 (TTS keys; written by `phantombot voice`).
  *   ~/.env                     — legacy credentials plus file-backed harness
  *                                 routing settings; credentials migrate into
@@ -100,40 +45,9 @@ export const RETIRED_UNIT_NAMES = [
  * harnesses inherit, so the agent finds credentials without re-reading
  * the file.
  */
-/** The default personas root, expressed with systemd's `%h` home escape. */
-const DEFAULT_PERSONAS_ROOT_UNIT = "%h/.local/share/phantombot/personas";
-
-/**
- * Where THIS install keeps its personas, and whether that is the default.
- *
- * The unit used to hard-code `%h/.local/share/phantombot/personas` (#436): on a
- * box with PHANTOMBOT_PERSONAS_DIR set, the service then sourced a `.env` that
- * does not exist and — worse — the daemon it started resolved a DIFFERENT
- * personas root from the one the operator's shell uses, so the service ran a
- * different (usually empty) persona. When the root is custom we bake it into
- * the unit as an Environment= line so the service and the shell agree.
- */
-function personasRootForUnit(): { path: string; isDefault: boolean } {
-  const actual = personasRoot();
-  const fallback = join(dataHome(), "phantombot", "personas");
-  if (!process.env.PHANTOMBOT_PERSONAS_DIR && actual === fallback) {
-    return { path: DEFAULT_PERSONAS_ROOT_UNIT, isDefault: true };
-  }
-  return { path: actual, isDefault: false };
-}
-
-function environmentFileLines(persona: string): string {
-  // `%h` is systemd's escape for the user's home. The persona .env is written
-  // by `phantombot voice` and friends; `~/.env` stays supported as the user's
-  // own general-purpose file. Leading `-` makes both optional.
-  const root = personasRootForUnit();
-  return (
-    `Environment="PHANTOMBOT_PERSONA=${persona}"\n` +
-    (root.isDefault ? "" : `Environment="PHANTOMBOT_PERSONAS_DIR=${root.path}"\n`) +
-    `EnvironmentFile=-${root.path}/${persona}/.env\n` +
-    "EnvironmentFile=-%h/.env"
-  );
-}
+const ENVIRONMENT_FILE_LINES =
+  "EnvironmentFile=-%h/.config/phantombot/.env\n" +
+  "EnvironmentFile=-%h/.env";
 
 export const PHANTOMBOT_SERVICE_PATH =
   "%h/.local/share/pi-node/bin:" +
@@ -142,25 +56,16 @@ export const PHANTOMBOT_SERVICE_PATH =
   "%h/.local/bin:" +
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/**
- * Directory holding systemd --user units. This is the one place phantombot
- * writes outside a persona directory, and it is unavoidable: systemd only
- * looks here. Every file we put in it is named for exactly one persona.
- */
-function unitDir(): string {
-  return join(homedir(), ".config", "systemd", "user");
+export function defaultUnitPath(): string {
+  return join(homedir(), ".config", "systemd", "user", PHANTOMBOT_UNIT_NAME);
 }
 
-export function defaultUnitPath(persona?: string): string {
-  return join(unitDir(), phantombotUnitName(persona));
+export function heartbeatServicePath(): string {
+  return join(homedir(), ".config", "systemd", "user", HEARTBEAT_SERVICE_NAME);
 }
 
-export function heartbeatServicePath(persona?: string): string {
-  return join(unitDir(), heartbeatServiceName(persona));
-}
-
-export function heartbeatTimerPath(persona?: string): string {
-  return join(unitDir(), heartbeatTimerName(persona));
+export function heartbeatTimerPath(): string {
+  return join(homedir(), ".config", "systemd", "user", HEARTBEAT_TIMER_NAME);
 }
 
 /** Path of the retired nightly service (kept for cleanup only). */
@@ -173,12 +78,12 @@ export function nightlyTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", NIGHTLY_TIMER_NAME);
 }
 
-export function tickServicePath(persona?: string): string {
-  return join(unitDir(), tickServiceName(persona));
+export function tickServicePath(): string {
+  return join(homedir(), ".config", "systemd", "user", TICK_SERVICE_NAME);
 }
 
-export function tickTimerPath(persona?: string): string {
-  return join(unitDir(), tickTimerName(persona));
+export function tickTimerPath(): string {
+  return join(homedir(), ".config", "systemd", "user", TICK_TIMER_NAME);
 }
 
 export interface SystemdUnitParams {
@@ -187,12 +92,6 @@ export interface SystemdUnitParams {
   /** Args to pass to phantombot. e.g. ["run"]. */
   args: readonly string[];
   description?: string;
-  /**
-   * Persona this unit serves. Baked in as Environment=PHANTOMBOT_PERSONA so
-   * the daemon never has to guess, and used to point EnvironmentFile= at that
-   * persona's own .env. Defaults to the active persona.
-   */
-  persona?: string;
 }
 
 /**
@@ -206,13 +105,12 @@ export interface SystemdUnitParams {
  *   report the missing harness.
  * - Two EnvironmentFile= lines: phantombot's own .env plus the user's
  *   general-purpose ~/.env. The agent finds credentials in process.env
- *   without re-reading either file. See environmentFileLines().
+ *   without re-reading either file. See ENVIRONMENT_FILE_LINES.
  */
 export function generateSystemdUnit(params: SystemdUnitParams): string {
   const exec = [params.binPath, ...params.args].map(quoteArg).join(" ");
-  const persona = params.persona ?? activePersona();
   const desc =
-    params.description ?? `Phantombot (${persona}) — Giving the harness a Soul`;
+    params.description ?? "Phantombot — Giving the harness a Soul";
   return `[Unit]
 Description=${desc}
 After=network-online.target
@@ -237,7 +135,7 @@ SuccessExitStatus=143
 # half. The code-level watchdog (~5s) is the primary fix; this is the floor.
 TimeoutStopSec=15s
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
-${environmentFileLines(persona)}
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 
@@ -252,17 +150,16 @@ function quoteArg(s: string): string {
 }
 
 /** Generate the heartbeat oneshot service body. */
-export function generateHeartbeatService(binPath: string, persona?: string): string {
+export function generateHeartbeatService(binPath: string): string {
   const exec = [binPath, "heartbeat"].map(quoteArg).join(" ");
-  const who = persona ?? activePersona();
   return `[Unit]
-Description=Phantombot heartbeat (${who}) — mechanical 30-minute maintenance pass
+Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
 
 [Service]
 Type=oneshot
 ExecStart=${exec}
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
-${environmentFileLines(who)}
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 `;
@@ -293,11 +190,10 @@ WantedBy=timers.target
 }
 
 /** Generate the tick oneshot service body — runs due scheduled tasks. */
-export function generateTickService(binPath: string, persona?: string): string {
+export function generateTickService(binPath: string): string {
   const exec = [binPath, "tick"].map(quoteArg).join(" ");
-  const who = persona ?? activePersona();
   return `[Unit]
-Description=Phantombot tick (${who}) — fire any scheduled tasks that are due
+Description=Phantombot tick — fire any scheduled tasks that are due
 After=network-online.target
 Wants=network-online.target
 
@@ -306,7 +202,7 @@ Type=oneshot
 ExecStart=${exec}
 TimeoutStartSec=infinity
 Environment="PATH=${PHANTOMBOT_SERVICE_PATH}"
-${environmentFileLines(who)}
+${ENVIRONMENT_FILE_LINES}
 StandardOutput=journal
 StandardError=journal
 `;
@@ -425,9 +321,12 @@ export function buildSystemctlEnv(
  * Exported so the unit-test layer can pin this without spawning a real
  * subprocess.
  */
-export function selfRestartArgs(persona?: string): readonly string[] {
-  return ["--user", "--no-block", "restart", phantombotUnitName(persona)];
-}
+export const SELF_RESTART_ARGS: readonly string[] = [
+  "--user",
+  "--no-block",
+  "restart",
+  PHANTOMBOT_UNIT_NAME,
+];
 
 /**
  * True iff a self-restart `systemctl` result is our own cgroup teardown
@@ -462,7 +361,7 @@ export function isSelfRestartTeardown(r: SystemctlResult): boolean {
 export async function runSelfRestart(
   systemctl: SystemctlRunner,
 ): Promise<{ ok: boolean; stderr?: string }> {
-  const r = await systemctl.run(selfRestartArgs());
+  const r = await systemctl.run(SELF_RESTART_ARGS);
   return r.exitCode === 0 || isSelfRestartTeardown(r)
     ? { ok: true }
     : { ok: false, stderr: r.stderr.trim() || `exit ${r.exitCode}` };
@@ -583,7 +482,7 @@ export function defaultSystemdServiceControl(): ServiceControl {
       const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
         "--user",
         "is-active",
-        phantombotUnitName(),
+        PHANTOMBOT_UNIT_NAME,
       ]);
       return r.exitCode === 0 && r.stdout.trim() === "active";
     },
@@ -596,7 +495,7 @@ export function defaultSystemdServiceControl(): ServiceControl {
       const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
         "--user",
         "start",
-        phantombotUnitName(),
+        PHANTOMBOT_UNIT_NAME,
       ]);
       return r.exitCode === 0
         ? { ok: true }
@@ -611,7 +510,7 @@ export function defaultSystemdServiceControl(): ServiceControl {
       const r = await new BunSystemctlRunner(buildSystemctlEnv(sysEnv)).run([
         "--user",
         "stop",
-        phantombotUnitName(),
+        PHANTOMBOT_UNIT_NAME,
       ]);
       return r.exitCode === 0
         ? { ok: true }
@@ -693,31 +592,31 @@ export function phantombotUnitTargets(
     {
       path: overrides.unitPath ?? defaultUnitPath(),
       content: generateSystemdUnit({ binPath, args: ["run"] }),
-      unit: phantombotUnitName(),
+      unit: PHANTOMBOT_UNIT_NAME,
       isTimer: false,
     },
     {
       path: overrides.heartbeatServicePath ?? heartbeatServicePath(),
       content: generateHeartbeatService(binPath),
-      unit: heartbeatServiceName(),
+      unit: HEARTBEAT_SERVICE_NAME,
       isTimer: false,
     },
     {
       path: overrides.heartbeatTimerPath ?? heartbeatTimerPath(),
       content: generateHeartbeatTimer(),
-      unit: heartbeatTimerName(),
+      unit: HEARTBEAT_TIMER_NAME,
       isTimer: true,
     },
     {
       path: overrides.tickServicePath ?? tickServicePath(),
       content: generateTickService(binPath),
-      unit: tickServiceName(),
+      unit: TICK_SERVICE_NAME,
       isTimer: false,
     },
     {
       path: overrides.tickTimerPath ?? tickTimerPath(),
       content: generateTickTimer(),
-      unit: tickTimerName(),
+      unit: TICK_TIMER_NAME,
       isTimer: true,
     },
   ];
@@ -814,20 +713,9 @@ export interface EnsureUnitsCurrentResult {
  * systemctl that fails on an already-absent unit is expected, not an error.
  * Returns the basenames actually deleted, so callers only log on real cleanup.
  */
-/**
- * Every unit file phantombot no longer installs, in `dir` (defaults to the real
- * systemd --user directory; tests pass a tmpdir). This is the ONLY consumer of
- * RETIRED_UNIT_NAMES — the list was inert before #436, which meant a pre-#435
- * host-global `phantombot.service` stayed enabled and racing the new
- * persona-scoped unit for the run lock after an upgrade.
- */
-export function retiredUnitPaths(dir: string = unitDir()): string[] {
-  return RETIRED_UNIT_NAMES.map((name) => join(dir, name));
-}
-
 export async function removeRetiredUnits(
   systemctl: SystemctlRunner,
-  paths: readonly string[] = retiredUnitPaths(),
+  paths: readonly string[] = [nightlyTimerPath(), nightlyServicePath()],
 ): Promise<string[]> {
   const present = paths.filter((p) => existsSync(p));
   // Nothing on disk → nothing systemd can run, so skip the IPC entirely. This
@@ -835,13 +723,7 @@ export async function removeRetiredUnits(
   // because the heal path runs on every heartbeat.
   if (present.length === 0) return [];
 
-  // Stop AND disable every retired name — services included, not just timers.
-  // A retired .service can be RUNNING (the pre-#435 `phantombot.service` is a
-  // long-lived daemon); deleting its unit file without stopping it first leaves
-  // the process alive holding the run lock until the next reboot.
-  const presentNames = new Set(present.map((p) => basename(p)));
-  for (const unit of RETIRED_UNIT_NAMES) {
-    if (!presentNames.has(unit)) continue;
+  for (const unit of RETIRED_TIMER_NAMES) {
     await systemctl.run(["--user", "stop", unit]);
     await systemctl.run(["--user", "disable", unit]);
   }
@@ -866,17 +748,9 @@ export async function ensureSystemdUnitsCurrent(
   // Sweep away units we no longer install (currently the 02:00 nightly timer)
   // before reconciling the ones we do. Cheap, and it means a box heals itself
   // on the next heartbeat instead of needing a reinstall.
-  // Retired names live beside the nightly ones, so deriving the directory from
-  // the (test-overridable) nightly path keeps the whole sweep inside a tmpdir
-  // under test while covering the real unit dir in production.
-  const nightlyTimer = opts.nightlyTimerPath ?? nightlyTimerPath();
-  const nightlyService = opts.nightlyServicePath ?? nightlyServicePath();
   const removedRetired = await removeRetiredUnits(opts.systemctl, [
-    ...new Set([
-      nightlyTimer,
-      nightlyService,
-      ...retiredUnitPaths(dirname(nightlyTimer)),
-    ]),
+    opts.nightlyTimerPath ?? nightlyTimerPath(),
+    opts.nightlyServicePath ?? nightlyServicePath(),
   ]);
 
   const rewrote: string[] = [];
@@ -985,17 +859,9 @@ export async function installPhantombotUnit(
   }
 
   // Reinstalling over an older layout: drop the retired 02:00 nightly timer.
-  // Retired names live beside the nightly ones, so deriving the directory from
-  // the (test-overridable) nightly path keeps the whole sweep inside a tmpdir
-  // under test while covering the real unit dir in production.
-  const nightlyTimer = opts.nightlyTimerPath ?? nightlyTimerPath();
-  const nightlyService = opts.nightlyServicePath ?? nightlyServicePath();
   const removedRetired = await removeRetiredUnits(opts.systemctl, [
-    ...new Set([
-      nightlyTimer,
-      nightlyService,
-      ...retiredUnitPaths(dirname(nightlyTimer)),
-    ]),
+    opts.nightlyTimerPath ?? nightlyTimerPath(),
+    opts.nightlyServicePath ?? nightlyServicePath(),
   ]);
   for (const name of removedRetired) {
     opts.out.write(`removed retired unit: ${name}\n`);
@@ -1003,12 +869,12 @@ export async function installPhantombotUnit(
 
   for (const args of [
     ["--user", "daemon-reload"],
-    ["--user", "enable", phantombotUnitName()],
-    ["--user", "start", phantombotUnitName()],
-    ["--user", "enable", heartbeatTimerName()],
-    ["--user", "start", heartbeatTimerName()],
-    ["--user", "enable", tickTimerName()],
-    ["--user", "start", tickTimerName()],
+    ["--user", "enable", PHANTOMBOT_UNIT_NAME],
+    ["--user", "start", PHANTOMBOT_UNIT_NAME],
+    ["--user", "enable", HEARTBEAT_TIMER_NAME],
+    ["--user", "start", HEARTBEAT_TIMER_NAME],
+    ["--user", "enable", TICK_TIMER_NAME],
+    ["--user", "start", TICK_TIMER_NAME],
   ]) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
@@ -1036,14 +902,14 @@ export async function uninstallPhantombotUnit(
 ): Promise<{ removed: boolean }> {
   // stop + disable are best-effort: a half-installed unit is fine to remove.
   for (const args of [
-    ["--user", "stop", tickTimerName()],
-    ["--user", "disable", tickTimerName()],
+    ["--user", "stop", TICK_TIMER_NAME],
+    ["--user", "disable", TICK_TIMER_NAME],
     ["--user", "stop", NIGHTLY_TIMER_NAME],
     ["--user", "disable", NIGHTLY_TIMER_NAME],
-    ["--user", "stop", heartbeatTimerName()],
-    ["--user", "disable", heartbeatTimerName()],
-    ["--user", "stop", phantombotUnitName()],
-    ["--user", "disable", phantombotUnitName()],
+    ["--user", "stop", HEARTBEAT_TIMER_NAME],
+    ["--user", "disable", HEARTBEAT_TIMER_NAME],
+    ["--user", "stop", PHANTOMBOT_UNIT_NAME],
+    ["--user", "disable", PHANTOMBOT_UNIT_NAME],
   ]) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {

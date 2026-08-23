@@ -1,7 +1,5 @@
 /**
- * Phantombot-managed runtime state. Lives at `<persona>/state.json` (#435) —
- * per persona, because `harness_bins` is a property of the persona's own
- * harness chain and two personas on one box must not overwrite each other's.
+ * Phantombot-managed runtime state. Lives at $XDG_DATA_HOME/phantombot/state.json.
  *
  * Distinct from config.toml: config.toml is user-owned and hand-edited,
  * state.json is phantombot-owned and mutated by commands like
@@ -13,43 +11,30 @@
 
 import { mkdir, readFile, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { xdgDataHome } from "./config.ts";
 import { writeFileAtomic } from "./lib/io.ts";
-import {
-  loadGlobalConfig,
-  personaStatePath,
-  setGlobalConfigValue,
-} from "./lib/personaPaths.ts";
 
 export interface State {
-  /**
-   * Which persona a `--persona`-less CLI call means. NOT stored in the
-   * per-persona state file — it is inherently global, so it is read from and
-   * written to `<personas-root>/config.toml`. Surfaced on this object so the
-   * many existing `state.default_persona` call sites keep working.
-   */
   default_persona?: string;
   harness_bins?: Record<string, string>;
 }
 
-export function statePath(persona?: string): string {
-  return personaStatePath(persona);
+export function statePath(): string {
+  return (
+    process.env.PHANTOMBOT_STATE ??
+    join(xdgDataHome(), "phantombot", "state.json")
+  );
 }
 
-export async function loadState(persona?: string): Promise<State> {
-  const globalDefault = loadGlobalConfig().default_persona;
-  let own: State = {};
+export async function loadState(): Promise<State> {
   try {
-    const content = await readFile(statePath(persona), "utf8");
+    const content = await readFile(statePath(), "utf8");
     const parsed = JSON.parse(content);
-    if (typeof parsed === "object" && parsed !== null) own = parsed as State;
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw e;
   }
-  // The global value always wins for default_persona: a stale copy left in a
-  // persona state file by a pre-#435 box must never resurrect an old default.
-  return globalDefault === undefined
-    ? own
-    : { ...own, default_persona: globalDefault };
 }
 
 /**
@@ -112,20 +97,13 @@ async function auditPersonaChange(prev: State, next: State): Promise<void> {
   }
 }
 
-export async function saveState(state: State, persona?: string): Promise<string> {
-  const path = statePath(persona);
+export async function saveState(state: State): Promise<string> {
+  const path = statePath();
   const prev = await loadStateForAudit();
   await auditPersonaChange(prev, state);
-  // default_persona is global, so it is routed to the global file rather than
-  // written into this persona's state.json — otherwise `phantombot persona`
-  // run as lena would set a default only lena could see.
-  const { default_persona, ...ownState } = state;
-  if (default_persona !== undefined && default_persona !== prev.default_persona) {
-    setGlobalConfigValue("default_persona", default_persona);
-  }
   // Atomic write: a torn state.json bricks every command that must parse it
   // on startup (loadState throws), so never expose a half-written file.
-  await writeFileAtomic(path, JSON.stringify(ownState, null, 2) + "\n");
+  await writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
   return path;
 }
 

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { xdgStateHome } from "../config.ts";
 import { writeFileAtomic } from "./io.ts";
-import { personaRunDir } from "./personaPaths.ts";
 
 export type ReplyMode = "text" | "voice";
 export type ReplyModeRequest = ReplyMode | "default";
@@ -33,7 +33,7 @@ type StoredOverrides = Record<string, StoredOverride>;
 export function replyModeStatePath(): string {
   return (
     process.env.PHANTOMBOT_REPLY_MODE_STATE ??
-    join(personaRunDir(), "reply-mode-overrides.json")
+    join(xdgStateHome(), "phantombot", "reply-mode-overrides.json")
   );
 }
 

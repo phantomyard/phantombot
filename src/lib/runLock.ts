@@ -43,12 +43,10 @@
  * tmpfs ($XDG_RUNTIME_DIR) or %TEMP% and is reaped on reboot; a stale PID inside
  * it is harmless because nothing reads it for a correctness decision.
  *
- * ── Multi-user AND multi-persona ──
- * The lock path is scoped to (OS user, persona) on every platform: the persona
- * slug is part of the filename under $XDG_RUNTIME_DIR / ~/.cache/phantombot/run,
- * and on Windows the file lives in the persona's own tmp dir. Two users, or two
- * personas in one account, never share a lock file and never block each other —
- * which is the point, because each persona polls a DIFFERENT bot token.
+ * ── Multi-user ──
+ * The lock path is user-scoped ($XDG_RUNTIME_DIR / per-uid /tmp on POSIX,
+ * per-account %TEMP% on Windows), so two users starting their own phantom at
+ * boot never share a lock file and never block each other.
  */
 
 import { dlopen, FFIType } from "bun:ffi";
@@ -62,9 +60,8 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { activePersona, ensurePersonaTmpDir, FALLBACK_PERSONA } from "./personaPaths.ts";
 
 export interface LockHandle {
   /** Path to the lock file. */
@@ -80,43 +77,23 @@ export interface LockConflict {
   pid: number;
 }
 
-/**
- * A persona name is user-supplied and becomes part of a filename, so strip
- * anything that could escape the directory or collide across personas.
- */
-function lockSlug(persona: string): string {
-  // Dots are NOT in the allowed set: ".." is the one sequence that still reads
-  // as a path component after separators are gone, and no real persona name
-  // needs one.
-  const slug = persona.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
-  // A name that carries no alphanumerics at all ("///", "..") sanitises to
-  // punctuation only — meaningless as a filename and, in the ".." case, still
-  // path-ish. Fall back rather than build a lock file nobody can reason about.
-  return /[A-Za-z0-9]/.test(slug) ? slug : FALLBACK_PERSONA;
-}
-
-export function defaultLockPath(persona: string = activePersona()): string {
-  // Per persona on EVERY platform (#435/#436). The lock exists to stop two
-  // daemons polling ONE bot token; two personas in one OS account are two
-  // different tokens, so a per-user lock made persona B silently refuse to
-  // start while persona A held it. Scope is therefore (user, persona).
-  const slug = lockSlug(persona);
+export function defaultLockPath(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg) return join(xdg, `phantombot-${slug}.run.lock`);
+  if (xdg) return join(xdg, "phantombot.run.lock");
   // Windows has no XDG_RUNTIME_DIR and no uid. `os.tmpdir()` resolves to the
   // per-user %TEMP% (…\AppData\Local\Temp), which is already user-scoped, so a
   // single filename there won't collide across accounts the way /tmp would.
   if (process.platform === "win32") {
-    const dir = ensurePersonaTmpDir(persona);
-    return join(dir, "phantombot.run.lock");
+    return join(tmpdir(), "phantombot.run.lock");
   }
   // No XDG_RUNTIME_DIR (e.g. a non-systemd login): fall back to a user-scoped
   // dir under $HOME, NOT /tmp (issue #365) — a full/quota'd tmpfs must never be
-  // able to block the lock.
+  // able to block the lock. Still per-user (not per-persona), so two personas
+  // sharing one OS user can't spawn two daemons on the same token.
   const uid = process.getuid?.() ?? 0;
   const runDir = join(homedir(), ".cache", "phantombot", "run");
   mkdirSync(runDir, { recursive: true });
-  return join(runDir, `phantombot-${uid}-${slug}.run.lock`);
+  return join(runDir, `phantombot-${uid}.run.lock`);
 }
 
 /** Informational payload: our PID, so a conflicting starter can name us. */

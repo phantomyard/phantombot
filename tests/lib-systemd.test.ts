@@ -20,16 +20,10 @@ import {
   generateTickService,
   installPhantombotUnit,
   isSelfRestartTeardown,
-  heartbeatServiceName,
-  heartbeatTimerName,
-  phantombotUnitName,
   phantombotUnitTargets,
   PHANTOMBOT_SERVICE_PATH,
-  RETIRED_UNIT_NAMES,
-  tickServiceName,
-  tickTimerName,
   runSelfRestart,
-  selfRestartArgs,
+  SELF_RESTART_ARGS,
   uninstallPhantombotUnit,
   type SystemctlResult,
   type SystemctlRunner,
@@ -85,13 +79,13 @@ function tmpInstallPaths() {
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-systemd-"));
-  unitPath = join(workdir, "phantombot-phantom.service");
-  hbServicePath = join(workdir, "phantombot-phantom-heartbeat.service");
-  hbTimerPath = join(workdir, "phantombot-phantom-heartbeat.timer");
+  unitPath = join(workdir, "phantombot.service");
+  hbServicePath = join(workdir, "phantombot-heartbeat.service");
+  hbTimerPath = join(workdir, "phantombot-heartbeat.timer");
   ngServicePath = join(workdir, "phantombot-nightly.service");
   ngTimerPath = join(workdir, "phantombot-nightly.timer");
-  tickServicePath = join(workdir, "phantombot-phantom-tick.service");
-  tickTimerPath = join(workdir, "phantombot-phantom-tick.timer");
+  tickServicePath = join(workdir, "phantombot-tick.service");
+  tickTimerPath = join(workdir, "phantombot-tick.timer");
 });
 
 afterEach(async () => {
@@ -120,19 +114,16 @@ describe("generateSystemdUnit", () => {
     expect(u).toContain('ExecStart="/path with space/phantombot" run');
   });
 
-  test("selfRestartArgs passes --no-block so the systemctl child can exit cleanly before the cgroup kill", () => {
+  test("SELF_RESTART_ARGS passes --no-block so the systemctl child can exit cleanly before the cgroup kill", () => {
     // The /restart and /update flows call svc.restart() from INSIDE the
     // running service. Without --no-block, systemctl blocks awaiting
     // unit start-up — but the same restart sends SIGTERM through the
     // whole cgroup, taking out the systemctl child too, which we then
     // observed as exit 143 and (mis-)logged as "/restart failed".
-    const args = selfRestartArgs("robbie");
-    expect(args).toContain("--no-block");
-    expect(args).toContain("--user");
-    expect(args).toContain("restart");
-    // Persona-scoped since #435 — restarting a bare `phantombot-phantom.service`
-    // would restart whichever persona happened to own that name.
-    expect(args).toContain("phantombot-robbie.service");
+    expect(SELF_RESTART_ARGS).toContain("--no-block");
+    expect(SELF_RESTART_ARGS).toContain("--user");
+    expect(SELF_RESTART_ARGS).toContain("restart");
+    expect(SELF_RESTART_ARGS).toContain("phantombot.service");
   });
 
   // --- phantombot #408: exit 143 from the self-restart systemctl child ---
@@ -190,7 +181,7 @@ describe("generateSystemdUnit", () => {
     expect(r.ok).toBe(true);
     expect(r.stderr).toBeUndefined();
     // …and it really did ask systemd for the restart.
-    expect(fake.calls[0]).toEqual([...selfRestartArgs()]);
+    expect(fake.calls[0]).toEqual([...SELF_RESTART_ARGS]);
   });
 
   test("runSelfRestart: exit 0 is ok:true", async () => {
@@ -205,12 +196,12 @@ describe("generateSystemdUnit", () => {
       {
         exitCode: 1,
         stdout: "",
-        stderr: "Failed to restart phantombot-phantom.service: Unit not found.\n",
+        stderr: "Failed to restart phantombot.service: Unit not found.\n",
       },
     ];
     const r = await runSelfRestart(fake);
     expect(r.ok).toBe(false);
-    expect(r.stderr).toBe("Failed to restart phantombot-phantom.service: Unit not found.");
+    expect(r.stderr).toBe("Failed to restart phantombot.service: Unit not found.");
   });
 
   test("runSelfRestart: non-zero with empty stderr still fails, reported as `exit N`", async () => {
@@ -286,15 +277,15 @@ describe("installPhantombotUnit", () => {
 
     expect(sys.calls).toEqual([
       ["--user", "daemon-reload"],
-      ["--user", "enable", "phantombot-phantom.service"],
-      ["--user", "start", "phantombot-phantom.service"],
-      ["--user", "enable", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "start", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "enable", "phantombot-phantom-tick.timer"],
-      ["--user", "start", "phantombot-phantom-tick.timer"],
+      ["--user", "enable", "phantombot.service"],
+      ["--user", "start", "phantombot.service"],
+      ["--user", "enable", "phantombot-heartbeat.timer"],
+      ["--user", "start", "phantombot-heartbeat.timer"],
+      ["--user", "enable", "phantombot-tick.timer"],
+      ["--user", "start", "phantombot-tick.timer"],
     ]);
-    expect(out.text).toContain("wrote phantombot-phantom.service");
-    expect(out.text).toContain("wrote phantombot-phantom-tick.timer");
+    expect(out.text).toContain("wrote phantombot.service");
+    expect(out.text).toContain("wrote phantombot-tick.timer");
     expect(out.text).toContain("enabled and started");
   });
 
@@ -377,10 +368,10 @@ describe("ensureSystemdUnitsCurrent", () => {
     // No daemon-reload, no enable, no start — only the 4 inspect calls
     // (is-enabled + is-active for each of the 2 timers).
     expect(sys.calls).toEqual([
-      ["--user", "is-enabled", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "is-active", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "is-enabled", "phantombot-phantom-tick.timer"],
-      ["--user", "is-active", "phantombot-phantom-tick.timer"],
+      ["--user", "is-enabled", "phantombot-heartbeat.timer"],
+      ["--user", "is-active", "phantombot-heartbeat.timer"],
+      ["--user", "is-enabled", "phantombot-tick.timer"],
+      ["--user", "is-active", "phantombot-tick.timer"],
     ]);
   });
 
@@ -408,17 +399,17 @@ describe("ensureSystemdUnitsCurrent", () => {
     });
     expect(r.rewrote.sort()).toEqual(
       [
-        "phantombot-phantom-heartbeat.service",
-        "phantombot-phantom-heartbeat.timer",
-        "phantombot-phantom-tick.service",
-        "phantombot-phantom-tick.timer",
-        "phantombot-phantom.service",
+        "phantombot-heartbeat.service",
+        "phantombot-heartbeat.timer",
+        "phantombot-tick.service",
+        "phantombot-tick.timer",
+        "phantombot.service",
       ].sort(),
     );
     expect(r.backups).toEqual([]); // nothing pre-existing to back up
     expect(r.repairedTimers).toEqual([
-      "phantombot-phantom-heartbeat.timer",
-      "phantombot-phantom-tick.timer",
+      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
     // Verify each canonical body landed on disk.
     expect(await readFile(unitPath, "utf8")).toContain(
@@ -451,9 +442,9 @@ describe("ensureSystemdUnitsCurrent", () => {
       ...paths(),
       systemctl: sys,
     });
-    // phantombot-phantom.service was rewritten; others (missing) also rewritten;
+    // phantombot.service was rewritten; others (missing) also rewritten;
     // but only the existing-and-different one produces a backup.
-    expect(r.rewrote).toContain("phantombot-phantom.service");
+    expect(r.rewrote).toContain("phantombot.service");
     expect(r.backups).toEqual([`${unitPath}.bak`]);
     expect(await readFile(`${unitPath}.bak`, "utf8")).toBe(
       "HAND_EDITED_CONTENT_DO_NOT_LOSE",
@@ -485,14 +476,14 @@ describe("ensureSystemdUnitsCurrent", () => {
       systemctl: sys,
     });
     expect(r.rewrote).toEqual([]);
-    expect(r.repairedTimers).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
     // Verify the repair call was enable --now (not just start), which
     // both arms the symlink and starts the timer in one shot.
     expect(sys.calls).toContainEqual([
       "--user",
       "enable",
       "--now",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
   });
 
@@ -523,15 +514,15 @@ describe("ensureSystemdUnitsCurrent", () => {
       binPath: bin,
       ...paths(),
       systemctl: sys,
-      forceRearmTimers: ["phantombot-phantom-heartbeat.timer"],
+      forceRearmTimers: ["phantombot-heartbeat.timer"],
     });
     expect(r.rewrote).toEqual([]);
     // Only the listed zombie is touched; the other healthy timers aren't.
-    expect(r.repairedTimers).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
     expect(sys.calls).toContainEqual([
       "--user",
       "restart",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
     // It must NOT have used enable --now, which can't recover an
     // already-active timer.
@@ -539,7 +530,7 @@ describe("ensureSystemdUnitsCurrent", () => {
       "--user",
       "enable",
       "--now",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
   });
 
@@ -575,19 +566,19 @@ describe("ensureSystemdUnitsCurrent", () => {
       ...paths(),
       systemctl: sys,
     });
-    expect(r.rewrote).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(r.rewrote).toEqual(["phantombot-heartbeat.timer"]);
     expect(r.backups).toEqual([`${hbTimerPath}.bak`]);
     // The rewritten timer was restarted; the untouched ones were not.
-    expect(r.repairedTimers).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
     expect(sys.calls).toContainEqual([
       "--user",
       "restart",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
     expect(sys.calls).not.toContainEqual([
       "--user",
       "restart",
-      "phantombot-phantom-tick.timer",
+      "phantombot-tick.timer",
     ]);
   });
 
@@ -615,30 +606,30 @@ describe("ensureSystemdUnitsCurrent", () => {
       binPath: bin,
       ...paths(),
       systemctl: sys,
-      forceRearmTimers: ["phantombot-phantom-heartbeat.timer"],
+      forceRearmTimers: ["phantombot-heartbeat.timer"],
     });
-    expect(r.repairedTimers).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
     expect(sys.calls).toContainEqual([
       "--user",
       "enable",
       "--now",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
     expect(sys.calls).not.toContainEqual([
       "--user",
       "restart",
-      "phantombot-phantom-heartbeat.timer",
+      "phantombot-heartbeat.timer",
     ]);
   });
 
   test("never generates the retired nightly units", () => {
     const targets = phantombotUnitTargets("/usr/local/bin/phantombot");
     expect(targets.map((t) => t.unit)).toEqual([
-      "phantombot-phantom.service",
-      "phantombot-phantom-heartbeat.service",
-      "phantombot-phantom-heartbeat.timer",
-      "phantombot-phantom-tick.service",
-      "phantombot-phantom-tick.timer",
+      "phantombot.service",
+      "phantombot-heartbeat.service",
+      "phantombot-heartbeat.timer",
+      "phantombot-tick.service",
+      "phantombot-tick.timer",
     ]);
   });
 
@@ -708,19 +699,19 @@ describe("driftedUnitNames", () => {
     const targets = phantombotUnitTargets(bin);
     const byPath = new Map(targets.map((t) => [t.path, t.content]));
     const heartbeat = targets.find(
-      (t) => t.unit === "phantombot-phantom-heartbeat.timer",
+      (t) => t.unit === "phantombot-heartbeat.timer",
     );
     if (!heartbeat) throw new Error("heartbeat timer target missing");
     // Simulate the pre-OnCalendar body left behind by an in-place update.
     byPath.set(heartbeat.path, "OnUnitActiveSec=30min\n");
     const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
-    expect(drifted).toEqual(["phantombot-phantom-heartbeat.timer"]);
+    expect(drifted).toEqual(["phantombot-heartbeat.timer"]);
   });
 
   test("a missing file (reader returns undefined) is not counted as drift", () => {
     const targets = phantombotUnitTargets(bin);
     const byPath = new Map(targets.map((t) => [t.path, t.content]));
-    const tick = targets.find((t) => t.unit === "phantombot-phantom-tick.timer");
+    const tick = targets.find((t) => t.unit === "phantombot-tick.timer");
     if (!tick) throw new Error("tick timer target missing");
     byPath.delete(tick.path); // absent on disk
     const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
@@ -930,7 +921,7 @@ WantedBy=default.target
     expect(r.rerendered).toBe(true);
     expect(sys.calls).toEqual([["--user", "daemon-reload"]]);
     const rewritten = await readFile(unitPath, "utf8");
-    expect(rewritten).toContain("EnvironmentFile=-%h/.local/share/phantombot/personas/phantom/.env");
+    expect(rewritten).toContain("EnvironmentFile=-%h/.config/phantombot/.env");
     expect(rewritten).toContain(`ExecStart=${BIN} run`);
   });
 });
@@ -949,14 +940,14 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(sys.calls).toEqual([
-      ["--user", "stop", "phantombot-phantom-tick.timer"],
-      ["--user", "disable", "phantombot-phantom-tick.timer"],
+      ["--user", "stop", "phantombot-tick.timer"],
+      ["--user", "disable", "phantombot-tick.timer"],
       ["--user", "stop", "phantombot-nightly.timer"],
       ["--user", "disable", "phantombot-nightly.timer"],
-      ["--user", "stop", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "disable", "phantombot-phantom-heartbeat.timer"],
-      ["--user", "stop", "phantombot-phantom.service"],
-      ["--user", "disable", "phantombot-phantom.service"],
+      ["--user", "stop", "phantombot-heartbeat.timer"],
+      ["--user", "disable", "phantombot-heartbeat.timer"],
+      ["--user", "stop", "phantombot.service"],
+      ["--user", "disable", "phantombot.service"],
       ["--user", "daemon-reload"],
     ]);
     await expect(readFile(unitPath, "utf8")).rejects.toThrow();
@@ -974,142 +965,5 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(out.text).toContain("(no unit file at");
-  });
-});
-
-describe("persona-scoped units (#435)", () => {
-  test("two personas get different unit names for every unit", () => {
-    // A single shared `phantombot.service` meant installing persona B
-    // overwrote persona A's unit, leaving one daemon serving the wrong
-    // persona. The unit name IS the isolation on Linux.
-    const names = (p: string) => [
-      phantombotUnitName(p),
-      heartbeatServiceName(p),
-      heartbeatTimerName(p),
-      tickServiceName(p),
-      tickTimerName(p),
-    ];
-    const lena = names("lena");
-    const kai = names("kai");
-    expect(new Set([...lena, ...kai]).size).toBe(10);
-    expect(lena[0]).toBe("phantombot-lena.service");
-    expect(lena[2]).toBe("phantombot-lena-heartbeat.timer");
-  });
-
-  test("a persona name with a path separator cannot escape the unit directory", () => {
-    expect(phantombotUnitName("../../evil")).toBe("phantombot-.._.._evil.service");
-  });
-
-  test("the unit bakes in PHANTOMBOT_PERSONA and that persona's own .env", () => {
-    // Baked in, not inherited: the daemon must resolve its config, state,
-    // database and tmp dir from <persona>/ with no ambient default to get wrong.
-    const unit = generateSystemdUnit({
-      binPath: "/home/x/.local/bin/phantombot",
-      args: ["run"],
-      persona: "lena",
-    });
-    expect(unit).toContain('Environment="PHANTOMBOT_PERSONA=lena"');
-    expect(unit).toContain(
-      "EnvironmentFile=-%h/.local/share/phantombot/personas/lena/.env",
-    );
-    expect(unit).not.toContain(".config/phantombot/.env");
-  });
-
-  /**
-   * #436: RETIRED_UNIT_NAMES was exported and asserted on, but NOTHING consumed
-   * it — `removeRetiredUnits` only ever swept the two nightly paths. So an
-   * upgraded box kept its pre-#435 host-global `phantombot.service` enabled and
-   * running, racing the new persona-scoped unit for the run lock: precisely the
-   * two-daemons bug #435 exists to end, reintroduced by the migration itself.
-   */
-  test("the sweep actually deletes the pre-#435 host-global units", async () => {
-    const { removeRetiredUnits, retiredUnitPaths } = await import(
-      "../src/lib/systemd.ts"
-    );
-    for (const p of retiredUnitPaths(workdir)) {
-      await writeFile(p, "stale unit\n", "utf8");
-    }
-    const sys = new FakeSystemctl();
-
-    const removed = await removeRetiredUnits(sys, retiredUnitPaths(workdir));
-
-    expect(removed).toContain("phantombot.service");
-    expect(removed).toContain("phantombot-heartbeat.timer");
-    expect(removed).toContain("phantombot-tick.service");
-    for (const p of retiredUnitPaths(workdir)) {
-      expect(existsSync(p)).toBe(false);
-    }
-    // A retired .service can be RUNNING, so it is stopped and disabled before
-    // its file is deleted — not just unlinked out from under a live daemon.
-    const flat = sys.calls.map((c) => c.join(" "));
-    expect(flat).toContain("--user stop phantombot.service");
-    expect(flat).toContain("--user disable phantombot.service");
-  });
-
-  test("the sweep leaves the units we DO install alone", async () => {
-    const { removeRetiredUnits, retiredUnitPaths } = await import(
-      "../src/lib/systemd.ts"
-    );
-    const live = join(workdir, "phantombot-phantom.service");
-    await writeFile(live, "live unit\n", "utf8");
-    await writeFile(join(workdir, "phantombot.service"), "stale\n", "utf8");
-
-    await removeRetiredUnits(new FakeSystemctl(), retiredUnitPaths(workdir));
-
-    expect(existsSync(live)).toBe(true);
-  });
-
-  /**
-   * #436: the unit hard-coded `%h/.local/share/phantombot/personas`, so on a box
-   * with PHANTOMBOT_PERSONAS_DIR set the service sourced a .env that does not
-   * exist AND resolved a different personas root than the operator's shell —
-   * silently running a different (usually empty) persona.
-   */
-  test("a custom PHANTOMBOT_PERSONAS_DIR is baked into the unit", async () => {
-    const saved = process.env.PHANTOMBOT_PERSONAS_DIR;
-    process.env.PHANTOMBOT_PERSONAS_DIR = "/srv/phantom/personas";
-    try {
-      const unit = generateSystemdUnit({
-        binPath: "/usr/local/bin/phantombot",
-        args: ["run"],
-        persona: "lena",
-      });
-      expect(unit).toContain(
-        'Environment="PHANTOMBOT_PERSONAS_DIR=/srv/phantom/personas"',
-      );
-      expect(unit).toContain(
-        "EnvironmentFile=-/srv/phantom/personas/lena/.env",
-      );
-      expect(unit).not.toContain("%h/.local/share/phantombot/personas");
-    } finally {
-      if (saved === undefined) delete process.env.PHANTOMBOT_PERSONAS_DIR;
-      else process.env.PHANTOMBOT_PERSONAS_DIR = saved;
-    }
-  });
-
-  test("the default root still uses systemd's %h escape and no extra Environment line", () => {
-    const saved = process.env.PHANTOMBOT_PERSONAS_DIR;
-    delete process.env.PHANTOMBOT_PERSONAS_DIR;
-    try {
-      const unit = generateSystemdUnit({
-        binPath: "/usr/local/bin/phantombot",
-        args: ["run"],
-        persona: "lena",
-      });
-      expect(unit).toContain(
-        "EnvironmentFile=-%h/.local/share/phantombot/personas/lena/.env",
-      );
-      expect(unit).not.toContain("PHANTOMBOT_PERSONAS_DIR");
-    } finally {
-      if (saved !== undefined) process.env.PHANTOMBOT_PERSONAS_DIR = saved;
-    }
-  });
-
-  test("the pre-#435 shared units are on the retired list so an upgrade removes them", () => {
-    // Two daemons on one persona — the old unit and the new one — would race
-    // for the run lock, which is exactly the bug #435 exists to end.
-    expect(RETIRED_UNIT_NAMES).toContain("phantombot.service");
-    expect(RETIRED_UNIT_NAMES).toContain("phantombot-heartbeat.timer");
-    expect(RETIRED_UNIT_NAMES).toContain("phantombot-tick.timer");
   });
 });

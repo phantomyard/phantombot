@@ -71,6 +71,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
 import {
   isSameProcess,
@@ -79,7 +80,6 @@ import {
   type ProcessStartProbe,
 } from "./processLiveness.ts";
 import type { TurnOrigin } from "../memory/store.ts";
-import { personaRunDir } from "./personaPaths.ts";
 
 /**
  * How long after an interactive turn FINISHES a task wake keeps deferring.
@@ -170,7 +170,7 @@ export function registryEnabled(): boolean {
 export function defaultRegistryDir(): string {
   return (
     process.env.PHANTOMBOT_TURN_REGISTRY_DIR ??
-    join(personaRunDir(), "turns")
+    join(xdgStateHome(), "phantombot", "turns")
   );
 }
 

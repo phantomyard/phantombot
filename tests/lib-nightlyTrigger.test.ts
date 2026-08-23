@@ -96,12 +96,9 @@ describe("buildNightlyLaunch", () => {
     // own .env nor the agent's ~/.env, and with whatever PATH the manager has.
     const l = buildNightlyLaunch(bare, "robbie", systemd);
     expect(l.args).toContain("--property=EnvironmentFile=-/home/robbie/.env");
-    // Per persona since #435 — and the persona is pinned explicitly so the
-    // sweep can never resolve a different one than the caller meant.
     expect(l.args).toContain(
-      "--property=EnvironmentFile=-/home/robbie/.local/share/phantombot/personas/robbie/.env",
+      "--property=EnvironmentFile=-/home/robbie/.config/phantombot/.env",
     );
-    expect(l.args).toContain("--property=Environment=PHANTOMBOT_PERSONA=robbie");
     const path = l.args.find((a) => a.startsWith("--property=Environment=PATH="));
     // `%h` is a unit-FILE specifier; transient properties travel over D-Bus
     // where nothing expands it, so home must already be resolved here.

@@ -49,15 +49,11 @@ let config: Config;
 // This is the exact leak that poisoned Kai's persona (→ "robbie") whenever the
 // suite was run on his box. Isolate EVERY test, not just the auto-adopt block.
 let savedStateEnv: string | undefined;
-let savedGlobalEnv: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-imp-"));
   savedStateEnv = process.env.PHANTOMBOT_STATE;
   process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
-  // `default_persona` moved to the global config in #435.
-  savedGlobalEnv = process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
   source = join(workdir, "openclaw-agent");
   await mkdir(source, { recursive: true });
   await writeFile(join(source, "BOOT.md"), "# id");
@@ -82,8 +78,6 @@ beforeEach(async () => {
 afterEach(async () => {
   if (savedStateEnv === undefined) delete process.env.PHANTOMBOT_STATE;
   else process.env.PHANTOMBOT_STATE = savedStateEnv;
-  if (savedGlobalEnv === undefined) delete process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  else process.env.PHANTOMBOT_GLOBAL_CONFIG = savedGlobalEnv;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -128,7 +122,7 @@ describe("applyRestore", () => {
 });
 
 describe("runImportPersona — restart hint", () => {
-  test("prints restart hint when phantombot-phantom.service is active", async () => {
+  test("prints restart hint when phantombot.service is active", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     await runImportPersona({
@@ -147,7 +141,7 @@ describe("runImportPersona — restart hint", () => {
     expect(out.text).toContain("systemctl --user restart phantombot");
   });
 
-  test("does NOT print restart hint when phantombot-phantom.service is inactive", async () => {
+  test("does NOT print restart hint when phantombot.service is inactive", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
     await runImportPersona({
@@ -270,8 +264,8 @@ describe("runImportPersona — auto-adopt as default", () => {
     });
     expect(code).toBe(0);
     expect(out.text).toContain("adopted 'robbie' as default_persona");
-    const global = await readFile(process.env.PHANTOMBOT_GLOBAL_CONFIG!, "utf8");
-    expect(global).toContain('default_persona = "robbie"');
+    const state = JSON.parse(await readFile(stateFile(), "utf8"));
+    expect(state.default_persona).toBe("robbie");
   });
 
   test("doesn't override a working default (additive imports)", async () => {

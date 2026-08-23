@@ -38,9 +38,9 @@
 
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log } from "./logger.ts";
-import { ensurePersonaTmpDir } from "./personaPaths.ts";
 
 /**
  * Linux's per-argv-string ceiling: MAX_ARG_STRLEN = 32 * PAGE_SIZE = 131,072
@@ -205,26 +205,25 @@ export function cleanupPersonaTmpDir(
  * data — a system prompt carries memory, drawers and conversation — so they
  * must not land in a world-readable shared `/tmp` alongside other personas'.
  *
- * When no `baseDir` is given we fall back to the ACTIVE persona's tmp dir
- * (#435) rather than the shared system tmp, so even a caller that forgot to
- * thread the base through still keeps the spill inside the persona boundary.
- * That fallback is WARNED about rather than silently taken, because a
- * production spill reaching it is a plumbing regression, not a configuration
- * choice. It is a fallback and not a throw: refusing the turn on a headless
- * box would be worse.
+ * The `os.tmpdir()` fallback exists only for tests and for a caller that
+ * genuinely has no persona dir. It is WARNED about rather than silently taken,
+ * because a production spill landing there is a plumbing regression, not a
+ * configuration choice. It is still a fallback and not a throw: writing a
+ * persona's prompt to a less private directory is bad, refusing the turn on a
+ * headless box is worse.
  */
 export async function createHarnessTempDir(
   baseDir?: string,
 ): Promise<HarnessTempDir> {
   if (!baseDir) {
-    log.warn("createHarnessTempDir: no persona tmp base given, falling back to the active persona's tmp dir", {
-      fallback: ensurePersonaTmpDir(),
+    log.warn("createHarnessTempDir: no persona tmp base given, falling back to the shared system tmp", {
+      fallback: tmpdir(),
     });
   }
-  const base = baseDir ?? ensurePersonaTmpDir();
+  const base = baseDir ?? tmpdir();
   // Ensure the persona tmp root exists before mkdtemp (first use on a fresh
   // box). Harmless for the os.tmpdir() fallback, which always exists.
-  await mkdir(base, { recursive: true });
+  if (baseDir) await mkdir(base, { recursive: true });
   const dir = await mkdtemp(join(base, "phantombot-harness-"));
   return {
     dir,

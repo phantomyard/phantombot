@@ -74,6 +74,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
 import { inertField, inertText } from "./promptSafeText.ts";
 import { readRegistry, registryEnabled } from "./turnRegistry.ts";
@@ -84,7 +85,6 @@ import {
   type ProcessAliveProbe,
   type ProcessStartProbe,
 } from "./processLiveness.ts";
-import { personaRunDir } from "./personaPaths.ts";
 
 /**
  * Age past which a held lock is considered abandoned.
@@ -149,7 +149,7 @@ export function locksEnabled(): boolean {
 export function defaultLockDir(): string {
   return (
     process.env.PHANTOMBOT_WORKSPACE_LOCK_DIR ??
-    join(personaRunDir(), "workspaces")
+    join(xdgStateHome(), "phantombot", "workspaces")
   );
 }
 

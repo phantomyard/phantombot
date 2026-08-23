@@ -10,7 +10,6 @@ import type {
   HarnessChunk,
   HarnessRequest,
 } from "../src/harnesses/types.ts";
-import { personaTmpDir } from "../src/lib/personaPaths.ts";
 import { acquireRunLock, isLockHandle } from "../src/lib/runLock.ts";
 import { openTaskStore, type TaskStore } from "../src/lib/tasks.ts";
 import { openMemoryStore, type MemoryStore } from "../src/memory/store.ts";
@@ -375,43 +374,6 @@ describe("runTick — normal task fire", () => {
       if (oldOther === undefined) delete process.env.PHANTOMBOT_TEST_OTHER_SECRET;
       else process.env.PHANTOMBOT_TEST_OTHER_SECRET = oldOther;
     }
-  });
-
-  /**
-   * #436: a `--command` task is the one subprocess that routinely calls BACK
-   * into phantombot (`phantombot ask`, `phantombot notify`). Without
-   * PHANTOMBOT_PERSONA the child resolves the GLOBAL default persona instead of
-   * the one whose task just fired, so persona B's poller notifies persona A.
-   * The tmp overlay travels with it so scratch files stay inside the boundary.
-   */
-  test("command-backed task inherits the TASK's persona, not the default", async () => {
-    const markerPath = join(workdir, "command-persona.txt");
-    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
-    const created = store.add({
-      persona: "lena",
-      description: "command poll",
-      schedule: "0 * * * *",
-      prompt: "audit context only",
-      command: `printf "%s|%s" "$PHANTOMBOT_PERSONA" "$TMPDIR" > ${markerPath}`,
-      reviewIntervalMs: 1,
-      now: new Date("2026-05-02T09:30:00Z"),
-    });
-    if (!created.ok) throw new Error("setup");
-    const code = await runTick({
-      config,
-      taskStore: store,
-      memory,
-      harnesses: [
-        new ScriptedHarness("h", [{ type: "done", finalText: "should not run" }]),
-      ],
-      lockPath,
-      now: new Date("2026-05-02T10:00:00Z"),
-    });
-    expect(code).toBe(0);
-    const [persona, tmp] = (await readFile(markerPath, "utf8")).split("|");
-    expect(persona).toBe("lena");
-    // TMPDIR points INSIDE lena's persona dir, not at the shared system temp.
-    expect(tmp).toBe(personaTmpDir("lena"));
   });
 
   test("command-backed due task runs without invoking any harness", async () => {

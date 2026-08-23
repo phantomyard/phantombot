@@ -122,12 +122,11 @@ describe("installZed — JSONC preservation", () => {
     expect(parsed.theme).toBe("One Dark");
     expect(parsed.agent_servers.Phantombot.command).toBe(BIN);
     expect(parsed.agent_servers.Phantombot.args).toEqual(["acp"]);
-    // The registered env bakes in an absolute PHANTOMBOT_CONFIG override so the
-    // spawned `phantombot acp` always reads the real config.toml (insurance
-    // against a redirected child `$HOME`/`$XDG_*`, the strict-snap class of
-    // bug). Since #435 that file lives inside the persona directory.
+    // The registered env now bakes in an absolute PHANTOMBOT_CONFIG override so
+    // the spawned `phantombot acp` always reads the real config.toml (insurance
+    // against a redirected child `$HOME`/`$XDG_*`, the strict-snap class of bug).
     expect(parsed.agent_servers.Phantombot.env.PHANTOMBOT_CONFIG).toMatch(
-      /\/personas\/[^/]+\/config\.toml$/,
+      /\/phantombot\/config\.toml$/,
     );
     // PHANTOMBOT_PERSONAS_DIR is deliberately NOT baked in: it would override a
     // custom `personas_dir` in config.toml and silently break custom persona

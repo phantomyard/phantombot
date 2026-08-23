@@ -14,7 +14,6 @@ import { listArchives } from "../src/lib/personaArchive.ts";
 import { loadState } from "../src/state.ts";
 
 const SAVED_STATE = process.env.PHANTOMBOT_STATE;
-const SAVED_GLOBAL = process.env.PHANTOMBOT_GLOBAL_CONFIG;
 let workdir: string;
 let config: Config;
 
@@ -22,8 +21,6 @@ beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-cp-"));
   await mkdir(join(workdir, "personas"), { recursive: true });
   process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
-  // `default_persona` moved to the global config in #435.
-  process.env.PHANTOMBOT_GLOBAL_CONFIG = join(workdir, "global.toml");
   config = {
     defaultPersona: "phantom",
     harnessIdleTimeoutMs: 600_000, harnessHardTimeoutMs: 600_000, harnessStartupTimeoutMs: 600_000,
@@ -44,8 +41,6 @@ beforeEach(async () => {
 afterEach(async () => {
   if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
   else process.env.PHANTOMBOT_STATE = SAVED_STATE;
-  if (SAVED_GLOBAL === undefined) delete process.env.PHANTOMBOT_GLOBAL_CONFIG;
-  else process.env.PHANTOMBOT_GLOBAL_CONFIG = SAVED_GLOBAL;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -134,9 +129,8 @@ describe("applyPersona", () => {
       setDefault: false,
     });
     expect(r.adoptedAsDefault).toBe(false);
-    // `default_persona` lives in the global config since #435; loadState only
-    // surfaces it, so assert on the file that actually owns it.
-    expect(await Bun.file(process.env.PHANTOMBOT_GLOBAL_CONFIG!).exists()).toBe(false);
+    const state = await loadState();
+    expect(state.default_persona).toBeUndefined();
   });
 
   test("setDefault=false adopts as default when current default has no dir on disk", async () => {

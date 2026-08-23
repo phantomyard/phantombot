@@ -62,15 +62,14 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { xdgDataHome } from "../config.ts";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
 import { currentUserName, currentUserSid } from "./filePermissions.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
-import { personaLogDir, personaRoot } from "./personaPaths.ts";
-import { dataHome, ensurePersonaTmpDir } from "./personaPaths.ts";
 
 export const TASK_FOLDER = "\\Phantombot";
 
@@ -202,7 +201,7 @@ function logonMarkerPath(persona: string): string {
  * installs made before the scoping still heal in their original mode until
  * the next `phantombot install` rewrites the persona-scoped marker. */
 function legacyLogonMarkerPath(): string {
-  return join(legacyDataDir(), "windows-logon.json");
+  return join(launcherDir(), "windows-logon.json");
 }
 
 export async function writeTaskLogon(
@@ -285,7 +284,7 @@ type TaskLabel = "phantombot" | "heartbeat" | "tick" | "login";
  * forever.
  */
 export function taskLogsDir(): string {
-  return personaLogDir();
+  return join(xdgDataHome(), "phantombot", "logs");
 }
 
 function logsDir(): string {
@@ -310,19 +309,9 @@ function xmlEscape(s: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Directory that holds this persona's hidden-launcher script (beside logs\). */
+/** Directory that holds the shared hidden-launcher script (beside logs\). */
 function launcherDir(): string {
-  return personaRoot();
-}
-
-/**
- * Pre-#435 host-global data directory. Referenced ONLY by the legacy-cleanup
- * paths below — the shared launcher script and the pre-scoping logon marker
- * both live here, and an install that predates #435 still points its tasks at
- * them, so we must be able to find and remove them at their ORIGINAL location.
- */
-function legacyDataDir(): string {
-  return join(dataHome(), "phantombot");
+  return join(xdgDataHome(), "phantombot");
 }
 
 /** Absolute path of THIS persona's hidden-launcher VBScript. The launcher
@@ -336,7 +325,7 @@ export function launcherVbsPath(persona: string): string {
 /** Pre-persona-scoping shared launcher location. Only the legacy pre-rename
  * tasks still reference it, so it may only be removed once those are gone. */
 export function legacyLauncherVbsPath(): string {
-  return join(legacyDataDir(), "phantombot-launch.vbs");
+  return join(launcherDir(), "phantombot-launch.vbs");
 }
 
 /**
@@ -1270,7 +1259,7 @@ export async function installPhantombotTasks(
     sid,
     username: opts.accountName ?? currentUserName(),
   };
-  const xmlDir = opts.xmlDir ?? ensurePersonaTmpDir();
+  const xmlDir = opts.xmlDir ?? tmpdir();
   const logon = opts.logon ?? { mode: "interactive" as const };
 
   // Persist the logon MODE before registering, so a later heal sees it even if
@@ -1625,7 +1614,7 @@ export async function ensureTasksCurrent(
   opts: EnsureTasksCurrentOptions,
 ): Promise<EnsureTasksCurrentResult> {
   const sid = opts.sid ?? currentUserSid();
-  const xmlDir = opts.xmlDir ?? ensurePersonaTmpDir();
+  const xmlDir = opts.xmlDir ?? tmpdir();
   const persona = opts.persona ?? (await currentPersonaName());
   const logon: TaskLogon & { password?: string } =
     opts.logon ??

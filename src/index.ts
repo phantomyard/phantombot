@@ -7,10 +7,6 @@
  *
  * Before dispatch we bootstrap credentials, in order:
  *
- *   0. `migrateHostLayoutAtStartup` — one-shot, idempotent move of a pre-#435
- *      host-global layout (`~/.config/phantombot`, the shared state/data dirs)
- *      into the per-persona directories. Nothing is deleted; the old dirs are
- *      renamed aside.
  *   1. `migratePlaintextToVault` — an idempotent, best-effort migration of any
  *      leftover plaintext `~/.env` / `~/.config/phantombot/.env` into the
  *      per-persona ENCRYPTED vaults, deleting each plaintext file only after
@@ -36,7 +32,6 @@ import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
 import { preloadEnvFiles } from "./lib/envBootstrap.ts";
 import { log } from "./lib/logger.ts";
-import { migrateHostLayoutAtStartup } from "./lib/hostLayoutMigrate.ts";
 import { loadVaultIntoEnv } from "./lib/vault.ts";
 import { migratePlaintextToVault } from "./lib/vaultMigrate.ts";
 
@@ -55,12 +50,6 @@ if (process.argv[2] === "_complete") {
 // (--help/--version/bare) so they never mutate disk or provision a persona —
 // important for CI, which uses them as smoke tests. See cliInvocation.ts.
 if (!isReadOnlyInvocation(process.argv)) {
-  // Before ANYTHING reads a path: fold a pre-#435 host-global layout into the
-  // per-persona one. Idempotent, never deletes, and a no-op on a fresh install.
-  // It has to run first because every path below is now persona-relative — a
-  // box that still had its config in ~/.config/phantombot would otherwise boot
-  // with built-in defaults and look like it had lost its settings.
-  migrateHostLayoutAtStartup();
   try {
     const config = await loadConfig();
     await migratePlaintextToVault(config);
