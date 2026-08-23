@@ -423,6 +423,47 @@ describe("loadConfig persona layering", () => {
     expect(lena.channels.telegramPersonas?.lena?.token).toBe("lena-bot");
   });
 
+  test("a PARTIAL persona telegram table never borrows the host token", async () => {
+    // Kai's round-2 repro: lena's file states an allowlist but no token. The
+    // deep merge has already folded the host account underneath it, so a fix
+    // that merely skips the isolation rewrite when lena "has a telegram table"
+    // hands her the DEFAULT persona's token with her allowlist — two listeners
+    // on one bot, and lena answering on the owner's bot.
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\n' +
+        'token = "robbie-bot"\nallowed_user_ids = [1]\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      "[channels.telegram]\nallowed_user_ids = [2]\n",
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    // An account with no token of its own is INCOMPLETE, not a licence to
+    // borrow the host's: lena simply has no Telegram until she is given a bot.
+    expect(lena.channels.telegram).toBeUndefined();
+  });
+
+  test("a partial persona table completes from its LEGACY entry, not the host", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\n' +
+        'token = "robbie-bot"\npoll_timeout_s = 11\n\n' +
+        '[channels.telegram.personas.lena]\ntoken = "lena-bot"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      "[channels.telegram]\nallowed_user_ids = [2]\n",
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram?.token).toBe("lena-bot");
+    expect(lena.channels.telegram?.allowedUserIds).toEqual([2]);
+  });
+
   test("autostart_personas parses, trims, dedupes and survives junk", async () => {
     await writeFile(
       process.env.PHANTOMBOT_CONFIG!,

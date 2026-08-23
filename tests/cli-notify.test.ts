@@ -619,7 +619,7 @@ describe("runNotify — persona-aware config resolution (phantombot#439)", () =>
     saved.clear();
   });
 
-  test("--persona notifies THAT persona's own bot, not the default one", async () => {
+  test("--persona notifies THAT persona's own bot AND the host default bot", async () => {
     const transport = new FakeTransport();
     const code = await runNotify({
       persona: "lena",
@@ -629,7 +629,31 @@ describe("runNotify — persona-aware config resolution (phantombot#439)", () =>
       err: new CaptureStream(),
     });
     expect(code).toBe(0);
-    expect(transport.sent.map((s) => s.chatId)).toEqual(["777"]);
+    // The broadcast contract survives the persona layer: lena's own bot first,
+    // the owner's default bot as well. Loading only lena's layer would drop
+    // 111 — her config deliberately does not carry the host account.
+    expect(transport.sent.map((s) => s.chatId).sort()).toEqual(["111", "777"]);
+  });
+
+  test("a persona with NO telegram of its own still reaches the default bot", async () => {
+    // The phantomchat-only case: nothing in kai's layer names a bot, so the
+    // host default account is the only delivery path an incident has.
+    mkdirSync(join(dir, "personas", "kai"), { recursive: true });
+    writeFileSync(
+      join(dir, "personas", "kai", "config.toml"),
+      `[voice]\nenabled = false\n`,
+      "utf8",
+    );
+    const transport = new FakeTransport();
+    const code = await runNotify({
+      persona: "kai",
+      message: "hello",
+      transport,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(transport.sent.map((s) => s.chatId)).toEqual(["111"]);
   });
 
   test("no --persona still notifies the default persona's bot", async () => {

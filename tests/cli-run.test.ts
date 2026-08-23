@@ -305,6 +305,75 @@ describe("runRun — multi-persona telegram", () => {
     expect(chains.amanda).toEqual(["claude", "codex"]);
   });
 
+  test("a LEGACY-routed persona gets its OWN resolved config, not the default's", async () => {
+    // phantombot#439 round 2: `autostart_personas` is not the only road to a
+    // second listener — a host still routing through
+    // `[channels.telegram.personas.amanda]` gets one too, and a listener with
+    // no resolved config silently runs on the DEFAULT persona's harness chain,
+    // voice, chattiness and timeouts. Migration seeds amanda's config.toml, so
+    // the run wiring must resolve it.
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await mkdir(join(workdir, "personas", "amanda"), { recursive: true });
+    await writeFile(join(workdir, "personas", "amanda", "BOOT.md"), "# Amanda");
+    await writeFile(
+      join(workdir, "personas", "amanda", "config.toml"),
+      'chattiness = true\n',
+      "utf8",
+    );
+    const asked: string[] = [];
+    const chains: Record<string, string[]> = {};
+
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: {
+          ...config.harnesses,
+          chain: ["codex"],
+          codex: { bin: "codex", model: "" },
+        },
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          telegramPersonas: {
+            amanda: { token: "amanda-tok", pollTimeoutS: 30, allowedUserIds: [] },
+          },
+        },
+      },
+      lockPath: join(workdir, "run.lock"),
+      checkHarnesses: false,
+      loadPersonaConfig: async (name) => {
+        asked.push(name);
+        return {
+          ...config,
+          harnesses: {
+            ...config.harnesses,
+            chain: ["claude"],
+            claude: { ...config.harnesses.claude, bin: "claude" },
+          },
+          channels: {
+            telegramPersonas: {
+              amanda: {
+                token: "amanda-tok",
+                pollTimeoutS: 30,
+                allowedUserIds: [],
+              },
+            },
+          },
+        } as typeof config;
+      },
+      runTelegramServer: async (input) => {
+        chains[input.persona] = input.harnesses.map((h) => h.id);
+      },
+      out,
+      err,
+    });
+
+    expect(code).toBe(0);
+    expect(asked).toContain("amanda");
+    expect(chains.amanda).toEqual(["claude"]);
+    expect(chains.phantom).toEqual(["codex"]);
+  });
+
   test("fails startup when a telegram persona override has no usable harness", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();

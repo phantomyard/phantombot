@@ -133,10 +133,11 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // persona's Telegram bot now lives in ITS OWN config.toml, so loading the
   // default layer would notify on the default persona's bot — or find no
   // channel at all once the legacy global keys are pruned.
-  const { config, persona } = input.config
+  const { config, persona, host } = input.config
     ? {
         config: input.config,
         persona: input.persona ?? input.config.defaultPersona,
+        host: input.config,
       }
     : await loadConfigForPersona(input.persona);
 
@@ -150,10 +151,18 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   // or a persona whose bot IS the default bot — is contacted exactly once, while
   // the same id on two genuinely different bots (distinct tokens = distinct
   // chats) is contacted on each.
+  //
+  // The HOST layer is consulted explicitly for the default bot: a non-default
+  // persona's effective config no longer carries the host account at all (it
+  // is the default persona's bot — see applyPersonaLayer), so reading only
+  // `config.channels.telegram` here would quietly drop the owner's bot from
+  // every incident notification, and would leave a PhantomChat-only persona
+  // with no Telegram fallback whatsoever.
   const tgAccounts: TelegramAccount[] = [];
   const personaBot = config.channels.telegramPersonas?.[persona];
   if (personaBot) tgAccounts.push(personaBot);
   if (config.channels.telegram) tgAccounts.push(config.channels.telegram);
+  if (host.channels.telegram) tgAccounts.push(host.channels.telegram);
 
   const tgTargets: { account: TelegramAccount; chatIds: string[] }[] = [];
   {

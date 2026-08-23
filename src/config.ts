@@ -787,11 +787,14 @@ const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
  *    it did before.
  *
  * 2. A NON-DEFAULT persona never inherits the global `[channels.telegram]`
- *    account. That block is the DEFAULT persona's bot; handing it to a second
- *    persona would put two listeners on one token, which planListeners
- *    (rightly) refuses to start. Instead it falls back to its own entry in the
- *    legacy `[channels.telegram.personas.<name>]` routing table, and to no
- *    Telegram at all when it has neither.
+ *    account — not even key by key. That block is the DEFAULT persona's bot;
+ *    handing it to a second persona would put two listeners on one token,
+ *    which planListeners (rightly) refuses to start. Its account is therefore
+ *    REBUILT, not merged: its legacy `[channels.telegram.personas.<name>]`
+ *    entry first, then its own `[channels.telegram]` table on top, and no
+ *    Telegram at all when it has neither. A persona file stating only part of
+ *    an account (an allowlist but no token) is incomplete, not a licence to
+ *    borrow the host's token.
  *
  * Everything else is the ordinary per-key deep merge: persona wins, absent
  * keys fall back to the global file, never to a constant.
@@ -817,33 +820,52 @@ export function applyPersonaLayer(
   if (!opts.isDefault) {
     const channels = merged.channels;
     if (isTomlTable(channels)) {
+      // NEVER start from the merged account: `mergeToml` has already folded the
+      // GLOBAL `[channels.telegram]` (the default persona's bot) into it, so a
+      // persona file stating only `allowed_user_ids` would otherwise resolve to
+      // the default token with this persona's allowlist — two listeners on one
+      // token, or worse, this persona answering on the owner's bot. Build the
+      // account from scratch out of the only two sources that describe THIS
+      // persona: its legacy routing entry, then its own file on top.
+      const telegram = channels.telegram;
+      const globalRouting =
+        isTomlTable(telegram) && isTomlTable(telegram.personas)
+          ? telegram.personas
+          : undefined;
+      const legacyEntry =
+        globalRouting && isTomlTable(globalRouting[opts.persona])
+          ? (globalRouting[opts.persona] as TomlObject)
+          : undefined;
       const personaChannels = personaToml.channels;
-      const ownTelegram = isTomlTable(personaChannels)
-        ? personaChannels.telegram
-        : undefined;
-      if (ownTelegram === undefined) {
-        const telegram = channels.telegram;
-        const table = isTomlTable(telegram) ? telegram.personas : undefined;
-        const legacyEntry = isTomlTable(table) ? table[opts.persona] : undefined;
-        const nextChannels: TomlObject = { ...channels };
-        if (isTomlTable(legacyEntry)) {
-          nextChannels.telegram = {
-            ...legacyEntry,
-            // Keep the routing table visible: planListeners still reads it to
-            // plan the legacy listeners of OTHER personas.
-            ...(isTomlTable(telegram) && isTomlTable(telegram.personas)
-              ? { personas: telegram.personas }
-              : {}),
-          };
-        } else if (telegram !== undefined) {
-          nextChannels.telegram = isTomlTable(telegram) &&
-              isTomlTable(telegram.personas)
-            ? { personas: telegram.personas }
-            : undefined;
-          if (nextChannels.telegram === undefined) delete nextChannels.telegram;
-        }
-        merged.channels = nextChannels;
+      const ownTelegram =
+        isTomlTable(personaChannels) && isTomlTable(personaChannels.telegram)
+          ? personaChannels.telegram
+          : undefined;
+      // The routing table stays visible either way: planListeners still reads
+      // it to plan the legacy listeners of OTHER personas.
+      const routing =
+        (ownTelegram && isTomlTable(ownTelegram.personas)
+          ? ownTelegram.personas
+          : undefined) ?? globalRouting;
+
+      let account: TomlObject | undefined;
+      if (legacyEntry || ownTelegram) {
+        account = { ...(legacyEntry ?? {}), ...(ownTelegram ?? {}) };
+        delete account.personas;
       }
+
+      const nextChannels: TomlObject = { ...channels };
+      if (account) {
+        nextChannels.telegram = {
+          ...account,
+          ...(routing ? { personas: routing } : {}),
+        };
+      } else if (routing) {
+        nextChannels.telegram = { personas: routing };
+      } else {
+        delete nextChannels.telegram;
+      }
+      merged.channels = nextChannels;
     }
   }
 
@@ -1133,17 +1155,22 @@ export async function loadConfig(persona?: string): Promise<Config> {
 export async function loadConfigForPersona(
   persona?: string,
   base?: Config,
-): Promise<{ config: Config; persona: string }> {
+): Promise<{ config: Config; persona: string; host: Config }> {
   const host = base ?? (await loadConfig());
   const target = persona ?? host.defaultPersona;
   // `host` already IS the target's layer when it was loaded for it — or when
   // the caller injected a config that names no layer, in which case there is
   // nothing else to load.
   if (target === (host.personaLayer ?? host.defaultPersona)) {
-    return { config: host, persona: target };
+    return { config: host, persona: target, host };
   }
   const layered = await loadConfig(target);
-  return { config: withHostHarnessBins(layered, host), persona: target };
+  // `host` is returned alongside because a non-default persona's layer
+  // deliberately does NOT carry the host's default Telegram account (see
+  // applyPersonaLayer). Callers that legitimately need the host account —
+  // notify, which broadcasts an incident to the owner's bot as well — read it
+  // from here rather than reaching back into the file system.
+  return { config: withHostHarnessBins(layered, host), persona: target, host };
 }
 
 /**

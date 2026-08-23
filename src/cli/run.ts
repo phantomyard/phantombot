@@ -44,7 +44,10 @@ import {
   withHostHarnessBins,
 } from "../config.ts";
 import { readConfigToml } from "../lib/configWriter.ts";
-import { migratePersonaConfig } from "../lib/personaConfig.ts";
+import {
+  migratePersonaConfig,
+  personaConfigPath,
+} from "../lib/personaConfig.ts";
 import {
   advertiseP2PCapability,
   buildP2PNode,
@@ -438,24 +441,50 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // out of this map falls back to `config`, i.e. the DEFAULT persona's voice,
   // chattiness and harness chain, which is precisely the silent mis-run #439
   // exists to remove.
+  // LEGACY Telegram personas count too: a host still routing lena through
+  // `[channels.telegram.personas.lena]` gets a listener, and a listener with no
+  // resolved config falls back to `config` — the DEFAULT persona's harness
+  // chain, voice, chattiness, retrieval and timeouts. That is the same silent
+  // mis-run, just reached by the older road.
+  const legacyTelegramNames = Object.keys(
+    config.channels.telegramPersonas ?? {},
+  ).filter((name) => name !== defaultPersona);
   const resolveNames = new Set<string>([
     ...autostart,
+    ...legacyTelegramNames,
     ...phantomchatPersonas
       .map((spec) => spec.persona)
       .filter((name) => name !== defaultPersona),
   ]);
   for (const name of resolveNames) {
+    // A legacy-routed persona with no config.toml of its own has nothing to
+    // layer: the host file IS its whole configuration, exactly as before #439.
+    // Loading a layer for it would be a no-op at best, so skip it and keep the
+    // pre-#439 fallback. Once migration has seeded its file (it runs for every
+    // legacy name above), this resolves like any other persona.
+    if (
+      !autostart.includes(name) &&
+      !phantomchatPersonas.some((spec) => spec.persona === name) &&
+      !existsSync(personaConfigPath(config.personasDir, name))
+    ) {
+      continue;
+    }
     if (!existsSync(personaDir(config, name))) {
-      err.write(
-        `warning: autostart_personas lists '${name}' but no persona dir at ${personaDir(config, name)} — skipping\n`,
-      );
+      // A legacy-routed persona with no dir is planListeners' business to
+      // report (it already refuses to start a listener for a missing persona);
+      // only an explicit autostart entry is worth a warning of its own here.
+      if (autostart.includes(name)) {
+        err.write(
+          `warning: autostart_personas lists '${name}' but no persona dir at ${personaDir(config, name)} — skipping\n`,
+        );
+      }
       continue;
     }
     try {
       personaConfigs.set(name, await loadPersonaConfig(name));
     } catch (e) {
       err.write(
-        `warning: could not load config for autostart persona '${name}': ${(e as Error).message} — skipping\n`,
+        `warning: could not load config for persona '${name}': ${(e as Error).message} — skipping\n`,
       );
     }
   }
