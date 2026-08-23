@@ -30,7 +30,8 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/index.ts` | Entry point. Calls `runMain(mainCommand)`. | `cli/` |
 | `src/cli/index.ts` | Citty dispatcher. Wires every subcommand. | `cli/*.ts` |
 | `src/cli/{ask,chat,import-persona,list-personas,set-default-persona,history,config,doctor}.ts` | One subcommand each. Each exports a `run*` function for testing. | `orchestrator`, `importer`, `state`, `repl` |
-| `src/config.ts` | TOML + XDG + env-var loader. Single source of truth for paths and harness chain. | filesystem, env, `state.ts` |
+| `src/config.ts` | TOML + XDG + env-var loader. Single source of truth for paths and harness chain. Layers `<persona>/config.toml` over the host file per key (`loadConfig(persona)`). | filesystem, env, `state.ts`, `lib/personaConfig.ts` |
+| `src/lib/personaConfig.ts` | Per-persona config layering: the per-key merge, the host-only key list, and the copy-only, idempotent migration that seeds `<persona>/config.toml` from the global file. | filesystem, `lib/configWriter.ts` |
 | `src/state.ts` | Phantombot-managed runtime state (currently just `default_persona`). Lives at `$XDG_DATA_HOME/phantombot/state.json`. | filesystem |
 | `src/persona/loader.ts` | Reads BOOT.md / SOUL.md / IDENTITY.md (required) + MEMORY.md / tools.md / AGENTS.md (optional). | filesystem |
 | `src/persona/builder.ts` | Concatenates persona pieces + (deferred) retrieved memory + invocation context into a system prompt string. | `loader.ts` |

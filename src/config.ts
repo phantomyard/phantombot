@@ -27,6 +27,11 @@ import {
   resolveRouting,
 } from "./lib/piRouting.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "./lib/voice.ts";
+import {
+  mergeToml,
+  readPersonaToml,
+  stripHostOnlyKeys,
+} from "./lib/personaConfig.ts";
 import { loadState } from "./state.ts";
 
 /**
@@ -552,6 +557,29 @@ export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
   /**
+   * Personas that get their channels started at boot ALONGSIDE the default
+   * persona (phantombot#439). Host-level: it lives in the global config.toml,
+   * never in a persona file.
+   *
+   * Explicit list, never inferred from what happens to be on disk — an
+   * imported or archived persona must not start talking to the world because
+   * its directory exists. Empty (or absent) means exactly the old behaviour:
+   * the default persona only. The default persona is always started and is
+   * filtered out of this list, so listing it is harmless.
+   *
+   * Optional on the type (mirrors `updateChannel`) so partial test fixtures
+   * need no update; `loadConfig` always populates it and read sites treat
+   * absence as [].
+   */
+  autostartPersonas?: string[];
+  /**
+   * The persona whose `<persona>/config.toml` layer was merged into this
+   * object, when any. `loadConfig()` sets it to the default persona;
+   * `loadConfigForPersona(name)` sets it to `name`. Undefined only in
+   * hand-built test fixtures.
+   */
+  personaLayer?: string;
+  /**
    * Kill the harness subprocess if no output lands on stdout for this
    * long. Resets every time the harness emits a chunk. Right knob for
    * "subprocess wedged on a hung tool call" — productive work that's
@@ -743,15 +771,50 @@ export function xdgStateHome(): string {
 
 const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 
-export async function loadConfig(): Promise<Config> {
+/**
+ * Load the effective config for ONE persona.
+ *
+ * Two layers, merged per key, persona wins:
+ *   1. the host's global config.toml (paths, harness bins, default persona)
+ *   2. `<personas-root>/<persona>/config.toml` (that persona's own settings)
+ *
+ * Env vars are applied after both and still win over everything, so
+ * `PHANTOMBOT_*` remains the top of the precedence order it has always been.
+ *
+ * A key the persona file does not mention falls back to the GLOBAL FILE, not
+ * to a built-in default. An unmigrated host therefore behaves exactly as it
+ * did before this existed: no persona file, empty layer, identical config.
+ *
+ * @param persona persona whose layer to apply. Omit for the default persona.
+ */
+export async function loadConfig(persona?: string): Promise<Config> {
   const configPath =
     process.env.PHANTOMBOT_CONFIG ??
     join(xdgConfigHome(), "phantombot", "config.toml");
 
-  const toml = await tryReadToml(configPath);
+  const globalToml = await tryReadToml(configPath);
   const state = await loadState();
 
   const dataDir = join(xdgDataHome(), "phantombot");
+
+  // personas_dir and default_persona are resolved from the GLOBAL layer only —
+  // they are what tells us which persona file to read, so they cannot
+  // themselves come from it.
+  const personasDir =
+    process.env.PHANTOMBOT_PERSONAS_DIR ??
+    asString(globalToml.personas_dir) ??
+    join(dataDir, "personas");
+  const personaLayer =
+    persona ??
+    process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+    state.default_persona ??
+    asString(globalToml.default_persona) ??
+    "phantom";
+
+  const personaToml = stripHostOnlyKeys(
+    await readPersonaToml(personasDir, personaLayer),
+  );
+  const toml = mergeToml(globalToml, personaToml);
 
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
@@ -819,8 +882,12 @@ export async function loadConfig(): Promise<Config> {
     defaultPersona:
       process.env.PHANTOMBOT_DEFAULT_PERSONA ??
       state.default_persona ??
-      asString(toml.default_persona) ??
+      asString(globalToml.default_persona) ??
       "phantom",
+
+    autostartPersonas: parseAutostartPersonas(globalToml),
+
+    personaLayer,
 
     // Legacy alias: pre-PR-#56 configs only had `turn_timeout_s`, which
     // meant "kill at this wall-clock with no other constraints." The new
@@ -861,14 +928,11 @@ export async function loadConfig(): Promise<Config> {
 
     harnessHardTimeoutMs,
 
-    personasDir:
-      process.env.PHANTOMBOT_PERSONAS_DIR ??
-      asString(toml.personas_dir) ??
-      join(dataDir, "personas"),
+    personasDir,
 
     memoryDbPath:
       process.env.PHANTOMBOT_MEMORY_DB ??
-      asString(toml.memory_db) ??
+      asString(globalToml.memory_db) ??
       join(dataDir, "memory.sqlite"),
 
     configPath,
@@ -939,7 +1003,7 @@ export async function loadConfig(): Promise<Config> {
     // as opt-in: a typo (`update_channel = "prevew"`) must never leave a
     // box quietly following a ring the operator did not choose, and stable
     // is the fail-closed direction.
-    updateChannel: resolveUpdateChannel(toml.update_channel),
+    updateChannel: resolveUpdateChannel(globalToml.update_channel),
 
     embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini),
 
@@ -1604,6 +1668,40 @@ function asIntArray(v: unknown): number[] | undefined {
   for (const x of v) {
     const n = asInt(x);
     if (n !== undefined) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Read `autostart_personas` from the global config (env override:
+ * `PHANTOMBOT_AUTOSTART_PERSONAS`, comma-separated).
+ *
+ * Unknown shapes resolve to [] rather than throwing: an autostart list is a
+ * convenience, and a malformed one must not stop the daemon from starting the
+ * default persona. Entries are trimmed, empties dropped, duplicates collapsed,
+ * and order preserved (it is the order listeners come up in).
+ */
+export function parseAutostartPersonas(
+  toml: Record<string, unknown>,
+): string[] {
+  const env = process.env.PHANTOMBOT_AUTOSTART_PERSONAS;
+  const raw = env !== undefined ? env.split(",") : toml.autostart_personas;
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined) {
+      log.warn(
+        "config: autostart_personas must be an array of persona names — ignoring",
+      );
+    }
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const name = entry.trim();
+    if (name.length === 0 || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
   }
   return out;
 }

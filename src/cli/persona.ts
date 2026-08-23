@@ -31,6 +31,7 @@ import {
   personaDir,
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { updateConfigToml, type TomlObject } from "../lib/configWriter.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
@@ -262,7 +263,13 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
     p.note("No personas yet. Create or import one to get started.", "Status");
   }
 
-  type Action = "create" | "import" | "restore" | "switch" | "cancel";
+  type Action =
+    | "create"
+    | "import"
+    | "restore"
+    | "switch"
+    | "autostart"
+    | "cancel";
   const archives = await listArchives(config.personasDir);
   const switchableCount = personas.filter((n) => n !== currentDefault).length;
 
@@ -287,6 +294,14 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
             ? "create or import another first"
             : `${switchableCount} other(s) available`,
       },
+      {
+        value: "autostart",
+        label: "Choose which personas start at boot",
+        hint:
+          personas.length < 2
+            ? "create or import another first"
+            : describeAutostart(config),
+      },
       { value: "cancel", label: "Cancel" },
     ],
   });
@@ -305,6 +320,15 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
     // need to diverge.
     return runImportPersona({
       config,
+      serviceControl: input.serviceControl,
+      out: input.out,
+      err: input.err,
+    });
+  }
+  if (action === "autostart") {
+    return runAutostartPicker({
+      config,
+      personas,
       serviceControl: input.serviceControl,
       out: input.out,
       err: input.err,
@@ -335,6 +359,103 @@ async function runPersonaMenu(input: RunPersonaMenuInput): Promise<number> {
     p.outro("done");
     return code;
   }
+  return 0;
+}
+
+/** One-line summary of the current autostart set, for the menu hint. */
+function describeAutostart(config: Config): string {
+  const extra = (config.autostartPersonas ?? []).filter(
+    (n) => n !== config.defaultPersona,
+  );
+  return extra.length === 0
+    ? `only ${config.defaultPersona}`
+    : `${config.defaultPersona} + ${extra.join(", ")}`;
+}
+
+export interface RunAutostartPickerInput {
+  config: Config;
+  personas: string[];
+  serviceControl?: ServiceControl;
+  out: WriteSink;
+  err: WriteSink;
+  /** Test seam: returns the chosen persona names, or null for "cancelled". */
+  choose?: (options: {
+    personas: string[];
+    selected: string[];
+    defaultPersona: string;
+  }) => Promise<string[] | null>;
+}
+
+/**
+ * Pick the personas that start at boot alongside the default (phantombot#439).
+ *
+ * All of them run inside the ONE phantombot process — this is a config choice,
+ * not a supervisor. The default persona is always started and is deliberately
+ * not offered here: unchecking it would leave a box whose default persona owns
+ * `/update` and `/restart` but never comes up to hear them.
+ *
+ * Writes `autostart_personas` to the HOST config.toml (never a persona file:
+ * a persona must not be able to elect itself, or its neighbours, into boot).
+ */
+export async function runAutostartPicker(
+  input: RunAutostartPickerInput,
+): Promise<number> {
+  const config = input.config;
+  const selectable = input.personas.filter((n) => n !== config.defaultPersona);
+  if (selectable.length === 0) {
+    p.cancel("no other personas on disk yet.");
+    return 0;
+  }
+  const current = (config.autostartPersonas ?? []).filter((n) =>
+    selectable.includes(n),
+  );
+
+  const choose =
+    input.choose ??
+    (async ({ personas, selected }) => {
+      const picked = await p.multiselect<string>({
+        message: `Start at boot alongside '${config.defaultPersona}'`,
+        options: personas.map((n) => ({ value: n, label: n })),
+        initialValues: selected,
+        required: false,
+      });
+      return p.isCancel(picked) ? null : (picked as string[]);
+    });
+
+  const picked = await choose({
+    personas: selectable,
+    selected: current,
+    defaultPersona: config.defaultPersona,
+  });
+  if (picked === null) {
+    p.cancel("cancelled");
+    return 0;
+  }
+
+  // Preserve the on-disk order of the existing list, then append what's new,
+  // so an unrelated reorder never shows up as a diff in the config file.
+  const chosen = [
+    ...current.filter((n) => picked.includes(n)),
+    ...picked.filter((n) => !current.includes(n)),
+  ];
+
+  await updateConfigToml(config.configPath, (toml: TomlObject) => {
+    if (chosen.length === 0) {
+      delete toml.autostart_personas;
+    } else {
+      toml.autostart_personas = chosen;
+    }
+  });
+  config.autostartPersonas = chosen;
+
+  input.out.write(
+    chosen.length === 0
+      ? `autostart: ${config.defaultPersona} only\n`
+      : `autostart: ${config.defaultPersona} + ${chosen.join(", ")}\n`,
+  );
+  // A change only takes effect when the daemon next builds its listeners.
+  await maybePromptRestart(input.serviceControl ?? defaultServiceControl());
+  p.outro("done");
   return 0;
 }
 

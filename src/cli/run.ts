@@ -42,6 +42,8 @@ import {
   personaDir,
   type TelegramAccount,
 } from "../config.ts";
+import { readConfigToml } from "../lib/configWriter.ts";
+import { migratePersonaConfig } from "../lib/personaConfig.ts";
 import {
   advertiseP2PCapability,
   buildP2PNode,
@@ -124,6 +126,12 @@ export interface RunInput {
    * stub so run-wiring can be asserted without touching real relays.
    */
   runPhantomchatServer?: typeof runPhantomchatServer;
+  /**
+   * Test seam for per-persona config resolution (phantombot#439). Production
+   * calls `loadConfig(persona)`, which layers `<persona>/config.toml` over the
+   * host globals.
+   */
+  loadPersonaConfig?: (persona: string) => Promise<Config>;
 }
 
 /** One persona-bound listener that runRun() will spawn. */
@@ -131,8 +139,15 @@ export interface ListenerSpec {
   persona: string;
   agentDir: string;
   account: TelegramAccount;
-  /** "default" or "personas.<name>" — used in log/error messages. */
+  /** "default", "autostart.<name>" or "personas.<name>" — for log/error text. */
   source: string;
+  /**
+   * The persona's EFFECTIVE config: the host globals with that persona's own
+   * `<persona>/config.toml` layered on top (phantombot#439). Optional so
+   * existing callers and fixtures keep working; when absent the caller falls
+   * back to the process-wide config, which is exactly the pre-#439 behaviour.
+   */
+  config?: Config;
 }
 
 /**
@@ -151,6 +166,7 @@ export function planListeners(
   config: Config,
   defaultPersona: string,
   err: WriteSink,
+  personaConfigs?: Map<string, Config>,
 ): { listeners: ListenerSpec[]; fatal?: string } {
   const listeners: ListenerSpec[] = [];
 
@@ -162,6 +178,7 @@ export function planListeners(
         agentDir,
         account: config.channels.telegram,
         source: "default",
+        config,
       });
     } else {
       err.write(
@@ -170,9 +187,62 @@ export function planListeners(
     }
   }
 
+  // Autostart personas (phantombot#439): each brings its OWN
+  // `<persona>/config.toml`, so its bot is `[channels.telegram]` in that file
+  // rather than an entry in the host's `[channels.telegram.personas]` table.
+  // The default persona is skipped — it is already started above, and starting
+  // it twice would trip the duplicate-token guard on its own bot.
+  for (const persona of config.autostartPersonas ?? []) {
+    if (persona === defaultPersona) continue;
+    const personaConfig = personaConfigs?.get(persona);
+    if (!personaConfig) {
+      err.write(
+        `warning: autostart persona '${persona}' has no resolved config — skipping\n`,
+      );
+      continue;
+    }
+    const account = personaConfig.channels.telegram;
+    if (!account) {
+      // Not an error: a persona may autostart for PhantomChat alone. Its
+      // phantomchat listener is planned separately from its persona dir.
+      continue;
+    }
+    const agentDir = personaDir(config, persona);
+    if (!existsSync(agentDir)) {
+      err.write(
+        `warning: autostart_personas lists '${persona}' but no agent dir at ${agentDir} — skipping\n`,
+      );
+      continue;
+    }
+    listeners.push({
+      persona,
+      agentDir,
+      account,
+      source: `autostart.${persona}`,
+      config: personaConfig,
+    });
+  }
+
   for (const [persona, account] of Object.entries(
     config.channels.telegramPersonas ?? {},
   )) {
+    // The legacy `[channels.telegram.personas.<name>]` table still works, but a
+    // persona that already got a listener from its OWN config file must not get
+    // a second one here. Migration COPIES rather than moves, so on a migrated
+    // host the same bot is described in both places — without this skip the
+    // duplicate-token guard below would read that as two personas fighting over
+    // one bot and take Telegram down.
+    //
+    // Scoped to autostart-sourced listeners on purpose. A legacy entry that
+    // names the DEFAULT persona is a different, long-supported shape (a second
+    // bot bound to the same persona) and keeps working untouched.
+    if (
+      listeners.some(
+        (l) => l.persona === persona && l.source === `autostart.${persona}`,
+      )
+    ) {
+      continue;
+    }
     const agentDir = personaDir(config, persona);
     if (!existsSync(agentDir)) {
       err.write(
@@ -185,6 +255,7 @@ export function planListeners(
       agentDir,
       account,
       source: `personas.${persona}`,
+      config: personaConfigs?.get(persona),
     });
   }
 
@@ -205,6 +276,37 @@ export function planListeners(
   }
 
   return { listeners };
+}
+
+/**
+ * Take a persona's config but keep the HOST's harness binary paths.
+ *
+ * Binaries are a property of the machine, not the personality: `claude` lives
+ * at one path on this box for everyone. runRun probes them once (and persists
+ * the result to state), so re-probing per persona would be wasted work — and
+ * worse, a persona whose file happens to carry a stale `bin` would silently
+ * run a different binary than the one doctor just verified. The persona keeps
+ * everything else it overrode, notably `harnesses.chain`.
+ */
+function withHostHarnessBins(personaConfig: Config, host: Config): Config {
+  if (personaConfig === host) return host;
+  return {
+    ...personaConfig,
+    harnesses: {
+      ...personaConfig.harnesses,
+      claude: { ...personaConfig.harnesses.claude, bin: host.harnesses.claude.bin },
+      pi: { ...personaConfig.harnesses.pi, bin: host.harnesses.pi.bin },
+      ...(personaConfig.harnesses.codex
+        ? {
+            codex: {
+              ...personaConfig.harnesses.codex,
+              bin:
+                host.harnesses.codex?.bin ?? personaConfig.harnesses.codex.bin,
+            },
+          }
+        : {}),
+    },
+  };
 }
 
 export async function runRun(input: RunInput = {}): Promise<number> {
@@ -260,7 +362,60 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     }
   }
 
-  const plan = planListeners(config, defaultPersona, err);
+  // Persona config migration + resolution (phantombot#439).
+  //
+  // Migration is copy-only and idempotent, so running it on every start is
+  // safe and — crucially — order-independent: a host arriving from ANY older
+  // version lands correct in one `/update`, with no "upgrade to X first"
+  // dance. It also cannot change the config we already loaded: it only copies
+  // keys the global file already has, and the merge gives the same answer
+  // either way. So there is nothing to reload.
+  const personaConfigs = new Map<string, Config>();
+  const loadPersonaConfig =
+    input.loadPersonaConfig ?? ((name: string) => loadConfig(name));
+  const autostart = (config.autostartPersonas ?? []).filter(
+    (name) => name !== defaultPersona,
+  );
+  try {
+    const globalToml = await readConfigToml(config.configPath);
+    const migrateNames = [
+      defaultPersona,
+      ...autostart,
+      ...Object.keys(config.channels.telegramPersonas ?? {}),
+    ];
+    for (const name of new Set(migrateNames)) {
+      if (!existsSync(personaDir(config, name))) continue;
+      await migratePersonaConfig({
+        personasDir: config.personasDir,
+        persona: name,
+        globalToml,
+        isDefault: name === defaultPersona,
+      });
+    }
+  } catch (e) {
+    // Never fatal. A persona that could not be seeded keeps reading the global
+    // file exactly as it did before — degraded to the old behaviour, not broken.
+    log.warn("run: persona config migration threw", {
+      error: (e as Error).message,
+    });
+  }
+  for (const name of autostart) {
+    if (!existsSync(personaDir(config, name))) {
+      err.write(
+        `warning: autostart_personas lists '${name}' but no persona dir at ${personaDir(config, name)} — skipping\n`,
+      );
+      continue;
+    }
+    try {
+      personaConfigs.set(name, await loadPersonaConfig(name));
+    } catch (e) {
+      err.write(
+        `warning: could not load config for autostart persona '${name}': ${(e as Error).message} — skipping\n`,
+      );
+    }
+  }
+
+  const plan = planListeners(config, defaultPersona, err, personaConfigs);
   if (plan.fatal) {
     err.write(`${plan.fatal}\n`);
     // Fatal only when Telegram is the sole channel. With PhantomChat available,
@@ -319,10 +474,19 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // empty chain for just that bot, leaving a listener that accepts messages
   // but fails every turn. Fail the whole startup and name the broken persona;
   // a partial multi-bot daemon is harder to diagnose than a clear boot error.
-  const telegramListeners = plan.listeners.map((listener) => ({
-    ...listener,
-    harnesses: buildHarnessChain(config, err, listener.persona),
-  }));
+  const telegramListeners = plan.listeners.map((listener) => {
+    // A listener resolves its harness chain from its OWN config when it has
+    // one, so a persona can set `[harnesses].chain` in its own file. The bins
+    // stay host-level — they name binaries installed on this machine, and were
+    // just probed for real above — so they are carried over from the resolved
+    // global config rather than re-probed per persona.
+    const listenerConfig = withHostHarnessBins(listener.config ?? config, config);
+    return {
+      ...listener,
+      config: listenerConfig,
+      harnesses: buildHarnessChain(listenerConfig, err, listener.persona),
+    };
+  });
   const unusableTelegramListener = telegramListeners.find(
     (listener) => listener.harnesses.length === 0,
   );
@@ -640,7 +804,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     const startTelegram = input.runTelegramServer ?? runTelegramServer;
     const tasks = telegramListeners.map((l) =>
       startTelegram({
-        config,
+        config: l.config ?? config,
         memory,
         harnesses: l.harnesses,
         agentDir: l.agentDir,
@@ -693,7 +857,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       const p2pSettings = config.p2p ?? DEFAULT_P2P;
 
       for (const spec of phantomchatPersonas) {
-        const personaHarnesses = buildHarnessChain(config, err, spec.persona);
+        const personaConfig = withHostHarnessBins(
+          personaConfigs.get(spec.persona) ?? config,
+          config,
+        );
+        const personaHarnesses = buildHarnessChain(
+          personaConfig,
+          err,
+          spec.persona,
+        );
         if (personaHarnesses.length === 0) {
           err.write(
             `warning: phantomchat persona '${spec.persona}' has no usable harnesses — skipping\n`,
@@ -857,7 +1029,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         const agentDir = spec.agentDir;
         tasks.push(
           startPhantomchat({
-            config,
+            config: personaConfig,
             memory,
             harnesses: personaHarnesses,
             agentDir,

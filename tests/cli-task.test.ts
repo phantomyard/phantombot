@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -318,5 +318,101 @@ describe("runTaskShow + runTaskCancel", () => {
     });
     expect(code).toBe(1);
     expect(err.text).toContain("not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --persona (phantombot#439)
+// ---------------------------------------------------------------------------
+
+describe("task --persona", () => {
+  beforeEach(async () => {
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+  });
+
+  test("add files the task against the named persona, not the default", async () => {
+    const out = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      persona: "lena",
+      relIn: "10m",
+      prompt: "check the oven",
+      description: "oven",
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(store.list("lena", {})).toHaveLength(1);
+    expect(store.list("phantom", {})).toHaveLength(0);
+  });
+
+  test("the commitment lands in THAT persona's journal", async () => {
+    await runTaskAdd({
+      config,
+      store,
+      persona: "lena",
+      relIn: "10m",
+      prompt: "check the oven",
+      description: "oven",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    const day = new Date(Date.now() + 10 * 60_000).toISOString().slice(0, 10);
+    const journal = await readFile(
+      join(workdir, "personas", "lena", "memory", `${day}.md`),
+      "utf8",
+    );
+    expect(journal).toContain("[commitment] task");
+  });
+
+  test("an unknown persona is refused — a task that can never fire is worse than an error", async () => {
+    const err = new CaptureStream();
+    const code = await runTaskAdd({
+      config,
+      store,
+      persona: "ghost",
+      relIn: "10m",
+      prompt: "x",
+      description: "x",
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(err.text).toContain("ghost");
+    expect(store.list("ghost", {})).toHaveLength(0);
+  });
+
+  test("list shows the named persona's tasks", async () => {
+    await runTaskAdd({
+      config,
+      store,
+      persona: "lena",
+      relIn: "10m",
+      prompt: "check the oven",
+      description: "oven",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    const mine = new CaptureStream();
+    await runTaskList({ config, store, persona: "lena", out: mine });
+    expect(mine.text).toContain("oven");
+
+    const theirs = new CaptureStream();
+    await runTaskList({ config, store, out: theirs });
+    expect(theirs.text).toContain("no tasks for persona 'phantom'");
+  });
+
+  test("omitting --persona keeps the historical default-persona behaviour", async () => {
+    await runTaskAdd({
+      config,
+      store,
+      relIn: "10m",
+      prompt: "x",
+      description: "x",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(store.list("phantom", {})).toHaveLength(1);
   });
 });

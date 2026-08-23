@@ -1,0 +1,250 @@
+/**
+ * Per-persona config layering (phantombot#439).
+ *
+ * One phantombot process serves EVERY persona on the host — there is one
+ * daemon, one binary, one update. What was missing is a place for a persona
+ * to keep its OWN settings: until now every persona-scoped knob (its Telegram
+ * bot, its voice block, its chattiness default) lived in the single global
+ * `~/.config/phantombot/config.toml`, which made "start these three personas
+ * at boot" a config-shaped problem rather than a code-shaped one.
+ *
+ * The model:
+ *
+ *   <config-home>/phantombot/config.toml   — HOST globals only:
+ *                                            default_persona, autostart_personas,
+ *                                            update_channel, paths, harness bins
+ *   <personas-root>/<persona>/config.toml  — that persona's own settings
+ *
+ * Resolution is a PER-KEY deep merge with the persona file winning every
+ * conflict, and env vars still winning over both (they are applied later, in
+ * config.ts). A key absent from the persona file falls back to the global
+ * file — never to a constant. That is deliberate: a "default" that outranks an
+ * operator's existing global setting is a silent behaviour change on upgrade.
+ *
+ * Migration is COPY, NEVER DELETE, and idempotent:
+ *
+ *   - if `<persona>/config.toml` already exists, migration does nothing at all;
+ *   - otherwise the persona-scoped keys are COPIED out of the global file and
+ *     the global file is left byte-identical.
+ *
+ * Copy-not-delete is what makes `/update` order-independent. Release rings mean
+ * a host can be rolled BACK to a binary that has never heard of persona config
+ * files; if migration had pruned `[channels.telegram]` from the global file,
+ * that host would come back up with no channels and no error. Leaving the
+ * original in place means the new binary reads the persona file, the old binary
+ * reads the global one, and updating in either direction is a no-op. Users who
+ * want a tidy global file can prune it by hand; nothing reads those keys once a
+ * persona file exists.
+ */
+
+import { join } from "node:path";
+
+import { readConfigToml, writeConfigToml, type TomlObject } from "./configWriter.ts";
+import { log } from "./logger.ts";
+
+/**
+ * Top-level config keys that describe ONE persona rather than the host.
+ * Used only by migration, to decide what to seed a fresh persona file with.
+ *
+ * The READ path is deliberately not restricted to this list: any key present in
+ * a persona's config.toml overrides the global one. That keeps the mechanism
+ * general (a future persona-scoped knob needs no change here) while migration
+ * stays conservative and only moves what is unambiguously persona-shaped.
+ *
+ * Notably absent: `harnesses` (bins and the failover chain are host-level;
+ * per-persona chains already have `[harnesses.personas.<name>]`, which
+ * migration maps into the persona file separately), `personas_dir`,
+ * `memory_db`, `update_channel`, `default_persona`, `autostart_personas`.
+ */
+export const PERSONA_SCOPED_KEYS: readonly string[] = [
+  "channels",
+  "voice",
+  "telegram_streaming",
+  "chattiness",
+  "retrieval",
+  "durable_facts",
+];
+
+/**
+ * Keys that belong to the HOST and must never be taken from a persona file.
+ *
+ * A persona cannot elect itself default, change the release ring the box
+ * follows, relocate the personas root, or repoint the shared memory database.
+ * Those decide things about the machine, not about a personality, and honoring
+ * them from a persona file would let one persona reconfigure every other one.
+ * Stripped from the persona layer before the merge, so a stray key is inert
+ * rather than dangerous.
+ */
+export const HOST_ONLY_KEYS: readonly string[] = [
+  "default_persona",
+  "autostart_personas",
+  "update_channel",
+  "personas_dir",
+  "memory_db",
+];
+
+/** Drop host-level keys from a persona layer. Returns a new object. */
+export function stripHostOnlyKeys(toml: TomlObject): TomlObject {
+  const out: TomlObject = {};
+  for (const [k, v] of Object.entries(toml)) {
+    if (HOST_ONLY_KEYS.includes(k)) {
+      log.warn(
+        "personaConfig: ignoring host-level key in persona config.toml",
+        { key: k },
+      );
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+/** Path to a persona's own config file. */
+export function personaConfigPath(
+  personasDir: string,
+  persona: string,
+): string {
+  return join(personasDir, persona, "config.toml");
+}
+
+/** Read a persona's config.toml. A missing file reads as `{}`. */
+export async function readPersonaToml(
+  personasDir: string,
+  persona: string,
+): Promise<TomlObject> {
+  return await readConfigToml(personaConfigPath(personasDir, persona));
+}
+
+function isPlainObject(v: unknown): v is TomlObject {
+  return typeof v === "object" && v !== null && !Array.isArray(v) &&
+    !(v instanceof Date);
+}
+
+/**
+ * Deep per-key merge. `override` wins; tables recurse; arrays and scalars
+ * replace wholesale.
+ *
+ * Arrays are replaced rather than concatenated because every array in this
+ * config is a complete statement — `allowed_user_ids`, `harnesses.chain`,
+ * `stun_servers`. Element-wise merging would make it impossible for a persona
+ * to NARROW an inherited allowlist, which is the direction that matters for
+ * security.
+ *
+ * Neither input is mutated.
+ */
+export function mergeToml(base: TomlObject, override: TomlObject): TomlObject {
+  const out: TomlObject = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const prev = out[key];
+    if (isPlainObject(prev) && isPlainObject(value)) {
+      out[key] = mergeToml(prev, value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/** Structural clone that is safe for the TOML value domain. */
+function cloneToml<T>(v: T): T {
+  if (Array.isArray(v)) return v.map((x) => cloneToml(x)) as unknown as T;
+  if (isPlainObject(v)) {
+    const out: TomlObject = {};
+    for (const [k, val] of Object.entries(v)) out[k] = cloneToml(val);
+    return out as unknown as T;
+  }
+  return v;
+}
+
+export interface MigratePersonaConfigInput {
+  personasDir: string;
+  persona: string;
+  /** Parsed contents of the global config.toml. */
+  globalToml: TomlObject;
+  /**
+   * True when `persona` is the host's default persona. The default persona
+   * inherits the global `[channels.telegram]` block; a non-default persona
+   * inherits `[channels.telegram.personas.<persona>]` instead, since that is
+   * where its bot lived under the old layout.
+   */
+  isDefault: boolean;
+}
+
+export type MigratePersonaConfigResult =
+  | { migrated: false; reason: "exists" | "nothing-to-copy" }
+  | { migrated: true; keys: string[]; path: string };
+
+/**
+ * Seed `<persona>/config.toml` from the global file, once.
+ *
+ * Idempotent by construction: the presence of the persona file is the entire
+ * guard, so running this on every daemon start (which is the point — a user
+ * types `/update` and lands correct, whatever version they came from) costs one
+ * stat after the first time. It never writes an empty file, so a host with no
+ * global config stays clean rather than growing an empty one per persona.
+ */
+export async function migratePersonaConfig(
+  input: MigratePersonaConfigInput,
+): Promise<MigratePersonaConfigResult> {
+  const path = personaConfigPath(input.personasDir, input.persona);
+  const existing = await readConfigToml(path);
+  if (Object.keys(existing).length > 0) {
+    return { migrated: false, reason: "exists" };
+  }
+
+  const seed: TomlObject = {};
+  for (const key of PERSONA_SCOPED_KEYS) {
+    const value = input.globalToml[key];
+    if (value === undefined) continue;
+    seed[key] = cloneToml(value);
+  }
+
+  // `[channels.telegram.personas]` is a routing table for the OLD layout: it
+  // maps persona name → that persona's bot. It is host-shaped, not
+  // persona-shaped, so it must never be copied verbatim into a persona file.
+  // Instead the persona takes its OWN entry from that table as its
+  // `[channels.telegram]`, and the table itself is dropped from the copy.
+  const channels = seed.channels;
+  if (isPlainObject(channels)) {
+    const telegram = channels.telegram;
+    if (isPlainObject(telegram)) {
+      const table = telegram.personas;
+      const own = isPlainObject(table) ? table[input.persona] : undefined;
+      const { personas: _dropped, ...ownAccount } = telegram;
+      if (input.isDefault) {
+        channels.telegram = ownAccount;
+      } else if (isPlainObject(own)) {
+        channels.telegram = cloneToml(own);
+      } else {
+        // A non-default persona with no bot of its own inherits nothing from
+        // the default persona's Telegram block — that bot belongs to someone
+        // else, and copying it would hand two personas the same token.
+        delete channels.telegram;
+      }
+    }
+    if (Object.keys(channels).length === 0) delete seed.channels;
+  }
+
+  // Per-persona harness chain: `[harnesses.personas.<name>].chain` in the old
+  // layout becomes plain `[harnesses].chain` in the persona's own file.
+  const globalHarnesses = input.globalToml.harnesses;
+  if (isPlainObject(globalHarnesses)) {
+    const table = globalHarnesses.personas;
+    const own = isPlainObject(table) ? table[input.persona] : undefined;
+    if (isPlainObject(own) && Array.isArray(own.chain)) {
+      seed.harnesses = { chain: cloneToml(own.chain) };
+    }
+  }
+
+  if (Object.keys(seed).length === 0) {
+    return { migrated: false, reason: "nothing-to-copy" };
+  }
+
+  await writeConfigToml(path, seed);
+  log.info("personaConfig: seeded persona config from global config.toml", {
+    persona: input.persona,
+    path,
+    keys: Object.keys(seed),
+  });
+  return { migrated: true, keys: Object.keys(seed), path };
+}

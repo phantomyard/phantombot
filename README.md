@@ -66,6 +66,7 @@ Supported harnesses:
 - [Windows](#windows)
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
+- [Multiple personas](#multiple-personas)
 - [Telegram](#telegram)
 - [PhantomChat](#phantomchat)
 - [Editors: VS Code, Zed & JetBrains](#editors-vs-code-zed--jetbrains)
@@ -452,8 +453,23 @@ service from inside itself.
 Phantombot resolves configuration in this order:
 
 1. `PHANTOMBOT_*` environment variables.
-2. TOML at `$XDG_CONFIG_HOME/phantombot/config.toml` or `PHANTOMBOT_CONFIG`.
-3. Built-in defaults.
+2. TOML at `<personas-root>/<persona>/config.toml` — that persona's own settings.
+3. TOML at `$XDG_CONFIG_HOME/phantombot/config.toml` or `PHANTOMBOT_CONFIG`.
+4. Built-in defaults.
+
+Layers 2 and 3 merge **per key**, with the persona file winning each conflict.
+A key the persona file doesn't mention falls back to the global file — never to
+a built-in default — so a host with no persona files behaves exactly as it
+always has.
+
+Some keys describe the *machine* and are only ever read from the global file:
+`default_persona`, `autostart_personas`, `update_channel`, `personas_dir` and
+`memory_db`. A persona cannot elect itself default or move the personas root.
+
+The first time a newer phantombot starts, it **copies** the persona-scoped keys
+out of the global file into each persona's own file. It never deletes anything:
+the global file keeps working on an older binary, so an update — or a rollback —
+is safe in either direction and can be run at any time.
 
 Common paths:
 
@@ -464,11 +480,16 @@ Common paths:
 | `~/.env` | General credentials available to the harness |
 | `~/.local/share/phantombot/memory.sqlite` | Rolling turns, tasks, capture log |
 | `~/.local/share/phantombot/personas/<name>/` | Persona markdown memory and KB |
+| `~/.local/share/phantombot/personas/<name>/config.toml` | That persona's own settings (channels, voice, chattiness) |
 
 Minimal config example:
 
 ```toml
 default_persona = "phantom"
+
+# Personas started at boot ALONGSIDE the default, in the same process.
+# Absent or empty = the default persona only. See "Multiple personas".
+autostart_personas = ["lena", "kai"]
 
 # Release ring this host follows: "stable" (default) or "preview".
 # See "Release rings" under Maintenance.
@@ -518,12 +539,12 @@ Interactive setup:
 
 | Command | Purpose |
 |---|---|
-| `phantombot persona` | Create, import, restore, or switch personas |
+| `phantombot persona` | Create, import, restore, switch personas, or pick which start at boot |
 | `phantombot harness` | Choose the global harness chain |
 | `phantombot harness --persona <name>` | Choose one persona's harness chain |
 | `phantombot telegram` | Configure Telegram token and allowlist |
 | `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel |
-| `phantombot voice` | Configure TTS/STT providers |
+| `phantombot voice [--persona <name>]` | Configure TTS/STT providers for one persona |
 | `phantombot embedding` | Configure semantic memory |
 | `phantombot acp install zed` | Register phantombot as an ACP agent in Zed |
 | `phantombot acp install jetbrains` | Register phantombot as an ACP agent in JetBrains IDEs (Rider, IntelliJ, …) |
@@ -568,6 +589,7 @@ Agent-facing tools:
 | `phantombot task add "<prompt>" "<description>" --every 1h` | Schedule an LLM-backed task |
 | `phantombot task add "<prompt>" "<description>" --every 1h --command "/path/to/script"` | Schedule a command-backed task |
 | `phantombot task list / show / cancel` | Inspect and manage scheduled tasks |
+| `phantombot task add/list/selftest --persona <name>` | Target another persona's schedule |
 | `phantombot memory today / search / get / list / index` | Inspect memory and KB |
 | `phantombot memory capture "<text>" --tag decision` | Append a tagged memory capture |
 | `phantombot memory drawers [--kind norms] [--sync]` | Show the ranked drawer entries the threat judge is briefed from |
@@ -593,6 +615,49 @@ every `<TAB>`, so it always matches the available subcommands and flags —
 `phantombot p<TAB>` → `persona`, `phantomchat`, `p2p`; `phantombot p2p <TAB>` →
 `status`; `phantombot logs --<TAB>` → `--follow`, `--no-follow`, `--lines`.
 
+## Multiple personas
+
+One phantombot process serves every persona on the host. There is no supervisor
+and no child process per persona: the daemon builds one set of channel listeners
+per persona and runs them side by side.
+
+Which personas come up at boot is a config choice:
+
+```toml
+default_persona = "robbie"
+autostart_personas = ["lena", "kai"]
+```
+
+The default persona always starts; `autostart_personas` names the others. The
+list is explicit on purpose — a persona directory that merely exists (an import,
+a restored archive) never starts talking to the world on its own. Pick the set
+interactively with `phantombot persona` → *Choose which personas start at boot*.
+
+Each persona keeps its own settings in `<personas-root>/<persona>/config.toml`:
+
+```toml
+# ~/.local/share/phantombot/personas/lena/config.toml
+chattiness = false
+
+[channels.telegram]
+token = "222:lena-bot-token"
+allowed_user_ids = [123456789]
+
+[voice]
+provider = "elevenlabs"
+```
+
+The per-persona TUIs write there for you: `phantombot telegram --persona lena`,
+`phantombot voice --persona lena`, `phantombot phantomchat --persona lena`.
+`phantombot task --persona lena` files and lists that persona's schedule.
+
+**Lifecycle commands belong to the default persona.** `/update` and `/restart`
+swap the binary and bounce the service for *everyone* in the process, so they
+are only accepted in the default persona's chats; anywhere else they reply with
+who to ask. `/stop` is unaffected — it aborts the current turn in the current
+chat and touches nobody else. `/status` shows the release ring and the full
+persona roster, marking the default and which persona is answering.
+
 ## Telegram
 
 Phantombot runs one or more Telegram long-poll listeners. Each listener needs a
@@ -609,7 +674,10 @@ allowed_user_ids = [123456789]
 poll_timeout_s = 30
 ```
 
-Additional persona-bound bots can run inside the same phantombot process:
+Additional persona-bound bots can run inside the same phantombot process. The
+preferred place for one is that persona's own `config.toml` (see "Multiple
+personas"); the older `[channels.telegram.personas.<name>]` table below is still
+read and still works:
 
 ```toml
 [channels.telegram]
@@ -646,10 +714,10 @@ overwrites stale BotFather commands. The supported commands are:
 |---|---|
 | `/stop` | Abort the current turn |
 | `/reset` | Clear this chat's history |
-| `/status` | Show phantom name, PID, version, harness chain with availability, per-harness models, uptime, context usage, the persona's own PhantomChat address (`phantomchat: npub…`), and live subsystem health probes (Telegram, editor connectors, memory/embeddings, voice) |
+| `/status` | Show phantom name, PID, version, release ring, the persona roster on this host, harness chain with availability, per-harness models, uptime, context usage, the persona's own PhantomChat address (`phantomchat: npub…`), and live subsystem health probes (Telegram, editor connectors, memory/embeddings, voice) |
 | `/harness` | List or switch the active harness |
-| `/update` | Install the latest phantombot release. `/update resign` (macOS-only) re-signs the current binary in place — no download, reinstall, restart, or version change — to dogfood the re-sign path or repair a signature a macOS update invalidated; a no-op on other platforms |
-| `/restart` | Restart the phantombot service |
+| `/update` | Default persona only. Install the latest phantombot release. `/update resign` (macOS-only) re-signs the current binary in place — no download, reinstall, restart, or version change — to dogfood the re-sign path or repair a signature a macOS update invalidated; a no-op on other platforms |
+| `/restart` | Default persona only. Restart the phantombot service |
 | `/coder` | Force the coding brain on for this chat (`off` / `default` to revert) |
 | `/chattiness` | Show or hide progress bubbles in this chat (`on` / `off` / `<on\|off> default`) |
 | `/model` | Show or switch harness models (`list` / `<slug>` / `coding <slug>` / `image <slug>` / `clear`) |

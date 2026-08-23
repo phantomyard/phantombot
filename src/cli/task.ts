@@ -4,11 +4,11 @@
  * `phantombot tasks` Clack TUI exists for human use but isn't expected
  * to be the main path.
  *
- * Tasks are persona-scoped — `add` records the task against
- * `config.defaultPersona` so the running tick (which fires under the
- * same persona) picks them up. Cross-persona task management isn't a
- * thing today; if you switch personas, you don't see the prior
- * persona's tasks.
+ * Tasks are persona-scoped. `add`, `list` and `selftest` target the default
+ * persona unless `--persona <name>` names another one (phantombot#439) — with
+ * several personas autostarted in one process, "the current persona" is no
+ * longer a single answer, and a task filed against the wrong persona simply
+ * never fires because tick runs each persona's own queue.
  *
  * One-off vs recurring:
  *   - One-off (default): --in 10m or --at "2026-05-07 09:00"
@@ -35,6 +35,7 @@
 import { defineCommand } from "citty";
 import { join } from "node:path";
 
+import { existsSync } from "node:fs";
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -78,16 +79,42 @@ export interface RunTaskAddInput {
   command?: string;
   /** --secret NAME — env var names to expose to a command task. */
   commandSecrets?: string[];
+  /** --persona NAME — file the task against this persona. Default: the host default. */
+  persona?: string;
   config?: Config;
   store?: TaskStore;
   out?: WriteSink;
   err?: WriteSink;
 }
 
+/**
+ * Resolve the persona a task command targets.
+ *
+ * An explicit `--persona` must EXIST on disk. Filing against a typo'd name
+ * would otherwise succeed silently and produce a task that can never fire —
+ * no persona runs that queue — which is the worst possible outcome for a
+ * scheduler: the user believes a reminder is set.
+ */
+function resolveTaskPersona(
+  config: Config,
+  requested: string | undefined,
+  err: WriteSink,
+): string | undefined {
+  if (!requested) return config.defaultPersona;
+  const dir = personaDir(config, requested);
+  if (!existsSync(dir)) {
+    err.write(`no persona '${requested}' at ${dir}\n`);
+    return undefined;
+  }
+  return requested;
+}
+
 export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
+  const persona = resolveTaskPersona(config, input.persona, err);
+  if (!persona) return 2;
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {
     const now = new Date();
@@ -202,7 +229,7 @@ export async function runTaskAdd(input: RunTaskAddInput): Promise<number> {
     }
 
     const result = store.add({
-      persona: config.defaultPersona,
+      persona,
       schedule,
       prompt: input.prompt,
       description: input.description,
@@ -283,7 +310,9 @@ function describeExpiry(t: Task, isCommandTask = false): string {
 async function writeCommitmentToDaily(config: Config, t: Task): Promise<string | null> {
   try {
     const dateStr = t.nextRunAt.toISOString().slice(0, 10);
-    const dailyPath = join(personaDir(config, config.defaultPersona), "memory", `${dateStr}.md`);
+    // The task's OWN persona, not the host default: the commitment belongs in
+    // the journal of whoever will have to act on it.
+    const dailyPath = join(personaDir(config, t.persona), "memory", `${dateStr}.md`);
     const line = `[commitment] task ${t.id}: ${t.description} — fires ${t.nextRunAt.toISOString()}${t.oneOff ? " (one-off)" : ` (recurring, ${t.schedule})`}\n`;
     const { appendFile, mkdir } = await import("node:fs/promises");
     const { dirname } = await import("node:path");
@@ -303,21 +332,27 @@ async function writeCommitmentToDaily(config: Config, t: Task): Promise<string |
 
 export interface RunTaskListInput {
   includeInactive?: boolean;
+  /** --persona NAME — list this persona's tasks. Default: the host default. */
+  persona?: string;
   config?: Config;
   store?: TaskStore;
   out?: WriteSink;
+  err?: WriteSink;
 }
 
 export async function runTaskList(input: RunTaskListInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
+  const persona = resolveTaskPersona(config, input.persona, err);
+  if (!persona) return 2;
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {
-    const tasks = store.list(config.defaultPersona, {
+    const tasks = store.list(persona, {
       includeInactive: input.includeInactive,
     });
     if (tasks.length === 0) {
-      out.write(`(no tasks for persona '${config.defaultPersona}')\n`);
+      out.write(`(no tasks for persona '${persona}')\n`);
       return 0;
     }
     for (const t of tasks) {
@@ -419,6 +454,8 @@ export async function runTaskLog(input: RunTaskLogInput): Promise<number> {
 }
 
 export interface RunTaskSelftestInput {
+  /** --persona NAME — run the selftest under this persona. */
+  persona?: string;
   config?: Config;
   store?: TaskStore;
   out?: WriteSink;
@@ -431,9 +468,11 @@ export async function runTaskSelftest(
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
   const config = input.config ?? (await loadConfig());
+  const selftestPersona = resolveTaskPersona(config, input.persona, err);
+  if (!selftestPersona) return 2;
   const store = input.store ?? (await openTaskStore(config.memoryDbPath));
   try {
-    const { id, firesAt } = store.selftest(config.defaultPersona);
+    const { id, firesAt } = store.selftest(selftestPersona);
     out.write(
       `selftest task ${id} scheduled\n` +
       `  fires at: ${formatLocal(firesAt)} (${firesAt.toISOString()})\n` +
@@ -577,6 +616,12 @@ export default defineCommand({
           description: "Allow recurring durations beyond the 90-day default cap.",
           default: false,
         },
+        persona: {
+          type: "string",
+          required: false,
+          description:
+            "Persona to file this task against. Defaults to the host's default persona.",
+        },
       },
       async run({ args }) {
         process.exitCode = await runTaskAdd({
@@ -593,21 +638,29 @@ export default defineCommand({
           command: args.command as string | undefined,
           commandSecrets: normalizeCliSecretArg(args.secret),
           forceLongRunning: args["force-long-running"] as boolean,
+          persona: args.persona as string | undefined,
         });
       },
     }),
     list: defineCommand({
-      meta: { name: "list", description: "List active tasks for the current persona." },
+      meta: { name: "list", description: "List active tasks for a persona." },
       args: {
         all: {
           type: "boolean",
           description: "Include inactive (cancelled / stopped) tasks too.",
           default: false,
         },
+        persona: {
+          type: "string",
+          required: false,
+          description:
+            "Persona whose tasks to list. Defaults to the host's default persona.",
+        },
       },
       async run({ args }) {
         process.exitCode = await runTaskList({
           includeInactive: args.all as boolean,
+          persona: args.persona as string | undefined,
         });
       },
     }),
@@ -644,8 +697,18 @@ export default defineCommand({
         description:
           "Create a 60s self-test task that fires and verifies the scheduler is working.",
       },
-      async run() {
-        process.exitCode = await runTaskSelftest();
+      args: {
+        persona: {
+          type: "string",
+          required: false,
+          description:
+            "Persona to run the selftest under. Defaults to the host's default persona.",
+        },
+      },
+      async run({ args }) {
+        process.exitCode = await runTaskSelftest({
+          persona: args.persona as string | undefined,
+        });
       },
     }),
   },

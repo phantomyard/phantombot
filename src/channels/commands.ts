@@ -22,6 +22,7 @@
 
 import { stopNoteText } from "./core/backlog.ts";
 import { type Config } from "../config.ts";
+import { DEFAULT_UPDATE_CHANNEL } from "../lib/githubReleases.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { formatElapsedSeconds, truncateLine } from "../lib/format.ts";
 import { log } from "../lib/logger.ts";
@@ -275,10 +276,17 @@ export async function handleSlashCommand(
       // faithful dogfood of the re-sign path and doubles as a manual repair
       // button when a macOS update breaks the signature. macOS-only; a no-op
       // elsewhere. Bare `/update` is the full self-update.
+      {
+        const refused = lifecycleRefusal(ctx, "/update");
+        if (refused) return refused;
+      }
       if (arg.toLowerCase() === "resign") return await handleUpdateResign(ctx);
       return await handleUpdate(ctx);
-    case "/restart":
+    case "/restart": {
+      const refused = lifecycleRefusal(ctx, "/restart");
+      if (refused) return refused;
       return handleRestart(ctx);
+    }
     case "/coder":
       // Bare `/coder` forces on; `/coder off|default` is also accepted.
       return await handleCoderSwap(arg || "on", ctx);
@@ -292,6 +300,42 @@ export async function handleSlashCommand(
     default:
       return null;
   }
+}
+
+/**
+ * Lifecycle commands act on the PROCESS, not on a persona (phantombot#439).
+ *
+ * One phantombot serves every persona on the host, so `/update` and `/restart`
+ * swap the binary and bounce the service for ALL of them. Typed at a
+ * non-default persona they read like a per-persona action and are not one:
+ * every other persona is taken down with no warning in its own chat, and two
+ * personas racing an update would have two turns swapping the same binary.
+ *
+ * So they are answered — never silently ignored — only in the default
+ * persona's chats, and the refusal names where to go instead.
+ *
+ * `/stop` is deliberately NOT gated: it aborts the current turn in the current
+ * conversation, which is per-chat and harms nobody else.
+ */
+function lifecycleRefusal(
+  ctx: SlashCommandContext,
+  command: string,
+): SlashCommandResult | undefined {
+  const owner = ctx.config?.defaultPersona;
+  // No config (tests, embedders) → no gate. The check must never be the
+  // reason a lifecycle command stops working on a single-persona box.
+  if (!owner || owner === ctx.persona) return undefined;
+  log.info("commands: lifecycle command refused on non-default persona", {
+    command,
+    persona: ctx.persona,
+    defaultPersona: owner,
+  });
+  return {
+    reply:
+      `${command} runs the whole phantombot process — every persona on this host shares it — ` +
+      `so it is only accepted by the default persona.\n` +
+      `Ask ${owner} to run ${command}.`,
+  };
 }
 
 /**
@@ -765,10 +809,22 @@ async function handleStatus(
     (probes.voice ? `voice:   ${probes.voice}\n` : "") +
     (probes.dreaming ? `dreaming: ${probes.dreaming}\n` : "");
 
+  // Release ring this HOST follows (#432). Host-level, not per-persona: every
+  // persona on a box runs the same binary, so one line, no repetition.
+  const channelLine = `channel: ${ctx.config?.updateChannel ?? DEFAULT_UPDATE_CHANNEL}\n`;
+
+  // Who else is running in this process (phantombot#439). The point is the
+  // "who is in the preview cohort?" question: from any one persona's chat you
+  // can see the whole set the daemon started, which persona is the default
+  // (the one that owns /update and /restart), and which is answering here.
+  const personaLine = formatPersonaRoster(ctx);
+
   return {
     reply:
       `phantom: ${ctx.persona} (pid ${process.pid}, v${VERSION})\n` +
       npubLine +
+      channelLine +
+      personaLine +
       `harness: ${primary}\n` +
       `chain:   ${chain}\n` +
       modelsLine +
@@ -778,6 +834,30 @@ async function handleStatus(
       `active:  ${active}` +
       runningLine,
   };
+}
+
+/**
+ * "personas: robbie* (you), lena, kai" — the personas this process started.
+ *
+ * `*` marks the host default; "(you)" marks the persona answering. Omitted
+ * entirely on a single-persona host, where the line would say nothing the
+ * first line of /status has not already said.
+ */
+function formatPersonaRoster(ctx: SlashCommandContext): string {
+  const config = ctx.config;
+  if (!config) return "";
+  const roster = [
+    config.defaultPersona,
+    ...(config.autostartPersonas ?? []),
+  ].filter((name, i, all) => all.indexOf(name) === i);
+  if (roster.length < 2) return "";
+  const rendered = roster.map((name) => {
+    const marks =
+      (name === config.defaultPersona ? "*" : "") +
+      (name === ctx.persona ? " (you)" : "");
+    return `${name}${marks}`;
+  });
+  return `personas: ${rendered.join(", ")}  (* = default: owns /update, /restart)\n`;
 }
 
 async function handleHarness(

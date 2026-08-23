@@ -19,7 +19,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPersona, runSwitchPersona } from "../src/cli/persona.ts";
+import {
+  runAutostartPicker,
+  runPersona,
+  runSwitchPersona,
+} from "../src/cli/persona.ts";
+import { readConfigToml } from "../src/lib/configWriter.ts";
 import type { Config } from "../src/config.ts";
 import type { ServiceControl } from "../src/lib/systemd.ts";
 
@@ -430,5 +435,96 @@ describe("runPersona dispatch", () => {
     });
     expect(code).toBe(0);
     expect(out.text).toContain("→ 'robbie'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Autostart picker (phantombot#439)
+// ---------------------------------------------------------------------------
+
+describe("runAutostartPicker", () => {
+  test("writes the chosen personas to the HOST config, default excluded", async () => {
+    const out = new CaptureStream();
+    const code = await runAutostartPicker({
+      config: makeConfig(),
+      personas: ["phantom", "lena", "kai"],
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+      choose: async ({ personas }) => {
+        // The default persona is never even offered — it always starts.
+        expect(personas).toEqual(["lena", "kai"]);
+        return ["lena"];
+      },
+    });
+    expect(code).toBe(0);
+    expect((await readConfigToml(configPath)).autostart_personas).toEqual([
+      "lena",
+    ]);
+    expect(out.text).toContain("phantom + lena");
+  });
+
+  test("clearing the selection removes the key rather than writing []", async () => {
+    await runAutostartPicker({
+      config: makeConfig({ autostartPersonas: ["lena"] }),
+      personas: ["phantom", "lena"],
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      choose: async () => ["lena"],
+    });
+    const out = new CaptureStream();
+    await runAutostartPicker({
+      config: makeConfig({ autostartPersonas: ["lena"] }),
+      personas: ["phantom", "lena"],
+      serviceControl: svcInactive,
+      out,
+      err: new CaptureStream(),
+      choose: async () => [],
+    });
+    const toml = await readConfigToml(configPath);
+    expect("autostart_personas" in toml).toBe(false);
+    expect(out.text).toContain("phantom only");
+  });
+
+  test("cancelling writes nothing", async () => {
+    await runAutostartPicker({
+      config: makeConfig(),
+      personas: ["phantom", "lena"],
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      choose: async () => null,
+    });
+    expect((await readConfigToml(configPath)).autostart_personas).toBeUndefined();
+  });
+
+  test("existing order is preserved; new picks are appended", async () => {
+    await runAutostartPicker({
+      config: makeConfig({ autostartPersonas: ["kai", "lena"] }),
+      personas: ["phantom", "lena", "kai", "miles"],
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      choose: async () => ["lena", "miles", "kai"],
+    });
+    expect((await readConfigToml(configPath)).autostart_personas).toEqual([
+      "kai",
+      "lena",
+      "miles",
+    ]);
+  });
+
+  test("no other personas on disk → nothing to pick, no write", async () => {
+    const code = await runAutostartPicker({
+      config: makeConfig(),
+      personas: ["phantom"],
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      choose: async () => ["nope"],
+    });
+    expect(code).toBe(0);
+    expect((await readConfigToml(configPath)).autostart_personas).toBeUndefined();
   });
 });

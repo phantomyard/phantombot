@@ -772,6 +772,103 @@ describe("/status phantom + models surface", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Multi-persona: lifecycle gate + /status roster (phantombot#439)
+// ---------------------------------------------------------------------------
+
+describe("lifecycle commands are default-persona-only (#439)", () => {
+  function multiPersonaConfig(): any {
+    return {
+      defaultPersona: "robbie",
+      autostartPersonas: ["lena", "kai"],
+      updateChannel: "preview",
+      personasDir: "/tmp/personas",
+      memoryDbPath: ":memory:",
+      configPath: "/tmp/config.toml",
+      harnessIdleTimeoutMs: 1,
+      harnessHardTimeoutMs: 1,
+      harnessStartupTimeoutMs: 1,
+      harnesses: {
+        chain: ["claude"],
+        claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+        pi: { bin: "pi" },
+      },
+      channels: {},
+      embeddings: { provider: "none" as const },
+      voice: { provider: "none" as const },
+    };
+  }
+
+  for (const command of ["/update", "/restart"]) {
+    test(`${command} from a non-default persona is refused, and says who owns it`, async () => {
+      const r = await handleSlashCommand(
+        command,
+        ctx({ persona: "lena", config: multiPersonaConfig() }),
+      );
+      expect(r).not.toBeNull();
+      expect(r!.reply).toContain(command);
+      expect(r!.reply).toContain("robbie");
+      // Refused means refused: nothing is scheduled to run after the reply.
+      expect(r!.afterSend).toBeUndefined();
+    });
+  }
+
+  test("/update from the DEFAULT persona is not gated", async () => {
+    // Reaching the platform guard proves we got past the persona gate.
+    const origPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "freebsd" });
+    try {
+      const r = await handleSlashCommand(
+        "/update",
+        ctx({ persona: "robbie", config: multiPersonaConfig() }),
+      );
+      expect(r!.reply).toContain("can't self-update");
+    } finally {
+      Object.defineProperty(process, "platform", { value: origPlatform });
+    }
+  });
+
+  test("/stop is NOT gated — it only aborts this chat's own turn", async () => {
+    const controller = new AbortController();
+    const r = await handleSlashCommand(
+      "/stop",
+      ctx({
+        persona: "lena",
+        config: multiPersonaConfig(),
+        activeTurn: { controller, startTime: Date.now() },
+      }),
+    );
+    expect(controller.signal.aborted).toBe(true);
+    expect(r!.reply).not.toContain("default persona");
+  });
+
+  test("/status shows the release ring and who else is running", async () => {
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({ persona: "lena", config: multiPersonaConfig() }),
+    );
+    expect(r!.reply).toContain("channel: preview");
+    expect(r!.reply).toContain("personas: robbie*, lena (you), kai");
+  });
+
+  test("/status omits the roster on a single-persona host", async () => {
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({
+        persona: "robbie",
+        config: { ...multiPersonaConfig(), autostartPersonas: [] },
+      }),
+    );
+    expect(r!.reply).not.toContain("personas:");
+    expect(r!.reply).toContain("channel: preview");
+  });
+
+  test("/status defaults the ring to stable when config says nothing", async () => {
+    const r = await handleSlashCommand("/status", ctx());
+    expect(r!.reply).toContain("channel: stable");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // /model (issue #313)
 // ---------------------------------------------------------------------------
 
