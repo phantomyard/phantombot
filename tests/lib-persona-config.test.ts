@@ -269,6 +269,17 @@ describe("loadConfig persona layering", () => {
     "PHANTOMBOT_UPDATE_CHANNEL",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_ALLOWED_USER_IDS",
+    // The default bot's unsuffixed env overrides, and the suffixed forms the
+    // persona layer reads instead. Several tests below set these DELIBERATELY
+    // to reproduce a real host (where the default token arrives vault -> env),
+    // so they must be saved and restored like everything else.
+    "PHANTOMBOT_TELEGRAM_ALLOWED_USERS",
+    "PHANTOMBOT_TELEGRAM_POLL_S",
+    "PHANTOMBOT_TELEGRAM_GROUP_PERSONAS",
+    "TELEGRAM_BOT_TOKEN_LENA",
+    "PHANTOMBOT_TELEGRAM_ALLOWED_USERS_LENA",
+    "PHANTOMBOT_TELEGRAM_POLL_S_LENA",
+    "PHANTOMBOT_TELEGRAM_GROUP_PERSONAS_LENA",
   ] as const;
   const SAVED = new Map<string, string | undefined>();
 
@@ -444,6 +455,94 @@ describe("loadConfig persona layering", () => {
     // An account with no token of its own is INCOMPLETE, not a licence to
     // borrow the host's: lena simply has no Telegram until she is given a bot.
     expect(lena.channels.telegram).toBeUndefined();
+  });
+
+  test("ambient DEFAULT bot env vars never reach a non-default persona", async () => {
+    // Round-3 Major (Kai + Lena). `applyPersonaLayer` rebuilds lena's TOML
+    // account from scratch, but `buildTelegramConfig` used to reapply the
+    // UNSUFFIXED env overrides on top of it — and on a real host that is
+    // exactly where the default bot's token arrives (vault -> env). Result:
+    // every non-default persona resolved back to the owner's bot, two
+    // listeners on one token, isolation silently undone.
+    process.env.TELEGRAM_BOT_TOKEN = "HOST_DEFAULT_ENV";
+    process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS = "111";
+    process.env.PHANTOMBOT_TELEGRAM_POLL_S = "7";
+    process.env.PHANTOMBOT_TELEGRAM_GROUP_PERSONAS = "hostgroup";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[channels.telegram]\ntoken = "lena-bot"\n' +
+        "allowed_user_ids = [222]\npoll_timeout_s = 21\n" +
+        'group_persona_names = ["lenagroup"]\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram?.token).toBe("lena-bot");
+    expect(lena.channels.telegram?.allowedUserIds).toEqual([222]);
+    expect(lena.channels.telegram?.pollTimeoutS).toBe(21);
+    expect(lena.channels.telegram?.groupPersonaNames).toEqual(["lenagroup"]);
+  });
+
+  test("an ambient host token alone gives a non-default persona NO telegram", async () => {
+    // Lena's exact repro: no TOML account anywhere, only the host token in the
+    // environment. Ignoring the unsuffixed vars must mean ignoring them, not
+    // falling back to them — a fallback is the same leak by another name.
+    process.env.TELEGRAM_BOT_TOKEN = "HOST_DEFAULT_ENV";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram).toBeUndefined();
+    // ...while the default persona still gets it, exactly as before.
+    const robbie = await loadConfig("robbie");
+    expect(robbie.channels.telegram?.token).toBe("HOST_DEFAULT_ENV");
+  });
+
+  test("a non-default persona reads its OWN suffixed env overrides", async () => {
+    // The convention the README already documents for named accounts, now
+    // reaching the persona layer: env still wins over TOML, per persona.
+    process.env.TELEGRAM_BOT_TOKEN = "HOST_DEFAULT_ENV";
+    process.env.TELEGRAM_BOT_TOKEN_LENA = "lena-env-bot";
+    process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS_LENA = "333";
+    process.env.PHANTOMBOT_TELEGRAM_POLL_S_LENA = "9";
+    process.env.PHANTOMBOT_TELEGRAM_GROUP_PERSONAS_LENA = "lenaenvgroup";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[channels.telegram]\ntoken = "lena-toml-bot"\n' +
+        "allowed_user_ids = [222]\npoll_timeout_s = 21\n",
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram?.token).toBe("lena-env-bot");
+    expect(lena.channels.telegram?.allowedUserIds).toEqual([333]);
+    expect(lena.channels.telegram?.pollTimeoutS).toBe(9);
+    expect(lena.channels.telegram?.groupPersonaNames).toEqual(["lenaenvgroup"]);
+  });
+
+  test("the DEFAULT persona still honours the unsuffixed env overrides", async () => {
+    // Pre-#439 behaviour, unchanged: those vars describe the default bot.
+    process.env.TELEGRAM_BOT_TOKEN = "HOST_DEFAULT_ENV";
+    process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS = "111";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\n' +
+        'token = "robbie-toml-bot"\nallowed_user_ids = [1]\n',
+      "utf8",
+    );
+    const robbie = await loadConfig();
+    expect(robbie.channels.telegram?.token).toBe("HOST_DEFAULT_ENV");
+    expect(robbie.channels.telegram?.allowedUserIds).toEqual([111]);
   });
 
   test("a partial persona table completes from its LEGACY entry, not the host", async () => {

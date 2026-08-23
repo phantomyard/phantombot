@@ -922,14 +922,15 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const personaToml = stripHostOnlyKeys(
     await readPersonaToml(personasDir, personaLayer),
   );
+  const isDefaultPersona =
+    personaLayer ===
+    (process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+      state.default_persona ??
+      asString(globalToml.default_persona) ??
+      "phantom");
   const toml = applyPersonaLayer(globalToml, personaToml, {
     persona: personaLayer,
-    isDefault:
-      personaLayer ===
-      (process.env.PHANTOMBOT_DEFAULT_PERSONA ??
-        state.default_persona ??
-        asString(globalToml.default_persona) ??
-        "phantom"),
+    isDefault: isDefaultPersona,
   });
 
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
@@ -1097,7 +1098,12 @@ export async function loadConfig(persona?: string): Promise<Config> {
     },
 
     channels: {
-      telegram: buildTelegramConfig(tomlTelegram),
+      telegram: buildTelegramConfig(
+        tomlTelegram,
+        // Default persona keeps the unsuffixed env vars; every other persona
+        // reads only its own suffixed ones. See buildTelegramConfig.
+        isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
+      ),
       telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
     },
 
@@ -1712,20 +1718,41 @@ function buildEmbeddingsConfig(
   };
 }
 
+/**
+ * Build the persona layer's own Telegram account.
+ *
+ * The env overrides are PERSONA-SCOPED. `TELEGRAM_BOT_TOKEN` and the
+ * `PHANTOMBOT_TELEGRAM_*` vars describe the DEFAULT persona's bot — on a real
+ * host that is exactly where the default token arrives (vault → env). Applying
+ * them to a non-default persona would hand it the owner's bot even though
+ * `applyPersonaLayer` just rebuilt its TOML account from scratch to prevent
+ * precisely that, putting two listeners on one token. So for a NON-DEFAULT
+ * persona we read only the suffixed form (`TELEGRAM_BOT_TOKEN_<PERSONA>`, the
+ * convention the README already documents for named accounts) and IGNORE the
+ * unsuffixed vars entirely — never falling back to them, since a fallback is
+ * the same leak by another name.
+ *
+ * @param envSuffix persona env-var suffix, or undefined for the default
+ *                  persona (which keeps the historical unsuffixed vars).
+ */
 function buildTelegramConfig(
   tomlTelegram: Record<string, unknown>,
+  envSuffix?: string,
 ): Config["channels"]["telegram"] {
+  const sfx = envSuffix ? `_${envSuffix}` : "";
   const token =
-    process.env.TELEGRAM_BOT_TOKEN ?? asString(tomlTelegram.token);
+    process.env[`TELEGRAM_BOT_TOKEN${sfx}`] ?? asString(tomlTelegram.token);
   if (!token) return undefined;
 
   const pollTimeoutS = clampPollTimeout(
-    asInt(process.env.PHANTOMBOT_TELEGRAM_POLL_S) ??
+    asInt(process.env[`PHANTOMBOT_TELEGRAM_POLL_S${sfx}`]) ??
       asInt(tomlTelegram.poll_timeout_s) ??
       30,
   );
 
-  const allowedFromEnv = process.env.PHANTOMBOT_TELEGRAM_ALLOWED_USERS
+  const allowedFromEnv = process.env[
+    `PHANTOMBOT_TELEGRAM_ALLOWED_USERS${sfx}`
+  ]
     ?.split(",")
     .map((s) => Number(s.trim()))
     .filter((n) => Number.isInteger(n));
@@ -1733,7 +1760,9 @@ function buildTelegramConfig(
   const allowedUserIds = allowedFromEnv ?? allowedFromToml ?? [];
 
   const groupPersonaNames =
-    parseGroupPersonaNames(process.env.PHANTOMBOT_TELEGRAM_GROUP_PERSONAS) ??
+    parseGroupPersonaNames(
+      process.env[`PHANTOMBOT_TELEGRAM_GROUP_PERSONAS${sfx}`],
+    ) ??
     asStringArray(tomlTelegram.group_persona_names) ??
     [];
 

@@ -722,6 +722,16 @@ Environment variable overrides:
 Persona env suffixes are uppercased and non-alphanumeric characters become
 underscores, so `my-bot.test` uses `TELEGRAM_BOT_TOKEN_MY_BOT_TEST`.
 
+The unsuffixed vars in the middle column describe the **default persona's**
+bot only. A non-default persona reads its suffixed vars and nothing else — it
+never falls back to `TELEGRAM_BOT_TOKEN`, so a host that supplies the default
+token through the environment (the usual vault → env path) can never hand that
+bot to a second persona and put two listeners on one token. Give each persona
+either its own `[channels.telegram]` block in
+`<personas-root>/<persona>/config.toml`, its
+`[channels.telegram.personas.<name>]` entry, or its suffixed env vars; with
+none of those, that persona simply has no Telegram.
+
 ### Telegram Commands
 
 At startup, phantombot registers the real command menu with Telegram and
