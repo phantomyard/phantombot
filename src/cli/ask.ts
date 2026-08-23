@@ -30,7 +30,11 @@ import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  type Config,
+  personaDir,
+  loadConfigForPersona,
+} from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -94,8 +98,16 @@ export async function runAsk(input: RunAskInput): Promise<number> {
     return 2;
   }
 
-  let config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
+  // Target persona first, THEN its effective config (phantombot#439). `ask`
+  // is the documented way a poller or script wakes a NON-default persona; on
+  // the default layer it would answer with the wrong harness chain, voice and
+  // retrieval policy.
+  let { config, persona } = input.config
+    ? {
+        config: input.config,
+        persona: input.persona ?? input.config.defaultPersona,
+      }
+    : await loadConfigForPersona(input.persona);
   const agentDir = personaDir(config, persona);
   if (!existsSync(agentDir)) {
     err.write(

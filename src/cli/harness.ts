@@ -16,6 +16,10 @@ import {
   updateConfigToml,
 } from "../lib/configWriter.ts";
 import {
+  type PersonaWriteScope,
+  resolvePersonaWriteTarget,
+} from "../lib/personaConfig.ts";
+import {
   harnessBin,
   resolveHarnessBinary,
   whichBinary,
@@ -104,11 +108,18 @@ export async function applyHarnessChain(
   configPath: string,
   chain: readonly HarnessId[],
   persona?: string,
+  scope: PersonaWriteScope = "global",
 ): Promise<void> {
+  // Same rule as the Telegram writer (phantombot#439): in "persona" scope
+  // `configPath` IS that persona's own config.toml, where its chain is the
+  // plain `[harnesses].chain` — and where the reader looks first. Writing the
+  // legacy `[harnesses.personas.<name>]` table into a persona file would be
+  // read as "this persona's override for a persona of the same name", which
+  // `loadConfig` deliberately drops.
   await updateConfigToml(configPath, (toml) => {
     setIn(
       toml,
-      persona
+      persona && scope === "global"
         ? ["harnesses", "personas", persona, "chain"]
         : ["harnesses", "chain"],
       [...chain],
@@ -201,9 +212,18 @@ interface RunInput {
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
-  const config = input.config ?? (await loadConfig());
   const persona = input.persona?.trim() || undefined;
+  // Read the persona's EFFECTIVE config, so the picker pre-selects the chain
+  // that persona actually runs with rather than the default persona's.
+  const config = input.config ?? (await loadConfig(persona));
   const currentChain = harnessChainIds(config, persona);
+  // Write where the read path looks: the persona's own file once it exists,
+  // the global file (legacy shape) until then.
+  const target = await resolvePersonaWriteTarget({
+    configPath: config.configPath,
+    personasDir: config.personasDir,
+    persona: persona ?? config.defaultPersona,
+  });
   const availability = input.availability ?? (await detectAvailability(config));
   await saveHarnessBins(availability);
   const svc = input.serviceControl ?? defaultServiceControl();
@@ -293,9 +313,9 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const chain: HarnessId[] = [primary as HarnessId];
   if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
 
-  await applyHarnessChain(config.configPath, chain, persona);
+  await applyHarnessChain(target.path, chain, persona, target.scope);
   p.note(
-    `harness chain${persona ? ` for '${persona}'` : ""}: ${chain.join(" → ")}\nsaved to ${config.configPath}`,
+    `harness chain${persona ? ` for '${persona}'` : ""}: ${chain.join(" → ")}\nsaved to ${target.path}`,
     "Saved",
   );
 

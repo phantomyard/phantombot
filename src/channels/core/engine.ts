@@ -232,6 +232,17 @@ export function createIndicatorKeepalive(
 
 export interface RunTelegramServerInput {
   config: Config;
+  /**
+   * Every persona this daemon actually started — Telegram listeners AND
+   * PhantomChat identities, deduped (phantombot#439). `/status` reports this
+   * verbatim: reconstructing the roster from `default_persona` +
+   * `autostart_personas` would omit legacy `[channels.telegram.personas.*]`
+   * listeners and any PhantomChat persona, so a multi-persona process could
+   * report itself as single-persona. Absent (tests, embedded callers) means
+   * "unknown" and the roster line is derived from config as a fallback.
+   */
+  runningPersonas?: string[];
+
   memory: MemoryStore;
   harnesses: Harness[];
   agentDir: string;
@@ -613,6 +624,7 @@ export async function runTelegramServer(
             startedAt: serverStartedAt,
             activeTurn: activeTurns.get(msg.conversationId),
             config: input.config,
+            runningPersonas: input.runningPersonas,
             serviceControl: input.serviceControl,
             botUsername,
             phantomchatNpub,

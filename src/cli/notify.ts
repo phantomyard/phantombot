@@ -41,7 +41,7 @@ import {
   personaDir,
   type Config,
   type TelegramAccount,
-  loadConfig,
+  loadConfigForPersona,
 } from "../config.ts";
 import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
 import { synthesize, ttsSupport } from "../lib/audio.ts";
@@ -129,8 +129,16 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
     return 2;
   }
 
-  const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
+  // Target persona first, THEN its effective config (phantombot#439). A
+  // persona's Telegram bot now lives in ITS OWN config.toml, so loading the
+  // default layer would notify on the default persona's bot — or find no
+  // channel at all once the legacy global keys are pruned.
+  const { config, persona } = input.config
+    ? {
+        config: input.config,
+        persona: input.persona ?? input.config.defaultPersona,
+      }
+    : await loadConfigForPersona(input.persona);
 
   // ── Resolve the configured channels for this persona ──────────────────
   // A channel is a notify target when it has an account/identity AND at least

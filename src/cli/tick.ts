@@ -37,7 +37,13 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
-import { type Config, loadConfig, personaDir, xdgStateHome } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  personaDir,
+  withHostHarnessBins,
+  xdgStateHome,
+} from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
@@ -79,6 +85,12 @@ export interface RunTickInput {
   harnesses?: Harness[];
   /** Build a task's effective chain (test seam for persona routing). */
   buildHarnesses?: typeof buildHarnessChain;
+  /**
+   * Resolve one persona's EFFECTIVE config (test seam, phantombot#439).
+   * Production layers `<persona>/config.toml` over the host globals via
+   * `loadConfigForPersona`.
+   */
+  loadPersonaConfig?: (persona: string) => Promise<Config>;
   out?: WriteSink;
   err?: WriteSink;
 }
@@ -104,6 +116,47 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
     });
     return 0;
   }
+
+  // Every task runs under ITS OWN persona's effective config (phantombot#439).
+  // The row stores the persona; the settings that decide how the wake behaves
+  // — harness chain, retrieval, durable facts, timeouts — live in that
+  // persona's config.toml. Resolving them once per persona (not once per task)
+  // keeps a busy tick to one extra config read per distinct persona, and the
+  // default persona costs nothing at all because `config` already IS its layer.
+  const personaConfigs = new Map<string, Config>();
+  const resolvePersonaConfig = async (persona: string): Promise<Config> => {
+    // `config` already IS this persona's layer when it was loaded for it —
+    // or when the caller injected a config (tests, embedded callers) that
+    // names no layer at all, in which case the default persona's settings are
+    // the only ones there are.
+    if (persona === (config.personaLayer ?? config.defaultPersona)) return config;
+    const cached = personaConfigs.get(persona);
+    if (cached) return cached;
+    let resolved: Config;
+    try {
+      resolved = input.loadPersonaConfig
+        ? await input.loadPersonaConfig(persona)
+        : await loadConfig(persona);
+    } catch (e) {
+      // A persona whose file cannot be read still runs — on the host layer,
+      // exactly as it did before per-persona config existed. Degrade, never
+      // drop the wake.
+      log.warn("tick: could not load persona config, using host layer", {
+        persona,
+        error: (e as Error).message,
+      });
+      resolved = config;
+    }
+    personaConfigs.set(persona, resolved);
+    return resolved;
+  };
+  // The persona layer is cached RAW and given the host's harness binary paths
+  // at each use, never at cache time: `resolveHarnessBinsForConfig` rewrites
+  // `config` lazily, part-way through the loop, so a persona resolved before
+  // that (e.g. by a command task, which needs only the timeout) must not
+  // freeze the unresolved bins for an agent task that comes later.
+  const effectiveConfigFor = async (persona: string): Promise<Config> =>
+    withHostHarnessBins(await resolvePersonaConfig(persona), config);
 
   const taskStore =
     input.taskStore ?? (await openTaskStore(config.memoryDbPath));
@@ -204,7 +257,8 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       try {
         if (isCommandTask) {
           const result = await runCommandTask(task.command!, {
-            timeoutMs: config.harnessHardTimeoutMs,
+            timeoutMs: (await effectiveConfigFor(task.persona))
+              .harnessHardTimeoutMs,
             cwd: agentDir,
             env: buildCommandEnv(task.commandSecrets),
           });
@@ -224,9 +278,14 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             ({ config } = await resolveHarnessBinsForConfig(config, { err }));
             harnessBinsResolved = true;
           }
+          const taskConfig = await effectiveConfigFor(task.persona);
           const taskHarnesses =
             input.harnesses ??
-            (input.buildHarnesses ?? buildHarnessChain)(config, err, task.persona);
+            (input.buildHarnesses ?? buildHarnessChain)(
+              taskConfig,
+              err,
+              task.persona,
+            );
           if (taskHarnesses.length === 0) {
             throw new Error("no harnesses configured");
           }
@@ -241,7 +300,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             workingDir: homedir(),
             harnesses: taskHarnesses,
             memory,
-            idleTimeoutMs: config.harnessIdleTimeoutMs,
+            idleTimeoutMs: taskConfig.harnessIdleTimeoutMs,
             hardTimeoutMs: BACKGROUND_WAKE_HARD_TIMEOUT_MS,
             // #324: an agent-woken task should wake with the same memory
             // instincts a conversation turn gets — semantic recall + durable
@@ -251,16 +310,26 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             // disabled in config, so this is a no-op when retrieval/durable
             // facts are off. (--command tasks never reach here — they stay
             // blind/mute by design.)
-            retrieve: makeRetriever(config, task.persona, agentDir, conversation),
-            indexTurns: makeTurnIndexer(config, task.persona, conversation, memory),
+            retrieve: makeRetriever(
+              taskConfig,
+              task.persona,
+              agentDir,
+              conversation,
+            ),
+            indexTurns: makeTurnIndexer(
+              taskConfig,
+              task.persona,
+              conversation,
+              memory,
+            ),
             pullFacts: makeDurableFactPuller(
-              config,
+              taskConfig,
               task.persona,
               conversation,
               memory,
             ),
             extractFacts: makeFactExtractor(
-              config,
+              taskConfig,
               task.persona,
               conversation,
               memory,

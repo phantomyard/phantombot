@@ -41,6 +41,7 @@ import {
   loadConfig,
   personaDir,
   type TelegramAccount,
+  withHostHarnessBins,
 } from "../config.ts";
 import { readConfigToml } from "../lib/configWriter.ts";
 import { migratePersonaConfig } from "../lib/personaConfig.ts";
@@ -148,6 +149,46 @@ export interface ListenerSpec {
    * back to the process-wide config, which is exactly the pre-#439 behaviour.
    */
   config?: Config;
+}
+
+/**
+ * Which PhantomChat personas this host is allowed to START (phantombot#439).
+ *
+ * `listPhantomchatPersonas` SCANS THE DISK: every persona directory holding a
+ * `phantomchat.json` comes back. That is the right answer for "who is
+ * configured" and the wrong answer for "who should talk to the world" — an
+ * imported, restored or archived-and-recreated identity would start answering
+ * strangers purely because its directory exists. The explicit boot roster is
+ * `default_persona` + `autostart_personas`, exactly as for Telegram.
+ *
+ * The gate is opt-in, and deliberately so: `autostart_personas` ABSENT means
+ * this host has never been told what to start, so every configured identity
+ * keeps starting exactly as it did before this landed — no silent channel loss
+ * on upgrade. Once the key is present (even as an empty list) it is the whole
+ * truth, and anything outside it is skipped with a warning naming the fix.
+ */
+export function selectPhantomchatPersonas<T extends { persona: string }>(
+  specs: T[],
+  config: Pick<Config, "autostartPersonas">,
+  defaultPersona: string,
+  err: WriteSink,
+): T[] {
+  const autostart = config.autostartPersonas;
+  if (autostart === undefined) return specs;
+  const roster = new Set([defaultPersona, ...autostart]);
+  const out: T[] = [];
+  for (const spec of specs) {
+    if (roster.has(spec.persona)) {
+      out.push(spec);
+      continue;
+    }
+    err.write(
+      `warning: phantomchat persona '${spec.persona}' is configured but not in ` +
+        `autostart_personas — not starting it. Add it to autostart_personas in ` +
+        `config.toml (or run \`phantombot persona\`) to start it.\n`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -278,37 +319,6 @@ export function planListeners(
   return { listeners };
 }
 
-/**
- * Take a persona's config but keep the HOST's harness binary paths.
- *
- * Binaries are a property of the machine, not the personality: `claude` lives
- * at one path on this box for everyone. runRun probes them once (and persists
- * the result to state), so re-probing per persona would be wasted work — and
- * worse, a persona whose file happens to carry a stale `bin` would silently
- * run a different binary than the one doctor just verified. The persona keeps
- * everything else it overrode, notably `harnesses.chain`.
- */
-function withHostHarnessBins(personaConfig: Config, host: Config): Config {
-  if (personaConfig === host) return host;
-  return {
-    ...personaConfig,
-    harnesses: {
-      ...personaConfig.harnesses,
-      claude: { ...personaConfig.harnesses.claude, bin: host.harnesses.claude.bin },
-      pi: { ...personaConfig.harnesses.pi, bin: host.harnesses.pi.bin },
-      ...(personaConfig.harnesses.codex
-        ? {
-            codex: {
-              ...personaConfig.harnesses.codex,
-              bin:
-                host.harnesses.codex?.bin ?? personaConfig.harnesses.codex.bin,
-            },
-          }
-        : {}),
-    },
-  };
-}
-
 export async function runRun(input: RunInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -326,7 +336,14 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // have one or more persona `phantomchat.json` files. Without accounting for
   // them here, runRun would exit at the Telegram guard and the freshly
   // installed service would die immediately on the advertised no-Telegram path.
-  const phantomchatPersonas = listPhantomchatPersonas(config);
+  const allPhantomchatPersonas = listPhantomchatPersonas(config);
+  const rosterDefault = config.defaultPersona;
+  let phantomchatPersonas = selectPhantomchatPersonas(
+    allPhantomchatPersonas,
+    config,
+    rosterDefault,
+    err,
+  );
   const hasPhantomchat = phantomchatPersonas.length > 0;
 
   if (!hasDefault && !hasPersonas && !hasPhantomchat) {
@@ -362,6 +379,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     }
   }
 
+  // The default persona may have been HEALED to a different name just above,
+  // and the roster is anchored on it — recompute so the healed persona is not
+  // gated out of its own PhantomChat listener.
+  if (defaultPersona !== rosterDefault) {
+    phantomchatPersonas = selectPhantomchatPersonas(
+      allPhantomchatPersonas,
+      config,
+      defaultPersona,
+      err,
+    );
+  }
+
   // Persona config migration + resolution (phantombot#439).
   //
   // Migration is copy-only and idempotent, so running it on every start is
@@ -382,6 +411,11 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       defaultPersona,
       ...autostart,
       ...Object.keys(config.channels.telegramPersonas ?? {}),
+      // PhantomChat-only personas have config of their own too (voice,
+      // chattiness, harness chain); a persona that never had a Telegram bot
+      // must still be migrated or it reads the default persona's settings
+      // forever.
+      ...phantomchatPersonas.map((spec) => spec.persona),
     ];
     for (const name of new Set(migrateNames)) {
       if (!existsSync(personaDir(config, name))) continue;
@@ -399,7 +433,18 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       error: (e as Error).message,
     });
   }
-  for (const name of autostart) {
+  // Every persona this process will actually run needs its OWN effective
+  // config — not just the Telegram autostart list. A PhantomChat persona left
+  // out of this map falls back to `config`, i.e. the DEFAULT persona's voice,
+  // chattiness and harness chain, which is precisely the silent mis-run #439
+  // exists to remove.
+  const resolveNames = new Set<string>([
+    ...autostart,
+    ...phantomchatPersonas
+      .map((spec) => spec.persona)
+      .filter((name) => name !== defaultPersona),
+  ]);
+  for (const name of resolveNames) {
     if (!existsSync(personaDir(config, name))) {
       err.write(
         `warning: autostart_personas lists '${name}' but no persona dir at ${personaDir(config, name)} — skipping\n`,
@@ -798,6 +843,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
 
+  // The roster /status reports: every persona this process really started,
+  // Telegram and PhantomChat alike (phantombot#439).
+  const runningPersonas = [
+    ...new Set([
+      ...telegramListeners.map((l) => l.persona),
+      ...phantomchatPersonas.map((spec) => spec.persona),
+    ]),
+  ];
+
   try {
     // Fan-out: one listener per (persona, account). Shared AbortSignal
     // so Ctrl-C cleanly tears all of them down together.
@@ -809,6 +863,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         harnesses: l.harnesses,
         agentDir: l.agentDir,
         persona: l.persona,
+        runningPersonas,
         account: l.account,
         transport: new HttpTelegramTransport(l.account.token),
         signal: ac.signal,
@@ -1034,6 +1089,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             harnesses: personaHarnesses,
             agentDir,
             persona: spec.persona,
+            runningPersonas,
             channel,
             secretKey: identity.secretKey,
             allowedHex,

@@ -212,6 +212,57 @@ describe("runTick — normal task fire", () => {
     expect(harness.invocations).toBe(1);
   });
 
+  test("a task fires under ITS persona's effective config, not the default's", async () => {
+    // The row stores the persona; the SETTINGS that decide how the wake
+    // behaves — harness chain, idle timeout, retrieval — live in that
+    // persona's own config.toml (phantombot#439). Before this, tick loaded the
+    // default persona's config once and used it for every due task, so a task
+    // added with `--persona lena` ran on the wrong policy entirely.
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+    await writeFile(join(workdir, "personas", "lena", "BOOT.md"), "# Lena");
+    const created = store.add({
+      persona: "lena",
+      description: "Lena check",
+      schedule: "0 * * * *",
+      prompt: "do the thing",
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    const lenaConfig = {
+      ...config,
+      personaLayer: "lena",
+      harnessIdleTimeoutMs: 4242,
+    };
+    const asked: string[] = [];
+    const harness = new ScriptedHarness("h", [
+      { type: "done", finalText: "done" },
+    ]);
+    const seenConfigs: number[] = [];
+
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      loadPersonaConfig: async (persona) => {
+        asked.push(persona);
+        return lenaConfig;
+      },
+      buildHarnesses: (cfg, _err, _persona) => {
+        seenConfigs.push(cfg.harnessIdleTimeoutMs);
+        return [harness];
+      },
+      lockPath,
+      out: { write() {} },
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+
+    expect(code).toBe(0);
+    expect(asked).toEqual(["lena"]);
+    expect(seenConfigs).toEqual([4242]);
+    expect(harness.lastRequest?.idleTimeoutMs).toBe(4242);
+  });
+
   test("background agent wake logs lifecycle and stream chunks without Telegram delivery", async () => {
     const created = store.add({
       persona: "phantom",

@@ -13,7 +13,12 @@
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
 
-import { type Config, loadConfig, memoryIndexPath, personaDir } from "../config.ts";
+import {
+  type Config,
+  memoryIndexPath,
+  personaDir,
+  loadConfigForPersona,
+} from "../config.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
@@ -107,8 +112,16 @@ export async function runHeartbeatCli(
 ): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
-  const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
+  // Resolve the TARGET persona first, then load ITS effective config
+  // (phantombot#439): the heartbeat's retrieval/embedding and update-notify
+  // settings are persona-scoped, and loading the default layer first would
+  // silently run every persona's heartbeat on the default persona's settings.
+  const { config, persona } = input.config
+    ? {
+        config: input.config,
+        persona: input.persona ?? input.config.defaultPersona,
+      }
+    : await loadConfigForPersona(input.persona);
   const dir = personaDir(config, persona);
 
   if (!existsSync(dir)) {

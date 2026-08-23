@@ -85,6 +85,18 @@ describe("applyHarnessChain", () => {
     expect(text).toContain('chain = [ "pi" ]');
   });
 
+  test("in persona scope the chain is the plain [harnesses].chain", async () => {
+    // A persona's own file describes one persona, so its chain is
+    // `[harnesses].chain` — the key loadConfig reads first for that persona.
+    // Writing the legacy table into a persona file would be dropped on read
+    // and the change would silently do nothing (phantombot#439).
+    const path = join(workdir, "lena-config.toml");
+    await applyHarnessChain(path, ["pi", "claude"], "lena", "persona");
+    const text = await readFile(path, "utf8");
+    expect(text).toContain('chain = [ "pi", "claude" ]');
+    expect(text).not.toContain("personas");
+  });
+
   test("writes a persona override without changing the global chain", async () => {
     const path = join(workdir, "config.toml");
     await applyHarnessChain(path, ["codex", "pi"]);

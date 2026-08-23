@@ -630,8 +630,14 @@ autostart_personas = ["lena", "kai"]
 
 The default persona always starts; `autostart_personas` names the others. The
 list is explicit on purpose — a persona directory that merely exists (an import,
-a restored archive) never starts talking to the world on its own. Pick the set
+a restored archive) never starts talking to the world on its own, and that
+applies to PhantomChat identities as much as to Telegram bots. Pick the set
 interactively with `phantombot persona` → *Choose which personas start at boot*.
+
+Leaving `autostart_personas` out entirely keeps the host exactly as it behaved
+before the key existed: every configured identity starts. Once the key is
+present — even as an empty list — it is the whole truth, and a persona outside
+it is skipped with a warning naming the fix.
 
 Each persona keeps its own settings in `<personas-root>/<persona>/config.toml`:
 
@@ -648,8 +654,19 @@ provider = "elevenlabs"
 ```
 
 The per-persona TUIs write there for you: `phantombot telegram --persona lena`,
-`phantombot voice --persona lena`, `phantombot phantomchat --persona lena`.
-`phantombot task --persona lena` files and lists that persona's schedule.
+`phantombot voice --persona lena`, `phantombot harness --persona lena`,
+`phantombot phantomchat --persona lena`. `phantombot task --persona lena` files
+and lists that persona's schedule. Each of them writes wherever phantombot will
+READ the setting back from: the persona's own file once it exists, the host's
+`config.toml` (in its historical shape) on a host that has not been migrated
+yet — so a saved change always takes effect on the next restart. A `--persona`
+that does not exist is refused before anything is written.
+
+Reading follows one rule: a per-key merge with the persona file winning, and
+anything it does not mention falling back to the host file — never to a
+built-in default. Env vars still win over both. `default_persona`,
+`autostart_personas`, `update_channel`, `personas_dir` and `memory_db` describe
+the machine, so they are ignored inside a persona file.
 
 **Lifecycle commands belong to the default persona.** `/update` and `/restart`
 swap the binary and bounce the service for *everyone* in the process, so they

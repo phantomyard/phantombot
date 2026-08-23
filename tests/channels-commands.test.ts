@@ -850,6 +850,23 @@ describe("lifecycle commands are default-persona-only (#439)", () => {
     expect(r!.reply).toContain("personas: robbie*, lena (you), kai");
   });
 
+  test("/status reports the personas the daemon REALLY started", async () => {
+    // Reconstructing the roster from default_persona + autostart_personas
+    // under-reports: a legacy `[channels.telegram.personas.*]` listener and a
+    // PhantomChat-only persona both start without appearing there, so a
+    // multi-persona process could report itself as single-persona
+    // (phantombot#439). runRun passes the planned set instead.
+    const r = await handleSlashCommand(
+      "/status",
+      ctx({
+        persona: "lena",
+        config: { ...multiPersonaConfig(), autostartPersonas: [] },
+        runningPersonas: ["robbie", "lena", "legacy-bot"],
+      }),
+    );
+    expect(r!.reply).toContain("personas: robbie*, lena (you), legacy-bot");
+  });
+
   test("/status omits the roster on a single-persona host", async () => {
     const r = await handleSlashCommand(
       "/status",

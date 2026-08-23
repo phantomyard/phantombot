@@ -567,3 +567,80 @@ describe("runNotify turn persistence", () => {
     expect(transport.sent).toHaveLength(2); // both recipients still notified
   });
 });
+
+describe("runNotify — persona-aware config resolution (phantombot#439)", () => {
+  // A CALLER-level test on purpose: the loader was already correct before this
+  // fix; the bug was that runNotify loaded the DEFAULT layer and only then
+  // looked at `--persona`, so a persona whose bot lives in its own
+  // config.toml was notified on someone else's bot (or reported as having no
+  // channel at all once the legacy global keys are pruned).
+  const SCRUBBED = [
+    "PHANTOMBOT_CONFIG",
+    "PHANTOMBOT_PERSONAS_DIR",
+    "PHANTOMBOT_STATE",
+    "PHANTOMBOT_DEFAULT_PERSONA",
+    "PHANTOMBOT_PERSONA",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALLOWED_USER_IDS",
+  ] as const;
+  const saved = new Map<string, string | undefined>();
+  let dir: string;
+
+  beforeEach(() => {
+    for (const k of SCRUBBED) {
+      saved.set(k, process.env[k]);
+      delete process.env[k];
+    }
+    dir = mkdtempSync(join(tmpdir(), "phantombot-notify-persona-"));
+    mkdirSync(join(dir, "personas", "lena"), { recursive: true });
+    mkdirSync(join(dir, "personas", "robbie"), { recursive: true });
+    writeFileSync(
+      join(dir, "config.toml"),
+      `default_persona = "robbie"\nmemory_db = "${join(dir, "memory.sqlite")}"\n\n` +
+        `[channels.telegram]\ntoken = "111:robbie"\nallowed_user_ids = [111]\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "personas", "lena", "config.toml"),
+      `[channels.telegram]\ntoken = "222:lena"\nallowed_user_ids = [777]\n`,
+      "utf8",
+    );
+    process.env.PHANTOMBOT_CONFIG = join(dir, "config.toml");
+    process.env.PHANTOMBOT_PERSONAS_DIR = join(dir, "personas");
+    process.env.PHANTOMBOT_STATE = join(dir, "state.json");
+  });
+
+  afterEach(() => {
+    for (const k of SCRUBBED) {
+      const v = saved.get(k);
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    saved.clear();
+  });
+
+  test("--persona notifies THAT persona's own bot, not the default one", async () => {
+    const transport = new FakeTransport();
+    const code = await runNotify({
+      persona: "lena",
+      message: "hello",
+      transport,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(transport.sent.map((s) => s.chatId)).toEqual(["777"]);
+  });
+
+  test("no --persona still notifies the default persona's bot", async () => {
+    const transport = new FakeTransport();
+    const code = await runNotify({
+      message: "hello",
+      transport,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(transport.sent.map((s) => s.chatId)).toEqual(["111"]);
+  });
+});

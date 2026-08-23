@@ -30,9 +30,9 @@ import { join } from "node:path";
 
 import {
   type Config,
-  loadConfig,
   memoryIndexPath,
   personaDir,
+  loadConfigForPersona,
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -340,8 +340,15 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const now = input.now ?? new Date();
 
-  let config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
+  // Target persona first, THEN its effective config (phantombot#439) — the
+  // nightly runs a full harness turn, so the chain, timeouts, retrieval and
+  // durable-fact policy must be the ones that persona actually runs with.
+  let { config, persona } = input.config
+    ? {
+        config: input.config,
+        persona: input.persona ?? input.config.defaultPersona,
+      }
+    : await loadConfigForPersona(input.persona);
   const dir = personaDir(config, persona);
   if (!existsSync(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);

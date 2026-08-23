@@ -21,11 +21,14 @@
  * file — never to a constant. That is deliberate: a "default" that outranks an
  * operator's existing global setting is a silent behaviour change on upgrade.
  *
- * Migration is COPY, NEVER DELETE, and idempotent:
+ * Migration is COPY, NEVER DELETE, ADDITIVE, and idempotent:
  *
- *   - if `<persona>/config.toml` already exists, migration does nothing at all;
- *   - otherwise the persona-scoped keys are COPIED out of the global file and
- *     the global file is left byte-identical.
+ *   - persona-scoped keys are COPIED out of the global file into
+ *     `<persona>/config.toml`, and the global file is left byte-identical;
+ *   - a key the persona file ALREADY sets is never touched, so a hand edit (or
+ *     a half-written file left by `phantombot voice --persona`) always wins;
+ *   - only the keys that are MISSING are filled in, so a partial persona file
+ *     cannot leave the rest of that persona unmigrated.
  *
  * Copy-not-delete is what makes `/update` order-independent. Release rings mean
  * a host can be rolled BACK to a binary that has never heard of persona config
@@ -156,6 +159,40 @@ function cloneToml<T>(v: T): T {
   return v;
 }
 
+
+/**
+ * Where a per-persona SETTING must be written so that reading it back gives
+ * the value just written (phantombot#439).
+ *
+ * The read path is: persona file wins, global file is the fallback. A writer
+ * that ignores that ends in split-brain — `phantombot telegram --persona lena`
+ * updating the legacy `[channels.telegram.personas.lena]` table while the
+ * daemon keeps reading the token from `<lena>/config.toml`, so the change
+ * "saves" and nothing happens.
+ *
+ * The rule is therefore the read rule, backwards:
+ *
+ *   - `<persona>/config.toml` exists → write THERE. It exists because
+ *     migration ran, or because the user made it; either way it outranks the
+ *     global file on read, so it is the only place a write can win.
+ *   - it does not exist → write the GLOBAL file in its historical shape. That
+ *     keeps an unmigrated host readable by an older binary (release rings make
+ *     rollback real), and the next daemon start copies the key into the
+ *     persona file anyway.
+ */
+export type PersonaWriteScope = "persona" | "global";
+
+export async function resolvePersonaWriteTarget(input: {
+  configPath: string;
+  personasDir: string;
+  persona: string;
+}): Promise<{ path: string; scope: PersonaWriteScope }> {
+  const path = personaConfigPath(input.personasDir, input.persona);
+  const existing = await readConfigToml(path);
+  if (Object.keys(existing).length > 0) return { path, scope: "persona" };
+  return { path: input.configPath, scope: "global" };
+}
+
 export interface MigratePersonaConfigInput {
   personasDir: string;
   persona: string;
@@ -175,6 +212,43 @@ export type MigratePersonaConfigResult =
   | { migrated: true; keys: string[]; path: string };
 
 /**
+ * Fill in only what `existing` does not already say.
+ *
+ * Recurses into tables so a persona file that sets `[voice]` alone still gets
+ * `[channels.telegram]` seeded, and a file that sets
+ * `channels.telegram.token` keeps its token while gaining the allowlist it
+ * omitted. Never overwrites a value the persona file already has — the whole
+ * point is that a hand edit outranks a migration.
+ *
+ * Returns the top-level keys that gained something, so the caller can decide
+ * whether there is anything to write at all.
+ */
+export function seedMissing(
+  existing: TomlObject,
+  seed: TomlObject,
+): { merged: TomlObject; added: string[] } {
+  const added: string[] = [];
+  const merged: TomlObject = { ...existing };
+  for (const [key, value] of Object.entries(seed)) {
+    const prev = merged[key];
+    if (prev === undefined) {
+      merged[key] = cloneToml(value);
+      added.push(key);
+      continue;
+    }
+    if (isPlainObject(prev) && isPlainObject(value)) {
+      const sub = seedMissing(prev, value);
+      if (sub.added.length > 0) {
+        merged[key] = sub.merged;
+        added.push(key);
+      }
+    }
+    // Scalar or array already present: the persona file wins, untouched.
+  }
+  return { merged, added };
+}
+
+/**
  * Seed `<persona>/config.toml` from the global file, once.
  *
  * Idempotent by construction: the presence of the persona file is the entire
@@ -188,9 +262,6 @@ export async function migratePersonaConfig(
 ): Promise<MigratePersonaConfigResult> {
   const path = personaConfigPath(input.personasDir, input.persona);
   const existing = await readConfigToml(path);
-  if (Object.keys(existing).length > 0) {
-    return { migrated: false, reason: "exists" };
-  }
 
   const seed: TomlObject = {};
   for (const key of PERSONA_SCOPED_KEYS) {
@@ -240,11 +311,23 @@ export async function migratePersonaConfig(
     return { migrated: false, reason: "nothing-to-copy" };
   }
 
-  await writeConfigToml(path, seed);
+  // A persona file that already exists is not proof that migration ran: the
+  // voice TUI writes `<persona>/config.toml` with a `[voice]` block alone, and
+  // a user may hand-write one. Treating any non-empty file as "done" would
+  // skip that persona's Telegram translation forever, leaving it to inherit
+  // the DEFAULT persona's bot from the global file — two listeners on one
+  // token, which planListeners rightly refuses to start. So seed only the
+  // MISSING keys and never touch what is already there.
+  const { merged, added } = seedMissing(existing, seed);
+  if (added.length === 0) {
+    return { migrated: false, reason: "exists" };
+  }
+
+  await writeConfigToml(path, merged);
   log.info("personaConfig: seeded persona config from global config.toml", {
     persona: input.persona,
     path,
-    keys: Object.keys(seed),
+    keys: added,
   });
-  return { migrated: true, keys: Object.keys(seed), path };
+  return { migrated: true, keys: added, path };
 }

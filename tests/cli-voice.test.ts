@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { maybePromptRestart } from "../src/cli/harness.ts";
-import { applyVoiceConfig } from "../src/cli/voice.ts";
+import { applyVoiceConfig, runVoice } from "../src/cli/voice.ts";
+import type { Config } from "../src/config.ts";
 import { loadEnvFile } from "../src/lib/envFile.ts";
 import {
   ensureUnitCurrent,
@@ -204,5 +206,55 @@ WantedBy=default.target
     await maybePromptRestart(svc, async () => false);
     // Rerender ran (always does) but restart was declined.
     expect(callOrder).toEqual(["rerender"]);
+  });
+});
+
+describe("runVoice — unknown persona", () => {
+  test("refuses a --persona that does not exist, before writing anything", async () => {
+    // A typo used to be silently "successful": loadConfig reads a missing
+    // persona file as an empty layer, and the writes CREATE
+    // `<personas-root>/typo/config.toml` (plus its directory), save the
+    // provider credential and offer a restart — for a persona that does not
+    // exist and never runs. `task --persona` already refuses this class of
+    // silent loss; so does voice now (phantombot#439).
+    const personasDir = join(workdir, "personas");
+    await mkdir(join(personasDir, "lena"), { recursive: true });
+    const errors: string[] = [];
+    let restarted = false;
+
+    const code = await runVoice({
+      persona: "lenaa",
+      config: {
+        defaultPersona: "lena",
+        personaLayer: "lenaa",
+        harnessIdleTimeoutMs: 1000,
+        harnessHardTimeoutMs: 1000,
+        harnessStartupTimeoutMs: 1000,
+        personasDir,
+        memoryDbPath: join(workdir, "memory.sqlite"),
+        configPath,
+        harnesses: {
+          chain: ["claude"],
+          claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
+          pi: { bin: "pi", maxPayloadBytes: 1 },
+        },
+        channels: {},
+        embeddings: { provider: "none" },
+        voice: { provider: "none" },
+      } as unknown as Config,
+      err: { write: (t: string) => (errors.push(String(t)), true) },
+      serviceControl: {
+        restart: async () => {
+          restarted = true;
+          return { ok: true, stdout: "", stderr: "" };
+        },
+      } as unknown as ServiceControl,
+    });
+
+    expect(code).toBe(2);
+    expect(errors.join("")).toContain("lenaa");
+    expect(restarted).toBe(false);
+    // No directory, no config file, nothing to clean up.
+    expect(existsSync(join(personasDir, "lenaa"))).toBe(false);
   });
 });

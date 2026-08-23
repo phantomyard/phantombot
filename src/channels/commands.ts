@@ -90,6 +90,16 @@ export interface SlashCommandContext {
    */
   config?: Config;
   /**
+   * Every persona this daemon actually started — Telegram listeners AND
+   * PhantomChat identities, deduped (phantombot#439). `/status` reports this
+   * verbatim: reconstructing the roster from `default_persona` +
+   * `autostart_personas` would omit legacy `[channels.telegram.personas.*]`
+   * listeners and any PhantomChat persona, so a multi-persona process could
+   * report itself as single-persona. Absent (tests, embedded callers) means
+   * "unknown" and the roster line is derived from config as a fallback.
+   */
+  runningPersonas?: string[];
+  /**
    * ServiceControl override for /restart's afterSend. Production
    * callers leave this undefined and /restart picks up
    * `defaultServiceControl()`; tests inject a stub so a `bun test` run
@@ -846,10 +856,16 @@ async function handleStatus(
 function formatPersonaRoster(ctx: SlashCommandContext): string {
   const config = ctx.config;
   if (!config) return "";
-  const roster = [
-    config.defaultPersona,
-    ...(config.autostartPersonas ?? []),
-  ].filter((name, i, all) => all.indexOf(name) === i);
+  // What the daemon ACTUALLY started, when it told us (phantombot#439). The
+  // config-derived list below is a fallback for embedded callers and tests: it
+  // can under-report, because a legacy `[channels.telegram.personas.*]` entry
+  // and a PhantomChat-only persona both start without appearing in
+  // `autostart_personas`.
+  const roster = (
+    ctx.runningPersonas && ctx.runningPersonas.length > 0
+      ? ctx.runningPersonas
+      : [config.defaultPersona, ...(config.autostartPersonas ?? [])]
+  ).filter((name, i, all) => all.indexOf(name) === i);
   if (roster.length < 2) return "";
   const rendered = roster.map((name) => {
     const marks =

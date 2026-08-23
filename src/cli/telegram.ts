@@ -14,6 +14,10 @@ import * as p from "@clack/prompts";
 import { type Config, loadConfig } from "../config.ts";
 import { pickChannelPersona } from "./channelPersona.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
+import {
+  type PersonaWriteScope,
+  resolvePersonaWriteTarget,
+} from "../lib/personaConfig.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
 import { telegramGetMe, type GetMeResult } from "../lib/telegramApi.ts";
 import type { WriteSink } from "../lib/io.ts";
@@ -36,8 +40,13 @@ export async function applyTelegramConfig(
   configPath: string,
   inputs: TelegramTuiInputs,
   persona?: string,
+  scope: PersonaWriteScope = "global",
 ): Promise<void> {
-  const base = persona
+  // In "persona" scope `configPath` IS `<persona>/config.toml`, and that file
+  // describes exactly one persona — so its bot is the plain
+  // `[channels.telegram]` block, never a routing-table entry keyed by its own
+  // name. In "global" scope the historical shapes are kept.
+  const base = persona && scope === "global"
     ? ["channels", "telegram", "personas", persona]
     : ["channels", "telegram"];
   await updateConfigToml(configPath, (toml) => {
@@ -88,11 +97,26 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
     persona = picked;
   }
 
+  const personaConfig = input.config ?? (await loadConfig(persona));
+
   p.intro(`Configure the Telegram channel for persona '${persona}'`);
 
-  const existing = persona
-    ? config.channels.telegramPersonas?.[persona]
-    : config.channels.telegram;
+  // Write where the READ path will look (phantombot#439): the persona's own
+  // file once it exists, the global file (in its historical shape) until then.
+  const target = await resolvePersonaWriteTarget({
+    configPath: config.configPath,
+    personasDir: config.personasDir,
+    persona,
+  });
+
+  // ...and read the SAME way, so "Existing config" shows what is actually
+  // live. `loadConfig(persona)` has already layered the persona file over the
+  // global one, so its `channels.telegram` is that persona's effective bot;
+  // the legacy routing table is only consulted for a persona that has no
+  // layered account of its own.
+  const existing =
+    personaConfig.channels.telegram ??
+    (persona ? config.channels.telegramPersonas?.[persona] : undefined);
   if (existing?.token) {
     p.note(
       `Token: ${maskToken(existing.token)}\n` +
@@ -114,7 +138,13 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
       return 0;
     }
     if (action === "users") {
-      return updateAllowedUsersOnly(config, existing.token, svc, persona);
+      return updateAllowedUsersOnly(
+        existing.token,
+        svc,
+        persona,
+        target,
+        existing.allowedUserIds,
+      );
     }
     // fallthrough to replace flow
   } else {
@@ -187,20 +217,21 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
   }
 
   await applyTelegramConfig(
-    config.configPath,
+    target.path,
     {
       token: token as string,
       pollTimeoutS: 30,
       allowedUserIds,
     },
     persona,
+    target.scope,
   );
   p.note(
     `bot: @${me.username}\n` +
       `allowed users: ${
         allowedUserIds.length === 0 ? "(any)" : allowedUserIds.join(", ")
       }\n` +
-      `saved to ${config.configPath}`,
+      `saved to ${target.path}`,
     "Saved",
   );
 
@@ -211,16 +242,13 @@ export async function runTelegram(input: RunInput = {}): Promise<number> {
 }
 
 async function updateAllowedUsersOnly(
-  config: Config,
   existingToken: string,
   svc: ServiceControl,
-  persona?: string,
+  persona: string | undefined,
+  target: { path: string; scope: PersonaWriteScope },
+  currentAllowedIds: readonly number[],
 ): Promise<number> {
-  const currentAllowed =
-    (persona
-      ? config.channels.telegramPersonas?.[persona]
-      : config.channels.telegram
-    )?.allowedUserIds.join(", ") ?? "";
+  const currentAllowed = currentAllowedIds.join(", ");
   const allowedRaw = await p.text({
     message:
       "Allowed Telegram user IDs (comma-separated; empty = anyone, with a warning). The FIRST ID is the incident-notification target.",
@@ -244,17 +272,18 @@ async function updateAllowedUsersOnly(
     }
   }
   await applyTelegramConfig(
-    config.configPath,
+    target.path,
     {
       token: existingToken,
       pollTimeoutS: 30,
       allowedUserIds,
     },
     persona,
+    target.scope,
   );
   p.note(
     `allowed users: ${allowedUserIds.length === 0 ? "(any)" : allowedUserIds.join(", ")}\n` +
-      `saved to ${config.configPath}`,
+      `saved to ${target.path}`,
     "Saved",
   );
   await maybePromptRestart(svc);

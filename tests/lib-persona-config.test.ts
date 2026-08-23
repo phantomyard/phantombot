@@ -20,6 +20,7 @@ import {
   stripHostOnlyKeys,
 } from "../src/lib/personaConfig.ts";
 import { loadConfig } from "../src/config.ts";
+import { harnessChainIds } from "../src/harnesses/buildChain.ts";
 import { readConfigToml } from "../src/lib/configWriter.ts";
 
 let workdir: string;
@@ -174,7 +175,7 @@ describe("migratePersonaConfig", () => {
     expect(await readFile(globalPath, "utf8")).toBe(before);
   });
 
-  test("idempotent: a second run is a no-op and never clobbers hand edits", async () => {
+  test("idempotent: a second run over a fully seeded file writes nothing", async () => {
     await migratePersonaConfig({
       personasDir,
       persona: "robbie",
@@ -182,7 +183,7 @@ describe("migratePersonaConfig", () => {
       isDefault: true,
     });
     const path = personaConfigPath(personasDir, "robbie");
-    await writeFile(path, 'chattiness = true\n', "utf8");
+    const first = await readFile(path, "utf8");
 
     const second = await migratePersonaConfig({
       personasDir,
@@ -191,7 +192,49 @@ describe("migratePersonaConfig", () => {
       isDefault: true,
     });
     expect(second).toEqual({ migrated: false, reason: "exists" });
-    expect(await readFile(path, "utf8")).toBe("chattiness = true\n");
+    expect(await readFile(path, "utf8")).toBe(first);
+  });
+
+  test("never clobbers a hand edit, but fills the keys it omits", async () => {
+    const path = personaConfigPath(personasDir, "robbie");
+    await mkdir(join(personasDir, "robbie"), { recursive: true });
+    await writeFile(path, 'chattiness = true\n', "utf8");
+
+    const r = await migratePersonaConfig({
+      personasDir,
+      persona: "robbie",
+      globalToml,
+      isDefault: true,
+    });
+    expect(r.migrated).toBe(true);
+    const written = await readPersonaToml(personasDir, "robbie");
+    // The hand-set value survives...
+    expect(written.chattiness).toBe(true);
+    // ...and the rest of the persona-scoped keys are seeded around it.
+    expect((written.channels as any)?.telegram?.token).toBe("default-bot");
+  });
+
+  test("a partial persona file still gets its Telegram account translated", async () => {
+    // Kai's repro: `phantombot voice --persona lena` writes `[voice]` into
+    // lena's file BEFORE the first daemon start on the new binary. Treating
+    // any non-empty file as "already migrated" would skip lena's Telegram
+    // translation forever — she would then inherit the DEFAULT persona's bot
+    // from the global file and planListeners would refuse to start Telegram
+    // at all (one token, two listeners).
+    const path = personaConfigPath(personasDir, "lena");
+    await mkdir(join(personasDir, "lena"), { recursive: true });
+    await writeFile(path, '[voice]\nprovider = "openai"\n', "utf8");
+
+    const r = await migratePersonaConfig({
+      personasDir,
+      persona: "lena",
+      globalToml,
+      isDefault: false,
+    });
+    expect(r.migrated).toBe(true);
+    const written = await readPersonaToml(personasDir, "lena");
+    expect((written.voice as any)?.provider).toBe("openai");
+    expect((written.channels as any)?.telegram?.token).toBe("lena-bot");
   });
 
   test("a host with nothing persona-scoped grows no empty file", async () => {
@@ -207,29 +250,44 @@ describe("migratePersonaConfig", () => {
 });
 
 describe("loadConfig persona layering", () => {
-  const SAVED = {
-    config: process.env.PHANTOMBOT_CONFIG,
-    personas: process.env.PHANTOMBOT_PERSONAS_DIR,
-    state: process.env.PHANTOMBOT_STATE,
-    persona: process.env.PHANTOMBOT_DEFAULT_PERSONA,
-  };
+  // EVERY env var that outranks TOML in the assertions below has to be
+  // scrubbed, not just the ones that point at the fixture. Two have bitten
+  // this repo before: `PHANTOMBOT_PERSONA` is set on every child a harness
+  // turn spawns (`withPersonaEnv`), and `TELEGRAM_BOT_TOKEN` is exported on
+  // any real configured host — with either one live these tests read the
+  // machine instead of the fixture and fail (or, worse, pass for the wrong
+  // reason).
+  const SCRUBBED = [
+    "PHANTOMBOT_CONFIG",
+    "PHANTOMBOT_PERSONAS_DIR",
+    "PHANTOMBOT_STATE",
+    "PHANTOMBOT_DEFAULT_PERSONA",
+    "PHANTOMBOT_PERSONA",
+    "PHANTOMBOT_AUTOSTART_PERSONAS",
+    "PHANTOMBOT_CHATTINESS",
+    "PHANTOMBOT_HARNESS_CHAIN",
+    "PHANTOMBOT_UPDATE_CHANNEL",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALLOWED_USER_IDS",
+  ] as const;
+  const SAVED = new Map<string, string | undefined>();
 
   beforeEach(() => {
+    for (const k of SCRUBBED) {
+      SAVED.set(k, process.env[k]);
+      delete process.env[k];
+    }
     process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
     process.env.PHANTOMBOT_PERSONAS_DIR = personasDir;
     process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
-    delete process.env.PHANTOMBOT_DEFAULT_PERSONA;
   });
   afterEach(() => {
-    for (const [k, v] of [
-      ["PHANTOMBOT_CONFIG", SAVED.config],
-      ["PHANTOMBOT_PERSONAS_DIR", SAVED.personas],
-      ["PHANTOMBOT_STATE", SAVED.state],
-      ["PHANTOMBOT_DEFAULT_PERSONA", SAVED.persona],
-    ] as const) {
+    for (const k of SCRUBBED) {
+      const v = SAVED.get(k);
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    SAVED.clear();
   });
 
   test("no persona file = exactly the pre-#439 behaviour", async () => {
@@ -295,6 +353,74 @@ describe("loadConfig persona layering", () => {
     expect(config.defaultPersona).toBe("robbie");
     expect(config.updateChannel).toBe("stable");
     expect(config.personasDir).toBe(personasDir);
+  });
+
+  test("a persona's own harness chain beats the LEGACY personas table", async () => {
+    // The post-migration state every upgraded host is in: the legacy
+    // `[harnesses.personas.lena]` entry still sits in the global file (copy,
+    // never delete — a rollback has to keep booting) AND lena's own file now
+    // states her chain. `harnessChainIds` reads the legacy table first, so
+    // without the fix the persona's own file could never take effect and
+    // editing it would silently do nothing.
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses]\nchain = ["claude"]\n\n' +
+        '[harnesses.personas.lena]\nchain = ["codex"]\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[harnesses]\nchain = ["pi"]\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(harnessChainIds(lena, "lena")).toEqual(["pi"]);
+    // Another persona's legacy entry is untouched by lena's layer.
+    const robbie = await loadConfig("robbie");
+    expect(harnessChainIds(robbie, "lena")).toEqual(["codex"]);
+  });
+
+  test("an UNMIGRATED persona keeps its legacy harness chain", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses]\nchain = ["claude"]\n\n' +
+        '[harnesses.personas.lena]\nchain = ["codex"]\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(harnessChainIds(lena, "lena")).toEqual(["codex"]);
+  });
+
+  test("a non-default persona never inherits the default persona's bot", async () => {
+    // Otherwise two listeners hold one token and planListeners (rightly)
+    // refuses to start Telegram at all.
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\ntoken = "robbie-bot"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[voice]\nprovider = "openai"\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram).toBeUndefined();
+    expect(lena.voice.provider).toBe("openai");
+  });
+
+  test("a non-default persona falls back to its LEGACY routing-table bot", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\ntoken = "robbie-bot"\n\n' +
+        '[channels.telegram.personas.lena]\ntoken = "lena-bot"\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.channels.telegram?.token).toBe("lena-bot");
+    // The routing table itself stays readable: planListeners still uses it to
+    // plan OTHER personas' legacy listeners.
+    expect(lena.channels.telegramPersonas?.lena?.token).toBe("lena-bot");
   });
 
   test("autostart_personas parses, trims, dedupes and survives junk", async () => {

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   armShutdownWatchdog,
   planListeners,
+  selectPhantomchatPersonas,
   runRun,
   SHUTDOWN_GRACE_MS,
 } from "../src/cli/run.ts";
@@ -455,10 +456,19 @@ describe("runRun — multi-persona telegram", () => {
     // The global file is untouched — an older binary must still boot.
     expect(await readFile(globalPath, "utf8")).toBe(globalText);
 
-    // Second start changes nothing: /update is order-independent.
+    // Second start over the already-seeded file changes nothing at all:
+    // /update is order-independent and re-running is free.
+    expect(await run()).toBe(2);
+    expect(await readFile(personaPath, "utf8")).toBe(seeded);
+
+    // A hand edit is preserved, and only the keys the file OMITS are filled
+    // back in — a partial file (e.g. one `phantombot voice --persona` wrote
+    // before the first restart) must not leave the persona half-migrated.
     await writeFile(personaPath, 'chattiness = true\n', "utf8");
     expect(await run()).toBe(2);
-    expect(await readFile(personaPath, "utf8")).toBe("chattiness = true\n");
+    const reseeded = await readFile(personaPath, "utf8");
+    expect(reseeded).toContain("chattiness = true");
+    expect(reseeded).toContain("tok");
   });
 
   // --- autostart personas (phantombot#439) ---------------------------------
@@ -476,6 +486,42 @@ describe("runRun — multi-persona telegram", () => {
       },
     };
   }
+
+  test("selectPhantomchatPersonas gates on the explicit boot roster", () => {
+    const err = new CaptureStream();
+    const specs = [
+      { persona: "phantom" },
+      { persona: "lena" },
+      { persona: "imported" },
+    ];
+
+    // An explicit roster is the whole truth: an imported/restored identity
+    // that merely EXISTS on disk must never start talking to the world.
+    const gated = selectPhantomchatPersonas(
+      specs,
+      { autostartPersonas: ["lena"] },
+      "phantom",
+      err,
+    );
+    expect(gated.map((s) => s.persona)).toEqual(["phantom", "lena"]);
+    expect(err.text).toContain("imported");
+    expect(err.text).toContain("autostart_personas");
+  });
+
+  test("no autostart_personas key = every configured identity still starts", () => {
+    const err = new CaptureStream();
+    const specs = [{ persona: "phantom" }, { persona: "lena" }];
+    // Upgrade safety: a host that has never been told what to start keeps
+    // exactly today's behaviour rather than silently losing a channel.
+    const ungated = selectPhantomchatPersonas(
+      specs,
+      { autostartPersonas: undefined },
+      "phantom",
+      err,
+    );
+    expect(ungated).toEqual(specs);
+    expect(err.text).toBe("");
+  });
 
   test("planListeners starts an autostart persona from its OWN config", async () => {
     const err = new CaptureStream();

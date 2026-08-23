@@ -32,6 +32,7 @@ import {
   readPersonaToml,
   stripHostOnlyKeys,
 } from "./lib/personaConfig.ts";
+import type { TomlObject } from "./lib/configWriter.ts";
 import { loadState } from "./state.ts";
 
 /**
@@ -772,6 +773,91 @@ export function xdgStateHome(): string {
 const DEFAULT_HARNESS_CHAIN = ["claude"] as const;
 
 /**
+ * Merge a persona's own TOML over the host globals, with the two corrections
+ * the plain deep-merge cannot make on its own.
+ *
+ * 1. A persona's own `[harnesses].chain` must beat the LEGACY
+ *    `[harnesses.personas.<name>].chain` entry. Migration copies rather than
+ *    deletes (so a rollback still boots), which means both descriptions of the
+ *    same persona live on forever; `harnessChainIds` reads the legacy table
+ *    first, so without this the persona's own file could never take effect and
+ *    editing it would silently do nothing. The persona's own entry is dropped
+ *    from the merged legacy table only when the persona file actually states a
+ *    chain — an unmigrated host keeps the legacy entry and behaves exactly as
+ *    it did before.
+ *
+ * 2. A NON-DEFAULT persona never inherits the global `[channels.telegram]`
+ *    account. That block is the DEFAULT persona's bot; handing it to a second
+ *    persona would put two listeners on one token, which planListeners
+ *    (rightly) refuses to start. Instead it falls back to its own entry in the
+ *    legacy `[channels.telegram.personas.<name>]` routing table, and to no
+ *    Telegram at all when it has neither.
+ *
+ * Everything else is the ordinary per-key deep merge: persona wins, absent
+ * keys fall back to the global file, never to a constant.
+ */
+export function applyPersonaLayer(
+  globalToml: TomlObject,
+  personaToml: TomlObject,
+  opts: { persona: string; isDefault: boolean },
+): TomlObject {
+  const merged = mergeToml(globalToml, personaToml);
+
+  const personaHarnesses = personaToml.harnesses;
+  const statesOwnChain =
+    isTomlTable(personaHarnesses) && Array.isArray(personaHarnesses.chain);
+  if (statesOwnChain) {
+    const harnesses = merged.harnesses;
+    if (isTomlTable(harnesses) && isTomlTable(harnesses.personas)) {
+      const { [opts.persona]: _legacy, ...rest } = harnesses.personas;
+      merged.harnesses = { ...harnesses, personas: rest };
+    }
+  }
+
+  if (!opts.isDefault) {
+    const channels = merged.channels;
+    if (isTomlTable(channels)) {
+      const personaChannels = personaToml.channels;
+      const ownTelegram = isTomlTable(personaChannels)
+        ? personaChannels.telegram
+        : undefined;
+      if (ownTelegram === undefined) {
+        const telegram = channels.telegram;
+        const table = isTomlTable(telegram) ? telegram.personas : undefined;
+        const legacyEntry = isTomlTable(table) ? table[opts.persona] : undefined;
+        const nextChannels: TomlObject = { ...channels };
+        if (isTomlTable(legacyEntry)) {
+          nextChannels.telegram = {
+            ...legacyEntry,
+            // Keep the routing table visible: planListeners still reads it to
+            // plan the legacy listeners of OTHER personas.
+            ...(isTomlTable(telegram) && isTomlTable(telegram.personas)
+              ? { personas: telegram.personas }
+              : {}),
+          };
+        } else if (telegram !== undefined) {
+          nextChannels.telegram = isTomlTable(telegram) &&
+              isTomlTable(telegram.personas)
+            ? { personas: telegram.personas }
+            : undefined;
+          if (nextChannels.telegram === undefined) delete nextChannels.telegram;
+        }
+        merged.channels = nextChannels;
+      }
+    }
+  }
+
+  return merged;
+}
+
+function isTomlTable(v: unknown): v is TomlObject {
+  return typeof v === "object" && v !== null && !Array.isArray(v) &&
+    !(v instanceof Date);
+}
+
+
+
+/**
  * Load the effective config for ONE persona.
  *
  * Two layers, merged per key, persona wins:
@@ -814,7 +900,15 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const personaToml = stripHostOnlyKeys(
     await readPersonaToml(personasDir, personaLayer),
   );
-  const toml = mergeToml(globalToml, personaToml);
+  const toml = applyPersonaLayer(globalToml, personaToml, {
+    persona: personaLayer,
+    isDefault:
+      personaLayer ===
+      (process.env.PHANTOMBOT_DEFAULT_PERSONA ??
+        state.default_persona ??
+        asString(globalToml.default_persona) ??
+        "phantom"),
+  });
 
   const tomlHarnesses = (toml.harnesses ?? {}) as Record<string, unknown>;
   const tomlClaude = (tomlHarnesses.claude ?? {}) as Record<string, unknown>;
@@ -1016,6 +1110,68 @@ export async function loadConfig(persona?: string): Promise<Config> {
     voice: buildVoiceConfig(tomlVoice),
 
     p2p: buildP2PConfig(tomlP2p),
+  };
+}
+
+/**
+ * Resolve the persona a persona-aware command targets, and load THAT persona's
+ * effective config (phantombot#439).
+ *
+ * Every persona-aware entry point used to do this the other way round — load
+ * the config first, read `defaultPersona` off it, then act on some other
+ * persona while still holding the DEFAULT persona's settings. With per-persona
+ * config files that silently runs the wrong Telegram bot, the wrong harness
+ * chain, the wrong voice and the wrong retrieval policy for every persona but
+ * one. So: resolve the target first, then load its layer.
+ *
+ * Host-level harness BINARY paths are kept from the host layer — a `bin` names
+ * something installed on this machine, not a property of a personality — which
+ * is the same rule the daemon applies to its listeners.
+ *
+ * Costs one extra config read, and only when the target is not the default.
+ */
+export async function loadConfigForPersona(
+  persona?: string,
+  base?: Config,
+): Promise<{ config: Config; persona: string }> {
+  const host = base ?? (await loadConfig());
+  const target = persona ?? host.defaultPersona;
+  // `host` already IS the target's layer when it was loaded for it — or when
+  // the caller injected a config that names no layer, in which case there is
+  // nothing else to load.
+  if (target === (host.personaLayer ?? host.defaultPersona)) {
+    return { config: host, persona: target };
+  }
+  const layered = await loadConfig(target);
+  return { config: withHostHarnessBins(layered, host), persona: target };
+}
+
+/**
+ * Take a persona's config but keep the HOST's harness binary paths.
+ *
+ * Binaries are a property of the machine, not the personality: `claude` lives
+ * at one path on this box for everyone, and the host layer's paths are the
+ * ones `doctor`/`run` probed for real. A persona file carrying a stale `bin`
+ * must not quietly run a different binary. Everything else the persona
+ * overrode — notably `harnesses.chain` — is preserved.
+ */
+export function withHostHarnessBins(personaConfig: Config, host: Config): Config {
+  if (personaConfig === host) return host;
+  return {
+    ...personaConfig,
+    harnesses: {
+      ...personaConfig.harnesses,
+      claude: { ...personaConfig.harnesses.claude, bin: host.harnesses.claude.bin },
+      pi: { ...personaConfig.harnesses.pi, bin: host.harnesses.pi.bin },
+      ...(personaConfig.harnesses.codex
+        ? {
+            codex: {
+              ...personaConfig.harnesses.codex,
+              bin: host.harnesses.codex?.bin ?? personaConfig.harnesses.codex.bin,
+            },
+          }
+        : {}),
+    },
   };
 }
 

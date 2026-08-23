@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,10 @@ import {
   parseAllowedUserIds,
   parseOpenClawTelegram,
 } from "../src/cli/telegram.ts";
+import {
+  personaConfigPath,
+  resolvePersonaWriteTarget,
+} from "../src/lib/personaConfig.ts";
 
 let workdir: string;
 let configPath: string;
@@ -52,6 +56,49 @@ describe("applyTelegramConfig", () => {
     expect(text).toContain('token = "111:secret"');
     expect(text).toContain("poll_timeout_s = 30");
     expect(text).toContain("allowed_user_ids = [ 42, 99 ]");
+  });
+
+  test("in persona scope the account is the plain [channels.telegram] block", async () => {
+    // The write must land where the READ path looks. In persona scope the file
+    // IS `<persona>/config.toml`, which describes one persona — so its bot is
+    // `[channels.telegram]`, not a routing-table entry keyed by its own name
+    // (loadConfig drops that, and the change would silently do nothing).
+    const personaPath = join(workdir, "lena-config.toml");
+    await applyTelegramConfig(
+      personaPath,
+      { token: "222:lena", pollTimeoutS: 30, allowedUserIds: [7] },
+      "lena",
+      "persona",
+    );
+    const text = await readFile(personaPath, "utf8");
+    expect(text).toContain("[channels.telegram]");
+    expect(text).not.toContain("personas");
+    expect(text).toContain('token = "222:lena"');
+  });
+
+  test("resolvePersonaWriteTarget follows the read precedence", async () => {
+    const personasDir = join(workdir, "personas");
+    await mkdir(join(personasDir, "lena"), { recursive: true });
+
+    // No persona file yet → the global file is what the daemon reads, so it
+    // is what a write must update (and an older binary can still read it).
+    const before = await resolvePersonaWriteTarget({
+      configPath,
+      personasDir,
+      persona: "lena",
+    });
+    expect(before).toEqual({ path: configPath, scope: "global" });
+
+    // Once the persona file exists it outranks the global one on read, so a
+    // write anywhere else would "save" and change nothing.
+    const personaPath = personaConfigPath(personasDir, "lena");
+    await writeFile(personaPath, "chattiness = true\n", "utf8");
+    const after = await resolvePersonaWriteTarget({
+      configPath,
+      personasDir,
+      persona: "lena",
+    });
+    expect(after).toEqual({ path: personaPath, scope: "persona" });
   });
 
   test("--persona writes the [channels.telegram.personas.<name>] block", async () => {

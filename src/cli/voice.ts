@@ -8,7 +8,10 @@
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
-import { type Config, loadConfig } from "../config.ts";
+import { existsSync } from "node:fs";
+
+import { type Config, loadConfig, personaDir } from "../config.ts";
+import type { WriteSink } from "../lib/io.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
 import { defaultEnvFilePath, updateEnvFile } from "../lib/envFile.ts";
@@ -89,13 +92,28 @@ interface RunInput {
    *     service afterwards, so there is nothing running to restart yet).
    */
   embedded?: boolean;
+  /** Error sink (test seam). Default: process.stderr. */
+  err?: WriteSink;
 }
 
 export async function runVoice(input: RunInput = {}): Promise<number> {
+  const err = input.err ?? process.stderr;
   // Load the TARGET persona's layered config, so "Existing config" shows what
   // that persona actually runs with rather than the default persona's voice.
   const config = input.config ?? (await loadConfig(input.persona));
   const persona = input.persona ?? config.defaultPersona;
+  // An explicit `--persona` must EXIST before anything is written. Without
+  // this check a typo is silently "successful": `loadConfig("robbei")` reads a
+  // missing persona file as an empty layer, and the writes below CREATE
+  // `<personas-root>/robbei/config.toml` (and its directory), store the
+  // provider credential and restart the service — for a persona that does not
+  // exist and never runs. `task --persona` already refuses this class of
+  // silent loss; so does this.
+  const dir = personaDir(config, persona);
+  if (!existsSync(dir)) {
+    err.write(`no persona '${persona}' at ${dir}\n`);
+    return 2;
+  }
   // Writes land in the persona's own file. The global file is left alone: on
   // an unmigrated host it still holds the old `[voice]` block, and the merge
   // has the persona file winning, so the new value takes effect immediately
