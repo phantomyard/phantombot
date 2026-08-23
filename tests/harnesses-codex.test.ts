@@ -273,6 +273,33 @@ describe("codex subagent lockdown flags", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Non-interactive hook trust. A `codex exec` spawn has no one to answer a hook
+// trust prompt, so BOTH flag sets bypass it. `--ask-for-approval` is not a
+// valid `codex exec` flag (exit 2) and must never be added.
+// ---------------------------------------------------------------------------
+
+describe("codex hook-trust bypass", () => {
+  test("normal-turn flags bypass hook trust", () => {
+    expect(PHANTOMBOT_INJECTED_CODEX_FLAGS).toContain("--dangerously-bypass-hook-trust");
+  });
+
+  test("judge flags bypass hook trust while KEEPING the read-only sandbox", () => {
+    expect(PHANTOMBOT_JUDGE_CODEX_FLAGS).toContain("--dangerously-bypass-hook-trust");
+    expect(PHANTOMBOT_JUDGE_CODEX_FLAGS).toContain("--sandbox");
+    expect(PHANTOMBOT_JUDGE_CODEX_FLAGS).toContain("read-only");
+    expect(PHANTOMBOT_JUDGE_CODEX_FLAGS).not.toContain(
+      "--dangerously-bypass-approvals-and-sandbox",
+    );
+  });
+
+  test("neither flag set passes --ask-for-approval (invalid on `codex exec`)", () => {
+    for (const flags of [PHANTOMBOT_INJECTED_CODEX_FLAGS, PHANTOMBOT_JUDGE_CODEX_FLAGS]) {
+      expect(flags.join(" ")).not.toContain("--ask-for-approval");
+    }
+  });
+});
+
 describe("isCodexSubagentActivity", () => {
   test("flags collab_* item types", () => {
     for (const t of [

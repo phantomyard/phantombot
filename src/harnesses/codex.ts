@@ -129,6 +129,14 @@ export function renderStdinPayload(req: HarnessRequest): string {
 
 export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
   "--dangerously-bypass-approvals-and-sandbox",
+  // Hooks configured in ~/.codex/config.toml are otherwise gated behind a
+  // trust prompt that a non-interactive `exec` spawn can never answer, so an
+  // untrusted hook stalls or drops the turn. Verified against codex-cli
+  // 0.149.0: the flag prints a warning and exits 0.
+  // NOTE: `--ask-for-approval never` is deliberately NOT passed — that flag
+  // does not exist on `codex exec` (exit 2, "unexpected argument"), and the
+  // bypass flag above already reports `approval: never` in the session header.
+  "--dangerously-bypass-hook-trust",
   "--ephemeral",
   // NOTE: we intentionally do NOT pass `--ignore-user-config` on normal turns.
   // Codex's MCP connectors (Gmail / Google Calendar / Google Drive, etc.) are
@@ -162,6 +170,10 @@ export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [
  */
 export const PHANTOMBOT_JUDGE_CODEX_FLAGS = [
   "--sandbox", "read-only",
+  // Same non-interactive hook-trust bypass as normal turns. Orthogonal to the
+  // sandbox: it suppresses a prompt, it does not widen what the judge may do —
+  // the read-only sandbox above is what contains it, and that stays.
+  "--dangerously-bypass-hook-trust",
   "--ephemeral",
   "--ignore-user-config",
   "--ignore-rules",

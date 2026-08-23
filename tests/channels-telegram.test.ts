@@ -2441,7 +2441,8 @@ describe("runTelegramServer system-prompt suffixes", () => {
       const prompt = harness.lastRequest?.systemPrompt ?? "";
       // Telegram chat-style suffix is present.
       expect(prompt).toContain("Reply style (Telegram chat)");
-      expect(prompt).toContain("Confirm before long jobs");
+      // No blanket confirm-before-you-act gate is injected (see prompts.ts).
+      expect(prompt).not.toContain("Confirm before long jobs");
       // Voice overlay is also present (stacked on top).
       expect(prompt).toContain("Reply length (this turn only)");
       expect(prompt).toContain("text-to-speech");
@@ -2474,7 +2475,10 @@ describe("runTelegramServer system-prompt suffixes", () => {
     const prompt = harness.lastRequest?.systemPrompt ?? "";
     // The chat-style instruction is always applied for Telegram turns.
     expect(prompt).toContain("Reply style (Telegram chat)");
-    expect(prompt).toContain("Confirm before long jobs");
+    // The channel layer no longer injects a confirm-before-long-jobs gate:
+    // it outranked the user's own instructions on every turn (AGENTS invariant 29).
+    expect(prompt).not.toContain("Confirm before long jobs");
+    expect(prompt).not.toContain("outline your plan");
     // The voice-only overlay must NOT leak into text replies.
     expect(prompt).not.toContain("text-to-speech");
     expect(prompt).not.toContain("Reply length (this turn only)");

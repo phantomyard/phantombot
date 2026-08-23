@@ -23,15 +23,22 @@ import type { MemoryStore } from "../../memory/store.ts";
  *    conversational answers; structured-and-clear is fine when the
  *    user explicitly asks for a detailed report.
  *
- * 2. Plan-then-confirm before long jobs. A Telegram round-trip is
- *    seconds, but a misaligned 10-minute build burns the user's time
- *    AND tokens. Asking the agent to outline the plan and wait for
- *    confirmation when it's about to do something irreversible (git
- *    push, deploy) or expensive (multi-tool-call work) avoids that.
+ * 2. Voice/text reply-mode routing.
+ *
+ * It deliberately carries NO blanket confirm-before-you-act gate. One
+ * used to live here ("outline your plan and ask... anything where
+ * you're going to spawn more than one tool call... When you ask,
+ * STOP"), injected unconditionally into every chat turn for every
+ * persona. Because it was re-injected fresh each turn it outranked
+ * anything the user said or the persona remembered, so an explicit
+ * instruction ("review this PR", "deploy it") still came back as
+ * "shall I proceed?" — literal-minded harnesses read the STOP clause
+ * as unoverridable and asked forever. Confirmation policy belongs to
+ * the persona (IDENTITY.md / norms), where the user can actually
+ * change it; do not reintroduce it here.
  *
  * Lives at the channel layer (not in persona files) so CLI / nightly
- * turns aren't affected — those run unattended and don't want a
- * confirmation gate, and verbose CLI output is fine.
+ * turns aren't affected — verbose CLI output is fine there.
  */
 export const TELEGRAM_REPLY_INSTRUCTION =
   `# Reply style (Telegram chat)
@@ -44,24 +51,6 @@ narration ("Let me…", "Right, here's what I found…"); answer directly.
 Longer replies are fine when the user explicitly asks for a detailed
 report or analysis. Use clear structure (headings, lists) when the
 content earns it.
-
-# Confirm before long jobs
-
-Before starting any of these, briefly outline your plan in 2-3
-sentences and ask the user to confirm or adjust:
-
-- Anything involving git, build, or deploy operations
-- Anything where you're going to spawn more than one tool call
-
-When you ask, STOP. End the turn on the question itself — write
-nothing after it. Do NOT answer your own question, and do NOT fall
-back to a "safe default" and proceed anyway. Asking hands control
-back to the user; the next move is theirs. Wait for their actual
-reply before doing the work.
-
-Telegram round-trips are slow and tokens aren't free — confirming up
-front beats producing the wrong thing minutes later. For
-straightforward questions, just answer.
 
 # Voice/text reply mode
 
