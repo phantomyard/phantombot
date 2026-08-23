@@ -33,6 +33,7 @@ import * as path from "node:path";
 import {
   imageDelegationPrompt,
   planRouting,
+  routingConfigCandidates,
   type RoutingConfig,
 } from "./tools.ts";
 import {
@@ -99,14 +100,19 @@ function loadRoutingConfig(): RoutingConfig {
       dir = undefined;
     }
   }
-  if (!dir) return {};
-  try {
-    const raw = fs.readFileSync(path.join(dir, "routing.json"), "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? (parsed as RoutingConfig) : {};
-  } catch {
-    return {};
+  // Per-persona file first, host-stamped sibling second — see
+  // routingConfigCandidates. On ANY error (missing, unreadable, invalid JSON)
+  // we fall through to the next candidate and finally to `{}`, which registers
+  // no tools: the safe inert state.
+  for (const file of routingConfigCandidates(dir, process.env, path.join)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (parsed && typeof parsed === "object") return parsed as RoutingConfig;
+    } catch {
+      // try the next candidate
+    }
   }
+  return {};
 }
 
 const LookAtImageParams = Type.Object({

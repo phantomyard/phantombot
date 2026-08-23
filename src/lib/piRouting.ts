@@ -88,6 +88,20 @@ export const ENV_PI_API_KEY = "PHANTOMBOT_PI_API_KEY";
 export const ENV_PHANTOMBOT_TMP_DIR = "PHANTOMBOT_TMP_DIR";
 
 /**
+ * Absolute path to THIS persona's `routing.json`, handed to the pi child by the
+ * spawning harness (phantombot#441).
+ *
+ * The managed extension dir under `~/.pi/agent/extensions/capability-routing/`
+ * is stamped once per HOST, so its sibling routing.json can only describe one
+ * persona's delegate models. Now that `[harnesses]` is persona-scoped, every
+ * persona has its own — so the harness writes a per-turn routing.json into the
+ * persona's own tmp dir and names it here. The extension prefers this file and
+ * falls back to its sibling when the var is unset (a bare `pi` run, or a host
+ * that never spawned through phantombot).
+ */
+export const ENV_ROUTING_JSON = "PHANTOMBOT_ROUTING_JSON";
+
+/**
  * The resolved routing config. All model fields are optional: undefined means
  * "no override — let Pi / the extension fall back to its default behavior". An
  * absent imageModel specifically means the `look_at_image` tool will not be

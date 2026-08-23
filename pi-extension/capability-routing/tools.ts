@@ -22,8 +22,9 @@
  * the primary is multimodal — so `look_at_image` is registered even for a
  * vision-capable primary. The tool's DESCRIPTION (see index.ts) tells a model
  * that can already see images not to call it, so a multimodal primary won't,
- * while a text-only coding model swapped in for a code turn still can. Env vars
- * are NOT read by the extension — routing.json is the sole input.
+ * while a text-only coding model swapped in for a code turn still can. Model env
+ * vars are NOT read by the extension — a routing.json is the sole input. WHICH
+ * routing.json is chosen by `routingConfigCandidates` below (phantombot#441).
  */
 
 export interface RoutingConfig {
@@ -74,4 +75,32 @@ export function imageDelegationPrompt(imagePath: string, question: string): stri
     "If the image does not contain enough information to answer, say so plainly.",
     "Do not pad the answer with a full description unless the question asks for one.",
   ].join("\n");
+}
+
+
+/**
+ * The routing.json files to try, in order (phantombot#441).
+ *
+ * The managed extension directory is stamped ONCE per host, so its sibling
+ * routing.json can only ever describe one persona's delegate models. Since
+ * `[harnesses]` is persona-scoped, the spawning harness writes THIS persona's
+ * models to a per-turn file and names it in `PHANTOMBOT_ROUTING_JSON`. That
+ * file therefore comes first.
+ *
+ * The sibling stays as the fallback rather than being replaced: a `pi` run
+ * started by hand (no phantombot in the chain) sets no env var, and must keep
+ * working exactly as it did. A blank var is treated as unset for the same
+ * reason every other phantombot env var is — an empty value is how a cleared
+ * setting looks, not a path to an empty file.
+ */
+export function routingConfigCandidates(
+  extensionDir: string | undefined,
+  env: Record<string, string | undefined>,
+  join: (a: string, b: string) => string,
+): string[] {
+  const out: string[] = [];
+  const override = env.PHANTOMBOT_ROUTING_JSON?.trim();
+  if (override) out.push(override);
+  if (extensionDir) out.push(join(extensionDir, "routing.json"));
+  return out;
 }

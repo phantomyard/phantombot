@@ -19,7 +19,7 @@ import {
   readPersonaToml,
   stripHostOnlyKeys,
 } from "../src/lib/personaConfig.ts";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, withHostHarnessBins } from "../src/config.ts";
 import { harnessChainIds } from "../src/harnesses/buildChain.ts";
 import { readConfigToml } from "../src/lib/configWriter.ts";
 
@@ -110,7 +110,8 @@ describe("migratePersonaConfig", () => {
     },
     harnesses: {
       chain: ["claude"],
-      claude: { bin: "/usr/bin/claude" },
+      claude: { bin: "/usr/bin/claude", model: "opus" },
+      pi: { routing: { primary_model: "gpt-5.2", image_model: "vision-x" } },
       personas: { lena: { chain: ["pi", "claude"] } },
     },
   };
@@ -133,8 +134,59 @@ describe("migratePersonaConfig", () => {
     expect(written.update_channel).toBeUndefined();
     // ...and neither does the host's persona→bot routing table.
     expect((written.channels as any).telegram.personas).toBeUndefined();
-    // Harness BINS are host-level; only a persona's own chain moves.
-    expect(written.harnesses).toBeUndefined();
+    // `[harnesses]` is persona-scoped (phantombot#441): the whole block travels,
+    // models and bins included, so the persona file is a complete description of
+    // the brain it thinks with.
+    expect((written.harnesses as any).chain).toEqual(["claude"]);
+    expect((written.harnesses as any).claude).toEqual({
+      bin: "/usr/bin/claude",
+      model: "opus",
+    });
+    expect((written.harnesses as any).pi.routing).toEqual({
+      primary_model: "gpt-5.2",
+      image_model: "vision-x",
+    });
+    // ...but NOT the host-shaped persona→chain routing table, for the same
+    // reason `[channels.telegram.personas]` is dropped: inside a persona file
+    // it would read as that persona's override for a persona of its own name.
+    expect((written.harnesses as any).personas).toBeUndefined();
+  });
+
+  test("a persona's legacy chain entry beats the host chain it just copied", async () => {
+    // Both descriptions of Lena exist in the global file: the host default
+    // chain, and her own legacy `[harnesses.personas.lena]` entry. The specific
+    // one has to win, or migrating would silently re-point her at the host's
+    // brain.
+    await migratePersonaConfig({
+      personasDir,
+      persona: "lena",
+      globalToml,
+      isDefault: false,
+    });
+    const written = await readPersonaToml(personasDir, "lena");
+    expect((written.harnesses as any).chain).toEqual(["pi", "claude"]);
+    expect((written.harnesses as any).personas).toBeUndefined();
+    // The rest of the host block still comes along.
+    expect((written.harnesses as any).claude.bin).toBe("/usr/bin/claude");
+  });
+
+  test("a hand-set model in a persona file survives migration", async () => {
+    await mkdir(join(personasDir, "jake"), { recursive: true });
+    await writeFile(
+      join(personasDir, "jake", "config.toml"),
+      '[harnesses.claude]\nmodel = "sonnet"\n',
+      "utf8",
+    );
+    await migratePersonaConfig({
+      personasDir,
+      persona: "jake",
+      globalToml,
+      isDefault: false,
+    });
+    const written = await readPersonaToml(personasDir, "jake");
+    // Seeded only what was MISSING: the hand-set model stands, the bin arrives.
+    expect((written.harnesses as any).claude.model).toBe("sonnet");
+    expect((written.harnesses as any).claude.bin).toBe("/usr/bin/claude");
   });
 
   test("a non-default persona takes its OWN bot, never the default's", async () => {
@@ -280,6 +332,26 @@ describe("loadConfig persona layering", () => {
     "PHANTOMBOT_TELEGRAM_ALLOWED_USERS_LENA",
     "PHANTOMBOT_TELEGRAM_POLL_S_LENA",
     "PHANTOMBOT_TELEGRAM_GROUP_PERSONAS_LENA",
+    // The harness/model env layer (phantombot#441), host-ambient and
+    // persona-suffixed. Same reason as the Telegram vars: the wizard writes the
+    // unsuffixed forms into the shared env file, so any real host has them set
+    // and an unscrubbed test would read the machine, not the fixture.
+    "PHANTOMBOT_CLAUDE_MODEL",
+    "PHANTOMBOT_CLAUDE_MODEL_LENA",
+    "PHANTOMBOT_CLAUDE_BIN",
+    "PHANTOMBOT_CLAUDE_BIN_LENA",
+    "PHANTOMBOT_CLAUDE_FALLBACK_MODEL",
+    "PHANTOMBOT_CODEX_MODEL",
+    "PHANTOMBOT_CODEX_BIN",
+    "PHANTOMBOT_PI_BIN",
+    "PHANTOMBOT_HARNESS_CHAIN_LENA",
+    "PHANTOMBOT_PRIMARY_MODEL",
+    "PHANTOMBOT_PRIMARY_MODEL_LENA",
+    "PHANTOMBOT_IMAGE_MODEL",
+    "PHANTOMBOT_IMAGE_MODEL_LENA",
+    "PHANTOMBOT_CODING_MODEL",
+    "PHANTOMBOT_PI_PROVIDER",
+    "PHANTOMBOT_PI_PROVIDER_LENA",
   ] as const;
   const SAVED = new Map<string, string | undefined>();
 
@@ -455,6 +527,123 @@ describe("loadConfig persona layering", () => {
     // An account with no token of its own is INCOMPLETE, not a licence to
     // borrow the host's: lena simply has no Telegram until she is given a bot.
     expect(lena.channels.telegram).toBeUndefined();
+  });
+
+  test("a persona's own model beats the host's ambient env var", async () => {
+    // The #441 crux. The harness wizard writes PHANTOMBOT_PRIMARY_MODEL into
+    // the SHARED env file, so on any configured host the ambient var is set. If
+    // env beat TOML unconditionally (phantombot's usual rule) every persona
+    // would think with the host's model and the persona-scoped `[harnesses]`
+    // block would be decorative.
+    process.env.PHANTOMBOT_CLAUDE_MODEL = "host-opus";
+    process.env.PHANTOMBOT_PRIMARY_MODEL = "host-primary";
+    process.env.PHANTOMBOT_IMAGE_MODEL = "host-vision";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[harnesses.claude]\nmodel = "lena-sonnet"\n\n' +
+        '[harnesses.pi.routing]\nprimary_model = "lena-primary"\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.harnesses.claude.model).toBe("lena-sonnet");
+    expect(lena.harnesses.pi.routing?.primaryModel).toBe("lena-primary");
+    // A key lena does NOT state still takes the host's ambient value — the
+    // fallback is the host, never a constant.
+    expect(lena.harnesses.pi.routing?.imageModel).toBe("host-vision");
+  });
+
+  test("a persona's OWN suffixed env var still beats its file", async () => {
+    process.env.PHANTOMBOT_CLAUDE_MODEL = "host-opus";
+    process.env.PHANTOMBOT_CLAUDE_MODEL_LENA = "lena-env";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[harnesses.claude]\nmodel = "lena-file"\n',
+      "utf8",
+    );
+    expect((await loadConfig("lena")).harnesses.claude.model).toBe("lena-env");
+  });
+
+  test("an UNMIGRATED persona keeps the pre-#441 env-over-TOML rule", async () => {
+    // No persona file: the ambient var must still win over the global TOML, or
+    // upgrading would silently change which model an existing host runs.
+    process.env.PHANTOMBOT_CLAUDE_MODEL = "host-env";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses.claude]\nmodel = "global-toml"\n',
+      "utf8",
+    );
+    expect((await loadConfig("lena")).harnesses.claude.model).toBe("host-env");
+    // ...and so does the DEFAULT persona, whose layer IS the host's.
+    await writeFile(
+      personaConfigPath(personasDir, "robbie"),
+      '[harnesses.claude]\nmodel = "robbie-file"\n',
+      "utf8",
+    );
+    expect((await loadConfig("robbie")).harnesses.claude.model).toBe("host-env");
+  });
+
+  test("a persona states its own chain and Pi provider", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses]\nchain = ["claude"]\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[harnesses]\nchain = ["pi", "claude"]\n\n' +
+        '[harnesses.pi.routing]\nprovider = "openrouter"\n',
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.harnesses.chain).toEqual(["pi", "claude"]);
+    expect(lena.harnesses.pi.routing?.provider).toBe("openrouter");
+    expect((await loadConfig("robbie")).harnesses.chain).toEqual(["claude"]);
+  });
+
+  test("only a DELIBERATELY pinned bin survives withHostHarnessBins", async () => {
+    // Migration copies the host's bins into every persona file, so "the file
+    // mentions a bin" cannot mean "pinned" — that would freeze each persona on
+    // whatever path was probed the day it migrated. A bin that DIFFERS from the
+    // host's is a real pin and is honoured.
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses.claude]\nbin = "/usr/bin/claude"\n\n' +
+        '[harnesses.pi]\nbin = "/usr/bin/pi"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[harnesses.claude]\nbin = "/usr/bin/claude"\n\n' +
+        '[harnesses.pi]\nbin = "/opt/lena/pi"\n',
+      "utf8",
+    );
+    const host = await loadConfig("robbie");
+    const lena = withHostHarnessBins(await loadConfig("lena"), host);
+    expect(lena.harnesses.pi.bin).toBe("/opt/lena/pi");
+    expect(lena.harnesses.claude.bin).toBe("/usr/bin/claude");
+    expect(lena.harnesses.ownBins).toEqual(["pi"]);
+
+    // The echoed bin follows the host when the binary moves.
+    const moved: typeof host = {
+      ...host,
+      harnesses: {
+        ...host.harnesses,
+        claude: { ...host.harnesses.claude, bin: "/opt/new/claude" },
+      },
+    };
+    expect(
+      withHostHarnessBins(await loadConfig("lena"), moved).harnesses.claude.bin,
+    ).toBe("/opt/new/claude");
   });
 
   test("ambient DEFAULT bot env vars never reach a non-default persona", async () => {

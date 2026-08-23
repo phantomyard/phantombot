@@ -23,6 +23,10 @@ import {
   type UpdateChannel,
 } from "./lib/githubReleases.ts";
 import {
+  ENV_CODING_MODEL,
+  ENV_IMAGE_MODEL,
+  ENV_PI_PROVIDER,
+  ENV_PRIMARY_MODEL,
   type PiRoutingConfig,
   resolveRouting,
 } from "./lib/piRouting.ts";
@@ -617,6 +621,15 @@ export interface Config {
      * entry uses the global `chain` above.
      */
     personas?: Record<string, { chain: string[] }>;
+    /**
+     * Harness ids whose `bin` was stated by THIS persona's own config.toml
+     * (phantombot#441). Everything else in the block is persona-scoped by
+     * value, but a `bin` is normally a property of the machine — so the daemon
+     * re-imposes the host's probed paths on a persona layer
+     * (`withHostHarnessBins`) EXCEPT for the ids listed here, which the
+     * operator pinned deliberately. Absent/empty = nothing pinned.
+     */
+    ownBins?: string[];
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
       bin: string;
@@ -953,6 +966,87 @@ export async function loadConfig(persona?: string): Promise<Config> {
     string,
     unknown
   >;
+  // ── The harness env layer, scoped per persona (phantombot#441) ──────────
+  //
+  // `[harnesses]` is persona-scoped now (chain, models, Pi routing, bins), and
+  // a config layer is not isolation until the ENV layer is scoped with it —
+  // the lesson from #440's Telegram-token leak. The wizard writes
+  // PHANTOMBOT_PRIMARY_MODEL & friends into the shared env file, so without
+  // this every persona's carefully-stated model would be overwritten by the
+  // host's ambient one and persona scoping would be decorative.
+  //
+  // Precedence per key, most specific first:
+  //
+  //   1. this persona's own env var   PHANTOMBOT_CLAUDE_MODEL_<PERSONA>
+  //   2. this persona's config.toml   <persona>/config.toml  [harnesses]
+  //   3. the host's ambient env var   PHANTOMBOT_CLAUDE_MODEL
+  //   4. the host's config.toml       [harnesses]
+  //   5. the built-in default
+  //
+  // (2) beating (3) is deliberate and is the ONE place this departs from
+  // phantombot's usual env-wins rule: the ambient var is the HOST's statement
+  // about its default brain, while the persona file is that persona's
+  // statement about itself — the more specific one wins. Crucially it is
+  // conditioned on the persona file actually STATING the key, so an unmigrated
+  // host (no persona file, or one that omits the key) keeps exactly its
+  // pre-#441 behaviour: ambient env over global TOML.
+  //
+  // The default persona is untouched by all of this — it reads the unsuffixed
+  // vars as it always has, since its layer and the host's are the same thing.
+  const personaHarnessToml = isDefaultPersona
+    ? {}
+    : ((personaToml.harnesses ?? {}) as Record<string, unknown>);
+  const harnessEnvSuffix = isDefaultPersona
+    ? undefined
+    : personaEnvSuffix(personaLayer);
+
+  /** Does this persona's OWN file state `[harnesses].<path>`? */
+  const personaStatesHarness = (path: readonly string[]): boolean => {
+    let node: unknown = personaHarnessToml;
+    for (const key of path) {
+      if (typeof node !== "object" || node === null || Array.isArray(node)) {
+        return false;
+      }
+      node = (node as Record<string, unknown>)[key];
+      if (node === undefined) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Resolve the ENV half of the precedence above for one harness key: the
+   * persona's own suffixed var, else undefined when the persona states the key
+   * itself (so the caller's `?? toml` fallback lands on the persona's value),
+   * else the host's ambient var.
+   */
+  const harnessEnv = (
+    name: string,
+    path: readonly string[],
+  ): string | undefined => {
+    if (harnessEnvSuffix) {
+      const own = process.env[`${name}_${harnessEnvSuffix}`];
+      if (own !== undefined && own.trim() !== "") return own;
+      if (personaStatesHarness(path)) return undefined;
+    }
+    return process.env[name];
+  };
+
+  // Bins the persona pinned for itself. Migration copies the host's bins into
+  // every persona file, so "the file mentions a bin" alone would freeze each
+  // persona on whatever path was probed the day it migrated. What we record is
+  // narrower: only ids whose bin the persona file states AND that differ from
+  // the host's — i.e. a deliberate pin, not a copied echo. See
+  // withHostHarnessBins.
+  const personaOwnBins = ["claude", "pi", "codex"].filter((id) => {
+    if (!personaStatesHarness([id, "bin"])) return false;
+    const own = asString(
+      ((personaHarnessToml[id] ?? {}) as Record<string, unknown>).bin,
+    );
+    const hostToml = ((globalToml.harnesses ?? {}) as Record<string, unknown>)[id];
+    const host = asString((hostToml as Record<string, unknown> | undefined)?.bin);
+    return own !== undefined && own !== host;
+  });
+
   const tomlChannels = (toml.channels ?? {}) as Record<string, unknown>;
   const tomlTelegram = (tomlChannels.telegram ?? {}) as Record<string, unknown>;
   const tomlP2p = (toml.p2p ?? {}) as Record<string, unknown>;
@@ -970,7 +1064,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
 
   const configuredChain =
-    process.env.PHANTOMBOT_HARNESS_CHAIN
+    harnessEnv("PHANTOMBOT_HARNESS_CHAIN", ["chain"])
       ?.split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0) ??
@@ -1058,40 +1152,66 @@ export async function loadConfig(persona?: string): Promise<Config> {
       chain: migratedChain,
       personas: buildHarnessPersonasConfig(tomlHarnessPersonas),
 
+      ownBins: personaOwnBins,
+
       claude: {
         bin:
-          process.env.PHANTOMBOT_CLAUDE_BIN ??
+          harnessEnv("PHANTOMBOT_CLAUDE_BIN", ["claude", "bin"]) ??
           asString(tomlClaude.bin) ??
           state.harness_bins?.claude ??
           "claude",
         model:
-          process.env.PHANTOMBOT_CLAUDE_MODEL ??
+          harnessEnv("PHANTOMBOT_CLAUDE_MODEL", ["claude", "model"]) ??
           asString(tomlClaude.model) ??
           "opus",
         fallbackModel:
-          process.env.PHANTOMBOT_CLAUDE_FALLBACK_MODEL ??
+          harnessEnv("PHANTOMBOT_CLAUDE_FALLBACK_MODEL", [
+            "claude",
+            "fallback_model",
+          ]) ??
           asString(tomlClaude.fallback_model) ??
           "sonnet",
       },
 
       pi: {
         bin:
-          process.env.PHANTOMBOT_PI_BIN ??
+          harnessEnv("PHANTOMBOT_PI_BIN", ["pi", "bin"]) ??
           asString(tomlPi.bin) ??
           state.harness_bins?.pi ??
           "pi",
-        routing: buildPiRoutingConfig(tomlPi),
+        routing: buildPiRoutingConfig(tomlPi, {
+          [ENV_PI_PROVIDER]: harnessEnv(ENV_PI_PROVIDER, [
+            "pi",
+            "routing",
+            "provider",
+          ]),
+          [ENV_PRIMARY_MODEL]: harnessEnv(ENV_PRIMARY_MODEL, [
+            "pi",
+            "routing",
+            "primary_model",
+          ]),
+          [ENV_IMAGE_MODEL]: harnessEnv(ENV_IMAGE_MODEL, [
+            "pi",
+            "routing",
+            "image_model",
+          ]),
+          [ENV_CODING_MODEL]: harnessEnv(ENV_CODING_MODEL, [
+            "pi",
+            "routing",
+            "coding_model",
+          ]),
+        }),
       },
 
       codex: {
         bin:
-          process.env.PHANTOMBOT_CODEX_BIN ??
+          harnessEnv("PHANTOMBOT_CODEX_BIN", ["codex", "bin"]) ??
           asString(tomlCodex.bin) ??
           state.harness_bins?.codex ??
           "codex",
         // Empty string = "let codex pick its own default".
         model:
-          process.env.PHANTOMBOT_CODEX_MODEL ??
+          harnessEnv("PHANTOMBOT_CODEX_MODEL", ["codex", "model"]) ??
           asString(tomlCodex.model) ??
           "",
       },
@@ -1190,17 +1310,35 @@ export async function loadConfigForPersona(
  */
 export function withHostHarnessBins(personaConfig: Config, host: Config): Config {
   if (personaConfig === host) return host;
+  // A bin the persona DELIBERATELY pinned (stated in its own file and different
+  // from the host's) is left alone — that is the per-key rule the whole persona
+  // layer runs on. Everything else takes the host's probed path, so the bins
+  // migration copied into each persona file cannot freeze a persona on a stale
+  // path after a binary moves. See Config.harnesses.ownBins.
+  const pinned = new Set(personaConfig.harnesses.ownBins ?? []);
+  const bin = (id: string, own: string, hostBin: string | undefined): string =>
+    pinned.has(id) ? own : (hostBin ?? own);
   return {
     ...personaConfig,
     harnesses: {
       ...personaConfig.harnesses,
-      claude: { ...personaConfig.harnesses.claude, bin: host.harnesses.claude.bin },
-      pi: { ...personaConfig.harnesses.pi, bin: host.harnesses.pi.bin },
+      claude: {
+        ...personaConfig.harnesses.claude,
+        bin: bin("claude", personaConfig.harnesses.claude.bin, host.harnesses.claude.bin),
+      },
+      pi: {
+        ...personaConfig.harnesses.pi,
+        bin: bin("pi", personaConfig.harnesses.pi.bin, host.harnesses.pi.bin),
+      },
       ...(personaConfig.harnesses.codex
         ? {
             codex: {
               ...personaConfig.harnesses.codex,
-              bin: host.harnesses.codex?.bin ?? personaConfig.harnesses.codex.bin,
+              bin: bin(
+                "codex",
+                personaConfig.harnesses.codex.bin,
+                host.harnesses.codex?.bin,
+              ),
             },
           }
         : {}),
@@ -1661,9 +1799,10 @@ function asNumber(v: unknown): number | undefined {
  */
 function buildPiRoutingConfig(
   tomlPi: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env,
 ): PiRoutingConfig | undefined {
   const tomlRouting = (tomlPi.routing ?? {}) as Record<string, unknown>;
-  const resolved = resolveRouting(tomlRouting);
+  const resolved = resolveRouting(tomlRouting, env);
   if (
     resolved.provider === undefined &&
     resolved.primaryModel === undefined &&

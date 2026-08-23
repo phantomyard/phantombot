@@ -44,7 +44,13 @@ import type {
   HarnessModelInfo,
   HarnessRequest,
 } from "./types.ts";
-import { ENV_PHANTOMBOT_TMP_DIR, ENV_PI_API_KEY, ENV_PI_PROVIDER, type PiRoutingConfig } from "../lib/piRouting.ts";
+import {
+  ENV_PHANTOMBOT_TMP_DIR,
+  ENV_PI_API_KEY,
+  ENV_PI_PROVIDER,
+  ENV_ROUTING_JSON,
+  type PiRoutingConfig,
+} from "../lib/piRouting.ts";
 import { CODER_SWAP_MAX_ATTEMPTS, getCoderSwapOverride, resolveSwapModel } from "../lib/coderSwap.ts";
 import { buildToolCall, type ToolCallDetail } from "./toolNote.ts";
 import { reloadEnvFiles, withPersonaEnv } from "../lib/envBootstrap.ts";
@@ -283,6 +289,21 @@ export class PiHarness implements Harness {
     const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation, req.turnId) };
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
+    // Point the extension at THIS persona's delegate models (phantombot#441).
+    // Delegate models still travel as a routing.json, NOT as env vars — that
+    // contract is unchanged. What changes is WHICH routing.json: the managed
+    // one is stamped once per host from the default persona's config, so on a
+    // multi-persona box every other persona's vision delegate was the default
+    // persona's model. `[harnesses]` is persona-scoped now, so we write this
+    // persona's models into its own per-turn temp dir (persona-owned, cleaned
+    // up with the turn) and name the file in the child env. Written even when
+    // this harness has no routing at all — an empty object is the inert state,
+    // and stating it is what stops a routing-free persona inheriting the host's
+    // stamped delegate.
+    childEnv[ENV_ROUTING_JSON] = await temp.file(
+      "routing.json",
+      JSON.stringify(routingModelsForChild(this.config.routing)),
+    );
     // Route the pi capability-routing extension's `phantombot-route-*` temp
     // files into the persona tmp dir too (issue #365). We pass our OWN var, not
     // a process-wide TMPDIR — that would leak across personas / unrelated child
@@ -690,4 +711,24 @@ function extractUsefulArgDetail(args: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+
+/**
+ * The delegate-model subset the capability-routing extension consumes, in the
+ * same shape `piExtensionProvision.routingModels` stamps (phantombot#441) —
+ * only defined fields, and deliberately NO coding model: that drives the
+ * per-turn coding-brain swap in this file, not any tool the extension
+ * registers, so handing it over would be dead weight the extension might one
+ * day act on.
+ */
+export function routingModelsForChild(
+  routing: PiRoutingConfig | undefined,
+): { primaryModel?: string; imageModel?: string } {
+  const out: { primaryModel?: string; imageModel?: string } = {};
+  const primary = routing?.primaryModel?.trim();
+  const image = routing?.imageModel?.trim();
+  if (primary) out.primaryModel = primary;
+  if (image) out.imageModel = image;
+  return out;
 }

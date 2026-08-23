@@ -61,7 +61,15 @@ case "$mode" in
     exit 0
     ;;
   env)
-    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-}"
+    # The per-persona routing file the harness points us at (phantombot#441).
+    # Echo its CONTENTS, not just the path: what the test needs to know is which
+    # persona's delegate models this child would actually route with. Quotes are
+    # escaped so the JSON line below stays parseable.
+    routejson=""
+    if [ -n "${PHANTOMBOT_ROUTING_JSON-}" ] && [ -f "${PHANTOMBOT_ROUTING_JSON}" ]; then
+      routejson=$(tr -d '\n ' < "${PHANTOMBOT_ROUTING_JSON}" | sed 's/"/\\"/g')
+    fi
+    joined="primary=${PHANTOMBOT_PRIMARY_MODEL-} image=${PHANTOMBOT_IMAGE_MODEL-} coding=${PHANTOMBOT_CODING_MODEL-} provider=${PHANTOMBOT_PI_PROVIDER-} apikey=${PHANTOMBOT_PI_API_KEY-} routing=${routejson}"
     printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"env: ${joined}\",\"partial\":{}},\"message\":{}}"
     printf '%s\n' '{"type":"turn_end","message":{},"toolResults":[]}'
     exit 0

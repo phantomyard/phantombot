@@ -104,6 +104,44 @@ describe("clearPiRouting (the 'Use Pi's own config' path)", () => {
   });
 });
 
+describe("applyRouting for a non-default persona (phantombot#441)", () => {
+  test("TOML lands in the persona file and the env mirror is SUFFIXED", async () => {
+    // The env file is shared by every persona on the host, so writing the
+    // unsuffixed vars while configuring Lena would repoint Kai and Robbie too —
+    // and, because env outranks the global TOML, would keep doing so. The
+    // suffixed vars are what config.ts reads for a non-default persona.
+    await applyRouting(
+      configPath,
+      { provider: "openrouter", primaryModel: "lena-primary", imageModel: "lena-vision" },
+      envPath,
+      "LENA",
+    );
+
+    const toml = await readConfigToml(configPath);
+    expect((toml as any).harnesses.pi.routing.primary_model).toBe("lena-primary");
+
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_PRIMARY_MODEL_LENA).toBe("lena-primary");
+    expect(env.PHANTOMBOT_IMAGE_MODEL_LENA).toBe("lena-vision");
+    expect(env.PHANTOMBOT_PI_PROVIDER_LENA).toBe("openrouter");
+    // The host's own vars are untouched — configuring one persona must never
+    // move another persona's brain.
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(env.PHANTOMBOT_IMAGE_MODEL).toBeUndefined();
+  });
+
+  test("clearPiRouting clears the SUFFIXED vars, not the host's", async () => {
+    await applyRouting(configPath, { primaryModel: "host-primary" }, envPath);
+    await applyRouting(configPath, { primaryModel: "lena-primary" }, envPath, "LENA");
+    await clearPiRouting(configPath, envPath, "LENA");
+
+    const env = await loadEnvFile(envPath);
+    // An empty write REMOVES the var (updateEnvFile's "" = unset semantics).
+    expect(env.PHANTOMBOT_PRIMARY_MODEL_LENA).toBeUndefined();
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBe("host-primary");
+  });
+});
+
 describe("applyRouting", () => {
   test("text-only primary writes all three models to toml + env", async () => {
     await applyRouting(

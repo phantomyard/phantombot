@@ -623,6 +623,43 @@ describe("PiHarness routing (subprocess)", () => {
     expect(out).not.toContain("PHANTOMBOT_CODING_MODEL=qwen-coder");
   });
 
+  test("the child is pointed at THIS persona's routing.json, not the host's", async () => {
+    // phantombot#441. The managed extension dir is stamped once per HOST, so
+    // its sibling routing.json can only describe one persona's delegates — on a
+    // multi-persona box every other persona's vision delegate was the default
+    // persona's model. The harness now writes its OWN models into the persona's
+    // per-turn temp dir and names that file in the child env.
+    process.env.FAKE_PI_MODE = "env";
+    const out = (
+      await collect(
+        routed({
+          primaryModel: "gpt-5.2",
+          imageModel: "vision-x",
+          codingModel: "qwen-coder",
+        }).invoke(newRequest()),
+      )
+    )
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(out).toContain('routing={"primaryModel":"gpt-5.2","imageModel":"vision-x"}');
+    // The coding model drives the in-harness brain swap, not any extension
+    // tool, so it is deliberately absent from the file.
+    expect(out).not.toContain("qwen-coder");
+  });
+
+  test("a routing-free harness states an EMPTY routing file (no host inheritance)", async () => {
+    // Stating `{}` is the point: without it the child falls back to the
+    // host-stamped sibling routing.json and a persona with no routing of its
+    // own silently borrows the default persona's vision delegate.
+    process.env.FAKE_PI_MODE = "env";
+    const out = (await collect(mkHarness().invoke(newRequest())))
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    expect(out).toContain("routing={}");
+  });
+
   test("the active harness's provider + api-key ARE projected into the child env (for the extension's delegates)", async () => {
     // The capability-routing extension runs INSIDE this spawned pi and threads
     // the pair onto its OWN delegate children. It reads them from this env, so

@@ -54,14 +54,21 @@ import { log } from "./logger.ts";
  * general (a future persona-scoped knob needs no change here) while migration
  * stays conservative and only moves what is unambiguously persona-shaped.
  *
- * Notably absent: `harnesses` (bins and the failover chain are host-level;
- * per-persona chains already have `[harnesses.personas.<name>]`, which
- * migration maps into the persona file separately), `personas_dir`,
- * `memory_db`, `update_channel`, `default_persona`, `autostart_personas`.
+ * `harnesses` IS persona-scoped (phantombot#441): which brain a persona thinks
+ * with — the failover chain, the Claude/Codex model, Pi's capability routing —
+ * is a property of the personality, not of the box. The whole block is copied,
+ * INCLUDING `bin` paths, so a persona file is a complete, self-contained
+ * description of that persona's harness; an unstated bin still falls back to
+ * the host's probed path, so a moved binary does not require editing N files
+ * unless the operator deliberately pinned one.
+ *
+ * Notably absent: `personas_dir`, `memory_db`, `update_channel`,
+ * `default_persona`, `autostart_personas`.
  */
 export const PERSONA_SCOPED_KEYS: readonly string[] = [
   "channels",
   "voice",
+  "harnesses",
   "telegram_streaming",
   "chattiness",
   "retrieval",
@@ -296,15 +303,22 @@ export async function migratePersonaConfig(
     if (Object.keys(channels).length === 0) delete seed.channels;
   }
 
-  // Per-persona harness chain: `[harnesses.personas.<name>].chain` in the old
-  // layout becomes plain `[harnesses].chain` in the persona's own file.
-  const globalHarnesses = input.globalToml.harnesses;
-  if (isPlainObject(globalHarnesses)) {
-    const table = globalHarnesses.personas;
+  // `[harnesses]` is copied whole — chain, models, routing, bins — minus the
+  // host-shaped `personas` routing table, which is dropped for the same reason
+  // as `[channels.telegram.personas]`: inside a persona file it would read as
+  // "this persona's override for a persona of the same name". That persona's
+  // OWN legacy entry is instead translated into the plain `[harnesses].chain`,
+  // overriding the host chain that was just copied — the legacy entry is the
+  // more specific statement about this persona, so it must win.
+  const harnesses = seed.harnesses;
+  if (isPlainObject(harnesses)) {
+    const table = harnesses.personas;
     const own = isPlainObject(table) ? table[input.persona] : undefined;
+    delete harnesses.personas;
     if (isPlainObject(own) && Array.isArray(own.chain)) {
-      seed.harnesses = { chain: cloneToml(own.chain) };
+      harnesses.chain = cloneToml(own.chain);
     }
+    if (Object.keys(harnesses).length === 0) delete seed.harnesses;
   }
 
   if (Object.keys(seed).length === 0) {
