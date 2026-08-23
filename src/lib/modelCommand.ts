@@ -16,6 +16,12 @@
  * stale. Both must move together, exactly like applyRouting does for the
  * onboarding wizard.
  *
+ * WHERE IT WRITES: `[harnesses]` is persona-scoped (phantombot#441), so a
+ * /model typed at one persona must land in THAT persona's config.toml and its
+ * suffixed env mirror — never in the host file, which every other persona
+ * inherits under the per-key merge. The target comes from the same
+ * `resolveHarnessWriteTarget` the wizard uses, so the two writers cannot drift.
+ *
  * A restart is always required after a successful write — every harness
  * bakes its model config at construction (buildHarnessChain), so the
  * dispatcher fires selfRestart via afterSend, same dance as /restart.
@@ -28,8 +34,13 @@ import {
   ENV_CODING_MODEL,
   ENV_IMAGE_MODEL,
   ENV_PRIMARY_MODEL,
-  type PiRoutingConfig,
+  ROUTING_LOCAL_CONFIG_KEY,
 } from "./piRouting.ts";
+import {
+  type HarnessWriteTarget,
+  resolveHarnessWriteTarget,
+  suffixEnvKeys,
+} from "./harnessWriteTarget.ts";
 import type { HarnessModelInfo } from "../harnesses/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -130,7 +141,12 @@ export type ModelApplyResult =
 
 const PI_ROLE_WRITES: Record<
   ModelRole,
-  { tomlKey: string; envVar: string; routingField: keyof PiRoutingConfig }
+  {
+    tomlKey: string;
+    envVar: string;
+    /** Only the model fields are writable here — never `useLocalConfig`. */
+    routingField: "primaryModel" | "codingModel" | "imageModel";
+  }
 > = {
   primary: { tomlKey: "primary_model", envVar: ENV_PRIMARY_MODEL, routingField: "primaryModel" },
   coding: { tomlKey: "coding_model", envVar: ENV_CODING_MODEL, routingField: "codingModel" },
@@ -151,14 +167,16 @@ export async function applyModelRequest(
   harnessId: string,
   config: Config,
   envPath: string = defaultEnvFilePath(),
+  persona?: string,
 ): Promise<ModelApplyResult> {
+  const target = await resolveHarnessWriteTarget(config, persona);
   switch (harnessId) {
     case "pi":
-      return applyPi(req, config, envPath);
+      return applyPi(req, config, envPath, target);
     case "claude":
-      return applyClaude(req, config, envPath);
+      return applyClaude(req, config, envPath, target);
     case "codex":
-      return applySimple(req, config, envPath, "codex", "PHANTOMBOT_CODEX_MODEL");
+      return applySimple(req, config, envPath, target, "codex", "PHANTOMBOT_CODEX_MODEL");
     default:
       return {
         ok: false,
@@ -171,6 +189,7 @@ async function applyPi(
   req: ModelRequest & { kind: "set" | "clear" },
   config: Config,
   envPath: string,
+  target: HarnessWriteTarget,
 ): Promise<ModelApplyResult> {
   if (req.kind === "clear") {
     return {
@@ -181,15 +200,24 @@ async function applyPi(
     };
   }
   const { tomlKey, envVar, routingField } = PI_ROLE_WRITES[req.role];
-  await updateConfigToml(config.configPath, (toml) => {
+  await updateConfigToml(target.path, (toml) => {
     setIn(toml, ["harnesses", "pi", "routing", tomlKey], req.slug);
+    // Naming a model REVOKES a previous "use Pi's own config" opt-out, exactly
+    // as the wizard's configure path does — otherwise the tombstone would keep
+    // short-circuiting resolveRouting and this write would be inert.
+    const routingToml = getIn(toml, ["harnesses", "pi", "routing"]) as
+      | Record<string, unknown>
+      | undefined;
+    if (routingToml) delete routingToml[ROUTING_LOCAL_CONFIG_KEY];
   });
-  await updateEnvFile(envPath, { [envVar]: req.slug });
+  const envWrites = suffixEnvKeys({ [envVar]: req.slug }, target.envSuffix);
+  await updateEnvFile(envPath, envWrites);
   // In-memory sync — config.ts resolved env-over-TOML at startup, so both
   // the live Config and the live env must agree with what we just wrote.
   const routing = (config.harnesses.pi.routing ??= {});
+  delete routing.useLocalConfig;
   routing[routingField] = req.slug;
-  process.env[envVar] = req.slug;
+  for (const [k, v] of Object.entries(envWrites)) process.env[k] = v;
   return { ok: true, summary: `pi ${req.role} model → ${req.slug}` };
 }
 
@@ -197,6 +225,7 @@ async function applyClaude(
   req: ModelRequest & { kind: "set" | "clear" },
   config: Config,
   envPath: string,
+  target: HarnessWriteTarget,
 ): Promise<ModelApplyResult> {
   if (req.kind === "clear") {
     return {
@@ -220,12 +249,16 @@ async function applyClaude(
         CLAUDE_MODEL_ALIASES.join(", "),
     };
   }
-  await updateConfigToml(config.configPath, (toml) => {
+  await updateConfigToml(target.path, (toml) => {
     setIn(toml, ["harnesses", "claude", "model"], alias);
   });
-  await updateEnvFile(envPath, { PHANTOMBOT_CLAUDE_MODEL: alias });
+  const claudeEnv = suffixEnvKeys(
+    { PHANTOMBOT_CLAUDE_MODEL: alias },
+    target.envSuffix,
+  );
+  await updateEnvFile(envPath, claudeEnv);
   config.harnesses.claude.model = alias;
-  process.env.PHANTOMBOT_CLAUDE_MODEL = alias;
+  for (const [k, v] of Object.entries(claudeEnv)) process.env[k] = v;
   return { ok: true, summary: `claude model → ${alias}` };
 }
 
@@ -240,6 +273,7 @@ async function applySimple(
   req: ModelRequest & { kind: "set" | "clear" },
   config: Config,
   envPath: string,
+  target: HarnessWriteTarget,
   id: "codex",
   envVar: string,
 ): Promise<ModelApplyResult> {
@@ -251,23 +285,34 @@ async function applySimple(
   }
 
   if (req.kind === "clear") {
-    await updateConfigToml(config.configPath, (toml) => {
+    await updateConfigToml(target.path, (toml) => {
+      if (target.scope === "persona") {
+        // In a PERSONA file, deleting the key is not clearing it: the per-key
+        // merge would hand this persona the HOST's pinned model right back.
+        // `model = ""` is the pinned-to-nothing state config.ts already
+        // understands ("" ⇒ let the CLI pick), and stating it also stops the
+        // host's ambient env var applying to this persona.
+        setIn(toml, ["harnesses", id, "model"], "");
+        return;
+      }
       const harness = getIn(toml, ["harnesses", id]) as
         | Record<string, unknown>
         | undefined;
       if (harness) delete harness.model;
     });
-    await updateEnvFile(envPath, { [envVar]: "" });
+    const clearEnv = suffixEnvKeys({ [envVar]: "" }, target.envSuffix);
+    await updateEnvFile(envPath, clearEnv);
     if (config.harnesses.codex) config.harnesses.codex.model = "";
-    delete process.env[envVar];
+    for (const k of Object.keys(clearEnv)) delete process.env[k];
     return { ok: true, summary: `${id} model → (default)` };
   }
 
-  await updateConfigToml(config.configPath, (toml) => {
+  await updateConfigToml(target.path, (toml) => {
     setIn(toml, ["harnesses", id, "model"], req.slug);
   });
-  await updateEnvFile(envPath, { [envVar]: req.slug });
+  const setEnv = suffixEnvKeys({ [envVar]: req.slug }, target.envSuffix);
+  await updateEnvFile(envPath, setEnv);
   if (config.harnesses.codex) config.harnesses.codex.model = req.slug;
-  process.env[envVar] = req.slug;
+  for (const [k, v] of Object.entries(setEnv)) process.env[k] = v;
   return { ok: true, summary: `${id} model → ${req.slug}` };
 }

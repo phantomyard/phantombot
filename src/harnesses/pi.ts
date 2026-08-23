@@ -233,7 +233,15 @@ export class PiHarness implements Harness {
     // local store settings (the "install later, no key" path keeps legacy
     // installs working); neither ⇒ Pi errors as usual. Must precede the
     // positional payload below.
-    const piApiKey = process.env[ENV_PI_API_KEY]?.trim();
+    // ...UNLESS this persona explicitly opted out of phantombot's routing
+    // ("Use Pi's own config"). That opt-out has to cover the key as well as the
+    // models: the key is read from the ambient env, which on a multi-persona
+    // host is the HOST's key, so honouring it here would fire another persona's
+    // credential at a provider this persona never chose. Withholding the flag
+    // is what "Pi decides for itself" actually means.
+    const piApiKey = this.config.routing?.useLocalConfig
+      ? undefined
+      : process.env[ENV_PI_API_KEY]?.trim();
 
     /**
      * Assemble the full argv for ONE attempt. `model` is the brain this

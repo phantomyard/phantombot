@@ -118,6 +118,14 @@ export interface PiRoutingConfig {
   primaryModel?: string;
   imageModel?: string;
   codingModel?: string;
+  /**
+   * The persona explicitly opted OUT of phantombot's routing
+   * (`use_local_config = true`, written by the wizard's "Use Pi's own config"
+   * path — see ROUTING_LOCAL_CONFIG_KEY). Every other field is undefined when
+   * this is set, and the pi harness passes no `--provider` / `--model` /
+   * `--api-key` at all.
+   */
+  useLocalConfig?: boolean;
 }
 
 function clean(v: string | undefined): string | undefined {
@@ -203,6 +211,10 @@ export function resolveRouting(
   env: Record<string, string | undefined> = process.env,
 ): PiRoutingConfig {
   const t = toml ?? {};
+  // Explicit persona opt-out short-circuits everything — see
+  // ROUTING_LOCAL_CONFIG_KEY. Checked before env so an inherited ambient
+  // PHANTOMBOT_PRIMARY_MODEL cannot resurrect routing this persona cleared.
+  if (t[ROUTING_LOCAL_CONFIG_KEY] === true) return { useLocalConfig: true };
   const tomlStr = (key: string): string | undefined => {
     const v = t[key];
     return typeof v === "string" ? clean(v) : undefined;
@@ -294,6 +306,32 @@ export function computeRoutingWrites(choices: RoutingChoices): RoutingWrites {
  * so `computeRoutingClears` and the wizard's TOML delete stay in lockstep with
  * what `computeRoutingWrites` sets.
  */
+/**
+ * The explicit "this persona uses Pi's own config" tombstone
+ * (phantombot#441).
+ *
+ * DELETING a persona's routing keys does not clear that persona's routing —
+ * per-key merge means an absent key falls back to the host's
+ * `[harnesses.pi.routing]` (and to the host's unsuffixed ambient env, since
+ * "the persona no longer states this key" is exactly what re-enables the
+ * ambient fallback). "Cleared" and "never configured" are different states and
+ * need different spellings on disk, so the clear path writes this flag instead
+ * of relying on absence.
+ *
+ * When it is set, `resolveRouting` returns NOTHING else — not the inherited
+ * TOML, not the ambient env, not the persona's own suffixed vars. The flag is
+ * the operator's most recent and most specific statement about this persona;
+ * re-running the wizard and picking "Configure models" removes it in the same
+ * write that sets the new models, so there is no state where it lingers behind
+ * a routing the operator just chose.
+ *
+ * It is only ever written in PERSONA scope. In the global file it would be
+ * inherited by every persona that has not stated it, which would turn one
+ * persona's opt-out into a host-wide one — the same class of leak that put the
+ * models in the persona file in the first place.
+ */
+export const ROUTING_LOCAL_CONFIG_KEY = "use_local_config";
+
 export const ROUTING_TOML_KEYS = [
   "provider",
   "primary_model",

@@ -87,20 +87,26 @@ export function imageDelegationPrompt(imagePath: string, question: string): stri
  * models to a per-turn file and names it in `PHANTOMBOT_ROUTING_JSON`. That
  * file therefore comes first.
  *
- * The sibling stays as the fallback rather than being replaced: a `pi` run
- * started by hand (no phantombot in the chain) sets no env var, and must keep
- * working exactly as it did. A blank var is treated as unset for the same
- * reason every other phantombot env var is — an empty value is how a cleared
- * setting looks, not a path to an empty file.
+ * The sibling is the answer to an ABSENT override only, never a fallback for a
+ * broken one. A `pi` run started by hand (no phantombot in the chain) sets no
+ * env var and must keep working exactly as it did, so an unset var still reads
+ * the sibling. But once the var is STATED it is authoritative: if that file is
+ * missing, unreadable or invalid JSON, falling through to the host-stamped
+ * sibling would silently hand this persona another persona's delegate models —
+ * the precise isolation this override exists to provide. A stated-but-unusable
+ * override therefore resolves to `{}` (no tools registered), which is the safe
+ * inert state.
+ *
+ * A blank var is treated as unset for the same reason every other phantombot
+ * env var is — an empty value is how a cleared setting looks, not a path to an
+ * empty file.
  */
 export function routingConfigCandidates(
   extensionDir: string | undefined,
   env: Record<string, string | undefined>,
   join: (a: string, b: string) => string,
 ): string[] {
-  const out: string[] = [];
   const override = env.PHANTOMBOT_ROUTING_JSON?.trim();
-  if (override) out.push(override);
-  if (extensionDir) out.push(join(extensionDir, "routing.json"));
-  return out;
+  if (override) return [override];
+  return extensionDir ? [join(extensionDir, "routing.json")] : [];
 }

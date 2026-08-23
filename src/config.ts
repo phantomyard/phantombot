@@ -1803,6 +1803,11 @@ function buildPiRoutingConfig(
 ): PiRoutingConfig | undefined {
   const tomlRouting = (tomlPi.routing ?? {}) as Record<string, unknown>;
   const resolved = resolveRouting(tomlRouting, env);
+  // An explicit opt-out is a CONFIGURED state, not an absent one: it must reach
+  // the harness so it can withhold the api-key too (undefined here would mean
+  // "nothing was said", and the key is read straight from the env). See
+  // ROUTING_LOCAL_CONFIG_KEY.
+  if (resolved.useLocalConfig) return resolved;
   if (
     resolved.provider === undefined &&
     resolved.primaryModel === undefined &&

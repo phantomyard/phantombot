@@ -235,6 +235,124 @@ describe("applyModelRequest pi", () => {
 });
 
 // ---------------------------------------------------------------------------
+// applyModelRequest — persona scope (phantombot#441)
+// ---------------------------------------------------------------------------
+
+describe("applyModelRequest persona scope", () => {
+  const PERSONA_ENV = [
+    "PHANTOMBOT_PRIMARY_MODEL_LENA",
+    "PHANTOMBOT_CLAUDE_MODEL_LENA",
+    "PHANTOMBOT_CODEX_MODEL_LENA",
+  ] as const;
+  afterEach(() => {
+    for (const k of PERSONA_ENV) delete process.env[k];
+  });
+
+  test("a non-default persona's /model writes ITS file and ITS suffixed env", async () => {
+    // `[harnesses]` is persona-scoped, so a /model typed in Lena's chat must
+    // not land in the host file — under the per-key merge that is the default
+    // every OTHER persona inherits, so Lena's choice would move Kai's brain.
+    const config = makeConfig();
+    await applyModelRequest(
+      { kind: "set", role: "primary", slug: "lena-primary" },
+      "pi",
+      config,
+      envPath,
+      "lena",
+    );
+    const personaToml = await readConfigToml(join(dir, "lena", "config.toml"));
+    expect(getIn(personaToml, ["harnesses", "pi", "routing", "primary_model"]))
+      .toBe("lena-primary");
+    expect(await readConfigToml(configPath)).toEqual({});
+
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_PRIMARY_MODEL_LENA).toBe("lena-primary");
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(process.env.PHANTOMBOT_PRIMARY_MODEL_LENA).toBe("lena-primary");
+    expect(process.env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+  });
+
+  test("claude and codex writes are persona-scoped too", async () => {
+    const config = makeConfig({ codex: { bin: "codex", model: "" } });
+    await applyModelRequest(
+      { kind: "set", role: "primary", slug: "haiku" },
+      "claude",
+      config,
+      envPath,
+      "lena",
+    );
+    await applyModelRequest(
+      { kind: "set", role: "primary", slug: "gpt-5.2-codex" },
+      "codex",
+      config,
+      envPath,
+      "lena",
+    );
+    const personaToml = await readConfigToml(join(dir, "lena", "config.toml"));
+    expect(getIn(personaToml, ["harnesses", "claude", "model"])).toBe("haiku");
+    expect(getIn(personaToml, ["harnesses", "codex", "model"])).toBe("gpt-5.2-codex");
+    expect(await readConfigToml(configPath)).toEqual({});
+    const env = await loadEnvFile(envPath);
+    expect(env.PHANTOMBOT_CLAUDE_MODEL_LENA).toBe("haiku");
+    expect(env.PHANTOMBOT_CODEX_MODEL_LENA).toBe("gpt-5.2-codex");
+  });
+
+  test("a persona's codex CLEAR is a stated '' pin, not a delete", async () => {
+    // Deleting the key in a persona file re-inherits the HOST's pinned codex
+    // model through the per-key merge, so the clear would read as a no-op.
+    const config = makeConfig({ codex: { bin: "codex", model: "gpt-5.2-codex" } });
+    await applyModelRequest(
+      { kind: "clear" },
+      "codex",
+      config,
+      envPath,
+      "lena",
+    );
+    const personaToml = await readConfigToml(join(dir, "lena", "config.toml"));
+    expect(getIn(personaToml, ["harnesses", "codex", "model"])).toBe("");
+  });
+
+  test("naming a pi model revokes that persona's use_local_config opt-out", async () => {
+    const config = makeConfig();
+    await Bun.write(
+      join(dir, "lena", "config.toml"),
+      "[harnesses.pi.routing]\nuse_local_config = true\n",
+    );
+    await applyModelRequest(
+      { kind: "set", role: "primary", slug: "lena-primary" },
+      "pi",
+      config,
+      envPath,
+      "lena",
+    );
+    const routing = getIn(
+      await readConfigToml(join(dir, "lena", "config.toml")),
+      ["harnesses", "pi", "routing"],
+    ) as Record<string, unknown>;
+    expect(routing.use_local_config).toBeUndefined();
+    expect(routing.primary_model).toBe("lena-primary");
+  });
+
+  test("the DEFAULT persona still writes the host file and unsuffixed env", async () => {
+    const config = makeConfig();
+    await applyModelRequest(
+      { kind: "set", role: "primary", slug: "host-primary" },
+      "pi",
+      config,
+      envPath,
+      "phantom",
+    );
+    expect(getIn(await readConfigToml(configPath), [
+      "harnesses",
+      "pi",
+      "routing",
+      "primary_model",
+    ])).toBe("host-primary");
+    expect((await loadEnvFile(envPath)).PHANTOMBOT_PRIMARY_MODEL).toBe("host-primary");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // applyModelRequest — claude
 // ---------------------------------------------------------------------------
 

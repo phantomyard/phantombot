@@ -7,18 +7,14 @@
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
 
-import { type Config, loadConfig, personaEnvSuffix } from "../config.ts";
+import { type Config, loadConfig } from "../config.ts";
 import {
   getIn,
   setIn,
   type TomlObject,
   updateConfigToml,
 } from "../lib/configWriter.ts";
-import {
-  personaConfigPath,
-  type PersonaWriteScope,
-  resolvePersonaWriteTarget,
-} from "../lib/personaConfig.ts";
+import { type PersonaWriteScope } from "../lib/personaConfig.ts";
 import {
   harnessBin,
   resolveHarnessBinary,
@@ -39,6 +35,7 @@ import {
 } from "../lib/piModels.ts";
 import {
   computeRoutingClears,
+  ROUTING_LOCAL_CONFIG_KEY,
   computeRoutingWrites,
   ENV_PI_API_KEY,
   resolvePiApiKeyWrite,
@@ -52,6 +49,19 @@ import { saveHarnessBins } from "../state.ts";
 import { harnessChainIds } from "../harnesses/buildChain.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
+// The harness write resolver lives in lib/ so non-TUI writers (/model) share
+// exactly one definition with the wizard; re-exported here for callers and
+// tests that have always found it on this module.
+export {
+  resolveHarnessWriteTarget,
+  suffixEnvKeys,
+  type HarnessWriteTarget,
+} from "../lib/harnessWriteTarget.ts";
+import {
+  resolveHarnessWriteTarget,
+  suffixEnvKeys,
+  type HarnessWriteTarget,
+} from "../lib/harnessWriteTarget.ts";
 
 export type HarnessId = "claude" | "pi" | "codex";
 // Pi is listed FIRST so it is the default primary in the wizard (both the
@@ -103,42 +113,6 @@ export async function detectAvailability(
   };
 }
 
-/**
- * Where this wizard run persists everything it collects (phantombot#441).
- *
- * `[harnesses]` is persona-scoped, so the chain, the models and Pi's routing
- * all have to land in the SAME place the reader looks for them — the persona's
- * own config.toml once it exists — and the env mirror has to be scoped with
- * them, or the shared env file's unsuffixed vars would overwrite every
- * persona's models with the last one configured.
- *
- * `envSuffix` is undefined for the default persona (it keeps the unsuffixed
- * vars it has always used) and `<PERSONA>` for every other one.
- */
-export interface HarnessWriteTarget {
-  path: string;
-  scope: PersonaWriteScope;
-  persona?: string;
-  envSuffix?: string;
-}
-
-/**
- * Suffix the env keys of a routing write for a non-default persona, so
- * `PHANTOMBOT_PRIMARY_MODEL` becomes `PHANTOMBOT_PRIMARY_MODEL_LENA`. Config
- * reads the suffixed var first for that persona and never falls back to the
- * unsuffixed one when the persona states the key itself (see config.ts
- * harnessEnv) — the same shape as the Telegram token isolation in #440.
- */
-export function suffixEnvKeys(
-  env: Record<string, string>,
-  envSuffix?: string,
-): Record<string, string> {
-  if (!envSuffix) return env;
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) out[`${k}_${envSuffix}`] = v;
-  return out;
-}
-
 export async function applyHarnessChain(
   configPath: string,
   chain: readonly HarnessId[],
@@ -187,6 +161,11 @@ export async function applyRouting(
     // no image/coding model so a multimodal switch clears a stale entry.
     setRoutingKey(toml, "image_model", writes.toml.image_model);
     setRoutingKey(toml, "coding_model", writes.toml.coding_model);
+    // Configuring models REVOKES a previous "use Pi's own config" opt-out in
+    // the same write. Left behind, the tombstone would win over the models the
+    // operator just picked (resolveRouting short-circuits on it) and the wizard
+    // would report success while changing nothing.
+    setRoutingKey(toml, ROUTING_LOCAL_CONFIG_KEY, undefined);
   });
   await updateEnvFile(envPath, suffixEnvKeys(writes.env, envSuffix));
   return writes;
@@ -207,9 +186,19 @@ export async function clearPiRouting(
   configPath: string,
   envPath: string = userEnvPath(),
   envSuffix?: string,
+  opts: { tombstone?: boolean } = {},
 ): Promise<ReturnType<typeof computeRoutingClears>> {
   const clears = computeRoutingClears();
   await updateConfigToml(configPath, (toml) => {
+    if (opts.tombstone) {
+      // PERSONA scope: deleting the keys is not clearing them. A key this
+      // persona no longer states falls back to the host's
+      // `[harnesses.pi.routing]` under the per-key merge, and to the host's
+      // unsuffixed ambient env — so a deleted persona routing silently becomes
+      // the HOST routing. State the opt-out explicitly instead
+      // (ROUTING_LOCAL_CONFIG_KEY), which resolveRouting honours over both.
+      setIn(toml, ["harnesses", "pi", "routing", ROUTING_LOCAL_CONFIG_KEY], true);
+    }
     const routing = getIn(toml, ["harnesses", "pi", "routing"]) as
       | Record<string, unknown>
       | undefined;
@@ -246,47 +235,6 @@ interface RunInput {
    * availability and we don't want to re-walk PATH for every harness.
    */
   availability?: Record<HarnessId, string | undefined>;
-}
-
-/**
- * Where the harness wizard writes for `persona` (phantombot#441).
- *
- * The generic rule (`resolvePersonaWriteTarget`) falls back to the GLOBAL file
- * in its legacy shape while a persona has no config.toml of its own. For the
- * chain that is safe — the fallback writes `[harnesses.personas.<name>].chain`,
- * which only that persona reads. It is NOT safe for the models: routing is
- * written as a plain `[harnesses.pi.routing]` table, which in the global file
- * is the HOST default that every other persona inherits under the per-key
- * merge. Configuring Lena's brain would then move Kai's — via TOML, exactly the
- * leak the suffixed env mirror closes on the env side.
- *
- * So a NON-DEFAULT persona is always written in persona scope, materialising
- * `<persona>/config.toml` on first write. The default persona keeps the
- * historical global-file behaviour until migration gives it a file, so an
- * unmigrated host stays readable by an older binary (release rings make
- * rollback real).
- */
-export async function resolveHarnessWriteTarget(
-  config: Config,
-  persona?: string,
-): Promise<HarnessWriteTarget> {
-  const name = persona ?? config.defaultPersona;
-  const isDefault = !persona || persona === config.defaultPersona;
-  const resolved = isDefault
-    ? await resolvePersonaWriteTarget({
-      configPath: config.configPath,
-      personasDir: config.personasDir,
-      persona: name,
-    })
-    : {
-      path: personaConfigPath(config.personasDir, name),
-      scope: "persona" as PersonaWriteScope,
-    };
-  return {
-    ...resolved,
-    persona: name,
-    envSuffix: isDefault ? undefined : personaEnvSuffix(name),
-  };
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
@@ -509,7 +457,14 @@ async function configurePi(
     // ACTIVELY clear both stores — see clearPiRouting/computeRoutingClears. The
     // old "later" branch returned without clearing, so any previously-configured
     // routing kept being threaded onto every turn and this option did nothing.
-    await clearPiRouting(target.path, userEnvPath(), target.envSuffix);
+    await clearPiRouting(target.path, userEnvPath(), target.envSuffix, {
+      // Only a persona file may carry the opt-out tombstone: in the global
+      // file it would be inherited by every persona that has not stated its
+      // own routing, turning one persona's "use Pi's own config" into the
+      // host's. In global scope the delete is already a true clear — there is
+      // no layer above it to fall back to.
+      tombstone: target.scope === "persona",
+    });
     p.note(
       [
         "Pi will use its own local config (~/.pi/agent/settings.json) — the",

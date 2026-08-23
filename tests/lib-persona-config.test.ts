@@ -557,6 +557,38 @@ describe("loadConfig persona layering", () => {
     expect(lena.harnesses.pi.routing?.imageModel).toBe("host-vision");
   });
 
+  test("a cleared persona inherits NOTHING — not the host TOML, not ambient env", async () => {
+    // Kai's Major: the wizard's "use Pi's own config" used to DELETE the
+    // persona's routing keys, and under a per-key merge an absent key is the
+    // host's key. So clearing Lena's routing resolved straight back to the
+    // host's provider and models, and the host's ambient env on top of that.
+    // The cleared state is now stated explicitly (use_local_config).
+    process.env.PHANTOMBOT_PRIMARY_MODEL = "host-primary";
+    process.env.PHANTOMBOT_IMAGE_MODEL = "host-vision";
+    process.env.PHANTOMBOT_PI_PROVIDER = "host-provider";
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[harnesses.pi.routing]\n' +
+        'provider = "openrouter"\nprimary_model = "host-toml-primary"\n' +
+        'coding_model = "host-toml-coder"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      "[harnesses.pi.routing]\nuse_local_config = true\n",
+      "utf8",
+    );
+    const lena = await loadConfig("lena");
+    expect(lena.harnesses.pi.routing?.useLocalConfig).toBe(true);
+    expect(lena.harnesses.pi.routing?.provider).toBeUndefined();
+    expect(lena.harnesses.pi.routing?.primaryModel).toBeUndefined();
+    expect(lena.harnesses.pi.routing?.imageModel).toBeUndefined();
+    expect(lena.harnesses.pi.routing?.codingModel).toBeUndefined();
+    // ...and the host itself is untouched by another persona's opt-out.
+    expect((await loadConfig("robbie")).harnesses.pi.routing?.primaryModel)
+      .toBe("host-primary");
+  });
+
   test("a persona's OWN suffixed env var still beats its file", async () => {
     process.env.PHANTOMBOT_CLAUDE_MODEL = "host-opus";
     process.env.PHANTOMBOT_CLAUDE_MODEL_LENA = "lena-env";

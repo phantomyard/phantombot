@@ -363,3 +363,58 @@ describe("resolveHarnessWriteTarget (phantombot#441, wizard scope)", () => {
     expect(target.scope).toBe("global");
   });
 });
+
+describe("persona clears are tombstoned, not deleted (phantombot#441)", () => {
+  const cfg = (defaultPersona: string) =>
+    ({
+      configPath,
+      personasDir: join(workdir, "personas"),
+      defaultPersona,
+    }) as any;
+
+  test("PERSONA scope writes an explicit use_local_config opt-out", async () => {
+    // THE bug Kai caught: deleting a persona's routing keys is not clearing
+    // them. Under the per-key merge an absent key falls back to the HOST's
+    // [harnesses.pi.routing] — so "use Pi's own config" silently resolved to
+    // the host's provider and models. The cleared state needs its own spelling.
+    const target = await resolveHarnessWriteTarget(cfg("robbie"), "lena");
+    await applyRouting(
+      target.path,
+      { provider: "openrouter", primaryModel: "lena-primary", codingModel: "lena-coder" },
+      envPath,
+      target.envSuffix,
+    );
+
+    await clearPiRouting(target.path, envPath, target.envSuffix, { tombstone: true });
+
+    const routing = (await readConfigToml(target.path) as any).harnesses.pi.routing;
+    expect(routing.use_local_config).toBe(true);
+    expect(routing.provider).toBeUndefined();
+    expect(routing.primary_model).toBeUndefined();
+    expect(routing.coding_model).toBeUndefined();
+  });
+
+  test("GLOBAL scope never writes the tombstone (it would be inherited host-wide)", async () => {
+    // In the global file the flag is not this persona's opt-out, it is every
+    // persona's: any persona that does not state its own routing inherits it.
+    await applyRouting(configPath, { primaryModel: "host-primary" }, envPath);
+    await clearPiRouting(configPath, envPath);
+    const routing = (await readConfigToml(configPath) as any).harnesses.pi.routing;
+    expect(routing.use_local_config).toBeUndefined();
+    expect(routing.primary_model).toBeUndefined();
+  });
+
+  test("configuring models REVOKES a previous opt-out in the same write", async () => {
+    const target = await resolveHarnessWriteTarget(cfg("robbie"), "lena");
+    await clearPiRouting(target.path, envPath, target.envSuffix, { tombstone: true });
+    await applyRouting(
+      target.path,
+      { primaryModel: "lena-primary-2" },
+      envPath,
+      target.envSuffix,
+    );
+    const routing = (await readConfigToml(target.path) as any).harnesses.pi.routing;
+    expect(routing.use_local_config).toBeUndefined();
+    expect(routing.primary_model).toBe("lena-primary-2");
+  });
+});

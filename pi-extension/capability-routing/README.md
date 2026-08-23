@@ -35,9 +35,9 @@ when the operator explicitly picks "(none)" for the image model.
 
 ## Config: `routing.json` (not env vars)
 
-The extension reads a single managed data file, `routing.json`, that lives
-**next to this directory's `index.ts`**. phantombot bakes it from `config.toml`'s
-`[harnesses.pi.routing]` table. Shape (every key optional):
+The extension reads a single managed data file, `routing.json`. phantombot bakes
+it from the `[harnesses.pi.routing]` table of **the persona running this turn**.
+Shape (every key optional):
 
 ```json
 {
@@ -54,10 +54,30 @@ The extension reads a single managed data file, `routing.json`, that lives
 A blank/whitespace value is treated as absent. If `routing.json` is missing or
 unparseable the extension registers **nothing** (the safe inert default).
 
-> **Env vars are no longer used by this extension.** The old
+### Which `routing.json` — `PHANTOMBOT_ROUTING_JSON`
+
+One host runs many personas in one process, but the managed extension directory
+is stamped **once per host**, so its sibling `routing.json` can only ever
+describe one persona. `[harnesses]` is per-persona, so phantombot's pi harness
+writes the routing of **this** persona into its own per-turn temp directory and
+names that file in the `PHANTOMBOT_ROUTING_JSON` environment variable.
+
+Resolution is therefore:
+
+| `PHANTOMBOT_ROUTING_JSON` | What is read |
+|---|---|
+| set (non-blank) | **only** that file — it is authoritative. If it is missing, unreadable or invalid JSON the extension registers nothing rather than falling back, because the sibling belongs to a different persona. |
+| unset or blank | the sibling `routing.json` next to `index.ts` — a bare `pi` run started by hand behaves exactly as it always has. |
+
+This is the one env var the extension reads for config; the delegate models
+themselves still travel as JSON, never as env vars.
+
+> **Model env vars are no longer used by this extension.** The old
 > `PHANTOMBOT_PRIMARY_MODEL` / `PHANTOMBOT_IMAGE_MODEL` / `PHANTOMBOT_CODING_MODEL`
 > child-env projection has been removed; the wizard still writes those to `~/.env`
-> / `config.toml` as a *config* layer, but the extension reads only `routing.json`.
+> / `config.toml` (suffixed per persona) as a *config* layer, but the extension
+> reads models only from `routing.json` — `PHANTOMBOT_ROUTING_JSON` selects
+> *which* file, it never carries a model.
 
 ## Install — automatic
 
@@ -66,7 +86,9 @@ its binary and **stamps it into `~/.pi/agent/extensions/capability-routing/` on
 every startup**, overwriting that owned directory (the same way nginx owns
 `conf.d` or systemd owns its drop-ins). `phantombot doctor` detects a missing or
 drifted managed extension and re-stamps it. The `routing.json` is written
-alongside the source from your current config.
+alongside the source from your current config — that stamped copy is the
+default-persona/bare-`pi` fallback; a phantombot turn overrides it per persona
+via `PHANTOMBOT_ROUTING_JSON` (above).
 
 A manual symlink is only for **extension development** (so `/reload` picks up
 edits to this repo without a rebuild):
@@ -80,6 +102,6 @@ ships the change: `bun run gen:pi-extension`.
 
 ## Files
 
-- `index.ts` — extension entry point; loads `routing.json` from its own dir and registers `look_at_image` per the plan.
+- `index.ts` — extension entry point; loads `routing.json` (per-persona override first, own dir otherwise) and registers `look_at_image` per the plan.
 - `tools.ts` — pure registration-decision logic + delegation prompts (unit-tested from phantombot's `bun test`).
 - `spawnPi.ts` — spawns a child `pi --mode json` process and captures structured output (messages, usage, cost, stop reason). Mirrors pi's own subagent example.

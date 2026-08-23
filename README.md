@@ -480,7 +480,7 @@ Common paths:
 | `~/.env` | General credentials available to the harness |
 | `~/.local/share/phantombot/memory.sqlite` | Rolling turns, tasks, capture log |
 | `~/.local/share/phantombot/personas/<name>/` | Persona markdown memory and KB |
-| `~/.local/share/phantombot/personas/<name>/config.toml` | That persona's own settings (channels, voice, chattiness) |
+| `~/.local/share/phantombot/personas/<name>/config.toml` | That persona's own settings (channels, voice, chattiness, **and its `[harnesses]` block — chain, models, Pi routing**) |
 
 Minimal config example:
 
@@ -498,9 +498,9 @@ update_channel = "stable"
 [harnesses]
 chain = ["pi", "claude", "codex"]
 
-# Optional. Amanda uses this chain. Other personas use the global chain above.
-[harnesses.personas.amanda]
-chain = ["claude", "codex"]
+# Legacy per-persona chain table (still read; migrated into Amanda's own
+# personas/amanda/config.toml on the next start). New overrides belong in
+# that file as a plain [harnesses] block — see "Harness notes".
 
 [channels.telegram]
 token = "123456:telegram-bot-token"
@@ -522,9 +522,35 @@ Harness notes:
 - Gemini remains available for optional semantic-memory embeddings via `phantombot embedding`; it is not an agent harness.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
-- A `[harnesses.personas.<name>]` `chain` overrides the global chain for that
-  persona. If the block is absent or its chain is empty, the persona uses the
-  global chain. Run `phantombot harness --persona <name>` to set an override.
+- **The whole `[harnesses]` block is per-persona.** Which brain a persona
+  thinks with — the failover chain, the Claude/Codex model, Pi's provider and
+  capability routing — is a property of the personality, not of the box, so it
+  lives in `~/.local/share/phantombot/personas/<name>/config.toml`. The global
+  file is the host default; a persona file overrides it **key by key**, so a
+  persona that states only `[harnesses.pi.routing] primary_model` still
+  inherits the host's chain, bins and other models.
+- `phantombot harness --persona <name>` and `/model` typed in that persona's
+  chat both write there, and the env mirror is suffixed with the persona name
+  (`PHANTOMBOT_PRIMARY_MODEL_LENA`, `PHANTOMBOT_CLAUDE_MODEL_LENA`,
+  `PHANTOMBOT_CODEX_MODEL_LENA`, `PHANTOMBOT_PI_PROVIDER_LENA`, …). Precedence
+  for a persona is: **its own suffixed env var > its config.toml > the host's
+  unsuffixed env var > the global config.toml > the built-in default.** A
+  persona's file beating the host's ambient env var is deliberate and applies
+  only to keys that persona actually states — an unmigrated host keeps its
+  previous behaviour exactly.
+- Picking **"Use Pi's own config"** in the wizard for a persona writes an
+  explicit opt-out, `[harnesses.pi.routing] use_local_config = true`, rather
+  than deleting keys — a deleted key would simply inherit the host's routing
+  again. While it is set, that persona is passed no `--provider`, `--model` or
+  `--api-key` at all and Pi uses its own local settings. Configuring models
+  again (wizard or `/model`) removes it.
+- Host-level harness **bins** are the exception: a persona inherits whatever
+  `doctor` last probed on this machine unless it deliberately pins a different
+  path.
+- The legacy `[harnesses.personas.<name>]` `chain` table still works and still
+  means "this persona's chain". Migration translates it into that persona's own
+  `[harnesses] chain` on the first daemon start after upgrading; do not add new
+  entries to it.
 - Falling back is silent in chat, but not silent to you: if the primary
   harness fails authentication several turns running, phantombot sends you
   one Telegram alert naming the host and which harness is covering for it

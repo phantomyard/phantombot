@@ -181,10 +181,15 @@ describe("delegation prompts", () => {
 describe("routingConfigCandidates (phantombot#441)", () => {
   const join = (a: string, b: string) => `${a}/${b}`;
 
-  test("the persona's file is tried BEFORE the host-stamped sibling", () => {
+  test("a STATED override is authoritative — the host sibling is not a fallback", () => {
+    // Kai's finding: falling through to the sibling when the persona's file is
+    // missing/unreadable/invalid hands this persona the host-stamped delegate
+    // models of ANOTHER persona — the precise isolation this override exists to
+    // provide. A broken authoritative file must resolve to `{}` (inert), which
+    // is what returning it as the ONLY candidate produces.
     expect(
       routingConfigCandidates("/ext", { PHANTOMBOT_ROUTING_JSON: "/p/lena.json" }, join),
-    ).toEqual(["/p/lena.json", "/ext/routing.json"]);
+    ).toEqual(["/p/lena.json"]);
   });
 
   test("no override = today's behaviour exactly", () => {

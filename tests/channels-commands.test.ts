@@ -906,6 +906,11 @@ describe("/model", () => {
   function modelConfig(): import("../src/config.ts").Config {
     return {
       configPath: join(dir, "config.toml"),
+      // A real Config always carries these, and /model now resolves its write
+      // target from them (phantombot#441) — a fixture without them would test a
+      // shape that cannot exist on a host.
+      defaultPersona: "phantom",
+      personasDir: join(dir, "personas"),
       harnesses: {
         chain: ["pi"],
         claude: { bin: "claude", model: "opus", fallbackModel: "sonnet" },
@@ -963,6 +968,29 @@ describe("/model", () => {
     expect(getIn(toml, ["harnesses", "pi", "routing", "primary_model"])).toBe(
       "deepseek-v3",
     );
+  });
+
+  test("/model in a NON-default persona's chat writes that persona's file", async () => {
+    // phantombot#441: `[harnesses]` is persona-scoped, so /model must land in
+    // <persona>/config.toml. Writing the host file would move every other
+    // persona's models under the per-key merge.
+    const config = modelConfig();
+    const r = await handleSlashCommand(
+      "/model deepseek-v3",
+      ctx({
+        harnesses: [new StubHarness("pi", true, { model: "old-model" })],
+        config,
+        persona: "lena",
+      }),
+    );
+    expect(r!.reply).toContain("pi primary model → deepseek-v3");
+    const personaToml = await readConfigToml(
+      join(dir, "personas", "lena", "config.toml"),
+    );
+    expect(getIn(personaToml, ["harnesses", "pi", "routing", "primary_model"]))
+      .toBe("deepseek-v3");
+    expect(await readConfigToml(config.configPath)).toEqual({});
+    delete process.env.PHANTOMBOT_PRIMARY_MODEL_LENA;
   });
 
   test("claude rejects a typo'd alias without writing anything", async () => {

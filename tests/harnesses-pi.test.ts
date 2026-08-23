@@ -730,6 +730,31 @@ describe("PiHarness routing (subprocess)", () => {
     expect(argv).not.toContain("--api-key");
   });
 
+  test("an opted-out persona passes NO provider/model/api-key, even with a host key in the env", async () => {
+    // The persona picked "use Pi's own config". That opt-out has to cover the
+    // API KEY as well as the models: the key is read from the ambient env,
+    // which on a multi-persona host is the HOST's key — firing another
+    // persona's credential at a provider this persona never chose.
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "sk-host-key";
+    try {
+      const argv = (
+        await collect(
+          new PiHarness({ bin: FAKE_PI, routing: { useLocalConfig: true } })
+            .invoke(newRequest()),
+        )
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).not.toContain("--api-key");
+      expect(argv).not.toContain("--provider");
+      expect(argv).not.toContain("--model");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+    }
+  });
+
   test("invoke re-sources env files each turn (reloadEnvFiles is called)", async () => {
     // The reload is stubbed for hermeticity (see top-of-file note), so lock in
     // the guarantee it stands for: phantombot re-sources ~/.env per turn so a
