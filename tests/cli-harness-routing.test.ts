@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyRouting, clearPiRouting } from "../src/cli/harness.ts";
+import {
+  applyRouting,
+  clearPiRouting,
+  resolveHarnessWriteTarget,
+} from "../src/cli/harness.ts";
 import {
   computeRoutingClears,
   resolveRoutingProvider,
@@ -304,5 +308,58 @@ describe("applyRouting", () => {
     expect((toml.harnesses as Record<string, any>).pi.routing.primary_model).toBe(
       "gpt-5.2",
     );
+  });
+});
+
+describe("resolveHarnessWriteTarget (phantombot#441, wizard scope)", () => {
+  const cfg = (defaultPersona: string) =>
+    ({
+      configPath,
+      personasDir: join(workdir, "personas"),
+      defaultPersona,
+    }) as any;
+
+  test("a NON-DEFAULT persona is written in persona scope even with no file yet", async () => {
+    // THE edge Lena caught: resolvePersonaWriteTarget falls back to the GLOBAL
+    // file until the persona has one of its own. For the chain that fallback is
+    // harmless (it writes the legacy per-persona table), but routing is written
+    // as a plain [harnesses.pi.routing] — in the global file that is the HOST
+    // default every other persona inherits under the per-key merge. Configuring
+    // Lena would move Kai's models via TOML, which is the very leak the suffixed
+    // env mirror closes on the env side.
+    const target = await resolveHarnessWriteTarget(cfg("robbie"), "lena");
+    expect(target.scope).toBe("persona");
+    expect(target.path).toBe(join(workdir, "personas", "lena", "config.toml"));
+    expect(target.envSuffix).toBe("LENA");
+
+    // And the write actually materialises that file rather than the global one.
+    await applyRouting(target.path, { primaryModel: "lena-primary" }, envPath, target.envSuffix);
+    expect((await readConfigToml(target.path) as any).harnesses.pi.routing.primary_model)
+      .toBe("lena-primary");
+    expect(await readConfigToml(configPath)).toEqual({});
+  });
+
+  test("the DEFAULT persona keeps the global-file fallback until migration runs", async () => {
+    // Unmigrated hosts must stay readable by an older binary — release rings
+    // make rollback real — so the default persona only moves to its own file
+    // once that file exists.
+    const before = await resolveHarnessWriteTarget(cfg("robbie"), "robbie");
+    expect(before.scope).toBe("global");
+    expect(before.path).toBe(configPath);
+    expect(before.envSuffix).toBeUndefined();
+
+    const personaPath = join(workdir, "personas", "robbie", "config.toml");
+    await applyRouting(personaPath, { primaryModel: "host-primary" }, envPath);
+    const after = await resolveHarnessWriteTarget(cfg("robbie"), "robbie");
+    expect(after.scope).toBe("persona");
+    expect(after.path).toBe(personaPath);
+    expect(after.envSuffix).toBeUndefined();
+  });
+
+  test("no --persona is the default persona, not a suffixed one", async () => {
+    const target = await resolveHarnessWriteTarget(cfg("robbie"));
+    expect(target.persona).toBe("robbie");
+    expect(target.envSuffix).toBeUndefined();
+    expect(target.scope).toBe("global");
   });
 });

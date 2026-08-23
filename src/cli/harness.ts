@@ -15,6 +15,7 @@ import {
   updateConfigToml,
 } from "../lib/configWriter.ts";
 import {
+  personaConfigPath,
   type PersonaWriteScope,
   resolvePersonaWriteTarget,
 } from "../lib/personaConfig.ts";
@@ -247,6 +248,47 @@ interface RunInput {
   availability?: Record<HarnessId, string | undefined>;
 }
 
+/**
+ * Where the harness wizard writes for `persona` (phantombot#441).
+ *
+ * The generic rule (`resolvePersonaWriteTarget`) falls back to the GLOBAL file
+ * in its legacy shape while a persona has no config.toml of its own. For the
+ * chain that is safe — the fallback writes `[harnesses.personas.<name>].chain`,
+ * which only that persona reads. It is NOT safe for the models: routing is
+ * written as a plain `[harnesses.pi.routing]` table, which in the global file
+ * is the HOST default that every other persona inherits under the per-key
+ * merge. Configuring Lena's brain would then move Kai's — via TOML, exactly the
+ * leak the suffixed env mirror closes on the env side.
+ *
+ * So a NON-DEFAULT persona is always written in persona scope, materialising
+ * `<persona>/config.toml` on first write. The default persona keeps the
+ * historical global-file behaviour until migration gives it a file, so an
+ * unmigrated host stays readable by an older binary (release rings make
+ * rollback real).
+ */
+export async function resolveHarnessWriteTarget(
+  config: Config,
+  persona?: string,
+): Promise<HarnessWriteTarget> {
+  const name = persona ?? config.defaultPersona;
+  const isDefault = !persona || persona === config.defaultPersona;
+  const resolved = isDefault
+    ? await resolvePersonaWriteTarget({
+      configPath: config.configPath,
+      personasDir: config.personasDir,
+      persona: name,
+    })
+    : {
+      path: personaConfigPath(config.personasDir, name),
+      scope: "persona" as PersonaWriteScope,
+    };
+  return {
+    ...resolved,
+    persona: name,
+    envSuffix: isDefault ? undefined : personaEnvSuffix(name),
+  };
+}
+
 export async function runHarness(input: RunInput = {}): Promise<number> {
   const persona = input.persona?.trim() || undefined;
   // Read the persona's EFFECTIVE config, so the picker pre-selects the chain
@@ -255,23 +297,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const currentChain = harnessChainIds(config, persona);
   // Write where the read path looks: the persona's own file once it exists,
   // the global file (legacy shape) until then.
-  const resolvedTarget = await resolvePersonaWriteTarget({
-    configPath: config.configPath,
-    personasDir: config.personasDir,
-    persona: persona ?? config.defaultPersona,
-  });
-  // Everything this wizard writes — chain, models, Pi routing — is scoped to
-  // the persona being configured (phantombot#441). The env mirror is suffixed
-  // for every persona but the default, so configuring Lena's models cannot
-  // silently repoint Kai's.
-  const target: HarnessWriteTarget = {
-    ...resolvedTarget,
-    persona: persona ?? config.defaultPersona,
-    envSuffix:
-      persona && persona !== config.defaultPersona
-        ? personaEnvSuffix(persona)
-        : undefined,
-  };
+  const target = await resolveHarnessWriteTarget(config, persona);
   const availability = input.availability ?? (await detectAvailability(config));
   await saveHarnessBins(availability);
   const svc = input.serviceControl ?? defaultServiceControl();
