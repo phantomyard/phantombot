@@ -194,6 +194,8 @@ If you add a new untrusted entry point (a new inbound channel, a new `ask`-style
 
 `runRun` builds one Telegram listener per persona-with-a-bot and one PhantomChat listener per persona-with-an-identity, all inside the single `phantombot run` process. The `runLock` (`src/lib/runLock.ts`) still prevents two `phantombot run` processes on one box — the multiplexing is inside the process, not across processes. There is no supervisor, no subprocess per persona, and adding one is a rejected design (crash isolation is not worth a supervisor, backoff, orphan handling on update, and the cgroup trap of #415).
 
+Telegram account parsing is deliberately permissive: an account without a token resolves to no `TelegramAccount`. `Config.channels.telegramStated` and `telegramPersonasStated` preserve whether TOML nevertheless stated that account, so `planListeners` can warn and `doctor` can fail without making startup fatal. Do not infer intent from `channels.telegram === undefined`: that shape also describes a valid PhantomChat-only persona. A broken Telegram account disables only that listener; sibling Telegram listeners and PhantomChat must keep running.
+
 **Config is two layers** (`src/lib/personaConfig.ts`, `loadConfig(persona)`):
 
 | File | Holds |

@@ -76,6 +76,23 @@ describe("runRun — early exits", () => {
     expect(err.text).toContain("phantombot telegram");
   });
 
+  test("incomplete Telegram-only config warns before exiting with no runnable channel", async () => {
+    const err = new CaptureStream();
+    const code = await runRun({
+      config: { ...config, channels: { telegramStated: true } },
+      lockPath: join(workdir, "run.lock"),
+      out: new CaptureStream(),
+      err,
+    });
+
+    expect(code).toBe(2);
+    expect(err.text).toContain("persona 'phantom'");
+    expect(err.text).toContain("no bot_token");
+    expect(err.text).toContain("no telegram listeners could be started");
+    expect(err.text).toContain("check the warnings above");
+    expect(err.text).not.toContain("no channels configured");
+  });
+
   test("returns 2 when persona dir is missing and no other personas exist", async () => {
     const out = new CaptureStream();
     const err = new CaptureStream();
@@ -685,6 +702,55 @@ describe("runRun — multi-persona telegram", () => {
     );
     expect(plan.fatal).toBeUndefined();
     expect(plan.listeners).toHaveLength(1);
+    expect(err.text).toBe("");
+  });
+
+  test("an autostart persona that states an incomplete bot warns without throwing", async () => {
+    const err = new CaptureStream();
+    await givePersona("lena");
+    const plan = planListeners(
+      {
+        ...config,
+        autostartPersonas: ["lena"],
+        channels: {
+          telegram: { token: "default-tok", pollTimeoutS: 30, allowedUserIds: [] },
+        },
+      },
+      "phantom",
+      err,
+      new Map([["lena", {
+        ...config,
+        channels: { telegramStated: true },
+      }]]),
+    );
+
+    expect(plan.fatal).toBeUndefined();
+    expect(plan.listeners).toHaveLength(1);
+    expect(err.text).toContain("persona 'lena'");
+    expect(err.text).toContain("no bot_token");
+    expect(err.text).toContain("no telegram listener will start");
+  });
+
+  test("incomplete default and legacy accounts warn but do not make planning fatal", async () => {
+    const err = new CaptureStream();
+    await givePersona("lena");
+    const plan = planListeners(
+      {
+        ...config,
+        channels: {
+          telegramStated: true,
+          telegramPersonasStated: ["lena"],
+        },
+      },
+      "phantom",
+      err,
+    );
+
+    expect(plan.fatal).toBeUndefined();
+    expect(plan.listeners).toEqual([]);
+    expect(err.text).toContain("persona 'phantom'");
+    expect(err.text).toContain("persona 'lena'");
+    expect(err.text.match(/no bot_token/g)).toHaveLength(2);
   });
 
   test("an autostart persona with no dir on disk warns and is skipped", async () => {
@@ -899,6 +965,30 @@ describe("runRun — phantomchat-only (no Telegram)", () => {
       allowedNpubs: [generateIdentity().npub],
     });
   }
+
+  test("incomplete Telegram warns and continues with PhantomChat", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await givePhantomchat("phantom");
+    const code = await runRun({
+      config: {
+        ...config,
+        harnesses: { ...config.harnesses, chain: [] },
+        channels: { telegramStated: true },
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+
+    // Reaching the harness guard proves the broken Telegram account did not
+    // throw or terminate startup while PhantomChat remained runnable.
+    expect(code).toBe(2);
+    expect(err.text).toContain("no bot_token");
+    expect(err.text).toContain("phantombot harness");
+    expect(err.text).not.toContain("no channels configured");
+    expect(err.text).not.toContain("no telegram listeners could be started");
+  });
 
   test("reused Telegram bot token degrades to PhantomChat-only (does NOT fatal)", async () => {
     const out = new CaptureStream();

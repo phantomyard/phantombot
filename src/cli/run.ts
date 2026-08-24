@@ -213,6 +213,15 @@ export function planListeners(
   personaConfigs?: Map<string, Config>,
 ): { listeners: ListenerSpec[]; fatal?: string } {
   const listeners: ListenerSpec[] = [];
+  const warnedIncomplete = new Set<string>();
+  const warnIncomplete = (persona: string, source: string): void => {
+    if (warnedIncomplete.has(persona)) return;
+    warnedIncomplete.add(persona);
+    err.write(
+      `warning: persona '${persona}' states ${source} but no bot_token — ` +
+        "no telegram listener will start\n",
+    );
+  };
 
   if (config.channels.telegram) {
     const agentDir = personaDir(config, defaultPersona);
@@ -229,6 +238,8 @@ export function planListeners(
         `warning: default persona '${defaultPersona}' agent dir missing at ${agentDir} — skipping default telegram listener\n`,
       );
     }
+  } else if (config.channels.telegramStated) {
+    warnIncomplete(defaultPersona, "[channels.telegram]");
   }
 
   // Autostart personas (phantombot#439): each brings its OWN
@@ -247,8 +258,12 @@ export function planListeners(
     }
     const account = personaConfig.channels.telegram;
     if (!account) {
-      // Not an error: a persona may autostart for PhantomChat alone. Its
-      // phantomchat listener is planned separately from its persona dir.
+      // A persona with no Telegram statement may autostart for PhantomChat
+      // alone. A stated-but-incomplete account is different and must be loud,
+      // while remaining non-fatal so PhantomChat and sibling bots stay alive.
+      if (personaConfig.channels.telegramStated) {
+        warnIncomplete(persona, "[channels.telegram]");
+      }
       continue;
     }
     const agentDir = personaDir(config, persona);
@@ -305,6 +320,14 @@ export function planListeners(
     });
   }
 
+  for (const persona of config.channels.telegramPersonasStated ?? []) {
+    if (config.channels.telegramPersonas?.[persona]) continue;
+    warnIncomplete(
+      persona,
+      `[channels.telegram.personas.${persona}]`,
+    );
+  }
+
   // Duplicate-token guard. Two listeners on the same Telegram bot would
   // both call getUpdates(offset=...) — the second call's confirmation
   // would mark the first call's batch as read, dropping messages. Fail
@@ -329,10 +352,12 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
 
   let config = input.config ?? (await loadConfig());
-  const hasDefault = !!config.channels.telegram;
+  const hasDefault =
+    !!config.channels.telegram || !!config.channels.telegramStated;
   const hasPersonas =
-    !!config.channels.telegramPersonas &&
-    Object.keys(config.channels.telegramPersonas).length > 0;
+    (!!config.channels.telegramPersonas &&
+      Object.keys(config.channels.telegramPersonas).length > 0) ||
+    (config.channels.telegramPersonasStated?.length ?? 0) > 0;
 
   // PhantomChat personas are a runnable channel in their own right. Compute
   // this BEFORE the channel guards below: `phantombot init` now makes
@@ -503,7 +528,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   }
   if (plan.listeners.length === 0 && !hasPhantomchat) {
     err.write(
-      "no telegram listeners could be started — every configured bot's persona is missing.\n",
+      "no telegram listeners could be started — check the warnings above.\n",
     );
     return 2;
   }
@@ -753,7 +778,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Startup health check — read-only for the nightly (it repairs itself by
   // sweeping); still repairs drifted units/timers/connectors. Don't await.
   // Runs against the admin persona for the same reason as notify above.
-  runDoctor({ config, persona: alertPersona, out, err }).then(
+  runDoctor({ config, persona: alertPersona, personaConfigs, out, err }).then(
     (code) => {
       if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
     },

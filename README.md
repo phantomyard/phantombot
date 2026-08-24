@@ -627,7 +627,7 @@ Maintenance:
 | `phantombot tick` | Fire due scheduled tasks |
 | `phantombot heartbeat` | Run mechanical maintenance |
 | `phantombot nightly [--resume]` | Run or resume memory distillation |
-| `phantombot doctor [--no-repair]` | Check memory health and optionally repair |
+| `phantombot doctor [--no-repair]` | Check channel and memory health and optionally repair |
 
 ## Shell completion
 
@@ -757,6 +757,13 @@ either its own `[channels.telegram]` block in
 `<personas-root>/<persona>/config.toml`, its
 `[channels.telegram.personas.<name>]` entry, or its suffixed env vars; with
 none of those, that persona simply has no Telegram.
+
+A persona that states a Telegram table but has no token is different from one
+that states no Telegram account at all. Startup warns and skips only that
+broken listener; it does not throw or stop PhantomChat or other Telegram bots.
+`phantombot doctor` reports the resolved listener count for every boot persona
+and exits non-zero for a stated account with no runnable listener. An
+intentional PhantomChat-only persona remains healthy.
 
 ### Telegram Commands
 

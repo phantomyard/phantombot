@@ -654,6 +654,13 @@ export interface Config {
   channels: {
     telegram?: TelegramAccount;
     /**
+     * True when this persona explicitly states a Telegram account source even
+     * if resolution dropped it because no token was available. This keeps
+     * "broken Telegram" distinguishable from intentional PhantomChat-only
+     * configuration after the permissive account parser has run.
+     */
+    telegramStated?: boolean;
+    /**
      * Optional additional Telegram bots, keyed by persona name. Each
      * entry spawns its own listener bound to the named persona, so the
      * same host can run several persona-bound bots from one process.
@@ -661,6 +668,8 @@ export interface Config {
      * resolve to undefined and behave exactly as before.
      */
     telegramPersonas?: Record<string, TelegramAccount>;
+    /** Legacy routing entries stated in TOML, including incomplete entries. */
+    telegramPersonasStated?: string[];
     // phantomchat (Nostr NIP-17 DM) is configured PER-PERSONA in
     // `<persona-dir>/phantomchat.json` (channels/phantomchat/personaStore.ts),
     // not here — so it has no config.toml block.
@@ -890,6 +899,17 @@ function isTomlTable(v: unknown): v is TomlObject {
     !(v instanceof Date);
 }
 
+/**
+ * Whether a TOML `[channels.telegram]` table describes an account rather than
+ * merely acting as the parent for legacy `.personas.<name>` routing entries.
+ * An empty table still counts: it is the broken shape #445 must surface.
+ */
+function statesTelegramAccount(table: TomlObject | undefined): boolean {
+  if (!table) return false;
+  const keys = Object.keys(table);
+  return keys.length === 0 || keys.some((key) => key !== "personas");
+}
+
 
 
 /**
@@ -1096,25 +1116,34 @@ export async function loadConfig(persona?: string): Promise<Config> {
     isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
   );
   let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram);
+  const globalChannels = isTomlTable(globalToml.channels)
+    ? globalToml.channels
+    : undefined;
+  const globalTelegram = globalChannels && isTomlTable(globalChannels.telegram)
+    ? globalChannels.telegram
+    : undefined;
+  const personaChannels = isTomlTable(personaToml.channels)
+    ? personaToml.channels
+    : undefined;
+  const ownTelegram = personaChannels && isTomlTable(personaChannels.telegram)
+    ? personaChannels.telegram
+    : undefined;
+  const globalRouting = globalTelegram && isTomlTable(globalTelegram.personas)
+    ? globalTelegram.personas
+    : undefined;
+  const legacyEntry = globalRouting && isTomlTable(globalRouting[personaLayer])
+    ? globalRouting[personaLayer] as TomlObject
+    : undefined;
+  const telegramStated = isDefaultPersona
+    ? statesTelegramAccount(globalTelegram) || statesTelegramAccount(ownTelegram)
+    : statesTelegramAccount(ownTelegram) || legacyEntry !== undefined;
+  const statedRouting = isTomlTable(tomlTelegram.personas)
+    ? Object.entries(tomlTelegram.personas)
+      .filter(([, entry]) => isTomlTable(entry))
+      .map(([name]) => name)
+    : [];
 
   if (isDefaultPersona && telegram && telegramPersonas?.[personaLayer]) {
-    const personaChannels = personaToml.channels;
-    const ownTelegram =
-      isTomlTable(personaChannels) && isTomlTable(personaChannels.telegram)
-        ? personaChannels.telegram
-        : undefined;
-    const globalChannels = globalToml.channels;
-    const globalTelegram =
-      isTomlTable(globalChannels) && isTomlTable(globalChannels.telegram)
-        ? globalChannels.telegram
-        : undefined;
-    const routing = globalTelegram && isTomlTable(globalTelegram.personas)
-      ? globalTelegram.personas
-      : undefined;
-    const legacyEntry = routing && isTomlTable(routing[personaLayer])
-      ? routing[personaLayer] as TomlObject
-      : undefined;
-
     // Migration is copy-not-delete for rollback safety. Suppress the old
     // routing entry only when the persona file proves it was copied from that
     // exact account AND both resolve to the same bot after env overrides. A
@@ -1260,7 +1289,9 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     channels: {
       telegram,
+      telegramStated,
       telegramPersonas,
+      telegramPersonasStated: statedRouting,
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),

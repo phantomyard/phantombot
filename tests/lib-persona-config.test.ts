@@ -642,6 +642,46 @@ describe("loadConfig persona layering", () => {
     // An account with no token of its own is INCOMPLETE, not a licence to
     // borrow the host's: lena simply has no Telegram until she is given a bot.
     expect(lena.channels.telegram).toBeUndefined();
+    expect(lena.channels.telegramStated).toBe(true);
+  });
+
+  test("Telegram statement metadata distinguishes broken accounts from no account", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\nautostart_personas = ["lena"]\n\n' +
+        '[channels.telegram.personas.lena]\nallowed_user_ids = [2]\n',
+      "utf8",
+    );
+    // An empty persona table is still an explicit (broken) account statement.
+    await writeFile(
+      personaConfigPath(personasDir, "robbie"),
+      "[channels.telegram]\n",
+      "utf8",
+    );
+
+    const robbie = await loadConfig("robbie");
+    const lena = await loadConfig("lena");
+    expect(robbie.channels.telegram).toBeUndefined();
+    expect(robbie.channels.telegramStated).toBe(true);
+    expect(robbie.channels.telegramPersonas).toBeUndefined();
+    expect(robbie.channels.telegramPersonasStated).toEqual(["lena"]);
+    expect(lena.channels.telegram).toBeUndefined();
+    expect(lena.channels.telegramStated).toBe(true);
+
+    await writeFile(
+      personaConfigPath(personasDir, "lena"),
+      '[voice]\nprovider = "none"\n',
+      "utf8",
+    );
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\nautostart_personas = ["lena"]\n',
+      "utf8",
+    );
+    const phantomchatOnly = await loadConfig("lena");
+    expect(phantomchatOnly.channels.telegram).toBeUndefined();
+    expect(phantomchatOnly.channels.telegramStated).toBe(false);
+    expect(phantomchatOnly.channels.telegramPersonasStated).toEqual([]);
   });
 
   test("a persona's own model beats the host's ambient env var", async () => {

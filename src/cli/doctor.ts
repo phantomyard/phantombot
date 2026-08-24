@@ -98,6 +98,18 @@ const DRY_DAY_TURN_THRESHOLD = 20;
 
 export interface DoctorReport {
   persona: string;
+  /** Telegram reachability for every persona the daemon is configured to boot. */
+  telegram: {
+    healthy: boolean;
+    listeners: number;
+    personas: Array<{
+      persona: string;
+      stated: boolean;
+      listeners: number;
+      healthy: boolean;
+      detail: string;
+    }>;
+  };
   nightly: {
     last_run?: string;
     last_status?: string;
@@ -267,6 +279,8 @@ export interface DoctorReport {
 export interface RunDoctorInput {
   config?: Config;
   persona?: string;
+  /** Already-resolved configs for non-default boot personas (startup seam). */
+  personaConfigs?: Map<string, Config>;
   /**
    * Perform the repairs doctor still owns (systemd units/timers, the managed
    * Pi extension, editor connectors). Default true. The nightly is NOT among
@@ -334,6 +348,122 @@ export interface RunDoctorInput {
     | ((repair: boolean) => DoctorReport["editorConnectors"]);
 }
 
+interface MutableTelegramPersonaHealth {
+  persona: string;
+  stated: boolean;
+  runnableAccounts: number;
+  listeners: number;
+  missingPersonaDir: boolean;
+}
+
+/**
+ * Mirror listener planning closely enough to diagnose zero-listener personas,
+ * without importing run.ts (run.ts already imports doctor.ts for startup).
+ */
+function telegramHealthReport(
+  config: Config,
+  personaConfigs: Map<string, Config>,
+): DoctorReport["telegram"] {
+  const rows = new Map<string, MutableTelegramPersonaHealth>();
+  const row = (persona: string): MutableTelegramPersonaHealth => {
+    let current = rows.get(persona);
+    if (!current) {
+      current = {
+        persona,
+        stated: false,
+        runnableAccounts: 0,
+        listeners: 0,
+        missingPersonaDir: false,
+      };
+      rows.set(persona, current);
+    }
+    return current;
+  };
+  const addAccount = (persona: string): void => {
+    const current = row(persona);
+    current.stated = true;
+    current.runnableAccounts++;
+    if (existsSync(personaDir(config, persona))) current.listeners++;
+    else current.missingPersonaDir = true;
+  };
+
+  const defaultRow = row(config.defaultPersona);
+  defaultRow.stated =
+    !!config.channels.telegram || !!config.channels.telegramStated;
+  if (config.channels.telegram) addAccount(config.defaultPersona);
+
+  const autostartWithListener = new Set<string>();
+  for (const persona of config.autostartPersonas ?? []) {
+    if (persona === config.defaultPersona) continue;
+    const current = row(persona);
+    const personaConfig = personaConfigs.get(persona);
+    current.stated =
+      current.stated ||
+      !!personaConfig?.channels.telegram ||
+      !!personaConfig?.channels.telegramStated;
+    if (personaConfig?.channels.telegram) {
+      addAccount(persona);
+      if (existsSync(personaDir(config, persona))) {
+        autostartWithListener.add(persona);
+      }
+    }
+  }
+
+  for (const persona of config.channels.telegramPersonasStated ?? []) {
+    row(persona).stated = true;
+  }
+  for (const persona of Object.keys(config.channels.telegramPersonas ?? {})) {
+    if (autostartWithListener.has(persona)) continue;
+    addAccount(persona);
+  }
+
+  // A directly requested persona belongs in the report even when it is not in
+  // the boot roster (useful for `doctor --persona <name>` before autostart).
+  for (const [persona, personaConfig] of personaConfigs) {
+    const current = row(persona);
+    current.stated =
+      current.stated ||
+      !!personaConfig.channels.telegram ||
+      !!personaConfig.channels.telegramStated;
+    // Config may be resolved because this persona has PhantomChat or was
+    // selected explicitly, while Telegram planning excludes it from the boot
+    // roster. Preserve that the account itself is complete so doctor reports
+    // "not planned", never the false "no bot_token" diagnosis.
+    if (
+      personaConfig.channels.telegram &&
+      current.runnableAccounts === 0
+    ) {
+      current.runnableAccounts = 1;
+      current.missingPersonaDir = !existsSync(personaDir(config, persona));
+    }
+  }
+
+  const personas = [...rows.values()].map((current) => {
+    const healthy = !current.stated || current.listeners > 0;
+    const detail = !current.stated
+      ? "not configured"
+      : current.listeners > 0
+        ? "runnable"
+        : current.runnableAccounts === 0
+          ? "states an account but has no bot_token"
+          : current.missingPersonaDir
+            ? "account resolved but persona directory is missing"
+            : "account resolved but no listener is planned";
+    return {
+      persona: current.persona,
+      stated: current.stated,
+      listeners: current.listeners,
+      healthy,
+      detail,
+    };
+  });
+  return {
+    healthy: personas.every((entry) => entry.healthy),
+    listeners: personas.reduce((sum, entry) => sum + entry.listeners, 0),
+    personas,
+  };
+}
+
 export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const out = input.out ?? process.stdout;
   const err = input.err ?? process.stderr;
@@ -341,6 +471,22 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
 
   const config = input.config ?? (await loadConfig());
   const persona = input.persona ?? config.defaultPersona;
+  const personaConfigs = new Map(input.personaConfigs ?? []);
+  if (!input.config) {
+    const names = new Set(config.autostartPersonas ?? []);
+    if (persona !== config.defaultPersona) names.add(persona);
+    for (const name of names) {
+      if (name === config.defaultPersona || personaConfigs.has(name)) continue;
+      try {
+        personaConfigs.set(name, await loadConfig(name));
+      } catch (e) {
+        log.warn("doctor: persona config load failed", {
+          persona: name,
+          error: (e as Error).message,
+        });
+      }
+    }
+  }
   const dir = personaDir(config, persona);
   if (!existsSync(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
@@ -389,6 +535,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
+  const telegramReport = telegramHealthReport(config, personaConfigs);
 
   // Embeddings status — informational only. Vector search is live only when
   // the provider is gemini AND a key is actually present; everything else
@@ -554,6 +701,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
 
   const report: DoctorReport = {
     persona,
+    telegram: telegramReport,
     nightly: {
       last_run: state.last_run,
       last_status: state.last_status,
@@ -654,6 +802,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // box installed this afternoon has none yet, and crying WARN there would
   // teach an operator to ignore the line that matters.
   const memoryDbBroken = dbPresent && !dbHealth.ok;
+  const telegramBroken = !telegramReport.healthy;
   const exitCode =
     memoryDbBroken
       ? 1
@@ -669,7 +818,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
               ? 1
               : editorConnectorsBroken
                 ? 1
-                : 0;
+                : telegramBroken
+                  ? 1
+                  : 0;
 
   if (input.json) {
     out.write(JSON.stringify(report, null, 2) + "\n");
@@ -679,6 +830,17 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Human summary.
   const tick = (ok: boolean) => (ok ? "ok" : "WARN");
   out.write(`phantombot doctor — persona '${persona}'\n`);
+  out.write(
+    `  telegram: ${tick(telegramReport.healthy)} — ` +
+      `${telegramReport.listeners} listener(s) across ` +
+      `${telegramReport.personas.length} persona(s)\n`,
+  );
+  for (const entry of telegramReport.personas) {
+    out.write(
+      `    persona '${entry.persona}': ${entry.listeners} listener(s), ` +
+        `${entry.detail}\n`,
+    );
+  }
   // Health comes off the ledger, not the clock: a box that slept through
   // 02:00 but has nothing pending is healthy.
   const marker =

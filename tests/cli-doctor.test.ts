@@ -90,6 +90,122 @@ describe("runDoctor", () => {
     expect(out.text).toContain("nothing pending");
   });
 
+  test("stated but incomplete Telegram account is WARN and exits 1", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const broken = {
+      ...config,
+      channels: { telegramStated: true },
+    } satisfies Config;
+
+    const code = await runDoctor({
+      config: broken,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: false,
+      checkPiExtension: false,
+      checkEditorConnectors: false,
+    });
+
+    expect(code).toBe(1);
+    expect(out.text).toContain("telegram: WARN");
+    expect(out.text).toContain("persona 'phantom': 0 listener(s)");
+    expect(out.text).toContain("states an account but has no bot_token");
+  });
+
+  test("intentional PhantomChat-only persona is healthy and silent about missing Telegram", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: false,
+      checkPiExtension: false,
+      checkEditorConnectors: false,
+    });
+
+    expect(code).toBe(0);
+    expect(out.text).toContain("telegram: ok");
+    expect(out.text).toContain("persona 'phantom': 0 listener(s), not configured");
+    expect(out.text).not.toContain("no bot_token");
+  });
+
+  test("doctor reports every boot persona and catches an incomplete autostart bot", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+    const out = new CaptureStream();
+    const host = {
+      ...config,
+      autostartPersonas: ["lena"],
+      channels: {
+        telegram: { token: "default", pollTimeoutS: 30, allowedUserIds: [] },
+        telegramStated: true,
+      },
+    } satisfies Config;
+    const lena = {
+      ...config,
+      personaLayer: "lena",
+      channels: { telegramStated: true },
+    } satisfies Config;
+
+    const code = await runDoctor({
+      config: host,
+      personaConfigs: new Map([["lena", lena]]),
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: false,
+      checkPiExtension: false,
+      checkEditorConnectors: false,
+    });
+
+    expect(code).toBe(1);
+    expect(out.text).toContain("persona 'phantom': 1 listener(s)");
+    expect(out.text).toContain("persona 'lena': 0 listener(s)");
+  });
+
+  test("a complete non-rostered account is reported as unplanned, not tokenless", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+    const out = new CaptureStream();
+    const lena = {
+      ...config,
+      personaLayer: "lena",
+      channels: {
+        telegram: { token: "lena", pollTimeoutS: 30, allowedUserIds: [] },
+        telegramStated: true,
+      },
+    } satisfies Config;
+
+    expect(await runDoctor({
+      config,
+      personaConfigs: new Map([["lena", lena]]),
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: false,
+      checkPiExtension: false,
+      checkEditorConnectors: false,
+    })).toBe(1);
+    expect(out.text).toContain("persona 'lena': 0 listener(s), account resolved but no listener is planned");
+    expect(out.text).not.toContain("persona 'lena': 0 listener(s), states an account but has no bot_token");
+  });
+
   // Backlog is the only truth — a box that slept through 02:00 and swept on
   // boot is healthy, however long ago that was.
   test("a long-idle sweep with an empty backlog is still ok", async () => {
