@@ -2,6 +2,9 @@
 
 A harness is a CLI binary that takes a system prompt + a user message (and optionally history) and emits an assistant reply. Adding one means writing a class that implements the `Harness` interface in `src/harnesses/types.ts`.
 
+See [How phantombot finds a harness binary](./harness-detection.md) for the
+bin precedence chain and the resolver your new harness inherits.
+
 ## Recipe
 
 1. **Pick a name.** Use the CLI's binary name: `claude`, `pi`, `codex`, etc. The name becomes the harness `id` and the env-var prefix. Gemini CLI is retired; Gemini remains an embeddings provider only.

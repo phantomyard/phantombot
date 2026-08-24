@@ -2,12 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chmod, writeFile } from "node:fs/promises";
 import {
   applyHarnessChain,
+  detectAvailability,
   piInstallCommand,
   SUPPORTED_HARNESSES,
   whichBinary,
 } from "../src/cli/harness.ts";
+import { checkConfiguredHarnesses } from "../src/lib/harnessAvailability.ts";
+import type { Config } from "../src/config.ts";
 
 describe("Pi-default wizard wiring", () => {
   test("Pi is the default primary (first in SUPPORTED_HARNESSES)", () => {
@@ -105,5 +109,56 @@ describe("applyHarnessChain", () => {
     expect(text).toContain('chain = [ "codex", "pi" ]');
     expect(text).toContain("[harnesses.personas.amanda]");
     expect(text).toContain('chain = [ "claude", "codex" ]');
+  });
+});
+
+describe("detectAvailability (issue #450)", () => {
+  let dir = "";
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "phantombot-detect-"));
+    const claude = join(dir, "claude");
+    await writeFile(claude, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(claude, 0o755);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const configWithStaleBin = (bin: string) =>
+    ({
+      harnesses: {
+        chain: ["claude"],
+        claude: { bin },
+        pi: { bin: "definitely-missing-pi" },
+        codex: { bin: "definitely-missing-codex", model: "" },
+      },
+    }) as unknown as Config;
+
+  test("agrees with checkConfiguredHarnesses on a stale absolute bin", async () => {
+    // The reported bug: `doctor`/`run` resolve claude via the absolute-bin ->
+    // bare-name retry, while the wizard's bare which() reported NOT FOUND on
+    // the very same config. The two detectors must not disagree.
+    const config = configWithStaleBin("/bin/claude");
+
+    const fromDoctor = await checkConfiguredHarnesses(config, dir);
+    const fromWizard = await detectAvailability(config, dir);
+
+    expect(fromDoctor.find((h) => h.id === "claude")?.resolved).toBe(join(dir, "claude"));
+    expect(fromWizard.claude).toBe(join(dir, "claude"));
+  });
+
+  test("still reports a genuinely missing harness as missing", async () => {
+    // The fix must not paper over a real absence — otherwise the wizard would
+    // offer to configure a harness that cannot start.
+    const avail = await detectAvailability(configWithStaleBin("/bin/claude"), dir);
+    expect(avail.pi).toBeUndefined();
+    expect(avail.codex).toBeUndefined();
+  });
+
+  test("resolves a bare configured bin from PATH", async () => {
+    const avail = await detectAvailability(configWithStaleBin("claude"), dir);
+    expect(avail.claude).toBe(join(dir, "claude"));
   });
 });

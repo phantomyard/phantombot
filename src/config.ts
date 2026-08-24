@@ -38,6 +38,7 @@ import {
 } from "./lib/personaConfig.ts";
 import type { TomlObject } from "./lib/configWriter.ts";
 import { loadState } from "./state.ts";
+import { usablePersistedBin } from "./lib/harnessBinPath.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -1232,7 +1233,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
         bin:
           harnessEnv("PHANTOMBOT_CLAUDE_BIN", ["claude", "bin"]) ??
           asString(tomlClaude.bin) ??
-          state.harness_bins?.claude ??
+          usablePersistedBin(state.harness_bins?.claude) ??
           "claude",
         model:
           harnessEnv("PHANTOMBOT_CLAUDE_MODEL", ["claude", "model"]) ??
@@ -1251,7 +1252,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
         bin:
           harnessEnv("PHANTOMBOT_PI_BIN", ["pi", "bin"]) ??
           asString(tomlPi.bin) ??
-          state.harness_bins?.pi ??
+          usablePersistedBin(state.harness_bins?.pi) ??
           "pi",
         routing: buildPiRoutingConfig(tomlPi, {
           [ENV_PI_PROVIDER]: harnessEnv(ENV_PI_PROVIDER, [
@@ -1281,7 +1282,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
         bin:
           harnessEnv("PHANTOMBOT_CODEX_BIN", ["codex", "bin"]) ??
           asString(tomlCodex.bin) ??
-          state.harness_bins?.codex ??
+          usablePersistedBin(state.harness_bins?.codex) ??
           "codex",
         // Empty string = "let codex pick its own default".
         model:

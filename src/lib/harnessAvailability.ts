@@ -186,6 +186,41 @@ export async function resolveHarnessBinary(
   return {};
 }
 
+/**
+ * Resolve ONE harness id against the live filesystem, applying every fallback
+ * phantombot knows about: the broad `harnessSearchPath()` sweep inside
+ * `resolveHarnessBinary`, plus the absolute-bin -> bare-name retry that keeps a
+ * stale absolute path (issue #150) from reading as "harness not installed".
+ *
+ * This is the SINGLE detector (issue #450). It exists as its own export because
+ * the wizard (`phantombot harness`) and `init` previously called a bare
+ * `whichBinary()` while `doctor`/`run` came through `checkConfiguredHarnesses`,
+ * so the two disagreed on the same box: `doctor` found claude and the wizard
+ * reported NOT FOUND. Two detectors is one too many — every caller resolves
+ * here now.
+ */
+export async function resolveHarnessAvailability(
+  config: Config,
+  id: string,
+  pathEnv = process.env.PATH ?? "",
+): Promise<HarnessAvailability | undefined> {
+  const bin = harnessBin(config, id);
+  if (!bin) return undefined;
+  let resolved = await resolveHarnessBinary(bin, pathEnv);
+  if (!resolved.path && isAbsolute(bin)) {
+    const fallbackBin = defaultHarnessBin(id);
+    if (fallbackBin) {
+      resolved = await resolveHarnessBinary(fallbackBin, pathEnv);
+    }
+  }
+  return {
+    id,
+    bin,
+    ...(resolved.path ? { resolved: resolved.path } : {}),
+    ...(resolved.source ? { source: resolved.source } : {}),
+  };
+}
+
 export async function checkConfiguredHarnesses(
   config: Config,
   pathEnv = process.env.PATH ?? "",
@@ -201,21 +236,9 @@ export async function checkConfiguredHarnesses(
   for (const id of configuredIds) {
     if (seen.has(id)) continue;
     seen.add(id);
-    const bin = harnessBin(config, id);
-    if (!bin) continue;
-    let resolved = await resolveHarnessBinary(bin, pathEnv);
-    if (!resolved.path && isAbsolute(bin)) {
-      const fallbackBin = defaultHarnessBin(id);
-      if (fallbackBin) {
-        resolved = await resolveHarnessBinary(fallbackBin, pathEnv);
-      }
-    }
-    out.push({
-      id,
-      bin,
-      ...(resolved.path ? { resolved: resolved.path } : {}),
-      ...(resolved.source ? { source: resolved.source } : {}),
-    });
+    const availability = await resolveHarnessAvailability(config, id, pathEnv);
+    if (!availability) continue;
+    out.push(availability);
   }
   return out;
 }

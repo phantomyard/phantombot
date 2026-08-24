@@ -17,8 +17,8 @@ import {
 import { type PersonaWriteScope } from "../lib/personaConfig.ts";
 import {
   harnessBin,
+  resolveHarnessAvailability,
   resolveHarnessBinary,
-  whichBinary,
 } from "../lib/harnessAvailability.ts";
 import {
   defaultServiceControl,
@@ -103,14 +103,30 @@ export function piInstallCommand(
   return ["sh", "-c", "curl -fsSL https://pi.dev/install.sh | sh"];
 }
 
+/**
+ * What the wizard and `init` show as "installed".
+ *
+ * Delegates to `resolveHarnessAvailability` (issue #450) instead of calling
+ * `whichBinary()` on the configured bin. The bare `which` skipped BOTH safety
+ * nets `doctor`/`run` have had since #150: the `harnessSearchPath()` sweep
+ * (`%APPDATA%\npm`, `~/.bun/bin`, nvm/fnm node dirs — where the harness CLIs
+ * actually land on Windows) and the absolute-bin -> bare-name retry. The result
+ * was a box where `phantombot doctor` resolved claude fine and `phantombot
+ * harness` reported NOT FOUND on the same config. The wizard must never be a
+ * weaker detector than the daemon it is configuring.
+ */
 export async function detectAvailability(
   config: Config,
+  pathEnv = process.env.PATH ?? "",
 ): Promise<Record<HarnessId, string | undefined>> {
-  return {
-    claude: await whichBinary(config.harnesses.claude.bin),
-    pi: await whichBinary(config.harnesses.pi.bin),
-    codex: await whichBinary(config.harnesses.codex?.bin ?? "codex"),
-  };
+  const ids: HarnessId[] = ["claude", "pi", "codex"];
+  const entries = await Promise.all(
+    ids.map(
+      async (id) =>
+        [id, (await resolveHarnessAvailability(config, id, pathEnv))?.resolved] as const,
+    ),
+  );
+  return Object.fromEntries(entries) as Record<HarnessId, string | undefined>;
 }
 
 export async function applyHarnessChain(
