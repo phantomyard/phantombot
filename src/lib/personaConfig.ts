@@ -290,8 +290,18 @@ export async function migratePersonaConfig(
       const own = isPlainObject(table) ? table[input.persona] : undefined;
       const { personas: _dropped, ...ownAccount } = telegram;
       if (input.isDefault) {
-        channels.telegram = ownAccount;
-      } else if (isPlainObject(own)) {
+        // The unsuffixed host account remains authoritative when present. Some
+        // older hosts, however, stored even the default persona exclusively in
+        // the legacy routing table. Translate that matching entry rather than
+        // seeding a stated-but-empty account that suppresses Telegram entirely.
+        if (Object.keys(ownAccount).length > 0) {
+          channels.telegram = ownAccount;
+        } else if (isPlainObject(own) && Object.keys(own).length > 0) {
+          channels.telegram = cloneToml(own);
+        } else {
+          delete channels.telegram;
+        }
+      } else if (isPlainObject(own) && Object.keys(own).length > 0) {
         channels.telegram = cloneToml(own);
       } else {
         // A non-default persona with no bot of its own inherits nothing from

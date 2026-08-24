@@ -1087,7 +1087,48 @@ export async function loadConfig(persona?: string): Promise<Config> {
       ? asInt(toml.harness_hard_timeout_s)! * 1000
       : undefined) ??
     legacyTurnTimeoutMs(toml) ??
-    3_600_000;
+      3_600_000;
+
+  const telegram = buildTelegramConfig(
+    tomlTelegram,
+    // Default persona keeps the unsuffixed env vars; every other persona
+    // reads only its own suffixed ones. See buildTelegramConfig.
+    isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
+  );
+  let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram);
+
+  if (isDefaultPersona && telegram && telegramPersonas?.[personaLayer]) {
+    const personaChannels = personaToml.channels;
+    const ownTelegram =
+      isTomlTable(personaChannels) && isTomlTable(personaChannels.telegram)
+        ? personaChannels.telegram
+        : undefined;
+    const globalChannels = globalToml.channels;
+    const globalTelegram =
+      isTomlTable(globalChannels) && isTomlTable(globalChannels.telegram)
+        ? globalChannels.telegram
+        : undefined;
+    const routing = globalTelegram && isTomlTable(globalTelegram.personas)
+      ? globalTelegram.personas
+      : undefined;
+    const legacyEntry = routing && isTomlTable(routing[personaLayer])
+      ? routing[personaLayer] as TomlObject
+      : undefined;
+
+    // Migration is copy-not-delete for rollback safety. Suppress the old
+    // routing entry only when the persona file proves it was copied from that
+    // exact account AND both resolve to the same bot after env overrides. A
+    // distinct legacy token remains a supported second bot.
+    if (
+      ownTelegram &&
+      legacyEntry &&
+      asString(ownTelegram.token) === asString(legacyEntry.token) &&
+      telegram.token === telegramPersonas[personaLayer]?.token
+    ) {
+      const { [personaLayer]: _migrated, ...rest } = telegramPersonas;
+      telegramPersonas = Object.keys(rest).length > 0 ? rest : undefined;
+    }
+  }
 
   return {
     defaultPersona:
@@ -1218,13 +1259,8 @@ export async function loadConfig(persona?: string): Promise<Config> {
     },
 
     channels: {
-      telegram: buildTelegramConfig(
-        tomlTelegram,
-        // Default persona keeps the unsuffixed env vars; every other persona
-        // reads only its own suffixed ones. See buildTelegramConfig.
-        isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
-      ),
-      telegramPersonas: buildTelegramPersonasConfig(tomlTelegram),
+      telegram,
+      telegramPersonas,
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),

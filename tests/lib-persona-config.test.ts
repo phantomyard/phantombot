@@ -202,6 +202,52 @@ describe("migratePersonaConfig", () => {
     expect((written.harnesses as any).chain).toEqual(["pi", "claude"]);
   });
 
+  test("the default persona takes its legacy bot when no host account exists", async () => {
+    const r = await migratePersonaConfig({
+      personasDir,
+      persona: "robbie",
+      globalToml: {
+        channels: {
+          telegram: {
+            personas: {
+              robbie: {
+                token: "legacy-default-bot",
+                allowed_user_ids: [7],
+              },
+            },
+          },
+        },
+      },
+      isDefault: true,
+    });
+
+    expect(r).toMatchObject({ migrated: true, keys: ["channels"] });
+    const written = await readPersonaToml(personasDir, "robbie");
+    expect((written.channels as any).telegram).toEqual({
+      token: "legacy-default-bot",
+      allowed_user_ids: [7],
+    });
+    expect((written.channels as any).telegram.personas).toBeUndefined();
+  });
+
+  test("does not seed empty channel tables when no default account exists", async () => {
+    const r = await migratePersonaConfig({
+      personasDir,
+      persona: "robbie",
+      globalToml: {
+        channels: {
+          telegram: {
+            personas: { lena: { token: "lena-bot" } },
+          },
+        },
+      },
+      isDefault: true,
+    });
+
+    expect(r).toEqual({ migrated: false, reason: "nothing-to-copy" });
+    expect(await readPersonaToml(personasDir, "robbie")).toEqual({});
+  });
+
   test("a non-default persona with no bot of its own inherits none", async () => {
     await mkdir(join(personasDir, "kai"), { recursive: true });
     await migratePersonaConfig({
@@ -329,6 +375,7 @@ describe("loadConfig persona layering", () => {
     "PHANTOMBOT_TELEGRAM_POLL_S",
     "PHANTOMBOT_TELEGRAM_GROUP_PERSONAS",
     "TELEGRAM_BOT_TOKEN_LENA",
+    "TELEGRAM_BOT_TOKEN_ROBBIE",
     "PHANTOMBOT_TELEGRAM_ALLOWED_USERS_LENA",
     "PHANTOMBOT_TELEGRAM_POLL_S_LENA",
     "PHANTOMBOT_TELEGRAM_GROUP_PERSONAS_LENA",
@@ -383,6 +430,74 @@ describe("loadConfig persona layering", () => {
     expect(config.channels.telegram?.token).toBe("global-bot");
     expect(config.personaLayer).toBe("robbie");
     expect(config.autostartPersonas).toEqual([]);
+  });
+
+  test("a migrated default account is removed from the effective legacy routing table", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n' +
+        '[channels.telegram.personas.robbie]\n' +
+        'token = "legacy-default-bot"\n\n' +
+        '[channels.telegram.personas.lena]\n' +
+        'token = "lena-bot"\n',
+      "utf8",
+    );
+    const global = await readConfigToml(process.env.PHANTOMBOT_CONFIG!);
+    await migratePersonaConfig({
+      personasDir,
+      persona: "robbie",
+      globalToml: global,
+      isDefault: true,
+    });
+
+    const config = await loadConfig();
+    expect(config.channels.telegram?.token).toBe("legacy-default-bot");
+    expect(config.channels.telegramPersonas?.robbie).toBeUndefined();
+    expect(config.channels.telegramPersonas?.lena?.token).toBe("lena-bot");
+  });
+
+  test("a distinct legacy bot for the default persona remains routable", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n' +
+        '[channels.telegram]\n' +
+        'token = "primary-bot"\n\n' +
+        '[channels.telegram.personas.robbie]\n' +
+        'token = "second-bot"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "robbie"),
+      '[channels.telegram]\ntoken = "primary-bot"\n',
+      "utf8",
+    );
+
+    const config = await loadConfig();
+    expect(config.channels.telegram?.token).toBe("primary-bot");
+    expect(config.channels.telegramPersonas?.robbie?.token).toBe("second-bot");
+  });
+
+  test("a suffixed env override can keep a copied legacy entry distinct", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n' +
+        '[channels.telegram.personas.robbie]\n' +
+        'token = "copied-bot"\n',
+      "utf8",
+    );
+    await writeFile(
+      personaConfigPath(personasDir, "robbie"),
+      '[channels.telegram]\ntoken = "copied-bot"\n',
+      "utf8",
+    );
+    process.env.TELEGRAM_BOT_TOKEN = "primary-env-bot";
+    process.env.TELEGRAM_BOT_TOKEN_ROBBIE = "second-env-bot";
+
+    const config = await loadConfig();
+    expect(config.channels.telegram?.token).toBe("primary-env-bot");
+    expect(config.channels.telegramPersonas?.robbie?.token).toBe(
+      "second-env-bot",
+    );
   });
 
   test("the persona file wins per key; unmentioned keys fall back to global", async () => {

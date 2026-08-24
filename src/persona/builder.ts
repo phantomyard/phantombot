@@ -556,6 +556,71 @@ narration is purely to fill the pre-tool silence; once the result
 is in, just answer.`;
 
 /**
+ * Channel-agnostic conduct overlay: plan-then-confirm before a long or
+ * state-changing job, and keep direct answers short.
+ *
+ * This is the block PR #443 removed from `TELEGRAM_REPLY_INSTRUCTION`,
+ * restored deliberately and in a different shape. #443's three
+ * complaints were real, and each is answered here:
+ *
+ *   - It was Telegram-only, so the same agent gated on chat and ran wild
+ *     from an editor. It now rides the ORCHESTRATOR overlay stack, so
+ *     every interactive entry point gets the identical rule: Telegram,
+ *     phantomchat, `phantombot ask`, and the ACP connectors (Zed / VS
+ *     Code / JetBrains).
+ *   - Its trigger, "more than one tool call", fired on essentially every
+ *     real request. The threshold is now more than THREE, and only
+ *     git/build/deploy work gates at any size.
+ *   - Its wording read as unoverridable ("do NOT fall back to a safe
+ *     default"), so a literal-minded harness asked forever even after
+ *     being told to stop. It now states explicitly that a direct
+ *     instruction from the user wins for the rest of the conversation.
+ *
+ * Applied only to turns whose question a human will actually SEE and can
+ * answer: interactive origin, non-silent audience (see turn.ts). A
+ * nightly, a task wake or a reaction turn asking "shall I proceed?" is
+ * asking the void.
+ *
+ * Exported for testing.
+ */
+export const CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION =
+  `# Confirm before long jobs
+
+Before starting any of these, briefly outline your plan in 2-3
+sentences and ask the user to confirm or adjust:
+
+  - anything involving git, build, or deploy operations, however small
+  - anything you expect to take more than three tool calls
+  - anything that changes state you cannot easily undo
+
+When you ask, STOP. End the turn on the question itself — write nothing
+after it. Do not answer your own question, and do not proceed on a
+"safe default" instead. Asking hands control back to the user; the next
+move is theirs.
+
+This is a default, not a cage. The user outranks it. If they have
+already described the work in enough detail to act on, or have told you
+to go ahead / stop asking / just do it, then act — and keep acting for
+the rest of the conversation without re-asking. Come back only when the
+job changes shape: new scope they did not ask for, a destructive step,
+or a plan that turned out to be wrong.
+
+Round-trips are slow and tokens aren't free — confirming up front beats
+producing the wrong thing minutes later. For straightforward questions,
+just answer.
+
+# Answer length
+
+When a human asks you a direct question, keep the answer to 50 words or
+fewer unless they asked for depth (a report, a comparison, a
+postmortem) or the answer genuinely does not fit. Lead with the answer;
+no preamble, no recap of the question, no menu of follow-ups.
+
+This is a CEILING, never a licence to write more. If a stricter reply
+rule is already in force for this turn — a spoken reply capped at 1-3
+sentences, a channel that asks for one line — that rule wins.`;
+
+/**
  * System-level credential discovery + persistence. Injected into every
  * persona's prompt so the agent has a consistent contract for finding
  * credentials and saving new ones, regardless of which persona is
