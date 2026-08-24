@@ -455,6 +455,50 @@ export class DrawerStore {
       .run(persona, kind, id);
   }
 
+  /**
+   * Follow the supersession chain FORWARD from `id` to the row that stands in
+   * its place today, or `id` itself if nothing has replaced it.
+   *
+   * An id is a hash of content, so anything holding one holds a SNAPSHOT: the
+   * moment that row is superseded the id names a retired row, and a holder
+   * that only ever calls `get()` sees the past. That is fine for a caller
+   * asking "what did this say", and wrong for one asking "what is this now" —
+   * an exported drawer file (#437) outlives the import that consumed it, and
+   * re-importing it a second time must land on the current row rather than
+   * re-retiring an already-retired one and stranding the row in between.
+   * Walking forward makes a marker denote a LINEAGE, not a snapshot.
+   *
+   * Scoped to `persona` + `kind` for the same reason `markSuperseded` is: an
+   * id is opaque, so a wrong-kind one must miss rather than wander into
+   * another drawer. Returns `undefined` when `id` names nothing here at all —
+   * callers treat that as "unknown marker", distinct from "chain ends here".
+   *
+   * Prefers an `active` successor when a row has more than one (possible if
+   * two writers superseded the same row concurrently), then the most recently
+   * reaffirmed, so the walk is deterministic. Terminates on a `seen` set
+   * rather than trusting acyclicity: `fileEntry` rejects self-supersession,
+   * but nothing stops a longer cycle arriving through separate writes, and
+   * this is called on untrusted file content.
+   */
+  resolveLive(persona: string, kind: DrawerKind, id: string): DrawerEntry | undefined {
+    const start = this.get(id);
+    if (!start || start.persona !== persona || start.kind !== kind) return undefined;
+    let current = start;
+    const seen = new Set<string>([current.id]);
+    for (;;) {
+      const next = this.db
+        .query(
+          "SELECT * FROM drawer_entries " +
+            "WHERE persona = ? AND kind = ? AND supersedes = ? " +
+            "ORDER BY (status = 'active') DESC, last_reaffirmed_at DESC LIMIT 1",
+        )
+        .get(persona, kind, current.id) as RawDrawerRow | null;
+      if (!next || seen.has(next.id)) return current;
+      seen.add(next.id);
+      current = mapRow(next);
+    }
+  }
+
   /** Move an entry's lifecycle state. Rejects a status the kind cannot hold. */
   setStatus(id: string, status: DrawerStatus): DrawerEntry | undefined {
     const entry = this.get(id);

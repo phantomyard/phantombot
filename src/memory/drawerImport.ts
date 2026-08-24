@@ -24,6 +24,22 @@
  *   - NO marker → new entry. Same behaviour as the plain ingest; a line with
  *     no marker was never claiming to replace anything.
  *
+ * On the CHANGED path a marker names a LINEAGE, not a snapshot. An id is
+ * derived from content, so the id in an exported file stops naming a live row
+ * the first time that line is edited and imported — and an export is a file,
+ * which people keep and edit again. Superseding the row the marker literally
+ * names would make the SECOND edit retire an already-retired row and leave
+ * the intermediate one active forever: two active rows disagreeing, the exact
+ * duplicate #437 exists to kill. So a changed line resolves FORWARD through
+ * `supersedes` (`DrawerStore.resolveLive`) and supersedes whatever stands in
+ * that row's place today.
+ *
+ * The walk is deliberately gated on "the line changed" rather than run up
+ * front, because an export lists a superseded row AND its successor, each
+ * under its own marker. An unconditional walk would make an unedited
+ * re-import compare the older line against the newer row and turn a no-op
+ * round trip into a supersession.
+ *
  * Two structural guards keep a marker from being a forgery surface (see the
  * module header discussion on #437):
  *
@@ -31,11 +47,12 @@
  *      export edited to claim `decisions:...` cannot touch a decision — the
  *      importer never even asks the store, it rejects the marker at parse
  *      time. Cross-kind is structurally impossible, not merely checked for.
- *   2. The id must resolve to a real row in THIS persona and kind. Ids are a
- *      hash of normalized content (`drawerEntryId`), not a sequential
- *      counter, so there is nothing to guess — a hand-typed or forged id
- *      simply fails to match anything and the line just files as a new
- *      entry. Worst case of a bad id is "no supersession happened", never
+ *   2. The id must resolve to a real row in THIS persona and kind. The
+ *      forward walk is scoped the same way, so a chain can never leave the
+ *      drawer it started in. Ids are a hash of normalized content
+ *      (`drawerEntryId`), not a sequential counter, so there is nothing to
+ *      guess — a hand-typed or forged id simply fails to match anything and
+ *      the line just files as a new entry. Worst case of a bad id is "no supersession happened", never
  *      "the wrong row got overwritten".
  *
  * No physical deletion, same as everything else in the drawer system —
@@ -140,19 +157,41 @@ export function importDrawerMarkdown(
         result.rejected += 1;
         markerRejected = "marker-mismatch";
       } else {
-        const row: DrawerEntry | undefined = store.get(marker.id);
-        if (!row || row.persona !== persona || row.kind !== kind) {
+        const named: DrawerEntry | undefined = store.get(marker.id);
+        if (!named || named.persona !== persona || named.kind !== kind) {
           // Guard 2 — the id doesn't name a real row here. Same degrade: file
           // the line as a fresh entry exactly as if it carried no marker.
           result.rejected += 1;
           markerRejected = "marker-unknown";
-        } else if (normalizeFact(row.content) !== normalizeFact(entry.content)) {
-          supersedes = row.id;
-          previousContent = row.content;
+        } else if (normalizeFact(named.content) !== normalizeFact(entry.content)) {
+          // The line was EDITED. Now — and only now — resolve the marker
+          // forward: `marker.id` is the row as it stood when the file was
+          // written, and after one import that row is retired behind a
+          // replacement whose id the file has never seen. Superseding the
+          // named row again would be a no-op and would leave the replacement
+          // active alongside this new line — two active rows disagreeing,
+          // the exact duplicate #437 exists to kill. So supersede whatever
+          // stands in its place today.
+          //
+          // The walk is gated on "content changed" rather than done up front
+          // because an export contains a superseded row AND its successor,
+          // each under its own marker. Walking unconditionally would make an
+          // UNEDITED re-import of that file compare the older line against
+          // the newer row, and churn a no-op round trip into a supersession.
+          const live = store.resolveLive(persona, kind, marker.id) ?? named;
+          if (normalizeFact(live.content) !== normalizeFact(entry.content)) {
+            supersedes = live.id;
+            previousContent = live.content;
+          }
+          // else: the lineage has ALREADY advanced to exactly this content —
+          // importing the same edited file twice, the ordinary way to retry a
+          // command. Filing it would derive `live.id` again and ask the row to
+          // supersede itself, which `fileEntry` rightly throws on. It is a
+          // plain reaffirm, and the second import is a no-op.
         }
         // else: unchanged — content-derived id already equals marker.id, so
-        // the fileEntry() call below reaffirms the same row with no extra
-        // work.
+        // the fileEntry() call below reaffirms that same row with no extra
+        // work, whatever lifecycle state it is in.
       }
     }
 

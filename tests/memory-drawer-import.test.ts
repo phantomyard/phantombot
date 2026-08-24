@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,6 +19,7 @@ import {
 } from "../src/memory/drawerExport.ts";
 import { parseDrawer } from "../src/memory/drawerIngest.ts";
 import { importDrawerMarkdown } from "../src/memory/drawerImport.ts";
+import { runMemoryDrawers } from "../src/cli/memory.ts";
 import { drawerEntryId } from "../src/memory/drawers.ts";
 
 const PERSONA = "robbie";
@@ -279,6 +280,243 @@ describe("importDrawerMarkdown", () => {
       close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  // A marker is a snapshot of an id, and an id is a hash of content — so the
+  // moment a marked line is edited and imported, every copy of that export
+  // still on disk names a retired row. These pin the behaviour when someone
+  // does the ordinary thing and edits the same exported file again.
+  describe("stale markers — the file outlives the import that consumed it", () => {
+    const active = (store: { list: (p: string, k: "norms") => { status: string; content: string }[] }) =>
+      store
+        .list(PERSONA, "norms")
+        .filter((r) => r.status === "active")
+        .map((r) => r.content);
+
+    test("editing the SAME export twice leaves exactly one active row", async () => {
+      const dir = await persona();
+      const { store, close } = await opened(dir);
+      try {
+        store.file({ persona: PERSONA, kind: "norms", content: "[norm] version a" });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+
+        // Round one supersedes `a`. Round two's marker STILL names `a`; before
+        // the forward walk it re-retired `a` (a no-op) and left `b` active
+        // beside `c` — the duplicate #437 exists to kill.
+        importDrawerMarkdown(store, PERSONA, "norms", md.replace("version a", "version b"));
+        const second = importDrawerMarkdown(store, PERSONA, "norms", md.replace("version a", "version c"));
+
+        expect(second.superseded).toBe(1);
+        expect(second.entries[0]!.previousContent).toBe("[norm] version b");
+        expect(active(store)).toEqual(["[norm] version c"]);
+      } finally {
+        close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("the walk follows a chain of any length, not just one hop", async () => {
+      const dir = await persona();
+      const { store, close } = await opened(dir);
+      try {
+        store.file({ persona: PERSONA, kind: "norms", content: "[norm] version a" });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        for (const v of ["b", "c", "d"]) {
+          importDrawerMarkdown(store, PERSONA, "norms", md.replace("version a", `version ${v}`));
+        }
+        expect(active(store)).toEqual(["[norm] version d"]);
+      } finally {
+        close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("importing the same edited buffer twice is a no-op, not a self-supersession", async () => {
+      const dir = await persona();
+      const { store, close } = await opened(dir);
+      try {
+        store.file({ persona: PERSONA, kind: "norms", content: "[norm] version a" });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        const edited = md.replace("version a", "version b");
+
+        importDrawerMarkdown(store, PERSONA, "norms", edited);
+        // Re-running the command is the ordinary way to retry it. The walk
+        // lands on the row this very content produced, so asking it to
+        // supersede itself would throw in fileEntry.
+        const again = importDrawerMarkdown(store, PERSONA, "norms", edited);
+
+        expect(again.superseded).toBe(0);
+        expect(again.reaffirmed).toBe(1);
+        expect(active(store)).toEqual(["[norm] version b"]);
+      } finally {
+        close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("re-importing an UNEDITED stale export changes nothing", async () => {
+      const dir = await persona();
+      const { store, close } = await opened(dir);
+      try {
+        store.file({ persona: PERSONA, kind: "norms", content: "[norm] version a" });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        importDrawerMarkdown(store, PERSONA, "norms", md.replace("version a", "version b"));
+
+        // The line still matches the row its marker names, so this is a plain
+        // reaffirm — the walk never runs. An unconditional walk would compare
+        // "version a" against `b` and revert the drawer.
+        const stale = importDrawerMarkdown(store, PERSONA, "norms", md);
+        expect(stale.superseded).toBe(0);
+        expect(active(store)).toEqual(["[norm] version b"]);
+      } finally {
+        close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("resolveLive stays inside its persona and kind, and survives a cycle", async () => {
+      const dir = await persona();
+      const { store, close } = await opened(dir);
+      try {
+        const a = store.file({ persona: PERSONA, kind: "norms", content: "[norm] a" });
+        const b = store.file({ persona: PERSONA, kind: "norms", content: "[norm] b", supersedes: a.id });
+
+        expect(store.resolveLive(PERSONA, "norms", a.id)!.id).toBe(b.id);
+        expect(store.resolveLive(PERSONA, "norms", b.id)!.id).toBe(b.id);
+        // Wrong kind and wrong persona both miss rather than wander.
+        expect(store.resolveLive(PERSONA, "decisions", a.id)).toBeUndefined();
+        expect(store.resolveLive("someone-else", "norms", a.id)).toBeUndefined();
+        expect(store.resolveLive(PERSONA, "norms", "deadbeefdeadbeef")).toBeUndefined();
+
+        // Close the chain by hand — fileEntry blocks self-supersession but
+        // nothing blocks a longer loop arriving through separate writes, and
+        // the walk is driven by untrusted file content.
+        store.file({ persona: PERSONA, kind: "norms", content: "[norm] a", supersedes: b.id });
+        expect(store.resolveLive(PERSONA, "norms", a.id)).toBeDefined();
+      } finally {
+        close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // CLI-level, because both of these are properties of how `--import` is
+  // WIRED rather than of importDrawerMarkdown itself.
+  describe("runMemoryDrawers --import", () => {
+    class Sink {
+      chunks: string[] = [];
+      write(t: string) {
+        this.chunks.push(t);
+        return true;
+      }
+      get text() {
+        return this.chunks.join("");
+      }
+    }
+
+    async function cliEnv() {
+      const root = await mkdtemp(join(tmpdir(), "drawer-cli-"));
+      await mkdir(join(root, "personas", PERSONA, "memory"), { recursive: true });
+      const saved = {
+        cfg: process.env.PHANTOMBOT_CONFIG,
+        personas: process.env.PHANTOMBOT_PERSONAS_DIR,
+        data: process.env.XDG_DATA_HOME,
+        state: process.env.XDG_STATE_HOME,
+      };
+      process.env.PHANTOMBOT_CONFIG = join(root, "config.toml");
+      process.env.PHANTOMBOT_PERSONAS_DIR = join(root, "personas");
+      process.env.XDG_DATA_HOME = join(root, "data");
+      process.env.XDG_STATE_HOME = join(root, "state");
+      const restore = async () => {
+        for (const [k, v] of [
+          ["PHANTOMBOT_CONFIG", saved.cfg],
+          ["PHANTOMBOT_PERSONAS_DIR", saved.personas],
+          ["XDG_DATA_HOME", saved.data],
+          ["XDG_STATE_HOME", saved.state],
+        ] as const) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        await rm(root, { recursive: true, force: true });
+      };
+      return { root, restore };
+    }
+
+    test("--import - is refused without --kind", async () => {
+      const { restore } = await cliEnv();
+      try {
+        const out = new Sink();
+        // Without the guard this drains stdin inside `for (const kind of
+        // kinds)` and files the whole document into DRAWER_KINDS[0] —
+        // `phantombot memory drawers --import - < norms.md` lands a norms
+        // export in `people`, silently when the lines carry no markers.
+        const code = await runMemoryDrawers({
+          persona: PERSONA,
+          import: "-",
+          out,
+        });
+        expect(code).toBe(1);
+        expect(out.text).toContain("--import - needs --kind");
+      } finally {
+        await restore();
+      }
+    });
+
+    test("a supersession logs ONE line to the daily file, newlines escaped", async () => {
+      const { root, restore } = await cliEnv();
+      try {
+        // A block-form entry is multi-line by definition. Interpolated raw,
+        // its body spills to column 0 of the daily file — and a spilled line
+        // shaped `[norm] …` matches promoteTaggedLines' TAG_PATTERN, so the
+        // next heartbeat promotes it as a brand-new drawer entry.
+        // Body lines are indented two spaces under a `### ` heading, and
+        // TAG_PATTERN allows leading whitespace — so `  [norm] looks like a
+        // tag` is exactly the shape the heartbeat would promote.
+        const before = "[norm] one\nbody line\n[norm] looks like a tag";
+
+        const dbPath = join(root, "data", "phantombot", "memory.sqlite");
+        await mkdir(join(root, "data", "phantombot"), { recursive: true });
+        const { store, close } = await openDrawerStore(dbPath);
+        const row = store.file({ persona: PERSONA, kind: "norms", content: before });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        expect(md).toContain(formatIdMarker("norms", row.id));
+        close();
+
+        const dir = join(root, "drawers");
+        await mkdir(dir, { recursive: true });
+        const edited = md.replace("### [norm] one", "### [norm] one edited");
+        expect(edited).not.toBe(md);
+        await writeFile(join(dir, "norms.md"), edited, "utf8");
+
+        const out = new Sink();
+        const code = await runMemoryDrawers({
+          persona: PERSONA,
+          kind: "norms",
+          import: dir,
+          out,
+        });
+        expect(code).toBe(0);
+        expect(out.text).toContain("1 superseded");
+
+        const date = new Date().toISOString().slice(0, 10);
+        const daily = await readFile(
+          join(root, "personas", PERSONA, "memory", `${date}.md`),
+          "utf8",
+        );
+        const logged = daily
+          .split("\n")
+          .filter((l) => l.includes("[drawer-import]"));
+        expect(logged).toHaveLength(1);
+        // Every line of the daily file is either the header or the one log
+        // line — nothing spilled to column 0.
+        for (const line of daily.split("\n")) {
+          if (line === "" || line.startsWith("# ")) continue;
+          expect(line.startsWith("- [drawer-import]")).toBe(true);
+        }
+      } finally {
+        await restore();
+      }
+    });
   });
 
   test("drawerEntryId of unchanged content matches the marker id (sanity)", () => {

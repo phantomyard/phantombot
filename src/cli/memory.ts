@@ -580,6 +580,19 @@ export async function runMemoryDrawers(input: {
     return 1;
   }
 
+  // Same guard as `--file`, for the same reason. The directory form derives
+  // the kind from each filename, which is why it can loop over all five;
+  // stdin carries exactly one document and cannot. Without this, the loop's
+  // first iteration drains stdin into DRAWER_KINDS[0] and the other four read
+  // empty — so `--import - < norms.md` would file a norms export into people.
+  if (input.import === "-" && input.kind === undefined) {
+    write(
+      "--import - needs --kind (stdin is one drawer; the directory form " +
+        "reads the kind off each filename)\n",
+    );
+    return 1;
+  }
+
   const { store, db, close } = await openDrawerStore(config.memoryDbPath);
   try {
     if (input.file !== undefined) {
@@ -625,9 +638,14 @@ export async function runMemoryDrawers(input: {
       // the ordinary digest, no separate review flow to maintain.
       const onSupersede = (r: ImportEntryResult & { outcome: "superseded" }) => {
         const stamp = `${new Date().toISOString().slice(11, 16)}Z`;
+        // JSON.stringify, not bare interpolation: a block-form drawer entry is
+        // multi-line, and a spilled body line starting `[norm] …` matches
+        // promoteTaggedLines' TAG_PATTERN and would be promoted as a brand-new
+        // entry on the next heartbeat. Escaping \n keeps one line per
+        // supersession and gives us the quotes we wanted anyway.
         logLines.push(
           `- [drawer-import] superseded ${r.marker!.kind}:${r.marker!.id} -> ${r.id}: ` +
-            `"${r.previousContent}" -> "${r.content}" · ${stamp}\n`,
+            `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)} · ${stamp}\n`,
         );
       };
       for (const kind of kinds) {

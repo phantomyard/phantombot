@@ -235,7 +235,41 @@ three things per line, and nothing else — see `src/memory/drawerImport.ts`:
 |---|---|---|
 | unmarked | files as a new entry | same as `--file` / plain ingest; a line with no marker never claimed to replace anything |
 | marked, **content unchanged** | reaffirms the row named by the marker | the content-derived id already equals the marker's id, so this is the ordinary re-file/reaffirm path with no special-casing |
-| marked, **content changed** | supersedes the row named by the marker | the edit *is* a correction: file the new content with `supersedes: <marker id>`, same as a phantomtool correcting a norm |
+| marked, **content changed** | supersedes whatever now stands in that marker's place | the edit *is* a correction: file the new content with `supersedes: <live id>`, same as a phantomtool correcting a norm |
+
+**A marker names a lineage, not a snapshot.** An id is a hash of content, so
+the moment you edit a marked line and import it, every copy of that export
+still on disk names a row that has been retired — and an export is a file,
+which people keep and edit again. So a *changed* line resolves its marker
+**forward** through the supersession chain to whatever stands in that row's
+place today, and supersedes that. Without the walk, a second edit of the same
+file would re-retire the original and leave the intermediate row active beside
+the new one: two active rows disagreeing, which is the duplicate `--import`
+exists to prevent.
+
+```bash
+phantombot memory drawers --export ./out --with-id
+sed -i 's/version a/version b/' out/norms.md && phantombot memory drawers --kind norms --import ./out
+sed -i 's/version b/version c/' out/norms.md && phantombot memory drawers --kind norms --import ./out
+# one active row: "version c" — even though both markers still say "version a"
+```
+
+Three consequences worth stating outright:
+
+- The walk only runs for a **changed** line. An export lists a superseded row
+  *and* its successor, each under its own marker, so walking unconditionally
+  would compare the older line against the newer row and turn an unedited
+  re-import into a supersession.
+- Re-importing an **unedited** stale export changes nothing. Each line still
+  matches the row its marker names, so it is a plain reaffirm.
+- Importing the **same edited file twice** is a no-op. The walk lands on the
+  row that content already produced, so it reaffirms rather than asking a row
+  to supersede itself.
+
+`--import -` (stdin) requires `--kind`, for the same reason `--file` does: the
+directory form reads each drawer's kind off its filename and can loop over all
+five, but stdin carries exactly one document, and without the guard it would be
+drained into the first drawer in the list.
 
 **Reaffirm is quiet; supersede is loud.** A supersession permanently retires a
 row from a markdown edit, so every one is appended to *that day's* daily file
