@@ -55,7 +55,7 @@ afterEach(async () => {
 
 describe("whichBinary", () => {
   test("returns the absolute path when bin is an absolute executable", async () => {
-    expect(await whichBinary(join(dir, "stale-claude-450"))).toBe("/bin/sh");
+    expect(await whichBinary("/bin/sh")).toBe("/bin/sh");
   });
 
   test("returns undefined for a non-existent absolute path", async () => {
