@@ -24,6 +24,8 @@ import {
   personaEnvSuffix,
 } from "../src/config.ts";
 
+const isWindows = process.platform === "win32";
+
 const SAVED_ENV: Record<string, string | undefined> = {};
 const ENV_KEYS = [
   "PHANTOMBOT_CONFIG",
@@ -368,22 +370,44 @@ chain = ["gemini"]
   });
 
   test("uses persisted harness bins when no explicit bin is configured", async () => {
+    // Native-flavour paths, because persisted bins are platform-filtered
+    // (issue #450): a POSIX-rooted path read back on Windows is exactly the
+    // stale-cache bug, so hardcoding one here would assert the bug.
+    const persistedPi = isWindows
+      ? "C:\\Users\\test\\AppData\\Roaming\\npm\\pi.cmd"
+      : "/home/test/.local/share/pi-node/node-v22/bin/pi";
+    const persistedClaude = isWindows
+      ? "C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd"
+      : "/home/test/.local/bin/claude";
+
     await writeFile(
       join(workdir, "state.json"),
-      JSON.stringify({
-        harness_bins: {
-          pi: "/home/test/.local/share/pi-node/node-v22/bin/pi",
-          claude: "/home/test/.local/bin/claude",
-        },
-      }),
+      JSON.stringify({ harness_bins: { pi: persistedPi, claude: persistedClaude } }),
       "utf8",
     );
     process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
 
     const c = await loadConfig();
 
-    expect(c.harnesses.pi.bin).toBe("/home/test/.local/share/pi-node/node-v22/bin/pi");
-    expect(c.harnesses.claude.bin).toBe("/home/test/.local/bin/claude");
+    expect(c.harnesses.pi.bin).toBe(persistedPi);
+    expect(c.harnesses.claude.bin).toBe(persistedClaude);
+  });
+
+  test("discards a persisted bin from a foreign platform (issue #450)", async () => {
+    // The Windows report: a WSL/Git-Bash run cached "/bin/claude", a native run
+    // reads it back. It must fall through to the bare default the search sweep
+    // can find, NOT be handed to the resolver verbatim.
+    const foreign = isWindows ? "/bin/claude" : "C:\\npm\\claude.cmd";
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ harness_bins: { claude: foreign } }),
+      "utf8",
+    );
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+
+    const c = await loadConfig();
+
+    expect(c.harnesses.claude.bin).toBe("claude");
   });
 
   test("explicit TOML harness bins override persisted discoveries", async () => {
