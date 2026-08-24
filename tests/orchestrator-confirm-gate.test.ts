@@ -14,6 +14,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runBridgeTurn } from "../src/connectors/acp/turnBridge.ts";
 import { runTurn } from "../src/orchestrator/turn.ts";
 import { type MemoryStore, openMemoryStore } from "../src/memory/store.ts";
 import { CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION } from "../src/persona/builder.ts";
@@ -71,9 +72,34 @@ async function promptFor(
   return harness.lastRequest?.systemPrompt ?? "";
 }
 
+/**
+ * A real ACP editor turn — driven through the connector's own bridge, not
+ * through runTurn with an `acp:` conversation id. The bridge is what sets
+ * `trusted`/`replyAudience` and (deliberately) leaves `origin` alone, so
+ * only this path proves an editor turn actually receives the gate.
+ */
+async function acpBridgePrompt(): Promise<string> {
+  const harness = new CapturingHarness();
+  await runBridgeTurn(
+    {
+      persona: "phantom",
+      conversation: "acp:abc123",
+      userMessage: "refactor the parser",
+      agentDir,
+      workingDir: agentDir,
+      harnesses: [harness],
+      memory,
+      idleTimeoutMs: 1_000,
+      hardTimeoutMs: 5_000,
+    },
+    { text: () => {}, progress: () => {} },
+  );
+  return harness.lastRequest?.systemPrompt ?? "";
+}
+
 describe("confirm-before-long-jobs overlay", () => {
   test("an ACP editor turn gets the same gate a chat turn gets", async () => {
-    const prompt = await promptFor({ trusted: true });
+    const prompt = await acpBridgePrompt();
     expect(prompt).toContain(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION);
   });
 
@@ -100,6 +126,11 @@ describe("confirm-before-long-jobs overlay", () => {
     expect(prompt).toContain("50 words or");
   });
 
+  test("the 50-word rule yields to a stricter rule (e.g. voice)", async () => {
+    const prompt = await promptFor({});
+    expect(prompt).toContain("This is a CEILING, never a licence to write more");
+  });
+
   test("withheld from a nightly / internal turn — nobody is there to answer", async () => {
     const prompt = await promptFor({ origin: "internal" });
     expect(prompt).not.toContain("Confirm before long jobs");
@@ -107,6 +138,11 @@ describe("confirm-before-long-jobs overlay", () => {
 
   test("withheld from a scheduled task wake", async () => {
     const prompt = await promptFor({ origin: "task" });
+    expect(prompt).not.toContain("Confirm before long jobs");
+  });
+
+  test("withheld from a notification turn", async () => {
+    const prompt = await promptFor({ origin: "notification" });
     expect(prompt).not.toContain("Confirm before long jobs");
   });
 

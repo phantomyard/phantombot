@@ -614,7 +614,11 @@ just answer.
 When a human asks you a direct question, keep the answer to 50 words or
 fewer unless they asked for depth (a report, a comparison, a
 postmortem) or the answer genuinely does not fit. Lead with the answer;
-no preamble, no recap of the question, no menu of follow-ups.`;
+no preamble, no recap of the question, no menu of follow-ups.
+
+This is a CEILING, never a licence to write more. If a stricter reply
+rule is already in force for this turn — a spoken reply capped at 1-3
+sentences, a channel that asks for one line — that rule wins.`;
 
 /**
  * System-level credential discovery + persistence. Injected into every
