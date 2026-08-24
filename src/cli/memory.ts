@@ -643,8 +643,20 @@ export async function runMemoryDrawers(input: {
         // promoteTaggedLines' TAG_PATTERN and would be promoted as a brand-new
         // entry on the next heartbeat. Escaping \n keeps one line per
         // supersession and gives us the quotes we wanted anyway.
+        // Log the row actually RETIRED (`supersededId`), not the marker's id:
+        // a marker names a lineage, and once it is more than one generation
+        // deep the id in the file names a row some earlier import already
+        // retired. Naming it here would claim a supersession that never
+        // happened and leave the real one absent from the audit trail
+        // entirely. The marker is still worth keeping when the two differ —
+        // "the file said A, A resolves to B, B is what I retired" is exactly
+        // the provenance a reader needs to follow the chain back.
+        const named =
+          r.supersededId !== r.marker!.id
+            ? ` (marker named ${r.marker!.kind}:${r.marker!.id})`
+            : "";
         logLines.push(
-          `- [drawer-import] superseded ${r.marker!.kind}:${r.marker!.id} -> ${r.id}: ` +
+          `- [drawer-import] superseded ${r.marker!.kind}:${r.supersededId}${named} -> ${r.id}: ` +
             `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)} · ${stamp}\n`,
         );
       };

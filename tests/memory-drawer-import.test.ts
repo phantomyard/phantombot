@@ -517,6 +517,88 @@ describe("importDrawerMarkdown", () => {
         await restore();
       }
     });
+
+    test("a second-generation supersession logs the RETIRED row, not the marker", async () => {
+      const { root, restore } = await cliEnv();
+      try {
+        // The generation-1 case above cannot catch a stale id: the marker
+        // names A and A is exactly what gets retired, so marker id and live
+        // id coincide. The bug only shows from the SECOND edit of the same
+        // exported file — the marker still says A, but A was retired by B on
+        // the previous import, and B is what this import actually takes out
+        // of service.
+        const dbPath = join(root, "data", "phantombot", "memory.sqlite");
+        await mkdir(join(root, "data", "phantombot"), { recursive: true });
+        const { store, close } = await openDrawerStore(dbPath);
+        const rowA = store.file({
+          persona: PERSONA,
+          kind: "norms",
+          content: "[norm] version a",
+        });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        expect(md).toContain(formatIdMarker("norms", rowA.id));
+        close();
+
+        const dir = join(root, "drawers");
+        await mkdir(dir, { recursive: true });
+
+        // Both edits are made to the SAME export — the marker never changes,
+        // which is the whole point: the file has never seen B's id.
+        const runImport = async (content: string) => {
+          await writeFile(
+            join(dir, "norms.md"),
+            md.replace("[norm] version a", content),
+            "utf8",
+          );
+          const out = new Sink();
+          const code = await runMemoryDrawers({
+            persona: PERSONA,
+            kind: "norms",
+            import: dir,
+            out,
+          });
+          expect(code).toBe(0);
+          expect(out.text).toContain("1 superseded");
+        };
+
+        await runImport("[norm] version b");
+        await runImport("[norm] version c");
+
+        const idB = drawerEntryId(PERSONA, "norms", "[norm] version b");
+        const idC = drawerEntryId(PERSONA, "norms", "[norm] version c");
+
+        const date = new Date().toISOString().slice(0, 10);
+        const daily = await readFile(
+          join(root, "personas", PERSONA, "memory", `${date}.md`),
+          "utf8",
+        );
+        const logged = daily
+          .split("\n")
+          .filter((l) => l.includes("[drawer-import]"));
+        expect(logged).toHaveLength(2);
+
+        // Generation 1: marker and retired row are the same row, so no
+        // provenance suffix — the line stays as short as it was before.
+        expect(logged[0]).toContain(`superseded norms:${rowA.id} -> `);
+        expect(logged[0]).not.toContain("marker named");
+
+        // Generation 2: B is what was retired and B is what gets named. The
+        // marker's id survives as provenance, explicitly labelled, so a
+        // reader can still follow the chain back to the line in the file.
+        expect(logged[1]).toContain(`superseded norms:${idB}`);
+        expect(logged[1]).toContain(`(marker named norms:${rowA.id})`);
+        expect(logged[1]).toContain(`-> ${idC}`);
+        // The bug: A appears as the RETIRED row on the second line, which
+        // reads as a fork A->B, A->C that never happened, and leaves B's
+        // retirement absent from the audit trail entirely.
+        expect(logged[1]).not.toContain(`superseded norms:${rowA.id} ->`);
+        // The id beside previousContent must agree with it: "version b" is
+        // B's content, so the id must be B's.
+        expect(logged[1]).toContain('"[norm] version b" -> "[norm] version c"');
+      } finally {
+        await restore();
+      }
+    });
   });
 
   test("drawerEntryId of unchanged content matches the marker id (sanity)", () => {

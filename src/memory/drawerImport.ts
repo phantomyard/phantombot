@@ -75,6 +75,18 @@ export interface ImportEntryResult {
   /** Set only on `outcome: "superseded"` — the content the row used to hold. */
   previousContent?: string;
   /**
+   * Set only on `outcome: "superseded"` — the id of the row actually retired.
+   *
+   * NOT the same as `marker.id` once a lineage is more than one generation
+   * deep: the marker names the row as the file last saw it, and the forward
+   * walk resolves that to whatever stands in its place today. A caller
+   * logging the supersession wants THIS id — it is the row that stopped
+   * being active — and `marker.id` only as the provenance of how we got
+   * here. Logging the marker alone points a reader at a row retired by some
+   * earlier import.
+   */
+  supersededId?: string;
+  /**
    * Set when the line carried a marker that couldn't be honoured — wrong
    * kind, or an id that doesn't name a row here. The line still gets filed
    * as ordinary content (`outcome` is `inserted`/`reaffirmed` as usual); this
@@ -146,6 +158,7 @@ export function importDrawerMarkdown(
     const marker = entry.idMarker;
     let supersedes: string | undefined;
     let previousContent: string | undefined;
+    let supersededId: string | undefined;
     let markerRejected: "marker-mismatch" | "marker-unknown" | undefined;
 
     if (marker) {
@@ -182,6 +195,7 @@ export function importDrawerMarkdown(
           if (normalizeFact(live.content) !== normalizeFact(entry.content)) {
             supersedes = live.id;
             previousContent = live.content;
+            supersededId = live.id;
           }
           // else: the lineage has ALREADY advanced to exactly this content —
           // importing the same edited file twice, the ordinary way to retry a
@@ -214,6 +228,7 @@ export function importDrawerMarkdown(
         id: row.id,
         marker,
         previousContent,
+        supersededId,
       };
       result.entries.push(r);
       opts.onSupersede?.(r);

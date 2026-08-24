@@ -273,10 +273,25 @@ drained into the first drawer in the list.
 
 **Reaffirm is quiet; supersede is loud.** A supersession permanently retires a
 row from a markdown edit, so every one is appended to *that day's* daily file
-(`- [drawer-import] superseded <old> -> <new>: "…" -> "…"`) — visible in the
-ordinary next-turn digest the same day, with no separate review UI to build or
-maintain. A stray keystroke that changes one character is now something you
+(`- [drawer-import] superseded <retired> -> <new>: "…" -> "…"`) — visible in
+the ordinary next-turn digest the same day, with no separate review UI to build
+or maintain. A stray keystroke that changes one character is now something you
 see, not something that silently and permanently happened.
+
+`<retired>` is the row that actually stopped being active, which is not always
+the id written in the file. Because a marker names a lineage rather than a
+snapshot (see below), the second edit of the same exported file names a row a
+previous import already retired. The log records what was really taken out of
+service, and keeps the file's id beside it as provenance when the two differ:
+
+```
+- [drawer-import] superseded norms:6bc32fa6 (marker named norms:5980f861) -> 1c656079: "…" -> "…"
+```
+
+Reading it the other way round — logging the marker's id — would claim a
+supersession that never happened (a fork off one row into two successors) and
+leave the row genuinely retired absent from the audit trail entirely. Since
+that trail *is* the whole safety mechanism here, it has to name the real row.
 
 **The marker is deliberately not "trust whatever the file says".** Two
 guards, both structural rather than best-effort validation:
