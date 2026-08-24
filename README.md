@@ -103,8 +103,10 @@ it — including text from email, web pages, and webhooks that may be trying to
 *instruct* it. Phantombot sits in front of that as a
 [capability-and-trust perimeter](#security): a **two-tier trust model** (input
 is judged by *origin*, not content) and a **tool-less threat judge** that reads
-every untrusted turn — *before any of your memory is even loaded into a prompt*
-— and holds anything dangerous for you to talk through on your trusted channel.
+every untrusted turn before turn history, daily journals, retrieved knowledge,
+or durable facts reach a capable harness. The judge receives the persona's
+normal static system prompt plus a bounded threat-relevant drawer briefing,
+then holds anything dangerous for you to talk through on a trusted channel.
 Same mental model as a firewall in front of an exposed box: the harness is
 still there, but nothing reaches it unfiltered.
 
@@ -198,9 +200,9 @@ Installer environment overrides:
 
 You need:
 
-- A Telegram bot token from [@BotFather](https://t.me/BotFather).
-- Your numeric Telegram user ID from [@userinfobot](https://t.me/userinfobot).
 - At least one installed and authenticated harness.
+- Any channel combination you want: PhantomChat, Telegram, both, or neither.
+  With neither, use `phantombot ask` or an ACP editor integration.
 
 Install and authenticate a harness first:
 
@@ -231,13 +233,18 @@ Then configure phantombot:
 ```bash
 phantombot persona     # create or import a persona
 phantombot harness     # choose primary and fallback harnesses
-phantombot telegram    # paste BotFather token and allowed user IDs
-phantombot voice       # optional TTS/STT setup
-phantombot embedding   # recommended semantic memory setup
 
-phantombot run         # foreground listener
+# Choose either, both, or neither:
+phantombot phantomchat # encrypted Nostr DMs
+phantombot telegram    # BotFather token + allowed Telegram user IDs
+
+phantombot voice       # optional TTS/STT setup
+phantombot embedding   # optional Gemini semantic-memory setup
+
+phantombot run         # foreground host runtime for configured chat channels + P2P
 phantombot run --if-not-running  # supervisor keep-alive; quiet success if already running
-phantombot install     # install systemd --user units
+phantombot acp install vscode     # optional editor integration
+phantombot install     # install the host service and periodic jobs
 
 phantombot start       # start the installed background service
 phantombot stop        # stop it (and keep it stopped)
@@ -270,10 +277,11 @@ iwr -useb https://raw.githubusercontent.com/phantomyard/phantombot/main/install.
 ```
 
 This detects your architecture (x64/arm64), downloads the matching binary,
-verifies its SHA256, runs `Unblock-File` so SmartScreen does not flag it,
+verifies its SHA256, runs `Unblock-File` to remove the download-zone marker,
 installs to `%LOCALAPPDATA%\Programs\phantombot\phantombot.exe` (per-user, no
-admin), adds that dir to your PATH, and launches `phantombot init`. It is the
-Windows parallel to the Linux/macOS `install.sh`.
+admin), adds that dir to your PATH, and launches `phantombot init`. The binary
+is unsigned, so SmartScreen or antivirus may still warn or block it. This is
+the Windows parallel to the Linux/macOS `install.sh`.
 
 **Or install manually** - download the `.exe` for your architecture, verify its
 checksum, and drop it into the same per-user location:
@@ -318,15 +326,14 @@ phantombot uninstall    # removes the service and tasks
 **no** — interactive/login mode). It then ensures the tasks in the current
 user's `\Phantombot\` folder, named per persona so multi-persona boxes stay
 identifiable in taskschd.msc: the always-on daemon (`phantombot-<persona>`) and
-the periodic `heartbeat-<persona>`, `nightly-<persona>`, and `tick-<persona>`
-tasks.
+the periodic `heartbeat-<persona>` and `tick-<persona>` tasks. Nightly has no
+scheduled task: startup and heartbeat day rollover trigger the sweep.
 
 For example, a persona named `robbie` gets:
 
 ```text
 \Phantombot\phantombot-robbie
 \Phantombot\heartbeat-robbie
-\Phantombot\nightly-robbie
 \Phantombot\tick-robbie
 ```
 
@@ -398,14 +405,15 @@ logged-off mode). The scheduled task's keep-alive trigger remains as a
 backstop. In-place self-update needs the task installed (`phantombot install`).
 
 **Logs.** Service stdout/stderr are redirected to
-`%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. These
-currently grow unbounded (no built-in rotation yet) - prune them periodically
-if the box runs for a long time.
+`%USERPROFILE%\.local\share\phantombot\logs\*.out.log` / `*.err.log`. Heartbeat
+rotates files over 16 MiB and keeps three generations by default; see
+[Service lifecycle](#service-lifecycle-start--stop--restart--logs).
 
-Status: the Windows port is exercised by a dedicated `windows-latest` CI job on
-every pull request and runs the full test suite alongside the Linux/macOS
-builds. The published binaries are unsigned, so SmartScreen may prompt on first
-run (the installer runs `Unblock-File` to minimize this).
+Status: every pull request runs the full suite and typecheck on Linux. A
+dedicated `windows-latest` job runs typecheck plus a curated set of
+Windows-relevant suites. There is no macOS pull-request runner; macOS and all
+six release targets are built only after merge. Published Windows and macOS
+binaries are unsigned, so operating-system warnings remain possible.
 
 ## Service lifecycle (`start` / `stop` / `restart` / `logs`)
 
@@ -475,12 +483,14 @@ Common paths:
 
 | Path | Purpose |
 |---|---|
-| `~/.config/phantombot/config.toml` | Main config |
+| `~/.config/phantombot/config.toml` | Host config and defaults; may also contain the default Telegram token and Gemini embedding key |
 | `~/.local/share/phantombot/personas/<name>/vault.sqlite` | That persona's secrets, encrypted at rest (`phantombot vault`) |
 | `~/.config/phantombot/.env`, `~/.env` | **Legacy plaintext credentials. Imported into the vaults once, then never read again.** Kept (with a `.migrated-to-vault` stamp beside them) so you can roll back to an older build; delete them when you're satisfied |
-| `~/.local/share/phantombot/memory.sqlite` | Rolling turns, tasks, capture log |
+| `~/.local/share/phantombot/memory.sqlite` | Rolling turns, tasks and runs, capture log, durable facts, and structured drawer rows |
 | `~/.local/share/phantombot/personas/<name>/` | Persona markdown memory and KB |
-| `~/.local/share/phantombot/personas/<name>/config.toml` | That persona's own settings (channels, voice, chattiness, **and its `[harnesses]` block — chain, models, Pi routing**) |
+| `~/.local/share/phantombot/personas/<name>/identity.json` | Persona Nostr root secret; also derives the vault key. Back this file up |
+| `~/.local/share/phantombot/personas/<name>/config.toml` | Persona settings: Telegram, voice, chattiness, retrieval, and the complete `[harnesses]` block |
+| `~/.local/share/phantombot/personas/<name>/phantomchat.json` | PhantomChat relays, allowlists, group roster, and channel state (not the root secret) |
 
 Minimal config example:
 
@@ -503,6 +513,7 @@ chain = ["pi", "claude", "codex"]
 # that file as a plain [harnesses] block — see "Harness notes".
 
 [channels.telegram]
+# Telegram tokens remain TOML settings; they are not in the generic vault.
 token = "123456:telegram-bot-token"
 allowed_user_ids = [123456789]
 ```
@@ -561,20 +572,23 @@ Harness notes:
 
 ## Command Reference
 
-Interactive setup:
+This table is checked against `src/cli/index.ts`; use
+`phantombot <command> --help` for the full flag schema.
+
+Setup and channels:
 
 | Command | Purpose |
 |---|---|
-| `phantombot persona` | Create, import, restore, switch personas, or pick which start at boot |
-| `phantombot harness` | Choose the global harness chain |
-| `phantombot harness --persona <name>` | Choose one persona's harness chain |
-| `phantombot telegram` | Configure Telegram token and allowlist |
-| `phantombot phantomchat` | Configure the PhantomChat (Nostr DM) channel |
-| `phantombot voice [--persona <name>]` | Configure TTS/STT providers for one persona |
-| `phantombot embedding` | Configure semantic memory |
-| `phantombot acp install zed` | Register phantombot as an ACP agent in Zed |
-| `phantombot acp install jetbrains` | Register phantombot as an ACP agent in JetBrains IDEs (Rider, IntelliJ, …) |
-| `phantombot acp install vscode` | Install the first-party VS Code extension |
+| `phantombot init` | Run the unified setup wizard |
+| `phantombot persona [<name>] [--yes]` | Create, import, list, or explicitly switch the default persona |
+| `phantombot persona --import <dir> [--as <name>] [--no-telegram]` | Import a persona directory |
+| `phantombot backfill-identity` | Add missing split identity files without overwriting existing content |
+| `phantombot harness [--persona <name>]` | Configure a host or persona harness chain, models, and Pi routing |
+| `phantombot telegram [--persona <name>]` | Configure a Telegram bot and allowlist |
+| `phantombot phantomchat [--persona <name>]` | Configure PhantomChat identity, relays, and allowlist |
+| `phantombot voice [--persona <name>]` | Configure TTS/STT |
+| `phantombot embedding` | Configure optional Gemini embeddings |
+| `phantombot acp install zed|jetbrains|vscode` | Register the ACP agent with an editor |
 
 `phantombot persona <name>` switches the daemon-wide default persona.
 Because that re-points the default every listener binds to, the switch is
@@ -593,41 +607,61 @@ Runtime:
 
 | Command | Purpose |
 |---|---|
-| `phantombot run` | Foreground Telegram listener |
+| `phantombot run [--if-not-running]` | Run configured Telegram and PhantomChat listeners plus P2P in the foreground |
+| `phantombot acp [--persona <name>]` | Run the editor ACP server over stdio |
 | `phantombot install` | Install the host service and periodic jobs |
 | `phantombot uninstall` | Remove the host service and periodic jobs |
 | `phantombot start` | Start the installed background service (systemd/launchd/Windows Task Scheduler) |
 | `phantombot stop` | Stop the background service and keep it down until `start` |
 | `phantombot restart` | Restart the background service |
 | `phantombot logs [--no-follow] [--lines N]` | Tail the service logs (journalctl/launchd files/Windows log) |
-| `phantombot ask "<prompt>"` | One-shot prompt through the persona and harness chain |
+| `phantombot ask "<prompt>" [--persona <name>] [--stream]` | Stateless one-shot prompt; add `--history --conversation <id>` to thread it |
 | `phantombot update [--check] [--force] [--restart]` | Check, install, or restart after updates |
+| `phantombot fix-signing` | Install or repair the stable local signing identity on macOS |
 | `phantombot p2p status` | Show relay-free P2P transport config and whether a local node is listening |
 
-Agent-facing tools:
+Secrets, integrations, and agent tools:
 
 | Command | Purpose |
 |---|---|
 | `printf '%s' "$VALUE" \| phantombot vault set NAME` | Save a credential without exposing it in argv |
-| `phantombot vault set NAME --allow-empty </dev/null` | Explicitly store an empty credential from stdin |
-| `phantombot notify --message "..."` | Send a Telegram text notification |
-| `phantombot notify --voice "..."` | Send a Telegram voice notification |
+| `phantombot vault get|list|unset` | Read or manage one persona's encrypted vault (`--persona` supported) |
+| `phantombot env ...` | Deprecated compatibility alias for `vault` |
+| `phantombot mcp help|add|list|status|search|describe|call|login|remove|proxy` | Register and lazily use persona-scoped MCP servers |
+| `phantombot notify --message "..." [--voice "..."] [--persona <name>]` | Broadcast to every authorized recipient on configured chat channels |
+| `phantombot reply-mode text|voice|default` | Temporarily override or clear reply modality for the current conversation |
+| `phantombot workspace lock|unlock|status` | Coordinate advisory claims on shared working copies |
+
+Scheduling:
+
+| Command | Purpose |
+|---|---|
 | `phantombot task add "<prompt>" "<description>" --every 1h` | Schedule an LLM-backed task |
+| `phantombot task add "<prompt>" "<description>" --in 10m` | Schedule a one-off task (`--at` accepts ISO 8601) |
+| `phantombot task add ... --every 1h --until <time>` | Bound a recurring task with `--until`, `--count`, or `--for` |
 | `phantombot task add "<prompt>" "<description>" --every 1h --command "/path/to/script"` | Schedule a command-backed task |
-| `phantombot task list / show / cancel` | Inspect and manage scheduled tasks |
-| `phantombot task add/list/selftest --persona <name>` | Target another persona's schedule |
-| `phantombot memory today / search / get / list / index` | Inspect memory and KB |
+| `phantombot task list|show|cancel|log|selftest` | Inspect tasks, fire history, and scheduler health |
+
+Memory:
+
+| Command | Purpose |
+|---|---|
+| `phantombot memory today|search|get|list|index` | Inspect daily journals and the KB, or refresh indexes |
 | `phantombot memory capture "<text>" --tag decision` | Append a tagged memory capture |
-| `phantombot memory drawers [--kind norms] [--sync]` | Show the ranked drawer entries the threat judge is briefed from |
+| `phantombot memory drawers [--kind norms]` | Read ranked database-backed drawers |
+| `phantombot memory drawers --kind decisions --file "..."` | File or reaffirm one drawer row |
+| `phantombot memory drawers --export <dir> --with-id` | Export editable Markdown; `--import <dir>` reads it back |
+| `phantombot memory backup [--list]` | Create or list verified database restore points |
+| `phantombot memory restore --from <snapshot> --yes` | Restore a stopped instance from a snapshot |
 
 Maintenance:
 
 | Command | Purpose |
 |---|---|
 | `phantombot tick` | Fire due scheduled tasks |
-| `phantombot heartbeat` | Run mechanical maintenance |
-| `phantombot nightly [--resume]` | Run or resume memory distillation |
-| `phantombot doctor [--no-repair]` | Check channel and memory health and optionally repair |
+| `phantombot heartbeat [--persona <name>]` | Run mechanical maintenance |
+| `phantombot nightly [--date YYYY-MM-DD] [--max-dates N] [--force] [--no-compact]` | Run the idempotent cognitive sweep |
+| `phantombot doctor [--persona <name>] [--no-repair] [--json]` | Check channel, timer, connector, and memory health |
 
 ## Shell completion
 
@@ -969,7 +1003,7 @@ an encrypted WebRTC data channel with no relay in the hot path.
   PWA (browser)                                    PWA (browser)
      │  ws://localhost:<discovered>                   │  ws://localhost:<discovered>
      ▼                                                ▼
-  [phantombot node] ◀── werift WebRTC data channel ──▶ [phantombot node]
+  [Phantombot P2P] ◀── werift WebRTC data channel ──▶ [Phantombot P2P]
      ╲                    (direct, encrypted)                    ╱
       ╲···· Nostr relays: WebRTC handshake (signaling) only ····╱
 ```
@@ -1686,9 +1720,30 @@ user explicitly asked to be interrupted.
 
 ## Credentials
 
-Phantombot stores secrets in a per-persona encrypted vault. Values are encrypted
-at rest with AES-256-GCM using a key derived from the persona identity and are
-loaded into the spawned harness environment at runtime.
+Most agent credentials live in a per-persona encrypted vault. Values are
+encrypted at rest with AES-256-GCM using a key derived from the persona's Nostr
+identity and are resolved for that persona at runtime. Losing
+`<persona>/identity.json` loses the key needed to decrypt the vault, so back it
+up with the vault database.
+
+Not every secret is a vault row. Current canonical locations are:
+
+| Credential or setting | Canonical location |
+|---|---|
+| Agent, MCP, voice-provider, and persona routing API keys | `<persona>/vault.sqlite`; shell/service exports remain higher-precedence host overrides |
+| Pi provider key entered in the harness wizard | Persona vault, also merge-written to Pi's own `~/.pi/agent/auth.json` so the Pi CLI can enumerate models |
+| Claude/Codex host login | The harness's own OAuth/auth store; Phantombot does not copy it |
+| PhantomChat Nostr secret (`nsec`) | `<persona>/identity.json` (owner-only permissions), shared with vault key derivation |
+| Telegram bot token | Persona or host `config.toml`, or `TELEGRAM_BOT_TOKEN[_PERSONA]`; not in the generic vault |
+| Gemini embedding API key | Host/persona `config.toml`, or `PHANTOMBOT_GEMINI_API_KEY`; not in the generic vault |
+| Windows logged-off account password | Persona vault; Task Scheduler also holds the registered task credential |
+
+`~/.env` and `~/.config/phantombot/.env` are legacy import sources only. On
+startup Phantombot imports their eligible credentials into each persona vault,
+verifies the encrypted read path, and writes a `.migrated-to-vault` stamp.
+Runtime code and services never source them and wizards never write them. The
+plaintext files are retained solely so an older build can still be used for
+rollback; a surviving file produces a warning until you remove it.
 
 Agent-facing credential CLI:
 
@@ -1714,20 +1769,28 @@ alias.
 
 Phantombot treats input by **origin**, not by content:
 
-- **Trusted source** — a message from an allow-listed Telegram principal is
-  the authenticated owner. It is acted on directly, with no extra screening.
-  The principal is the gate.
-- **Untrusted source** — anything else (email, `phantombot ask`, web, a
-  webhook) cannot be trusted to only contain data. Its text may try to
-  *instruct* the agent. These turns are screened before the harness runs.
+- **Trusted source** — an allow-listed Telegram sender, an allow-listed (or
+  TOFU-admitted) PhantomChat sender outside the relay tier, or a local ACP
+  editor session launched by the OS user. It is acted on directly; the
+  authenticated principal is the gate.
+- **Untrusted source** — `phantombot ask`, a PhantomChat relay/bridge sender,
+  email, webhooks, and other ambient integrations. Their text may try to
+  *instruct* the agent, so these turns are screened before the capable harness
+  runs. P2P changes transport, not authority: the same PhantomChat sender tier
+  still applies.
 
 ### Untrusted-Input Threat Screening
 
 Untrusted turns are passed to a **tool-less threat judge** before any capable
-harness sees them — and **before any of your private memory is pulled into a
-prompt** (screening runs ahead of memory retrieval, so an untrusted message
-can never ride into a memory-laden prompt before it has been judged). The
-judge is a bare, capability-restricted completion **on whichever harness you
+harness sees them. The judge is deliberately not memory-free: its system
+prompt contains the full static persona prompt (identity, `MEMORY.md`, optional
+persona tool hints, and built-in operating guidance) plus a bounded briefing
+from the decisions, people, and norms drawers. It does **not** receive
+conversation history, daily journals, retrieved KB/turn excerpts, durable
+facts, pending background digests, or MCP tools. Those are assembled only
+after a passing verdict.
+
+The judge is a capability-restricted completion **on whichever harness you
 configured as primary** — Claude, Pi, or Codex. It does **not** assume
 a particular CLI is installed: if you install only one of the three, screening
 still runs on that one. It is not a keyword engine and not a separate API key.
@@ -1759,10 +1822,10 @@ dangerous, not less.
 - **Below threshold** → the turn proceeds silently. Quiet when safe — no
   notification.
 - **At or above threshold** → the untrusted turn is **held and does nothing**
-  (fail-closed), and you get a Telegram message explaining what arrived and
-  why, phrased to be **talked through** rather than answered yes/no. You and
-  the agent discuss it on Telegram — the trusted channel — and *that*
-  conversation is where the ruling is recorded.
+  (fail-closed), and authorized owners are notified on configured chat
+  channels with what arrived and why. The notification is phrased to be
+  **talked through** rather than answered yes/no; that trusted conversation is
+  where the ruling is recorded.
 
 **The judge's briefing.** A judge that knows nothing about your world flags
 *everything* — the cry-wolf failure mode. So before judging, the screener
@@ -1774,10 +1837,10 @@ superseded and dormant ones left out — and feeds the judge a briefing:
 - **norms** — what is *routine* in your world (e.g. "the Plane dashboards
   trigger deploys and DB migrations every day — routine, not an attack").
 
-This is **deliberately scoped to those three drawers, not a raw memory dump**:
-the judge doesn't need your finances or inbox to score a threat, and keeping
-them out means they never land in a judge log either. A matching prior
-approval, a known sender, or a documented norm lowers scrutiny; the briefing
+This is **deliberately scoped to those three drawers, plus the static persona
+prompt, not a raw memory dump**. Daily journals, KB notes, commitments,
+lessons, retrieved turns, and durable facts stay out of the judge prompt. A
+matching prior approval, a known sender, or a documented norm lowers scrutiny; the briefing
 **never clears** it — a genuinely catastrophic request re-escalates regardless.
 The `norm` drawer is maintained by the nightly pass and is readable/correctable
 like any other, so *what the judge believes is normal* is auditable —
@@ -1790,7 +1853,7 @@ mid-entry.
 
 **Who can record a ruling.** Only *you*, from a trusted turn. The judge writes
 nothing; the untrusted turn writes nothing. An attacker can therefore never
-author "Andrew approved this" — your trusted reply is the only thing that
+author "the principal approved this" — your trusted reply is the only thing that
 records a decision, and that decision is what recall reads next time. Captured
 rulings are indexed on write, so they're recall-able the same session.
 
@@ -1800,12 +1863,11 @@ screening outage degrades to "unscreened", never "app down". (This is distinct
 from the **fail-closed hold** above, which governs an escalated-but-unanswered
 request: that simply never runs.)
 
-> **Recommended for production environments.** Threat screening itself needs no
-> extra configuration — it runs on your primary harness, which is always
-> present. A Gemini key ([`phantombot embedding`](#memory-search-okf-superpowers-by-default-gemini-semantic-on-top)) only
-> sharpens the judge's **briefing recall** (decisions/people/norms): without it,
-> recall falls back to OKF field-weighted BM25 (lexical), which is a quality degrade, not a security
-> hole — screening still runs. Screening is **not** a wall —
+> **Recommended for production environments.** Threat screening needs no
+> embedding key or separate model configuration: it runs on the primary
+> harness and reads the ranked drawer briefing directly. Gemini embeddings
+> affect normal memory retrieval, not whether screening runs or which drawer
+> rows the judge receives. Screening is **not** a wall —
 > a sufficiently clever injection can still fool an LLM judge, just as it can
 > fool a human — but it filters the obvious majority and puts a human beat in
 > front of the rest.
@@ -1814,8 +1876,9 @@ request: that simply never runs.)
 
 Phantombot memory has two layers:
 
-- SQLite for rolling machine state.
-- Markdown for durable human-readable memory and KB.
+- SQLite for rolling turns, schedules, durable facts, and the five structured
+  drawers.
+- Markdown for daily journals, `MEMORY.md`, and durable KB notes.
 
 ### SQLite Layer
 
@@ -1829,6 +1892,8 @@ Important tables:
 | `tasks` | Scheduled task store |
 | `task_runs` | Task execution history |
 | `capture_log` | Trace of explicit memory captures |
+| `drawer_entries` | Ranked people, decisions, lessons, commitments, and norms with dedupe/supersession lifecycle |
+| `durable_facts` | Provenance-weighted facts extracted from turns |
 
 `turns` is not a permanent transcript archive. It is a bounded context buffer
 used to keep recent conversations coherent.
@@ -1842,20 +1907,23 @@ Markdown memory lives under each persona directory:
   MEMORY.md
   memory/
     YYYY-MM-DD.md
-    decisions.md
-    lessons.md
-    people.md
-    commitments.md
-    norms.md
+    archive/
   kb/
+    inbox/
 ```
 
 The flow:
 
 1. The agent captures important facts with `phantombot memory capture`.
-2. Heartbeat promotes tagged daily lines into structured drawers.
-3. Nightly distills drawers and `kb/inbox/` into durable KB notes.
+2. Heartbeat files tagged daily lines into SQLite drawer rows.
+3. Nightly reconciles `MEMORY.md` and `kb/inbox/` into durable KB notes.
 4. `MEMORY.md` stays lean and always-loaded.
+
+The drawers are database rows, not live Markdown files. Read or file them with
+`phantombot memory drawers`; export them to Markdown when you need a
+human-editable copy. On upgrade, legacy Markdown drawer files under `memory/`
+are imported, verified as re-renderable, archived,
+and retired from the active tree.
 
 #### Which daily journals reach the prompt
 
@@ -1911,9 +1979,11 @@ Useful commands:
 phantombot memory today
 phantombot memory capture "Decision: use Pi as primary harness" --tag decision
 phantombot memory search "Pi primary harness"
-phantombot memory get memory/decisions.md
+phantombot memory drawers --kind decisions
+phantombot memory drawers --export /tmp/phantombot-drawers --with-id
 phantombot memory list kb
 phantombot memory index --rebuild
+phantombot memory backup
 ```
 
 ### Memory search: OKF superpowers by default, Gemini semantic on top
@@ -1998,6 +2068,14 @@ Enable it:
 phantombot embedding
 phantombot memory index --rebuild
 ```
+
+**Privacy boundary:** enabling Gemini sends the plaintext being embedded to
+Google's Generative Language API. That includes daily-journal and KB content,
+indexed conversation turns, and each semantic search query. The local
+SQLite database remains local, but the text submitted for vector generation
+does not. Leave embeddings disabled to keep recall entirely on-host with
+BM25F + link-graph expansion; your configured model harness still receives
+normal turn prompts under that provider's own terms.
 
 Equivalent TOML:
 
@@ -2181,7 +2259,7 @@ Installed user units:
 
 | Unit | Cadence | Purpose |
 |---|---|---|
-| `phantombot.service` | Always on | Telegram listener |
+| `phantombot.service` | Always on | Multi-persona Telegram + PhantomChat runtime and P2P nodes |
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
 | `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance + fires the nightly sweep on day rollover |
 
@@ -2253,51 +2331,52 @@ immediate.
 ## Architecture
 
 ```text
-Telegram getUpdates
-        |
-        v
-Telegram adapter  (channels/telegram)
-        |
-        |-- transport: HTTP getUpdates / sendMessage
-        |-- parse: raw update -> ChannelMessage
-        |-- convert numeric chat/user ids -> string at the boundary
-        |-- encrypt / decrypt seam (identity pass-through today)
-        |
-        v
-Channel core  (channels/core, channel-blind)
-        |
-        |-- slash command handler
-        |-- group routing gate
-        |-- attachment / voice handling
-        |-- streaming turn engine + server loop
-        |
-        v
-Turn coordinator
-        |
-        |-- load persona markdown
-        |-- load rolling conversation context
-        |-- retrieve memory / KB hits
-        |-- threat-screen untrusted input (see Security)
-        |
-        v
-Harness chain: pi -> claude -> codex
-        |
-        |-- native harness tool loop
-        |-- fallback on recoverable failure
-        |
-        v
-Persist turn and send Telegram reply
+             one `phantombot run` process per host
+                              |
+          +-------------------+-------------------+
+          |                                       |
+  Telegram adapters                     PhantomChat adapters
+  (one bot/persona)                      (one Nostr identity/persona)
+                                                  |
+                                         relay + WebRTC P2P paths
+          +-------------------+-------------------+
+                              |
+                   channel routing / streaming
+
+  ACP editor stdio ---------------------+---------------- `phantombot ask`
+                                        |
+                              turn coordinator
+                                        |
+                   trusted origin? -----+----- untrusted origin
+                         |                         |
+                         |               narrowed, tool-less judge
+                         |                 pass |         | hold
+                         +----------------------+         +--> notify; stop
+                                        |
+                    assemble persona + history + daily journals
+                    + retrieved KB/turns + durable facts
+                                        |
+                        persona-scoped harness chain
+                              pi -> claude -> codex
+                                        |
+                      persist successful turn and reply
 ```
 
 Tool execution happens inside the harness. Phantombot only coordinates the
 turn, memory, channel behavior, and runtime services.
 
-The channel layer is split into a channel-blind core and per-platform
-adapters. The core deals only in string `conversationId` / `senderId` ids and
-plaintext `ChannelMessage`s; each adapter converts its platform's native id
-types and (in future) decrypts on ingest / encrypts on egress at its own
-boundary. Telegram is the only adapter today; the encrypt/decrypt hooks are
-identity pass-throughs and there is no Matrix or crypto code yet.
+The default persona always starts; `autostart_personas` is the explicit roster
+of additional personas served by the same daemon. Each persona resolves its
+own channels, harness chain, config, vault, identity, and memory scope. A single
+host run lock prevents a second daemon; concurrency is multiplexed inside the
+one process.
+
+Telegram uses the channel-blind core with a thin adapter that normalizes ids at
+the boundary. PhantomChat has its own Nostr/NIP-17 server and encrypted
+transport, plus an optional relay-free WebRTC data path whose signaling still
+uses Nostr. ACP is a separate stdio process spawned by the editor, but enters
+the same turn coordinator and persona memory. `phantombot ask` is the
+non-interactive CLI entry point.
 
 ## Build From Source
 
@@ -2345,12 +2424,17 @@ phantombot/
     channels/
       core/        channel-blind types, routing, prompts, turn engine
       telegram/    Telegram adapter: transport, parse, channel
+      phantomchat/ Nostr encrypted channel, trust tiers, relay transport
       telegram.ts  backward-compat barrel re-export
+    connectors/
+      acp/          VS Code, Zed, and JetBrains stdio connector
+    p2p/            WebRTC transport, signaling, capability advertisement
     cli/
     harnesses/
     lib/
   agents/phantom/
   tests/
+  .github/workflows/ci.yml
   .github/workflows/release.yml
   package.json
   bunfig.toml
