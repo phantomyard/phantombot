@@ -279,7 +279,9 @@ export function planListeners(
     //
     // Scoped to autostart-sourced listeners on purpose. A legacy entry that
     // names the DEFAULT persona is a different, long-supported shape (a second
-    // bot bound to the same persona) and keeps working untouched.
+    // bot bound to the same persona) and keeps working untouched. Config
+    // layering removes only an entry proven to be the source of a migrated
+    // default account before it reaches this planner.
     if (
       listeners.some(
         (l) => l.persona === persona && l.source === `autostart.${persona}`,
