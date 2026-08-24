@@ -55,7 +55,7 @@ afterEach(async () => {
 
 describe("whichBinary", () => {
   test("returns the absolute path when bin is an absolute executable", async () => {
-    expect(await whichBinary("/bin/sh")).toBe("/bin/sh");
+    expect(await whichBinary(join(dir, "stale-claude-450"))).toBe("/bin/sh");
   });
 
   test("returns undefined for a non-existent absolute path", async () => {
@@ -126,6 +126,10 @@ describe("detectAvailability (issue #450)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  // Absolute on POSIX (and POSIX-absolute on Windows, which is the #450 shape)
+  // but inside a fresh temp dir, so it can never exist on any machine.
+  const staleAbsoluteBin = () => join(dir, "stale-claude-450");
+
   const configWithStaleBin = (bin: string) =>
     ({
       harnesses: {
@@ -140,7 +144,10 @@ describe("detectAvailability (issue #450)", () => {
     // The reported bug: `doctor`/`run` resolve claude via the absolute-bin ->
     // bare-name retry, while the wizard's bare which() reported NOT FOUND on
     // the very same config. The two detectors must not disagree.
-    const config = configWithStaleBin("/bin/claude");
+    // The stale path must be absolute AND guaranteed absent. A literal like
+    // "/bin/claude" is neither on a dev box with a system-wide install, where
+    // it resolves and the test reds for the wrong reason.
+    const config = configWithStaleBin(staleAbsoluteBin());
 
     const fromDoctor = await checkConfiguredHarnesses(config, dir);
     const fromWizard = await detectAvailability(config, dir);
@@ -152,7 +159,7 @@ describe("detectAvailability (issue #450)", () => {
   test("still reports a genuinely missing harness as missing", async () => {
     // The fix must not paper over a real absence — otherwise the wizard would
     // offer to configure a harness that cannot start.
-    const avail = await detectAvailability(configWithStaleBin("/bin/claude"), dir);
+    const avail = await detectAvailability(configWithStaleBin(staleAbsoluteBin()), dir);
     expect(avail.pi).toBeUndefined();
     expect(avail.codex).toBeUndefined();
   });
