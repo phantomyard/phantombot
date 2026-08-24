@@ -139,6 +139,35 @@ describe("runDoctor", () => {
     expect(out.text).not.toContain("no bot_token");
   });
 
+  test("a migrated default account is healthy despite its retained legacy statement", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const migrated = {
+      ...config,
+      channels: {
+        telegram: { token: "default", pollTimeoutS: 30, allowedUserIds: [] },
+        telegramStated: true,
+        telegramPersonasStated: ["phantom"],
+      },
+    } satisfies Config;
+
+    expect(await runDoctor({
+      config: migrated,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkHarnesses: false,
+      checkPiExtension: false,
+      checkEditorConnectors: false,
+    })).toBe(0);
+    expect(out.text).toContain("telegram: ok — 1 listener(s) across 1 persona(s)");
+    expect(out.text).toContain("persona 'phantom': 1 listener(s), runnable");
+    expect(out.text).not.toContain("no bot_token");
+  });
+
   test("doctor reports every boot persona and catches an incomplete autostart bot", async () => {
     await writeState({
       last_run: new Date().toISOString(),

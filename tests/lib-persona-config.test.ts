@@ -453,6 +453,7 @@ describe("loadConfig persona layering", () => {
     const config = await loadConfig();
     expect(config.channels.telegram?.token).toBe("legacy-default-bot");
     expect(config.channels.telegramPersonas?.robbie).toBeUndefined();
+    expect(config.channels.telegramPersonasStated).toEqual(["lena"]);
     expect(config.channels.telegramPersonas?.lena?.token).toBe("lena-bot");
   });
 
@@ -475,6 +476,7 @@ describe("loadConfig persona layering", () => {
     const config = await loadConfig();
     expect(config.channels.telegram?.token).toBe("primary-bot");
     expect(config.channels.telegramPersonas?.robbie?.token).toBe("second-bot");
+    expect(config.channels.telegramPersonasStated).toEqual(["robbie"]);
   });
 
   test("a suffixed env override can keep a copied legacy entry distinct", async () => {
@@ -498,6 +500,7 @@ describe("loadConfig persona layering", () => {
     expect(config.channels.telegramPersonas?.robbie?.token).toBe(
       "second-env-bot",
     );
+    expect(config.channels.telegramPersonasStated).toEqual(["robbie"]);
   });
 
   test("the persona file wins per key; unmentioned keys fall back to global", async () => {
@@ -682,6 +685,23 @@ describe("loadConfig persona layering", () => {
     expect(phantomchatOnly.channels.telegram).toBeUndefined();
     expect(phantomchatOnly.channels.telegramStated).toBe(false);
     expect(phantomchatOnly.channels.telegramPersonasStated).toEqual([]);
+  });
+
+  test("shared Telegram settings do not state a default account", async () => {
+    await writeFile(
+      process.env.PHANTOMBOT_CONFIG!,
+      'default_persona = "robbie"\n\n[channels.telegram]\n' +
+        'poll_timeout_s = 45\ngroup_persona_names = ["robbie", "lena"]\n\n' +
+        '[channels.telegram.streaming]\nbubble_max_sentences = 2\n\n' +
+        '[channels.telegram.personas.lena]\ntoken = "lena-bot"\n',
+      "utf8",
+    );
+
+    const robbie = await loadConfig("robbie");
+    expect(robbie.channels.telegram).toBeUndefined();
+    expect(robbie.channels.telegramStated).toBe(false);
+    expect(robbie.channels.telegramPersonas?.lena?.token).toBe("lena-bot");
+    expect(robbie.telegramStreaming?.bubbleMaxSentences).toBe(2);
   });
 
   test("a persona's own model beats the host's ambient env var", async () => {

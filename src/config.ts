@@ -900,14 +900,17 @@ function isTomlTable(v: unknown): v is TomlObject {
 }
 
 /**
- * Whether a TOML `[channels.telegram]` table describes an account rather than
- * merely acting as the parent for legacy `.personas.<name>` routing entries.
- * An empty table still counts: it is the broken shape #445 must surface.
+ * Whether a TOML `[channels.telegram]` table describes an account attempt
+ * rather than merely carrying shared settings or acting as the parent for
+ * legacy `.personas.<name>` routing entries. An empty table still counts: it
+ * is the broken shape #445 must surface.
  */
 function statesTelegramAccount(table: TomlObject | undefined): boolean {
   if (!table) return false;
   const keys = Object.keys(table);
-  return keys.length === 0 || keys.some((key) => key !== "personas");
+  return keys.length === 0 ||
+    Object.hasOwn(table, "token") ||
+    Object.hasOwn(table, "allowed_user_ids");
 }
 
 
@@ -1137,7 +1140,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
   const telegramStated = isDefaultPersona
     ? statesTelegramAccount(globalTelegram) || statesTelegramAccount(ownTelegram)
     : statesTelegramAccount(ownTelegram) || legacyEntry !== undefined;
-  const statedRouting = isTomlTable(tomlTelegram.personas)
+  let statedRouting = isTomlTable(tomlTelegram.personas)
     ? Object.entries(tomlTelegram.personas)
       .filter(([, entry]) => isTomlTable(entry))
       .map(([name]) => name)
@@ -1156,6 +1159,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     ) {
       const { [personaLayer]: _migrated, ...rest } = telegramPersonas;
       telegramPersonas = Object.keys(rest).length > 0 ? rest : undefined;
+      statedRouting = statedRouting.filter((name) => name !== personaLayer);
     }
   }
 

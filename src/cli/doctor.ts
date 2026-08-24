@@ -392,7 +392,7 @@ function telegramHealthReport(
     !!config.channels.telegram || !!config.channels.telegramStated;
   if (config.channels.telegram) addAccount(config.defaultPersona);
 
-  const autostartWithListener = new Set<string>();
+  const autostartWithAccount = new Set<string>();
   for (const persona of config.autostartPersonas ?? []) {
     if (persona === config.defaultPersona) continue;
     const current = row(persona);
@@ -403,9 +403,7 @@ function telegramHealthReport(
       !!personaConfig?.channels.telegramStated;
     if (personaConfig?.channels.telegram) {
       addAccount(persona);
-      if (existsSync(personaDir(config, persona))) {
-        autostartWithListener.add(persona);
-      }
+      autostartWithAccount.add(persona);
     }
   }
 
@@ -413,7 +411,7 @@ function telegramHealthReport(
     row(persona).stated = true;
   }
   for (const persona of Object.keys(config.channels.telegramPersonas ?? {})) {
-    if (autostartWithListener.has(persona)) continue;
+    if (autostartWithAccount.has(persona)) continue;
     addAccount(persona);
   }
 
