@@ -25,17 +25,15 @@ import type { MemoryStore } from "../../memory/store.ts";
  *
  * 2. Voice/text reply-mode routing.
  *
- * It deliberately carries NO blanket confirm-before-you-act gate. One
- * used to live here ("outline your plan and ask... anything where
- * you're going to spawn more than one tool call... When you ask,
- * STOP"), injected unconditionally into every chat turn for every
- * persona. Because it was re-injected fresh each turn it outranked
- * anything the user said or the persona remembered, so an explicit
- * instruction ("review this PR", "deploy it") still came back as
- * "shall I proceed?" — literal-minded harnesses read the STOP clause
- * as unoverridable and asked forever. Confirmation policy belongs to
- * the persona (IDENTITY.md / norms), where the user can actually
- * change it; do not reintroduce it here.
+ * It deliberately carries NO confirm-before-you-act gate of its own —
+ * not because there isn't one, but because it does not belong to this
+ * channel. One used to live here and was Telegram-only, so the same
+ * persona gated in chat and ran unchecked from an editor or the CLI.
+ * The rule now lives in the ORCHESTRATOR overlay stack
+ * (CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION, src/persona/builder.ts,
+ * appended in orchestrator/turn.ts) where every interactive entry point
+ * gets it identically. Do not re-add a copy here: two copies drift, and
+ * the channel-local one is the one nobody remembers to update.
  *
  * Lives at the channel layer (not in persona files) so CLI / nightly
  * turns aren't affected — verbose CLI output is fine there.
