@@ -32,6 +32,17 @@ export interface ParsedDrawerEntry {
   content: string;
   /** Section date if the enclosing `## ` header was a date, else undefined. */
   date?: string;
+  /**
+   * The `<!-- id: kind:hexid -->` marker trailing this entry, if present
+   * (issue #437). Parsed as an opaque `{ kind, id }` pair — NOT validated
+   * against the live drawer set here. Validation (does `kind` match this
+   * file, does `id` name a row that actually exists) is the importer's job,
+   * not the parser's: `parseDrawer` has no store to check against, and
+   * every other caller (round-trip verify, plain ingest) needs the marker
+   * stripped out of `content` regardless of whether it turns out to be
+   * genuine.
+   */
+  idMarker?: { kind: string; id: string };
 }
 
 export interface IngestResult {
@@ -49,6 +60,12 @@ const DATE_HEADER = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/;
 const SECTION_HEADER = /^##\s+(?!#)/;
 const ENTRY_HEADER = /^###\s+(.*)$/;
 const FLAT_BULLET = /^-\s+(.*)$/;
+// `<!-- id: norms:1a2b3c4d5e6f7890 -->` — the export marker (#437). `kind` is
+// captured but deliberately unvalidated here (see ParsedDrawerEntry); `id` is
+// the fixed 16 hex-char shape `drawerEntryId` always produces, so a mangled
+// or hand-typed id just fails this regex and the line falls through as inert
+// HTML-comment noise instead of ever being treated as a marker.
+const ID_MARKER = /^<!--\s*id:\s*([a-z][a-z]*):([0-9a-f]{16})\s*-->$/;
 
 /**
  * Split one drawer file into entries.
@@ -61,12 +78,19 @@ export function parseDrawer(text: string): ParsedDrawerEntry[] {
   const out: ParsedDrawerEntry[] = [];
   let date: string | undefined;
   /** The entry being accumulated, if any, and which shape it came from. */
-  let open: { lines: string[]; date?: string; block: boolean } | undefined;
+  let open:
+    | {
+        lines: string[];
+        date?: string;
+        block: boolean;
+        idMarker?: { kind: string; id: string };
+      }
+    | undefined;
 
   const flush = () => {
     if (!open) return;
     const content = open.lines.join("\n").trim();
-    if (content) out.push({ content, date: open.date });
+    if (content) out.push({ content, date: open.date, idMarker: open.idMarker });
     open = undefined;
   };
 
@@ -92,6 +116,19 @@ export function parseDrawer(text: string): ParsedDrawerEntry[] {
     if (entryHeader) {
       flush();
       open = { lines: [entryHeader[1]!.trim()], date, block: true };
+      continue;
+    }
+    // The id marker attaches to the entry still open when it's seen and is
+    // never itself content — it must be intercepted BEFORE the block/flat
+    // continuation rules below, or a block entry would swallow it as a body
+    // line (corrupting content identity) and a flat entry would read it as
+    // unindented prose and flush early (losing it entirely). A marker with no
+    // open entry (stray, or after a blank line already flushed one) matches
+    // nothing here and falls through as inert text, same as any other line
+    // that isn't an entry.
+    const marker = open ? ID_MARKER.exec(line.trim()) : null;
+    if (marker) {
+      open!.idMarker = { kind: marker[1]!, id: marker[2]! };
       continue;
     }
     // A bullet at COLUMN 0 starts an entry of its own. Matching on the

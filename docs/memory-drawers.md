@@ -205,6 +205,74 @@ Two behaviours to design around:
 norm.** A norm briefs the threat judge — it is a security-relevant surface, and
 content that arrived from outside the principal is data, not a rule.
 
+## Editing an export back in (`--with-id` / `--import`)
+
+`--export` alone is a read-only artefact: a backup, or something to grep. Every
+hand-edit to it used to be silently wrong — the parser has no way to tell
+"this is the same entry, reworded" from "this is a brand-new entry", so an
+edited line came back in as a duplicate on the next `--sync`, while the line it
+was meant to replace sat there untouched, forever. Issue #437 closes that gap
+with one marker instead of a general "trust whatever the file says" import.
+
+```bash
+phantombot memory drawers --export ./out --with-id   # tag every entry
+# ... edit ./out/norms.md by hand ...
+phantombot memory drawers --kind norms --import ./out
+```
+
+`--with-id` appends a trailing `<!-- id: kind:hexid -->` line to every
+rendered entry, e.g.:
+
+```markdown
+- [norm] Friday deploys are routine.
+<!-- id: norms:1a2b3c4d5e6f7890 -->
+```
+
+`--import` reads a marked (or plain) export back in and does exactly one of
+three things per line, and nothing else — see `src/memory/drawerImport.ts`:
+
+| line | what happens | why |
+|---|---|---|
+| unmarked | files as a new entry | same as `--file` / plain ingest; a line with no marker never claimed to replace anything |
+| marked, **content unchanged** | reaffirms the row named by the marker | the content-derived id already equals the marker's id, so this is the ordinary re-file/reaffirm path with no special-casing |
+| marked, **content changed** | supersedes the row named by the marker | the edit *is* a correction: file the new content with `supersedes: <marker id>`, same as a phantomtool correcting a norm |
+
+**Reaffirm is quiet; supersede is loud.** A supersession permanently retires a
+row from a markdown edit, so every one is appended to *that day's* daily file
+(`- [drawer-import] superseded <old> -> <new>: "…" -> "…"`) — visible in the
+ordinary next-turn digest the same day, with no separate review UI to build or
+maintain. A stray keystroke that changes one character is now something you
+see, not something that silently and permanently happened.
+
+**The marker is deliberately not "trust whatever the file says".** Two
+guards, both structural rather than best-effort validation:
+
+- **A marker only ever resolves within its own kind.** The marker embeds which
+  drawer it came from (`norms:...`, `decisions:...`, …); `--import` compares
+  that against the file it is importing and rejects the marker outright on a
+  mismatch — a `norms.md` hand-edited to claim `decisions:...` cannot touch a
+  decision. The line still files normally as a fresh entry; only the bogus
+  supersession claim is dropped.
+- **The id has to name a real row.** Ids are `sha256(persona, kind,
+  normalized content)[..16]` — a hash, not a sequential counter — so there is
+  nothing to guess or forge into colliding with a real row. A hand-typed or
+  stale id that doesn't resolve here degrades to "no marker": the content
+  still files as a new entry, nothing is superseded, nothing is destroyed.
+
+Both failure modes are reported by `--import` (`rejected marker: …`) so a
+tampered or stale marker is visible, not just silently dropped.
+
+Applies uniformly to all five drawers — the marker only ever touches the
+schema fields every kind already has (`asserted_at`, `last_reaffirmed_at`,
+`supersedes`, `status`); only the decay *rate* differs per kind, not this
+mechanism. `commitments` and `people` don't decay, but reaffirm/supersede work
+exactly the same way on them.
+
+No physical deletion, same rule as everywhere else in the drawer system — a
+superseded row from an import stays queryable forever. Orphaned superseded
+rows accumulating over repeated imports is a known, deliberately deferred
+follow-up (#437), not something this mechanism solves.
+
 ## Why the threat judge cares
 
 `orchestrator/screen.ts` briefs the judge from `decisions`, `people` and

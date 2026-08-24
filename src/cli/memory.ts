@@ -23,11 +23,19 @@
  *                              show the RANKED drawer rows the threat judge is
  *                              briefed from, and optionally project the
  *                              markdown drawers into rows first
+ *   phantombot memory drawers --export <dir|-> [--with-id]
+ *                              render rows back to markdown; --with-id tags
+ *                              every entry with its row id so the file can be
+ *                              hand-edited and re-filed
+ *   phantombot memory drawers --import <dir|->
+ *                              the inverse of --export: unmarked/unchanged
+ *                              lines file or reaffirm, a changed marked line
+ *                              supersedes the row it names (#437)
  */
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import {
@@ -56,6 +64,11 @@ import {
   verifyDrawerRoundTrip,
 } from "../memory/drawerExport.ts";
 import { describeRetirement, retireDrawers } from "../memory/drawerRetire.ts";
+import {
+  describeImport,
+  importDrawerMarkdown,
+  type ImportEntryResult,
+} from "../memory/drawerImport.ts";
 import {
   backupMemoryDb,
   checkIntegrity,
@@ -535,6 +548,13 @@ export async function runMemoryDrawers(input: {
   file?: string;
   /** Render drawers back to markdown: a directory, or `-` for stdout. */
   export?: string;
+  /**
+   * Include `<!-- id: kind:hexid -->` markers on `--export`, so the file can
+   * be edited and fed back in through `--import` (#437).
+   */
+  withId?: boolean;
+  /** Read drawer markdown back in: a directory, matching `--export`'s. */
+  import?: string;
   /** Archive and remove any markdown drawer whose content is proven filed. */
   retire?: boolean;
   json?: boolean;
@@ -579,7 +599,9 @@ export async function runMemoryDrawers(input: {
 
     if (input.export !== undefined) {
       for (const kind of kinds) {
-        const trip = verifyDrawerRoundTrip(store, persona, kind);
+        const trip = verifyDrawerRoundTrip(store, persona, kind, {
+          withId: input.withId,
+        });
         if (input.export === "-") {
           write(trip.markdown);
           continue;
@@ -588,6 +610,61 @@ export async function runMemoryDrawers(input: {
         const dest = join(input.export, `${kind}.md`);
         await writeFile(dest, trip.markdown, "utf8");
         write(`${dest}: ${describeRoundTrip(trip)}\n`);
+      }
+      return 0;
+    }
+
+    if (input.import !== undefined) {
+      const memDir = join(dir, "memory");
+      const date = new Date().toISOString().slice(0, 10);
+      const dailyPath = join(memDir, `${date}.md`);
+      const logLines: string[] = [];
+      // Supersede is the loud half of "reaffirm is quiet, supersede is loud"
+      // (#437): a stray hand-edit that flips one line permanently retires a
+      // row, so it goes in TODAY's daily file — same-day visibility through
+      // the ordinary digest, no separate review flow to maintain.
+      const onSupersede = (r: ImportEntryResult & { outcome: "superseded" }) => {
+        const stamp = `${new Date().toISOString().slice(11, 16)}Z`;
+        logLines.push(
+          `- [drawer-import] superseded ${r.marker!.kind}:${r.marker!.id} -> ${r.id}: ` +
+            `"${r.previousContent}" -> "${r.content}" · ${stamp}\n`,
+        );
+      };
+      for (const kind of kinds) {
+        const abs =
+          input.import === "-" ? "-" : join(input.import, `${kind}.md`);
+        const text =
+          input.import === "-"
+            ? await new Response(process.stdin as never).text()
+            : existsSync(abs)
+              ? await readFile(abs, "utf8")
+              : undefined;
+        if (text === undefined) {
+          write(`${abs}: no file, skipped\n`);
+          continue;
+        }
+        const result = importDrawerMarkdown(store, persona, kind, text, {
+          onSupersede,
+        });
+        write(`${abs === "-" ? kind : abs}: ${describeImport(result)}\n`);
+        for (const e of result.entries) {
+          if (e.markerRejected === "marker-mismatch") {
+            write(
+              `  rejected marker: names kind '${e.marker!.kind}', ` +
+                `not '${kind}' — filed as new entry instead: "${e.content}"\n`,
+            );
+          } else if (e.markerRejected === "marker-unknown") {
+            write(
+              `  rejected marker: ${e.marker!.kind}:${e.marker!.id} does not ` +
+                `name a row here — filed as new entry: "${e.content}"\n`,
+            );
+          }
+        }
+      }
+      if (logLines.length > 0) {
+        await mkdir(memDir, { recursive: true });
+        if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
+        await appendFile(dailyPath, logLines.join(""), "utf8");
       }
       return 0;
     }
@@ -994,6 +1071,21 @@ const drawersCmd = defineCommand({
       description:
         "Render the drawer(s) back to markdown into this directory, or '-' for stdout.",
     },
+    "with-id": {
+      type: "boolean",
+      description:
+        "With --export: append a <!-- id: kind:hexid --> marker to every " +
+        "entry, so the file can be hand-edited and re-filed with --import.",
+      default: false,
+    },
+    import: {
+      type: "string",
+      description:
+        "Read drawer markdown back in from this directory (as produced by " +
+        "--export --with-id), or '-' for stdin. Unmarked or unchanged lines " +
+        "file/reaffirm as usual; a changed marked line supersedes the row " +
+        "it names.",
+    },
     retire: {
       type: "boolean",
       description:
@@ -1012,6 +1104,8 @@ const drawersCmd = defineCommand({
       force: Boolean(args.force),
       file: args.file === undefined ? undefined : String(args.file),
       export: args.export === undefined ? undefined : String(args.export),
+      withId: Boolean(args["with-id"]),
+      import: args.import === undefined ? undefined : String(args.import),
       retire: Boolean(args.retire),
       json: Boolean(args.json),
     });

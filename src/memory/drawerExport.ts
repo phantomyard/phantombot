@@ -66,9 +66,13 @@ function isoDate(d: Date): string {
  * no such ambiguity, which is why the shape is chosen from the content rather
  * than fixed.
  */
-export function renderEntryMarkdown(entry: DrawerEntry): string {
+export function renderEntryMarkdown(
+  entry: DrawerEntry,
+  opts: RenderEntryOptions = {},
+): string {
   const lines = entry.content.split("\n").map((l) => l.trimEnd());
-  if (lines.length === 1) return `- ${lines[0]}`;
+  const marker = opts.withId ? `\n${formatIdMarker(entry.kind, entry.id)}` : "";
+  if (lines.length === 1) return `- ${lines[0]}${marker}`;
   const [head, ...rest] = lines;
   // Body lines are INDENTED, and that indentation is load-bearing rather than
   // cosmetic. An entry whose body happens to contain a line starting `## ` or
@@ -80,15 +84,39 @@ export function renderEntryMarkdown(entry: DrawerEntry): string {
   // It costs nothing in identity: entry ids are computed over
   // `normalizeFact`, which collapses runs of whitespace, so the indented
   // re-parse yields exactly the id the row already has.
-  return [
-    `### ${head!.replace(/^#+\s*/, "")}`,
-    ...rest.map((l) => (l.trim() === "" ? "" : `  ${l.replace(/^\s+/, "")}`)),
-  ].join("\n");
+  return (
+    [
+      `### ${head!.replace(/^#+\s*/, "")}`,
+      ...rest.map((l) => (l.trim() === "" ? "" : `  ${l.replace(/^\s+/, "")}`)),
+    ].join("\n") + marker
+  );
+}
+
+export interface RenderEntryOptions {
+  /**
+   * Append a trailing `<!-- id: kind:hexid -->` marker so the render can be
+   * hand-edited and imported back (#437) instead of only ever being a
+   * read-only backup. Off by default: the round-trip verifier and the plain
+   * `--export` artefact both predate the marker and their tests pin the
+   * marker-free shape, so this is opt-in rather than a silent format change.
+   */
+  withId?: boolean;
+}
+
+/**
+ * `<!-- id: kind:hexid -->` — the marker `renderEntryMarkdown({ withId: true
+ * })` appends and `parseDrawer` strips back out. One place so the export
+ * writer and the importer's validation both agree on the exact shape.
+ */
+export function formatIdMarker(kind: DrawerKind, id: string): string {
+  return `<!-- id: ${kind}:${id} -->`;
 }
 
 export interface ExportOptions {
   /** Include entries in these statuses only. Default: every status. */
   statuses?: readonly string[];
+  /** Append the `<!-- id: kind:hexid -->` marker to every entry (#437). */
+  withId?: boolean;
 }
 
 /**
@@ -126,7 +154,7 @@ export function exportDrawerMarkdown(
   for (const date of [...byDate.keys()].sort()) {
     out.push(`## ${date}`, "");
     for (const entry of byDate.get(date)!) {
-      out.push(renderEntryMarkdown(entry), "");
+      out.push(renderEntryMarkdown(entry, { withId: opts.withId }), "");
     }
   }
   return `${out.join("\n").trimEnd()}\n`;
