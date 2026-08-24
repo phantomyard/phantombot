@@ -47,6 +47,7 @@ import {
 } from "../lib/workspaceLock.ts";
 import {
   buildSystemPrompt,
+  CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
 } from "../persona/builder.ts";
 import { loadPersona } from "../persona/loader.ts";
@@ -454,6 +455,9 @@ async function* runTurnBody(
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's
   //      reply-style + voice-brevity rules; nightly's distillation
   //      directives).
+  //   1b. CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION — the channel-agnostic
+  //      plan-then-confirm + 50-word-answer rule, on every interactive
+  //      turn whose question a human will actually see.
   //   2. siblingNotice — #391. Sits between the caller's suffix and the
   //      narration rule: it is a constraint on WHAT the turn may do, so it
   //      outranks the formatting directive, but it must not displace the
@@ -464,6 +468,21 @@ async function* runTurnBody(
   //      and is the most prominent format-of-reply rule the model sees.
   const overlays: string[] = [];
   if (input.systemPromptSuffix) overlays.push(input.systemPromptSuffix);
+
+  // 1b. Plan-then-confirm + answer-length discipline. Channel-agnostic on
+  //     purpose: it lives HERE rather than in a channel's own suffix so
+  //     Telegram, phantomchat, `phantombot ask` and the ACP editor
+  //     connectors all get the identical rule (an agent that gates in chat
+  //     and runs wild from an editor is the bug this replaces).
+  //
+  //     Gated on a human being able to READ the question and ANSWER it.
+  //     Interactive origin excludes nightly (`internal`) and task wakes;
+  //     the audience check excludes a wake-but-silent reaction turn, whose
+  //     reply is never sent. Telling any of those to "stop and ask" would
+  //     stall work nobody is watching.
+  const canAskTheUser =
+    isInteractiveOrigin(origin) && input.replyAudience !== "silent";
+  if (canAskTheUser) overlays.push(CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION);
   const siblings = siblingTurns(input.persona, turnId);
   const notice = siblingNotice(siblings);
   if (notice) {

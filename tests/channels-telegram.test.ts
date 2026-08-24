@@ -2376,7 +2376,9 @@ describe("runTelegramServer voice round-trip", () => {
 // ---------------------------------------------------------------------------
 // Channel-layer system-prompt suffixes:
 //   - TELEGRAM_REPLY_INSTRUCTION applies to every Telegram turn
-//     (short conversational + plan-then-confirm before long jobs)
+//     (short conversational + voice/text routing). The plan-then-confirm
+//     gate is NOT in it — it comes from the orchestrator overlay, which is
+//     why these tests assert it is present on a Telegram turn all the same.
 //   - VOICE_REPLY_INSTRUCTION stacks on top for voice-in/voice-out
 //     (stricter 1-3 sentence limit + no markdown for TTS)
 // ---------------------------------------------------------------------------
@@ -2441,8 +2443,9 @@ describe("runTelegramServer system-prompt suffixes", () => {
       const prompt = harness.lastRequest?.systemPrompt ?? "";
       // Telegram chat-style suffix is present.
       expect(prompt).toContain("Reply style (Telegram chat)");
-      // No blanket confirm-before-you-act gate is injected (see prompts.ts).
-      expect(prompt).not.toContain("Confirm before long jobs");
+      // The channel-agnostic confirm gate rides along on a chat turn too
+      // (orchestrator overlay, not the Telegram suffix — AGENTS invariant 29).
+      expect(prompt).toContain("Confirm before long jobs");
       // Voice overlay is also present (stacked on top).
       expect(prompt).toContain("Reply length (this turn only)");
       expect(prompt).toContain("text-to-speech");
@@ -2475,10 +2478,15 @@ describe("runTelegramServer system-prompt suffixes", () => {
     const prompt = harness.lastRequest?.systemPrompt ?? "";
     // The chat-style instruction is always applied for Telegram turns.
     expect(prompt).toContain("Reply style (Telegram chat)");
-    // The channel layer no longer injects a confirm-before-long-jobs gate:
-    // it outranked the user's own instructions on every turn (AGENTS invariant 29).
-    expect(prompt).not.toContain("Confirm before long jobs");
-    expect(prompt).not.toContain("outline your plan");
+    // The confirm gate is injected by the orchestrator on every interactive
+    // turn, Telegram included — with the threshold at more than THREE tool
+    // calls and an explicit "the user outranks this" clause (invariant 29).
+    expect(prompt).toContain("Confirm before long jobs");
+    expect(prompt).toContain("outline your plan");
+    expect(prompt).toContain("more than three tool calls");
+    expect(prompt).toContain("This is a default, not a cage");
+    // ...and the 50-word answer-length rule travels with it.
+    expect(prompt).toContain("50 words or");
     // The voice-only overlay must NOT leak into text replies.
     expect(prompt).not.toContain("text-to-speech");
     expect(prompt).not.toContain("Reply length (this turn only)");
