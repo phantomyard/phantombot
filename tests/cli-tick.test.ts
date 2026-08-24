@@ -476,6 +476,59 @@ describe("runTick — normal task fire", () => {
     expect(await readFile(markerPath, "utf8")).toBe("kai-value");
   });
 
+  test("a transient vault failure still passes the persona's OWN injected secret", async () => {
+    // The other side of the guard: loadVaultIntoEnv leaves injected keys in
+    // place when the SAME persona's vault fails to open transiently, so
+    // refusing the ambient value would starve kai's poller of kai's own
+    // credential. Simulated by removing the vault file after injection.
+    const { openPersonaVault, loadVaultIntoEnv, vaultPath, _resetVaultTrackingForTesting } =
+      await import("../src/lib/vault.ts");
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(join(workdir, "personas", "kai", "BOOT.md"), "# Kai\n", "utf8");
+    const v = await openPersonaVault(join(workdir, "personas", "kai"));
+    try {
+      v.set("OWN_SECRET", "kais-own");
+    } finally {
+      v.close();
+    }
+    _resetVaultTrackingForTesting();
+    await loadVaultIntoEnv(join(workdir, "personas", "kai"));
+    expect(process.env.OWN_SECRET).toBe("kais-own");
+    await rm(vaultPath(join(workdir, "personas", "kai")), { force: true });
+
+    const markerPath = join(workdir, "kai-own.txt");
+    const created = store.add({
+      persona: "kai",
+      description: "kai poll",
+      schedule: "0 * * * *",
+      prompt: "audit context only",
+      command: `printf "[%s]" "$OWN_SECRET" > ${markerPath}`,
+      commandSecrets: ["OWN_SECRET"],
+      reviewIntervalMs: 1,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    try {
+      const code = await runTick({
+        config,
+        taskStore: store,
+        memory,
+        loadPersonaConfig: async (persona) => ({ ...config, personaLayer: persona }),
+        harnesses: [
+          new ScriptedHarness("h", [{ type: "done", finalText: "should not run" }]),
+        ],
+        lockPath,
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+      expect(code).toBe(0);
+      expect(await readFile(markerPath, "utf8")).toBe("[kais-own]");
+    } finally {
+      delete process.env.OWN_SECRET;
+      _resetVaultTrackingForTesting();
+    }
+  });
+
   test("another persona's vault value in process.env never stands in for a missing secret", async () => {
     // The leak direction: kai has no row of his own. An ambient value that we
     // injected from ANOTHER persona's vault must not be handed to his task —

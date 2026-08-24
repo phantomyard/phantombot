@@ -21,6 +21,7 @@ import {
   _resetVaultTrackingForTesting,
   loadVaultIntoEnv,
   openPersonaVault,
+  vaultPath,
 } from "../src/lib/vault.ts";
 
 const SAVED_ENV = {
@@ -410,6 +411,29 @@ describe("voiceApiKey — the key follows the persona, not the environment", () 
 
       expect(await voiceApiKey(cfgFor("lena"))).toBeUndefined();
       expect(await voiceApiKey(cfgFor("robbie"))).toBe("sk-robbie");
+    } finally {
+      _resetVaultTrackingForTesting();
+    }
+  });
+
+  test("a transient vault failure does NOT mute the persona whose key is injected", async () => {
+    // The other side of that guard. loadVaultIntoEnv deliberately leaves the
+    // injected secrets in place when the SAME persona's vault fails to open
+    // (transient blip, not a reason to strip), so refusing the ambient value
+    // here would mute robbie over robbie's own key. Simulated by removing the
+    // vault file after injection: the read finds nothing, the env still holds
+    // his value.
+    delete process.env.PHANTOMBOT_OPENAI_API_KEY;
+    await seedVault("robbie", "sk-robbie");
+    _resetVaultTrackingForTesting();
+    try {
+      await loadVaultIntoEnv(join(workdir, "robbie"));
+      await rm(vaultPath(join(workdir, "robbie")), { force: true });
+
+      expect(await voiceApiKey(cfgFor("robbie"))).toBe("sk-robbie");
+      // Still no stand-in for anyone else.
+      await mkdir(join(workdir, "lena"), { recursive: true });
+      expect(await voiceApiKey(cfgFor("lena"))).toBeUndefined();
     } finally {
       _resetVaultTrackingForTesting();
     }

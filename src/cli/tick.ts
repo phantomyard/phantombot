@@ -54,8 +54,7 @@ import {
   isLockHandle,
 } from "../lib/runLock.ts";
 import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
-import { getPersonaSecretStrict } from "../lib/vaultSecrets.ts";
-import { isVaultInjectedEnvKey } from "../lib/vault.ts";
+import { ambientEnvKeyAllowed, getPersonaSecretStrict } from "../lib/vaultSecrets.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
 import { shouldDeferWake } from "../lib/turnRegistry.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
@@ -561,10 +560,11 @@ async function buildCommandEnv(
       env[name] = fromVault;
       continue;
     }
-    // Not in this persona's vault. Ambient host values are still fair game;
-    // another persona's vault value, injected into our env at startup, is not.
+    // Not in this persona's vault. Ambient host values are still fair game,
+    // as is a key injected from THIS persona's own vault (a same-persona open
+    // blip leaves it in place); another persona's vault value is not.
     const ambient = process.env[name];
-    if (ambient !== undefined && !isVaultInjectedEnvKey(name)) {
+    if (ambient !== undefined && ambientEnvKeyAllowed(config, name, persona)) {
       env[name] = ambient;
     }
   }

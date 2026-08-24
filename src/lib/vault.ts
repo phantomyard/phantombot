@@ -323,6 +323,22 @@ export function isVaultInjectedEnvKey(
   return tracked.has(name);
 }
 
+/**
+ * True when `personaDirPath` is the persona whose vault this process last
+ * injected into `process.env`.
+ *
+ * Lets a resolver tell the two cases a vault-injected key can be in apart. If
+ * the key belongs to a DIFFERENT persona it must never stand in (see
+ * `isVaultInjectedEnvKey`); if it belongs to THIS persona it is that persona's
+ * own secret, still in the environment because `loadVaultIntoEnv` deliberately
+ * leaves injected keys in place when the same persona's vault fails to open
+ * transiently. Treating that blip as "no key" would mute a persona over its
+ * own credential.
+ */
+export function isVaultLoadedPersonaDir(personaDirPath: string): boolean {
+  return _vaultLoadedPersonaDir !== undefined && personaDirPath === _vaultLoadedPersonaDir;
+}
+
 /** For tests: reset the module-scope vault env tracking. */
 export function _resetVaultTrackingForTesting(): void {
   _vaultTracked.clear();

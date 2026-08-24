@@ -22,7 +22,12 @@ import { type Config, personaDir } from "../config.ts";
 import { log } from "./logger.ts";
 import { existsSync } from "node:fs";
 
-import { isVaultInjectedEnvKey, openPersonaVault, vaultPath } from "./vault.ts";
+import {
+  isVaultInjectedEnvKey,
+  isVaultLoadedPersonaDir,
+  openPersonaVault,
+  vaultPath,
+} from "./vault.ts";
 
 export interface SetPersonaSecretResult {
   ok: boolean;
@@ -125,9 +130,10 @@ export async function unsetPersonaSecret(
  * injected FROM a vault is not: it belongs to exactly one persona, and letting
  * it stand in here would put the startup persona's credential on a secondary
  * persona's request — nondeterministically, since `reloadVaultForPersona()`
- * rewrites those names before every harness spawn. Same guard tick's
- * `--secret` resolution applies. Never throws — an unopenable vault degrades
- * to the ambient fallback.
+ * rewrites those names before every harness spawn. A key injected from THIS
+ * persona's own vault is fine, though: see `ambientEnvKeyAllowed`. Same guard
+ * tick's `--secret` resolution applies. Never throws — an unopenable vault
+ * degrades to the ambient fallback.
  */
 export async function getPersonaSecret(
   config: Config,
@@ -136,8 +142,35 @@ export async function getPersonaSecret(
 ): Promise<string | undefined> {
   const fromVault = await getPersonaSecretStrict(config, name, persona);
   if (fromVault !== undefined) return fromVault;
-  if (isVaultInjectedEnvKey(name)) return undefined;
+  if (!ambientEnvKeyAllowed(config, name, persona)) return undefined;
   return process.env[name];
+}
+
+/**
+ * May `process.env[name]` stand in for `persona`'s missing vault row?
+ *
+ * Yes when the key was never injected from a vault by this process — it is a
+ * host-wide value (shell export, systemd `Environment=`) and pre-vault hosts
+ * depend on it. Yes, too, when it WAS injected but from this very persona's
+ * vault: that is the persona's own secret, left in the environment because
+ * `loadVaultIntoEnv` treats a same-persona open failure as a transient blip
+ * rather than a reason to strip. No only for the case the guard exists for —
+ * a key injected from a DIFFERENT persona's vault, which would put one
+ * persona's credential on another's request, nondeterministically, since
+ * `reloadVaultForPersona()` rewrites those names before every harness spawn.
+ *
+ * Shared by every resolver that reads a secret for a persona which may not be
+ * the loaded one (`getPersonaSecret`, tick's `--secret`), so the two cannot
+ * drift apart.
+ */
+export function ambientEnvKeyAllowed(
+  config: Config,
+  name: string,
+  persona?: string,
+): boolean {
+  if (!isVaultInjectedEnvKey(name)) return true;
+  const target = persona || config.personaLayer || config.defaultPersona;
+  return isVaultLoadedPersonaDir(personaDir(config, target));
 }
 
 /**
