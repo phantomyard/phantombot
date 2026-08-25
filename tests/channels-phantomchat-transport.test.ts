@@ -14,7 +14,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+  verifyEvent,
+} from "nostr-tools/pure";
 import {
   SimplePoolPhantomchatTransport,
   type NostrFilter,
@@ -640,5 +645,88 @@ describe("phantomchat transport fetchProfiles (kind-0)", () => {
     const map = await transport.fetchProfiles([]);
     expect(map.size).toBe(0);
     expect(subscribed).toBe(false);
+  });
+});
+
+describe("phantomchat transport close teardown (one-shot callers)", () => {
+  // Regression: the publish read-back (verifyStored) is deliberately DETACHED
+  // from the send path so it never blocks delivery. But a one-shot caller like
+  // `phantombot notify` closes the pool right after the send resolves, and the
+  // read-back's settle delay (750ms) outlasts that close. Before the fix, the
+  // read-back then re-opened relay connections via subscribeMany AFTER close(),
+  // leaving a live WebSocket in the pool that kept the process alive forever.
+  // This pins the contract: once closed, the detached read-back must NOT
+  // re-open connections.
+
+  function signedWrap(sk: Uint8Array): NTNostrEvent {
+    return finalizeEvent(
+      {
+        kind: 1059,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: "teardown-test",
+      },
+      sk,
+    ) as unknown as NTNostrEvent;
+  }
+
+  test("close() suppresses the detached read-back (no re-open after teardown)", async () => {
+    let subscribeCalls = 0;
+    const fakePool: RelayPool = {
+      subscribeMany() {
+        subscribeCalls++;
+        return { close() {} };
+      },
+      publish() {
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    await transport.publishWrap(signedWrap(sk));
+    transport.close(); // a one-shot caller tears down immediately after the send
+
+    // Settle delay (750ms) + margin. The detached read-back must have bailed.
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(subscribeCalls).toBe(0);
+  });
+
+  test("read-back still runs while the transport stays open", async () => {
+    let subscribeCalls = 0;
+    let received: unknown;
+    const fakePool: RelayPool = {
+      subscribeMany(_relays, filter, params) {
+        subscribeCalls++;
+        received = filter;
+        // Relay confirms the event is stored → read-back resolves immediately.
+        params.onevent(signedWrap(generateSecretKey()));
+        return { close() {} };
+      },
+      publish() {
+        return [Promise.resolve("ok")];
+      },
+      close() {},
+    };
+
+    const sk = generateSecretKey();
+    const transport = new SimplePoolPhantomchatTransport(
+      sk,
+      ["wss://relay.example"],
+      fakePool,
+    );
+
+    await transport.publishWrap(signedWrap(sk));
+    await new Promise((r) => setTimeout(r, 1000));
+
+    expect(subscribeCalls).toBe(1);
+    expect((received as NostrFilter).ids).toBeDefined();
+    transport.close();
   });
 });

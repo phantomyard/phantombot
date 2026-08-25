@@ -364,6 +364,14 @@ export interface PhantomchatTransport extends ChannelTransport {
  */
 export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   readonly relays: string[];
+  /**
+   * Flipped by close(). The publish read-back (verifyStored) is deliberately
+   * detached from the send path so it never blocks delivery, but a one-shot
+   * caller (e.g. `notify`) must be able to fully tear the pool down and exit:
+   * once closed, the read-back must not re-open relay connections — doing so
+   * leaves a live WebSocket in the pool that keeps the process alive forever.
+   */
+  private closed = false;
   /** Our 64-char hex pubkey — the `from` field of every reply envelope. */
   private readonly ourPubHex: string;
   /**
@@ -643,11 +651,17 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     timing?: { settleMs?: number; timeoutMs?: number },
     targets: readonly string[] = this.relays,
   ): Promise<string[]> {
+    if (this.closed) return [];
     if (event.kind >= 20000 && event.kind < 30000) return [];
     const missing: string[] = [];
     await new Promise((r) =>
       setTimeout(r, timing?.settleMs ?? PUBLISH_READBACK_SETTLE_MS),
     );
+    // close() may have run while we settled — a one-shot caller closes the pool
+    // right after the send resolves, and the read-back settle is intentionally
+    // slower than that. Re-opening connections now would leak a live socket
+    // past teardown and keep the process alive; bail out instead.
+    if (this.closed) return [];
     await Promise.all(
       targets.map(async (relay) => {
         const found = await this.readBackOne(relay, event.id, timing?.timeoutMs);
@@ -678,6 +692,7 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
     eventId: string,
     timeoutMs?: number,
   ): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       let settled = false;
       let sub: { close(): void } | undefined;
@@ -1041,6 +1056,8 @@ export class SimplePoolPhantomchatTransport implements PhantomchatTransport {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     try {
       this.pool.close(this.relays);
     } catch (e) {
