@@ -212,8 +212,10 @@ export async function dropOpenDayIndex(
     ix = await MemoryIndex.open(indexPathOverride ?? memoryIndexPath(persona));
     ix.removeVirtualNote(journalDayPath(date));
   } catch {
-    // A stale virtual row is harmless: it is overwritten the moment
-    // refreshStale indexes the real file at the same path.
+    // Not fatal, and not permanent: the artefact was written after the
+    // virtual note was published, so refreshStale hands the path over on
+    // mtime alone the next time it walks the tree. This call just makes the
+    // handover immediate instead of waiting for that comparison.
   } finally {
     ix?.close();
   }

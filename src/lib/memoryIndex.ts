@@ -702,8 +702,11 @@ export class MemoryIndex {
    * documented as the repair for a damaged index, would silently make the
    * persona's own morning unsearchable until the next capture happened to
    * republish it. Carry them across the delete instead: they are few, they
-   * are small, and if the real file has since appeared, `forceAll` indexes it
-   * over the top at the same path, which is the ordinary cutover.
+   * are small, and if the real file has since appeared AND POSTDATES the note,
+   * `forceAll` indexes it over the top at the same path, which is the ordinary
+   * cutover. The snapshot carries each note's original `indexed_at` for
+   * exactly that comparison — re-dating it here would make every restored
+   * note look newer than the artefact that superseded it.
    *
    * Snapshot, delete and restore run in ONE immediate transaction. Carrying
    * the notes across is a read-modify-write on rows another process is also
@@ -724,7 +727,8 @@ export class MemoryIndex {
     this.inWriteTx(() => {
       const virtuals = this.db
         .query(
-          "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body " +
+          "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body, " +
+            "f.indexed_at AS indexedAt " +
             "FROM files f JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
         )
         .all() as Array<{
@@ -732,9 +736,11 @@ export class MemoryIndex {
         scope: Scope;
         title: string;
         body: string;
+        indexedAt: string;
       }>;
       this.db.exec("DELETE FROM notes; DELETE FROM files;");
-      for (const v of virtuals) this.upsertVirtualNote(v);
+      for (const v of virtuals)
+        this.upsertVirtualNote({ ...v, indexedAt: v.indexedAt });
     });
     return this.refreshStale(personaDir, /* forceAll */ true);
   }
@@ -752,13 +758,27 @@ export class MemoryIndex {
     let indexed = 0;
     let removed = 0;
 
-    const recorded = new Map<string, { mtimeMs: number; virtual: boolean }>();
+    const recorded = new Map<
+      string,
+      { mtimeMs: number; virtual: boolean; indexedAtMs: number }
+    >();
     for (const row of this.db
-      .query("SELECT path, mtime_ms, virtual FROM files")
-      .all() as Array<{ path: string; mtime_ms: number; virtual: number }>) {
+      .query("SELECT path, mtime_ms, virtual, indexed_at FROM files")
+      .all() as Array<{
+      path: string;
+      mtime_ms: number;
+      virtual: number;
+      indexed_at: string;
+    }>) {
+      const indexedAtMs = Date.parse(row.indexed_at);
       recorded.set(row.path, {
         mtimeMs: row.mtime_ms,
         virtual: row.virtual === 1,
+        // An unparseable timestamp reads as "published at the dawn of time",
+        // so a file at that path always wins. Losing a virtual row to a real
+        // artefact is recoverable — the next capture republishes it — while
+        // keeping one that should have been relinquished is not.
+        indexedAtMs: Number.isNaN(indexedAtMs) ? -Infinity : indexedAtMs,
       });
     }
 
@@ -776,6 +796,36 @@ export class MemoryIndex {
 
     for (const f of live) {
       const prev = recorded.get(f.path);
+      // A VIRTUAL row owns its path against a file that is older than it.
+      //
+      // The virtual note is written with mtime_ms = -1 so that no "unchanged"
+      // shortcut can skip it. When a file also exists at that path — today's
+      // memory/<date>.md, left on disk after absorbDay turned it into rows —
+      // that sentinel guarantees the opposite of what it was for: every
+      // refresh re-indexes the stale file over the live rows and downgrades
+      // virtual = 1 to 0. refreshStale runs on the heartbeat, on `memory
+      // index`, on rebuild and on retrieval turns, so the publisher wins for
+      // seconds after each capture and loses permanently, leaving the day's
+      // newest entries unsearchable while recall still advertises them.
+      //
+      // Ownership is not unconditional: a file MODIFIED SINCE the virtual row
+      // was published is the nightly artefact taking over, which is the
+      // ordinary cutover. That keeps the handover self-healing even when the
+      // journal's explicit `dropOpenDayIndex` never ran.
+      //
+      // It is checked BEFORE forceAll on purpose: a rebuild passes forceAll
+      // to re-derive everything from disk, but a virtual note is not derived
+      // from disk — that is the whole reason rebuild() carries it across the
+      // delete.
+      //
+      // The comparison is STRICT so a tie hands the path to the file. mtime
+      // and indexed_at agree only to the millisecond, so equality means "we
+      // cannot tell", and the two mistakes are not symmetric: losing the row
+      // to a file is repaired by the next capture, which republishes the note
+      // with a later timestamp and takes the path straight back, while
+      // keeping a stand-in that should have stood down shadows the artefact
+      // for good — and the rows behind it are pruned once the render verifies.
+      if (prev?.virtual && f.mtimeMs < prev.indexedAtMs) continue;
       if (!forceAll && prev && prev.mtimeMs === f.mtimeMs) continue;
       const content = await readFile(join(personaDir, f.path), "utf8");
       const doc = parseOkf(content);
@@ -1880,12 +1930,21 @@ export class MemoryIndex {
    * `virtual = 0`, so the day never appears twice and no cutover is needed.
    * `mtime_ms = -1` guarantees that overwrite happens — no real file can have
    * that mtime, so the "unchanged since last index" shortcut cannot skip it.
+   *
+   * `indexed_at` is therefore load-bearing, not bookkeeping: refreshStale
+   * compares it against the file's mtime to decide whether a file at this
+   * path is the artefact taking over or a stale copy the rows have already
+   * superseded. `indexedAt` is overridable only so `rebuild()` can carry the
+   * ORIGINAL publish time across its delete — restoring a snapshot must not
+   * silently re-date the row and make an artefact written in between look
+   * older than the note it replaces.
    */
   upsertVirtualNote(input: {
     path: string;
     scope: Scope;
     title: string;
     body: string;
+    indexedAt?: string;
   }): void {
     // Delete-then-insert in one transaction: a reader (or a rebuild taking
     // its snapshot) must never observe the gap where the note exists in
@@ -1908,7 +1967,7 @@ export class MemoryIndex {
           input.scope,
           Buffer.byteLength(input.body, "utf8"),
           input.title,
-          new Date().toISOString(),
+          input.indexedAt ?? new Date().toISOString(),
         );
     });
   }

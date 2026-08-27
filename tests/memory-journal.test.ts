@@ -15,7 +15,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  stat,
+  utimes,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1017,6 +1024,96 @@ describe("index on write", () => {
       // Carrying the virtual note across the delete must not outrank the
       // artefact: forceAll re-indexes the real file over the same path, so
       // the day appears once, from disk.
+      expect(ix.search("file copy", { scope: "memory" }).length).toBe(1);
+      expect(ix.search("row copy", { scope: "memory" }).length).toBe(0);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a stale file at the open day's path cannot clobber the live rows", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    // The pre-#463 markdown absorbDay turned into rows and left on disk by
+    // design. Its body stops at the moment of absorption; the rows carry on.
+    const file = join(dir, "memory", `${DAY}.md`);
+    await writeFile(file, `\n# ${DAY}\n\n- morning note only\n`, "utf8");
+    const then = new Date(Date.now() - 60_000);
+    await utimes(file, then, then);
+
+    s.append({
+      persona: P,
+      date: DAY,
+      content: "release run 33109716080 failed on HTTP 400",
+      tags: ["lesson"],
+    });
+    await indexOpenDay(s, P, DAY, indexPath);
+
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      // refreshStale runs on the heartbeat, on `memory index`, on rebuild and
+      // on every retrieval turn. Before the fix it re-indexed the older file
+      // over the virtual row and flipped virtual 1 -> 0, so the publisher won
+      // for seconds after each capture and lost permanently — recall kept
+      // printing "nothing is lost, memory search" for entries search could no
+      // longer reach.
+      await ix.refreshStale(dir);
+      expect(ix.search("33109716080", { scope: "memory" }).length).toBe(1);
+      await ix.refreshStale(dir);
+      expect(ix.search("33109716080", { scope: "memory" }).length).toBe(1);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a file written after the virtual note still takes the path over", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "row copy of the day" });
+    await indexOpenDay(s, P, DAY, indexPath);
+    // The nightly rendered the artefact but never got to relinquish the
+    // virtual row — a crash, or an index it could not open. Ownership must
+    // still hand over on the mtime alone, or the stand-in shadows the real
+    // file for good and the rows behind it are pruned out from under it.
+    await new Promise((r) => setTimeout(r, 10));
+    await writeFile(
+      join(dir, "memory", `${DAY}.md`),
+      `# ${DAY}\n- file copy of the day\n`,
+      "utf8",
+    );
+
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      await ix.refreshStale(dir);
+      expect(ix.search("file copy", { scope: "memory" }).length).toBe(1);
+      expect(ix.search("row copy", { scope: "memory" }).length).toBe(0);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a rebuild keeps the virtual note's original publish time", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "row copy of the day" });
+    await indexOpenDay(s, P, DAY, indexPath);
+    await new Promise((r) => setTimeout(r, 10));
+    await writeFile(
+      join(dir, "memory", `${DAY}.md`),
+      `# ${DAY}\n- file copy of the day\n`,
+      "utf8",
+    );
+
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      // rebuild() restores the snapshot it took. Re-dating the restored row
+      // to "now" would make every artefact written before the repair look
+      // older than the stand-in it replaced, so the repair itself would pin
+      // the stale copy in place.
+      await ix.rebuild(dir);
       expect(ix.search("file copy", { scope: "memory" }).length).toBe(1);
       expect(ix.search("row copy", { scope: "memory" }).length).toBe(0);
     } finally {
