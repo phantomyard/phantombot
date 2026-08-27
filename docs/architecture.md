@@ -43,7 +43,8 @@ Run a chat agent ("Phantom") as a **CLI tool** on the operator's own machine. Al
 | `src/cli/doctor.ts` | `phantombot doctor`: reports the nightly ledger (read-only) + `capture_log`, repairs units/timers/connectors. | `memory/store`, `lib/nightly` |
 | `src/importer/openclaw.ts` | Walks an OpenClaw agent dir; copies recognized markdown into the personas dir. | filesystem |
 | `src/orchestrator/turn.ts` | `runTurn`: persona → memory → harness chain → persist. The one function every entry point calls. | `loader`, `builder`, `memory`, `fallback` |
-| `src/orchestrator/fallback.ts` | `runWithFallback`: tries each harness in order, advances on recoverable error, terminates on success or terminal error. Pre-spawn skip when `maxPayloadBytes` is too small. | `harnesses/*` |
+| `src/orchestrator/fallback.ts` | `runWithFallback`: tries each harness in order, advances on recoverable error, terminates on success or terminal error. Pre-spawn skip when `maxPayloadBytes` is too small. An idle-watchdog kill that had already produced output respawns the SAME harness once first (resume-with-context, #459). | `harnesses/*`, `resume` |
+| `src/orchestrator/resume.ts` | `PartialAttempt` chunk log + the verify-before-redoing preamble a resumed attempt carries. Harness-agnostic; no config flag. | — |
 | `src/repl/index.ts` | `runChat` (node:readline loop) + `handleSlash` (command dispatch). | `orchestrator/turn`, `memory` |
 | `src/harnesses/types.ts` | `Harness`, `HarnessRequest`, `HarnessChunk` (discriminated union). | — |
 | `src/harnesses/claude.ts` | `Bun.spawn claude --print --output-format stream-json …`. Stdin payload, ANTHROPIC_API_KEY filtered out. | `claude` CLI |

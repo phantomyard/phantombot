@@ -565,6 +565,24 @@ Harness notes:
   means "this persona's chain". Migration translates it into that persona's own
   `[harnesses] chain` on the first daemon start after upgrading; do not add new
   entries to it.
+- **A turn wedged mid-flight is resumed, not dropped.** If a harness is killed
+  by the idle watchdog *after* it had already started replying — it streamed
+  some narration, ran a tool, then the provider went quiet — phantombot
+  respawns that same harness **once**, before advancing the chain, and hands it
+  a short recovery note: what it had already said (the user can see it, so
+  don't repeat it) and which tool calls were in flight. That note states
+  plainly that each of those calls **may or may not have applied**, and tells
+  the model to verify current state before redoing anything that changes
+  something. It never claims the call failed — the stall may have happened
+  after a tool completed perfectly well.
+  This is on always; there is no flag. It replaces the old guarantee ("never
+  replay a side effect") with a better one ("never silently drop a turn") —
+  silently being the operative word, since the recovery attempt is told exactly
+  what is uncertain. Only an **idle** kill qualifies: a hard wall-clock cap
+  stays final, a turn that never produced output is handled by the ordinary
+  fall-through, and `/stop` means stop. One recovery per harness per turn; a
+  second wedge falls through to the next harness as before. This is what a
+  single-entry chain (`chain = ["pi"]`) gets instead of nothing at all.
 - Falling back is silent in chat, but not silent to you: if the primary
   harness fails authentication several turns running, phantombot sends you
   one Telegram alert naming the host and which harness is covering for it
@@ -1201,8 +1219,11 @@ Two safety rails keep a swapped turn from ever being *lost*:
   means anything: streamed text OR a tool run (pi tools surface as progress
   chunks, not text — and a retry after a bash/notify/vault tool ran would
   replay its side effects). Failures after the attempt got somewhere are
-  surfaced as normal harness errors instead, and a hard wall-clock cap kill is
-  final — the ladder never multiplies one 60-minute cap into four hours.
+  surfaced as normal harness errors instead — where, if the kill was the idle
+  watchdog, the orchestrator's resume-with-context recovery (see
+  [Configuration](#configuration)) picks them up with a verify-before-redoing
+  note. A hard wall-clock cap kill is final either way; the ladder never
+  multiplies one 60-minute cap into four hours.
 
 Configure all three roles with the `phantombot harness` wizard; the choices are
 mirrored into `config.toml` under `[harnesses.pi.routing]` and visible to

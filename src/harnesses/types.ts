@@ -188,6 +188,17 @@ export type HarnessChunk =
       recoverable: boolean;
       httpStatus?: number;
       terminal?: true;
+      /**
+       * Why the kill coordinator killed the subprocess, when it was a kill
+       * rather than a natural exit. Structured because the orchestrator makes
+       * a real decision on it (issue #459): an `idle` kill that had already
+       * produced output is resumable with context, while a hard-cap `timeout`
+       * or a `startup` kill is not. Matching on the human-readable `error`
+       * string to recover that distinction would be a rename away from
+       * silently disabling the recovery. Omitted when the failure was not a
+       * coordinator kill (spawn failure, non-zero exit, provider 4XX).
+       */
+      killCause?: "timeout" | "idle" | "startup" | "aborted" | "policy";
     };
 
 /**

@@ -351,6 +351,21 @@ describe("killCauseToErrorChunk", () => {
     expect(killCauseToErrorChunk(undefined, "claude", 1000, 100)).toBeUndefined();
   });
 
+  // The orchestrator branches on the STRUCTURED cause, not on the prose
+  // (issue #459): an idle kill that had already produced output is resumed
+  // with context, a hard-cap timeout never is. Losing this field would
+  // silently disable the recovery, so pin it for every cause.
+  test.each([
+    ["timeout"],
+    ["idle"],
+    ["startup"],
+    ["aborted"],
+    ["policy"],
+  ] as const)("%s cause is carried structurally as killCause", (cause) => {
+    const c = killCauseToErrorChunk(cause, "pi", 60_000, 300_000, 45_000);
+    expect(c?.killCause).toBe(cause);
+  });
+
   test("timeout cause → recoverable error mentioning the hard cap", () => {
     const c = killCauseToErrorChunk("timeout", "claude", 60_000, 1000);
     expect(c).toMatchObject({

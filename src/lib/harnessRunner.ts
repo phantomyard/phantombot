@@ -251,6 +251,11 @@ export function isHardCapError(error: string): boolean {
  *   - "policy"   → recoverable (terminal tripwire; normally unreachable here
  *     because the tripwire's own error chunk was already yielded and the
  *     generator returned — this is the belt-and-suspenders fallback)
+ *
+ * The cause is also carried STRUCTURALLY on the chunk as `killCause`, because
+ * the orchestrator branches on it: an `idle` kill that had already produced
+ * output gets a resume-with-context respawn (issue #459). Keep the two in sync
+ * — the string is for humans, the field is for code.
  */
 export function killCauseToErrorChunk(
   cause: KillCause,
@@ -259,13 +264,19 @@ export function killCauseToErrorChunk(
   idleTimeoutMs: number,
   startupTimeoutMs?: number,
 ):
-  | { type: "error"; error: string; recoverable: boolean }
+  | {
+      type: "error";
+      error: string;
+      recoverable: boolean;
+      killCause?: "timeout" | "idle" | "startup" | "aborted" | "policy";
+    }
   | undefined {
   if (cause === "timeout") {
     return {
       type: "error",
       error: `${harnessId} timed out after ${hardTimeoutMs ?? "unknown"}ms ${HARD_CAP_ERROR_SUFFIX}`,
       recoverable: true,
+      killCause: cause,
     };
   }
   if (cause === "idle") {
@@ -273,6 +284,7 @@ export function killCauseToErrorChunk(
       type: "error",
       error: `${harnessId} timed out after ${idleTimeoutMs}ms with no output (likely wedged on a tool call)`,
       recoverable: true,
+      killCause: cause,
     };
   }
   if (cause === "startup") {
@@ -280,16 +292,23 @@ export function killCauseToErrorChunk(
       type: "error",
       error: `${harnessId} produced no output within ${startupTimeoutMs ?? "unknown"}ms of startup (likely wedged on the MCP/init handshake)`,
       recoverable: true,
+      killCause: cause,
     };
   }
   if (cause === "aborted") {
-    return { type: "error", error: "stopped", recoverable: false };
+    return {
+      type: "error",
+      error: "stopped",
+      recoverable: false,
+      killCause: cause,
+    };
   }
   if (cause === "policy") {
     return {
       type: "error",
       error: `${harnessId} killed by policy tripwire`,
       recoverable: true,
+      killCause: cause,
     };
   }
   return undefined;

@@ -19,6 +19,11 @@
  *   - A successful turn (done with non-empty finalText, OR a "best we
  *     can do" empty-done from the last harness) clears the harness's
  *     counter.
+ * Resume-with-context (issue #459): a harness killed by the idle watchdog
+ * AFTER it had already streamed output is respawned ONCE, in the same chain
+ * slot, with a preamble describing what it had said and which tool calls were
+ * in flight. Only then does the chain advance. See orchestrator/resume.ts.
+ *
  *   - At turn start, a snapshot is taken; harnesses whose cooldown is
  *     active are skipped in chain order. Escape hatch: if EVERY harness
  *     in the chain is currently cooled, the snapshot is ignored and we
@@ -34,6 +39,12 @@ import {
 } from "../lib/harnessAlert.ts";
 import { log } from "../lib/logger.ts";
 import type { AuditSink } from "../lib/auditLog.ts";
+import {
+  buildResumeRequest,
+  MAX_RESUME_ATTEMPTS,
+  PartialAttempt,
+  shouldResume,
+} from "./resume.ts";
 
 export interface RunWithFallbackOptions {
   /**
@@ -184,112 +195,161 @@ export async function* runWithFallback(
     // handle.
     let thrown: unknown;
 
-    try {
-    for await (const chunk of harness.invoke(req)) {
-      if (chunk.type === "error") {
-        if (chunk.recoverable && !isLast) {
-          // ─────────────────────────────────────────────────────────────
-          // INTENTIONAL, STREAMING-FIRST TRADE-OFF — do not "fix" this by
-          // buffering or by deleting already-sent text.
-          //
-          // If this harness streamed some text chunks before erroring, that
-          // text is ALREADY on the user's screen — we yield chunks live, the
-          // instant the harness produces them, because phantombot is a
-          // conversational agent and low-latency token streaming is the
-          // entire point of the experience. When we now fall through to the
-          // next harness, the user may briefly see a truncated partial reply
-          // followed by a fresh full reply from a different model.
-          //
-          // That is the ACCEPTED COST of streaming-first, exactly like the
-          // at-most-once Telegram offset trade-off elsewhere. The two
-          // "clean" alternatives are both worse:
-          //   1. Buffer-until-done before showing anything — kills live
-          //      streaming and the conversational feel. Non-starter.
-          //   2. Delete the already-sent bubbles on fall-through — a
-          //      behaviour-risky transport change, and yanking text a user
-          //      may have already read is its own jarring UX.
-          //
-          // A phantom is a conversation, not a transactional render that must
-          // commit atomically. A rare doubled/partial reply on a mid-stream
-          // harness failure is a calculated, acceptable price for fluid,
-          // immediate streaming. Re-litigate with Andrew before changing it.
-          // ─────────────────────────────────────────────────────────────
-          log.warn(
-            "orchestrator: harness recoverable error, falling through",
-            {
+    // ── resume-with-context (#459) ────────────────────────────────────
+    // One harness slot, up to two attempts. The second only happens when the
+    // first was killed by the IDLE watchdog after it had already streamed
+    // something — a wedge mid-flight, the case with no other recovery path:
+    // pi's coder ladder declines it (it refuses to replay side effects) and a
+    // single-entry chain has no next harness to fall to, so the turn used to
+    // be dropped outright. The retry carries a synthesised preamble naming
+    // the in-flight tool calls and telling the model to verify before redoing
+    // any of them; see orchestrator/resume.ts for the trade being made.
+    //
+    // This reuses the streaming-first trade-off documented below: the partial
+    // narration is already on the user's screen and stays there. The preamble
+    // says so, so the resumed attempt continues rather than repeats.
+    let resumeAttemptsUsed = 0;
+    let attemptReq = req;
+    let resumeRequested = true;
+    while (resumeRequested) {
+      resumeRequested = false;
+      // Chunk log for THIS attempt only — a resume must describe the attempt
+      // that actually wedged, not an earlier one it already recovered from.
+      const partial = new PartialAttempt();
+      try {
+      for await (const chunk of harness.invoke(attemptReq)) {
+        if (chunk.type === "error") {
+          // Killed mid-flight with work already done: respawn this same
+          // harness once, carrying what it had said and started. Checked BEFORE
+          // the fall-through branch so a chain that HAS a next harness still
+          // prefers the one that was making progress over a cold hand-off to a
+          // different model with none of the context.
+          if (shouldResume(chunk, partial, resumeAttemptsUsed)) {
+            resumeAttemptsUsed++;
+            log.warn(
+              "orchestrator: harness wedged after producing output — resuming with context",
+              {
+                harnessId: harness.id,
+                error: chunk.error,
+                attempt: resumeAttemptsUsed,
+                of: MAX_RESUME_ATTEMPTS,
+                narrationChars: partial.text.length,
+                toolCalls: partial.toolCalls.length,
+              },
+            );
+            attemptReq = buildResumeRequest(req, partial);
+            resumeRequested = true;
+            break;
+          }
+          if (chunk.recoverable && !isLast) {
+            // ─────────────────────────────────────────────────────────────
+            // INTENTIONAL, STREAMING-FIRST TRADE-OFF — do not "fix" this by
+            // buffering or by deleting already-sent text.
+            //
+            // If this harness streamed some text chunks before erroring, that
+            // text is ALREADY on the user's screen — we yield chunks live, the
+            // instant the harness produces them, because phantombot is a
+            // conversational agent and low-latency token streaming is the
+            // entire point of the experience. When we now fall through to the
+            // next harness, the user may briefly see a truncated partial reply
+            // followed by a fresh full reply from a different model.
+            //
+            // That is the ACCEPTED COST of streaming-first, exactly like the
+            // at-most-once Telegram offset trade-off elsewhere. The two
+            // "clean" alternatives are both worse:
+            //   1. Buffer-until-done before showing anything — kills live
+            //      streaming and the conversational feel. Non-starter.
+            //   2. Delete the already-sent bubbles on fall-through — a
+            //      behaviour-risky transport change, and yanking text a user
+            //      may have already read is its own jarring UX.
+            //
+            // A phantom is a conversation, not a transactional render that must
+            // commit atomically. A rare doubled/partial reply on a mid-stream
+            // harness failure is a calculated, acceptable price for fluid,
+            // immediate streaming. Re-litigate with Andrew before changing it.
+            // ─────────────────────────────────────────────────────────────
+            log.warn(
+              "orchestrator: harness recoverable error, falling through",
+              {
+                harnessId: harness.id,
+                error: chunk.error,
+                httpStatus: chunk.httpStatus,
+              },
+            );
+            // Cool the harness off — esp. fast for 4XX (the harness
+            // detected an upstream auth/quota/capacity issue and we
+            // don't want to keep slamming it). markFailure() handles
+            // the exponential backoff bookkeeping.
+            cooldown.markFailure(harness.id);
+            alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
+            firstFailure ??= { harnessId: harness.id, error: chunk.error };
+            recoverableError = true;
+            break;
+          }
+          // Recoverable-but-nowhere-left-to-go: the chain is exhausted and the
+          // user gets no reply, so this is an outage worth waking the owner for
+          // — the case that would otherwise only ever be visible as "it stopped
+          // replying". A TERMINAL error deliberately does NOT alert: it is
+          // yielded to the channel as an error chunk, so the user is already
+          // looking at it and a push notification only says it twice.
+          if (chunk.recoverable) {
+            alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
+            await alerter.noteExhausted({
               harnessId: harness.id,
               error: chunk.error,
               httpStatus: chunk.httpStatus,
-            },
+              chain: chainIds,
+            });
+          }
+          yield chunk;
+          return;
+        }
+        // Empty `done` = the harness exited cleanly but produced no
+        // assistant text (gemini SIGTERMed mid-stream by an updater
+        // restart, or a tool-only run with no final message). On a
+        // non-last harness, fall through — pi getting a chance is far
+        // better than the user seeing "(no reply)". On the last harness,
+        // yield it and let the channel surface "(no reply)" so the user
+        // knows something happened.
+        if (
+          chunk.type === "done" &&
+          chunk.finalText.length === 0 &&
+          !isLast
+        ) {
+          log.warn(
+            "orchestrator: harness produced empty reply, falling through",
+            { harnessId: harness.id },
           );
-          // Cool the harness off — esp. fast for 4XX (the harness
-          // detected an upstream auth/quota/capacity issue and we
-          // don't want to keep slamming it). markFailure() handles
-          // the exponential backoff bookkeeping.
           cooldown.markFailure(harness.id);
-          alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
-          firstFailure ??= { harnessId: harness.id, error: chunk.error };
+          alerter.noteFailure(harness.id, "empty reply");
+          firstFailure ??= { harnessId: harness.id, error: "empty reply" };
           recoverableError = true;
           break;
         }
-        // Recoverable-but-nowhere-left-to-go: the chain is exhausted and the
-        // user gets no reply, so this is an outage worth waking the owner for
-        // — the case that would otherwise only ever be visible as "it stopped
-        // replying". A TERMINAL error deliberately does NOT alert: it is
-        // yielded to the channel as an error chunk, so the user is already
-        // looking at it and a push notification only says it twice.
-        if (chunk.recoverable) {
-          alerter.noteFailure(harness.id, chunk.error, chunk.httpStatus);
-          await alerter.noteExhausted({
-            harnessId: harness.id,
-            error: chunk.error,
-            httpStatus: chunk.httpStatus,
-            chain: chainIds,
-          });
+        // Audit hook (#282): record every tool call the harness surfaces.
+        // Best-effort and defensive — a misbehaving sink must never break the
+        // turn, so we guard even though the production sink already can't throw.
+        if (chunk.type === "progress" && chunk.tool && options.onToolCall) {
+          try {
+            options.onToolCall(chunk.tool);
+          } catch (err) {
+            log.debug("orchestrator: audit sink threw (ignored)", {
+              err: String(err),
+            });
+          }
         }
+        // Fold into this attempt's chunk log so a later idle kill has
+        // something to resume FROM. Cheap: bounded narration plus capped tool
+        // titles, dropped the moment the attempt ends any other way.
+        partial.record(chunk);
         yield chunk;
-        return;
+        if (chunk.type === "done") succeeded = true;
       }
-      // Empty `done` = the harness exited cleanly but produced no
-      // assistant text (gemini SIGTERMed mid-stream by an updater
-      // restart, or a tool-only run with no final message). On a
-      // non-last harness, fall through — pi getting a chance is far
-      // better than the user seeing "(no reply)". On the last harness,
-      // yield it and let the channel surface "(no reply)" so the user
-      // knows something happened.
-      if (
-        chunk.type === "done" &&
-        chunk.finalText.length === 0 &&
-        !isLast
-      ) {
-        log.warn(
-          "orchestrator: harness produced empty reply, falling through",
-          { harnessId: harness.id },
-        );
-        cooldown.markFailure(harness.id);
-        alerter.noteFailure(harness.id, "empty reply");
-        firstFailure ??= { harnessId: harness.id, error: "empty reply" };
-        recoverableError = true;
-        break;
+      } catch (e) {
+        thrown = e;
       }
-      // Audit hook (#282): record every tool call the harness surfaces.
-      // Best-effort and defensive — a misbehaving sink must never break the
-      // turn, so we guard even though the production sink already can't throw.
-      if (chunk.type === "progress" && chunk.tool && options.onToolCall) {
-        try {
-          options.onToolCall(chunk.tool);
-        } catch (err) {
-          log.debug("orchestrator: audit sink threw (ignored)", {
-            err: String(err),
-          });
-        }
-      }
-      yield chunk;
-      if (chunk.type === "done") succeeded = true;
     }
-    } catch (e) {
-      thrown = e;
-    }
+    // ── end resume-with-context ───────────────────────────────────────
 
     if (thrown !== undefined) {
       const error = describeInvokeThrow(harness.id, thrown);
