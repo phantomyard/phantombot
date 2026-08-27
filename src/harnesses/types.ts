@@ -199,6 +199,15 @@ export type HarnessChunk =
        * coordinator kill (spawn failure, non-zero exit, provider 4XX).
        */
       killCause?: "timeout" | "idle" | "startup" | "aborted" | "policy";
+      /**
+       * Last ~20 lines of harness stderr, captured by a ring buffer in
+       * `runHarnessProcess` (src/lib/harnessRunner.ts). Present on non-zero-exit
+       * and kill-cause error chunks so the orchestrator can surface the cause in
+       * failover alerts without requiring SSH access. Omitted when the exit was
+       * clean (0 with no stderr) or when no stderr was captured. Each line is
+       * capped at 500 chars. See issue #462.
+       */
+      stderrTail?: string[];
     };
 
 /**

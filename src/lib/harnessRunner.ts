@@ -464,10 +464,22 @@ export async function* runHarnessProcess(
     }
   }
 
-  const onStderrLine =
+  // Ring buffer for stderr lines — always collecting, capped at ~20 lines
+  // of ~500 chars each (~8KB worst case). Attached to error chunks so the
+  // orchestrator can surface the cause in failover alerts without SSH access
+  // (issue #462). Exit 0 stays quiet; non-zero exit promotes to warn level.
+  const STDERR_RING_SIZE = 20;
+  const STDERR_LINE_MAX = 500;
+  const stderrRing: string[] = [];
+  const baseOnStderrLine =
     spec.onStderrLine ??
     ((line: string) => log.debug(`${harnessId} stderr`, { text: line.slice(0, 500) }));
-  void drainStderr(proc.stderr as ReadableStream<Uint8Array>, onStderrLine);
+  const ringOnStderrLine = (line: string): void => {
+    stderrRing.push(line.slice(0, STDERR_LINE_MAX));
+    if (stderrRing.length > STDERR_RING_SIZE) stderrRing.shift();
+    baseOnStderrLine(line);
+  };
+  void drainStderr(proc.stderr as ReadableStream<Uint8Array>, ringOnStderrLine);
 
   let buffer = "";
   let finalText = "";
@@ -580,7 +592,7 @@ export async function* runHarnessProcess(
     req.startupTimeoutMs,
   );
   if (errChunk) {
-    yield errChunk;
+    yield { ...errChunk, stderrTail: stderrRing.length > 0 ? stderrRing : undefined };
     return;
   }
 
@@ -604,8 +616,16 @@ export async function* runHarnessProcess(
         type: "error",
         error: `${harnessId} terminated by ${signalCode ?? "SIGTERM"} (host shutting down)`,
         recoverable: false,
+        stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
       };
       return;
+    }
+    // A dead harness is not debug-level — promote the stderr tail to warn
+    // so it is visible in the journal without SSH (issue #462).
+    if (stderrRing.length > 0) {
+      log.warn(`${harnessId} exited with code ${code} — stderr tail`, {
+        lines: stderrRing,
+      });
     }
     yield {
       type: "error",
@@ -614,6 +634,7 @@ export async function* runHarnessProcess(
       // network blips, transient model errors) is recoverable so the
       // orchestrator tries the next harness.
       recoverable: code !== 127,
+      stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
     };
     return;
   }
@@ -631,6 +652,7 @@ export async function* runHarnessProcess(
       type: "error",
       error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,
       recoverable: true,
+      stderrTail: stderrRing.length > 0 ? stderrRing : undefined,
     };
     return;
   }

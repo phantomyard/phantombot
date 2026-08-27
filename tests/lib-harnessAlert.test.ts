@@ -320,3 +320,50 @@ describe("exhausted alert", () => {
     });
   });
 });
+
+describe("exhausted alert — stderr preview (issue #462)", () => {
+  test("surfaces last 1-2 stderr lines in the alert message", async () => {
+    const { alerter, sent } = newAlerter();
+    await alerter.noteExhausted({
+      harnessId: "claude",
+      error: "claude exited with code 1",
+      chain: ["claude"],
+      stderrTail: ["some old line", "rate limit exceeded", "retrying in 60s"],
+    });
+    expect(sent.length).toBe(1);
+    // The last 2 lines appear in the alert, pipe-separated.
+    expect(sent[0]).toContain("rate limit exceeded | retrying in 60s");
+    // The older line is NOT surfaced.
+    expect(sent[0]).not.toContain("some old line");
+    // Still one line — the preview is appended, not on a new line.
+    expect(sent[0]).not.toContain("\n");
+  });
+
+  test("omits the preview when no stderr was captured", async () => {
+    const { alerter, sent } = newAlerter();
+    await alerter.noteExhausted({
+      harnessId: "claude",
+      error: "claude exited with code 1",
+      chain: ["claude"],
+    });
+    expect(sent.length).toBe(1);
+    // No trailing separator — the message is identical to pre-#462.
+    expect(sent[0]).toContain("turn undelivered");
+    expect(sent[0]).not.toContain(" | ");
+  });
+
+  test("truncates long stderr lines to 200 chars for narrow channels", async () => {
+    const { alerter, sent } = newAlerter();
+    const longLine = "x".repeat(300);
+    await alerter.noteExhausted({
+      harnessId: "claude",
+      error: "claude exited with code 1",
+      chain: ["claude"],
+      stderrTail: [longLine],
+    });
+    expect(sent.length).toBe(1);
+    // The preview contains the truncated line (200 x's), not the full 300.
+    expect(sent[0]).toContain("x".repeat(200));
+    expect(sent[0]).not.toContain("x".repeat(201));
+  });
+});

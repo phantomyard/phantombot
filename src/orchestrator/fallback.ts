@@ -304,6 +304,7 @@ export async function* runWithFallback(
               error: chunk.error,
               httpStatus: chunk.httpStatus,
               chain: chainIds,
+              stderrTail: chunk.stderrTail,
             });
           }
           yield chunk;
