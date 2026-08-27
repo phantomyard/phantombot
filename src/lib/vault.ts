@@ -300,7 +300,23 @@ async function readAllVaultValues(
     // the old value from. Those rows stay — listed, inert, and named in the
     // warning — which is the recoverable side of the choice.
     for (const name of mirrors) {
-      const setting = await configOwnedEnvMirrorSetting(name, personaDirPath);
+      // `configOwnedEnvMirrorSetting` READS config.toml, and a config.toml can
+      // be unparseable, unreadable (EACCES) or a directory — anything but
+      // ENOENT propagates out of it. This whole function is contracted never
+      // to throw: `loadVaultIntoEnv` is fail-partial, so an escaping error
+      // here would cost the persona EVERY secret to fix a stale model id.
+      // An unanswerable question is the same answer as "no home": unknown
+      // lands on the non-destructive side, so the row is withheld and kept.
+      let setting: Awaited<ReturnType<typeof configOwnedEnvMirrorSetting>>;
+      try {
+        setting = await configOwnedEnvMirrorSetting(name, personaDirPath);
+      } catch (err) {
+        log.debug("vault: cannot read config.toml to judge a retired mirror", {
+          name,
+          err: String(err),
+        });
+        setting = undefined;
+      }
       if (!setting) {
         orphaned.push(name);
         continue;

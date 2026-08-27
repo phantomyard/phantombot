@@ -542,6 +542,41 @@ describe("retired config.toml mirrors (#452) are never injected", () => {
     expect(env.GITHUB_TOKEN).toBe("a-real-secret");
   });
 
+  test("withholding survives a config.toml that cannot be PARSED", async () => {
+    // Judging whether a mirror is safe to evict means reading config.toml, and
+    // that read throws on anything but a missing file. readAllVaultValues is
+    // contracted never to throw — loadVaultIntoEnv is fail-partial — so an
+    // escaping parse error would cost the persona EVERY secret in order to
+    // deal with a stale model id. Unknown must land non-destructive: withheld,
+    // kept, and everything else still loaded.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "config.toml"), "[harnesses.pi.routing\nprimary_model = \n");
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
+    v.set("GITHUB_TOKEN", "a-real-secret");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    const { updated } = await loadVaultIntoEnv(dir, env, tracked);
+
+    // The real secret survived: the failure did not take the read path down.
+    expect(env.GITHUB_TOKEN).toBe("a-real-secret");
+    expect(updated).toContain("GITHUB_TOKEN");
+
+    // The mirror is still inert...
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(tracked.has("PHANTOMBOT_PRIMARY_MODEL")).toBe(false);
+
+    // ...and NOT evicted, because an unreadable config cannot prove there is
+    // another copy of the value.
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    after.close();
+    expect(names).toContain("PHANTOMBOT_PRIMARY_MODEL");
+  });
+
   test("a mirror injected by an older build is REMOVED from env on reload", async () => {
     // In-place heal: a daemon upgraded mid-life already has the mirror in
     // process.env and tracked. Phase 1 reconciliation must delete it rather
