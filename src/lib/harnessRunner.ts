@@ -329,6 +329,11 @@ export async function drainStderr(
 ): Promise<void> {
   const decoder = new TextDecoder();
   let buf = "";
+  // Set while swallowing the remainder of an oversized unterminated line.
+  // We never emit fragments of it: a slice boundary can split credential-
+  // shaped content (e.g. `API_KEY=` exactly at the cap) so each half evades
+  // the redactor downstream — the label line and a naked value (PR #464).
+  let discardingOversized = false;
   const emit = (line: string): void => {
     const trimmed = line.trim();
     if (trimmed) onLine(trimmed);
@@ -336,23 +341,40 @@ export async function drainStderr(
   try {
     for await (const chunk of stream) {
       buf += decoder.decode(chunk, { stream: true });
-      if (buf.length >= maxPendingBytes) {
-        // Pathological: an unterminated line larger than the pending cap.
-        // Emit a truncated line and drop the overflow — memory stays bounded
-        // and at least something is captured, instead of buffering the whole
-        // write and capturing nothing.
-        emit(buf.slice(0, maxPendingBytes));
-        buf = "";
-        continue;
+      if (discardingOversized) {
+        // Still inside the oversized line — swallow until its newline.
+        const nl = buf.indexOf("\n");
+        if (nl === -1) {
+          buf = "";
+          continue;
+        }
+        buf = buf.slice(nl + 1);
+        discardingOversized = false;
       }
+      // Emit complete lines first, then judge the trailing unterminated
+      // partial against the cap. That way a line is either emitted whole
+      // (the redactor sees its full context) or replaced by the marker —
+      // never sliced at the cap boundary.
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       for (const line of lines) emit(line);
+      if (buf.length >= maxPendingBytes) {
+        // Pathological: an unterminated line larger than the pending cap.
+        // Replace it with a content-free truncation marker and drop its
+        // remainder as it streams in — memory stays bounded and no fragment
+        // of the line is ever emitted independently (which could split a
+        // credential across the cap boundary, PR #464).
+        emit(`[stderr line truncated: exceeded ${maxPendingBytes} bytes]`);
+        buf = "";
+        discardingOversized = true;
+      }
     }
     // Flush the final unterminated line — stderr often isn't newline-terminated
     // (e.g. `printf fatal >&2; exit 1`), and dropping it would lose the exact
-    // failure line we're trying to surface.
-    emit(buf);
+    // failure line we're trying to surface. If we were mid-discard of an
+    // oversized line, the tail is that line's overflow — it was already
+    // replaced by the truncation marker, so it must not be emitted.
+    if (!discardingOversized) emit(buf);
     emit(decoder.decode());
   } catch {
     /* swallow — stderr drain shouldn't take down the harness */

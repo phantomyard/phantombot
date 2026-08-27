@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   createKillCoordinator,
+  drainStderr,
   isShutdownExit,
   killCauseToErrorChunk,
   runHarnessProcess,
@@ -890,5 +891,56 @@ describe("runHarnessProcess — stderr capture hardening (PR #464 review)", () =
     expect(err).toBeDefined();
     expect(err.stderrTail.join("\n")).toContain("API_KEY=[REDACTED]");
     expect(err.stderrTail.join("\n")).not.toContain("super-secret-value");
+  });
+});
+
+describe("drainStderr — over-cap boundary never splits a credential (PR #464)", () => {
+  const streamFrom = (chunks: Uint8Array[]): ReadableStream<Uint8Array> =>
+    new ReadableStream({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      },
+    });
+
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+  test("an over-cap unterminated line is replaced whole, never emitted as fragments", async () => {
+    // The review repro, deterministic: chunk 1 ends EXACTLY at the pending
+    // cap with the credential label, chunk 2 carries the naked value. The
+    // old slice-emit path produced the bare label line, then the naked
+    // secret value as an independent "line" — each fragment evades the
+    // redactor. The line must instead be replaced wholesale by a marker and
+    // its remainder swallowed up to the newline.
+    const cap = 6;
+    const label = "TOKEN="; // exactly cap bytes — the repro's precise boundary
+    const secret = "super-secret-value-123456789";
+    const collected: string[] = [];
+    await drainStderr(
+      streamFrom([enc(label), enc(`${secret}\nafter\n`)]),
+      (line) => collected.push(line),
+      cap,
+    );
+    // The oversized line collapsed into a single truncation marker; the
+    // following short line survived; neither fragment of the credential
+    // appears anywhere.
+    expect(collected).toContain(`[stderr line truncated: exceeded ${cap} bytes]`);
+    expect(collected).toContain("after");
+    expect(collected.join("\n")).not.toContain("TOKEN=");
+    expect(collected.join("\n")).not.toContain(secret);
+  });
+
+  test("oversized tail at stream end is not re-emitted after the marker", async () => {
+    // If the stream ends mid-oversized-line, the final-flush path must not
+    // leak the swallowed remainder (the marker already replaced that line).
+    const cap = 8;
+    const collected: string[] = [];
+    await drainStderr(
+      streamFrom([enc("AAAAAAAAAAAA"), enc("BBBBBBBBBBsecret")]),
+      (line) => collected.push(line),
+      cap,
+    );
+    expect(collected).toEqual([`[stderr line truncated: exceeded ${cap} bytes]`]);
+    expect(collected.join("")).not.toContain("secret");
   });
 });
