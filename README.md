@@ -544,14 +544,26 @@ Harness notes:
   persona that states only `[harnesses.pi.routing] primary_model` still
   inherits the host's chain, bins and other models.
 - `phantombot harness --persona <name>` and `/model` typed in that persona's
-  chat both write there, and the env mirror is suffixed with the persona name
-  (`PHANTOMBOT_PRIMARY_MODEL_LENA`, `PHANTOMBOT_CLAUDE_MODEL_LENA`,
-  `PHANTOMBOT_CODEX_MODEL_LENA`, `PHANTOMBOT_PI_PROVIDER_LENA`, …). Precedence
-  for a persona is: **its own suffixed env var > its config.toml > the host's
-  unsuffixed env var > the global config.toml > the built-in default.** A
-  persona's file beating the host's ambient env var is deliberate and applies
-  only to keys that persona actually states — an unmigrated host keeps its
-  previous behaviour exactly.
+  chat both write that file — plus the matching variable in the **running
+  process's** environment, so the switch takes effect without a restart. That
+  is the only place a `PHANTOMBOT_*_MODEL` / `_BIN` / `_CHAIN` name is still
+  written: the persisted env mirrors are retired (#452) and the vault refuses
+  to store one (#465). Those names are still *read* if a real shell or unit
+  `export` sets them, so the precedence
+  for a persona remains: **its own suffixed env var
+  (`PHANTOMBOT_PRIMARY_MODEL_LENA`) > its config.toml > the host's unsuffixed
+  env var > the global config.toml > the built-in default.** A persona's file
+  beating the host's ambient env var is deliberate and applies only to keys
+  that persona actually states — an unmigrated host keeps its previous
+  behaviour exactly.
+- **If a model you set will not stick, suspect one of those env vars.** On a
+  host that vaulted its `~/.env` before #454, the mirrors were vaulted with
+  it and re-injected into the environment on every startup, permanently
+  outranking the file the wizard writes. The daemon now withholds them at
+  vault-read time and says so on startup: it drops the row when `config.toml`
+  states the setting, and keeps the row (inert, still readable with
+  `phantombot vault get`) when nothing does, because there it is the last copy
+  of the value.
 - Picking **"Use Pi's own config"** in the wizard for a persona writes an
   explicit opt-out, `[harnesses.pi.routing] use_local_config = true`, rather
   than deleting keys — a deleted key would simply inherit the host's routing
@@ -1252,18 +1264,19 @@ harness model config is baked in at process start.
 Per-harness behavior:
 
 - **Pi** — full routing control: primary, coding, and image roles map to
-  `[harnesses.pi.routing]` in `config.toml` and the
-  `PHANTOMBOT_PRIMARY_MODEL` / `PHANTOMBOT_CODING_MODEL` /
-  `PHANTOMBOT_IMAGE_MODEL` env vars. `/model list` shells out to
+  `primary_model` / `coding_model` / `image_model` under
+  `[harnesses.pi.routing]` in `config.toml`, which is the only store `/model`
+  writes. `/model list` shells out to
   `pi --list-models`, so it shows the models Pi has credentials for. `clear`
   is refused — routing needs an explicit primary.
 - **Claude** — a single model, validated against the `opus` / `sonnet` /
-  `haiku` aliases (`PHANTOMBOT_CLAUDE_MODEL`). No catalog listing exists, and
+  `haiku` aliases (`[harnesses.claude] model`). No catalog listing exists, and
   `clear` is refused (there is no default to fall back to) — pick an alias
   explicitly.
-- **Codex** — a single model pinned by id (`PHANTOMBOT_CODEX_MODEL`). The CLI
+- **Codex** — a single model pinned by id (`[harnesses.codex] model`). The CLI
   exposes no model catalog, so `list` is unavailable; `clear` deletes the pin
-  and the env var so the CLI's own default applies again.
+  so the CLI's own default applies again (in a persona file it writes
+  `model = ""` instead, since deleting the key would inherit the host's pin).
 
 Model choice is per-harness config, not per-chat — switching brains affects
 every conversation that harness serves. `/status` always shows the result: a

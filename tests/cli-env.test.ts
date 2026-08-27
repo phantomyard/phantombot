@@ -56,6 +56,72 @@ afterEach(async () => {
   await rm(workdir, { recursive: true, force: true });
 });
 
+describe("config.toml settings are refused by the vault CLI (#465)", () => {
+  test("runVaultSet rejects a retired mirror and stores nothing", async () => {
+    // Without this the CLI would print "saved … to the vault" and the daemon
+    // would withhold (and possibly delete) the row on its next read — the
+    // exact silent revert the read-time guard exists to kill, at the one
+    // moment there is an operator standing here to be told instead.
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runVaultSet({
+      name: "PHANTOMBOT_PRIMARY_MODEL",
+      value: "z-ai/glm-5.3-flash",
+      vault,
+      out,
+      err,
+    });
+    expect(code).toBe(2);
+    expect(out.text).toBe("");
+    expect(err.text).toMatch(/phantombot harness/);
+    expect(err.text).toMatch(/config\.toml/);
+    expect(vault.get("PHANTOMBOT_PRIMARY_MODEL")).toBeUndefined();
+  });
+
+  test("the per-persona suffixed form is refused too", async () => {
+    const err = new CaptureStream();
+    const code = await runVaultSet({
+      name: "PHANTOMBOT_CODING_MODEL_LENA",
+      value: "z-ai/glm-5.3-flash",
+      vault,
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(vault.get("PHANTOMBOT_CODING_MODEL_LENA")).toBeUndefined();
+  });
+
+  test("the deprecated `phantombot env set` alias is refused as well", async () => {
+    // This is the spelling every pre-#452 runbook still gives, so it is the
+    // path an operator actually reaches by habit.
+    const err = new CaptureStream();
+    const code = await runEnvSet({
+      name: "PHANTOMBOT_PRIMARY_MODEL",
+      value: "z-ai/glm-5.3-flash",
+      vault,
+      out: new CaptureStream(),
+      err,
+    });
+    expect(code).toBe(2);
+    expect(vault.get("PHANTOMBOT_PRIMARY_MODEL")).toBeUndefined();
+  });
+
+  test("a real secret whose name merely SHARES a prefix still saves", async () => {
+    // Scope guard on the structural `<BASE>_<SUFFIX>` match: PHANTOMBOT_PI_BIN
+    // and PHANTOMBOT_PI_PROVIDER are mirrors, PHANTOMBOT_PI_API_KEY is a
+    // genuine credential and must keep working.
+    const code = await runVaultSet({
+      name: "PHANTOMBOT_PI_API_KEY",
+      value: "sk-real-credential",
+      vault,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(vault.get("PHANTOMBOT_PI_API_KEY")).toBe("sk-real-credential");
+  });
+});
+
 describe("runEnvSet (deprecated → vault)", () => {
   test("forwards to the vault; ack names the var only, notice on stderr", async () => {
     const out = new CaptureStream();

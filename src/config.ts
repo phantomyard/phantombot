@@ -2381,26 +2381,37 @@ function asBool(v: unknown): boolean | undefined {
  * The vault is a SECRETS store. Settings with a live home in config.toml do
  * not belong in it, so they are dropped at import rather than migrated.
  *
- * Enforced in TWO places, and the second one is the load-bearing one (#465).
- * `vaultMigrate.importableEntries` keeps them out of a vault at import; but a
- * host that vaulted its `~/.env` before this list existed already HAS the
- * rows, and nothing sweeps a key that is merely resident. So `vault.ts`'s
- * `readAllVaultValues` also withholds them at READ time (and evicts the row),
- * which is what actually makes an already-poisoned vault behave.
+ * Enforced in THREE places, and the second one is the load-bearing one (#465).
+ * `vaultMigrate.importableEntries` keeps them out of a vault at import;
+ * `runVaultSet` refuses to put one back; but a host that vaulted its `~/.env`
+ * before this list existed already HAS the rows, and nothing sweeps a key that
+ * is merely resident. So `vault.ts`'s `readAllVaultValues` also withholds them
+ * at READ time, which is what actually makes an already-poisoned vault behave.
+ *
+ * Each entry maps to the `[harnesses]` key in `config.toml` that superseded it,
+ * so a caller can ask what the setting falls back TO once the mirror is gone —
+ * see `configOwnedEnvMirrorSetting`.
  */
-export const CONFIG_OWNED_ENV_MIRRORS: readonly string[] = [
-  "PHANTOMBOT_HARNESS_CHAIN",
-  "PHANTOMBOT_CLAUDE_BIN",
-  "PHANTOMBOT_CLAUDE_MODEL",
-  "PHANTOMBOT_CLAUDE_FALLBACK_MODEL",
-  "PHANTOMBOT_CODEX_BIN",
-  "PHANTOMBOT_CODEX_MODEL",
-  "PHANTOMBOT_PI_BIN",
-  "PHANTOMBOT_PI_PROVIDER",
-  "PHANTOMBOT_PRIMARY_MODEL",
-  "PHANTOMBOT_IMAGE_MODEL",
-  "PHANTOMBOT_CODING_MODEL",
-];
+export const CONFIG_OWNED_ENV_MIRROR_HOMES: Readonly<
+  Record<string, readonly string[]>
+> = {
+  PHANTOMBOT_HARNESS_CHAIN: ["chain"],
+  PHANTOMBOT_CLAUDE_BIN: ["claude", "bin"],
+  PHANTOMBOT_CLAUDE_MODEL: ["claude", "model"],
+  PHANTOMBOT_CLAUDE_FALLBACK_MODEL: ["claude", "fallback_model"],
+  PHANTOMBOT_CODEX_BIN: ["codex", "bin"],
+  PHANTOMBOT_CODEX_MODEL: ["codex", "model"],
+  PHANTOMBOT_PI_BIN: ["pi", "bin"],
+  PHANTOMBOT_PI_PROVIDER: ["pi", "routing", "provider"],
+  PHANTOMBOT_PRIMARY_MODEL: ["pi", "routing", "primary_model"],
+  PHANTOMBOT_IMAGE_MODEL: ["pi", "routing", "image_model"],
+  PHANTOMBOT_CODING_MODEL: ["pi", "routing", "coding_model"],
+};
+
+/** The retired mirror names themselves, in declaration order. */
+export const CONFIG_OWNED_ENV_MIRRORS: readonly string[] = Object.keys(
+  CONFIG_OWNED_ENV_MIRROR_HOMES,
+);
 
 /**
  * True when `name` is a retired config.toml mirror — either the bare name or
@@ -2412,4 +2423,60 @@ export function isConfigOwnedEnvMirror(name: string): boolean {
   return CONFIG_OWNED_ENV_MIRRORS.some(
     (base) => name === base || name.startsWith(`${base}_`),
   );
+}
+
+/**
+ * What `config.toml` states for the setting a retired mirror was retired INTO,
+ * or `undefined` when nothing states it.
+ *
+ * This is the difference between "the mirror is a duplicate of a live setting"
+ * and "the mirror is the LAST copy of it". The pre-#452 wizard wrote both, so
+ * on almost every host the answer is the former and dropping the row costs
+ * nothing; but `phantombot env set PHANTOMBOT_PRIMARY_MODEL …` was a supported
+ * way to set the value WITHOUT touching `config.toml`, and on such a host
+ * deleting the row silently drops the persona to a built-in default with no
+ * copy of the old value left anywhere. So the destructive half of the read-time
+ * guard is conditioned on this answering; withholding is not.
+ *
+ * Layers are checked persona-file-then-host-file, matching `loadConfig`. Env is
+ * deliberately NOT consulted: the question is what the FILES say, and the
+ * mirror we are judging is itself in the environment.
+ *
+ * A per-persona `_<SUFFIX>` variant returns `undefined` — its home is some
+ * other persona's file, which cannot be identified from a name alone, and
+ * "unknown" must land on the non-destructive side.
+ */
+export async function configOwnedEnvMirrorSetting(
+  name: string,
+  personaDirPath: string,
+): Promise<{ key: string; value: string; file: string } | undefined> {
+  const path = CONFIG_OWNED_ENV_MIRROR_HOMES[name];
+  if (!path) return undefined;
+  const key = `harnesses.${path.join(".")}`;
+  const files = [
+    join(personaDirPath, "config.toml"),
+    process.env.PHANTOMBOT_CONFIG ??
+      join(xdgConfigHome(), "phantombot", "config.toml"),
+  ];
+  for (const file of files) {
+    const toml = await tryReadToml(file);
+    let node: unknown = (toml.harnesses ?? {}) as Record<string, unknown>;
+    for (const segment of path) {
+      if (typeof node !== "object" || node === null || Array.isArray(node)) {
+        node = undefined;
+        break;
+      }
+      node = (node as Record<string, unknown>)[segment];
+      if (node === undefined) break;
+    }
+    // `chain` is the one array-valued mirror; render it the way the env var
+    // spelled it so the operator recognises what they are looking at.
+    const value = Array.isArray(node)
+      ? node.filter((v) => typeof v === "string").join(",")
+      : typeof node === "string"
+        ? node.trim()
+        : undefined;
+    if (value !== undefined && value !== "") return { key, value, file };
+  }
+  return undefined;
 }

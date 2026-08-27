@@ -372,6 +372,23 @@ describe("per-row resilience — one bad row never blanks the vault", () => {
 });
 
 describe("retired config.toml mirrors (#452) are never injected", () => {
+  // These cases resolve "does config.toml state this setting?", so the HOST's
+  // real config file must never be in scope. Point PHANTOMBOT_CONFIG at a
+  // path inside the temp workdir and write it per test.
+  let priorConfigEnv: string | undefined;
+  let hostConfig: string;
+
+  beforeEach(() => {
+    priorConfigEnv = process.env.PHANTOMBOT_CONFIG;
+    hostConfig = join(workdir, "host-config.toml");
+    process.env.PHANTOMBOT_CONFIG = hostConfig;
+  });
+
+  afterEach(() => {
+    if (priorConfigEnv === undefined) delete process.env.PHANTOMBOT_CONFIG;
+    else process.env.PHANTOMBOT_CONFIG = priorConfigEnv;
+  });
+
   test("a mirror row is withheld from env AND evicted, real secrets unaffected", async () => {
     // The bug: pre-#452 wizards wrote model mirrors into ~/.env; #254 vaulted
     // that file wholesale, and #454's drop-list only ran on IMPORT. So an
@@ -379,6 +396,13 @@ describe("retired config.toml mirrors (#452) are never injected", () => {
     // outranks config.toml in resolveRouting -> `phantombot harness` appeared
     // to save and then silently reverted on the next spawn.
     const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    // The ordinary shape: the old wizard wrote BOTH, so config.toml still
+    // holds the setting and dropping the row loses nothing.
+    await writeFile(
+      join(dir, "config.toml"),
+      '[harnesses.pi.routing]\nprimary_model = "new/wanted-model"\n',
+    );
     const v = await openPersonaVault(dir);
     v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
     v.set("GITHUB_TOKEN", "a-real-secret");
@@ -405,9 +429,62 @@ describe("retired config.toml mirrors (#452) are never injected", () => {
     expect(names).toContain("GITHUB_TOKEN");
   });
 
+  test("a mirror with NO config.toml home is withheld but NOT deleted", async () => {
+    // `phantombot env set PHANTOMBOT_PRIMARY_MODEL …` set the value without
+    // ever touching config.toml, and #254 vaulted that file wholesale. On such
+    // a host the row is the LAST copy: withholding is what fixes the override,
+    // and deleting would drop the persona to a built-in default with nothing
+    // left to read the old value from. Eviction is hygiene, so it yields.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "config.toml"), "[harnesses]\n");
+    await writeFile(hostConfig, "[harnesses]\n");
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "only-copy/model");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    const { updated } = await loadVaultIntoEnv(dir, env, new Set<string>());
+
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(updated).not.toContain("PHANTOMBOT_PRIMARY_MODEL");
+
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    const kept = after.get("PHANTOMBOT_PRIMARY_MODEL");
+    after.close();
+    expect(names).toContain("PHANTOMBOT_PRIMARY_MODEL");
+    expect(kept).toBe("only-copy/model");
+  });
+
+  test("the HOST config.toml counts as a home when the persona file is silent", async () => {
+    // Precedence mirrors loadConfig: persona layer first, then the host file.
+    // A persona that never states the key still resolves to the host's value,
+    // so the row there really is a duplicate and may go.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      hostConfig,
+      '[harnesses.pi.routing]\nprimary_model = "host/model"\n',
+    );
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
+    v.close();
+
+    await loadVaultIntoEnv(dir, {}, new Set<string>());
+
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    after.close();
+    expect(names).not.toContain("PHANTOMBOT_PRIMARY_MODEL");
+  });
+
   test("the per-persona suffixed form is dropped too", async () => {
     // `<NAME>_<PERSONA>` beat even the persona's own config file, so it is the
     // worse of the two forms and must not survive on a name-equality check.
+    // It is withheld like any other; the row itself is kept, because the file
+    // that would own it belongs to some OTHER persona and cannot be resolved
+    // from the name alone — unknown lands on the non-destructive side.
     const dir = join(workdir, "p");
     const v = await openPersonaVault(dir);
     v.set("PHANTOMBOT_CODING_MODEL_ROBBIE", "stale/old-coder");
@@ -418,6 +495,51 @@ describe("retired config.toml mirrors (#452) are never injected", () => {
 
     expect(env.PHANTOMBOT_CODING_MODEL_ROBBIE).toBeUndefined();
     expect(updated).toEqual([]);
+  });
+
+  test("withholding survives an eviction that THROWS", async () => {
+    // The design claim this pins: withholding is load-bearing and eviction is
+    // best-effort, so a refactor that made the skip depend on a successful
+    // unset must fail here. Make the vault read-only after the values are
+    // written so `unset` raises inside the read path.
+    const dir = join(workdir, "p");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "config.toml"),
+      '[harnesses.pi.routing]\nprimary_model = "new/wanted-model"\n',
+    );
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
+    v.set("GITHUB_TOKEN", "a-real-secret");
+    v.close();
+    // Make exactly the DELETE fail, portably: a BEFORE DELETE trigger that
+    // aborts. Read-only file permissions would do it on POSIX but not on
+    // Windows, and this suite runs there too — and a trigger is narrower
+    // anyway, failing the eviction without disturbing the reads around it.
+    const db = new Database(vaultPath(dir));
+    db.exec(
+      "CREATE TRIGGER no_delete BEFORE DELETE ON secrets " +
+        "BEGIN SELECT RAISE(ABORT, 'eviction blocked'); END",
+    );
+    db.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    const { updated } = await loadVaultIntoEnv(dir, env, tracked);
+
+    // The eviction really did fail — pins that this case exercises the
+    // throwing path and is not silently a happy-path duplicate.
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    after.close();
+    expect(names).toContain("PHANTOMBOT_PRIMARY_MODEL");
+
+    // ...and the row is inert regardless.
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(updated).not.toContain("PHANTOMBOT_PRIMARY_MODEL");
+    expect(tracked.has("PHANTOMBOT_PRIMARY_MODEL")).toBe(false);
+    // And the failure is contained: real secrets still loaded.
+    expect(env.GITHUB_TOKEN).toBe("a-real-secret");
   });
 
   test("a mirror injected by an older build is REMOVED from env on reload", async () => {

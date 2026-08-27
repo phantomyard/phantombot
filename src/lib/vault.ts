@@ -31,6 +31,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 import {
+  configOwnedEnvMirrorSetting,
   isConfigOwnedEnvMirror,
   loadConfig,
   personaDir as resolvePersonaDir,
@@ -257,6 +258,11 @@ async function readAllVaultValues(
   const values = new Map<string, string>();
   const badKeys: string[] = [];
   const mirrors: string[] = [];
+  /** Mirrors whose setting has a live config.toml home — safe to evict. */
+  const superseded: { name: string; key: string; value: string; file: string }[] =
+    [];
+  /** Mirrors with no config.toml home — withheld, warned about, NOT deleted. */
+  const orphaned: string[] = [];
   try {
     for (const name of vault.list()) {
       // A retired config.toml mirror (#452) must never reach process.env: env
@@ -284,7 +290,22 @@ async function readAllVaultValues(
     // vault should never have held, idempotent, and self-extinguishing after
     // the first pass. Best-effort — a failed unset costs nothing, because the
     // skip above already made the row inert.
+    //
+    // ONLY when config.toml states the setting the mirror was retired into.
+    // Withholding is what fixes the bug and it is free; eviction is hygiene
+    // and it is irreversible. `phantombot env set PHANTOMBOT_PRIMARY_MODEL …`
+    // was once a supported way to set the value without touching
+    // config.toml, so on such a host the row is the LAST copy and deleting it
+    // would drop the persona to a built-in default with nothing left to read
+    // the old value from. Those rows stay — listed, inert, and named in the
+    // warning — which is the recoverable side of the choice.
     for (const name of mirrors) {
+      const setting = await configOwnedEnvMirrorSetting(name, personaDirPath);
+      if (!setting) {
+        orphaned.push(name);
+        continue;
+      }
+      superseded.push({ name, ...setting });
       try {
         vault.unset(name);
       } catch {
@@ -294,7 +315,7 @@ async function readAllVaultValues(
   } finally {
     vault.close();
   }
-  warnConfigOwnedEnvMirrors(mirrors, personaDirPath);
+  warnConfigOwnedEnvMirrors(superseded, orphaned, personaDirPath);
   return { values, badKeys };
 }
 
@@ -339,23 +360,52 @@ function warnBadVaultKeys(badKeys: string[]): void {
  * wizards wrote them into the plaintext `~/.env`, and hosts that vaulted that
  * file before #454 added the import drop-list carry them still. Naming them is
  * the point — an operator who set a model and watched it "not stick" needs to
- * see what was overriding it. Names only; a mirror value is a model id, but
- * this path is shared with real secrets and must not learn to log values.
+ * see what was overriding it.
+ *
+ * The two cases get different sentences because they need different actions,
+ * and conflating them is how the old wording lied: a mirror `config.toml` also
+ * states is a duplicate, and saying "the value in config.toml now applies" is
+ * true and reassuring. A mirror it does NOT state was the only copy of that
+ * setting, and what applies now is a built-in default — that one is a change
+ * of behaviour and has to say so. The value is named for the first case only;
+ * it is a model id read out of a config FILE, not out of the vault, so this
+ * path still never logs a vault value.
  */
-function warnConfigOwnedEnvMirrors(names: string[], personaDirPath: string): void {
-  if (names.length === 0) return;
-  const sorted = [...names].sort();
-  const signature = `${personaDirPath}\u0000${sorted.join(" ")}`;
+function warnConfigOwnedEnvMirrors(
+  superseded: readonly { name: string; key: string; value: string }[],
+  orphaned: readonly string[],
+  personaDirPath: string,
+): void {
+  if (superseded.length === 0 && orphaned.length === 0) return;
+  const supersededNames = superseded.map((m) => m.name).sort();
+  const orphanedNames = [...orphaned].sort();
+  const signature = `${personaDirPath}\u0000${supersededNames.join(" ")}\u0000${orphanedNames.join(" ")}`;
   if (_warnedMirrorSets.has(signature)) return;
   _warnedMirrorSets.add(signature);
-  log.warn(
-    `vault: dropped ${sorted.length} retired config.toml mirror` +
-      `${sorted.length === 1 ? "" : "s"} (${sorted.join(", ")}) — these are ` +
-      "settings, not secrets, and they outranked config.toml on every " +
-      "startup. The value in config.toml now applies; re-run " +
-      "`phantombot harness` if it is not what you want.",
-    { count: sorted.length, keys: sorted },
-  );
+
+  const total = supersededNames.length + orphanedNames.length;
+  const lines: string[] = [
+    `vault: withheld ${total} retired config.toml mirror` +
+      `${total === 1 ? "" : "s"} — these are settings, not secrets, and they ` +
+      "outranked config.toml on every startup.",
+  ];
+  for (const m of [...superseded].sort((a, b) => a.name.localeCompare(b.name))) {
+    lines.push(
+      `  ${m.name}: dropped from the vault; ${m.key} = "${m.value}" now applies.`,
+    );
+  }
+  for (const name of orphanedNames) {
+    lines.push(
+      `  ${name}: no config.toml setting for it, so the BUILT-IN DEFAULT now ` +
+        "applies and the value may change. The vault row is kept (inert) so " +
+        "the old value is still readable with `phantombot vault get` — set it " +
+        "for real with `phantombot harness`, then remove the row.",
+    );
+  }
+  log.warn(lines.join("\n"), {
+    superseded: supersededNames,
+    orphaned: orphanedNames,
+  });
 }
 
 /**

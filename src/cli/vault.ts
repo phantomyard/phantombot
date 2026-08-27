@@ -16,7 +16,12 @@
 
 import { defineCommand } from "citty";
 
-import { loadConfig, personaDir, type Config } from "../config.ts";
+import {
+  isConfigOwnedEnvMirror,
+  loadConfig,
+  personaDir,
+  type Config,
+} from "../config.ts";
 import { openPersonaVault, type Vault } from "../lib/vault.ts";
 import type { WriteSink } from "../lib/io.ts";
 
@@ -103,6 +108,25 @@ export async function runVaultSet(input: VaultSetInput): Promise<number> {
   if (!ENV_VAR_NAME.test(input.name)) {
     err.write(
       `'${input.name}' is not a valid env var name (alphanumerics + underscore, must start with letter or underscore).\n`,
+    );
+    return 2;
+  }
+  // Refuse a setting config.toml owns (#452/#465), BEFORE reading stdin.
+  //
+  // The daemon withholds and may evict these on its next vault read, so
+  // accepting one here would print "saved NAME to the vault" and then have the
+  // value quietly disappear — the same silent failure that guard exists to
+  // kill, at the one moment there is an operator standing here to be told
+  // instead. `phantombot env set PHANTOMBOT_PRIMARY_MODEL …` is the spelling
+  // every pre-#452 runbook still gives, so this path is reached by habit, not
+  // by accident. Rejecting is also why the guard can stay self-extinguishing:
+  // nothing puts a mirror back.
+  if (isConfigOwnedEnvMirror(input.name)) {
+    err.write(
+      `${input.name} is a setting, not a secret: it now lives in config.toml ` +
+        "and the vault is no longer read for it. Run `phantombot harness` " +
+        "(or `/model` in chat) to set it, or edit [harnesses] in " +
+        "config.toml directly.\n",
     );
     return 2;
   }
