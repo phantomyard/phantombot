@@ -370,3 +370,86 @@ describe("per-row resilience — one bad row never blanks the vault", () => {
     expect(env.GITHUB_TOKEN).toBe("good");
   });
 });
+
+describe("retired config.toml mirrors (#452) are never injected", () => {
+  test("a mirror row is withheld from env AND evicted, real secrets unaffected", async () => {
+    // The bug: pre-#452 wizards wrote model mirrors into ~/.env; #254 vaulted
+    // that file wholesale, and #454's drop-list only ran on IMPORT. So an
+    // upgraded host kept the rows, loadVaultIntoEnv injected them, and env
+    // outranks config.toml in resolveRouting -> `phantombot harness` appeared
+    // to save and then silently reverted on the next spawn.
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
+    v.set("GITHUB_TOKEN", "a-real-secret");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    const tracked = new Set<string>();
+    const { updated } = await loadVaultIntoEnv(dir, env, tracked);
+
+    // Withheld: config.toml is left free to win.
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(updated).not.toContain("PHANTOMBOT_PRIMARY_MODEL");
+    expect(tracked.has("PHANTOMBOT_PRIMARY_MODEL")).toBe(false);
+
+    // A genuine secret in the same vault still loads — the guard is by name,
+    // not a blanket refusal to read a vault that contains a mirror.
+    expect(env.GITHUB_TOKEN).toBe("a-real-secret");
+
+    // Evicted from disk, so `vault list` stops advertising a dead setting.
+    const after = await openPersonaVault(dir);
+    const names = after.list();
+    after.close();
+    expect(names).not.toContain("PHANTOMBOT_PRIMARY_MODEL");
+    expect(names).toContain("GITHUB_TOKEN");
+  });
+
+  test("the per-persona suffixed form is dropped too", async () => {
+    // `<NAME>_<PERSONA>` beat even the persona's own config file, so it is the
+    // worse of the two forms and must not survive on a name-equality check.
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_CODING_MODEL_ROBBIE", "stale/old-coder");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = {};
+    const { updated } = await loadVaultIntoEnv(dir, env, new Set<string>());
+
+    expect(env.PHANTOMBOT_CODING_MODEL_ROBBIE).toBeUndefined();
+    expect(updated).toEqual([]);
+  });
+
+  test("a mirror injected by an older build is REMOVED from env on reload", async () => {
+    // In-place heal: a daemon upgraded mid-life already has the mirror in
+    // process.env and tracked. Phase 1 reconciliation must delete it rather
+    // than leave the override standing until the next restart.
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("PHANTOMBOT_PRIMARY_MODEL", "stale/old-model");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = { PHANTOMBOT_PRIMARY_MODEL: "stale/old-model" };
+    const tracked = new Set<string>(["PHANTOMBOT_PRIMARY_MODEL"]);
+    const { removed } = await loadVaultIntoEnv(dir, env, tracked);
+
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBeUndefined();
+    expect(removed).toContain("PHANTOMBOT_PRIMARY_MODEL");
+    expect(tracked.has("PHANTOMBOT_PRIMARY_MODEL")).toBe(false);
+  });
+
+  test("a SHELL-exported mirror is left alone — the vault is the only target", async () => {
+    // Scope guard: #452 kept env-over-config precedence deliberately, so a
+    // real `export` stays a working escape hatch. What this PR removes is the
+    // vault fabricating that export behind the operator's back.
+    const dir = join(workdir, "p");
+    const v = await openPersonaVault(dir);
+    v.set("GITHUB_TOKEN", "s");
+    v.close();
+
+    const env: NodeJS.ProcessEnv = { PHANTOMBOT_PRIMARY_MODEL: "operator/override" };
+    await loadVaultIntoEnv(dir, env, new Set<string>());
+
+    expect(env.PHANTOMBOT_PRIMARY_MODEL).toBe("operator/override");
+  });
+});

@@ -2380,6 +2380,13 @@ function asBool(v: unknown): boolean | undefined {
  *
  * The vault is a SECRETS store. Settings with a live home in config.toml do
  * not belong in it, so they are dropped at import rather than migrated.
+ *
+ * Enforced in TWO places, and the second one is the load-bearing one (#465).
+ * `vaultMigrate.importableEntries` keeps them out of a vault at import; but a
+ * host that vaulted its `~/.env` before this list existed already HAS the
+ * rows, and nothing sweeps a key that is merely resident. So `vault.ts`'s
+ * `readAllVaultValues` also withholds them at READ time (and evicts the row),
+ * which is what actually makes an already-poisoned vault behave.
  */
 export const CONFIG_OWNED_ENV_MIRRORS: readonly string[] = [
   "PHANTOMBOT_HARNESS_CHAIN",

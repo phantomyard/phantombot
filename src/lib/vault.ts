@@ -30,7 +30,12 @@ import { dirname, join } from "node:path";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-import { loadConfig, personaDir as resolvePersonaDir, type Config } from "../config.ts";
+import {
+  isConfigOwnedEnvMirror,
+  loadConfig,
+  personaDir as resolvePersonaDir,
+  type Config,
+} from "../config.ts";
 import { log } from "./logger.ts";
 import { getOrCreatePersonaIdentity } from "./personaIdentity.ts";
 
@@ -251,8 +256,19 @@ async function readAllVaultValues(
   }
   const values = new Map<string, string>();
   const badKeys: string[] = [];
+  const mirrors: string[] = [];
   try {
     for (const name of vault.list()) {
+      // A retired config.toml mirror (#452) must never reach process.env: env
+      // outranks config.toml in every harness resolver, so injecting one turns
+      // a dead setting into a permanent override of the only store `/model`
+      // and `phantombot harness` still write. Skip it here — the guard is at
+      // READ time so it holds for every persona and every per-turn reload,
+      // whether or not the eviction below ever succeeds.
+      if (isConfigOwnedEnvMirror(name)) {
+        mirrors.push(name);
+        continue;
+      }
       try {
         const value = vault.get(name);
         if (value !== undefined) values.set(name, value);
@@ -262,9 +278,23 @@ async function readAllVaultValues(
         badKeys.push(name);
       }
     }
+    // Evict, so `vault list` stops showing settings that no longer do
+    // anything and a later downgrade can't resurrect the override. This is
+    // the one write on an otherwise pure read path: bounded to names the
+    // vault should never have held, idempotent, and self-extinguishing after
+    // the first pass. Best-effort — a failed unset costs nothing, because the
+    // skip above already made the row inert.
+    for (const name of mirrors) {
+      try {
+        vault.unset(name);
+      } catch {
+        // Ignore: the row stays listed but is inert. Reported either way.
+      }
+    }
   } finally {
     vault.close();
   }
+  warnConfigOwnedEnvMirrors(mirrors, personaDirPath);
   return { values, badKeys };
 }
 
@@ -275,9 +305,17 @@ async function readAllVaultValues(
  */
 const _warnedBadKeySets = new Set<string>();
 
+/**
+ * Per-persona signatures already warned about for retired config.toml mirrors.
+ * Keyed by persona dir as well as name set, because a multi-persona daemon
+ * reloads a different vault every turn and each one deserves its own line.
+ */
+const _warnedMirrorSets = new Set<string>();
+
 /** For tests: reset the warn-once-per-process dedupe of undecryptable keys. */
 export function _resetVaultWarningsForTesting(): void {
   _warnedBadKeySets.clear();
+  _warnedMirrorSets.clear();
 }
 
 /** Warn once per process start about undecryptable vault rows. Never logs values. */
@@ -290,6 +328,32 @@ function warnBadVaultKeys(badKeys: string[]): void {
   log.warn(
     `vault: ${sorted.length} undecryptable key${sorted.length === 1 ? "" : "s"} ` +
       `(${sorted.join(", ")}) — skipped; other secrets loaded normally`,
+    { count: sorted.length, keys: sorted },
+  );
+}
+
+/**
+ * Warn once per persona about retired config.toml mirrors found in a vault.
+ *
+ * These are not secrets and were never meant to be here: pre-#452 setup
+ * wizards wrote them into the plaintext `~/.env`, and hosts that vaulted that
+ * file before #454 added the import drop-list carry them still. Naming them is
+ * the point — an operator who set a model and watched it "not stick" needs to
+ * see what was overriding it. Names only; a mirror value is a model id, but
+ * this path is shared with real secrets and must not learn to log values.
+ */
+function warnConfigOwnedEnvMirrors(names: string[], personaDirPath: string): void {
+  if (names.length === 0) return;
+  const sorted = [...names].sort();
+  const signature = `${personaDirPath}\u0000${sorted.join(" ")}`;
+  if (_warnedMirrorSets.has(signature)) return;
+  _warnedMirrorSets.add(signature);
+  log.warn(
+    `vault: dropped ${sorted.length} retired config.toml mirror` +
+      `${sorted.length === 1 ? "" : "s"} (${sorted.join(", ")}) — these are ` +
+      "settings, not secrets, and they outranked config.toml on every " +
+      "startup. The value in config.toml now applies; re-run " +
+      "`phantombot harness` if it is not what you want.",
     { count: sorted.length, keys: sorted },
   );
 }
