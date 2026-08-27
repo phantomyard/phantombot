@@ -80,6 +80,7 @@ export class PartialAttempt {
   private narration = "";
   private readonly tools: string[] = [];
   private toolsDropped = 0;
+  private otherProgress = 0;
 
   /** Fold one chunk from the live stream into the log. */
   record(chunk: HarnessChunk): void {
@@ -88,7 +89,20 @@ export class PartialAttempt {
       return;
     }
     if (chunk.type === "progress") {
-      const note = (chunk.tool?.title ?? chunk.note).trim();
+      // ONLY a structured `chunk.tool` is a started tool call. The chunk
+      // contract allows `progress` without `tool` for plain liveness and
+      // diagnostic lines (a version warning, a "still working" note), and
+      // those must not become resume evidence: telling the model a version
+      // warning "may or may not have applied" is a lie, and letting one
+      // satisfy `producedOutput` would respawn a harness that had in fact
+      // produced nothing — stealing the turn from the ordinary, cheaper
+      // no-output fall-through. Counted separately so the wedge is still
+      // visible in the log without changing the decision.
+      if (!chunk.tool) {
+        this.otherProgress++;
+        return;
+      }
+      const note = chunk.tool.title.trim();
       if (!note) return;
       if (this.tools.length < MAX_TOOL_CALLS) this.tools.push(note);
       else this.toolsDropped++;
@@ -123,6 +137,19 @@ export class PartialAttempt {
   /** Tool calls elided by the cap, so the preamble can say so honestly. */
   get droppedToolCalls(): number {
     return this.toolsDropped;
+  }
+
+  /**
+   * Non-tool progress lines seen (diagnostics, liveness). Diagnostic only —
+   * deliberately NOT part of `producedOutput` and never quoted at the model.
+   */
+  get nonToolProgress(): number {
+    return this.otherProgress;
+  }
+
+  /** The raw, untruncated streamed text, for terminal-`done` reconciliation. */
+  get rawText(): string {
+    return this.narration;
   }
 }
 

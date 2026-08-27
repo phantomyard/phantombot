@@ -211,6 +211,10 @@ export async function* runWithFallback(
     let resumeAttemptsUsed = 0;
     let attemptReq = req;
     let resumeRequested = true;
+    // Text this slot has already streamed under a PREVIOUS attempt. A resumed
+    // slot emits its reply across two processes, and the terminal `done` has
+    // to account for both — see the stitch below.
+    let carriedText = "";
     while (resumeRequested) {
       resumeRequested = false;
       // Chunk log for THIS attempt only — a resume must describe the attempt
@@ -237,6 +241,7 @@ export async function* runWithFallback(
                 toolCalls: partial.toolCalls.length,
               },
             );
+            carriedText += partial.rawText;
             attemptReq = buildResumeRequest(req, partial);
             resumeRequested = true;
             break;
@@ -311,9 +316,23 @@ export async function* runWithFallback(
         // better than the user seeing "(no reply)". On the last harness,
         // yield it and let the channel surface "(no reply)" so the user
         // knows something happened.
+        // Stitch a resumed slot's two attempts back together. `done.finalText`
+        // is contracted to be the sum of every text chunk the slot emitted, and
+        // consumers lean on that: runTurn persists it as the assistant message,
+        // voice and other non-streaming channels deliver only it, and the
+        // Telegram/PhantomChat transports diff it against what they already
+        // sent to work out the remaining suffix. Forwarding the recovery
+        // attempt's own `finalText` unchanged would drop the pre-kill text from
+        // history and from voice, and — because the stream no longer matches
+        // its own prefix — make the transports resend the recovery text. So the
+        // terminal chunk describes the whole stream, not just its tail.
+        const emitted: HarnessChunk =
+          chunk.type === "done" && carriedText.length > 0
+            ? { ...chunk, finalText: carriedText + chunk.finalText }
+            : chunk;
         if (
-          chunk.type === "done" &&
-          chunk.finalText.length === 0 &&
+          emitted.type === "done" &&
+          emitted.finalText.length === 0 &&
           !isLast
         ) {
           log.warn(
@@ -342,8 +361,8 @@ export async function* runWithFallback(
         // something to resume FROM. Cheap: bounded narration plus capped tool
         // titles, dropped the moment the attempt ends any other way.
         partial.record(chunk);
-        yield chunk;
-        if (chunk.type === "done") succeeded = true;
+        yield emitted;
+        if (emitted.type === "done") succeeded = true;
       }
       } catch (e) {
         thrown = e;

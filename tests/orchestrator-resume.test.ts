@@ -106,14 +106,18 @@ describe("PartialAttempt — the chunk log a resume is built from", () => {
     expect(p.text).toBe("Checking the release notes...");
   });
 
-  test("tool progress counts as output even with no text at all", () => {
+  test("a structured tool call counts as output even with no text at all", () => {
     const p = new PartialAttempt();
-    p.record({ type: "progress", note: "Bash: git status" });
+    p.record({
+      type: "progress",
+      note: "tool: Bash",
+      tool: { title: "Bash: git status", kind: "execute", locations: [] },
+    });
     expect(p.producedOutput).toBe(true);
     expect(p.toolCalls).toEqual(["Bash: git status"]);
   });
 
-  test("structured tool detail wins over the bare note", () => {
+  test("the structured tool title is what the preamble quotes", () => {
     const p = new PartialAttempt();
     p.record({
       type: "progress",
@@ -123,11 +127,41 @@ describe("PartialAttempt — the chunk log a resume is built from", () => {
     expect(p.toolCalls).toEqual(["Bash: gh pr create"]);
   });
 
-  test("empty progress notes are ignored, not listed as a blank call", () => {
+  test("progress WITHOUT a tool is not a tool call and is not output", () => {
+    // The chunk contract allows bare `progress` for diagnostics and liveness
+    // lines. Counting one as a started tool call would both steal the turn
+    // from the cheaper no-output fall-through and tell the model a version
+    // warning "may or may not have applied".
     const p = new PartialAttempt();
-    p.record({ type: "progress", note: "   " });
+    p.record({ type: "progress", note: "warning: pi 0.9.1 is out of date" });
+    p.record({ type: "progress", note: "still working" });
     expect(p.producedOutput).toBe(false);
     expect(p.toolCalls).toEqual([]);
+    expect(p.nonToolProgress).toBe(2);
+  });
+
+  test("a bare diagnostic line does NOT trigger a resume", () => {
+    const p = new PartialAttempt();
+    p.record({ type: "progress", note: "warning: pi 0.9.1 is out of date" });
+    expect(shouldResume(idleKill(), p, 0)).toBe(false);
+  });
+
+  test("empty tool titles are ignored, not listed as a blank call", () => {
+    const p = new PartialAttempt();
+    p.record({
+      type: "progress",
+      note: "tool: Bash",
+      tool: { title: "   ", kind: "execute", locations: [] },
+    });
+    expect(p.producedOutput).toBe(false);
+    expect(p.toolCalls).toEqual([]);
+  });
+
+  test("rawText keeps the full untruncated stream for done reconciliation", () => {
+    const p = new PartialAttempt();
+    p.record({ type: "text", text: "x".repeat(3_000) });
+    expect(p.rawText.length).toBe(3_000);
+    expect(p.text.length).toBeLessThan(2_100);
   });
 
   test("narration is tail-truncated — the newest context is what matters", () => {
@@ -141,7 +175,7 @@ describe("PartialAttempt — the chunk log a resume is built from", () => {
   test("tool list is capped and the overflow is counted, not silently lost", () => {
     const p = new PartialAttempt();
     for (let i = 0; i < 25; i++) {
-      p.record({ type: "progress", note: `Bash: step ${i}` });
+      p.record({ type: "progress", note: "tool: Bash", tool: { title: `Bash: step ${i}`, kind: "execute", locations: [] } });
     }
     expect(p.toolCalls.length).toBe(20);
     expect(p.droppedToolCalls).toBe(5);
@@ -237,8 +271,8 @@ describe("the recovery preamble", () => {
   const partial = () => {
     const p = new PartialAttempt();
     p.record({ type: "text", text: "Pushing the branch now." });
-    p.record({ type: "progress", note: "Bash: git commit -m 'fix'" });
-    p.record({ type: "progress", note: "Bash: git push origin HEAD" });
+    p.record({ type: "progress", note: "tool: Bash", tool: { title: "Bash: git commit -m 'fix'", kind: "execute", locations: [] } });
+    p.record({ type: "progress", note: "tool: Bash", tool: { title: "Bash: git push origin HEAD", kind: "execute", locations: [] } });
     return p;
   };
 
@@ -264,7 +298,7 @@ describe("the recovery preamble", () => {
 
   test("degrades cleanly when only tool calls were seen, no narration", () => {
     const p = new PartialAttempt();
-    p.record({ type: "progress", note: "Bash: rm -rf build" });
+    p.record({ type: "progress", note: "tool: Bash", tool: { title: "Bash: rm -rf build", kind: "execute", locations: [] } });
     const text = buildResumePreamble(p);
     expect(text).toContain("Bash: rm -rf build");
     expect(text).not.toContain("already streamed this to the user");
@@ -296,7 +330,11 @@ describe("runWithFallback — resume-with-context end to end", () => {
     const pi = new ScriptedHarness("pi", [
       [
         { type: "text", text: "Checking the logs..." },
-        { type: "progress", note: "Bash: journalctl -n 200" },
+        {
+          type: "progress",
+          note: "tool: Bash",
+          tool: { title: "Bash: journalctl -n 200", kind: "execute", locations: [] },
+        },
         idleKill(),
       ],
       [
@@ -318,7 +356,11 @@ describe("runWithFallback — resume-with-context end to end", () => {
     const pi = new ScriptedHarness("pi", [
       [
         { type: "text", text: "Opening the PR." },
-        { type: "progress", note: "Bash: gh pr create" },
+        {
+          type: "progress",
+          note: "tool: Bash",
+          tool: { title: "Bash: gh pr create", kind: "execute", locations: [] },
+        },
         idleKill(),
       ],
       [{ type: "done", finalText: "PR is up." }],
@@ -330,6 +372,77 @@ describe("runWithFallback — resume-with-context end to end", () => {
     expect(resumed).toContain("get the PR ready");
     expect(resumed).toContain("Bash: gh pr create");
     expect(resumed).toContain("MAY OR MAY NOT have applied");
+  });
+
+  test("the terminal done covers BOTH attempts' text, not just the recovery's", async () => {
+    // Regression: the stream is `A`, idle kill, `B`, done(B). `finalText` is
+    // contracted to be the sum of the slot's text chunks, so a consumer that
+    // reads only the terminal chunk (runTurn's persisted message, voice) must
+    // still get A+B — and the transports' suffix diff must see a finalText
+    // that its own streamed prefix actually matches.
+    const pi = new ScriptedHarness("pi", [
+      [{ type: "text", text: "Checking the logs... " }, idleKill()],
+      [
+        { type: "text", text: "Here is what failed." },
+        { type: "done", finalText: "Here is what failed." },
+      ],
+    ]);
+    const chunks = await collect(runWithFallback([pi], newRequest(), opts()));
+
+    const streamed = chunks
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text)
+      .join("");
+    const done = chunks.at(-1) as { type: string; finalText: string };
+    expect(done.type).toBe("done");
+    expect(done.finalText).toBe("Checking the logs... Here is what failed.");
+    expect(done.finalText).toBe(streamed);
+  });
+
+  test("stitching keeps the FULL pre-kill text, not the truncated preamble copy", async () => {
+    const long = "x".repeat(3_000);
+    const pi = new ScriptedHarness("pi", [
+      [{ type: "text", text: long }, idleKill()],
+      [{ type: "done", finalText: "!" }],
+    ]);
+    const chunks = await collect(runWithFallback([pi], newRequest(), opts()));
+    const done = chunks.at(-1) as { finalText: string };
+    expect(done.finalText).toBe(long + "!");
+  });
+
+  test("an unresumed slot's done is forwarded untouched", async () => {
+    const pi = new ScriptedHarness("pi", [
+      [
+        { type: "text", text: "all in one go" },
+        { type: "done", finalText: "all in one go" },
+      ],
+    ]);
+    const chunks = await collect(runWithFallback([pi], newRequest(), opts()));
+    expect(chunks.at(-1)).toMatchObject({
+      type: "done",
+      finalText: "all in one go",
+    });
+  });
+
+  test("a resumed slot that ends empty still delivers the pre-kill text", async () => {
+    // The recovery came back with nothing of its own. The user has already
+    // seen `A`, so the slot has NOT produced an empty reply — treating it as
+    // one would hand the turn to the next harness and double the answer.
+    const pi = new ScriptedHarness("pi", [
+      [{ type: "text", text: "the whole answer" }, idleKill()],
+      [{ type: "done", finalText: "" }],
+    ]);
+    const claude = new ScriptedHarness("claude", [
+      [{ type: "done", finalText: "second opinion" }],
+    ]);
+    const chunks = await collect(
+      runWithFallback([pi, claude], newRequest(), opts()),
+    );
+    expect(claude.invocations).toBe(0);
+    expect(chunks.at(-1)).toMatchObject({
+      type: "done",
+      finalText: "the whole answer",
+    });
   });
 
   test("recovery does not cool the harness off — it answered in the end", async () => {
@@ -371,7 +484,10 @@ describe("runWithFallback — resume-with-context end to end", () => {
     );
     expect(pi.invocations).toBe(2);
     expect(claude.invocations).toBe(0);
-    expect(chunks.at(-1)).toMatchObject({ finalText: "finished it" });
+    // Stitched: the pre-kill text is part of this slot's reply too.
+    expect(chunks.at(-1)).toMatchObject({
+      finalText: "half an answerfinished it",
+    });
   });
 
   test("one resume only: a second wedge falls through to the next harness", async () => {
