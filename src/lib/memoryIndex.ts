@@ -510,6 +510,18 @@ CREATE TABLE IF NOT EXISTS turn_index_state (
 `;
 
 export class MemoryIndex {
+  /**
+   * Runs a closure inside one IMMEDIATE write transaction.
+   *
+   * Immediate (not deferred) because the read that opens the critical
+   * section — the virtual-note snapshot in `rebuild()` — has to hold the
+   * write lock from its first statement. A deferred transaction takes only a
+   * read lock there and upgrades on the first write, which is precisely the
+   * window a concurrent publisher slips through. Nesting is safe: bun:sqlite
+   * turns an inner call into a SAVEPOINT.
+   */
+  private readonly inWriteTx: <T>(fn: () => T) => T;
+
   constructor(private readonly db: Database) {
     // Pragmas must already be applied on `db` before this runs (see open()).
     // busy_timeout in particular has to be set before the very first
@@ -519,6 +531,10 @@ export class MemoryIndex {
     this.selfHealEmbeddingSchema();
     this.selfHealNotesSchema();
     this.selfHealTurnSchema();
+    const tx = db.transaction((fn: () => unknown) => fn());
+    this.inWriteTx = ((fn: () => unknown) => tx.immediate(fn)) as <T>(
+      fn: () => T,
+    ) => T;
   }
 
   /** Add per-row space provenance without dropping legacy vectors. */
@@ -688,16 +704,38 @@ export class MemoryIndex {
    * republish it. Carry them across the delete instead: they are few, they
    * are small, and if the real file has since appeared, `forceAll` indexes it
    * over the top at the same path, which is the ordinary cutover.
+   *
+   * Snapshot, delete and restore run in ONE immediate transaction. Carrying
+   * the notes across is a read-modify-write on rows another process is also
+   * writing: `writeJournalEntry` republishes the open day from the daemon and
+   * task paths against this same shared index DB. Split into three
+   * autocommitted steps, a capture that lands between the SELECT and the
+   * restore is overwritten by the older snapshot and stops being searchable
+   * until something else happens to republish it — a lost update on the one
+   * kind of note that cannot be recovered by re-walking the disk. Holding the
+   * write lock for the whole section makes the concurrent publisher wait
+   * (busy_timeout, set in open()) and then write its newer body over ours.
+   *
+   * refreshStale stays OUTSIDE the transaction: it reads the filesystem and
+   * embeds, so it is far too slow to hold a write lock across, and it is
+   * re-derivable work — a crash there costs a second rebuild, not data.
    */
   async rebuild(personaDir: string): Promise<{ indexed: number }> {
-    const virtuals = this.db
-      .query(
-        "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body " +
-          "FROM files f JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
-      )
-      .all() as Array<{ path: string; scope: Scope; title: string; body: string }>;
-    this.db.exec("DELETE FROM notes; DELETE FROM files;");
-    for (const v of virtuals) this.upsertVirtualNote(v);
+    this.inWriteTx(() => {
+      const virtuals = this.db
+        .query(
+          "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body " +
+            "FROM files f JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
+        )
+        .all() as Array<{
+        path: string;
+        scope: Scope;
+        title: string;
+        body: string;
+      }>;
+      this.db.exec("DELETE FROM notes; DELETE FROM files;");
+      for (const v of virtuals) this.upsertVirtualNote(v);
+    });
     return this.refreshStale(personaDir, /* forceAll */ true);
   }
 
@@ -1849,25 +1887,30 @@ export class MemoryIndex {
     title: string;
     body: string;
   }): void {
-    this.deletePath(input.path);
-    this.db
-      .prepare(
-        "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
-          "VALUES (?, ?, ?, ?, '', '', '', ?)",
-      )
-      .run(input.path, input.scope, "journal", input.title, input.body);
-    this.db
-      .prepare(
-        "INSERT INTO files (path, scope, mtime_ms, size, title, aliases, indexed_at, virtual) " +
-          "VALUES (?, ?, -1, ?, ?, '', ?, 1)",
-      )
-      .run(
-        input.path,
-        input.scope,
-        Buffer.byteLength(input.body, "utf8"),
-        input.title,
-        new Date().toISOString(),
-      );
+    // Delete-then-insert in one transaction: a reader (or a rebuild taking
+    // its snapshot) must never observe the gap where the note exists in
+    // neither table.
+    this.inWriteTx(() => {
+      this.deletePath(input.path);
+      this.db
+        .prepare(
+          "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
+            "VALUES (?, ?, ?, ?, '', '', '', ?)",
+        )
+        .run(input.path, input.scope, "journal", input.title, input.body);
+      this.db
+        .prepare(
+          "INSERT INTO files (path, scope, mtime_ms, size, title, aliases, indexed_at, virtual) " +
+            "VALUES (?, ?, -1, ?, ?, '', ?, 1)",
+        )
+        .run(
+          input.path,
+          input.scope,
+          Buffer.byteLength(input.body, "utf8"),
+          input.title,
+          new Date().toISOString(),
+        );
+    });
   }
 
   /** Drop a virtual note. No-op if the path is a real, on-disk note. */

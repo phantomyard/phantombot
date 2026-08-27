@@ -683,6 +683,75 @@ describe("index on write", () => {
     }
   });
 
+  test("a rebuild cannot lose a capture that lands while it is running", async () => {
+    // rebuild() carries virtual notes across the DELETE, which is a
+    // read-modify-write on rows the daemon is also writing: writeJournalEntry
+    // republishes the open day against this same shared index DB. If the
+    // snapshot, the delete and the restore are three autocommitted steps, a
+    // capture that lands in between is written back over with the older
+    // snapshot body and stops being searchable — and unlike a real note, a
+    // virtual one cannot be recovered by re-walking the disk.
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "the morning entry" });
+    await indexOpenDay(s, P, DAY, indexPath);
+
+    const ix = await MemoryIndex.open(indexPath);
+    // A second connection standing in for the concurrent publisher. Its
+    // busy_timeout is deliberately tiny: the interleaved write below runs
+    // INSIDE the rebuild's transaction on the other connection, so if the
+    // section holds the write lock the publisher can only wait, and we want
+    // it to give up in milliseconds rather than deadlock the test.
+    const db2 = new Database(indexPath);
+    db2.exec("PRAGMA journal_mode = WAL");
+    db2.exec("PRAGMA busy_timeout = 50");
+    const publisher = new MemoryIndex(db2);
+
+    const newerBody = `# ${DAY}\n\n- the morning entry\n- the afternoon entry\n`;
+    const publish = () =>
+      publisher.upsertVirtualNote({
+        path: `memory/${DAY}.md`,
+        scope: "memory",
+        title: `Journal ${DAY}`,
+        body: newerBody,
+      });
+
+    let madeToWait = false;
+    // Fire the publisher exactly between the snapshot and the restore, which
+    // is the only window where the lost update is possible.
+    const db = (ix as unknown as { db: Database }).db;
+    const origExec = db.exec.bind(db);
+    (db as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+      const out = origExec(sql);
+      if (sql.includes("DELETE FROM notes")) {
+        try {
+          publish();
+        } catch {
+          madeToWait = true;
+        }
+      }
+      return out;
+    };
+
+    try {
+      await ix.rebuild(dir);
+      (db as { exec: (sql: string) => unknown }).exec = origExec;
+
+      // The section is mutually exclusive, so the publisher never got to
+      // write mid-rebuild — it was refused and would, in the real daemon,
+      // block on busy_timeout until the restore had committed.
+      expect(madeToWait).toBe(true);
+      if (madeToWait) publish();
+
+      // ...and having waited, its newer body is the one that survives.
+      expect(ix.search("afternoon entry", { scope: "memory" }).length).toBe(1);
+    } finally {
+      publisher.close();
+      ix.close();
+    }
+  });
+
   test("a rebuild still lets the real file take over the virtual path", async () => {
     const dir = await personaTree();
     const indexPath = join(dir, "index.sqlite");
