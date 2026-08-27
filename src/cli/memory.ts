@@ -74,6 +74,13 @@ import {
 } from "../memory/drawerExport.ts";
 import { describeRetirement, retireDrawers } from "../memory/drawerRetire.ts";
 import {
+  absorbDay,
+  openJournalStore,
+  writeJournalEntry,
+} from "../memory/journalIngest.ts";
+import { renderClosedDays } from "../memory/journalRender.ts";
+import { renderDay, renderEntry } from "../memory/journal.ts";
+import {
   describeImport,
   importDrawerMarkdown,
   type ImportEntryResult,
@@ -262,6 +269,115 @@ export async function runMemoryToday(
   out.write(path);
   out.write("\n");
   return 0;
+}
+
+export interface RunJournalInput extends RunMemoryInput {
+  persona?: string;
+  /** Day to print. Defaults to today. Ignored when --export is given. */
+  date?: string;
+  /** Write every day back out as markdown into this directory. */
+  export?: string;
+  /** Absorb one day's markdown file into rows (defaults to today). */
+  absorb?: boolean;
+  /** Run the closed-day render + prune pass now instead of at nightly. */
+  render?: boolean;
+  json?: boolean;
+}
+
+/**
+ * `phantombot memory journal` — read the journal TABLE.
+ *
+ * Four jobs, matching `memory drawers`: print a day, export the days still
+ * held as rows, absorb a hand-edited daily file, or run the closed-day render
+ * and prune by hand instead of waiting for the nightly.
+ *
+ * `--export` is a table dump, not a history dump. Days the nightly has
+ * rendered and pruned live in `memory/<date>.md` — that IS the export, and it
+ * is why the table is allowed to forget them.
+ */
+export async function runMemoryJournal(
+  input: RunJournalInput,
+): Promise<number> {
+  const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
+  const config = input.config ?? (await loadConfig());
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
+
+  if (!existsSync(dir)) {
+    err.write(`persona '${persona}' not found at ${dir}\n`);
+    return 2;
+  }
+
+  const { store, close } = await openJournalStore(config.memoryDbPath);
+  try {
+    if (input.absorb) {
+      const date = input.date ?? new Date().toISOString().slice(0, 10);
+      const r = await absorbDay(store, dir, persona, date);
+      if (input.json) {
+        out.write(`${JSON.stringify(r ?? null, null, 2)}\n`);
+      } else if (!r) {
+        out.write(`no memory/${date}.md to absorb\n`);
+      } else {
+        out.write(
+          `${r.date}.md: ${r.parsed} parsed, ${r.inserted} new, ` +
+            `${r.merged} already filed\n`,
+        );
+      }
+      return 0;
+    }
+
+    if (input.render) {
+      const today = new Date().toISOString().slice(0, 10);
+      const r = await renderClosedDays(store, dir, persona, today);
+      if (input.json) {
+        out.write(`${JSON.stringify(r, null, 2)}\n`);
+      } else {
+        out.write(
+          `rendered ${r.rendered.length}, pruned ${r.pruned.length}, ` +
+            `failed ${r.failed.length}, backlog ${r.backlogDays} day(s)\n`,
+        );
+        for (const d of r.rendered) out.write(`  rendered memory/${d}.md\n`);
+        for (const d of r.pruned) out.write(`  pruned rows for ${d}\n`);
+        for (const d of r.failed) out.write(`  FAILED ${d} (rows kept)\n`);
+      }
+      return r.failed.length > 0 ? 1 : 0;
+    }
+
+    if (input.export) {
+      await mkdir(input.export, { recursive: true });
+      let days = 0;
+      for (const date of store.dates(persona)) {
+        const entries = store.listDay(persona, date);
+        await writeFile(
+          join(input.export, `${date}.md`),
+          renderDay(date, entries),
+          "utf8",
+        );
+        days++;
+        out.write(`${date}.md: ${entries.length} entries\n`);
+      }
+      out.write(`exported ${days} day(s) to ${input.export}\n`);
+      return 0;
+    }
+
+    const date = input.date ?? new Date().toISOString().slice(0, 10);
+    const entries = store.listDay(persona, date);
+    if (input.json) {
+      out.write(`${JSON.stringify(entries, null, 2)}\n`);
+      return 0;
+    }
+    if (entries.length === 0) {
+      // Not an error: an empty day is the normal state of a day that has not
+      // happened yet. Say which day, so a mistyped date is obvious.
+      out.write(`no journal entries for ${date} (persona ${persona})\n`);
+      return 0;
+    }
+    out.write(`# ${date}\n`);
+    for (const e of entries) out.write(`${renderEntry(e)}\n`);
+    return 0;
+  } finally {
+    close();
+  }
 }
 
 export interface RunIndexInput extends RunMemoryInput {
@@ -541,19 +657,38 @@ export async function runMemoryCapture(
   await mkdir(memDir, { recursive: true });
   const dailyPath = join(memDir, `${date}.md`);
 
-  // Create today's daily file with a one-line header if it doesn't exist.
-  if (!existsSync(dailyPath)) {
-    await Bun.write(dailyPath, `# ${date}\n`);
+  // ONE ROW, whatever the tag count (#461). This used to append one markdown
+  // line PER TAG — the same paragraph written twice for
+  // `--tag decision --tag lesson` — and every copy was injected into every
+  // subsequent prompt for the rest of the day. Tags are a column now, so the
+  // duplication is not "avoided", it is unrepresentable. No markdown is
+  // written: `writeJournalEntry` files the row and publishes the open day to
+  // the search index under the path its file will have, so the capture is
+  // recallable now and the nightly renders the artefact once the day closes.
+  const wrote = await writeJournalEntry(
+    config.memoryDbPath,
+    dir,
+    {
+      persona,
+      date,
+      content: text,
+      tags,
+      source: "self",
+      conversation: input.conversation ?? "cli:default",
+      createdAt: now,
+    },
+    { indexPath: input.indexPath, skipIndex: input.skipIndex },
+  );
+  if (!wrote) {
+    // The table refused the write. Append markdown instead: a capture that
+    // reaches neither layer is lost outright, and the heartbeat absorbs this
+    // line into the table on its next pass, so the two converge rather than
+    // diverging. This is a RECOVERY path, not a second writer — nothing takes
+    // it while the database is healthy.
+    if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
+    const stamp = `${now.toISOString().slice(11, 16)}Z`;
+    await appendFile(dailyPath, `- [${tags.join(",")}] ${text} · ${stamp}\n`, "utf8");
   }
-
-  // HH:MMZ — appended at the END of the line so the heartbeat tag regex
-  // (/^\s*-?\s*\[([a-z]+)\]\s+(.+)$/i) still matches.
-  const stamp = `${now.toISOString().slice(11, 16)}Z`;
-  let block = "";
-  for (const tag of tags) {
-    block += `- [${tag}] ${text} · ${stamp}\n`;
-  }
-  await appendFile(dailyPath, block, "utf8");
 
   // Record the capture so the nudge counter and `doctor` can see it.
   const conversation = input.conversation ?? "cli:default";
@@ -654,6 +789,10 @@ export async function runMemoryDrawers(input: {
   /** Archive and remove any markdown drawer whose content is proven filed. */
   retire?: boolean;
   json?: boolean;
+  /** Index to publish the import's audit rows into. Tests point this at a temp. */
+  indexPath?: string;
+  /** Skip indexing the audit rows entirely. Tests only. */
+  skipIndex?: boolean;
   out?: WriteSink;
 }): Promise<number> {
   const sink = input.out ?? process.stdout;
@@ -724,21 +863,28 @@ export async function runMemoryDrawers(input: {
     }
 
     if (input.import !== undefined) {
-      const memDir = join(dir, "memory");
       const date = new Date().toISOString().slice(0, 10);
-      const dailyPath = join(memDir, `${date}.md`);
-      const logLines: string[] = [];
+      // Rows, not markdown. This used to create and append `memory/<date>.md`
+      // directly, which broke the open day in two ways at once: prompt recall
+      // prefers the table once a day has rows, so the audit line was never
+      // read; and the index's VIRTUAL note for the open day lives at exactly
+      // that path, so the next `refreshStale()` found a real file there and
+      // replaced a whole day of searchable rows with the audit text alone.
+      // One writer is the entire premise of #461 — see `writeJournalEntry`.
+      const logEntries: { content: string; createdAt: Date }[] = [];
       // Supersede is the loud half of "reaffirm is quiet, supersede is loud"
       // (#437): a stray hand-edit that flips one line permanently retires a
       // row, so it goes in TODAY's daily file — same-day visibility through
       // the ordinary digest, no separate review flow to maintain.
       const onSupersede = (r: ImportEntryResult & { outcome: "superseded" }) => {
-        const stamp = `${new Date().toISOString().slice(11, 16)}Z`;
-        // JSON.stringify, not bare interpolation: a block-form drawer entry is
-        // multi-line, and a spilled body line starting `[norm] …` matches
-        // promoteTaggedLines' TAG_PATTERN and would be promoted as a brand-new
-        // entry on the next heartbeat. Escaping \n keeps one line per
-        // supersession and gives us the quotes we wanted anyway.
+        const at = new Date();
+        // JSON.stringify, not bare interpolation: a block-form drawer entry
+        // is multi-line, and one journal entry is one line — both in the
+        // rendered artefact and to any parser reading it back. A spilled body
+        // line starting `[norm] …` also matches promoteTaggedLines'
+        // TAG_PATTERN and would be promoted as a brand-new entry. Escaping
+        // \n keeps one line per supersession and gives us the quotes we
+        // wanted anyway.
         // Log the row actually RETIRED (`supersededId`), not the marker's id:
         // a marker names a lineage, and once it is more than one generation
         // deep the id in the file names a row some earlier import already
@@ -751,10 +897,18 @@ export async function runMemoryDrawers(input: {
           r.supersededId !== r.marker!.id
             ? ` (marker named ${r.marker!.kind}:${r.marker!.id})`
             : "";
-        logLines.push(
-          `- [drawer-import] superseded ${r.marker!.kind}:${r.supersededId}${named} -> ${r.id}: ` +
-            `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)} · ${stamp}\n`,
-        );
+        logEntries.push({
+          createdAt: at,
+          // `drawer-import:` as plain content, not a tag. Tags are a column
+          // now, and a tag is a PROMOTION instruction — the heartbeat files
+          // tagged rows into the drawers by name, so tagging an audit line
+          // with a non-kind would either be dropped or, worse, chase a kind.
+          // It also keeps render->parse honest: a leading `[drawer-import]`
+          // in the content would round-trip back as a tag.
+          content:
+            `drawer-import: superseded ${r.marker!.kind}:${r.supersededId}${named} -> ${r.id}: ` +
+            `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)}`,
+        });
       };
       for (const kind of kinds) {
         const abs =
@@ -787,10 +941,25 @@ export async function runMemoryDrawers(input: {
           }
         }
       }
-      if (logLines.length > 0) {
-        await mkdir(memDir, { recursive: true });
-        if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
-        await appendFile(dailyPath, logLines.join(""), "utf8");
+      for (const e of logEntries) {
+        await writeJournalEntry(
+          config.memoryDbPath,
+          dir,
+          {
+            persona,
+            date,
+            content: e.content,
+            tags: [],
+            // The origin axis has a name for exactly this: a mechanical
+            // maintenance note. Not `task` — that class is withheld from the
+            // prompt, and a silent supersession is the one outcome #437 says
+            // must be loud.
+            source: "heartbeat",
+            conversation: "cli:memory-drawers-import",
+            createdAt: e.createdAt,
+          },
+          { indexPath: input.indexPath, skipIndex: input.skipIndex },
+        );
       }
       return 0;
     }
@@ -1055,6 +1224,28 @@ const todayCmd = defineCommand({
   },
 });
 
+const journalCmd = defineCommand({
+  meta: { name: "journal", description: "The daily journal table: print a day, --export it as markdown, --absorb a hand-edited daily file, or --render closed days now." },
+  args: {
+    persona: { type: "string", description: "Persona name." },
+    date: { type: "string", description: "Day to print (YYYY-MM-DD). Default today." },
+    export: { type: "string", description: "Write every day back out as markdown into this directory." },
+    absorb: { type: "boolean", description: "Absorb memory/<date>.md into rows now (default today).", default: false },
+    render: { type: "boolean", description: "Render + prune closed days now instead of waiting for the nightly.", default: false },
+    json: { type: "boolean", description: "JSON output.", default: false },
+  },
+  async run({ args }) {
+    process.exitCode = await runMemoryJournal({
+      persona: args.persona ? String(args.persona) : undefined,
+      date: args.date ? String(args.date) : undefined,
+      export: args.export ? String(args.export) : undefined,
+      absorb: Boolean(args.absorb),
+      render: Boolean(args.render),
+      json: Boolean(args.json),
+    });
+  },
+});
+
 const indexCmd = defineCommand({
   meta: { name: "index", description: "Refresh FTS5 + embeddings (incremental by default; --rebuild for from-scratch; --reembed for a full derived-vector rebuild; --no-embed to skip vectors)." },
   args: {
@@ -1251,6 +1442,7 @@ export default defineCommand({
     get: getCmd,
     list: listCmd,
     today: todayCmd,
+    journal: journalCmd,
     index: indexCmd,
     capture: captureCmd,
     drawers: drawersCmd,

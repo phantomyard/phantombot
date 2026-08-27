@@ -387,8 +387,13 @@ export function rrfMerge(
  * Existing databases carry rows written without it, so the bump is what makes
  * the controlled vocabulary reach retrieval rather than just the prompts —
  * the drop-and-rebuild below repopulates every note from disk on next open.
+ *
+ * v4 → v5: `files.virtual` — a note whose text lives in a table rather than in
+ * a file on disk. The open journal day (#461) is the first: its entries are
+ * rows until the nightly renders them, and without this flag the deletion
+ * sweep in refreshStale would evict them on sight for not existing on disk.
  */
-export const NOTES_SCHEMA_VERSION = 4;
+export const NOTES_SCHEMA_VERSION = 5;
 
 /**
  * Version of the turn_docs schema. Unlike the notes tables, turn rows are
@@ -444,7 +449,11 @@ CREATE TABLE IF NOT EXISTS files (
   size        INTEGER NOT NULL,
   title       TEXT NOT NULL DEFAULT '',
   aliases     TEXT NOT NULL DEFAULT '',
-  indexed_at  TEXT NOT NULL
+  indexed_at  TEXT NOT NULL,
+  -- 1 when the text was supplied from a table instead of read from disk.
+  -- Virtual rows are exempt from the "not on disk any more" deletion sweep,
+  -- and are the source of their own embedding text.
+  virtual     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_files_scope ON files(scope);
 
@@ -501,6 +510,18 @@ CREATE TABLE IF NOT EXISTS turn_index_state (
 `;
 
 export class MemoryIndex {
+  /**
+   * Runs a closure inside one IMMEDIATE write transaction.
+   *
+   * Immediate (not deferred) because the read that opens the critical
+   * section — the virtual-note snapshot in `rebuild()` — has to hold the
+   * write lock from its first statement. A deferred transaction takes only a
+   * read lock there and upgrades on the first write, which is precisely the
+   * window a concurrent publisher slips through. Nesting is safe: bun:sqlite
+   * turns an inner call into a SAVEPOINT.
+   */
+  private readonly inWriteTx: <T>(fn: () => T) => T;
+
   constructor(private readonly db: Database) {
     // Pragmas must already be applied on `db` before this runs (see open()).
     // busy_timeout in particular has to be set before the very first
@@ -510,6 +531,10 @@ export class MemoryIndex {
     this.selfHealEmbeddingSchema();
     this.selfHealNotesSchema();
     this.selfHealTurnSchema();
+    const tx = db.transaction((fn: () => unknown) => fn());
+    this.inWriteTx = ((fn: () => unknown) => tx.immediate(fn)) as <T>(
+      fn: () => T,
+    ) => T;
   }
 
   /** Add per-row space provenance without dropping legacy vectors. */
@@ -544,8 +569,16 @@ export class MemoryIndex {
     const isEmpty =
       (this.db.query("SELECT COUNT(*) AS c FROM files").get() as { c: number })
         .c === 0;
-    if (have === NOTES_SCHEMA_VERSION) return;
-    if (have === 0 && isEmpty) {
+    // ...unless the columns are NOT current. `CREATE TABLE IF NOT EXISTS` is a
+    // no-op against a pre-existing table of the wrong shape, so a database
+    // whose `files` happened to be empty at the moment of an upgrade got
+    // stamped with the new version while keeping the OLD `notes` columns —
+    // and every later open trusted the stamp and skipped the rebuild. The
+    // symptom is an insert failing with "table notes has no column named
+    // type" on a database that claims to be current. Check the shape, not
+    // just the stamp.
+    if (have === NOTES_SCHEMA_VERSION && this.notesColumnsAreCurrent()) return;
+    if (have === 0 && isEmpty && this.notesColumnsAreCurrent()) {
       this.stampNotesSchemaVersion();
       return;
     }
@@ -559,6 +592,16 @@ export class MemoryIndex {
     );
     this.db.exec(SCHEMA);
     this.stampNotesSchemaVersion();
+  }
+
+  /** True when `notes` carries the columns the current SCHEMA declares. */
+  private notesColumnsAreCurrent(): boolean {
+    const cols = (
+      this.db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    return ["type", "title", "tags", "aliases", "headings", "body"].every((c) =>
+      cols.includes(c),
+    );
   }
 
   private stampNotesSchemaVersion(): void {
@@ -650,9 +693,49 @@ export class MemoryIndex {
    * Rebuild from scratch — drop all rows in `notes` and `files` and
    * re-walk personaDir/memory/ and personaDir/kb/. Safe to call on a
    * fresh persona with no memory/kb dirs yet (returns 0 indexed).
+   *
+   * VIRTUAL notes survive. Everything else here is derived from disk and so
+   * costs nothing to throw away, but a virtual note is the index's only copy
+   * of text that lives in a TABLE — today's journal, whose file does not
+   * exist until the nightly renders it. Dropping and re-walking would delete
+   * the open day and find nothing to put back, so `memory index --rebuild`,
+   * documented as the repair for a damaged index, would silently make the
+   * persona's own morning unsearchable until the next capture happened to
+   * republish it. Carry them across the delete instead: they are few, they
+   * are small, and if the real file has since appeared, `forceAll` indexes it
+   * over the top at the same path, which is the ordinary cutover.
+   *
+   * Snapshot, delete and restore run in ONE immediate transaction. Carrying
+   * the notes across is a read-modify-write on rows another process is also
+   * writing: `writeJournalEntry` republishes the open day from the daemon and
+   * task paths against this same shared index DB. Split into three
+   * autocommitted steps, a capture that lands between the SELECT and the
+   * restore is overwritten by the older snapshot and stops being searchable
+   * until something else happens to republish it — a lost update on the one
+   * kind of note that cannot be recovered by re-walking the disk. Holding the
+   * write lock for the whole section makes the concurrent publisher wait
+   * (busy_timeout, set in open()) and then write its newer body over ours.
+   *
+   * refreshStale stays OUTSIDE the transaction: it reads the filesystem and
+   * embeds, so it is far too slow to hold a write lock across, and it is
+   * re-derivable work — a crash there costs a second rebuild, not data.
    */
   async rebuild(personaDir: string): Promise<{ indexed: number }> {
-    this.db.exec("DELETE FROM notes; DELETE FROM files;");
+    this.inWriteTx(() => {
+      const virtuals = this.db
+        .query(
+          "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body " +
+            "FROM files f JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
+        )
+        .all() as Array<{
+        path: string;
+        scope: Scope;
+        title: string;
+        body: string;
+      }>;
+      this.db.exec("DELETE FROM notes; DELETE FROM files;");
+      for (const v of virtuals) this.upsertVirtualNote(v);
+    });
     return this.refreshStale(personaDir, /* forceAll */ true);
   }
 
@@ -669,15 +752,22 @@ export class MemoryIndex {
     let indexed = 0;
     let removed = 0;
 
-    const recorded = new Map<string, { mtimeMs: number }>();
+    const recorded = new Map<string, { mtimeMs: number; virtual: boolean }>();
     for (const row of this.db
-      .query("SELECT path, mtime_ms FROM files")
-      .all() as Array<{ path: string; mtime_ms: number }>) {
-      recorded.set(row.path, { mtimeMs: row.mtime_ms });
+      .query("SELECT path, mtime_ms, virtual FROM files")
+      .all() as Array<{ path: string; mtime_ms: number; virtual: number }>) {
+      recorded.set(row.path, {
+        mtimeMs: row.mtime_ms,
+        virtual: row.virtual === 1,
+      });
     }
 
     const livePathSet = new Set(live.map((f) => f.path));
-    for (const recordedPath of recorded.keys()) {
+    for (const [recordedPath, rec] of recorded) {
+      // A virtual note has no file to go missing, so "not on disk" is its
+      // normal state, not evidence of a delete. Its owner (the journal) drops
+      // it explicitly when the rows behind it are rendered or pruned.
+      if (rec.virtual) continue;
       if (!livePathSet.has(recordedPath)) {
         this.deletePath(recordedPath);
         removed++;
@@ -1772,6 +1862,80 @@ export class MemoryIndex {
       .prepare("SELECT scope FROM files WHERE path = ?")
       .get(path) as { scope?: Scope } | null;
     return row?.scope;
+  }
+
+  /**
+   * Index text that lives in a TABLE, at a path that may not exist on disk.
+   *
+   * This is what closes the recall hole the row-based journal would otherwise
+   * open: between a capture at 09:00 and the nightly that renders the day at
+   * 03:00, the entry exists only as a row, and a `memory search` rooted in
+   * files would not find the thing the persona wrote down that morning. An
+   * 18-hour blind spot in your own memory is worse than the duplication we
+   * are removing.
+   *
+   * The path is the one the artefact will EVENTUALLY have
+   * (`memory/2026-08-27.md`), deliberately: when the nightly writes that file
+   * and refreshStale indexes it for real, the same key is overwritten with
+   * `virtual = 0`, so the day never appears twice and no cutover is needed.
+   * `mtime_ms = -1` guarantees that overwrite happens — no real file can have
+   * that mtime, so the "unchanged since last index" shortcut cannot skip it.
+   */
+  upsertVirtualNote(input: {
+    path: string;
+    scope: Scope;
+    title: string;
+    body: string;
+  }): void {
+    // Delete-then-insert in one transaction: a reader (or a rebuild taking
+    // its snapshot) must never observe the gap where the note exists in
+    // neither table.
+    this.inWriteTx(() => {
+      this.deletePath(input.path);
+      this.db
+        .prepare(
+          "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
+            "VALUES (?, ?, ?, ?, '', '', '', ?)",
+        )
+        .run(input.path, input.scope, "journal", input.title, input.body);
+      this.db
+        .prepare(
+          "INSERT INTO files (path, scope, mtime_ms, size, title, aliases, indexed_at, virtual) " +
+            "VALUES (?, ?, -1, ?, ?, '', ?, 1)",
+        )
+        .run(
+          input.path,
+          input.scope,
+          Buffer.byteLength(input.body, "utf8"),
+          input.title,
+          new Date().toISOString(),
+        );
+    });
+  }
+
+  /** Drop a virtual note. No-op if the path is a real, on-disk note. */
+  removeVirtualNote(path: string): void {
+    const row = this.db
+      .prepare("SELECT virtual FROM files WHERE path = ?")
+      .get(path) as { virtual?: number } | null;
+    if (row?.virtual === 1) this.deletePath(path);
+  }
+
+  /**
+   * Body text for a virtual note, or undefined for a real one.
+   *
+   * The embed job reads its text from disk; this is how a virtual note gets
+   * embedded anyway, so today's journal is reachable by MEANING and not only
+   * by keyword.
+   */
+  virtualText(path: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT n.body AS body FROM notes n JOIN files f ON f.path = n.path " +
+          "WHERE n.path = ? AND f.virtual = 1 LIMIT 1",
+      )
+      .get(path) as { body?: string } | null;
+    return row?.body ?? undefined;
   }
 
   private snippetForPath(path: string): string {

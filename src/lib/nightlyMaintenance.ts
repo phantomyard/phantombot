@@ -32,10 +32,18 @@ import {
   type BackupResult,
 } from "../memory/dbBackup.ts";
 import { openDrawerStore } from "../memory/drawerSync.ts";
+import { openJournalStore } from "../memory/journalIngest.ts";
+import {
+  renderClosedDays,
+  JOURNAL_BACKLOG_ALARM_DAYS,
+  type JournalRenderResult,
+} from "../memory/journalRender.ts";
 
 export interface MaintenanceResult {
   /** Beliefs moved to `dormant` this run. */
   dormant: number;
+  /** Closed journal days rendered to markdown, and rows pruned (#461). */
+  journal?: JournalRenderResult;
   backup?: BackupResult;
   /** Anything that failed. Reported, never thrown — see below. */
   errors: string[];
@@ -54,6 +62,8 @@ export interface MaintenanceResult {
 export async function runMemoryMaintenance(input: {
   dbPath: string;
   persona: string;
+  /** Persona working directory. Required for the journal render stage. */
+  personaDir?: string;
   keep?: number;
   now?: Date;
   out?: WriteSink;
@@ -80,6 +90,58 @@ export async function runMemoryMaintenance(input: {
     const msg = `dormancy sweep: ${(e as Error).message}`;
     result.errors.push(msg);
     log.warn("nightly: dormancy sweep failed", { error: (e as Error).message });
+  }
+
+  // The journal render — rows to markdown, verified, then the rows of days an
+  // EARLIER run already verified (#461). Deliberately before the snapshot: a
+  // restore point taken after the prune captures the state we intend to keep,
+  // where one taken before would preserve rows we are about to drop.
+  //
+  // Rendering is the only thing that turns a day into a durable file, so a
+  // backlog here is memory quietly not being written down. Recall reads only
+  // TODAY, so nothing about a stalled render is visible in the prompt — which
+  // is exactly why it gets an error line rather than a debug log.
+  if (input.personaDir) {
+    try {
+      const { store, close } = await openJournalStore(input.dbPath);
+      try {
+        const today = now.toISOString().slice(0, 10);
+        const journal = await renderClosedDays(
+          store,
+          input.personaDir,
+          input.persona,
+          today,
+          now,
+        );
+        result.journal = journal;
+        if (journal.rendered.length > 0 || journal.pruned.length > 0) {
+          write(
+            `nightly: journal rendered ${journal.rendered.length} day(s)` +
+              (journal.pruned.length > 0
+                ? `, pruned rows for ${journal.pruned.length}`
+                : "") +
+              `\n`,
+          );
+        }
+        for (const date of journal.failed) {
+          result.errors.push(
+            `journal render ${date}: artefact did not verify (rows kept)`,
+          );
+        }
+        if (journal.backlogDays > JOURNAL_BACKLOG_ALARM_DAYS) {
+          result.errors.push(
+            `journal: ${journal.backlogDays} closed day(s) still unrendered — ` +
+              `run 'phantombot memory journal --render'`,
+          );
+        }
+      } finally {
+        close();
+      }
+    } catch (e) {
+      const msg = `journal render: ${(e as Error).message}`;
+      result.errors.push(msg);
+      log.warn("nightly: journal render failed", { error: (e as Error).message });
+    }
   }
 
   try {

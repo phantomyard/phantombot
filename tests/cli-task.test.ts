@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { openJournalStore } from "../src/memory/journalIngest.ts";
 import {
   runTaskAdd,
   runTaskCancel,
@@ -26,8 +28,15 @@ let workdir: string;
 let store: TaskStore;
 let config: Config;
 
+let savedXdgDataHome: string | undefined;
+
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-task-cli-"));
+  // The journal write path indexes the open day (#461), and the index lives
+  // under XDG_DATA_HOME. Point it at the temp tree so a test run cannot write
+  // into the developer's real memory index.
+  savedXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
   store = await openTaskStore(join(workdir, "tasks.sqlite"));
   config = {
     defaultPersona: "phantom",
@@ -48,6 +57,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   store.close();
+  if (savedXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = savedXdgDataHome;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -359,11 +370,16 @@ describe("task --persona", () => {
       err: new CaptureStream(),
     });
     const day = new Date(Date.now() + 10 * 60_000).toISOString().slice(0, 10);
-    const journal = await readFile(
-      join(workdir, "personas", "lena", "memory", `${day}.md`),
-      "utf8",
-    );
-    expect(journal).toContain("[commitment] task");
+    // Rows, not markdown: the open day has no file until the nightly renders
+    // it, so the assertion has to look where the commitment actually lives.
+    const { store: journal, close } = await openJournalStore(config.memoryDbPath);
+    try {
+      const rows = journal.listDay("lena", day);
+      expect(rows.map((r) => r.content).join("\n")).toContain("task");
+      expect(rows.some((r) => r.tags.includes("commitment"))).toBe(true);
+    } finally {
+      close();
+    }
   });
 
   test("an unknown persona is refused — a task that can never fire is worse than an error", async () => {
