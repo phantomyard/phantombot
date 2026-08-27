@@ -126,8 +126,12 @@ picture. From an architecture standpoint:
   `UNIQUE (persona, date, content_norm)`, and an `origin` column that separates
   the scheduler's own bookkeeping from what the persona chose to write. Recall
   (`lib/dailyRecall.ts`) fills a 16 KB budget over whole entries, dropping
-  untagged narration before tagged captures, instead of injecting the file
-  verbatim — which is what stops the prompt scaling with how busy the day was:
+  untagged narration before tagged captures and ordering tagged ones by decayed
+  tag weight rather than by clock, instead of injecting the file verbatim.
+  What does not fit is degraded to a bounded one-line stub — tags, clock, head
+  text, `… · elided` — paid for out of the same budget and interleaved in
+  reading order, so an over-budget day becomes an index of itself rather than
+  an amputation (#467) — which is what stops the prompt scaling with how busy the day was:
   the file path could only slice bytes, so a heavy day lost its morning
   silently and a two-tag capture was injected twice for the rest of the day.
   Rows are indexed on write (`memory/journalRender.ts` → a VIRTUAL note at the

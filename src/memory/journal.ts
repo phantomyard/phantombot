@@ -479,21 +479,39 @@ export function dayFingerprint(text: string): string {
 }
 
 export interface RecallSelection {
-  /** Kept rows, chronological — the order a journal is read in. */
+  /** Rows kept IN FULL, chronological — the order a journal is read in. */
   entries: JournalEntry[];
-  /** Rows dropped because the budget ran out (oldest first). */
+  /**
+   * Rows that did not fit in full and came back as one-line stubs, also
+   * chronological. A stub is not a kept entry and not a dropped one: the
+   * content is gone but its EXISTENCE, its tags, its clock time and enough
+   * head text to search on are still in the prompt (#467).
+   */
+  stubbed: JournalEntry[];
+  /**
+   * Rows not shown in full — stubbed ones included. Kept as "not in full" so
+   * the number keeps meaning what it always meant; `droppedEntirely` is the
+   * count that has no representation at all.
+   */
   droppedForBudget: number;
   /**
-   * Of `droppedForBudget`, how many were dropped because ONE row is bigger
-   * than the whole budget. Counted apart because the remedy is different: a
-   * normal drop means the day was busy, an oversized drop means a single
-   * capture needs `memory search` (or splitting) and no amount of quiet day
-   * will bring it back.
+   * Rows with NO representation in the block: no full text, not even a stub.
+   * Only reachable when the budget is too small to hold the stubs themselves,
+   * which on the production budget means a pathological day.
+   */
+  droppedEntirely: number;
+  /**
+   * Of `droppedForBudget`, how many were too large to keep in full because ONE
+   * row is bigger than the whole budget. Counted apart because the remedy is
+   * different: a normal overflow means the day was busy and the entry returns
+   * on a quiet one, an oversized row never returns and wants splitting or
+   * `memory search`. Since #467 these are stubbed like anything else rather
+   * than vanishing.
    */
   droppedOversize: number;
   /** Rows withheld because they are machine chatter (`source: 'task'`). */
   withheldMechanical: number;
-  /** Byte size of the kept entries as rendered. */
+  /** Byte size of everything returned — full entries AND stubs — as rendered. */
   bytes: number;
 }
 
@@ -508,34 +526,238 @@ export interface RecallOptions {
 }
 
 /**
+ * Tag weights for recall ordering.
+ *
+ * A tag is a promotion instruction — it names the drawer an entry is on its
+ * way to — so it is also the best available signal of how much a turn later
+ * in the same day still needs that entry in front of it. `decision` is the
+ * one thing a turn cannot re-derive from the code (it records a choice and
+ * the reasoning that was rejected); a `lesson` is next; a `norm` or a
+ * `person` fact is usually already durable somewhere else by the time it
+ * matters.
+ *
+ * `commitment` is absent on purpose: commitments do not decay and are not
+ * scored, they are simply first (see COMMITMENT_TAG below). That mirrors
+ * `BELIEF_KINDS` in drawers.ts, which excludes commitments from decay for the
+ * same reason — age makes an open commitment MORE urgent, not less relevant.
+ * One decay model in the codebase, not two.
+ */
+export const JOURNAL_TAG_WEIGHTS: Record<string, number> = {
+  decision: 1,
+  lesson: 0.9,
+  norm: 0.85,
+  person: 0.8,
+};
+
+/** Any tag not in the table above. Still beats untagged narration outright. */
+export const JOURNAL_DEFAULT_TAG_WEIGHT = 0.7;
+
+const COMMITMENT_TAG = "commitment";
+
+/**
+ * Recency half-life WITHIN one day, in hours.
+ *
+ * The drawers decay in days because they hold beliefs that span months; a
+ * journal day is only 24 hours wide, so an hour-scale half-life would be
+ * indistinguishable from pure recency and a month-scale one from a constant.
+ *
+ * 48h is chosen so the weight table can actually change an ordering over the
+ * gaps that occur inside a working day. Across the ~9 hours between a morning
+ * root-cause `decision` and an afternoon `person` note the factor is 0.88, so
+ * the decision (1 · 0.88) survives and the person note (0.8 · 1) is the one
+ * stubbed — which is the case #467 was opened on. Shorten this and weight
+ * stops mattering; lengthen it and the day stops being ordered by time at
+ * all. Recency remains the dominant term either way: this tilts the ordering,
+ * it does not invert it, and the BANDS above it are strict regardless.
+ */
+export const JOURNAL_RECALL_HALF_LIFE_HOURS = 48;
+
+/**
+ * Priority band. Lower sorts first. Bands are STRICT: no score in band 1 can
+ * ever overtake band 0, and nothing tagged can be dropped before something
+ * untagged. That strictness is the guarantee #463 makes and the byte-slice on
+ * the markdown file could not — scoring happens INSIDE a band, never across.
+ */
+function recallBand(e: JournalEntry): 0 | 1 | 2 {
+  if (e.tags.includes(COMMITMENT_TAG)) return 0;
+  return e.tags.length > 0 ? 1 : 2;
+}
+
+/** An entry is worth its heaviest tag, not the average of them. */
+function tagWeight(e: JournalEntry): number {
+  let best = 0;
+  for (const t of e.tags) {
+    best = Math.max(best, JOURNAL_TAG_WEIGHTS[t] ?? JOURNAL_DEFAULT_TAG_WEIGHT);
+  }
+  return best || JOURNAL_DEFAULT_TAG_WEIGHT;
+}
+
+/**
+ * Order the eligible rows by band, then by decayed weight inside band 1.
+ *
+ * The decay clock is the NEWEST entry in the set, not `Date.now()`. Selection
+ * must be a pure function of its input: a wall clock makes the same journal
+ * select differently depending on when the turn ran, which is untestable and,
+ * worse, means a day's ordering silently changes as it ages in the same
+ * prompt.
+ */
+function prioritize(eligible: readonly JournalEntry[]): JournalEntry[] {
+  let ref = 0;
+  for (const e of eligible) ref = Math.max(ref, e.createdAt.getTime());
+  const halfLifeMs = JOURNAL_RECALL_HALF_LIFE_HOURS * 3_600_000;
+  const score = (e: JournalEntry): number => {
+    const ageMs = Math.max(0, ref - e.createdAt.getTime());
+    return tagWeight(e) * Math.pow(2, -ageMs / halfLifeMs);
+  };
+  return [...eligible].sort((a, b) => {
+    const band = recallBand(a) - recallBand(b);
+    if (band !== 0) return band;
+    // Bands 0 and 2 are pure recency: a commitment is not a belief to be
+    // scored, and untagged narration has no tag to weigh.
+    if (recallBand(a) === 1) {
+      const s = score(b) - score(a);
+      if (Math.abs(s) > 1e-9) return s;
+    }
+    return (
+      b.createdAt.getTime() - a.createdAt.getTime() || a.id.localeCompare(b.id)
+    );
+  });
+}
+
+/**
+ * Share of the budget held back for stubs when anything overflows — 15%.
+ *
+ * Held back rather than spent afterwards, because the full-entry pass would
+ * otherwise consume the last byte and leave nothing to say what it displaced.
+ * Nothing is reserved on a day that fits: the pass runs once at the full
+ * budget first, and only re-runs against the reserve when it finds leftovers.
+ * 15% of 16KB is ~2.4KB, i.e. ~17 stubs — comfortably more than the 14 rows
+ * that overflowed on the day #467 was measured.
+ */
+export const JOURNAL_STUB_RESERVE_FRACTION = 0.15;
+
+/** Hard cap on one stub, bytes. Head text is truncated to fit inside it. */
+export const JOURNAL_STUB_MAX_BYTES = 160;
+
+const STUB_SUFFIX = "… · elided — `memory search`";
+
+/** Byte-safe prefix: take whole characters while they fit in `maxBytes`. */
+function headBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let out = "";
+  let n = 0;
+  for (const ch of text) {
+    const w = Buffer.byteLength(ch, "utf8");
+    if (n + w > maxBytes) break;
+    out += ch;
+    n += w;
+  }
+  // Prefer a word boundary, but only if one is close enough that cutting
+  // there does not throw away most of the search terms.
+  const sp = out.lastIndexOf(" ");
+  return sp > maxBytes * 0.6 ? out.slice(0, sp) : out;
+}
+
+/**
+ * One line standing in for an entry that did not fit: tags, head text, clock.
+ *
+ * The point is not to convey the entry — it is to make the entry REACHABLE. A
+ * bare count ("14 earlier entries not shown") is honest and useless, because a
+ * turn cannot search for something whose existence it does not know; the head
+ * text is what carries the search terms. Bounded at
+ * JOURNAL_STUB_MAX_BYTES so a day of stubs is a fixed cost per row and not a
+ * second unbounded blob.
+ *
+ * Stubs live ONLY in the injected block. `renderEntry` / `renderDay` — the
+ * markdown that reaches disk and round-trips through `parseJournalLine` — are
+ * untouched, so nothing lossy can ever be written back over a day's rows.
+ */
+export function renderStub(e: JournalEntry): string {
+  const tags = e.tags.length > 0 ? `[${e.tags.join(",")}] ` : "";
+  const stamp = ` · ${e.createdAt.toISOString().slice(11, 16)}Z`;
+  const fixed = Buffer.byteLength(
+    `- ${tags}${STUB_SUFFIX}${stamp}`,
+    "utf8",
+  );
+  const room = Math.max(8, JOURNAL_STUB_MAX_BYTES - fixed);
+  // Collapse newlines: a multi-line capture must still be ONE line here, or
+  // the stub is neither bounded nor parseable by eye.
+  const flat = e.content.replace(/\s+/g, " ").trim();
+  return `- ${tags}${headBytes(flat, room)}${STUB_SUFFIX}${stamp}`;
+}
+
+const sizeOf = (text: string): number => Buffer.byteLength(text, "utf8") + 1;
+
+/** Pack full entries into `budget`, in the order given. Returns the leftovers. */
+function packFull(
+  ordered: readonly JournalEntry[],
+  budget: number,
+): { kept: JournalEntry[]; bytes: number; leftovers: JournalEntry[]; oversize: number } {
+  const kept: JournalEntry[] = [];
+  const leftovers: JournalEntry[] = [];
+  let bytes = 0;
+  let oversize = 0;
+  for (const e of ordered) {
+    const size = sizeOf(renderEntry(e));
+    if (size > budget) {
+      // One row bigger than the entire budget. It can never be kept without
+      // making the budget a suggestion, and `memory capture` caps nothing — a
+      // single pasted log or stack trace is enough. Since #467 it is not lost
+      // either: it falls through to the stub pass like any other leftover.
+      oversize++;
+      leftovers.push(e);
+      continue;
+    }
+    if (bytes + size > budget) {
+      // Keep walking: a later, smaller entry may still fit where this one did
+      // not. Skipping the rest would drop a 40-byte decision because a 4KB
+      // narration happened to come first.
+      leftovers.push(e);
+      continue;
+    }
+    kept.push(e);
+    bytes += size;
+  }
+  return { kept, bytes, leftovers, oversize };
+}
+
+const chronological = (a: JournalEntry, b: JournalEntry): number =>
+  a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id);
+
+/**
  * Fill a byte budget from one day's rows.
  *
  * Two orderings are in play and they are not the same one:
  *
  *   PRIORITY decides what is dropped when the budget runs out. Not age alone
- *   — CLASS first, then age. A tagged capture (`decision`, `lesson`,
- *   `commitment`, `person`, `norm`) is something the persona deliberately
- *   wrote down for later; untagged narration is what it happened to say while
- *   doing the work. When a day overflows, the chatter goes and the decisions
- *   stay. The old byte-slice on the file did the exact opposite: it cut from
- *   the FRONT, so the first casualty was the morning's tagged captures.
+ *   — BAND first, then score, then age. A tagged capture (`decision`,
+ *   `lesson`, `commitment`, `person`, `norm`) is something the persona
+ *   deliberately wrote down for later; untagged narration is what it happened
+ *   to say while doing the work. When a day overflows, the chatter goes and
+ *   the decisions stay. The old byte-slice on the file did the exact
+ *   opposite: it cut from the FRONT, so the first casualty was the morning's
+ *   tagged captures. Inside the tagged band, ordering is by decayed tag
+ *   weight rather than by clock (#467) — measured on the day that motivated
+ *   it, every row of an over-budget day was tagged, so the class tier bought
+ *   nothing and pure recency was deciding which decisions survived.
  *
- *   READ order is chronological, always. A journal read out of order is a
- *   different document.
+ *   READ order is chronological, always, and stubs are interleaved with kept
+ *   entries in it. A journal read out of order is a different document.
  *
- * Overflow is not loss. Every row remains in the table and in the index, so a
- * dropped entry is one `memory search` away — which is why the caller is
- * expected to SAY it dropped some. Truncation the model cannot see reads as
- * absence, and absence is what makes it re-derive what it already knew.
+ * Overflow is DEGRADATION, not loss. What does not fit in full comes back as
+ * a one-line stub carrying its tags, its clock and enough head text to search
+ * on; every row also remains in the table and in the index. That is the whole
+ * difference between "this never happened" and "this happened, go read it" —
+ * and it is the second one that makes a turn reach for `memory search`
+ * instead of re-deriving what it already knew this morning.
  *
- * The budget is a HARD bound, including against a single row bigger than the
- * whole of it. Nothing caps the length of one `memory capture`, so one pasted
- * log is enough; letting the highest-priority row through unmeasured would
- * make the budget advisory and hand back exactly the unbounded prompt this
- * table exists to bound. An oversized row is skipped, counted separately, and
- * left to `memory search` — the one case where a day can legitimately come
- * back with no entries at all, which the caller must report rather than
- * mistake for an empty day.
+ * The budget is a HARD bound including the stubs, and including against a
+ * single row bigger than the whole of it. Nothing caps the length of one
+ * `memory capture`, so one pasted log is enough; letting the highest-priority
+ * row through unmeasured would make the budget advisory and hand back exactly
+ * the unbounded prompt this table exists to bound. When even the stubs will
+ * not fit, the remainder is dropped and counted, which the caller must report
+ * rather than mistake for an empty day.
  */
 export function selectForRecall(
   entries: readonly JournalEntry[],
@@ -547,47 +769,71 @@ export function selectForRecall(
     : entries.filter((e) => e.source !== "task");
   const withheldMechanical = entries.length - eligible.length;
 
-  // Newest first within each class; tagged class considered first.
-  const byPriority = [
-    ...eligible.filter((e) => e.tags.length > 0).reverse(),
-    ...eligible.filter((e) => e.tags.length === 0).reverse(),
-  ];
+  const ordered = prioritize(eligible);
 
-  const kept: JournalEntry[] = [];
-  let bytes = 0;
-  let droppedOversize = 0;
-  for (const e of byPriority) {
-    const size = Buffer.byteLength(renderEntry(e), "utf8") + 1;
-    if (size > budgetBytes) {
-      // One row bigger than the entire budget. It can never be kept without
-      // making the budget a suggestion, and `memory capture` caps nothing —
-      // a single pasted log or stack trace is enough. Keeping it "because
-      // something is better than nothing" is how the bounded prompt this
-      // whole change exists to guarantee turns back into an unbounded one,
-      // and an unbounded prompt is the spawn-size failure, not a big read.
-      droppedOversize++;
-      continue;
+  // First pass at the FULL budget: a day that fits pays nothing for a stub
+  // reserve it does not need.
+  let pass = packFull(ordered, budgetBytes);
+  const stubbed: JournalEntry[] = [];
+  let stubBytes = 0;
+
+  if (pass.leftovers.length > 0) {
+    const need = pass.leftovers.reduce(
+      (n, e) => n + sizeOf(renderStub(e)),
+      0,
+    );
+    // Floor of one whole stub, ceiling of half the budget. The fraction alone
+    // is right at 16KB and useless at 400 bytes, where 15% cannot hold a
+    // single stub and the reserve would silently buy nothing; the half-budget
+    // ceiling stops the reverse case, a tiny budget spending everything on
+    // stubs and showing no entry in full at all.
+    const reserve = Math.min(
+      need,
+      Math.max(
+        Math.floor(budgetBytes * JOURNAL_STUB_RESERVE_FRACTION),
+        JOURNAL_STUB_MAX_BYTES + 1,
+      ),
+      Math.floor(budgetBytes / 2),
+    );
+    pass = packFull(ordered, budgetBytes - reserve);
+    let remaining = budgetBytes - pass.bytes;
+    for (const e of pass.leftovers) {
+      const size = sizeOf(renderStub(e));
+      if (size > remaining) continue;
+      stubbed.push(e);
+      stubBytes += size;
+      remaining -= size;
     }
-    if (bytes + size > budgetBytes) {
-      // Keep walking: a later, smaller entry may still fit where this one
-      // did not. Skipping the rest would drop a 40-byte decision because a
-      // 4KB narration happened to come first.
-      continue;
-    }
-    kept.push(e);
-    bytes += size;
   }
-  kept.sort(
-    (a, b) =>
-      a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id),
-  );
+
+  const kept = [...pass.kept].sort(chronological);
+  stubbed.sort(chronological);
   return {
     entries: kept,
+    stubbed,
     droppedForBudget: eligible.length - kept.length,
-    droppedOversize,
+    droppedEntirely: eligible.length - kept.length - stubbed.length,
+    droppedOversize: pass.oversize,
     withheldMechanical,
-    bytes,
+    bytes: pass.bytes + stubBytes,
   };
+}
+
+/**
+ * The injected text for a selection: kept entries and stubs, interleaved in
+ * clock order.
+ *
+ * Interleaved rather than appended as a separate "elided" section, because
+ * the block is read as a narrative of the day — a stub in its right place
+ * says "something happened here at 09:12 that you cannot see"; the same stub
+ * in a footer at the bottom says nothing about when.
+ */
+export function renderRecall(sel: RecallSelection): string {
+  const stubs = new Set(sel.stubbed.map((e) => e.id));
+  return [...sel.entries, ...sel.stubbed]
+    .sort(chronological)
+    .map((e) => (stubs.has(e.id) ? renderStub(e) : renderEntry(e)))
+    .join("\n");
 }
 
 /** One markdown line for one entry: `- [decision,lesson] text · 07:18Z`. */

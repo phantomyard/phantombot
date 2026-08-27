@@ -106,24 +106,37 @@ describe("buildDailyRecall over rows", () => {
     expect(d.block).toContain("1 scheduled-task entry withheld");
   });
 
-  test("the budget drops whole entries and the block says how many", async () => {
+  test("the budget degrades older entries to stubs and says so", async () => {
     await seed(
       Array.from({ length: 40 }, (_, i) => ({
         content: `entry ${i} ${"y".repeat(60)}`,
         at: `09:${String(i).padStart(2, "0")}`,
       })),
     );
-    const d = await buildDailyRecall(dir, NOW, 400, undefined, src());
+    const d = await buildDailyRecall(dir, NOW, 2_000, undefined, src());
     expect(d.today?.truncated).toBe(true);
-    expect(d.block).toContain("earlier entries not shown");
+    // Unexplained, an `… · elided` line reads as corruption; explained, it
+    // reads as an index of the rest of the day, which is the point of #467.
+    expect(d.block).toContain("shown as one-line stubs");
+    expect(d.block).toContain("elided");
     // The block must say the missing entries are RETRIEVABLE. Truncation the
     // model cannot see reads as absence, and absence is what makes it
     // re-derive what it already wrote down this morning.
     expect(d.block).toContain("Nothing is lost");
     expect(d.block).toContain("memory search");
-    // The newest survives; the oldest is what goes.
+    // The newest survive IN FULL, the next band down as stubs carrying their
+    // head text — which a bare count never did — and the block says plainly
+    // how many got neither. Stubs are paid for out of the SAME budget, so a
+    // heavy day still degrades rather than growing the prompt.
     expect(d.block).toContain("entry 39");
-    expect(d.block).not.toContain("entry 0 ");
+    expect(d.block).toContain("further entries are not shown at all");
+    const lines = d.block!.split("\n").filter((l) => l.startsWith("- "));
+    expect(lines.some((l) => l.includes("elided"))).toBe(true);
+    expect(lines.at(-1)).not.toContain("elided");
+    // Chronological throughout: stubs sit where they happened, not in a
+    // footer — a stub in its right place says WHEN something is missing.
+    const stamps = lines.map((l) => l.slice(-6));
+    expect([...stamps].sort()).toEqual(stamps);
   });
 
   test("no rows and no file means no journal block at all", async () => {

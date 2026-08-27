@@ -25,7 +25,10 @@ import {
   normalizeTags,
   renderDay,
   renderEntry,
+  renderRecall,
+  renderStub,
   selectForRecall,
+  JOURNAL_STUB_MAX_BYTES,
   type JournalEntry,
 } from "../src/memory/journal.ts";
 import {
@@ -469,7 +472,7 @@ describe("recall selection", () => {
     expect(sel.droppedForBudget).toBe(1);
   });
 
-  test("a day of nothing but oversized rows returns none, and says so", () => {
+  test("a day of nothing but oversized rows comes back as stubs", () => {
     const sel = selectForRecall(
       [
         entry({ id: "a", content: "x".repeat(40_000), tags: ["decision"] }),
@@ -477,12 +480,15 @@ describe("recall selection", () => {
       ],
       JOURNAL_RECALL_BUDGET_BYTES,
     );
+    // Nothing can be shown in full — but "nothing in full" is not "nothing".
     expect(sel.entries).toHaveLength(0);
-    expect(sel.bytes).toBe(0);
-    // Reported, not silent: the caller turns this into a visible note. An
-    // omission the model cannot see reads as "nothing happened today".
+    expect(sel.stubbed.map((e) => e.id)).toEqual(["a", "b"]);
     expect(sel.droppedOversize).toBe(2);
     expect(sel.droppedForBudget).toBe(2);
+    // The whole point of #467: no entry left WITHOUT a trace in the block.
+    expect(sel.droppedEntirely).toBe(0);
+    expect(sel.bytes).toBeGreaterThan(0);
+    expect(sel.bytes).toBeLessThanOrEqual(JOURNAL_RECALL_BUDGET_BYTES);
   });
 
   test("a tiny budget drops everything rather than busting itself", () => {
@@ -584,13 +590,17 @@ describe("recall drops chatter before decisions", () => {
         createdAt: new Date(`${DAY}T10:00:00.000Z`),
       }),
     ];
-    // Room for two entries out of three.
-    const sel = selectForRecall(all, 480);
+    // Room for two entries in full plus the stub reserve.
+    const sel = selectForRecall(all, 640);
     expect(sel.entries.map((e) => e.id)).toEqual(["decision-first", "lesson-last"]);
     // The OLDEST entry survived and a newer one did not, which is exactly what
     // the byte-slice on the file could never do: it cut from the front, so the
     // morning's tagged captures were always the first casualty.
     expect(sel.droppedForBudget).toBe(1);
+    // The chatter is not shown in full — but it is still ACCOUNTED for, as a
+    // stub, so the turn can see that something happened at 09:00.
+    expect(sel.stubbed.map((e) => e.id)).toEqual(["chatter"]);
+    expect(sel.droppedEntirely).toBe(0);
   });
 
   test("a big entry does not starve the smaller ones behind it", () => {
@@ -606,6 +616,198 @@ describe("recall drops chatter before decisions", () => {
     const sel = selectForRecall(all, 200);
     // The oversized entry is skipped, not treated as the end of the budget.
     expect(sel.entries.map((e) => e.id)).toEqual(["small-a", "small-b"]);
+  });
+});
+
+describe("degradation instead of dropping (#467)", () => {
+  const long = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      entry({
+        id: `e${i}`,
+        content: `entry number ${i} — ${"detail ".repeat(40)}`,
+        tags: ["decision"],
+        createdAt: new Date(Date.parse(`${DAY}T08:00:00.000Z`) + i * 60_000),
+      }),
+    );
+
+  test("an over-budget day comes back as full entries PLUS stubs", () => {
+    const sel = selectForRecall(long(60), 4_000);
+    expect(sel.entries.length).toBeGreaterThan(0);
+    expect(sel.stubbed.length).toBeGreaterThan(0);
+    // The bound is over EVERYTHING emitted, stubs included — a budget that
+    // only counts the full entries is not a budget.
+    expect(sel.bytes).toBeLessThanOrEqual(4_000);
+    expect(Buffer.byteLength(renderRecall(sel), "utf8")).toBeLessThanOrEqual(
+      4_000,
+    );
+    // Accounting adds up: every eligible row is kept, stubbed or counted.
+    expect(sel.entries.length + sel.stubbed.length + sel.droppedEntirely).toBe(
+      60,
+    );
+  });
+
+  test("a stub carries tags, clock and searchable head text", () => {
+    const stub = renderStub(
+      entry({
+        content:
+          "phantomops prod stuck at starting: status_generator holds a DB " +
+          "session across a long tool call and Postgres kills it",
+        tags: ["decision", "lesson"],
+        createdAt: new Date(`${DAY}T15:31:00.000Z`),
+      }),
+    );
+    expect(stub).toContain("[decision,lesson]");
+    expect(stub).toContain("15:31Z");
+    // The head text is the load-bearing part: a bare count cannot be searched
+    // for, and a turn cannot look up something it does not know happened.
+    expect(stub).toContain("status_generator");
+    expect(stub).toContain("memory search");
+    expect(Buffer.byteLength(stub, "utf8")).toBeLessThanOrEqual(
+      JOURNAL_STUB_MAX_BYTES,
+    );
+  });
+
+  test("a multi-line capture stubs to ONE line", () => {
+    const stub = renderStub(
+      entry({ content: "first line\nsecond line\n\nthird line", tags: ["lesson"] }),
+    );
+    expect(stub.includes("\n")).toBe(false);
+  });
+
+  test("stubs are interleaved chronologically, not appended in a footer", () => {
+    const sel = selectForRecall(long(40), 3_000);
+    const lines = renderRecall(sel).split("\n");
+    const stamps = lines.map((l) => l.slice(-6));
+    expect([...stamps].sort()).toEqual(stamps);
+    // A stub in its right place says "something happened here you cannot
+    // see"; the same stub in a footer says nothing about when.
+    expect(lines.some((l) => l.includes("elided"))).toBe(true);
+  });
+
+  test("a day that fits pays NO stub reserve", () => {
+    const all = long(3);
+    const sel = selectForRecall(all, JOURNAL_RECALL_BUDGET_BYTES);
+    expect(sel.entries).toHaveLength(3);
+    expect(sel.stubbed).toHaveLength(0);
+    expect(sel.droppedForBudget).toBe(0);
+  });
+
+  test("a budget too small even for stubs drops the rest and counts it", () => {
+    const sel = selectForRecall(long(20), 60);
+    expect(sel.entries).toHaveLength(0);
+    expect(sel.stubbed).toHaveLength(0);
+    expect(sel.droppedEntirely).toBe(20);
+    expect(sel.bytes).toBe(0);
+  });
+
+  test("the markdown that reaches DISK is not stubbed", () => {
+    // Stubs are a prompt-time artefact. renderDay/renderEntry feed the file
+    // the nightly writes and parseJournalLine reads back, so a lossy line
+    // there would overwrite a day's rows with their own summary.
+    const e = long(1)[0]!;
+    expect(renderDay(DAY, [e])).toContain(e.content);
+    expect(renderEntry(e)).not.toContain("elided");
+  });
+});
+
+describe("recall weighting (#467)", () => {
+  const sized = (over: Partial<JournalEntry>) =>
+    entry({ content: `${"pad ".repeat(120)}`, ...over });
+
+  test("a morning commitment outranks an afternoon person note", () => {
+    const all = [
+      sized({
+        id: "commitment",
+        tags: ["commitment"],
+        createdAt: new Date(`${DAY}T08:00:00.000Z`),
+      }),
+      sized({
+        id: "person",
+        tags: ["person"],
+        createdAt: new Date(`${DAY}T17:00:00.000Z`),
+      }),
+    ];
+    // Room for exactly one in full, plus the stub reserve.
+    const sel = selectForRecall(all, 800);
+    expect(sel.entries.map((e) => e.id)).toEqual(["commitment"]);
+    // Time makes a commitment MORE urgent, not less relevant — same rule
+    // BELIEF_KINDS applies in the drawers, so there is one decay model here.
+    expect(sel.stubbed.map((e) => e.id)).toEqual(["person"]);
+  });
+
+  test("a morning decision outranks an afternoon person note", () => {
+    const all = [
+      sized({
+        id: "decision",
+        tags: ["decision"],
+        createdAt: new Date(`${DAY}T08:00:00.000Z`),
+      }),
+      sized({
+        id: "person",
+        tags: ["person"],
+        createdAt: new Date(`${DAY}T17:00:00.000Z`),
+      }),
+    ];
+    const sel = selectForRecall(all, 800);
+    // Pure recency — the pre-#467 rule — would have kept the newer one. On
+    // the day this was measured every row was tagged, so recency alone was
+    // deciding which DECISIONS survived.
+    expect(sel.entries.map((e) => e.id)).toEqual(["decision"]);
+  });
+
+  test("recency still dominates between equals", () => {
+    const all = [
+      sized({
+        id: "old",
+        tags: ["decision"],
+        createdAt: new Date(`${DAY}T08:00:00.000Z`),
+      }),
+      sized({
+        id: "new",
+        tags: ["decision"],
+        createdAt: new Date(`${DAY}T17:00:00.000Z`),
+      }),
+    ];
+    expect(selectForRecall(all, 800).entries.map((e) => e.id)).toEqual(["new"]);
+  });
+
+  test("weighting NEVER lifts narration above a tagged capture", () => {
+    // The band is strict: no score in the tagged band can be overtaken by an
+    // untagged row, however fresh. This is the guarantee the byte-slice on
+    // the markdown file could not make.
+    const all = [
+      sized({
+        id: "tagged-oldest",
+        tags: ["person"],
+        createdAt: new Date(`${DAY}T06:00:00.000Z`),
+      }),
+      sized({
+        id: "narration-newest",
+        createdAt: new Date(`${DAY}T23:59:00.000Z`),
+      }),
+    ];
+    const sel = selectForRecall(all, 800);
+    expect(sel.entries.map((e) => e.id)).toEqual(["tagged-oldest"]);
+  });
+
+  test("selection is a pure function of the rows, not of the wall clock", () => {
+    // The decay clock is the newest entry in the SET. A wall clock would make
+    // the same journal select differently depending on when the turn ran.
+    const all = [
+      sized({
+        id: "a",
+        tags: ["decision"],
+        createdAt: new Date(`${DAY}T08:00:00.000Z`),
+      }),
+      sized({
+        id: "b",
+        tags: ["person"],
+        createdAt: new Date(`${DAY}T09:00:00.000Z`),
+      }),
+    ];
+    const first = selectForRecall(all, 800).entries.map((e) => e.id);
+    const later = selectForRecall(all, 800).entries.map((e) => e.id);
+    expect(later).toEqual(first);
   });
 });
 

@@ -1991,18 +1991,46 @@ Since #461 the journal is a **table**, not a file. Each capture is one row in
 --tag lesson` files one entry carrying both tags instead of writing the same
 paragraph twice, and a repeated capture collides on `UNIQUE (persona, date,
 content_norm)` and merges. Recall then SELECTS to a **16 KB budget**
-(`JOURNAL_RECALL_BUDGET_BYTES`), newest first, dropping whole entries and
-saying in the block how many it left behind — so the prompt stops scaling with
-how busy the day was. Scheduled-task rows (`source: 'task'`) are withheld from
+(`JOURNAL_RECALL_BUDGET_BYTES`) and says in the block what it left out — so
+the prompt stops scaling with how busy the day was. Scheduled-task rows (`source: 'task'`) are withheld from
 the block and reported as a count: machine bookkeeping injected inline reads as
 the persona's own reasoning.
 
 What overflows the budget is chosen by CLASS before age: untagged narration
 goes before a tagged capture (`decision`, `lesson`, `commitment`, `person`,
 `norm`). The old byte-slice did the opposite — it cut from the FRONT, so the
-first thing a heavy day lost was the morning's decisions. And nothing that
-overflows is lost: every row is indexed on write, so the block says so and
-points at `memory search`.
+first thing a heavy day lost was the morning's decisions. Inside the tagged
+class, ordering is by decayed tag weight rather than by clock (#467): a
+`commitment` never decays (age makes it urgent, exactly as `BELIEF_KINDS`
+treats it in the drawers), and everything else scores
+`weight · 2^(-ageHours / 48)`, so a morning root-cause `decision` outranks an
+afternoon `person` note. The decay clock is the newest row in the day, not the
+wall clock, so selection is a pure function of the journal.
+
+**What does not fit is degraded, not dropped.** An entry that cannot be shown
+in full comes back as a bounded one-line stub carrying its tags, its clock time
+and the first ~80 characters of its content, marked `… · elided`:
+
+```
+- [decision] phantomops prod stuck at starting: status_generator holds a DB… · elided — `memory search` · 15:31Z
+```
+
+Stubs are interleaved chronologically with the full entries and paid for out of
+the *same* 16 KB — ~15 % of the budget is reserved for them on an overflowing
+day, and nothing at all is reserved on a day that fits. That makes the budget a
+graceful slope instead of a cliff: a heavy day degrades to an *index of
+itself*. A bare count ("14 earlier entries not shown") was honest and useless,
+because a turn cannot search for something whose existence it does not know;
+the head text is what carries the search terms. A row larger than the entire
+budget — one pasted stack trace is enough — is stubbed like any other rather
+than vanishing. When even the stubs will not fit, the remainder is dropped and
+counted separately in the block. Nothing that overflows is lost either way:
+every row is indexed on write, and the block points at `memory search`.
+
+Stubs exist only in the injected block. `renderEntry` / `renderDay` — the
+markdown the nightly writes to disk and `parseJournalLine` reads back — are
+never stubbed, so a lossy line can never overwrite a day's rows with a summary
+of themselves.
 
 **The markdown file is now a derived artefact, not the write path.** The open
 day exists as rows and as an index entry under the path its file will

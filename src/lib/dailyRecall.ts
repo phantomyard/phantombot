@@ -48,7 +48,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 import {
-  renderEntry,
+  renderRecall,
   selectForRecall,
   type JournalEntry,
 } from "../memory/journal.ts";
@@ -304,7 +304,8 @@ function readDayRows(
   const all = store.listDay(persona, date);
   if (all.length === 0) return undefined;
   const sel = selectForRecall(all, budgetBytes);
-  if (sel.entries.length === 0 && sel.droppedForBudget === 0) {
+  if (sel.entries.length === 0 && sel.stubbed.length === 0 &&
+      sel.droppedForBudget === 0) {
     // Nothing kept and nothing dropped for size means the day is all
     // scheduler chatter. Fall back, as before: there is no human content to
     // report missing.
@@ -316,27 +317,41 @@ function readDayRows(
   // byte-slice of the very content the budget just refused. Report the
   // omission instead; a visible "0 shown, N searchable" is honest, a silent
   // reappearance through the other layer is not.
-  const text = sel.entries.map(renderEntry).join("\n");
+  const text = renderRecall(sel);
   const keptBytes = Buffer.byteLength(text, "utf8");
   const notes: string[] = [];
   if (sel.droppedForBudget > 0) {
     // Loud, and countable — the file path could only ever report bytes, so a
     // day losing its morning looked identical to a day that had no morning.
-    log.warn("dailyRecall: journal over budget; oldest entries dropped", {
+    log.warn("dailyRecall: journal over budget; older entries degraded", {
       date,
       persona,
       entries: all.length,
-      dropped: sel.droppedForBudget,
+      notInFull: sel.droppedForBudget,
+      stubbed: sel.stubbed.length,
+      droppedEntirely: sel.droppedEntirely,
       oversize: sel.droppedOversize,
       kept: sel.entries.length,
       budgetBytes,
     });
-    const plain = sel.droppedForBudget - sel.droppedOversize;
-    if (plain > 0) {
+    if (sel.stubbed.length > 0) {
+      // Say what the `… · elided` lines ARE. Unexplained they read as
+      // corruption; explained they read as an index of the rest of the day,
+      // which is the point of stubbing rather than dropping (#467).
       notes.push(
-        `${plain} earlier ${
-          plain === 1 ? "entry" : "entries"
-        } not shown (narration dropped before tagged captures)`,
+        `${sel.stubbed.length} earlier ${
+          sel.stubbed.length === 1 ? "entry is" : "entries are"
+        } shown as one-line stubs (marked … · elided) — the head ` +
+          `text is there to search on`,
+      );
+    }
+    if (sel.droppedEntirely > 0) {
+      // Distinct from a stub: this one left NO trace in the block at all, so
+      // the count is the only thing telling the turn to go looking.
+      notes.push(
+        `${sel.droppedEntirely} further ${
+          sel.droppedEntirely === 1 ? "entry is" : "entries are"
+        } not shown at all`,
       );
     }
     if (sel.droppedOversize > 0) {
@@ -346,7 +361,7 @@ function readDayRows(
         `${sel.droppedOversize} ${
           sel.droppedOversize === 1 ? "entry is" : "entries are"
         } individually larger than the whole ${budgetBytes}-byte journal ` +
-          `budget and can only be read via search`,
+          `budget and can only be read in full via search`,
       );
     }
   }
