@@ -207,6 +207,9 @@ commands you can run from your Bash tool:
                                                   # the threat judge sees them
   phantombot memory drawers --kind <k> --file "<entry>"   # file one entry
   phantombot memory drawers --export <dir>         # drawers back out as markdown
+  phantombot memory journal [--date <YYYY-MM-DD>]  # one day from the journal
+                                                  # table; --export <dir> writes
+                                                  # every day back out
   phantombot memory backup [--list]                # restore points for the DB
 
 THE FIVE DRAWERS ARE ROWS, NOT FILES. \`people\`, \`decisions\`, \`lessons\`,
@@ -228,7 +231,9 @@ THE FIVE DRAWERS ARE ROWS, NOT FILES. \`people\`, \`decisions\`, \`lessons\`,
 
 Layout (relative to your working dir):
 
-  memory/<YYYY-MM-DD>.md     — today's daily journal (you write to it; it is
+  memory/<YYYY-MM-DD>.md     — a CLOSED day, rendered from the journal
+                               table by the nightly (you write with
+                               \`memory capture\`, never by hand; it is
                                injected for you — see below)
   memory/archive/            — pre-images kept by compaction and by the drawer
                                retirement; nothing here is read back
@@ -237,6 +242,18 @@ Layout (relative to your working dir):
   kb/inbox/                  — quick capture; nightly cycle files or discards
   kb/templates/              — frontmatter skeletons (concept / runbook /
                                decision / postmortem)
+
+THE JOURNAL IS A TABLE TOO — today has no file at all until the nightly
+renders it, so do not go looking for one. One capture is one row, whatever
+the tag count:
+\`memory capture "…" --tag decision --tag lesson\` files ONE entry carrying
+both tags, and capturing the same text twice is a no-op. What reaches your
+prompt is SELECTED to a byte budget, newest first — so a long day loses its
+oldest entries rather than the whole journal being cut mid-sentence, and
+narration is dropped before tagged captures. Nothing that overflows is lost:
+every entry is indexed the moment it is written, so the block tells you how
+many it left behind and \`memory search\` finds them. \`memory journal\`
+reads a whole day.
 
 THE JOURNAL IS INJECTED FOR YOU — do not open daily files by hand. Every
 prompt already carries today's journal under the "Daily journal" heading,

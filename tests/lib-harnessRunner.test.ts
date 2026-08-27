@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   createKillCoordinator,
+  drainStderr,
   isShutdownExit,
   killCauseToErrorChunk,
   runHarnessProcess,
@@ -694,5 +695,252 @@ describe("runHarnessProcess — shutdown signal", () => {
     expect(err).toBeDefined();
     expect(err.recoverable).toBe(false);
     expect(err.error).toContain("shutting down");
+  });
+});
+
+describe("runHarnessProcess — stderr capture (issue #462)", () => {
+  test("non-zero exit attaches stderrTail to the error chunk", async () => {
+    // A subprocess that writes to stderr then exits non-zero. The ring
+    // buffer should capture the lines and attach them as `stderrTail`.
+    const proc = spawnInNewSession(
+      ["sh", "-c", 'echo "error: something broke" >&2; echo "error: more details" >&2; exit 1'],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 10_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.error).toContain("exited with code 1");
+    expect(Array.isArray(err.stderrTail)).toBe(true);
+    expect(err.stderrTail).toContain("error: something broke");
+    expect(err.stderrTail).toContain("error: more details");
+  });
+
+  test("exit 0 with stderr stays quiet — no warn-level stderrTail", async () => {
+    // A subprocess that writes to stderr but exits 0. The stderrTail is
+    // still attached (the ring buffer captures regardless of exit code),
+    // but the log level must NOT be promoted to warn — exit 0 is a happy
+    // path. We verify the chunk is a clean `done`, not an error.
+    const proc = spawnInNewSession(
+      ["sh", "-c", 'echo "some warning text" >&2; echo \'{}\''],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 10_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => ({ type: "done", finalText: "ok", meta: {} } as const),
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    // No error chunk — the done is clean.
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeUndefined();
+    const done = chunks.find((c) => c.type === "done");
+    expect(done).toBeDefined();
+    // stderrTail is NOT on the done chunk — it only goes on error chunks.
+    expect(done.stderrTail).toBeUndefined();
+  });
+
+  test("ring buffer is bounded at 20 lines", async () => {
+    // Write 30 stderr lines, exit non-zero. Only the last 20 should survive
+    // in stderrTail — the ring buffer evicts the oldest.
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        "for i in $(seq 1 30); do echo \"line $i\" >&2; done; exit 1",
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 10_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.stderrTail.length).toBe(20);
+    // The oldest lines (1-10) are evicted; the tail starts at line 11.
+    expect(err.stderrTail[0]).toContain("line 11");
+    expect(err.stderrTail[19]).toContain("line 30");
+  });
+});
+
+describe("runHarnessProcess — stderr capture hardening (PR #464 review)", () => {
+  const run = async (cmd: string[]) => {
+    const proc = spawnInNewSession(cmd, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 30_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  };
+
+  test("captures the FINAL unterminated stderr line (no trailing newline)", async () => {
+    // The exact repro from review: a fatal written without a newline before
+    // exit 1 must still land in stderrTail.
+    const chunks = await run([
+      "sh",
+      "-c",
+      'printf "warn: booting\\n" >&2; printf fatal >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.stderrTail).toContain("warn: booting");
+    expect(err.stderrTail).toContain("fatal");
+  });
+
+  test("10 MiB of unterminated stderr stays bounded — captured, not buffered whole", async () => {
+    const chunks = await run([
+      "sh",
+      "-c",
+      'head -c 10485760 /dev/zero | tr "\\0" "x" >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(Array.isArray(err.stderrTail)).toBe(true);
+    // Bounded: at least one line captured (not zero), each line within the
+    // 1MB pending cap — never the full 10 MiB buffered or in the chunk. The
+    // ring further caps each stored line to 500 chars (~8KB total).
+    expect(err.stderrTail.length).toBeGreaterThanOrEqual(1);
+    for (const line of err.stderrTail) {
+      expect(line.length).toBeLessThanOrEqual(1_000_000);
+      expect(line.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  test("credential-shaped stderr is redacted before it becomes a HarnessChunk", async () => {
+    // stderrTail flows into failover alerts that are broadcast (Telegram /
+    // PhantomChat) and persisted as assistant turns — those paths do NOT go
+    // through the logger's redaction choke point, so redaction must happen
+    // at capture time. This mirrors the review repro.
+    const chunks = await run([
+      "sh",
+      "-c",
+      'echo "API_KEY=super-secret-value-123456789" >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.stderrTail.join("\n")).toContain("API_KEY=[REDACTED]");
+    expect(err.stderrTail.join("\n")).not.toContain("super-secret-value");
+  });
+});
+
+describe("drainStderr — over-cap boundary never splits a credential (PR #464)", () => {
+  const streamFrom = (chunks: Uint8Array[]): ReadableStream<Uint8Array> =>
+    new ReadableStream({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      },
+    });
+
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+  test("an over-cap unterminated line is replaced whole, never emitted as fragments", async () => {
+    // The review repro, deterministic: chunk 1 ends EXACTLY at the pending
+    // cap with the credential label, chunk 2 carries the naked value. The
+    // old slice-emit path produced the bare label line, then the naked
+    // secret value as an independent "line" — each fragment evades the
+    // redactor. The line must instead be replaced wholesale by a marker and
+    // its remainder swallowed up to the newline.
+    const cap = 6;
+    const label = "TOKEN="; // exactly cap bytes — the repro's precise boundary
+    const secret = "super-secret-value-123456789";
+    const collected: string[] = [];
+    await drainStderr(
+      streamFrom([enc(label), enc(`${secret}\nafter\n`)]),
+      (line) => collected.push(line),
+      cap,
+    );
+    // The oversized line collapsed into a single truncation marker; the
+    // following short line survived; neither fragment of the credential
+    // appears anywhere.
+    expect(collected).toContain(`[stderr line truncated: exceeded ${cap} bytes]`);
+    expect(collected).toContain("after");
+    expect(collected.join("\n")).not.toContain("TOKEN=");
+    expect(collected.join("\n")).not.toContain(secret);
+  });
+
+  test("oversized tail at stream end is not re-emitted after the marker", async () => {
+    // If the stream ends mid-oversized-line, the final-flush path must not
+    // leak the swallowed remainder (the marker already replaced that line).
+    const cap = 8;
+    const collected: string[] = [];
+    await drainStderr(
+      streamFrom([enc("AAAAAAAAAAAA"), enc("BBBBBBBBBBsecret")]),
+      (line) => collected.push(line),
+      cap,
+    );
+    expect(collected).toEqual([`[stderr line truncated: exceeded ${cap} bytes]`]);
+    expect(collected.join("")).not.toContain("secret");
   });
 });

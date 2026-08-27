@@ -1165,3 +1165,42 @@ describe("per-path BM25 lookup for vector-only hits (#378)", () => {
     expect(bbbHit!.ftsScore).toBe(rawBbb!.ftsScore);
   });
 });
+
+describe("stale notes schema behind a current stamp", () => {
+  test("a v1 notes table stamped as current is rebuilt, not trusted", async () => {
+    // How this happens: `CREATE TABLE IF NOT EXISTS` is a no-op against a
+    // table of the wrong shape, and the self-heal short-circuited on
+    // "no meta row + empty files table = fresh database". An OLD index whose
+    // files table happened to be empty was therefore stamped with the current
+    // version while keeping v1 columns, and every later open believed the
+    // stamp. Found on a real persona: an insert failed with "table notes has
+    // no column named type" against a database claiming to be current.
+    const dbPath = join(workdir, "stale.sqlite");
+    const raw = new Database(dbPath, { create: true });
+    raw.exec(
+      "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);" +
+        "CREATE VIRTUAL TABLE notes USING fts5(path UNINDEXED, scope UNINDEXED, content);",
+    );
+    raw
+      .prepare("INSERT INTO meta (key, value) VALUES ('notes_schema_version', ?)")
+      .run(String(NOTES_SCHEMA_VERSION));
+    raw.close();
+
+    const healed = await MemoryIndex.open(dbPath);
+    try {
+      // Usability IS the assertion: a v1 `notes` table has no `type` column,
+      // so this insert is what failed on the real database.
+      healed.upsertVirtualNote({
+        path: "memory/2026-08-27.md",
+        scope: "memory",
+        title: "Journal 2026-08-27",
+        body: "- [lesson] the stamp is not the schema",
+      });
+      expect(
+        healed.search("stamp", { scope: "memory" }).map((h) => h.path),
+      ).toEqual(["memory/2026-08-27.md"]);
+    } finally {
+      healed.close();
+    }
+  });
+});

@@ -42,6 +42,12 @@ import {
   retireDrawers,
   type DrawerRetirement,
 } from "../memory/drawerRetire.ts";
+import { JournalStore } from "../memory/journal.ts";
+import {
+  absorbDay,
+  type JournalIngestResult,
+} from "../memory/journalIngest.ts";
+import { indexOpenDay } from "../memory/journalRender.ts";
 import {
   checkAndNotifyOnce,
   type CheckAndNotifyOnceResult,
@@ -61,6 +67,8 @@ export interface HeartbeatResult {
    * drawers were retired on some earlier run.
    */
   drawerRetirement?: DrawerRetirement[];
+  /** Per-day markdown→rows ingest for the journal (#461). */
+  journalIngest?: JournalIngestResult[];
   staleRecent: { line: string; ageHours: number }[];
   indexedFiles: number;
   /** When the heartbeat ran. */
@@ -149,7 +157,7 @@ export async function runHeartbeat(
   const now = input.now ?? new Date();
 
   const drawers = await drawersStep(input, today, now);
-  const { promoted, drawerSync, drawerRetirement } = drawers;
+  const { promoted, drawerSync, drawerRetirement, journalIngest } = drawers;
   const staleRecent = await checkStaleness(input.personaDir, now);
 
   // FTS-only refresh. Don't touch embeddings.
@@ -205,6 +213,7 @@ export async function runHeartbeat(
     promoted,
     drawerSync,
     drawerRetirement,
+    journalIngest,
     staleRecent,
     indexedFiles,
     ranAt: now,
@@ -237,6 +246,7 @@ async function drawersStep(
   promoted: HeartbeatResult["promoted"];
   drawerSync?: DrawerSyncResult;
   drawerRetirement?: DrawerRetirement[];
+  journalIngest?: JournalIngestResult[];
 }> {
   if (!input.memoryDbPath || !input.persona) {
     return { promoted: await promoteTaggedLines(input.personaDir, today) };
@@ -260,10 +270,47 @@ async function drawersStep(
           drawers: drawerSync.ingested.map((r) => r.kind),
         });
       }
+      // JOURNAL first, for the same reason drawer sync runs before drawer
+      // retirement: absorb whatever markdown holds before anything reads it.
+      // Absorption is idempotent (content-derived ids), so on a converged box
+      // — where today was born as rows and has no file yet — it does nothing
+      // at all. It earns its place on the box that upgrades mid-day, and on
+      // the day a human appends a line to the file by hand.
+      const journal = new JournalStore(db);
+      let journalIngest: JournalIngestResult[] | undefined;
+      try {
+        const absorbed = await absorbDay(
+          journal,
+          input.personaDir,
+          input.persona,
+          today,
+        );
+        journalIngest = absorbed ? [absorbed] : [];
+        if (absorbed && absorbed.inserted > 0) {
+          log.info("heartbeat: absorbed journal lines from markdown", {
+            persona: input.persona,
+            date: today,
+            inserted: absorbed.inserted,
+          });
+        }
+        // Keep the open day's index entry current, so a capture written by a
+        // path that could not index it (the scheduler, a failed write) is
+        // still searchable within the heartbeat interval rather than at
+        // midnight. NOT a render: today's markdown is the nightly's to write.
+        await indexOpenDay(journal, input.persona, today, input.indexPath);
+      } catch (e) {
+        // The journal is memory, but it is not the heartbeat's only job:
+        // promotion, staleness and the index refresh still have to run.
+        log.warn("heartbeat: journal absorb failed", {
+          error: (e as Error).message,
+        });
+      }
+
       const promoted = await promoteTaggedLines(input.personaDir, today, {
         store,
         persona: input.persona,
         now,
+        journal,
       });
       const drawerRetirement = await retireDrawers({
         store,
@@ -293,7 +340,7 @@ async function drawersStep(
           since: held[0]?.heldSince,
         });
       }
-      return { promoted, drawerSync, drawerRetirement };
+      return { promoted, drawerSync, drawerRetirement, journalIngest };
     } finally {
       close();
     }
@@ -315,32 +362,72 @@ async function drawersStep(
  * id is derived from normalized content, so re-filing is a reaffirmation
  * enforced by a UNIQUE constraint rather than by a string search.
  *
- * The daily file is untouched — it stays the append-only capture surface, and
- * the nightly still distills it. Promotion is idempotent, so a line promoted
- * on one heartbeat is simply reaffirmed on the next.
+ * Since #461 the tagged lines are read from `journal_entries` when a journal
+ * store is passed — a SELECT on a tags column rather than a regex over a file
+ * that another process may be appending to mid-read. The markdown path is kept
+ * for callers with no journal store (and for a persona whose rows have not
+ * been ingested yet); both file the same content, so a line promoted by either
+ * is simply reaffirmed by the other.
  */
 export async function promoteTaggedLines(
   personaDir: string,
   today: string,
-  target?: { store: DrawerStore; persona: string; now?: Date },
+  target?: { store: DrawerStore; persona: string; now?: Date; journal?: JournalStore },
 ): Promise<HeartbeatResult["promoted"]> {
-  const dailyPath = join(personaDir, "memory", `${today}.md`);
-  if (!existsSync(dailyPath)) return [];
   if (!target) {
-    // No database configured on this call. The tagged lines stay in the daily
-    // file and promote on the next heartbeat that has one — deliberately NOT
+    // No database configured on this call. The tagged lines stay where they
+    // are and promote on the next heartbeat that has one — deliberately NOT
     // falling back to a markdown append, because a second write path is how
     // the drawers ended up with two disagreeing copies of the same entry.
     log.warn("heartbeat: no drawer store, tagged lines left for the next run");
     return [];
   }
-
-  const text = await readFile(dailyPath, "utf8");
   const promoted: HeartbeatResult["promoted"] = [];
-  // The date header the line sits under, so a line captured on a day the
-  // heartbeat missed is filed with THAT day's date rather than today's.
+  // The date the line sits under, so a line captured on a day the heartbeat
+  // missed is filed with THAT day's date rather than today's.
   const assertedAt = dayStart(today) ?? target.now ?? new Date();
 
+  const file = (line: string, kind: DrawerKind): void => {
+    try {
+      const { inserted } = target.store.fileEntry({
+        persona: target.persona,
+        kind,
+        content: line,
+        source: "self",
+        origin: `memory/${today}.md`,
+        assertedAt,
+      });
+      if (inserted) promoted.push({ drawer: kind, line });
+    } catch (e) {
+      // One bad line must not cost the rest of the day its promotions.
+      log.warn("heartbeat: could not file tagged line", {
+        kind,
+        error: (e as Error).message,
+      });
+    }
+  };
+
+  if (target.journal) {
+    // ROW path (#461): a SELECT over today's tagged rows, no regex and no
+    // "the file was mid-append" hazard. The filed CONTENT is deliberately
+    // still `[tag] text · HH:MMZ`, byte-identical to what the file path
+    // produced, because a drawer entry's id is derived from its content —
+    // filing the bare text instead would re-file the entire back catalogue as
+    // brand-new entries sitting next to their own duplicates.
+    for (const entry of target.journal.taggedForDay(target.persona, today)) {
+      const stamp = ` · ${entry.createdAt.toISOString().slice(11, 16)}Z`;
+      for (const tag of entry.tags) {
+        const kind = TAG_TO_DRAWER[tag];
+        if (!kind) continue;
+        file(`[${tag}] ${entry.content}${stamp}`, kind);
+      }
+    }
+    return promoted;
+  }
+
+  const dailyPath = join(personaDir, "memory", `${today}.md`);
+  if (!existsSync(dailyPath)) return [];
+  const text = await readFile(dailyPath, "utf8");
   for (const raw of text.split("\n")) {
     const m = TAG_PATTERN.exec(raw);
     if (!m) continue;
@@ -349,24 +436,7 @@ export async function promoteTaggedLines(
     if (!kind) continue;
     // Strip the leading list bullet the daily line carries (`- [tag] …`); the
     // entry content is the line, not its markdown decoration.
-    const cleanLine = raw.trim().replace(/^[-*]\s+/, "");
-    try {
-      const { inserted } = target.store.fileEntry({
-        persona: target.persona,
-        kind,
-        content: cleanLine,
-        source: "self",
-        origin: `memory/${today}.md`,
-        assertedAt,
-      });
-      if (inserted) promoted.push({ drawer: kind, line: cleanLine });
-    } catch (e) {
-      // One bad line must not cost the rest of the day its promotions.
-      log.warn("heartbeat: could not file tagged line", {
-        kind,
-        error: (e as Error).message,
-      });
-    }
+    file(raw.trim().replace(/^[-*]\s+/, ""), kind);
   }
   return promoted;
 }

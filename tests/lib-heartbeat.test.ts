@@ -15,6 +15,7 @@ import {
 } from "../src/lib/heartbeat.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 import { openDrawerStore } from "../src/memory/drawerSync.ts";
+import { JournalStore } from "../src/memory/journal.ts";
 import { existsSync } from "node:fs";
 
 let workdir: string;
@@ -423,5 +424,111 @@ describe("runHeartbeat update check hook", () => {
     // all of them — the invariant is that the heartbeat itself did not fail.
     expect(r.updateCheck?.status).toBe("release_check_failed");
     expect(r.ranAt).toBeDefined();
+  });
+});
+
+describe("promoteTaggedLines from journal rows (#461)", () => {
+  test("a two-tag ROW promotes into both drawers, once each", async () => {
+    const { store: drawers, db, close } = await openDrawerStore(
+      join(workdir, "memory.sqlite"),
+    );
+    try {
+      const journal = new JournalStore(db);
+      journal.append({
+        persona: "robbie",
+        date: "2026-05-02",
+        content: "Switched to deepseek for kai's heartbeat",
+        tags: ["decision", "lesson"],
+        createdAt: new Date("2026-05-02T14:00:00.000Z"),
+      });
+
+      const r = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+        journal,
+      });
+      expect(r.map((p) => p.drawer).sort()).toEqual(["decisions", "lessons"]);
+
+      // The filed CONTENT stays byte-identical to what the file path produced,
+      // because a drawer id is derived from it: file the bare text instead and
+      // the whole back catalogue re-files as new entries next to its own
+      // duplicates.
+      expect(drawers.list("robbie", "decisions")[0]!.content).toBe(
+        "[decision] Switched to deepseek for kai's heartbeat · 14:00Z",
+      );
+      expect(drawers.list("robbie", "decisions")[0]!.origin).toBe(
+        "memory/2026-05-02.md",
+      );
+
+      // Idempotent: a second heartbeat reaffirms, it does not re-file.
+      const again = await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: drawers,
+        persona: "robbie",
+        journal,
+      });
+      expect(again).toEqual([]);
+      expect(drawers.list("robbie", "decisions")).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+
+  test("the row path and the file path file the SAME drawer entry", async () => {
+    await file(
+      "memory/2026-05-02.md",
+      "# 2026-05-02\n- [decision] one true line · 14:00Z\n",
+    );
+    const a = await openDrawerStore(join(workdir, "a.sqlite"));
+    const b = await openDrawerStore(join(workdir, "b.sqlite"));
+    try {
+      await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: a.store,
+        persona: "robbie",
+      });
+      const journal = new JournalStore(b.db);
+      journal.append({
+        persona: "robbie",
+        date: "2026-05-02",
+        content: "one true line",
+        tags: ["decision"],
+        createdAt: new Date("2026-05-02T14:00:00.000Z"),
+      });
+      await promoteTaggedLines(personaDir, "2026-05-02", {
+        store: b.store,
+        persona: "robbie",
+        journal,
+      });
+      // Same id, not merely similar text — that equality is what makes the
+      // migration a no-op for the drawers instead of a duplication event.
+      expect(b.store.list("robbie", "decisions")[0]!.id).toBe(
+        a.store.list("robbie", "decisions")[0]!.id,
+      );
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  test("an untagged row promotes nothing", async () => {
+    const { store: drawers, db, close } = await openDrawerStore(
+      join(workdir, "memory.sqlite"),
+    );
+    try {
+      const journal = new JournalStore(db);
+      journal.append({
+        persona: "robbie",
+        date: "2026-05-02",
+        content: "just a note to self",
+      });
+      expect(
+        await promoteTaggedLines(personaDir, "2026-05-02", {
+          store: drawers,
+          persona: "robbie",
+          journal,
+        }),
+      ).toEqual([]);
+    } finally {
+      close();
+    }
   });
 });

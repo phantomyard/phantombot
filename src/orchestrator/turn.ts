@@ -433,7 +433,21 @@ async function* runTurnBody(
   let dailyRecall: string | undefined;
   if (!input.skipDailyRecall && !isNightlyConversation(input.conversation)) {
     try {
-      dailyRecall = (await buildDailyRecall(input.agentDir)).block;
+      dailyRecall = (
+        await buildDailyRecall(
+          input.agentDir,
+          undefined,
+          undefined,
+          undefined,
+          // Rows when this store knows where it lives, markdown when it does
+          // not (an in-memory store, a test fake). buildDailyRecall falls back
+          // on its own if the table is empty, so this is a preference, not a
+          // requirement.
+          input.memory.dbPath
+            ? { dbPath: input.memory.dbPath, persona: input.persona }
+            : undefined,
+        )
+      ).block;
     } catch {
       dailyRecall = undefined;
     }

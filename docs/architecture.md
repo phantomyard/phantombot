@@ -117,9 +117,26 @@ picture. From an architecture standpoint:
   context buffer, deliberately pruned — it is not a transcript archive, and nothing
   should be designed assuming old turns survive. `capture_log` is append-only and
   exists purely as an observability trail.
-- **Markdown (the persona dir)** holds the daily journals (`memory/<date>.md`),
-  `kb/` atomic notes and `MEMORY.md`. The five structured drawers are NOT here:
-  since #417 they are rows (see below).
+- **Markdown (the persona dir)** holds `kb/` atomic notes and `MEMORY.md`. The
+  five structured drawers are NOT here (rows since #417), and neither is the
+  daily journal (rows since #461) — `memory/<date>.md` survives as a rendered
+  artefact, not as the read path.
+- **The daily journal is rows in `journal_entries`** — one row per capture with
+  tags as a COLUMN, content-derived ids under
+  `UNIQUE (persona, date, content_norm)`, and an `origin` column that separates
+  the scheduler's own bookkeeping from what the persona chose to write. Recall
+  (`lib/dailyRecall.ts`) fills a 16 KB budget over whole entries, dropping
+  untagged narration before tagged captures, instead of injecting the file
+  verbatim — which is what stops the prompt scaling with how busy the day was:
+  the file path could only slice bytes, so a heavy day lost its morning
+  silently and a two-tag capture was injected twice for the rest of the day.
+  Rows are indexed on write (`memory/journalRender.ts` → a VIRTUAL note at the
+  path the file will have), so a capture is searchable the minute it is
+  written rather than after the nightly. The nightly renders each CLOSED day
+  to `memory/<date>.md`, verifies it by reading it back, and prunes the rows
+  of days an EARLIER run verified — markdown is the derived artefact, rows are
+  the write path, and the overlap between them is what makes a failed nightly
+  cost disk rather than memory.
 - **The drawers are rows in `drawer_entries`** — content-derived
   ids (so dedupe is a UNIQUE constraint, not a prompt instruction), supersession,
   per-kind lifecycle, and decay for the three *belief* drawers only. See

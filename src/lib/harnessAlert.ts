@@ -248,6 +248,7 @@ export class HarnessAlerter {
     error: string;
     httpStatus?: number;
     chain: string[];
+    stderrTail?: string[];
   }): Promise<void> {
     const cause = classifyFailure(input.error, input.httpStatus);
     const label =
@@ -278,10 +279,17 @@ export class HarnessAlerter {
       input.chain.length <= 1
         ? "no usable fallback configured"
         : "no fallback left";
+    // Surface the last 1-2 stderr lines so the cause is readable from
+    // Telegram without SSH (issue #462). Each line capped to 200 chars for
+    // the narrow Telegram column.
+    const stderrPreview =
+      input.stderrTail && input.stderrTail.length > 0
+        ? ` \u00b7 ${input.stderrTail.slice(-2).map((l) => l.slice(0, 200)).join(" | ")}`
+        : "";
     await this.emit(
       input.harnessId,
       "exhausted",
-      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 ${exhaustion}${chain}, turn undelivered`,
+      `\u{1f6a8} ${input.harnessId} ${label}${detail}${this.hostTag()} \u00b7 ${exhaustion}${chain}, turn undelivered${stderrPreview}`,
     );
   }
 

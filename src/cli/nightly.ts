@@ -667,6 +667,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
     const maintenance = await runMemoryMaintenance({
       dbPath: config.memoryDbPath,
       persona,
+      personaDir: dir,
       now,
       out,
     });
