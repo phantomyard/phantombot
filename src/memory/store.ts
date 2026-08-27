@@ -507,6 +507,16 @@ export interface MemoryStore {
     conversationPrefix: string,
     since: string,
   ): Promise<number>;
+  /**
+   * Path this store was opened from, when it has one.
+   *
+   * Optional on the interface on purpose: it is a LOCATOR, not behaviour, and
+   * making it required would break every hand-rolled test fake for the sake
+   * of a string. Its one production use is letting a caller that already
+   * holds a store reach a SIBLING table in the same database — the journal
+   * (#461) — without threading the config through another dozen signatures.
+   */
+  dbPath?: string;
   /** Close the underlying SQLite connection. Safe to call once; idempotent thereafter. */
   close(): Promise<void>;
 }
@@ -638,6 +648,8 @@ interface RawDisplayRow {
 }
 
 class SqliteMemoryStore implements MemoryStore {
+  /** Set by openMemoryStore; see MemoryStore.dbPath. */
+  dbPath?: string;
   private appendStmt;
   private recentStmt;
   private recentPrefixStmt;
@@ -1711,5 +1723,7 @@ export async function openMemoryStore(path: string): Promise<MemoryStore> {
   db.exec("PRAGMA busy_timeout = 5000");
   await enableWalMode(db);
   db.exec("PRAGMA foreign_keys = ON");
-  return new SqliteMemoryStore(db);
+  const store = new SqliteMemoryStore(db);
+  store.dbPath = path;
+  return store;
 }

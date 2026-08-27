@@ -117,9 +117,21 @@ picture. From an architecture standpoint:
   context buffer, deliberately pruned — it is not a transcript archive, and nothing
   should be designed assuming old turns survive. `capture_log` is append-only and
   exists purely as an observability trail.
-- **Markdown (the persona dir)** holds the daily journals (`memory/<date>.md`),
-  `kb/` atomic notes and `MEMORY.md`. The five structured drawers are NOT here:
-  since #417 they are rows (see below).
+- **Markdown (the persona dir)** holds `kb/` atomic notes and `MEMORY.md`. The
+  five structured drawers are NOT here (rows since #417), and neither is the
+  daily journal (rows since #461) — `memory/<date>.md` survives as a rendered
+  artefact, not as the read path.
+- **The daily journal is rows in `journal_entries`** — one row per capture with
+  tags as a COLUMN, content-derived ids under
+  `UNIQUE (persona, date, content_norm)`, and an `origin` column that separates
+  the scheduler's own bookkeeping from what the persona chose to write. Recall
+  (`lib/dailyRecall.ts`) fills a 16 KB budget newest-first over whole entries
+  instead of injecting the file verbatim, which is what stops the prompt
+  scaling with how busy the day was: the file path could only slice bytes, so a
+  heavy day lost its morning silently and a two-tag capture was injected twice
+  for the rest of the day. The heartbeat ingests `memory/*.md` (idempotent,
+  one-way) and re-renders TODAY's file from the rows; closed days are never
+  rewritten, because the nightly fingerprints them by mtime + size.
 - **The drawers are rows in `drawer_entries`** — content-derived
   ids (so dedupe is a UNIQUE constraint, not a prompt instruction), supersession,
   per-kind lifecycle, and decay for the three *belief* drawers only. See

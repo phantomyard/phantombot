@@ -5,11 +5,12 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   runMemoryCapture,
+  runMemoryJournal,
   runMemoryGet,
   runMemoryIndex,
   runMemoryList,
@@ -20,6 +21,7 @@ import type { Config } from "../src/config.ts";
 import { makeEmbeddingSpace } from "../src/lib/embeddingSpace.ts";
 import { sha256 } from "../src/lib/embedJob.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
+import { openJournalStore } from "../src/memory/journalIngest.ts";
 
 class CaptureStream {
   chunks: string[] = [];
@@ -573,5 +575,86 @@ describe("runMemoryCapture — index-on-write", () => {
       err: new CaptureStream(),
     });
     expect(await rawHits("quetzalcoatlus")).toBe(0);
+  });
+});
+
+describe("runMemoryCapture — one row per capture (#461)", () => {
+  test("a two-tag capture writes ONE journal row and ONE markdown line", async () => {
+    const code = await runMemoryCapture({
+      config,
+      text: "opened #461 to retire the markdown journal",
+      tags: ["decision", "lesson"],
+      date: "2026-06-05",
+      skipIndex: true,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+
+    const { store, close } = await openJournalStore(config.memoryDbPath);
+    try {
+      const rows = store.listDay(config.defaultPersona, "2026-06-05");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.tags).toEqual(["decision", "lesson"]);
+    } finally {
+      close();
+    }
+
+    // The file is now RENDERED from the rows, so the duplication that used to
+    // be injected into every prompt for the rest of the day is gone from it
+    // too: one line, both tags.
+    const md = await readFile(
+      join(workdir, "personas", "phantom", "memory", "2026-06-05.md"),
+      "utf8",
+    );
+    const bullets = md.split("\n").filter((l) => l.startsWith("- "));
+    expect(bullets).toHaveLength(1);
+    expect(bullets[0]).toContain("[decision,lesson]");
+  });
+
+  test("capturing the same text twice does not write a second row", async () => {
+    for (let i = 0; i < 2; i++) {
+      await runMemoryCapture({
+        config,
+        text: "the same lesson, learned twice",
+        tags: ["lesson"],
+        date: "2026-06-06",
+        skipIndex: true,
+        out: new CaptureStream(),
+        err: new CaptureStream(),
+      });
+    }
+    const { store, close } = await openJournalStore(config.memoryDbPath);
+    try {
+      expect(store.countDay(config.defaultPersona, "2026-06-06")).toBe(1);
+    } finally {
+      close();
+    }
+  });
+
+  test("memory journal --export writes every day back out as markdown", async () => {
+    await runMemoryCapture({
+      config,
+      text: "exportable entry",
+      tags: ["norm"],
+      date: "2026-06-07",
+      skipIndex: true,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    const dest = join(workdir, "export");
+    const out = new CaptureStream();
+    const code = await runMemoryJournal({
+      config,
+      export: dest,
+      out,
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    // Retiring the file must not mean losing the readable artefact — same
+    // promise `memory drawers --export` makes.
+    expect(await readFile(join(dest, "2026-06-07.md"), "utf8")).toContain(
+      "exportable entry",
+    );
   });
 });

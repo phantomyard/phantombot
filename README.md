@@ -668,6 +668,7 @@ Memory:
 | Command | Purpose |
 |---|---|
 | `phantombot memory today|search|get|list|index` | Inspect daily journals and the KB, or refresh indexes |
+| `phantombot memory journal [--date D]` | Print a day from the journal table; `--export <dir>` writes every day as Markdown, `--ingest` pulls `memory/*.md` into rows |
 | `phantombot memory capture "<text>" --tag decision` | Append a tagged memory capture |
 | `phantombot memory drawers [--kind norms]` | Read ranked database-backed drawers |
 | `phantombot memory drawers --kind decisions --file "..."` | File or reaffirm one drawer row |
@@ -1972,7 +1973,31 @@ them, and some of those turns were driven by untrusted input. They are also
 journal can render as a section of the system prompt, and control, bidi and
 zero-width characters are stripped.
 
-A journal that reaches the prompt goes in whole up to a **sanity ceiling of
+Since #461 the journal is a **table**, not a file. Each capture is one row in
+`journal_entries` — tags are a *column*, so `memory capture --tag decision
+--tag lesson` files one entry carrying both tags instead of writing the same
+paragraph twice, and a repeated capture collides on `UNIQUE (persona, date,
+content_norm)` and merges. Recall then SELECTS to a **16 KB budget**
+(`JOURNAL_RECALL_BUDGET_BYTES`), newest first, dropping whole entries and
+saying in the block how many it left behind — so the prompt stops scaling with
+how busy the day was. Scheduled-task rows (`source: 'task'`) are withheld from
+the block and reported as a count: machine bookkeeping injected inline reads as
+the persona's own reasoning.
+
+The markdown file has not gone away. The heartbeat ingests any
+`memory/<date>.md` into rows (idempotent, one-way, nothing deleted) and
+re-renders *today's* file from them; closed days keep the bytes they were
+written with, so the nightly's fingerprints stay valid. The file remains the
+human-readable artefact and the unit the search index walks — it is simply no
+longer what the prompt reads. `phantombot memory journal` prints a day,
+`--export <dir>` writes every day back out, `--ingest` runs the migration by
+hand.
+
+When there are no rows for a date — a persona that has not been ingested yet, a
+database that will not open — recall falls back to reading the file, with the
+ceilings below.
+
+A journal read from the FILE goes in whole up to a **sanity ceiling of
 32 KB** (`DAILY_RECALL_CEILING_BYTES`), and today plus yesterday together are
 held under **48 KB** (`DAILY_RECALL_COMBINED_CEILING_BYTES`). Today is served
 first and may use the whole per-file ceiling; yesterday gets the remainder,

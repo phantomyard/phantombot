@@ -74,6 +74,12 @@ import {
 } from "../memory/drawerExport.ts";
 import { describeRetirement, retireDrawers } from "../memory/drawerRetire.ts";
 import {
+  ingestJournalDir,
+  openJournalStore,
+  writeJournalEntry,
+} from "../memory/journalIngest.ts";
+import { renderDay, renderEntry } from "../memory/journal.ts";
+import {
   describeImport,
   importDrawerMarkdown,
   type ImportEntryResult,
@@ -262,6 +268,93 @@ export async function runMemoryToday(
   out.write(path);
   out.write("\n");
   return 0;
+}
+
+export interface RunJournalInput extends RunMemoryInput {
+  persona?: string;
+  /** Day to print. Defaults to today. Ignored when --export is given. */
+  date?: string;
+  /** Write every day back out as markdown into this directory. */
+  export?: string;
+  /** Ingest `memory/*.md` into rows and report what moved. */
+  ingest?: boolean;
+  json?: boolean;
+}
+
+/**
+ * `phantombot memory journal` — read the journal TABLE.
+ *
+ * Three jobs, matching `memory drawers`: print a day, export every day back
+ * out as markdown, or run the markdown→rows ingest by hand instead of waiting
+ * for the heartbeat. The export exists so retiring the file never means losing
+ * the readable artefact — the same promise the drawer retirement made.
+ */
+export async function runMemoryJournal(
+  input: RunJournalInput,
+): Promise<number> {
+  const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
+  const config = input.config ?? (await loadConfig());
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
+
+  if (!existsSync(dir)) {
+    err.write(`persona '${persona}' not found at ${dir}\n`);
+    return 2;
+  }
+
+  const { store, close } = await openJournalStore(config.memoryDbPath);
+  try {
+    if (input.ingest) {
+      const results = await ingestJournalDir(store, dir, persona);
+      if (input.json) {
+        out.write(`${JSON.stringify(results, null, 2)}\n`);
+      } else {
+        for (const r of results) {
+          out.write(
+            `${r.date}.md: ${r.parsed} parsed, ${r.inserted} new, ` +
+              `${r.merged} already filed\n`,
+          );
+        }
+        out.write(`${results.length} day(s) ingested\n`);
+      }
+      return 0;
+    }
+
+    if (input.export) {
+      await mkdir(input.export, { recursive: true });
+      let days = 0;
+      for (const date of store.dates(persona)) {
+        const entries = store.listDay(persona, date);
+        await writeFile(
+          join(input.export, `${date}.md`),
+          renderDay(date, entries),
+          "utf8",
+        );
+        days++;
+        out.write(`${date}.md: ${entries.length} entries\n`);
+      }
+      out.write(`exported ${days} day(s) to ${input.export}\n`);
+      return 0;
+    }
+
+    const date = input.date ?? new Date().toISOString().slice(0, 10);
+    const entries = store.listDay(persona, date);
+    if (input.json) {
+      out.write(`${JSON.stringify(entries, null, 2)}\n`);
+      return 0;
+    }
+    if (entries.length === 0) {
+      // Not an error: an empty day is the normal state of a day that has not
+      // happened yet. Say which day, so a mistyped date is obvious.
+      out.write(`no journal entries for ${date} (persona ${persona})\n`);
+      return 0;
+    }
+    out.write(`# ${date}\n`);
+    for (const e of entries) out.write(`${renderEntry(e)}\n`);
+    return 0;
+  } finally {
+    close();
+  }
 }
 
 export interface RunIndexInput extends RunMemoryInput {
@@ -541,19 +634,32 @@ export async function runMemoryCapture(
   await mkdir(memDir, { recursive: true });
   const dailyPath = join(memDir, `${date}.md`);
 
-  // Create today's daily file with a one-line header if it doesn't exist.
-  if (!existsSync(dailyPath)) {
-    await Bun.write(dailyPath, `# ${date}\n`);
+  // ONE ROW, whatever the tag count (#461). This used to append one markdown
+  // line PER TAG — the same paragraph written twice for
+  // `--tag decision --tag lesson` — and every copy was injected into every
+  // subsequent prompt for the rest of the day. Tags are a column now, so the
+  // duplication is not "avoided", it is unrepresentable. `writeJournalEntry`
+  // re-renders today's markdown from the rows afterwards, which is what keeps
+  // the file readable for a human and indexable for FTS.
+  const wrote = await writeJournalEntry(config.memoryDbPath, dir, {
+    persona,
+    date,
+    content: text,
+    tags,
+    source: "self",
+    conversation: input.conversation ?? "cli:default",
+    createdAt: now,
+  });
+  if (!wrote) {
+    // The table refused the write. Append markdown instead: a capture that
+    // reaches neither layer is lost outright, and the heartbeat's ingest will
+    // pull this line into the table on its next pass, so the two converge
+    // rather than diverging. This is a RECOVERY path, not a second writer —
+    // nothing takes it while the database is healthy.
+    if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
+    const stamp = `${now.toISOString().slice(11, 16)}Z`;
+    await appendFile(dailyPath, `- [${tags.join(",")}] ${text} · ${stamp}\n`, "utf8");
   }
-
-  // HH:MMZ — appended at the END of the line so the heartbeat tag regex
-  // (/^\s*-?\s*\[([a-z]+)\]\s+(.+)$/i) still matches.
-  const stamp = `${now.toISOString().slice(11, 16)}Z`;
-  let block = "";
-  for (const tag of tags) {
-    block += `- [${tag}] ${text} · ${stamp}\n`;
-  }
-  await appendFile(dailyPath, block, "utf8");
 
   // Record the capture so the nudge counter and `doctor` can see it.
   const conversation = input.conversation ?? "cli:default";
@@ -1055,6 +1161,26 @@ const todayCmd = defineCommand({
   },
 });
 
+const journalCmd = defineCommand({
+  meta: { name: "journal", description: "Read the daily journal table: print a day, --export every day as markdown, or --ingest memory/*.md into rows." },
+  args: {
+    persona: { type: "string", description: "Persona name." },
+    date: { type: "string", description: "Day to print (YYYY-MM-DD). Default today." },
+    export: { type: "string", description: "Write every day back out as markdown into this directory." },
+    ingest: { type: "boolean", description: "Ingest memory/*.md into rows now instead of waiting for the heartbeat.", default: false },
+    json: { type: "boolean", description: "JSON output.", default: false },
+  },
+  async run({ args }) {
+    process.exitCode = await runMemoryJournal({
+      persona: args.persona ? String(args.persona) : undefined,
+      date: args.date ? String(args.date) : undefined,
+      export: args.export ? String(args.export) : undefined,
+      ingest: Boolean(args.ingest),
+      json: Boolean(args.json),
+    });
+  },
+});
+
 const indexCmd = defineCommand({
   meta: { name: "index", description: "Refresh FTS5 + embeddings (incremental by default; --rebuild for from-scratch; --reembed for a full derived-vector rebuild; --no-embed to skip vectors)." },
   args: {
@@ -1251,6 +1377,7 @@ export default defineCommand({
     get: getCmd,
     list: listCmd,
     today: todayCmd,
+    journal: journalCmd,
     index: indexCmd,
     capture: captureCmd,
     drawers: drawersCmd,

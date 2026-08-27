@@ -33,7 +33,6 @@
  */
 
 import { defineCommand } from "citty";
-import { join } from "node:path";
 
 import { existsSync } from "node:fs";
 import { type Config, loadConfig, personaDir } from "../config.ts";
@@ -48,6 +47,7 @@ import {
   MAX_RECURRING_DURATION_MS,
 } from "../lib/scheduleParser.ts";
 import { openTaskStore, type Task, type TaskStore, type TaskRunRow } from "../lib/tasks.ts";
+import { writeJournalEntry } from "../memory/journalIngest.ts";
 
 export interface RunTaskAddInput {
   schedule?: string;
@@ -312,13 +312,21 @@ async function writeCommitmentToDaily(config: Config, t: Task): Promise<string |
     const dateStr = t.nextRunAt.toISOString().slice(0, 10);
     // The task's OWN persona, not the host default: the commitment belongs in
     // the journal of whoever will have to act on it.
-    const dailyPath = join(personaDir(config, t.persona), "memory", `${dateStr}.md`);
-    const line = `[commitment] task ${t.id}: ${t.description} — fires ${t.nextRunAt.toISOString()}${t.oneOff ? " (one-off)" : ` (recurring, ${t.schedule})`}\n`;
-    const { appendFile, mkdir } = await import("node:fs/promises");
-    const { dirname } = await import("node:path");
-    await mkdir(dirname(dailyPath), { recursive: true });
-    await appendFile(dailyPath, line, "utf8");
-    return null;
+    const dir = personaDir(config, t.persona);
+    const line = `task ${t.id}: ${t.description} — fires ${t.nextRunAt.toISOString()}${t.oneOff ? " (one-off)" : ` (recurring, ${t.schedule})`}`;
+    // source: "task" — the scheduler writing about the scheduler. It is stored
+    // and exported like any other entry, but recall withholds it from the
+    // injected block and reports a count instead: injected inline, machine
+    // bookkeeping reads as the persona's own reasoning (#461).
+    const ok = await writeJournalEntry(config.memoryDbPath, dir, {
+      persona: t.persona,
+      date: dateStr,
+      content: line,
+      tags: ["commitment"],
+      source: "task",
+      createdAt: new Date(),
+    });
+    return ok ? null : "journal write failed";
   } catch (e) {
     const msg = (e as Error).message;
     // Persistent log entry too, in case stderr was redirected.
