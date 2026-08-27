@@ -491,6 +491,23 @@ describe("recall selection", () => {
     expect(sel.bytes).toBeLessThanOrEqual(JOURNAL_RECALL_BUDGET_BYTES);
   });
 
+  test("droppedOversize means bigger than the WHOLE budget, not the reserve", () => {
+    // A row at ~90% of the budget does not fit alongside anything, but it is
+    // not oversized: it comes back on a quieter day. Counting it as oversized
+    // would make the recall note claim, falsely, that it never can.
+    const big = entry({
+      id: "big",
+      content: "z".repeat(15_000),
+      tags: ["decision"],
+      createdAt: new Date(`${DAY}T08:00:00.000Z`),
+    });
+    const rest = many(60);
+    const sel = selectForRecall([big, ...rest], JOURNAL_RECALL_BUDGET_BYTES);
+    expect(sel.bytes).toBeLessThanOrEqual(JOURNAL_RECALL_BUDGET_BYTES);
+    expect(sel.droppedForBudget).toBeGreaterThan(0);
+    expect(sel.droppedOversize).toBe(0);
+  });
+
   test("a tiny budget drops everything rather than busting itself", () => {
     const sel = selectForRecall(many(5), 1);
     expect(sel.entries).toHaveLength(0);
@@ -665,6 +682,34 @@ describe("degradation instead of dropping (#467)", () => {
     expect(Buffer.byteLength(stub, "utf8")).toBeLessThanOrEqual(
       JOURNAL_STUB_MAX_BYTES,
     );
+  });
+
+  test("a pathological tag list cannot bust the stub cap", () => {
+    const stub = renderStub(
+      entry({
+        content: "a decision worth finding again",
+        tags: Array.from({ length: 20 }, (_, i) => `tag-number-${i}`),
+        createdAt: new Date(`${DAY}T09:12:00.000Z`),
+      }),
+    );
+    expect(Buffer.byteLength(stub, "utf8")).toBeLessThanOrEqual(
+      JOURNAL_STUB_MAX_BYTES,
+    );
+    // The overflow is reported, not silently forgotten...
+    expect(stub).toMatch(/\+\d+\]/);
+    // ...and the head text still survives, which is the point of a stub.
+    expect(stub).toContain("decision");
+    expect(stub).toContain("09:12Z");
+  });
+
+  test("a single tag longer than the whole tag allowance still fits", () => {
+    const stub = renderStub(
+      entry({ content: "short", tags: ["x".repeat(500)] }),
+    );
+    expect(Buffer.byteLength(stub, "utf8")).toBeLessThanOrEqual(
+      JOURNAL_STUB_MAX_BYTES,
+    );
+    expect(stub).toContain("[+1]");
   });
 
   test("a multi-line capture stubs to ONE line", () => {

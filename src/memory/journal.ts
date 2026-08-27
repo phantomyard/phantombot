@@ -636,8 +636,22 @@ function prioritize(eligible: readonly JournalEntry[]): JournalEntry[] {
  */
 export const JOURNAL_STUB_RESERVE_FRACTION = 0.15;
 
-/** Hard cap on one stub, bytes. Head text is truncated to fit inside it. */
+/**
+ * Hard cap on one stub, bytes — the WHOLE rendered line, not just its head
+ * text. Both variable parts are bounded to hold it: the tag list at
+ * `JOURNAL_STUB_TAG_BYTES` and the head text by whatever is left.
+ */
 export const JOURNAL_STUB_MAX_BYTES = 160;
+
+/**
+ * Cap on the tag list inside one stub, bytes. Tags are unbounded in principle
+ * (`memory capture` takes any `--tag`), so without this the "hard cap" above
+ * is not one: a long enough tag list alone overruns it and the head text gets
+ * squeezed to nothing. Extra tags become a `+N` marker — the count still says
+ * the entry was tagged more heavily than shown, and the band it was selected
+ * in is decided by the row, not by this line.
+ */
+export const JOURNAL_STUB_TAG_BYTES = 40;
 
 const STUB_SUFFIX = "… · elided — `memory search`";
 
@@ -672,14 +686,36 @@ function headBytes(text: string, maxBytes: number): string {
  * markdown that reaches disk and round-trips through `parseJournalLine` — are
  * untouched, so nothing lossy can ever be written back over a day's rows.
  */
+function stubTagList(tags: readonly string[]): string {
+  if (tags.length === 0) return "";
+  const fits = (list: readonly string[]): boolean =>
+    Buffer.byteLength(list.join(","), "utf8") <= JOURNAL_STUB_TAG_BYTES;
+  const kept: string[] = [];
+  for (const t of tags) {
+    if (!fits([...kept, t])) break;
+    kept.push(t);
+  }
+  const dropped = tags.length - kept.length;
+  if (dropped === 0) return `[${kept.join(",")}] `;
+  // Make room for the marker itself, so the cap holds even when a single tag
+  // is longer than the whole allowance (kept ends up empty and the stub says
+  // only how many tags there were).
+  const marker = `+${dropped}`;
+  while (kept.length > 0 && !fits([...kept, marker])) kept.pop();
+  return `[${[...kept, marker].join(",")}] `;
+}
+
 export function renderStub(e: JournalEntry): string {
-  const tags = e.tags.length > 0 ? `[${e.tags.join(",")}] ` : "";
+  const tags = stubTagList(e.tags);
   const stamp = ` · ${e.createdAt.toISOString().slice(11, 16)}Z`;
   const fixed = Buffer.byteLength(
     `- ${tags}${STUB_SUFFIX}${stamp}`,
     "utf8",
   );
-  const room = Math.max(8, JOURNAL_STUB_MAX_BYTES - fixed);
+  // No `Math.max` floor here: `fixed` is bounded by construction (constant
+  // prefix + suffix + stamp, plus a tag list capped above), so the room left
+  // for head text is always positive and the cap is arithmetic, not a hope.
+  const room = JOURNAL_STUB_MAX_BYTES - fixed;
   // Collapse newlines: a multi-line capture must still be ONE line here, or
   // the stub is neither bounded nor parseable by eye.
   const flat = e.content.replace(/\s+/g, " ").trim();
@@ -774,6 +810,13 @@ export function selectForRecall(
   // First pass at the FULL budget: a day that fits pays nothing for a stub
   // reserve it does not need.
   let pass = packFull(ordered, budgetBytes);
+  // Measured against the FULL budget, and kept from this pass only: pass 2
+  // runs against `budgetBytes - reserve`, where a row at 90% of the budget
+  // would also count as "oversize" and make the dailyRecall note claim it is
+  // bigger than the whole budget — which is the one thing that count exists
+  // to mean, because it is what distinguishes "returns on a quiet day" from
+  // "never returns; split it or search for it".
+  const oversize = pass.oversize;
   const stubbed: JournalEntry[] = [];
   let stubBytes = 0;
 
@@ -813,7 +856,7 @@ export function selectForRecall(
     stubbed,
     droppedForBudget: eligible.length - kept.length,
     droppedEntirely: eligible.length - kept.length - stubbed.length,
-    droppedOversize: pass.oversize,
+    droppedOversize: oversize,
     withheldMechanical,
     bytes: pass.bytes + stubBytes,
   };
