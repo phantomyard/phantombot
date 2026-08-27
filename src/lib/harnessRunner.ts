@@ -31,6 +31,7 @@
 import type { FileSink, Subprocess, SpawnOptions } from "bun";
 import { killProcessGroup } from "./processGroup.ts";
 import { log } from "./logger.ts";
+import { redactForLog } from "./redact.ts";
 import type { HarnessChunk, HarnessRequest } from "../harnesses/types.ts";
 
 type HarnessSubprocess = Subprocess<
@@ -324,19 +325,35 @@ export function killCauseToErrorChunk(
 export async function drainStderr(
   stream: ReadableStream<Uint8Array>,
   onLine: (line: string) => void,
+  maxPendingBytes = 1_000_000,
 ): Promise<void> {
   const decoder = new TextDecoder();
   let buf = "";
+  const emit = (line: string): void => {
+    const trimmed = line.trim();
+    if (trimmed) onLine(trimmed);
+  };
   try {
     for await (const chunk of stream) {
       buf += decoder.decode(chunk, { stream: true });
+      if (buf.length >= maxPendingBytes) {
+        // Pathological: an unterminated line larger than the pending cap.
+        // Emit a truncated line and drop the overflow — memory stays bounded
+        // and at least something is captured, instead of buffering the whole
+        // write and capturing nothing.
+        emit(buf.slice(0, maxPendingBytes));
+        buf = "";
+        continue;
+      }
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed) onLine(trimmed);
-      }
+      for (const line of lines) emit(line);
     }
+    // Flush the final unterminated line — stderr often isn't newline-terminated
+    // (e.g. `printf fatal >&2; exit 1`), and dropping it would lose the exact
+    // failure line we're trying to surface.
+    emit(buf);
+    emit(decoder.decode());
   } catch {
     /* swallow — stderr drain shouldn't take down the harness */
   }
@@ -475,11 +492,31 @@ export async function* runHarnessProcess(
     spec.onStderrLine ??
     ((line: string) => log.debug(`${harnessId} stderr`, { text: line.slice(0, 500) }));
   const ringOnStderrLine = (line: string): void => {
-    stderrRing.push(line.slice(0, STDERR_LINE_MAX));
+    // Redact BEFORE the line becomes part of a HarnessChunk: stderrTail flows
+    // into failover alerts that are broadcast over Telegram/PhantomChat and
+    // persisted as assistant turns — none of those go through the logger's
+    // redaction choke point, so captured lines must be redacted here (see
+    // review on PR #464). Redact before truncating so a slice boundary can't
+    // split a credential shape the redactor would otherwise match.
+    const redacted = redactForLog(line).slice(0, STDERR_LINE_MAX);
+    stderrRing.push(redacted);
     if (stderrRing.length > STDERR_RING_SIZE) stderrRing.shift();
     baseOnStderrLine(line);
   };
-  void drainStderr(proc.stderr as ReadableStream<Uint8Array>, ringOnStderrLine);
+  // Retain the drain promise: terminal chunks must not be constructed until
+  // collection has finished, or the tail on a fast-failing process is empty.
+  const stderrDrained = drainStderr(
+    proc.stderr as ReadableStream<Uint8Array>,
+    ringOnStderrLine,
+  );
+  // Bounded wait: the process is dead at every terminal-chunk site, but a
+  // stray grandchild holding the stderr fd could keep the stream open —
+  // don't let the error path hang on that. drainStderr never rejects.
+  const awaitStderrDrained = (): Promise<void> =>
+    Promise.race([
+      stderrDrained,
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
 
   let buffer = "";
   let finalText = "";
@@ -592,6 +629,7 @@ export async function* runHarnessProcess(
     req.startupTimeoutMs,
   );
   if (errChunk) {
+    await awaitStderrDrained();
     yield { ...errChunk, stderrTail: stderrRing.length > 0 ? stderrRing : undefined };
     return;
   }
@@ -612,6 +650,7 @@ export async function* runHarnessProcess(
     // least as often as it is a shutdown, and an OOM is a real failure the
     // owner should see reported rather than silently swallowed.
     if (isShutdownExit(signalCode, code)) {
+      await awaitStderrDrained();
       yield {
         type: "error",
         error: `${harnessId} terminated by ${signalCode ?? "SIGTERM"} (host shutting down)`,
@@ -620,6 +659,7 @@ export async function* runHarnessProcess(
       };
       return;
     }
+    await awaitStderrDrained();
     // A dead harness is not debug-level — promote the stderr tail to warn
     // so it is visible in the journal without SSH (issue #462).
     if (stderrRing.length > 0) {
@@ -648,6 +688,7 @@ export async function* runHarnessProcess(
   // here (narration IS text), so the existing empty-done fall-through in
   // runWithFallback cannot catch this case — the completion marker can.
   if (spec.requireCompletion && !sawCompletion) {
+    await awaitStderrDrained();
     yield {
       type: "error",
       error: `${harnessId} exited 0 without a completion signal (only partial/tool output — likely stopped mid-turn)`,

@@ -813,3 +813,82 @@ describe("runHarnessProcess — stderr capture (issue #462)", () => {
     expect(err.stderrTail[19]).toContain("line 30");
   });
 });
+
+describe("runHarnessProcess — stderr capture hardening (PR #464 review)", () => {
+  const run = async (cmd: string[]) => {
+    const proc = spawnInNewSession(cmd, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    trackedPids.push(proc.pid!);
+    const chunks: any[] = [];
+    for await (const chunk of runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      req: {
+        idleTimeoutMs: 10_000,
+        hardTimeoutMs: 30_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: () => undefined,
+      activity: () => "productive",
+      buildDoneMeta: () => ({}),
+    })) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  };
+
+  test("captures the FINAL unterminated stderr line (no trailing newline)", async () => {
+    // The exact repro from review: a fatal written without a newline before
+    // exit 1 must still land in stderrTail.
+    const chunks = await run([
+      "sh",
+      "-c",
+      'printf "warn: booting\\n" >&2; printf fatal >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.stderrTail).toContain("warn: booting");
+    expect(err.stderrTail).toContain("fatal");
+  });
+
+  test("10 MiB of unterminated stderr stays bounded — captured, not buffered whole", async () => {
+    const chunks = await run([
+      "sh",
+      "-c",
+      'head -c 10485760 /dev/zero | tr "\\0" "x" >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(Array.isArray(err.stderrTail)).toBe(true);
+    // Bounded: at least one line captured (not zero), each line within the
+    // 1MB pending cap — never the full 10 MiB buffered or in the chunk. The
+    // ring further caps each stored line to 500 chars (~8KB total).
+    expect(err.stderrTail.length).toBeGreaterThanOrEqual(1);
+    for (const line of err.stderrTail) {
+      expect(line.length).toBeLessThanOrEqual(1_000_000);
+      expect(line.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  test("credential-shaped stderr is redacted before it becomes a HarnessChunk", async () => {
+    // stderrTail flows into failover alerts that are broadcast (Telegram /
+    // PhantomChat) and persisted as assistant turns — those paths do NOT go
+    // through the logger's redaction choke point, so redaction must happen
+    // at capture time. This mirrors the review repro.
+    const chunks = await run([
+      "sh",
+      "-c",
+      'echo "API_KEY=super-secret-value-123456789" >&2; exit 1',
+    ]);
+    const err = chunks.find((c) => c.type === "error");
+    expect(err).toBeDefined();
+    expect(err.stderrTail.join("\n")).toContain("API_KEY=[REDACTED]");
+    expect(err.stderrTail.join("\n")).not.toContain("super-secret-value");
+  });
+});
