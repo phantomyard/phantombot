@@ -789,6 +789,10 @@ export async function runMemoryDrawers(input: {
   /** Archive and remove any markdown drawer whose content is proven filed. */
   retire?: boolean;
   json?: boolean;
+  /** Index to publish the import's audit rows into. Tests point this at a temp. */
+  indexPath?: string;
+  /** Skip indexing the audit rows entirely. Tests only. */
+  skipIndex?: boolean;
   out?: WriteSink;
 }): Promise<number> {
   const sink = input.out ?? process.stdout;
@@ -859,21 +863,28 @@ export async function runMemoryDrawers(input: {
     }
 
     if (input.import !== undefined) {
-      const memDir = join(dir, "memory");
       const date = new Date().toISOString().slice(0, 10);
-      const dailyPath = join(memDir, `${date}.md`);
-      const logLines: string[] = [];
+      // Rows, not markdown. This used to create and append `memory/<date>.md`
+      // directly, which broke the open day in two ways at once: prompt recall
+      // prefers the table once a day has rows, so the audit line was never
+      // read; and the index's VIRTUAL note for the open day lives at exactly
+      // that path, so the next `refreshStale()` found a real file there and
+      // replaced a whole day of searchable rows with the audit text alone.
+      // One writer is the entire premise of #461 — see `writeJournalEntry`.
+      const logEntries: { content: string; createdAt: Date }[] = [];
       // Supersede is the loud half of "reaffirm is quiet, supersede is loud"
       // (#437): a stray hand-edit that flips one line permanently retires a
       // row, so it goes in TODAY's daily file — same-day visibility through
       // the ordinary digest, no separate review flow to maintain.
       const onSupersede = (r: ImportEntryResult & { outcome: "superseded" }) => {
-        const stamp = `${new Date().toISOString().slice(11, 16)}Z`;
-        // JSON.stringify, not bare interpolation: a block-form drawer entry is
-        // multi-line, and a spilled body line starting `[norm] …` matches
-        // promoteTaggedLines' TAG_PATTERN and would be promoted as a brand-new
-        // entry on the next heartbeat. Escaping \n keeps one line per
-        // supersession and gives us the quotes we wanted anyway.
+        const at = new Date();
+        // JSON.stringify, not bare interpolation: a block-form drawer entry
+        // is multi-line, and one journal entry is one line — both in the
+        // rendered artefact and to any parser reading it back. A spilled body
+        // line starting `[norm] …` also matches promoteTaggedLines'
+        // TAG_PATTERN and would be promoted as a brand-new entry. Escaping
+        // \n keeps one line per supersession and gives us the quotes we
+        // wanted anyway.
         // Log the row actually RETIRED (`supersededId`), not the marker's id:
         // a marker names a lineage, and once it is more than one generation
         // deep the id in the file names a row some earlier import already
@@ -886,10 +897,18 @@ export async function runMemoryDrawers(input: {
           r.supersededId !== r.marker!.id
             ? ` (marker named ${r.marker!.kind}:${r.marker!.id})`
             : "";
-        logLines.push(
-          `- [drawer-import] superseded ${r.marker!.kind}:${r.supersededId}${named} -> ${r.id}: ` +
-            `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)} · ${stamp}\n`,
-        );
+        logEntries.push({
+          createdAt: at,
+          // `drawer-import:` as plain content, not a tag. Tags are a column
+          // now, and a tag is a PROMOTION instruction — the heartbeat files
+          // tagged rows into the drawers by name, so tagging an audit line
+          // with a non-kind would either be dropped or, worse, chase a kind.
+          // It also keeps render->parse honest: a leading `[drawer-import]`
+          // in the content would round-trip back as a tag.
+          content:
+            `drawer-import: superseded ${r.marker!.kind}:${r.supersededId}${named} -> ${r.id}: ` +
+            `${JSON.stringify(r.previousContent)} -> ${JSON.stringify(r.content)}`,
+        });
       };
       for (const kind of kinds) {
         const abs =
@@ -922,10 +941,25 @@ export async function runMemoryDrawers(input: {
           }
         }
       }
-      if (logLines.length > 0) {
-        await mkdir(memDir, { recursive: true });
-        if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
-        await appendFile(dailyPath, logLines.join(""), "utf8");
+      for (const e of logEntries) {
+        await writeJournalEntry(
+          config.memoryDbPath,
+          dir,
+          {
+            persona,
+            date,
+            content: e.content,
+            tags: [],
+            // The origin axis has a name for exactly this: a mechanical
+            // maintenance note. Not `task` — that class is withheld from the
+            // prompt, and a silent supersession is the one outcome #437 says
+            // must be loud.
+            source: "heartbeat",
+            conversation: "cli:memory-drawers-import",
+            createdAt: e.createdAt,
+          },
+          { indexPath: input.indexPath, skipIndex: input.skipIndex },
+        );
       }
       return 0;
     }

@@ -304,7 +304,18 @@ function readDayRows(
   const all = store.listDay(persona, date);
   if (all.length === 0) return undefined;
   const sel = selectForRecall(all, budgetBytes);
-  if (sel.entries.length === 0) return undefined;
+  if (sel.entries.length === 0 && sel.droppedForBudget === 0) {
+    // Nothing kept and nothing dropped for size means the day is all
+    // scheduler chatter. Fall back, as before: there is no human content to
+    // report missing.
+    return undefined;
+  }
+  // Note the asymmetry with the line above: a day whose rows were ALL dropped
+  // for budget must NOT fall through to the markdown file. The rows exist, so
+  // the file is a stale mirror at best — and in the oversized case it is a
+  // byte-slice of the very content the budget just refused. Report the
+  // omission instead; a visible "0 shown, N searchable" is honest, a silent
+  // reappearance through the other layer is not.
   const text = sel.entries.map(renderEntry).join("\n");
   const keptBytes = Buffer.byteLength(text, "utf8");
   const notes: string[] = [];
@@ -316,13 +327,28 @@ function readDayRows(
       persona,
       entries: all.length,
       dropped: sel.droppedForBudget,
+      oversize: sel.droppedOversize,
+      kept: sel.entries.length,
       budgetBytes,
     });
-    notes.push(
-      `${sel.droppedForBudget} earlier ${
-        sel.droppedForBudget === 1 ? "entry" : "entries"
-      } not shown (narration dropped before tagged captures)`,
-    );
+    const plain = sel.droppedForBudget - sel.droppedOversize;
+    if (plain > 0) {
+      notes.push(
+        `${plain} earlier ${
+          plain === 1 ? "entry" : "entries"
+        } not shown (narration dropped before tagged captures)`,
+      );
+    }
+    if (sel.droppedOversize > 0) {
+      // Named apart from a normal overflow because the remedy is different:
+      // this one does not come back on a quiet day.
+      notes.push(
+        `${sel.droppedOversize} ${
+          sel.droppedOversize === 1 ? "entry is" : "entries are"
+        } individually larger than the whole ${budgetBytes}-byte journal ` +
+          `budget and can only be read via search`,
+      );
+    }
   }
   if (sel.withheldMechanical > 0) {
     notes.push(
@@ -489,22 +515,27 @@ export async function buildDailyRecall(
       },
     };
 
+    // A day can legitimately have a note and no text: every one of its rows
+    // was individually over budget. Emitting an empty fenced block there
+    // reads as "the day was silent", which is the opposite of true.
+    const body = (d: DayContent) =>
+      d.text.length > 0 ? inertBlock(d.text) : "";
     const parts: string[] = [];
     if (today) {
       parts.push(
-        `## Today so far (${todayKey})\n\n` +
+        (`## Today so far (${todayKey})\n\n` +
           (today.note ? `${today.note}\n\n` : "") +
-          inertBlock(today.text),
+          body(today)).trimEnd(),
       );
     }
     if (yesterday) {
       parts.push(
-        `## Yesterday (${yKey}) — NOT yet distilled\n\n` +
+        (`## Yesterday (${yKey}) — NOT yet distilled\n\n` +
           `The nightly sweep for this date did not complete, so none of it has ` +
           `been promoted to the drawers, MEMORY.md or kb/ yet. It is here in raw ` +
           `form because this is the only place it exists.\n\n` +
           (yesterday.note ? `${yesterday.note}\n\n` : "") +
-          inertBlock(yesterday.text),
+          body(yesterday)).trimEnd(),
       );
     }
 

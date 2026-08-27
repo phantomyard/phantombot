@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +22,9 @@ import { parseDrawer } from "../src/memory/drawerIngest.ts";
 import { importDrawerMarkdown } from "../src/memory/drawerImport.ts";
 import { runMemoryDrawers } from "../src/cli/memory.ts";
 import { drawerEntryId } from "../src/memory/drawers.ts";
+import { openJournalStore } from "../src/memory/journalIngest.ts";
+import { indexOpenDay } from "../src/memory/journalRender.ts";
+import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 
 const PERSONA = "robbie";
 
@@ -442,6 +446,18 @@ describe("importDrawerMarkdown", () => {
       return { root, restore };
     }
 
+    /** The open day as the table holds it — there is no file to read. */
+    async function journalRows(root: string, date: string) {
+      const { store, close } = await openJournalStore(
+        join(root, "data", "phantombot", "memory.sqlite"),
+      );
+      try {
+        return store.listDay(PERSONA, date);
+      } finally {
+        close();
+      }
+    }
+
     test("--import - is refused without --kind", async () => {
       const { restore } = await cliEnv();
       try {
@@ -462,7 +478,7 @@ describe("importDrawerMarkdown", () => {
       }
     });
 
-    test("a supersession logs ONE line to the daily file, newlines escaped", async () => {
+    test("a supersession files ONE journal ROW, newlines escaped", async () => {
       const { root, restore } = await cliEnv();
       try {
         // A block-form entry is multi-line by definition. Interpolated raw,
@@ -499,19 +515,95 @@ describe("importDrawerMarkdown", () => {
         expect(out.text).toContain("1 superseded");
 
         const date = new Date().toISOString().slice(0, 10);
-        const daily = await readFile(
-          join(root, "personas", PERSONA, "memory", `${date}.md`),
+        // ROWS, not a file. The audit used to be appended straight to
+        // `memory/<date>.md`, which put a second writer on the open day: once
+        // the day has rows, prompt recall reads the table and never sees that
+        // file — and the index's virtual note for the open day lives at
+        // exactly that path, so the next refreshStale replaced a whole day of
+        // searchable rows with the audit line alone.
+        expect(
+          existsSync(join(root, "personas", PERSONA, "memory", `${date}.md`)),
+        ).toBe(false);
+
+        const rows = await journalRows(root, date);
+        const logged = rows.filter((r) => r.content.startsWith("drawer-import:"));
+        expect(logged).toHaveLength(1);
+        // One ENTRY, and one line inside it — nothing spilled past the first
+        // line, so nothing can round-trip back out as a separate entry.
+        expect(logged[0]!.content).not.toContain("\n");
+        // `drawer-import` is not a tag: tags are a promotion instruction, and
+        // the heartbeat would go looking for a drawer of that name.
+        expect(logged[0]!.tags).toEqual([]);
+        // Mechanical, but not `task` — `task` rows are withheld from the
+        // prompt, and #437 says a supersession must be loud.
+        expect(logged[0]!.source).toBe("heartbeat");
+      } finally {
+        await restore();
+      }
+    });
+
+    test("an import leaves the open day's rows searchable, not replaced by the audit", async () => {
+      const { root, restore } = await cliEnv();
+      try {
+        const date = new Date().toISOString().slice(0, 10);
+        const dbPath = join(root, "data", "phantombot", "memory.sqlite");
+        const indexPath = join(root, "index.sqlite");
+        await mkdir(join(root, "data", "phantombot"), { recursive: true });
+
+        // A day's worth of real captures, already published to the index as
+        // the open day's VIRTUAL note.
+        const { store: journal, close: closeJournal } =
+          await openJournalStore(dbPath);
+        journal.append({
+          persona: PERSONA,
+          date,
+          content: "the OVH cluster is only reachable through the SOCKS proxy",
+          tags: ["lesson"],
+        });
+        await indexOpenDay(journal, PERSONA, date, indexPath);
+        closeJournal();
+
+        const { store, close } = await openDrawerStore(dbPath);
+        const row = store.file({
+          persona: PERSONA,
+          kind: "norms",
+          content: "[norm] one",
+        });
+        const md = exportDrawerMarkdown(store, PERSONA, "norms", { withId: true });
+        expect(md).toContain(formatIdMarker("norms", row.id));
+        close();
+
+        const dir = join(root, "drawers");
+        await mkdir(dir, { recursive: true });
+        await writeFile(
+          join(dir, "norms.md"),
+          md.replace("[norm] one", "[norm] one edited"),
           "utf8",
         );
-        const logged = daily
-          .split("\n")
-          .filter((l) => l.includes("[drawer-import]"));
-        expect(logged).toHaveLength(1);
-        // Every line of the daily file is either the header or the one log
-        // line — nothing spilled to column 0.
-        for (const line of daily.split("\n")) {
-          if (line === "" || line.startsWith("# ")) continue;
-          expect(line.startsWith("- [drawer-import]")).toBe(true);
+
+        const out = new Sink();
+        expect(
+          await runMemoryDrawers({
+            persona: PERSONA,
+            kind: "norms",
+            import: dir,
+            indexPath,
+            out,
+          }),
+        ).toBe(0);
+        expect(out.text).toContain("1 superseded");
+
+        const ix = await MemoryIndex.open(indexPath);
+        try {
+          // The audit used to arrive as a REAL FILE at exactly the virtual
+          // note's path, so the next refresh indexed it as the whole day and
+          // the morning's captures stopped being findable. Both the capture
+          // and the audit are rows now, so both survive the refresh.
+          await ix.refreshStale(join(root, "personas", PERSONA));
+          expect(ix.search("SOCKS proxy", { scope: "memory" }).length).toBe(1);
+          expect(ix.search("superseded", { scope: "memory" }).length).toBe(1);
+        } finally {
+          ix.close();
         }
       } finally {
         await restore();
@@ -568,13 +660,9 @@ describe("importDrawerMarkdown", () => {
         const idC = drawerEntryId(PERSONA, "norms", "[norm] version c");
 
         const date = new Date().toISOString().slice(0, 10);
-        const daily = await readFile(
-          join(root, "personas", PERSONA, "memory", `${date}.md`),
-          "utf8",
-        );
-        const logged = daily
-          .split("\n")
-          .filter((l) => l.includes("[drawer-import]"));
+        const logged = (await journalRows(root, date))
+          .map((r) => r.content)
+          .filter((c) => c.startsWith("drawer-import:"));
         expect(logged).toHaveLength(2);
 
         // Generation 1: marker and retired row are the same row, so no

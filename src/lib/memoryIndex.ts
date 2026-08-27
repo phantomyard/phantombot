@@ -677,9 +677,27 @@ export class MemoryIndex {
    * Rebuild from scratch — drop all rows in `notes` and `files` and
    * re-walk personaDir/memory/ and personaDir/kb/. Safe to call on a
    * fresh persona with no memory/kb dirs yet (returns 0 indexed).
+   *
+   * VIRTUAL notes survive. Everything else here is derived from disk and so
+   * costs nothing to throw away, but a virtual note is the index's only copy
+   * of text that lives in a TABLE — today's journal, whose file does not
+   * exist until the nightly renders it. Dropping and re-walking would delete
+   * the open day and find nothing to put back, so `memory index --rebuild`,
+   * documented as the repair for a damaged index, would silently make the
+   * persona's own morning unsearchable until the next capture happened to
+   * republish it. Carry them across the delete instead: they are few, they
+   * are small, and if the real file has since appeared, `forceAll` indexes it
+   * over the top at the same path, which is the ordinary cutover.
    */
   async rebuild(personaDir: string): Promise<{ indexed: number }> {
+    const virtuals = this.db
+      .query(
+        "SELECT n.path AS path, f.scope AS scope, n.title AS title, n.body AS body " +
+          "FROM files f JOIN notes n ON n.path = f.path WHERE f.virtual = 1",
+      )
+      .all() as Array<{ path: string; scope: Scope; title: string; body: string }>;
     this.db.exec("DELETE FROM notes; DELETE FROM files;");
+    for (const v of virtuals) this.upsertVirtualNote(v);
     return this.refreshStale(personaDir, /* forceAll */ true);
   }
 

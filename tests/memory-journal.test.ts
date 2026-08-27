@@ -43,6 +43,7 @@ import {
   renderClosedDays,
 } from "../src/memory/journalRender.ts";
 import { MemoryIndex } from "../src/lib/memoryIndex.ts";
+import { JOURNAL_RECALL_BUDGET_BYTES } from "../src/lib/dailyRecall.ts";
 
 const P = "robbie";
 const DAY = "2026-08-27";
@@ -441,10 +442,54 @@ describe("recall selection", () => {
     expect(sel.entries.at(-1)!.content).toBe(all.at(-1)!.content);
   });
 
-  test("never returns nothing: the newest entry survives any budget", () => {
+  test("the budget is a HARD bound: one oversized row is skipped, not kept", () => {
+    // Production budget, production-shaped content: `memory capture` caps
+    // nothing, so one pasted log or stack trace is all it takes. The old rule
+    // ("always keep the highest-priority row") let this single entry through
+    // unmeasured and made the budget advisory — which is the unbounded prompt
+    // this table exists to bound.
+    const huge = entry({
+      id: "huge",
+      content: "x".repeat(200_000),
+      tags: ["decision"],
+      createdAt: new Date(`${DAY}T09:00:00.000Z`),
+    });
+    const small = entry({
+      id: "small",
+      content: "a short decision that must survive the fat one",
+      tags: ["decision"],
+      createdAt: new Date(`${DAY}T08:00:00.000Z`),
+    });
+    const sel = selectForRecall([small, huge], JOURNAL_RECALL_BUDGET_BYTES);
+    expect(sel.bytes).toBeLessThanOrEqual(JOURNAL_RECALL_BUDGET_BYTES);
+    // The oversized row is highest priority AND newest, so it is considered
+    // first — packing must continue past it rather than stopping.
+    expect(sel.entries.map((e) => e.id)).toEqual(["small"]);
+    expect(sel.droppedOversize).toBe(1);
+    expect(sel.droppedForBudget).toBe(1);
+  });
+
+  test("a day of nothing but oversized rows returns none, and says so", () => {
+    const sel = selectForRecall(
+      [
+        entry({ id: "a", content: "x".repeat(40_000), tags: ["decision"] }),
+        entry({ id: "b", content: "y".repeat(40_000) }),
+      ],
+      JOURNAL_RECALL_BUDGET_BYTES,
+    );
+    expect(sel.entries).toHaveLength(0);
+    expect(sel.bytes).toBe(0);
+    // Reported, not silent: the caller turns this into a visible note. An
+    // omission the model cannot see reads as "nothing happened today".
+    expect(sel.droppedOversize).toBe(2);
+    expect(sel.droppedForBudget).toBe(2);
+  });
+
+  test("a tiny budget drops everything rather than busting itself", () => {
     const sel = selectForRecall(many(5), 1);
-    expect(sel.entries).toHaveLength(1);
-    expect(sel.entries[0]!.content).toContain("entry number 4");
+    expect(sel.entries).toHaveLength(0);
+    expect(sel.bytes).toBe(0);
+    expect(sel.droppedOversize).toBe(5);
   });
 
   test("scheduler rows are withheld and counted, not injected", () => {
@@ -607,6 +652,57 @@ describe("index on write", () => {
       // the hole straight back.
       await ix.refreshStale(dir);
       expect(ix.search("still open", { scope: "memory" }).length).toBe(1);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("`memory index --rebuild` does not erase the open day", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({
+      persona: P,
+      date: DAY,
+      content: "the rollback ACL bypass was in node_by_mac",
+      tags: ["lesson"],
+    });
+    await indexOpenDay(s, P, DAY, indexPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      expect(ix.search("ACL bypass", { scope: "memory" }).length).toBe(1);
+      // rebuild() is the documented repair for a damaged index, and it drops
+      // notes/files and re-walks DISK. The open day has no file by design, so
+      // a plain rebuild deletes it and finds nothing to put back — the repair
+      // command would silently blind the persona to its own morning until the
+      // next capture happened to republish it.
+      await ix.rebuild(dir);
+      expect(ix.search("ACL bypass", { scope: "memory" }).length).toBe(1);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a rebuild still lets the real file take over the virtual path", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "row copy of the day" });
+    await indexOpenDay(s, P, DAY, indexPath);
+    // The day closed and the nightly rendered it while the index was broken.
+    await writeFile(
+      join(dir, "memory", `${DAY}.md`),
+      `# ${DAY}\n- file copy of the day\n`,
+      "utf8",
+    );
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      await ix.rebuild(dir);
+      // Carrying the virtual note across the delete must not outrank the
+      // artefact: forceAll re-indexes the real file over the same path, so
+      // the day appears once, from disk.
+      expect(ix.search("file copy", { scope: "memory" }).length).toBe(1);
+      expect(ix.search("row copy", { scope: "memory" }).length).toBe(0);
     } finally {
       ix.close();
     }

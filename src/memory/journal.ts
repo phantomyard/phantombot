@@ -483,6 +483,14 @@ export interface RecallSelection {
   entries: JournalEntry[];
   /** Rows dropped because the budget ran out (oldest first). */
   droppedForBudget: number;
+  /**
+   * Of `droppedForBudget`, how many were dropped because ONE row is bigger
+   * than the whole budget. Counted apart because the remedy is different: a
+   * normal drop means the day was busy, an oversized drop means a single
+   * capture needs `memory search` (or splitting) and no amount of quiet day
+   * will bring it back.
+   */
+  droppedOversize: number;
   /** Rows withheld because they are machine chatter (`source: 'task'`). */
   withheldMechanical: number;
   /** Byte size of the kept entries as rendered. */
@@ -519,6 +527,15 @@ export interface RecallOptions {
  * dropped entry is one `memory search` away — which is why the caller is
  * expected to SAY it dropped some. Truncation the model cannot see reads as
  * absence, and absence is what makes it re-derive what it already knew.
+ *
+ * The budget is a HARD bound, including against a single row bigger than the
+ * whole of it. Nothing caps the length of one `memory capture`, so one pasted
+ * log is enough; letting the highest-priority row through unmeasured would
+ * make the budget advisory and hand back exactly the unbounded prompt this
+ * table exists to bound. An oversized row is skipped, counted separately, and
+ * left to `memory search` — the one case where a day can legitimately come
+ * back with no entries at all, which the caller must report rather than
+ * mistake for an empty day.
  */
 export function selectForRecall(
   entries: readonly JournalEntry[],
@@ -538,17 +555,25 @@ export function selectForRecall(
 
   const kept: JournalEntry[] = [];
   let bytes = 0;
+  let droppedOversize = 0;
   for (const e of byPriority) {
     const size = Buffer.byteLength(renderEntry(e), "utf8") + 1;
-    if (bytes + size > budgetBytes && kept.length > 0) {
+    if (size > budgetBytes) {
+      // One row bigger than the entire budget. It can never be kept without
+      // making the budget a suggestion, and `memory capture` caps nothing —
+      // a single pasted log or stack trace is enough. Keeping it "because
+      // something is better than nothing" is how the bounded prompt this
+      // whole change exists to guarantee turns back into an unbounded one,
+      // and an unbounded prompt is the spawn-size failure, not a big read.
+      droppedOversize++;
+      continue;
+    }
+    if (bytes + size > budgetBytes) {
       // Keep walking: a later, smaller entry may still fit where this one
       // did not. Skipping the rest would drop a 40-byte decision because a
       // 4KB narration happened to come first.
       continue;
     }
-    // The single highest-priority entry is always kept even if it alone busts
-    // the budget: "the prompt has no journal at all" is a worse failure than
-    // one oversized entry, and a caller with a tiny budget is a test.
     kept.push(e);
     bytes += size;
   }
@@ -559,6 +584,7 @@ export function selectForRecall(
   return {
     entries: kept,
     droppedForBudget: eligible.length - kept.length,
+    droppedOversize,
     withheldMechanical,
     bytes,
   };
