@@ -12,8 +12,9 @@
  * rather than clobbered, and a budgeted recall says how much it dropped.
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,13 +29,20 @@ import {
   type JournalEntry,
 } from "../src/memory/journal.ts";
 import {
-  ingestJournalDir,
+  absorbDay,
   ingestJournalMarkdown,
-  mirrorDay,
   openJournalStore,
   parseJournalLine,
   writeJournalEntry,
 } from "../src/memory/journalIngest.ts";
+import { dayFingerprint } from "../src/memory/journal.ts";
+import {
+  dropOpenDayIndex,
+  indexOpenDay,
+  JOURNAL_BACKLOG_ALARM_DAYS,
+  renderClosedDays,
+} from "../src/memory/journalRender.ts";
+import { MemoryIndex } from "../src/lib/memoryIndex.ts";
 
 const P = "robbie";
 const DAY = "2026-08-27";
@@ -196,64 +204,195 @@ describe("markdown ingest", () => {
     );
   });
 
-  test("ingestJournalDir walks every daily file and ignores other markdown", async () => {
+  test("absorbDay adopts a hand-written file and is a no-op without one", async () => {
     const dir = await personaTree();
     await writeFile(join(dir, "memory", `${DAY}.md`), "- [lesson] one\n", "utf8");
-    await writeFile(join(dir, "memory", "2026-08-26.md"), "- two\n", "utf8");
-    await writeFile(join(dir, "memory", "norms.md"), "- not a day\n", "utf8");
     const s = store();
-    const results = await ingestJournalDir(s, dir, P);
-    expect(results.map((r) => r.date)).toEqual(["2026-08-26", DAY]);
-    expect(s.dates(P)).toEqual([DAY, "2026-08-26"]);
+    expect((await absorbDay(s, dir, P, DAY))?.inserted).toBe(1);
+    // Second pass: same content-derived id, so nothing new.
+    expect((await absorbDay(s, dir, P, DAY))?.inserted).toBe(0);
+    // A day born as rows has no file at all — that is the normal case now.
+    expect(await absorbDay(s, dir, P, "2026-08-26")).toBeUndefined();
   });
 });
 
-describe("the markdown mirror", () => {
-  test("mirrorDay ABSORBS a hand-appended line instead of clobbering it", async () => {
+describe("render, verify, prune", () => {
+  test("today is NEVER rendered — it is still being written to", async () => {
     const dir = await personaTree();
     const s = store();
-    s.append({ persona: P, date: DAY, content: "from the table", tags: ["lesson"] });
-    const path = join(dir, "memory", `${DAY}.md`);
-    await writeFile(path, `# ${DAY}\n- written by hand\n`, "utf8");
-
-    await mirrorDay(s, dir, P, DAY);
-
-    const text = await readFile(path, "utf8");
-    // Sync-then-write, never write-over: the hand edit is now a row, so it
-    // survives the render that would otherwise have overwritten it.
-    expect(text).toContain("written by hand");
-    expect(text).toContain("from the table");
-    expect(s.countDay(P, DAY)).toBe(2);
-  });
-
-  test("a mirror pass is stable — rendering twice changes nothing", async () => {
-    const dir = await personaTree();
-    const s = store();
-    s.append({ persona: P, date: DAY, content: "one", tags: ["lesson"] });
-    await mirrorDay(s, dir, P, DAY);
-    const first = await readFile(join(dir, "memory", `${DAY}.md`), "utf8");
-    await mirrorDay(s, dir, P, DAY);
-    const second = await readFile(join(dir, "memory", `${DAY}.md`), "utf8");
-    // If the render did not round-trip through the parser, every heartbeat
-    // would rewrite the file and re-queue the nightly sweep forever.
-    expect(second).toBe(first);
+    s.append({ persona: P, date: DAY, content: "mid-day", tags: ["lesson"] });
+    const r = await renderClosedDays(s, dir, P, DAY);
+    expect(r.rendered).toEqual([]);
+    expect(existsSync(join(dir, "memory", `${DAY}.md`))).toBe(false);
+    // And the rows are untouched, so recall still has the day.
     expect(s.countDay(P, DAY)).toBe(1);
   });
 
-  test("writeJournalEntry writes the row AND the day's markdown", async () => {
+  test("a closed day is rendered, verified, and its rows KEPT for one run", async () => {
+    const dir = await personaTree();
+    const s = store();
+    s.append({ persona: P, date: "2026-08-26", content: "yesterday", tags: ["lesson"] });
+    const r = await renderClosedDays(s, dir, P, DAY);
+    expect(r.rendered).toEqual(["2026-08-26"]);
+    expect(r.pruned).toEqual([]);
+    // Retention overlap: the content is in BOTH places until an independent
+    // later run re-confirms the file. A nightly that renders and then dies
+    // costs disk, not memory.
+    expect(s.countDay(P, "2026-08-26")).toBe(1);
+    expect(await readFile(join(dir, "memory", "2026-08-26.md"), "utf8")).toContain(
+      "yesterday",
+    );
+  });
+
+  test("the NEXT run prunes the rows of the day the last one verified", async () => {
+    const dir = await personaTree();
+    const s = store();
+    s.append({ persona: P, date: "2026-08-25", content: "older", tags: ["lesson"] });
+    await renderClosedDays(s, dir, P, "2026-08-26", new Date("2026-08-26T03:00:00Z"));
+    const second = await renderClosedDays(s, dir, P, DAY, new Date(`${DAY}T03:00:00Z`));
+    expect(second.pruned).toEqual(["2026-08-25"]);
+    expect(s.countDay(P, "2026-08-25")).toBe(0);
+    // The day still exists — as the artefact the prune was conditional on.
+    expect(await readFile(join(dir, "memory", "2026-08-25.md"), "utf8")).toContain(
+      "older",
+    );
+  });
+
+  test("a day whose artefact stopped matching is NOT pruned; it is re-rendered", async () => {
+    const dir = await personaTree();
+    const s = store();
+    const date = "2026-08-25";
+    s.append({ persona: P, date, content: "load-bearing", tags: ["decision"] });
+    await renderClosedDays(s, dir, P, "2026-08-26", new Date("2026-08-26T03:00:00Z"));
+    // Something else ate the file between the two runs.
+    await writeFile(join(dir, "memory", `${date}.md`), "truncated\n", "utf8");
+
+    const second = await renderClosedDays(s, dir, P, DAY, new Date(`${DAY}T03:00:00Z`));
+    expect(second.pruned).toEqual([]);
+    // Rows survived, so the content is recoverable...
+    expect(s.countDay(P, date)).toBeGreaterThan(0);
+    // ...and the next run rebuilds the file from them.
+    const third = await renderClosedDays(s, dir, P, DAY, new Date(`${DAY}T03:00:00Z`));
+    expect(third.rendered).toContain(date);
+    expect(await readFile(join(dir, "memory", `${date}.md`), "utf8")).toContain(
+      "load-bearing",
+    );
+  });
+
+  test("a render that does not verify keeps the rows and reports the day", async () => {
+    const dir = await personaTree();
+    const s = store();
+    s.append({ persona: P, date: "2026-08-26", content: "precious", tags: ["lesson"] });
+    // Simulate a disk that accepts the write and returns something else.
+    const spy = spyOn(await import("node:fs/promises"), "readFile");
+    spy.mockImplementation((async () =>
+      "corrupted on the way back\n") as unknown as typeof import("node:fs/promises").readFile);
+    try {
+      const r = await renderClosedDays(s, dir, P, DAY);
+      expect(r.rendered).toEqual([]);
+      expect(r.failed).toEqual(["2026-08-26"]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(s.countDay(P, "2026-08-26")).toBe(1);
+  });
+
+  test("three missed nights render as three separate days, not one blob", async () => {
+    const dir = await personaTree();
+    const s = store();
+    for (const d of ["2026-08-24", "2026-08-25", "2026-08-26"]) {
+      s.append({
+        persona: P,
+        date: d,
+        content: `work on ${d}`,
+        tags: ["lesson"],
+        createdAt: new Date(`${d}T09:00:00.000Z`),
+      });
+    }
+    const r = await renderClosedDays(s, dir, P, DAY);
+    expect(r.rendered).toEqual(["2026-08-24", "2026-08-25", "2026-08-26"]);
+    for (const d of r.rendered) {
+      expect(await readFile(join(dir, "memory", `${d}.md`), "utf8")).toBe(
+        `# ${d}\n- [lesson] work on ${d} · 09:00Z\n`,
+      );
+    }
+    expect(r.backlogDays).toBe(0);
+  });
+
+  test("a stalled nightly is reported as a backlog, not left silent", async () => {
+    const dir = await personaTree();
+    const s = store();
+    for (const d of ["2026-08-20", "2026-08-21", "2026-08-22", "2026-08-23"]) {
+      s.append({ persona: P, date: d, content: `work on ${d}` });
+    }
+    // Nothing can be written: every render fails, so the backlog stands.
+    const spy = spyOn(await import("node:fs/promises"), "writeFile");
+    spy.mockImplementation((async () => {
+      throw new Error("EROFS: read-only file system");
+    }) as unknown as typeof import("node:fs/promises").writeFile);
+    let r;
+    try {
+      r = await renderClosedDays(s, dir, P, DAY);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(r!.failed).toHaveLength(4);
+    expect(r!.backlogDays).toBe(4);
+    expect(r!.backlogDays).toBeGreaterThan(JOURNAL_BACKLOG_ALARM_DAYS);
+  });
+
+  test("a render absorbs a hand-appended line instead of clobbering it", async () => {
+    const dir = await personaTree();
+    const s = store();
+    const date = "2026-08-26";
+    s.append({ persona: P, date, content: "from the table", tags: ["lesson"] });
+    await writeFile(
+      join(dir, "memory", `${date}.md`),
+      `# ${date}\n- written by hand\n`,
+      "utf8",
+    );
+
+    await renderClosedDays(s, dir, P, DAY);
+
+    const text = await readFile(join(dir, "memory", `${date}.md`), "utf8");
+    // Sync-then-write, never write-over.
+    expect(text).toContain("written by hand");
+    expect(text).toContain("from the table");
+  });
+
+  test("writeJournalEntry files the row and writes NO markdown", async () => {
     const dir = await personaTree();
     const dbPath = join(dir, "memory.db");
-    const ok = await writeJournalEntry(dbPath, dir, {
-      persona: P,
-      date: DAY,
-      content: "captured once",
-      tags: ["decision", "lesson"],
-      createdAt: new Date(`${DAY}T07:18:00.000Z`),
-    });
+    const ok = await writeJournalEntry(
+      dbPath,
+      dir,
+      {
+        persona: P,
+        date: DAY,
+        content: "captured once",
+        tags: ["decision", "lesson"],
+        createdAt: new Date(`${DAY}T07:18:00.000Z`),
+      },
+      { skipIndex: true },
+    );
     expect(ok).toBe(true);
-    const text = await readFile(join(dir, "memory", `${DAY}.md`), "utf8");
-    // ONE line for a two-tag capture. This is the 41%.
-    expect(text).toBe(`# ${DAY}\n- [decision,lesson] captured once · 07:18Z\n`);
+    // The open day is rows only; the artefact is the nightly's job.
+    expect(existsSync(join(dir, "memory", `${DAY}.md`))).toBe(false);
+    const { store: s, close } = await openJournalStore(dbPath);
+    try {
+      // ONE row for a two-tag capture. This is the 41%.
+      expect(s.listDay(P, DAY).map(renderEntry)).toEqual([
+        "- [decision,lesson] captured once · 07:18Z",
+      ]);
+    } finally {
+      close();
+    }
+  });
+
+  test("a fingerprint is taken of what is ON DISK, not of what we meant", () => {
+    const text = renderDay(DAY, []);
+    expect(dayFingerprint(text)).toBe(dayFingerprint(text));
+    expect(dayFingerprint(text)).not.toBe(dayFingerprint(`${text}tampered\n`));
   });
 
   test("renderDay round-trips back through the parser", () => {
@@ -344,19 +483,19 @@ describe("nothing is lost", () => {
     expect((await stat(dbPath)).isFile()).toBe(true);
   });
 
-  test("closed days keep their original bytes — only today is re-rendered", async () => {
+  test("history that predates the table is left ALONE, not backfilled", async () => {
     const dir = await personaTree();
-    const closed = join(dir, "memory", "2026-08-26.md");
-    const original = "# 2026-08-26\nfree-form prose nobody should rewrite\n";
+    const closed = join(dir, "memory", "2020-01-01.md");
+    const original = "# 2020-01-01\nfree-form prose nobody should rewrite\n";
     await writeFile(closed, original, "utf8");
     const s = store();
-    await ingestJournalDir(s, dir, P);
-    await mirrorDay(s, dir, P, DAY);
-    // The nightly sweep fingerprints closed days by mtime+size; re-rendering
-    // them would re-queue weeks of finished distillation for nothing.
+    await renderClosedDays(s, dir, P, DAY);
+    // Rows are the write path from here on; every day BEFORE the upgrade
+    // stays exactly the file it already is. There is no 205-file migration to
+    // run, and no day is rewritten with a fingerprint the nightly sweep would
+    // then re-queue.
     expect(await readFile(closed, "utf8")).toBe(original);
-    // Ingested all the same, so the content is queryable as rows.
-    expect(s.countDay(P, "2026-08-26")).toBe(1);
+    expect(s.countDay(P, "2020-01-01")).toBe(0);
   });
 });
 
@@ -375,5 +514,124 @@ describe("regressions", () => {
     const line = parseJournalLine("- [decision] [lesson] a thing");
     expect(line?.tags).toEqual(["decision", "lesson"]);
     expect(line?.content).toBe("a thing");
+  });
+});
+
+describe("recall drops chatter before decisions", () => {
+  test("an untagged entry is dropped before a tagged one, whatever the order", () => {
+    const pad = "z".repeat(200);
+    const all: JournalEntry[] = [
+      entry({
+        id: "decision-first",
+        content: `chose X over Y ${pad}`,
+        tags: ["decision"],
+        createdAt: new Date(`${DAY}T08:00:00.000Z`),
+      }),
+      entry({
+        id: "chatter",
+        content: `ran the thing and looked at the output ${pad}`,
+        createdAt: new Date(`${DAY}T09:00:00.000Z`),
+      }),
+      entry({
+        id: "lesson-last",
+        content: `learned Z ${pad}`,
+        tags: ["lesson"],
+        createdAt: new Date(`${DAY}T10:00:00.000Z`),
+      }),
+    ];
+    // Room for two entries out of three.
+    const sel = selectForRecall(all, 480);
+    expect(sel.entries.map((e) => e.id)).toEqual(["decision-first", "lesson-last"]);
+    // The OLDEST entry survived and a newer one did not, which is exactly what
+    // the byte-slice on the file could never do: it cut from the front, so the
+    // morning's tagged captures were always the first casualty.
+    expect(sel.droppedForBudget).toBe(1);
+  });
+
+  test("a big entry does not starve the smaller ones behind it", () => {
+    const all: JournalEntry[] = [
+      entry({ id: "small-a", content: "a", createdAt: new Date(`${DAY}T08:00:00.000Z`) }),
+      entry({
+        id: "huge",
+        content: "x".repeat(5_000),
+        createdAt: new Date(`${DAY}T09:00:00.000Z`),
+      }),
+      entry({ id: "small-b", content: "b", createdAt: new Date(`${DAY}T10:00:00.000Z`) }),
+    ];
+    const sel = selectForRecall(all, 200);
+    // The oversized entry is skipped, not treated as the end of the budget.
+    expect(sel.entries.map((e) => e.id)).toEqual(["small-a", "small-b"]);
+  });
+});
+
+describe("index on write", () => {
+  test("today's capture is searchable before any markdown exists", async () => {
+    const dir = await personaTree();
+    const dbPath = join(dir, "memory.db");
+    const indexPath = join(dir, "index.sqlite");
+    await writeJournalEntry(
+      dbPath,
+      dir,
+      {
+        persona: P,
+        date: DAY,
+        content: "the OVH cluster stalls when a DB session is held open",
+        tags: ["lesson"],
+        createdAt: new Date(`${DAY}T09:00:00.000Z`),
+      },
+      { indexPath },
+    );
+    // No file — and yet the persona's own reflex finds it. Without this the
+    // journal would be invisible to `memory search` until the nightly ran,
+    // i.e. an up-to-24-hour hole in the middle of the memory system.
+    expect(existsSync(join(dir, "memory", `${DAY}.md`))).toBe(false);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      const hits = ix.search("cluster stalls", { scope: "memory" });
+      expect(hits.map((h) => h.path)).toContain(`memory/${DAY}.md`);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a virtual day is not evicted by a refresh that finds no file", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "still open", tags: ["lesson"] });
+    await indexOpenDay(s, P, DAY, indexPath);
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      // refreshStale removes rows whose file is gone. A virtual note has no
+      // file by design, so "gone" is its normal state — evicting it would put
+      // the hole straight back.
+      await ix.refreshStale(dir);
+      expect(ix.search("still open", { scope: "memory" }).length).toBe(1);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("the rendered file replaces the virtual entry at the same path", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const date = "2026-08-26";
+    const s = store();
+    s.append({ persona: P, date, content: "yesterday's work", tags: ["lesson"] });
+    await indexOpenDay(s, P, date, indexPath);
+    await renderClosedDays(s, dir, P, DAY, new Date(`${DAY}T03:00:00Z`));
+    await dropOpenDayIndex(P, date, indexPath);
+
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      await ix.refreshStale(dir);
+      // One hit, not two: the virtual stand-in and the real file share the
+      // path the artefact will always have, so the day is never double-counted
+      // and there is no cutover to get wrong.
+      const hits = ix.search("yesterday", { scope: "memory" });
+      expect(hits.map((h) => h.path)).toEqual([`memory/${date}.md`]);
+    } finally {
+      ix.close();
+    }
   });
 });

@@ -115,7 +115,12 @@ describe("buildDailyRecall over rows", () => {
     );
     const d = await buildDailyRecall(dir, NOW, 400, undefined, src());
     expect(d.today?.truncated).toBe(true);
-    expect(d.block).toContain("entries trimmed to fit the budget");
+    expect(d.block).toContain("earlier entries not shown");
+    // The block must say the missing entries are RETRIEVABLE. Truncation the
+    // model cannot see reads as absence, and absence is what makes it
+    // re-derive what it already wrote down this morning.
+    expect(d.block).toContain("Nothing is lost");
+    expect(d.block).toContain("memory search");
     // The newest survives; the oldest is what goes.
     expect(d.block).toContain("entry 39");
     expect(d.block).not.toContain("entry 0 ");

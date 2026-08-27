@@ -74,10 +74,11 @@ import {
 } from "../memory/drawerExport.ts";
 import { describeRetirement, retireDrawers } from "../memory/drawerRetire.ts";
 import {
-  ingestJournalDir,
+  absorbDay,
   openJournalStore,
   writeJournalEntry,
 } from "../memory/journalIngest.ts";
+import { renderClosedDays } from "../memory/journalRender.ts";
 import { renderDay, renderEntry } from "../memory/journal.ts";
 import {
   describeImport,
@@ -276,18 +277,23 @@ export interface RunJournalInput extends RunMemoryInput {
   date?: string;
   /** Write every day back out as markdown into this directory. */
   export?: string;
-  /** Ingest `memory/*.md` into rows and report what moved. */
-  ingest?: boolean;
+  /** Absorb one day's markdown file into rows (defaults to today). */
+  absorb?: boolean;
+  /** Run the closed-day render + prune pass now instead of at nightly. */
+  render?: boolean;
   json?: boolean;
 }
 
 /**
  * `phantombot memory journal` — read the journal TABLE.
  *
- * Three jobs, matching `memory drawers`: print a day, export every day back
- * out as markdown, or run the markdown→rows ingest by hand instead of waiting
- * for the heartbeat. The export exists so retiring the file never means losing
- * the readable artefact — the same promise the drawer retirement made.
+ * Four jobs, matching `memory drawers`: print a day, export the days still
+ * held as rows, absorb a hand-edited daily file, or run the closed-day render
+ * and prune by hand instead of waiting for the nightly.
+ *
+ * `--export` is a table dump, not a history dump. Days the nightly has
+ * rendered and pruned live in `memory/<date>.md` — that IS the export, and it
+ * is why the table is allowed to forget them.
  */
 export async function runMemoryJournal(
   input: RunJournalInput,
@@ -304,20 +310,37 @@ export async function runMemoryJournal(
 
   const { store, close } = await openJournalStore(config.memoryDbPath);
   try {
-    if (input.ingest) {
-      const results = await ingestJournalDir(store, dir, persona);
+    if (input.absorb) {
+      const date = input.date ?? new Date().toISOString().slice(0, 10);
+      const r = await absorbDay(store, dir, persona, date);
       if (input.json) {
-        out.write(`${JSON.stringify(results, null, 2)}\n`);
+        out.write(`${JSON.stringify(r ?? null, null, 2)}\n`);
+      } else if (!r) {
+        out.write(`no memory/${date}.md to absorb\n`);
       } else {
-        for (const r of results) {
-          out.write(
-            `${r.date}.md: ${r.parsed} parsed, ${r.inserted} new, ` +
-              `${r.merged} already filed\n`,
-          );
-        }
-        out.write(`${results.length} day(s) ingested\n`);
+        out.write(
+          `${r.date}.md: ${r.parsed} parsed, ${r.inserted} new, ` +
+            `${r.merged} already filed\n`,
+        );
       }
       return 0;
+    }
+
+    if (input.render) {
+      const today = new Date().toISOString().slice(0, 10);
+      const r = await renderClosedDays(store, dir, persona, today);
+      if (input.json) {
+        out.write(`${JSON.stringify(r, null, 2)}\n`);
+      } else {
+        out.write(
+          `rendered ${r.rendered.length}, pruned ${r.pruned.length}, ` +
+            `failed ${r.failed.length}, backlog ${r.backlogDays} day(s)\n`,
+        );
+        for (const d of r.rendered) out.write(`  rendered memory/${d}.md\n`);
+        for (const d of r.pruned) out.write(`  pruned rows for ${d}\n`);
+        for (const d of r.failed) out.write(`  FAILED ${d} (rows kept)\n`);
+      }
+      return r.failed.length > 0 ? 1 : 0;
     }
 
     if (input.export) {
@@ -638,24 +661,30 @@ export async function runMemoryCapture(
   // line PER TAG — the same paragraph written twice for
   // `--tag decision --tag lesson` — and every copy was injected into every
   // subsequent prompt for the rest of the day. Tags are a column now, so the
-  // duplication is not "avoided", it is unrepresentable. `writeJournalEntry`
-  // re-renders today's markdown from the rows afterwards, which is what keeps
-  // the file readable for a human and indexable for FTS.
-  const wrote = await writeJournalEntry(config.memoryDbPath, dir, {
-    persona,
-    date,
-    content: text,
-    tags,
-    source: "self",
-    conversation: input.conversation ?? "cli:default",
-    createdAt: now,
-  });
+  // duplication is not "avoided", it is unrepresentable. No markdown is
+  // written: `writeJournalEntry` files the row and publishes the open day to
+  // the search index under the path its file will have, so the capture is
+  // recallable now and the nightly renders the artefact once the day closes.
+  const wrote = await writeJournalEntry(
+    config.memoryDbPath,
+    dir,
+    {
+      persona,
+      date,
+      content: text,
+      tags,
+      source: "self",
+      conversation: input.conversation ?? "cli:default",
+      createdAt: now,
+    },
+    { indexPath: input.indexPath, skipIndex: input.skipIndex },
+  );
   if (!wrote) {
     // The table refused the write. Append markdown instead: a capture that
-    // reaches neither layer is lost outright, and the heartbeat's ingest will
-    // pull this line into the table on its next pass, so the two converge
-    // rather than diverging. This is a RECOVERY path, not a second writer —
-    // nothing takes it while the database is healthy.
+    // reaches neither layer is lost outright, and the heartbeat absorbs this
+    // line into the table on its next pass, so the two converge rather than
+    // diverging. This is a RECOVERY path, not a second writer — nothing takes
+    // it while the database is healthy.
     if (!existsSync(dailyPath)) await Bun.write(dailyPath, `# ${date}\n`);
     const stamp = `${now.toISOString().slice(11, 16)}Z`;
     await appendFile(dailyPath, `- [${tags.join(",")}] ${text} · ${stamp}\n`, "utf8");
@@ -1162,12 +1191,13 @@ const todayCmd = defineCommand({
 });
 
 const journalCmd = defineCommand({
-  meta: { name: "journal", description: "Read the daily journal table: print a day, --export every day as markdown, or --ingest memory/*.md into rows." },
+  meta: { name: "journal", description: "The daily journal table: print a day, --export it as markdown, --absorb a hand-edited daily file, or --render closed days now." },
   args: {
     persona: { type: "string", description: "Persona name." },
     date: { type: "string", description: "Day to print (YYYY-MM-DD). Default today." },
     export: { type: "string", description: "Write every day back out as markdown into this directory." },
-    ingest: { type: "boolean", description: "Ingest memory/*.md into rows now instead of waiting for the heartbeat.", default: false },
+    absorb: { type: "boolean", description: "Absorb memory/<date>.md into rows now (default today).", default: false },
+    render: { type: "boolean", description: "Render + prune closed days now instead of waiting for the nightly.", default: false },
     json: { type: "boolean", description: "JSON output.", default: false },
   },
   async run({ args }) {
@@ -1175,7 +1205,8 @@ const journalCmd = defineCommand({
       persona: args.persona ? String(args.persona) : undefined,
       date: args.date ? String(args.date) : undefined,
       export: args.export ? String(args.export) : undefined,
-      ingest: Boolean(args.ingest),
+      absorb: Boolean(args.absorb),
+      render: Boolean(args.render),
       json: Boolean(args.json),
     });
   },

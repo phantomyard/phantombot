@@ -38,8 +38,14 @@ let workdir: string;
 let config: Config;
 let indexPath: string;
 
+let savedXdgDataHome: string | undefined;
+
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-mem-"));
+  // Journal writes index the open day (#461) into the index under
+  // XDG_DATA_HOME; keep that inside the temp tree.
+  savedXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
   await mkdir(join(workdir, "personas", "phantom", "memory"), {
     recursive: true,
   });
@@ -65,6 +71,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (savedXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = savedXdgDataHome;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -579,7 +587,7 @@ describe("runMemoryCapture — index-on-write", () => {
 });
 
 describe("runMemoryCapture — one row per capture (#461)", () => {
-  test("a two-tag capture writes ONE journal row and ONE markdown line", async () => {
+  test("a two-tag capture writes ONE journal row and NO markdown", async () => {
     const code = await runMemoryCapture({
       config,
       text: "opened #461 to retire the markdown journal",
@@ -600,16 +608,13 @@ describe("runMemoryCapture — one row per capture (#461)", () => {
       close();
     }
 
-    // The file is now RENDERED from the rows, so the duplication that used to
-    // be injected into every prompt for the rest of the day is gone from it
-    // too: one line, both tags.
-    const md = await readFile(
-      join(workdir, "personas", "phantom", "memory", "2026-06-05.md"),
-      "utf8",
-    );
-    const bullets = md.split("\n").filter((l) => l.startsWith("- "));
-    expect(bullets).toHaveLength(1);
-    expect(bullets[0]).toContain("[decision,lesson]");
+    // No markdown at all for an open day. The file is a DERIVED artefact the
+    // nightly writes once the day is closed, which is what makes the rows the
+    // single writer — a second one appending markdown here is exactly how the
+    // duplication got in.
+    expect(
+      existsSync(join(workdir, "personas", "phantom", "memory", "2026-06-05.md")),
+    ).toBe(false);
   });
 
   test("capturing the same text twice does not write a second row", async () => {

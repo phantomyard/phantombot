@@ -387,8 +387,13 @@ export function rrfMerge(
  * Existing databases carry rows written without it, so the bump is what makes
  * the controlled vocabulary reach retrieval rather than just the prompts —
  * the drop-and-rebuild below repopulates every note from disk on next open.
+ *
+ * v4 → v5: `files.virtual` — a note whose text lives in a table rather than in
+ * a file on disk. The open journal day (#461) is the first: its entries are
+ * rows until the nightly renders them, and without this flag the deletion
+ * sweep in refreshStale would evict them on sight for not existing on disk.
  */
-export const NOTES_SCHEMA_VERSION = 4;
+export const NOTES_SCHEMA_VERSION = 5;
 
 /**
  * Version of the turn_docs schema. Unlike the notes tables, turn rows are
@@ -444,7 +449,11 @@ CREATE TABLE IF NOT EXISTS files (
   size        INTEGER NOT NULL,
   title       TEXT NOT NULL DEFAULT '',
   aliases     TEXT NOT NULL DEFAULT '',
-  indexed_at  TEXT NOT NULL
+  indexed_at  TEXT NOT NULL,
+  -- 1 when the text was supplied from a table instead of read from disk.
+  -- Virtual rows are exempt from the "not on disk any more" deletion sweep,
+  -- and are the source of their own embedding text.
+  virtual     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_files_scope ON files(scope);
 
@@ -544,8 +553,16 @@ export class MemoryIndex {
     const isEmpty =
       (this.db.query("SELECT COUNT(*) AS c FROM files").get() as { c: number })
         .c === 0;
-    if (have === NOTES_SCHEMA_VERSION) return;
-    if (have === 0 && isEmpty) {
+    // ...unless the columns are NOT current. `CREATE TABLE IF NOT EXISTS` is a
+    // no-op against a pre-existing table of the wrong shape, so a database
+    // whose `files` happened to be empty at the moment of an upgrade got
+    // stamped with the new version while keeping the OLD `notes` columns —
+    // and every later open trusted the stamp and skipped the rebuild. The
+    // symptom is an insert failing with "table notes has no column named
+    // type" on a database that claims to be current. Check the shape, not
+    // just the stamp.
+    if (have === NOTES_SCHEMA_VERSION && this.notesColumnsAreCurrent()) return;
+    if (have === 0 && isEmpty && this.notesColumnsAreCurrent()) {
       this.stampNotesSchemaVersion();
       return;
     }
@@ -559,6 +576,16 @@ export class MemoryIndex {
     );
     this.db.exec(SCHEMA);
     this.stampNotesSchemaVersion();
+  }
+
+  /** True when `notes` carries the columns the current SCHEMA declares. */
+  private notesColumnsAreCurrent(): boolean {
+    const cols = (
+      this.db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    return ["type", "title", "tags", "aliases", "headings", "body"].every((c) =>
+      cols.includes(c),
+    );
   }
 
   private stampNotesSchemaVersion(): void {
@@ -669,15 +696,22 @@ export class MemoryIndex {
     let indexed = 0;
     let removed = 0;
 
-    const recorded = new Map<string, { mtimeMs: number }>();
+    const recorded = new Map<string, { mtimeMs: number; virtual: boolean }>();
     for (const row of this.db
-      .query("SELECT path, mtime_ms FROM files")
-      .all() as Array<{ path: string; mtime_ms: number }>) {
-      recorded.set(row.path, { mtimeMs: row.mtime_ms });
+      .query("SELECT path, mtime_ms, virtual FROM files")
+      .all() as Array<{ path: string; mtime_ms: number; virtual: number }>) {
+      recorded.set(row.path, {
+        mtimeMs: row.mtime_ms,
+        virtual: row.virtual === 1,
+      });
     }
 
     const livePathSet = new Set(live.map((f) => f.path));
-    for (const recordedPath of recorded.keys()) {
+    for (const [recordedPath, rec] of recorded) {
+      // A virtual note has no file to go missing, so "not on disk" is its
+      // normal state, not evidence of a delete. Its owner (the journal) drops
+      // it explicitly when the rows behind it are rendered or pruned.
+      if (rec.virtual) continue;
       if (!livePathSet.has(recordedPath)) {
         this.deletePath(recordedPath);
         removed++;
@@ -1772,6 +1806,75 @@ export class MemoryIndex {
       .prepare("SELECT scope FROM files WHERE path = ?")
       .get(path) as { scope?: Scope } | null;
     return row?.scope;
+  }
+
+  /**
+   * Index text that lives in a TABLE, at a path that may not exist on disk.
+   *
+   * This is what closes the recall hole the row-based journal would otherwise
+   * open: between a capture at 09:00 and the nightly that renders the day at
+   * 03:00, the entry exists only as a row, and a `memory search` rooted in
+   * files would not find the thing the persona wrote down that morning. An
+   * 18-hour blind spot in your own memory is worse than the duplication we
+   * are removing.
+   *
+   * The path is the one the artefact will EVENTUALLY have
+   * (`memory/2026-08-27.md`), deliberately: when the nightly writes that file
+   * and refreshStale indexes it for real, the same key is overwritten with
+   * `virtual = 0`, so the day never appears twice and no cutover is needed.
+   * `mtime_ms = -1` guarantees that overwrite happens — no real file can have
+   * that mtime, so the "unchanged since last index" shortcut cannot skip it.
+   */
+  upsertVirtualNote(input: {
+    path: string;
+    scope: Scope;
+    title: string;
+    body: string;
+  }): void {
+    this.deletePath(input.path);
+    this.db
+      .prepare(
+        "INSERT INTO notes (path, scope, type, title, tags, aliases, headings, body) " +
+          "VALUES (?, ?, ?, ?, '', '', '', ?)",
+      )
+      .run(input.path, input.scope, "journal", input.title, input.body);
+    this.db
+      .prepare(
+        "INSERT INTO files (path, scope, mtime_ms, size, title, aliases, indexed_at, virtual) " +
+          "VALUES (?, ?, -1, ?, ?, '', ?, 1)",
+      )
+      .run(
+        input.path,
+        input.scope,
+        Buffer.byteLength(input.body, "utf8"),
+        input.title,
+        new Date().toISOString(),
+      );
+  }
+
+  /** Drop a virtual note. No-op if the path is a real, on-disk note. */
+  removeVirtualNote(path: string): void {
+    const row = this.db
+      .prepare("SELECT virtual FROM files WHERE path = ?")
+      .get(path) as { virtual?: number } | null;
+    if (row?.virtual === 1) this.deletePath(path);
+  }
+
+  /**
+   * Body text for a virtual note, or undefined for a real one.
+   *
+   * The embed job reads its text from disk; this is how a virtual note gets
+   * embedded anyway, so today's journal is reachable by MEANING and not only
+   * by keyword.
+   */
+  virtualText(path: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT n.body AS body FROM notes n JOIN files f ON f.path = n.path " +
+          "WHERE n.path = ? AND f.virtual = 1 LIMIT 1",
+      )
+      .get(path) as { body?: string } | null;
+    return row?.body ?? undefined;
   }
 
   private snippetForPath(path: string): string {

@@ -143,8 +143,18 @@ export const DAILY_RECALL_COMBINED_CEILING_BYTES = 48 * 1024;
  * longer exists to be budgeted for.
  *
  * Dropping an entry here is not the silent morning-amputation the file cap
- * performed: the block says how many entries were dropped and how to read
- * them, because rows can be counted where a byte-sliced string cannot.
+ * performed. Two differences do that work. The block SAYS how many entries it
+ * left behind and how to get them, because rows can be counted where a
+ * byte-sliced string cannot. And what it drops is chosen by CLASS before age
+ * — untagged narration goes before a tagged capture — where the file cap cut
+ * from the front and so took the morning's decisions first.
+ *
+ * Fixed, not a share of some total prompt budget. A real allocator would have
+ * to make the history section byte-aware too, which is a separate change;
+ * until then a number derived from a number that is itself unbounded is a
+ * worse guarantee than a constant. Measured before choosing it: a normal day
+ * never reaches it, and the heaviest observed day (121KB of markdown) bounds
+ * to 16KB of whole entries.
  */
 export const JOURNAL_RECALL_BUDGET_BYTES = 16 * 1024;
 
@@ -311,7 +321,7 @@ function readDayRows(
     notes.push(
       `${sel.droppedForBudget} earlier ${
         sel.droppedForBudget === 1 ? "entry" : "entries"
-      } trimmed to fit the budget`,
+      } not shown (narration dropped before tagged captures)`,
     );
   }
   if (sel.withheldMechanical > 0) {
@@ -328,8 +338,13 @@ function readDayRows(
     truncated: sel.droppedForBudget > 0,
     note:
       notes.length > 0
-        ? `_${notes.join("; ")}. Run \`phantombot memory journal --date ${date}\` ` +
-          `for the whole day._`
+        ? // Say it plainly: what is missing is RETRIEVABLE, not lost. Every
+          // entry is a row and every row is indexed on write, so an omission
+          // the model cannot see reads as "this never happened" — which is
+          // precisely what makes it re-derive what it already knows.
+          `_${notes.join("; ")}. Nothing is lost — every entry is indexed: ` +
+          `\`phantombot memory search "<terms>"\`, or ` +
+          `\`phantombot memory journal --date ${date}\` for the whole day._`
         : undefined,
     layer: "rows",
   };

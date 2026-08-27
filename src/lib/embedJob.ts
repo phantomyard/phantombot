@@ -83,9 +83,12 @@ export async function runEmbedJob(
     try {
       content = await readFile(join(input.personaDir, path), "utf8");
     } catch {
-      // File listed in `files` but no longer on disk — skip silently;
-      // refreshStale will catch and remove it on next call.
-      continue;
+      // Not on disk. Either it is a VIRTUAL note whose text lives in a table
+      // (the open journal day, #461) — embed that — or it is a stale row,
+      // which refreshStale removes on its next call.
+      const virtual = input.index.virtualText(path);
+      if (virtual === undefined) continue;
+      content = virtual;
     }
 
     const chunks = chunkText(content, input.maxChunkChars);

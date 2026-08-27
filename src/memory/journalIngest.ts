@@ -1,34 +1,37 @@
 /**
- * Markdown → `journal_entries`, and back out again — the migration half of #461.
+ * Markdown → `journal_entries` — the ABSORB half of #461.
  *
- * Shaped after the drawer retirement (#417/#418, `drawerRetire.ts`): ingest is
- * ONE-WAY and IDEMPOTENT, ids are content-derived so re-running costs nothing,
- * and no markdown is ever deleted. A closed day's file stays on disk exactly as
- * it was written — the rows are the read path, the file is the artefact.
+ * The direction of travel changed in review. Rows are now the WRITE path and
+ * markdown is a DERIVED ARTEFACT the nightly produces once a day is closed
+ * (see journalRender.ts), so there is no bulk migration to run and no
+ * open-day mirror to keep honest: the table only ever holds days that have
+ * not been rendered yet, which on a healthy box is today plus at most one.
  *
- * The one file that IS rewritten is TODAY'S, by `mirrorDay`, and only after its
- * current contents have been ingested. That order is load-bearing: it is what
- * makes a line appended to the file by hand (or by a tool that has not moved to
- * rows yet) get absorbed rather than clobbered. Sync-then-write, never
- * write-over — the same rule that keeps the drawers from ending up with two
- * disagreeing copies.
+ * What survives here is the parser, for two narrow jobs:
  *
- * Ingest also DEDUPLICATES on the way in, which is where the headline number
- * comes from. `memory capture --tag decision --tag lesson` wrote the same
- * paragraph twice, once under each tag; both lines parse to the same body, so
- * they collide on `content_norm` and land as ONE row carrying both tags.
+ *   1. A persona upgrading mid-day already has a `memory/<today>.md` written
+ *      by the OLD code. Absorbing it once is what stops the morning
+ *      disappearing from the prompt at the moment of upgrade.
+ *   2. A human (or a tool that has not moved to rows) may append to a daily
+ *      file by hand. Absorbing before rendering means that line is ADOPTED
+ *      rather than clobbered — sync-then-write, never write-over.
+ *
+ * Absorption is one-way and idempotent: ids are content-derived, so a second
+ * pass over the same file is a no-op, and the per-tag duplication the old
+ * writer produced collapses on the way in because two lines differing only in
+ * their `[tag]` marker normalize to the same `content_norm`.
  */
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { log } from "../lib/logger.js";
 import { enableWalMode } from "./store.ts";
+import { indexOpenDay } from "./journalRender.ts";
 import {
   JournalStore,
-  renderDay,
   type AppendJournalInput,
   type JournalSource,
 } from "./journal.ts";
@@ -55,9 +58,6 @@ const TAG_MARKER = /^\[([a-z][a-z0-9_-]*(?:\s*,\s*[a-z][a-z0-9_-]*)*)\]\s*/i;
 
 /** Trailing ` · 07:18Z` stamp written by `memory capture`. */
 const STAMP = /\s*·\s*(\d{2}):(\d{2})Z\s*$/;
-
-/** `YYYY-MM-DD.md` — a daily file, as opposed to a drawer or a note. */
-const DAILY_FILE = /^(\d{4}-\d{2}-\d{2})\.md$/;
 
 /** A machine-written scheduler line: `[commitment] task 577: … fires …`. */
 const TASK_LINE = /^task\s+\d+:\s/i;
@@ -161,67 +161,35 @@ function dayTime(date: string, minutes?: number): Date {
 }
 
 /**
- * Ingest every `memory/YYYY-MM-DD.md` for a persona.
+ * Absorb one day's markdown file into rows, if it exists.
  *
- * Runs on the heartbeat, so a box that has not migrated yet converges within
- * 30 minutes of the upgrade with no operator step, and a persona whose owner
- * hand-edited a daily file gets that content into the table. Costs nothing on
- * a converged box: every id already exists, so every append is a merge.
+ * Called before a day is rendered and on the write path for the open day, so
+ * anything a human or a legacy writer put in the file becomes a row rather
+ * than being overwritten by the render. Returns undefined when there is no
+ * file — the normal case for a day that was born as rows.
+ *
+ * Never throws: an unreadable daily file must not stop a capture or a
+ * nightly. The cost of skipping is that a hand-edited line stays only in the
+ * file; the cost of throwing is losing the write that is in flight.
  */
-export async function ingestJournalDir(
-  store: JournalStore,
-  personaDir: string,
-  persona: string,
-): Promise<JournalIngestResult[]> {
-  const memDir = join(personaDir, "memory");
-  if (!existsSync(memDir)) return [];
-  const names = (await readdir(memDir)).filter((n) => DAILY_FILE.test(n)).sort();
-  const out: JournalIngestResult[] = [];
-  for (const name of names) {
-    const date = DAILY_FILE.exec(name)![1]!;
-    let text: string;
-    try {
-      text = await readFile(join(memDir, name), "utf8");
-    } catch {
-      // An unreadable day must not cost the other days their ingest.
-      continue;
-    }
-    out.push(ingestJournalMarkdown(store, persona, date, text));
-  }
-  return out;
-}
-
-/**
- * Re-render ONE day's markdown from its rows, after absorbing whatever the
- * file currently holds.
- *
- * Only the OPEN day is mirrored. Rewriting closed days would churn the mtime +
- * size fingerprint the nightly sweep uses to decide what it has already
- * distilled, re-queueing weeks of finished work for no gain — and the whole
- * point of rows is that nothing needs to read those files again anyway.
- *
- * The file survives as the human-readable artefact and as the unit the
- * FTS/vector indexer walks; the PROMPT path no longer reads it.
- */
-export async function mirrorDay(
+export async function absorbDay(
   store: JournalStore,
   personaDir: string,
   persona: string,
   date: string,
-): Promise<void> {
+): Promise<JournalIngestResult | undefined> {
   const path = join(personaDir, "memory", `${date}.md`);
-  if (existsSync(path)) {
-    try {
-      ingestJournalMarkdown(store, persona, date, await readFile(path, "utf8"));
-    } catch {
-      // Unreadable: fall through and write what the rows hold. Refusing to
-      // mirror would leave the capture invisible to search entirely.
-    }
+  if (!existsSync(path)) return undefined;
+  try {
+    return ingestJournalMarkdown(store, persona, date, await readFile(path, "utf8"));
+  } catch (e) {
+    log.warn("journal: could not absorb daily file", {
+      persona,
+      date,
+      error: (e as Error).message,
+    });
+    return undefined;
   }
-  const entries = store.listDay(persona, date);
-  if (entries.length === 0) return;
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, renderDay(date, entries), "utf8");
 }
 
 /**
@@ -245,27 +213,40 @@ export async function openJournalStore(
 }
 
 /**
- * The single journal WRITE path: append a row, then re-render today's mirror.
+ * The single journal WRITE path: append a row, and index it immediately.
  *
  * Every writer goes through here — `memory capture`, the scheduler's
  * commitment line, the drawer-import log. One writer is the whole reason the
- * duplication is fixable: a second one that appends markdown directly would
- * put the file and the table back into disagreement, which is exactly how the
+ * duplication is fixable: a second one appending markdown directly would put
+ * the file and the table back into disagreement, which is exactly how the
  * drawers ended up with two copies of everything before #417.
  *
- * Best-effort by contract: it returns `false` rather than throwing, because a
+ * No markdown is written. The open day exists as rows and as an INDEX entry
+ * (see `indexOpenDay`); its file appears when the nightly renders it. That
+ * ordering is what makes the day durable in two independent places at every
+ * moment: before the render it is rows + index, after it is rows + index +
+ * file, and only once a LATER nightly re-confirms the file do the rows go.
+ *
+ * Best-effort by contract: returns `false` rather than throwing, because a
  * SQLite hiccup must not fail the command whose side effect already happened.
  */
 export async function writeJournalEntry(
   dbPath: string,
   personaDir: string,
   input: AppendJournalInput,
+  opts: { indexPath?: string; skipIndex?: boolean } = {},
 ): Promise<boolean> {
   try {
     const { store, close } = await openJournalStore(dbPath);
     try {
+      // Absorb first: on a box upgrading mid-day the old code left a file
+      // behind, and its contents have to become rows before this entry lands
+      // or the render at midnight would publish a day missing its morning.
+      await absorbDay(store, personaDir, input.persona, input.date);
       store.append(input);
-      await mirrorDay(store, personaDir, input.persona, input.date);
+      if (!opts.skipIndex) {
+        await indexOpenDay(store, input.persona, input.date, opts.indexPath);
+      }
       return true;
     } finally {
       close();

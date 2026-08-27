@@ -668,7 +668,7 @@ Memory:
 | Command | Purpose |
 |---|---|
 | `phantombot memory today|search|get|list|index` | Inspect daily journals and the KB, or refresh indexes |
-| `phantombot memory journal [--date D]` | Print a day from the journal table; `--export <dir>` writes every day as Markdown, `--ingest` pulls `memory/*.md` into rows |
+| `phantombot memory journal [--date D]` | Print a day from the journal table; `--export <dir>` dumps the days it still holds, `--absorb` pulls a hand-edited `memory/<date>.md` into rows, `--render` runs the nightly's render + prune now |
 | `phantombot memory capture "<text>" --tag decision` | Append a tagged memory capture |
 | `phantombot memory drawers [--kind norms]` | Read ranked database-backed drawers |
 | `phantombot memory drawers --kind decisions --file "..."` | File or reaffirm one drawer row |
@@ -1984,18 +1984,32 @@ how busy the day was. Scheduled-task rows (`source: 'task'`) are withheld from
 the block and reported as a count: machine bookkeeping injected inline reads as
 the persona's own reasoning.
 
-The markdown file has not gone away. The heartbeat ingests any
-`memory/<date>.md` into rows (idempotent, one-way, nothing deleted) and
-re-renders *today's* file from them; closed days keep the bytes they were
-written with, so the nightly's fingerprints stay valid. The file remains the
-human-readable artefact and the unit the search index walks — it is simply no
-longer what the prompt reads. `phantombot memory journal` prints a day,
-`--export <dir>` writes every day back out, `--ingest` runs the migration by
-hand.
+What overflows the budget is chosen by CLASS before age: untagged narration
+goes before a tagged capture (`decision`, `lesson`, `commitment`, `person`,
+`norm`). The old byte-slice did the opposite — it cut from the FRONT, so the
+first thing a heavy day lost was the morning's decisions. And nothing that
+overflows is lost: every row is indexed on write, so the block says so and
+points at `memory search`.
 
-When there are no rows for a date — a persona that has not been ingested yet, a
-database that will not open — recall falls back to reading the file, with the
-ceilings below.
+**The markdown file is now a derived artefact, not the write path.** The open
+day exists as rows and as an index entry under the path its file will
+eventually have; the *nightly* renders each CLOSED day to `memory/<date>.md`,
+reads it back, and compares a fingerprint of what actually landed on disk. Only
+a day that verifies is recorded as rendered, and its rows are pruned by a
+LATER run — never the one that wrote it. A nightly that renders and then dies
+therefore costs disk space, not memory; a nightly that has not fired for three
+days renders three separate daily files, because rows carry their own date. A
+backlog of more than two unrendered days is reported as a nightly error, since
+recall only ever reads today and a stalled render would otherwise be invisible.
+
+Days that predate the upgrade are left exactly as they are: there is no bulk
+migration and no file is rewritten. `--absorb` exists for the one case that
+needs it — a daily file edited by hand, or written by the pre-#461 code
+mid-day — and it is one-way and idempotent.
+
+When there are no rows for a date — a day the nightly has already rendered and
+pruned, a database that will not open — recall falls back to reading the file,
+with the ceilings below.
 
 A journal read from the FILE goes in whole up to a **sanity ceiling of
 32 KB** (`DAILY_RECALL_CEILING_BYTES`), and today plus yesterday together are

@@ -44,10 +44,10 @@ import {
 } from "../memory/drawerRetire.ts";
 import { JournalStore } from "../memory/journal.ts";
 import {
-  ingestJournalDir,
-  mirrorDay,
+  absorbDay,
   type JournalIngestResult,
 } from "../memory/journalIngest.ts";
+import { indexOpenDay } from "../memory/journalRender.ts";
 import {
   checkAndNotifyOnce,
   type CheckAndNotifyOnceResult,
@@ -271,28 +271,37 @@ async function drawersStep(
         });
       }
       // JOURNAL first, for the same reason drawer sync runs before drawer
-      // retirement: absorb whatever markdown holds before anything reads or
-      // rewrites it. Ingest is idempotent (content-derived ids), so on a
-      // converged box every line is a merge and nothing is written.
+      // retirement: absorb whatever markdown holds before anything reads it.
+      // Absorption is idempotent (content-derived ids), so on a converged box
+      // — where today was born as rows and has no file yet — it does nothing
+      // at all. It earns its place on the box that upgrades mid-day, and on
+      // the day a human appends a line to the file by hand.
       const journal = new JournalStore(db);
       let journalIngest: JournalIngestResult[] | undefined;
       try {
-        journalIngest = await ingestJournalDir(journal, input.personaDir, input.persona);
-        const filedRows = journalIngest.reduce((n, r) => n + r.inserted, 0);
-        if (filedRows > 0) {
-          log.info("heartbeat: ingested journal entries", {
+        const absorbed = await absorbDay(
+          journal,
+          input.personaDir,
+          input.persona,
+          today,
+        );
+        journalIngest = absorbed ? [absorbed] : [];
+        if (absorbed && absorbed.inserted > 0) {
+          log.info("heartbeat: absorbed journal lines from markdown", {
             persona: input.persona,
-            inserted: filedRows,
-            days: journalIngest.filter((r) => r.inserted > 0).length,
+            date: today,
+            inserted: absorbed.inserted,
           });
         }
-        // Re-render TODAY only. A closed day keeps the bytes it was written
-        // with — churning its mtime would re-queue finished nightly sweeps.
-        await mirrorDay(journal, input.personaDir, input.persona, today);
+        // Keep the open day's index entry current, so a capture written by a
+        // path that could not index it (the scheduler, a failed write) is
+        // still searchable within the heartbeat interval rather than at
+        // midnight. NOT a render: today's markdown is the nightly's to write.
+        await indexOpenDay(journal, input.persona, today, input.indexPath);
       } catch (e) {
         // The journal is memory, but it is not the heartbeat's only job:
         // promotion, staleness and the index refresh still have to run.
-        log.warn("heartbeat: journal ingest failed", {
+        log.warn("heartbeat: journal absorb failed", {
           error: (e as Error).message,
         });
       }

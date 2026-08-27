@@ -110,6 +110,27 @@ CREATE INDEX IF NOT EXISTS idx_journal_entries_day
   ON journal_entries (persona, date, created_at);
 CREATE INDEX IF NOT EXISTS idx_journal_entries_tagged
   ON journal_entries (persona, date, tags);
+
+-- One row per day that has been RENDERED to markdown and verified.
+--
+-- The rows are the write path; the markdown is a derived artefact the nightly
+-- produces once the day is closed. This table is the handshake between them,
+-- and it exists so that pruning a day's rows is conditional on evidence that
+-- the artefact actually landed — not on the clock. fingerprint is a hash of
+-- the markdown as READ BACK FROM DISK, so a truncated write, a full disk or a
+-- read-only mount leaves the day unverified and its rows intact.
+CREATE TABLE IF NOT EXISTS journal_days (
+  persona     TEXT NOT NULL,
+  date        TEXT NOT NULL,
+  rendered_at TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  entry_count INTEGER NOT NULL,
+  -- NULL until the rows are dropped. Set on the NEXT successful nightly after
+  -- the render verified, so there is always at least one full day where the
+  -- content exists in both places.
+  pruned_at   TEXT,
+  PRIMARY KEY (persona, date)
+);
 `;
 
 export function ensureJournalSchema(db: Database): void {
@@ -303,6 +324,158 @@ export class JournalStore {
       .all(persona, date) as RawJournalRow[];
     return rows.map(mapRow);
   }
+
+  // ---------------------------------------------------------------------
+  // Day lifecycle: rows -> verified markdown -> pruned rows.
+  //
+  // The invariant this half enforces is that a day's rows are only ever
+  // dropped once its markdown has been written AND read back AND matched,
+  // and then only on a LATER nightly than the one that rendered it. A
+  // nightly that never runs, runs half-way, or writes to a full disk costs
+  // disk space in `journal_entries` — never content.
+  // ---------------------------------------------------------------------
+
+  /** Record a verified render. Idempotent; re-rendering updates in place. */
+  markRendered(
+    persona: string,
+    date: string,
+    fingerprint: string,
+    entryCount: number,
+    now = new Date(),
+  ): void {
+    this.db
+      .query(
+        `INSERT INTO journal_days (persona, date, rendered_at, fingerprint, entry_count)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (persona, date) DO UPDATE SET
+           rendered_at = excluded.rendered_at,
+           fingerprint = excluded.fingerprint,
+           entry_count = excluded.entry_count,
+           -- A re-render un-prunes: the day is live again until the next
+           -- nightly re-confirms it.
+           pruned_at   = NULL`,
+      )
+      .run(persona, date, now.toISOString(), fingerprint, entryCount);
+  }
+
+  dayRecord(persona: string, date: string): JournalDayRecord | undefined {
+    const row = this.db
+      .query("SELECT * FROM journal_days WHERE persona = ? AND date = ?")
+      .get(persona, date) as RawJournalDayRow | null;
+    return row ? mapDayRow(row) : undefined;
+  }
+
+  /** Forget a render record — used when its artefact no longer verifies. */
+  clearDayRecord(persona: string, date: string): void {
+    this.db
+      .query("DELETE FROM journal_days WHERE persona = ? AND date = ?")
+      .run(persona, date);
+  }
+
+  /**
+   * Closed days holding rows that have never been verified as markdown,
+   * oldest first.
+   *
+   * Keyed on DATE, not on "since the last run": a nightly that has not fired
+   * for three days finds three dates here and renders three correct daily
+   * files, rather than one merged blob or a duplicate of today. TODAY is
+   * excluded by construction — it is still being appended to, so any render
+   * of it would fail its own fingerprint on the next capture.
+   */
+  unrenderedDates(persona: string, today: string): string[] {
+    const rows = this.db
+      .query(
+        `SELECT DISTINCT e.date AS date
+           FROM journal_entries e
+           LEFT JOIN journal_days d
+             ON d.persona = e.persona AND d.date = e.date
+          WHERE e.persona = ? AND e.date < ? AND d.date IS NULL
+          ORDER BY e.date ASC`,
+      )
+      .all(persona, today) as Array<{ date: string }>;
+    return rows.map((r) => r.date);
+  }
+
+  /**
+   * Days whose render verified on an EARLIER day than `today` and whose rows
+   * are still present — the prune candidates.
+   *
+   * The `rendered_at < today` clause is the retention overlap. Pruning in the
+   * same pass that rendered would mean a nightly which renders and then dies
+   * before its own artefact is confirmed by a second, independent run takes
+   * the rows with it.
+   */
+  prunableDates(persona: string, today: string): string[] {
+    const rows = this.db
+      .query(
+        `SELECT DISTINCT d.date AS date
+           FROM journal_days d
+           JOIN journal_entries e
+             ON e.persona = d.persona AND e.date = d.date
+          WHERE d.persona = ? AND d.pruned_at IS NULL
+            AND substr(d.rendered_at, 1, 10) < ?
+          ORDER BY d.date ASC`,
+      )
+      .all(persona, today) as Array<{ date: string }>;
+    return rows.map((r) => r.date);
+  }
+
+  /** Drop one day's rows and stamp the day pruned. */
+  pruneDay(persona: string, date: string, now = new Date()): number {
+    return this.inWriteTx(() => {
+      const n = this.countDay(persona, date);
+      this.db
+        .query("DELETE FROM journal_entries WHERE persona = ? AND date = ?")
+        .run(persona, date);
+      this.db
+        .query(
+          "UPDATE journal_days SET pruned_at = ? WHERE persona = ? AND date = ?",
+        )
+        .run(now.toISOString(), persona, date);
+      return n;
+    });
+  }
+}
+
+export interface JournalDayRecord {
+  persona: string;
+  date: string;
+  renderedAt: Date;
+  fingerprint: string;
+  entryCount: number;
+  prunedAt?: Date;
+}
+
+interface RawJournalDayRow {
+  persona: string;
+  date: string;
+  rendered_at: string;
+  fingerprint: string;
+  entry_count: number;
+  pruned_at: string | null;
+}
+
+function mapDayRow(r: RawJournalDayRow): JournalDayRecord {
+  return {
+    persona: r.persona,
+    date: r.date,
+    renderedAt: new Date(r.rendered_at),
+    fingerprint: r.fingerprint,
+    entryCount: r.entry_count,
+    prunedAt: r.pruned_at ? new Date(r.pruned_at) : undefined,
+  };
+}
+
+/**
+ * Hash of a day's markdown.
+ *
+ * Deliberately computed over the RENDERED TEXT rather than over the rows: the
+ * question the nightly has to answer before it drops anything is "is the
+ * artefact on disk the artefact I meant to write", and only the text can
+ * answer that. Hashing the rows would verify the renderer against itself.
+ */
+export function dayFingerprint(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 32);
 }
 
 export interface RecallSelection {
@@ -327,13 +500,25 @@ export interface RecallOptions {
 }
 
 /**
- * Fill a byte budget from one day's rows, newest FIRST.
+ * Fill a byte budget from one day's rows.
  *
- * Newest-first is the same reasoning the old file-tail cap used — a journal is
- * append-ordered, so the newest entries are the ones a turn most likely needs,
- * and the older ones are the ones distillation reaches first. The difference
- * is that this drops WHOLE ENTRIES and can say how many, where the file cap
- * sliced the day mid-morning and could only report bytes.
+ * Two orderings are in play and they are not the same one:
+ *
+ *   PRIORITY decides what is dropped when the budget runs out. Not age alone
+ *   — CLASS first, then age. A tagged capture (`decision`, `lesson`,
+ *   `commitment`, `person`, `norm`) is something the persona deliberately
+ *   wrote down for later; untagged narration is what it happened to say while
+ *   doing the work. When a day overflows, the chatter goes and the decisions
+ *   stay. The old byte-slice on the file did the exact opposite: it cut from
+ *   the FRONT, so the first casualty was the morning's tagged captures.
+ *
+ *   READ order is chronological, always. A journal read out of order is a
+ *   different document.
+ *
+ * Overflow is not loss. Every row remains in the table and in the index, so a
+ * dropped entry is one `memory search` away — which is why the caller is
+ * expected to SAY it dropped some. Truncation the model cannot see reads as
+ * absence, and absence is what makes it re-derive what it already knew.
  */
 export function selectForRecall(
   entries: readonly JournalEntry[],
@@ -345,20 +530,32 @@ export function selectForRecall(
     : entries.filter((e) => e.source !== "task");
   const withheldMechanical = entries.length - eligible.length;
 
+  // Newest first within each class; tagged class considered first.
+  const byPriority = [
+    ...eligible.filter((e) => e.tags.length > 0).reverse(),
+    ...eligible.filter((e) => e.tags.length === 0).reverse(),
+  ];
+
   const kept: JournalEntry[] = [];
   let bytes = 0;
-  for (let i = eligible.length - 1; i >= 0; i--) {
-    const e = eligible[i]!;
+  for (const e of byPriority) {
     const size = Buffer.byteLength(renderEntry(e), "utf8") + 1;
-    if (bytes + size > budgetBytes && kept.length > 0) break;
-    // The single newest entry is always kept even if it alone busts the
-    // budget: "the prompt has no journal at all" is a worse failure than one
-    // oversized entry, and a caller with a tiny budget is a test, not prod.
+    if (bytes + size > budgetBytes && kept.length > 0) {
+      // Keep walking: a later, smaller entry may still fit where this one
+      // did not. Skipping the rest would drop a 40-byte decision because a
+      // 4KB narration happened to come first.
+      continue;
+    }
+    // The single highest-priority entry is always kept even if it alone busts
+    // the budget: "the prompt has no journal at all" is a worse failure than
+    // one oversized entry, and a caller with a tiny budget is a test.
     kept.push(e);
     bytes += size;
-    if (bytes >= budgetBytes) break;
   }
-  kept.reverse();
+  kept.sort(
+    (a, b) =>
+      a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id),
+  );
   return {
     entries: kept,
     droppedForBudget: eligible.length - kept.length,
