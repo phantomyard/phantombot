@@ -253,6 +253,27 @@ export function indexedNoteType(raw: string): string {
  */
 const DECAY_CANDIDATE_POOL = 25;
 
+/**
+ * Slack allowed when comparing a file's mtime against a virtual row's
+ * `indexed_at`.
+ *
+ * The two stamps come from DIFFERENT CLOCKS. `mtimeMs` is whatever the
+ * filesystem recorded, which on Linux is the coarse kernel clock — updated
+ * once per tick, so it can lag the wall clock by a few milliseconds.
+ * `indexed_at` is an in-process `new Date()`, i.e. the fine clock. A file
+ * written strictly AFTER a virtual note is published therefore lands with an
+ * mtime a tick EARLIER than the note's timestamp, routinely and on every
+ * filesystem measured.
+ *
+ * Without slack, "a strict comparison hands a tie to the file" is true of the
+ * operator and false of the data: the guard would be biased against the file
+ * by up to one tick, which is the non-recoverable direction — a stand-in that
+ * should have stood down shadows the real artefact for good. This is a
+ * clock-skew allowance, not a policy knob: it only decides the window in
+ * which the ordering of the two stamps carries no information.
+ */
+const FS_CLOCK_GRACE_MS = 50;
+
 export interface IndexedFile {
   path: string; // relative to personaDir
   scope: Scope;
@@ -740,7 +761,7 @@ export class MemoryIndex {
       }>;
       this.db.exec("DELETE FROM notes; DELETE FROM files;");
       for (const v of virtuals)
-        this.upsertVirtualNote({ ...v, indexedAt: v.indexedAt });
+        this.upsertVirtualNote(v);
     });
     return this.refreshStale(personaDir, /* forceAll */ true);
   }
@@ -818,14 +839,18 @@ export class MemoryIndex {
       // from disk — that is the whole reason rebuild() carries it across the
       // delete.
       //
-      // The comparison is STRICT so a tie hands the path to the file. mtime
-      // and indexed_at agree only to the millisecond, so equality means "we
-      // cannot tell", and the two mistakes are not symmetric: losing the row
-      // to a file is repaired by the next capture, which republishes the note
-      // with a later timestamp and takes the path straight back, while
-      // keeping a stand-in that should have stood down shadows the artefact
-      // for good — and the rows behind it are pruned once the render verifies.
-      if (prev?.virtual && f.mtimeMs < prev.indexedAtMs) continue;
+      // The comparison carries FS_CLOCK_GRACE_MS of slack because the two
+      // stamps come from different clocks: an mtime is the coarse kernel
+      // clock, indexed_at is an in-process Date, so inside that window their
+      // ordering carries no information. The two mistakes are not symmetric —
+      // losing the row to a file is repaired by the next capture, which
+      // republishes the note with a later timestamp and takes the path
+      // straight back, while keeping a stand-in that should have stood down
+      // shadows the artefact for good, and the rows behind it are pruned once
+      // the render verifies. So an ambiguous ordering hands the path to the
+      // file.
+      if (prev?.virtual && f.mtimeMs < prev.indexedAtMs - FS_CLOCK_GRACE_MS)
+        continue;
       if (!forceAll && prev && prev.mtimeMs === f.mtimeMs) continue;
       const content = await readFile(join(personaDir, f.path), "utf8");
       const doc = parseOkf(content);

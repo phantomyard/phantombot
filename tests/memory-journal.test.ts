@@ -1077,12 +1077,46 @@ describe("index on write", () => {
     // virtual row — a crash, or an index it could not open. Ownership must
     // still hand over on the mtime alone, or the stand-in shadows the real
     // file for good and the rows behind it are pruned out from under it.
-    await new Promise((r) => setTimeout(r, 10));
-    await writeFile(
-      join(dir, "memory", `${DAY}.md`),
-      `# ${DAY}\n- file copy of the day\n`,
-      "utf8",
+    const artefact = join(dir, "memory", `${DAY}.md`);
+    await writeFile(artefact, `# ${DAY}\n- file copy of the day\n`, "utf8");
+    // Stamped past the clock-skew grace: this is the unambiguous handover,
+    // not the window where the two stamps carry no information.
+    const later = new Date(Date.now() + 60_000);
+    await utimes(artefact, later, later);
+
+    const ix = await MemoryIndex.open(indexPath);
+    try {
+      await ix.refreshStale(dir);
+      expect(ix.search("file copy", { scope: "memory" }).length).toBe(1);
+      expect(ix.search("row copy", { scope: "memory" }).length).toBe(0);
+    } finally {
+      ix.close();
+    }
+  });
+
+  test("a file written a coarse-clock tick 'before' the note still wins", async () => {
+    const dir = await personaTree();
+    const indexPath = join(dir, "index.sqlite");
+    const s = store();
+    s.append({ persona: P, date: DAY, content: "row copy of the day" });
+    await indexOpenDay(s, P, DAY, indexPath);
+    // mtime and indexed_at come from different clocks: the filesystem's is
+    // coarse, so a file written strictly AFTER the note is published lands
+    // with an mtime a tick earlier. Without the grace window the guard is
+    // biased against the artefact in exactly the direction that never heals.
+    const artefact = join(dir, "memory", `${DAY}.md`);
+    await writeFile(artefact, `# ${DAY}\n- file copy of the day\n`, "utf8");
+    const db = new Database(indexPath);
+    const published = Date.parse(
+      (
+        db
+          .query("SELECT indexed_at AS at FROM files WHERE path = ?")
+          .get(`memory/${DAY}.md`) as { at: string }
+      ).at,
     );
+    db.close();
+    const skewed = new Date(published - 2);
+    await utimes(artefact, skewed, skewed);
 
     const ix = await MemoryIndex.open(indexPath);
     try {
@@ -1100,12 +1134,10 @@ describe("index on write", () => {
     const s = store();
     s.append({ persona: P, date: DAY, content: "row copy of the day" });
     await indexOpenDay(s, P, DAY, indexPath);
-    await new Promise((r) => setTimeout(r, 10));
-    await writeFile(
-      join(dir, "memory", `${DAY}.md`),
-      `# ${DAY}\n- file copy of the day\n`,
-      "utf8",
-    );
+    const rendered = join(dir, "memory", `${DAY}.md`);
+    await writeFile(rendered, `# ${DAY}\n- file copy of the day\n`, "utf8");
+    const after = new Date(Date.now() + 60_000);
+    await utimes(rendered, after, after);
 
     const ix = await MemoryIndex.open(indexPath);
     try {
