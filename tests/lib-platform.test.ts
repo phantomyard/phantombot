@@ -11,9 +11,11 @@ import { describe, expect, test } from "bun:test";
 import {
   currentPlatform,
   defaultServiceControl,
+  isSandbox,
   logsCommand,
   logsSpec,
   restartCommand,
+  sandboxServiceControl,
   selfRestart,
   startCommand,
   statusCommand,
@@ -249,5 +251,88 @@ describe("selfRestart", () => {
     // ...but the failure is surfaced for logging.
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("keep-alive");
+  });
+});
+
+describe("sandbox service suppression", () => {
+  /**
+   * A tracking backend: records every mutation so a test can assert the
+   * wrapper never reached it, and reports a KNOWN isActive value so we can
+   * tell "delegated" apart from "hardcoded false".
+   */
+  function trackingBackend(active: boolean) {
+    const calls: string[] = [];
+    const control: ServiceControl = {
+      async isActive() {
+        calls.push("isActive");
+        return active;
+      },
+      async start() {
+        calls.push("start");
+        return { ok: true };
+      },
+      async stop() {
+        calls.push("stop");
+        return { ok: true };
+      },
+      async restart() {
+        calls.push("restart");
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        calls.push("rerenderUnitIfStale");
+        return { rerendered: true };
+      },
+    };
+    return { calls, control };
+  }
+
+  test("isSandbox reads PHANTOMBOT_SANDBOX, ignoring empty and 0", () => {
+    expect(isSandbox({})).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "" })).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "0" })).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "1" })).toBe(true);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "yes" })).toBe(true);
+  });
+
+  test("mutations never reach the backend, and report success", async () => {
+    const { calls, control } = trackingBackend(true);
+    const sandboxed = sandboxServiceControl(control);
+
+    expect(await sandboxed.restart()).toMatchObject({ ok: true });
+    expect(await sandboxed.start()).toMatchObject({ ok: true });
+    expect(await sandboxed.stop()).toMatchObject({ ok: true });
+    expect(await sandboxed.rerenderUnitIfStale()).toEqual({
+      rerendered: false,
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  test("isActive still delegates, so status is the truth", async () => {
+    const { calls, control } = trackingBackend(true);
+    expect(await sandboxServiceControl(control).isActive()).toBe(true);
+    expect(calls).toEqual(["isActive"]);
+
+    const off = trackingBackend(false);
+    expect(await sandboxServiceControl(off.control).isActive()).toBe(false);
+  });
+
+  test("defaultServiceControl wraps only when the env var is set", async () => {
+    // Unset: the real backend. We can't restart the host service in a test,
+    // so assert on identity of behaviour we CAN see — the sandbox wrapper's
+    // rerenderUnitIfStale always answers {rerendered:false} without touching
+    // disk, whereas the sandbox flag is what selects it.
+    const sandboxed = defaultServiceControl({ PHANTOMBOT_SANDBOX: "1" });
+    expect(await sandboxed.rerenderUnitIfStale()).toEqual({
+      rerendered: false,
+    });
+    expect(await sandboxed.restart()).toMatchObject({ ok: true });
+
+    const plain = defaultServiceControl({});
+    // The unwrapped control is the platform backend; on an unsupported
+    // platform it refuses, on linux/darwin/windows it is a real object.
+    expect(typeof plain.restart).toBe("function");
+    expect(plain).not.toBe(sandboxed);
   });
 });

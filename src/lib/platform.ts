@@ -64,7 +64,14 @@ export function currentPlatform(): Platform {
  * so the only way to hit this branch is `bun src/index.ts` on Windows
  * or BSD, where the user is on their own.
  */
-export function defaultServiceControl(): ServiceControl {
+export function defaultServiceControl(
+  env: Record<string, string | undefined> = process.env,
+): ServiceControl {
+  const backend = hostServiceControl();
+  return isSandbox(env) ? sandboxServiceControl(backend) : backend;
+}
+
+function hostServiceControl(): ServiceControl {
   switch (currentPlatform()) {
     case "linux":
       return defaultSystemdServiceControl();
@@ -75,6 +82,49 @@ export function defaultServiceControl(): ServiceControl {
     default:
       return noopServiceControl();
   }
+}
+
+/** Truthy iff PHANTOMBOT_SANDBOX is set to something other than "" / "0". */
+export function isSandbox(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env.PHANTOMBOT_SANDBOX?.trim();
+  return raw !== undefined && raw !== "" && raw !== "0";
+}
+
+/**
+ * Read-through, write-suppressed ServiceControl for a DEVELOPMENT CHECKOUT.
+ *
+ * Running `bun run src/index.ts` from a working tree gives you a second
+ * phantombot process, but NOT a second service: every `restart()` in that
+ * process still names the host's one `phantombot.service` — the daemon
+ * serving the user's live conversations. So saving voice/autostart/default
+ * config while dogfooding a branch bounces production, killing whatever
+ * turn was in flight. (Observed three times on 2026-08-28/29.)
+ *
+ * With PHANTOMBOT_SANDBOX set, queries still tell the truth — `isActive()`
+ * delegates, so the TUI shows the real service state — while every
+ * MUTATION becomes a no-op that reports success. `rerenderUnitIfStale()`
+ * is suppressed too: it writes the real unit file on disk.
+ *
+ * The suppressed calls report ok=true rather than an error, because a
+ * suppressed restart is the intended outcome here, not a failure the user
+ * needs to act on.
+ */
+export function sandboxServiceControl(inner: ServiceControl): ServiceControl {
+  const suppressed = async () => ({
+    ok: true,
+    stderr: "sandbox: service change suppressed (PHANTOMBOT_SANDBOX)",
+  });
+  return {
+    isActive: () => inner.isActive(),
+    start: suppressed,
+    stop: suppressed,
+    restart: suppressed,
+    async rerenderUnitIfStale() {
+      return { rerendered: false };
+    },
+  };
 }
 
 export interface SelfRestartOpts {
