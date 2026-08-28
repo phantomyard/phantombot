@@ -19,7 +19,7 @@ import { installMouse } from "./mouse.ts";
 import { enterFullScreen, gateStdout } from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
-import { captureStdinListeners } from "./stdinHandover.ts";
+import { lendStdin } from "./stdinHandover.ts";
 import { setLogSink } from "../lib/logSink.ts";
 import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
@@ -109,8 +109,9 @@ export async function startTui(): Promise<number> {
     // owns the terminal we must not be reading the same bytes it is.
     installed.setForwarding(false);
     fullScreen.restore();
-    // Whatever borrows stdin next may leave its own handlers on it.
-    const dropBorrowedListeners = captureStdinListeners(process.stdin);
+    // Hand the stream over: snapshot the listeners the borrower will add, and
+    // resume it so the borrower actually receives bytes. See `lendStdin`.
+    const dropBorrowedListeners = lendStdin(process.stdin);
     try {
       return await fn();
     } finally {

@@ -49,3 +49,28 @@ export function captureStdinListeners(
     }
   };
 }
+
+/** The subset of stdin a borrow needs: listeners, plus the flow control. */
+type Borrowable = Emitterish & { resume?: () => unknown };
+
+/**
+ * Lend stdin to a prompt or a child process, and take it back intact.
+ *
+ * Two things have to happen on the way OUT, not only on the way back:
+ *
+ *  1. Snapshot the listeners, so whatever the borrower leaves behind can be
+ *     removed (see `captureStdinListeners`).
+ *  2. RESUME the stream. Detaching the TUI's tap removes the last `data`
+ *     listener, which drops Node out of flowing mode. A borrower that attaches
+ *     `keypress` instead of `data` — every `readline`-based prompt, which is
+ *     all of `@clack` — never resumes it, so the prompt renders and then
+ *     receives nothing: not the answer, and not the ^c that would cancel it.
+ *     That is a hard wedge with no key out of it, on a screen that looks alive.
+ *
+ * Returns the take-it-back function.
+ */
+export function lendStdin(stream: Borrowable = process.stdin): () => void {
+  const restoreListeners = captureStdinListeners(stream);
+  stream.resume?.();
+  return restoreListeners;
+}
