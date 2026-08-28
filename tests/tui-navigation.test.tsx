@@ -322,6 +322,30 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("Send");
   });
 
+  test("the table has no Keys/MCP keys — both are scoped to ONE phantom", async () => {
+    // Vault and MCP are per-persona, so acting on them from a host-level table
+    // means silently acting on whichever row the cursor happens to sit on.
+    // They live inside a phantom's own settings; the table must not shortcut
+    // there. Both halves: not advertised, and INERT.
+    const app = await mountApp();
+    await app.press("\x13"); // ^s -> the table
+    expect(app.frame()).toContain("PHANTOMS");
+    expect(app.frame()).not.toContain("Keys");
+    expect(app.frame()).not.toContain("MCP");
+
+    await app.press("k");
+    expect(app.frame()).toContain("PHANTOMS");
+    await app.press("m");
+    expect(app.frame()).toContain("PHANTOMS");
+
+    // Still reachable the one honest way: open the phantom first.
+    await app.press("\r");
+    const frame = app.frame();
+    expect(frame).toContain("▸ alice");
+    expect(frame).toContain("MCP");
+    expect(frame).toContain("Vault");
+  });
+
   test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
     // The logs pane is reachable two ways, and a hardcoded parent gets one of
     // them wrong: entered with ^l from the chat it must return to the chat,

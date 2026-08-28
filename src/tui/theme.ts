@@ -68,8 +68,6 @@ export const badge = {
   chat: "✉",
   new: "+",
   doctor: "✚",
-  keys: "✻",
-  mcp: "⚭",
   logs: "▤",
   search: "⌕",
   run: "▶",

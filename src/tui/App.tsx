@@ -525,14 +525,6 @@ export function App(props: AppProps): React.ReactElement {
             go("doctor");
             void runTheDoctor();
           }}
-          onKeys={(name) => {
-            setPersonaName(name);
-            go("keys");
-          }}
-          onMcp={(name) => {
-            setPersonaName(name);
-            go("mcp");
-          }}
           onBack={back}
         />
       );
