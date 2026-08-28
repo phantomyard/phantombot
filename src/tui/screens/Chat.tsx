@@ -27,8 +27,21 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
+import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
 import { glyph, humanDuration, theme } from "../theme.ts";
+import { useTerminalSize, viewportRows } from "../terminal.ts";
+import { visibleMessages } from "../transcript.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
+
+/**
+ * Rows the chat chrome takes: frame border (2), title (1), title gap (1),
+ * activity line (1), input box (3), footer (1), and one row of slack.
+ *
+ * A constant, not a measurement: measuring would mean a component reading the
+ * layout back out of Yoga mid-render, and being one row conservative costs a
+ * blank line while being one row optimistic tears the frame.
+ */
+export const CHAT_CHROME_ROWS = 10;
 
 function timeOf(at: number): string {
   const d = at ? new Date(at) : new Date();
@@ -38,13 +51,18 @@ function timeOf(at: number): string {
 function Message(props: {
   message: ChatMessage;
   showTools: boolean;
+  personaName: string;
 }): React.ReactElement {
   const isUser = props.message.role === "user";
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box>
-        <Text color={isUser ? theme.accent : theme.ok} bold>
-          {isUser ? "you" : "phantom"}
+        <Text
+          backgroundColor={isUser ? theme.accent : theme.ok}
+          color="black"
+          bold
+        >
+          {` ${isUser ? "you" : props.personaName} `}
         </Text>
         <Text color={theme.dim}>{"  " + timeOf(props.message.at)}</Text>
       </Box>
@@ -71,6 +89,32 @@ function Message(props: {
   );
 }
 
+/**
+ * The live activity line.
+ *
+ * This is the fix for "I do not know what it is doing": a moving spinner, the
+ * step the phantom is actually on, and a seconds counter that keeps climbing.
+ * The previous static `thinking…` sat inside the input box and was, by the
+ * user's own report, not noticed at all — nothing on the screen changed, so a
+ * long turn and a hung turn looked the same.
+ */
+function Activity(props: {
+  since: number;
+  note: string;
+}): React.ReactElement {
+  const frame = useSpinnerFrame(true);
+  const seconds = useElapsedSeconds(props.since);
+  return (
+    <Box paddingX={1}>
+      <Text color={theme.accent}>{frame} </Text>
+      <Text color={theme.dim}>{props.note}</Text>
+      <Text color={theme.dim}>{` · ${seconds}s`}</Text>
+      <Box flexGrow={1} />
+      <Text color={theme.dim}>^c interrupts</Text>
+    </Box>
+  );
+}
+
 export function ChatScreen(props: {
   session: ChatSession;
   /** Title-bar status: brain, service state, channels. */
@@ -84,6 +128,10 @@ export function ChatScreen(props: {
   );
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  /** When the in-flight turn started, for the elapsed counter. */
+  const [busySince, setBusySince] = useState<number | undefined>();
+  /** What the phantom is doing right now: a tool title, or "thinking". */
+  const [activity, setActivity] = useState("thinking");
   const [showTools, setShowTools] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -98,6 +146,8 @@ export function ChatScreen(props: {
       const controller = new AbortController();
       abortRef.current = controller;
       setBusy(true);
+      setBusySince(Date.now());
+      setActivity("thinking");
       setMessages((prev) => [
         ...prev,
         { role: "user", text, at: Date.now() },
@@ -112,8 +162,14 @@ export function ChatScreen(props: {
       try {
         for await (const event of props.session.send(text, controller.signal)) {
           if (event.type === "text") {
+            setActivity("writing the reply");
             patch((m) => ({ ...m, text: m.text + event.text }));
+          } else if (event.type === "thinking") {
+            // The harness is alive but silent. Say so rather than freezing the
+            // label on whatever the last tool happened to be.
+            setActivity("thinking");
           } else if (event.type === "tool") {
+            setActivity(event.title.split("\n")[0] ?? "working");
             patch((m) => ({
               ...m,
               tools: [
@@ -140,6 +196,7 @@ export function ChatScreen(props: {
         }
       } finally {
         setBusy(false);
+        setBusySince(undefined);
         abortRef.current = null;
       }
     },
@@ -198,8 +255,30 @@ export function ChatScreen(props: {
       setInput((v) => v.slice(0, -1));
       return;
     }
-    if (char && !key.ctrl && !key.meta) setInput((v) => v + char);
+    if (char && !key.ctrl && !key.meta) {
+      // A chunk can carry a newline INSIDE it: a paste, or a terminal that
+      // batched keystrokes. Ink only reports `key.return` for a chunk that is
+      // exactly "\r", so without this the newline is typed into the box as a
+      // literal character and the message is never sent.
+      const parts = char.split(/\r\n|\r|\n/);
+      if (parts.length === 1) {
+        setInput((v) => v + char);
+        return;
+      }
+      const head = parts[0] ?? "";
+      const rest = parts.slice(1).join(" ").trim();
+      const text = (input + head).trim();
+      setInput(rest);
+      setHistoryIndex(null);
+      if (text && !busy) void submit(text);
+    }
   });
+
+  const size = useTerminalSize();
+  const rows = viewportRows(size, CHAT_CHROME_ROWS);
+  // Clip before layout: overflowing the window is what pushes the border off
+  // the bottom of the screen. See `transcript.ts`.
+  const shown = visibleMessages(messages, rows, size.columns, { showTools });
 
   return (
     <Frame
@@ -215,17 +294,37 @@ export function ChatScreen(props: {
         { key: "^q", label: "quit" },
       ]}
     >
-      <Box flexDirection="column" flexGrow={1}>
-        {messages.map((message, i) => (
-          <Message key={i} message={message} showTools={showTools} />
-        ))}
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
+        {shown.length === 0 ? (
+          <Text color={theme.dim}>
+            Say something to {props.session.persona}. ^s for settings.
+          </Text>
+        ) : (
+          shown.map((message, i) => (
+            <Message
+              key={`${messages.length - shown.length + i}`}
+              message={message}
+              showTools={showTools}
+              personaName={props.session.persona}
+            />
+          ))
+        )}
       </Box>
-      <Box borderStyle="single" borderColor={theme.dim} paddingX={1}>
-        <Text color={theme.accent}>{"› "}</Text>
+      {busy && busySince !== undefined ? (
+        <Activity since={busySince} note={activity} />
+      ) : (
+        <Box paddingX={1}>
+          <Text color={theme.dim}> </Text>
+        </Box>
+      )}
+      <Box
+        borderStyle="round"
+        borderColor={busy ? theme.dim : theme.accent}
+        paddingX={1}
+      >
+        <Text color={busy ? theme.dim : theme.accent}>{"› "}</Text>
         <Text>{input}</Text>
-        <Text color={theme.dim}>
-          {busy ? `  ${glyph.up} thinking…` : "▌"}
-        </Text>
+        <Text color={theme.accent}>{busy ? "" : "▌"}</Text>
       </Box>
     </Frame>
   );

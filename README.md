@@ -278,8 +278,20 @@ Settings live one keypress away:
 | `esc` | Back to the conversation, mid-thread, nothing lost |
 | `^p` | Switch which phantom you are talking to, without leaving chat |
 | `^t` | Expand collapsed tool calls |
+| `^l` | Show captured log lines |
 | `^c` | Interrupt the turn (it does **not** quit) |
 | `^q` | Quit |
+
+It takes the whole window — the app runs on the alternate screen buffer, like
+`less` or `htop`, and leaves your shell and its scrollback exactly as it found
+them on exit. While it runs, log output is **captured rather than printed**:
+`^l` shows it. Otherwise those lines would land on top of the frame, which is
+where they used to go.
+
+While a turn is in flight the status line under the transcript animates: a
+spinner, the step the phantom is on right now (`gh release view`, `thinking`,
+`writing the reply`), and a seconds counter. A long answer and a hung process
+should never look the same.
 
 A conversation here is a real turn: same harness chain, same memory, same tools
 and the same journal as a message from any channel. The scrollback IS the
@@ -291,6 +303,13 @@ setup wizard instead — and resumes at the first unanswered step rather than
 starting from the beginning. "Configured" means a resolvable harness, an
 `identity.json` and a memory database that opens. Channels are deliberately not
 part of it: a phantom you only talk to from the terminal is a finished phantom.
+
+**Questions are asked in line mode.** The screens you read are rendered by Ink;
+the questions that change something — a value to type, a choice to make, a
+confirmation to give — are the same [`@clack`](https://github.com/bombshell-dev/clack)
+prompts every `phantombot` subcommand uses. The app steps out of the way while
+you answer and repaints when you are done, so a setting looks and behaves the
+same whether you reached it from the dashboard or from the command line.
 
 **Mouse is supported** — click a row to select it, click a footer action to run
 it, scroll a list with the wheel. It is always optional: every clickable target

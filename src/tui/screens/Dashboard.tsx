@@ -49,7 +49,20 @@ function PersonaRow(props: {
   const complete = p.completeness.complete;
   return (
     <Selectable selected={props.selected} onPress={props.onPress}>
-      <Cell width="16%">{p.name}</Cell>
+      {/* The selection bar — the same three-way signal the menus use: a filled
+          gutter, a bold name, and the row's own colour. */}
+      <Box marginRight={1}>
+        <Text backgroundColor={props.selected ? theme.accent : undefined}> </Text>
+      </Box>
+      <Box width="16%">
+        <Text
+          bold={props.selected}
+          color={props.selected ? theme.accent : undefined}
+          wrap="truncate"
+        >
+          {p.name}
+        </Text>
+      </Box>
       <Cell width="12%">
         <Text color={complete ? theme.ok : theme.warn}>
           {complete ? `${glyph.up} ready` : `${glyph.warn} setup`}
@@ -118,10 +131,19 @@ export function DashboardScreen(props: {
         { key: "esc", label: "back to chat" },
       ]}
     >
-      <Text color={theme.dim} bold>
-        PHANTOMS
-      </Text>
       <Box>
+        <Text color={theme.accent} bold>
+          PHANTOMS
+        </Text>
+        <Box flexGrow={1} />
+        <Text color={theme.dim}>
+          {`${props.host.personas.length} on this host`}
+        </Text>
+      </Box>
+      <Box>
+        <Box marginRight={1}>
+          <Text> </Text>
+        </Box>
         <Cell width="16%" dim>
           name
         </Cell>
@@ -160,7 +182,7 @@ export function DashboardScreen(props: {
       )}
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={theme.dim} bold>
+        <Text color={theme.accent} bold>
           HOST
         </Text>
         <Box>

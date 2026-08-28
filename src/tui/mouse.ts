@@ -231,6 +231,15 @@ export interface InstalledMouse {
    * of this file — clicking anywhere fires keyboard shortcuts at random.
    */
   stdin: NodeJS.ReadStream;
+  /**
+   * Stop or resume feeding Ink, and turn mouse reporting off/on with it.
+   *
+   * Used while a line-mode `@clack` prompt owns the terminal: the prompt reads
+   * the REAL stdin, so anything still forwarded to Ink would be typed into a
+   * screen the user cannot see, and mouse reports would arrive at the prompt as
+   * garbage keystrokes.
+   */
+  setForwarding: (on: boolean) => void;
   /** Restore the terminal. Idempotent; call it from every exit path. */
   teardown: () => void;
   /** False when there was no TTY to enable reporting on. */
@@ -251,7 +260,7 @@ export function installMouse(options: InstallMouseOptions = {}): InstalledMouse 
   const stdout = options.stdout ?? process.stdout;
   const dispatcher = options.dispatcher ?? mouse;
   if (!stdin.isTTY || !stdout.isTTY) {
-    return { stdin, teardown: () => {}, enabled: false };
+    return { stdin, setForwarding: () => {}, teardown: () => {}, enabled: false };
   }
 
   stdout.write(MOUSE_ON);
@@ -270,7 +279,9 @@ export function installMouse(options: InstallMouseOptions = {}): InstalledMouse 
   filtered.ref = (() => filtered) as NodeJS.ReadStream["ref"];
   filtered.unref = (() => filtered) as NodeJS.ReadStream["unref"];
 
+  let forwarding = true;
   const onData = (data: Buffer | string) => {
+    if (!forwarding) return;
     const chunk = typeof data === "string" ? data : data.toString("utf8");
     const { events, rest } = stripMouseSequences(chunk);
     for (const event of events) dispatcher.dispatch(event);
@@ -284,6 +295,12 @@ export function installMouse(options: InstallMouseOptions = {}): InstalledMouse 
   return {
     stdin: filtered,
     enabled: true,
+    setForwarding: (on: boolean) => {
+      if (on === forwarding) return;
+      forwarding = on;
+      dispatcher.enabled = on;
+      stdout.write(on ? MOUSE_ON : MOUSE_OFF);
+    },
     teardown: () => {
       if (torn) return;
       torn = true;

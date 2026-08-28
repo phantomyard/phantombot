@@ -16,6 +16,10 @@ import { render } from "ink";
 
 import { App } from "./App.tsx";
 import { installMouse } from "./mouse.ts";
+import { enterFullScreen, gateStdout } from "./terminal.ts";
+import { logBuffer } from "./logBuffer.ts";
+import { setPromptHost } from "./prompts.ts";
+import { setLogSink } from "../lib/logSink.ts";
 import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
@@ -51,11 +55,20 @@ export async function startTui(): Promise<number> {
   const host = await hostSnapshot();
   const opening = await resolveOpeningScreen();
 
+  // A terminal app owns the window. The alternate screen buffer is what makes
+  // this look like `htop` rather than like output pasted under a shell prompt,
+  // and leaving it puts the user's scrollback back untouched.
+  const fullScreen = enterFullScreen();
+  // Ink's writes go through a gate so a line-mode prompt can borrow the screen.
+  const gate = gateStdout();
+  // Logs are CAPTURED, not printed: stderr is the same terminal being drawn on,
+  // so every log line used to land on top of the frame. `^l` shows the buffer.
+  const restoreLogs = setLogSink((line) => logBuffer.push(line));
   // BEFORE render(): with the stdin tap attached from a useEffect instead, the
   // mouse RELEASE event is swallowed reproducibly. See mouse.ts.
   const installed = installMouse();
 
-  const instance = render(
+  const element = (
     <App
       host={host}
       startPersona={opening.persona}
@@ -63,11 +76,49 @@ export async function startTui(): Promise<number> {
       onCreatePersona={async (answers: WizardAnswers) => {
         await createPhantomFromWizard(answers);
       }}
-    />,
-    { stdin: installed.stdin, exitOnCtrlC: false },
+    />
   );
 
-  const restore = () => installed.teardown();
+  const instance = render(element, {
+    stdin: installed.stdin,
+    stdout: gate.stream,
+    exitOnCtrlC: false,
+  });
+
+  /**
+   * Hand the terminal to `@clack` and take it back.
+   *
+   * Ink cannot be paused, so the suspension is done around it: writes are
+   * dropped, keystrokes stop being forwarded, mouse reporting goes off, and the
+   * alternate screen is left so the prompt draws where the user's shell is. On
+   * the way back the frame is repainted in full — `clear()` first, because
+   * Ink diffs against a frame that is no longer on the screen and would
+   * otherwise redraw only the part it thinks changed.
+   */
+  const restoreHost = setPromptHost(async (fn) => {
+    gate.suspend();
+    installed.setForwarding(false);
+    fullScreen.restore();
+    try {
+      return await fn();
+    } finally {
+      fullScreen.enter();
+      installed.setForwarding(true);
+      gate.resume();
+      // Clack leaves the terminal in cooked mode; Ink's input layer needs raw
+      // mode back or the app returns deaf to every keystroke.
+      if (process.stdin.isTTY) process.stdin.setRawMode?.(true);
+      instance.clear();
+      instance.rerender(element);
+    }
+  });
+
+  const restore = () => {
+    restoreHost();
+    restoreLogs();
+    installed.teardown();
+    fullScreen.restore();
+  };
   process.once("exit", restore);
   process.once("SIGINT", restore);
   process.once("SIGTERM", restore);

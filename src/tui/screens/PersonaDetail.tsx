@@ -12,10 +12,10 @@
  */
 
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { useInput } from "ink";
 
 import { Frame, Field, Section } from "../components/Frame.tsx";
-import { Selectable } from "../components/Selectable.tsx";
+import { MenuItem } from "../components/Menu.tsx";
 import { glyph, humanBytes, humanCount, theme } from "../theme.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 
@@ -28,12 +28,12 @@ type Target = "memory" | "voice" | "keys" | "mcp" | "doctor";
  */
 type BootRow = "autostart" | "default";
 
-const TARGETS: Array<{ id: Target; label: string }> = [
-  { id: "memory", label: "Memory" },
-  { id: "voice", label: "Voice" },
-  { id: "keys", label: "Vault" },
-  { id: "mcp", label: "MCP" },
-  { id: "doctor", label: "Doctor" },
+const TARGETS: Array<{ id: Target; label: string; icon: string }> = [
+  { id: "memory", label: "Memory", icon: "◆" },
+  { id: "voice", label: "Voice", icon: "◈" },
+  { id: "keys", label: "Vault", icon: "⚿" },
+  { id: "mcp", label: "MCP", icon: "◇" },
+  { id: "doctor", label: "Doctor", icon: "✚" },
 ];
 
 const BOOT_ROWS: BootRow[] = ["autostart", "default"];
@@ -92,51 +92,52 @@ export function PersonaDetailScreen(props: {
       <Field label="configured" value={p.channels.join(", ")} />
 
       <Section title="boot" />
-      <Selectable selected={cursor === 0} onPress={() => press(0)}>
-        <Field
-          label="autostart"
-          value={p.autostart || p.isDefault ? `${glyph.ok} yes` : `${glyph.bad} no`}
-          hint="host setting · ↵ toggles"
-        />
-      </Selectable>
-      <Selectable selected={cursor === 1} onPress={() => press(1)}>
-        <Field
-          label="default"
-          value={
-            p.isDefault
-              ? `${glyph.ok} yes — owns /update and /restart`
-              : `${glyph.bad} no`
-          }
-          hint={p.isDefault ? undefined : "↵ hands over /update and /restart"}
-        />
-      </Selectable>
+      <MenuItem
+        icon="⏻"
+        label="autostart"
+        description="starts with the daemon"
+        badge={p.autostart || p.isDefault ? `${glyph.ok} on` : `${glyph.bad} off`}
+        badgeColor={p.autostart || p.isDefault ? theme.ok : theme.dim}
+        activateHint="↵ toggle"
+        selected={cursor === 0}
+        onPress={() => press(0)}
+      />
+      <MenuItem
+        icon="★"
+        label="default"
+        description={
+          p.isDefault
+            ? "owns /update and /restart"
+            : "↵ hands over /update and /restart"
+        }
+        badge={p.isDefault ? `${glyph.ok} yes` : `${glyph.bad} no`}
+        badgeColor={p.isDefault ? theme.ok : theme.dim}
+        activateHint={p.isDefault ? undefined : "↵ change"}
+        selected={cursor === 1}
+        onPress={() => press(1)}
+      />
 
       <Section title="settings" />
       {TARGETS.map((target, i) => (
-        <Selectable
+        <MenuItem
           key={target.id}
+          icon={target.icon}
+          label={target.label}
+          description={
+            target.id === "memory"
+              ? `journal ${humanCount(p.memory.journalRows)} rows · kb ${humanCount(p.memory.kbNotes)} notes · ${humanBytes(p.memory.dbBytes)}`
+              : target.id === "voice"
+                ? `${p.voiceProvider ?? "none"}${p.voiceProvider === "azure_edge" ? " · speaks, cannot hear" : ""}`
+                : target.id === "keys"
+                  ? `${p.secretNames?.length ?? 0} secrets in the vault`
+                  : target.id === "mcp"
+                    ? "external servers and their tools"
+                    : "run the checks"
+          }
+          activateHint="↵ open"
           selected={i + BOOT_ROWS.length === cursor}
           onPress={() => press(i + BOOT_ROWS.length)}
-        >
-          <Box>
-            <Box width="20%">
-              <Text>{target.label}</Text>
-            </Box>
-            <Box flexGrow={1}>
-              <Text color={theme.dim}>
-                {target.id === "memory"
-                  ? `journal ${humanCount(p.memory.journalRows)} rows · kb ${humanCount(p.memory.kbNotes)} notes · ${humanBytes(p.memory.dbBytes)}`
-                  : target.id === "voice"
-                    ? `${p.voiceProvider ?? "none"}${p.voiceProvider === "azure_edge" ? " · speaks only" : ""}`
-                    : target.id === "keys"
-                      ? `${p.secretNames?.length ?? 0} secrets`
-                      : target.id === "mcp"
-                        ? "servers and tools"
-                        : "run the checks"}
-              </Text>
-            </Box>
-          </Box>
-        </Selectable>
+        />
       ))}
     </Frame>
   );

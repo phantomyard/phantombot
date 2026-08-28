@@ -191,3 +191,57 @@ describe("installMouse", () => {
     expect(installed.stdin).toBe(stdin);
   });
 });
+
+/**
+ * Forwarding is gated while a line-mode prompt owns the terminal.
+ *
+ * A clack prompt reads the REAL stdin. Anything still forwarded to Ink would
+ * be typed into a screen the user cannot see, and the mouse reports the
+ * terminal keeps sending would arrive at the prompt as garbage.
+ */
+describe("installMouse forwarding gate", () => {
+  function fakeTty() {
+    const written: string[] = [];
+    const handlers: Array<(chunk: string) => void> = [];
+    const stdin = {
+      isTTY: true,
+      on(_event: string, fn: (chunk: string) => void) {
+        handlers.push(fn);
+      },
+      off() {},
+      setRawMode() {},
+    } as unknown as NodeJS.ReadStream;
+    const stdout = {
+      isTTY: true,
+      write: (chunk: string) => written.push(chunk),
+    } as unknown as NodeJS.WriteStream;
+    return { stdin, stdout, written, handlers };
+  }
+
+  test("stops feeding Ink and turns reporting off, then restores both", async () => {
+    const { stdin, stdout, written, handlers } = fakeTty();
+    const dispatcher = new MouseDispatcher();
+    const installed = installMouse({ stdin, stdout, dispatcher });
+    const seen: string[] = [];
+    installed.stdin.on("data", (chunk: Buffer | string) =>
+      seen.push(chunk.toString()),
+    );
+
+    handlers[0]!("a");
+    installed.setForwarding(false);
+    expect(dispatcher.enabled).toBe(false);
+    expect(written.at(-1)).toBe(MOUSE_OFF);
+    // Typed at the clack prompt: it must reach the prompt, and NOT the hidden
+    // Ink screen underneath it.
+    handlers[0]!("b");
+
+    installed.setForwarding(true);
+    expect(dispatcher.enabled).toBe(true);
+    expect(written.at(-1)).toBe(MOUSE_ON);
+    handlers[0]!("c");
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(seen.join("")).toBe("ac");
+    installed.teardown();
+  });
+});

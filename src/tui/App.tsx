@@ -30,8 +30,7 @@ import {
   type Consequence,
 } from "./actions.ts";
 import { Frame } from "./components/Frame.tsx";
-import { Prompt } from "./components/Prompt.tsx";
-import { Confirm } from "./components/Confirm.tsx";
+import { promptConfirm, promptValue } from "./prompts.ts";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
@@ -43,9 +42,12 @@ import { MemoryScreen, type SearchHit } from "./screens/Memory.tsx";
 import { VoiceScreen } from "./screens/Voice.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
 import { McpScreen } from "./screens/Mcp.tsx";
+import { LogsScreen } from "./screens/Logs.tsx";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
 import { mouse } from "./mouse.ts";
+import { logBuffer } from "./logBuffer.ts";
+import { TerminalSizeContext, terminalSize } from "./terminal.ts";
 import { loadConfigForPersona, type Config } from "../config.ts";
 import { runMemorySearch } from "../cli/memory.ts";
 import { runDoctor, type DoctorReport } from "../cli/doctor.ts";
@@ -61,6 +63,7 @@ type Screen =
   | "voice"
   | "doctor"
   | "mcp"
+  | "logs"
   | "wizard";
 
 export interface AppProps {
@@ -108,36 +111,66 @@ export function App(props: AppProps): React.ReactElement {
   const [doctorRunning, setDoctorRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
   /**
-   * A modal owns the keyboard while it is open. Screens below keep their state,
-   * so cancelling a prompt returns exactly where the user was.
+   * True while a `@clack` prompt owns the terminal.
+   *
+   * Ink is suspended for the duration (see `prompts.ts`), so this is not about
+   * drawing: it stops a keypress that arrived alongside the prompt from acting
+   * on a screen the user cannot currently see.
    */
-  const [modal, setModal] = useState<
-    | undefined
-    | { kind: "secret"; name: string }
-    | {
-        kind: "confirm";
-        title: string;
-        consequence: Consequence;
-        danger?: boolean;
-        run: () => Promise<void>;
-      }
-  >();
+  const [prompting, setPrompting] = useState(false);
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
   const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>("none");
-  // The ONLY read of stdout.columns in the app: a resize is a reason to
-  // re-render, never a number any component is allowed to see.
-  const [, setResizeTick] = useState(0);
+  /**
+   * The window, measured HERE and nowhere else.
+   *
+   * The app is full-screen now, so the root has to know the height: a flex
+   * column with no height lays out to its content and leaves the frame floating
+   * in the top of an empty screen. The size goes into a context, the root box
+   * gets `height`, and the scrolling regions ask how many rows they may use —
+   * no component reads `process.stdout`, and no component does column
+   * arithmetic to draw anything. See `terminal.ts`.
+   */
+  const [size, setSize] = useState(() => terminalSize(stdout ?? process.stdout));
 
   useEffect(() => {
     if (!stdout) return;
-    const onResize = () => setResizeTick((n) => n + 1);
+    const onResize = () => setSize(terminalSize(stdout));
     stdout.on("resize", onResize);
     return () => {
       stdout.off("resize", onResize);
     };
   }, [stdout]);
+
+  /**
+   * Ask a question with clack, with the renderer suspended around it.
+   *
+   * Every state-changing setting goes through here or `askConfirm`, so a
+   * cancelled prompt is a cancelled ACTION: `run` is only reached on an
+   * explicit yes.
+   */
+  const askConfirm = useCallback(
+    async (input: {
+      title: string;
+      consequence: Consequence;
+      danger?: boolean;
+      run: () => Promise<void>;
+    }) => {
+      setPrompting(true);
+      try {
+        const yes = await promptConfirm({
+          title: input.title,
+          consequence: input.consequence,
+          danger: input.danger,
+        });
+        if (yes) await input.run();
+      } finally {
+        setPrompting(false);
+      }
+    },
+    [],
+  );
 
   // One chat session per persona, opened lazily and kept across screen
   // switches so `^s` then `esc` returns to the same thread.
@@ -160,6 +193,10 @@ export function App(props: AppProps): React.ReactElement {
       const chat = await (props.openSession ?? openChat)({
         config,
         persona: personaName,
+        // Harness stderr into the log pane, not onto the frame. This is the
+        // other half of the log-sink fix: the logger is redirected globally,
+        // but a harness subprocess writes to whatever stream it was handed.
+        stderr: { write: (chunk: string) => logBuffer.push(chunk) },
       });
       if (cancelled) {
         await chat.close();
@@ -198,6 +235,16 @@ export function App(props: AppProps): React.ReactElement {
   }, []);
 
   useInput((char, key) => {
+    // While a clack prompt owns the terminal the app is not on screen. Acting
+    // on a keystroke here would change something the user cannot see.
+    if (prompting) return;
+    // The log pane, from anywhere: log lines are captured while the TUI runs
+    // (they used to be painted over the frame), so there has to be one key
+    // that shows them. Toggles, so ^l gets you back out of it too.
+    if (key.ctrl && char === "l") {
+      setScreen((current) => (current === "logs" ? "chat" : "logs"));
+      return;
+    }
     // A global safety net: esc from any leaf screen goes back to chat rather
     // than to a shell, so there is never a dead end.
     if (key.escape && screen !== "chat" && screen !== "dashboard") {
@@ -209,7 +256,7 @@ export function App(props: AppProps): React.ReactElement {
     // without this the window between "wizard finished" and "session ready" —
     // or a session that never opens because the harness is gone — is
     // unquittable except by killing the terminal, with mouse reporting still on.
-    if (screen === "chat" && !session && !modal) {
+    if (screen === "chat" && !session) {
       if ((key.ctrl && (char === "q" || char === "c")) || key.escape) exit();
     }
   });
@@ -362,8 +409,7 @@ export function App(props: AppProps): React.ReactElement {
           onBack={() => setScreen("dashboard")}
           onToggleAutostart={() => {
             const on = !(persona.autostart || persona.isDefault);
-            setModal({
-              kind: "confirm",
+            void askConfirm({
               title: `${on ? "Start" : "Stop starting"} ${persona.name} with the daemon?`,
               consequence: describeAutostartChange(persona.name, on),
               run: async () => {
@@ -383,8 +429,7 @@ export function App(props: AppProps): React.ReactElement {
             });
           }}
           onMakeDefault={() =>
-            setModal({
-              kind: "confirm",
+            void askConfirm({
               title: `Make ${persona.name} the default persona?`,
               danger: true,
               consequence: describeDefaultPersonaChange(
@@ -426,10 +471,35 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <KeysScreen
           persona={persona}
-          onSet={(name) => setModal({ kind: "secret", name })}
+          onSet={(name) => {
+            void (async () => {
+              setPrompting(true);
+              try {
+                const value = await promptValue({
+                  message: `Set ${name} for ${persona.name}`,
+                  hint: "written straight to the persona vault, never displayed again",
+                  masked: true,
+                });
+                if (!value) return;
+                const { config } = await loadConfigForPersona(persona.name);
+                const r = await setSecret({
+                  config,
+                  persona: persona.name,
+                  name,
+                  value,
+                });
+                // Name only, never the value: a confirmation that echoes a
+                // secret puts it in the scrollback the user just protected it
+                // from.
+                setNotice(r.ok ? `saved ${name}` : `failed: ${r.error}`);
+                await refresh();
+              } finally {
+                setPrompting(false);
+              }
+            })();
+          }}
           onUnset={(name) =>
-            setModal({
-              kind: "confirm",
+            void askConfirm({
               title: `Remove ${name} from ${persona.name}'s vault?`,
               danger: true,
               consequence: {
@@ -482,8 +552,7 @@ export function App(props: AppProps): React.ReactElement {
               next,
               indexedChunks: persona.memory.indexedTotal,
             });
-            setModal({
-              kind: "confirm",
+            void askConfirm({
               title: "Change the embedding provider?",
               consequence,
               run: async () => {
@@ -550,8 +619,7 @@ export function App(props: AppProps): React.ReactElement {
           }
           onSave={() => {
             const consequence = describeVoiceChange({ provider: voiceProvider });
-            setModal({
-              kind: "confirm",
+            void askConfirm({
               title: `Set ${persona.name}'s voice to ${voiceProvider}?`,
               consequence,
               run: async () => {
@@ -568,6 +636,15 @@ export function App(props: AppProps): React.ReactElement {
             });
           }}
           onBack={() => setScreen("persona")}
+        />
+      );
+    }
+
+    if (screen === "logs") {
+      return (
+        <LogsScreen
+          personaName={personaName}
+          onBack={() => setScreen("chat")}
         />
       );
     }
@@ -593,60 +670,24 @@ export function App(props: AppProps): React.ReactElement {
     );
   })();
 
-  // A running job and an open modal both take over the screen. The screen
-  // underneath keeps its state, so cancelling returns exactly where you were.
+  // A running job takes over the screen; the screen underneath keeps its state,
+  // so returning from it lands exactly where the user was.
   if (reembed) {
     return <ReembedScreen space={reembed.space} state={reembed.state} />;
   }
-  if (modal?.kind === "secret") {
-    return (
-      <Prompt
-        label={`Set ${modal.name} for ${personaName}`}
-        hint="written straight to the persona vault; never displayed again"
-        masked
-        onCancel={() => setModal(undefined)}
-        onSubmit={async (value) => {
-          setModal(undefined);
-          if (!value) return;
-          const { config } = await loadConfigForPersona(personaName);
-          const r = await setSecret({
-            config,
-            persona: personaName,
-            name: modal.name,
-            value,
-          });
-          // Name only, never the value — a confirmation that echoes a secret
-          // puts it in the scrollback the user just protected it from.
-          setNotice(r.ok ? `saved ${modal.name}` : `failed: ${r.error}`);
-          await refresh();
-        }}
-      />
-    );
-  }
-  if (modal?.kind === "confirm") {
-    return (
-      <Confirm
-        title={modal.title}
-        consequence={modal.consequence}
-        danger={modal.danger}
-        onCancel={() => setModal(undefined)}
-        onConfirm={async () => {
-          const run = modal.run;
-          setModal(undefined);
-          await run();
-        }}
-      />
-    );
-  }
-
   return (
-    <Box flexDirection="column" flexGrow={1}>
-      {body}
-      {notice ? (
-        <Box paddingX={2}>
-          <Text color={theme.warn}>{notice}</Text>
-        </Box>
-      ) : null}
-    </Box>
+    <TerminalSizeContext.Provider value={size}>
+      {/* `height` is what makes this a full-screen app rather than a block of
+          output in the shell's scrollback: without it the column lays out to
+          its content, and the frame neither fills the window nor stays put. */}
+      <Box flexDirection="column" height={size.rows}>
+        {body}
+        {notice ? (
+          <Box paddingX={2}>
+            <Text color={theme.warn}>{notice}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    </TerminalSizeContext.Provider>
   );
 }
