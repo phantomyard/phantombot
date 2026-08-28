@@ -25,6 +25,7 @@ import { runMain } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
+import { bareInvocationMode, currentTty } from "./lib/tuiGate.ts";
 import { cleanupPersonaTmpDir } from "./lib/harnessArgvFiles.ts";
 import { runComplete } from "./lib/completion.ts";
 import { log } from "./lib/logger.ts";
@@ -42,10 +43,22 @@ if (process.argv[2] === "_complete") {
   process.exit(0);
 }
 
+// A bare, TTY-attached `phantombot` opens the full-screen app (issue #471):
+// chat with the default phantom, or the wizard when it is not configured yet.
+//
+// The gate is TTY-based, NOT argv-based, and it is a SECOND question asked
+// after `isReadOnlyInvocation` rather than a change to it. A bare call stays
+// read-only whenever nobody is watching — CI uses bare/`--help` as "does the
+// binary run?" smoke tests and every <TAB> shells through this same entry, so
+// an argv-based gate would write to disk on a runner and hang `phantombot |
+// head` forever on a renderer nobody can see. See lib/tuiGate.ts.
+const bareMode = bareInvocationMode(process.argv, currentTty());
+
 // Skip the credential bootstrap entirely for read-only invocations
-// (--help/--version/bare) so they never mutate disk or provision a persona —
-// important for CI, which uses them as smoke tests. See cliInvocation.ts.
-if (!isReadOnlyInvocation(process.argv)) {
+// (--help/--version/bare-and-unwatched) so they never mutate disk or provision
+// a persona. An interactive TUI is the one bare invocation that DOES need the
+// bootstrap: it is about to open a vault-backed conversation.
+if (!isReadOnlyInvocation(process.argv) || bareMode === "tui") {
   try {
     const config = await loadConfig();
     await migratePlaintextToVault(config);
@@ -69,4 +82,12 @@ if (!isReadOnlyInvocation(process.argv)) {
     log.warn("startup: vault bootstrap failed", { error: (e as Error).message });
   }
 }
-runMain(mainCommand);
+if (bareMode === "tui") {
+  const { startTui } = await import("./tui/index.tsx");
+  process.exitCode = await startTui();
+} else if (bareMode === "repl") {
+  const { runRepl } = await import("./tui/index.tsx");
+  process.exitCode = await runRepl();
+} else {
+  runMain(mainCommand);
+}

@@ -52,6 +52,7 @@ import {
   runEmbeddingPreflight,
   runEmbedJob,
   runTurnEmbedJob,
+  type EmbedProgress,
   type Embedder,
 } from "../lib/embedJob.ts";
 import { resolveEmbedders } from "../lib/embedder.ts";
@@ -403,6 +404,12 @@ export interface RunIndexInputV2 extends RunIndexInput {
   fetchImpl?: typeof fetch;
   /** Test seam for the derived-vector rebuild. */
   embedder?: Embedder;
+  /**
+   * Progress sink for `--reembed`, so a caller with a screen can draw a bar
+   * instead of printing "go and run this command". The CLI leaves it unset and
+   * keeps its exact current output; the TUI passes one (issue #471).
+   */
+  onProgress?: (progress: EmbedProgress) => void;
 }
 
 export async function runMemoryIndex(
@@ -515,11 +522,13 @@ export async function runMemoryIndex(
         maxChunkChars,
         force: true,
         space,
+        onProgress: input.onProgress,
       });
       const turns = await runTurnEmbedJob({
         index: ix,
         embedder: reembedder,
         space,
+        onProgress: input.onProgress,
       });
       const failures = notes.failedChunks + turns.failed;
       if (failures === 0) ix.removeObsoleteEmbeddingSpaces(space);

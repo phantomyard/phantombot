@@ -20,6 +20,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    "jsx": "react-jsx",
     "types": ["bun"]
   },
   "include": ["src/**/*", "tests/**/*"]

@@ -16,6 +16,7 @@ import { type Config, personaDir } from "../config.ts";
 import { loadState, saveState } from "../state.ts";
 import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
+import { updateConfigToml, type TomlObject } from "./configWriter.ts";
 
 /**
  * If the current `default_persona` points at a directory that doesn't
@@ -105,4 +106,42 @@ export function listPersonaDirs(config: Config): string[] {
     });
     return [];
   }
+}
+
+/**
+ * Write the host-global `autostart_personas` list.
+ *
+ * Extracted from the `phantombot persona` autostart picker so the TUI and the
+ * CLI go through ONE writer. `autostart_personas` is a HOST-ONLY key
+ * (`lib/personaConfig.ts` HOST_ONLY_KEYS): it lives in the global config.toml
+ * and never in a persona file. A second writer that reached for the persona
+ * layer instead would "save" successfully and change nothing, and two personas
+ * editing their own copies would silently fight over who boots.
+ *
+ * The on-disk order of names already present is preserved and new names are
+ * appended, so toggling one persona never shows up as an unrelated reorder in
+ * the user's config file. An empty list removes the key entirely, which is
+ * exactly the pre-existing "default persona only" behaviour.
+ *
+ * Mutates `config.autostartPersonas` to match, so an in-memory caller does not
+ * have to reload to render the change it just made.
+ */
+export async function writeAutostartPersonas(
+  config: Config,
+  picked: readonly string[],
+): Promise<string[]> {
+  const current = config.autostartPersonas ?? [];
+  const chosen = [
+    ...current.filter((n) => picked.includes(n)),
+    ...picked.filter((n) => !current.includes(n)),
+  ];
+  await updateConfigToml(config.configPath, (toml: TomlObject) => {
+    if (chosen.length === 0) {
+      delete toml.autostart_personas;
+    } else {
+      toml.autostart_personas = chosen;
+    }
+  });
+  config.autostartPersonas = chosen;
+  return chosen;
 }

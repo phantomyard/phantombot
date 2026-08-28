@@ -64,6 +64,7 @@ Supported harnesses:
 - [Why Phantombot Exists](#why-phantombot-exists)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [The terminal app](#the-terminal-app)
 - [Windows](#windows)
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
@@ -259,6 +260,66 @@ running after logout:
 ```bash
 sudo loginctl enable-linger "$USER"
 ```
+
+## The terminal app
+
+`phantombot` with no arguments, in a terminal, opens **a conversation with your
+default phantom** — full screen, cursor in the box. Not a menu, not usage text.
+
+```
+phantombot
+```
+
+Settings live one keypress away:
+
+| Key | What it does |
+|---|---|
+| `^s` | Open the dashboard: every phantom, its brain, channels, boot state and memory |
+| `esc` | Back to the conversation, mid-thread, nothing lost |
+| `^p` | Switch which phantom you are talking to, without leaving chat |
+| `^t` | Expand collapsed tool calls |
+| `^c` | Interrupt the turn (it does **not** quit) |
+| `^q` | Quit |
+
+A conversation here is a real turn: same harness chain, same memory, same tools
+and the same journal as a message from any channel. The scrollback IS the
+conversation store, so closing the app and reopening it tomorrow continues the
+same thread.
+
+**If the default phantom is not configured yet**, the same command opens the
+setup wizard instead — and resumes at the first unanswered step rather than
+starting from the beginning. "Configured" means a resolvable harness, an
+`identity.json` and a memory database that opens. Channels are deliberately not
+part of it: a phantom you only talk to from the terminal is a finished phantom.
+
+**Mouse is supported** — click a row to select it, click a footer action to run
+it, scroll a list with the wheel. It is always optional: every clickable target
+also has a key on the footer, and exiting restores your terminal exactly.
+
+### When it does NOT open
+
+The app is gated on there being a human present — both stdin and stdout must be
+terminals. Everything else behaves exactly as it did before:
+
+| Invocation | Behaviour |
+|---|---|
+| `phantombot` in a terminal | The app (chat, or the wizard) |
+| `phantombot` piped, redirected, in CI or from cron | Today's usage text; touches no disk |
+| `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
+| `phantombot --help` / `--version` / any subcommand | Unchanged |
+
+**Every existing command keeps its exact behaviour, flags and output.** The app
+is a new surface over the same operations, so scripts, runbooks and systemd
+units are unaffected.
+
+### Changing a setting performs its consequence
+
+A settings screen that only writes config is a trap. Changing the embedding
+provider, model or dimensions changes the vector-space fingerprint, which makes
+every stored vector invisible to search — recall silently drops back to lexical
+with nothing looking broken. So the app states the consequence before you
+commit to it, then **runs it for you** with a progress bar. There is never a
+follow-up command to remember.
 
 ## Windows
 
@@ -613,7 +674,10 @@ Setup and channels:
 | Command | Purpose |
 |---|---|
 | `phantombot init` | Run the unified setup wizard |
+| `phantombot` (in a terminal) | Open the full-screen app: chat with the default phantom, or the setup wizard |
+| `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
 | `phantombot persona [<name>] [--yes]` | Create, import, list, or explicitly switch the default persona |
+| `phantombot persona new <name> [--autostart] [--default]` | Create a persona non-interactively. Never becomes the default unless `--default` is passed |
 | `phantombot persona --import <dir> [--as <name>] [--no-telegram]` | Import a persona directory |
 | `phantombot backfill-identity` | Add missing split identity files without overwriting existing content |
 | `phantombot harness [--persona <name>]` | Configure a host or persona harness chain, models, and Pi routing |

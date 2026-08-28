@@ -31,7 +31,8 @@ import {
   personaDir,
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
-import { updateConfigToml, type TomlObject } from "../lib/configWriter.ts";
+import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import personaNewCmd from "./persona-new.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
@@ -432,21 +433,9 @@ export async function runAutostartPicker(
     return 0;
   }
 
-  // Preserve the on-disk order of the existing list, then append what's new,
-  // so an unrelated reorder never shows up as a diff in the config file.
-  const chosen = [
-    ...current.filter((n) => picked.includes(n)),
-    ...picked.filter((n) => !current.includes(n)),
-  ];
-
-  await updateConfigToml(config.configPath, (toml: TomlObject) => {
-    if (chosen.length === 0) {
-      delete toml.autostart_personas;
-    } else {
-      toml.autostart_personas = chosen;
-    }
-  });
-  config.autostartPersonas = chosen;
+  // Ordering (preserve what is on disk, append what is new) lives in the
+  // writer, so the TUI and this picker cannot drift apart on it.
+  const chosen = await writeAutostartPersonas(config, picked);
 
   input.out.write(
     chosen.length === 0
@@ -485,6 +474,12 @@ export function listExistingPersonas(config: Config): string[] {
 }
 
 export default defineCommand({
+  subCommands: {
+    // `persona new` is ADDITIVE — bare `persona` and `persona <name>` keep
+    // their exact behaviour (issue #471's hard non-goal: the CLI does not
+    // change).
+    new: personaNewCmd,
+  },
   meta: {
     name: "persona",
     description:
