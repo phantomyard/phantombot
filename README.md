@@ -2075,7 +2075,8 @@ morning, and what fell out was the tagged captures on their way to the
 drawers. A day over 32 KB still loses its morning today, so the trim is loud:
 it keeps the tail, warns with the dropped byte count, and the injected block
 tells the turn to run `phantombot memory get memory/<date>.md` for the rest.
-The compaction budget is unchanged and still applies on disk.
+Since #461 there is no daily compaction budget at all — see
+[Compaction](#compaction).
 
 Useful commands:
 
@@ -2342,20 +2343,25 @@ bound — a 663KB drawer set costs tokens on every turn and buries live facts
 under dead ones. The compaction stage is the other half of the loop, and it is
 built to be safe rather than thorough:
 
-* Only files **over budget** are touched (MEMORY.md 16KB, a fully-distilled
-  daily file 8KB). A healthy persona pays one `stat` per file.
+* Only files **over budget** are touched — `MEMORY.md`, at 16KB, is the only
+  candidate there is. A healthy persona pays one `stat`.
 * Every candidate is copied verbatim into `memory/archive/<YYYY-MM-DD>/`
   **before** the stage runs. Nothing is ever deleted, and the nightly is the
   only code path that moves a memory file.
 * Afterwards each file is re-stat-ed and judged. A pass that removes more than
-  its allowance (40%, or 90% for a closed daily file), empties a file or loses
-  one is **rolled back from that copy** and recorded as `reverted`.
+  its allowance (40%), empties a file or loses one is **rolled back from that
+  copy** and recorded as `reverted`.
 * Byte accounting per file lands in the ledger under `compaction`, so "is memory
   still growing?" is answerable without grepping the log.
-* A daily file is only trimmed once the ledger shows both stages `ok` for it and
-  it is at least 30 days old. Because compaction rewrites that file, its ledger
-  entry is re-fingerprinted afterwards — otherwise the next sweep would see the
-  date as *changed* and pay for both LLM stages again, every night.
+* **Daily files are never candidates** (issue #461). They were, when the daily
+  markdown *was* the journal: it was injected verbatim on every turn and grew
+  without bound, so trimming a closed one was a real saving. Now the journal is
+  `journal_entries` rows and the file is the DERIVED artefact rendered for a
+  closed day. Recall never reads a day older than yesterday, so rewriting one
+  saves nothing in the prompt, while the archive pre-image is kept forever, so
+  it costs disk rather than reclaiming it — and `renderClosedDays` prunes the
+  rows once the file verifies, which makes that file the only surviving copy of
+  the day. The budget for the journal lives at the row layer now.
 * `memory/archive/` is **never indexed**. A rollback copy is a recovery artefact
   for a human with `cp`; indexing it would feed the stale text compaction just
   removed straight back into search as a live document.
@@ -2363,7 +2369,7 @@ built to be safe rather than thorough:
   sizes, not a day's events, so the steady-state night with a drained backlog is
   exactly the night it matters.
 
-Drawers are measured and reported but **never candidates**: their dedupe and
+Drawers are likewise **never candidates**: their dedupe and
 lifecycle work moves to the database, where it is a uniqueness constraint rather
 than an LLM pass over prose. Selecting them would buy a turn whose own prompt
 tells it to change nothing. `--no-compact` skips the stage; a `--date` backfill

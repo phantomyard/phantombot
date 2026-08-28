@@ -764,7 +764,10 @@ ${NIGHTLY_STAGE_BODY.kb(today)}`;
  *
  * There is no `drawer` entry: drawers are database rows now (issue #419),
  * never compaction candidates, and their retired markdown files — if a held
- * retirement left one — must never be selected or rewritten.
+ * retirement left one — must never be selected or rewritten. There is no
+ * `daily` entry either, for the same reason one layer along: the journal is
+ * rows since #461 and a daily file is a derived artefact, so compaction no
+ * longer selects one (see `nightlyCompact`).
  */
 const COMPACTION_KIND_BODY: Record<CompactionCandidate["kind"], string> = {
   memory: `MEMORY.md is loaded into context on EVERY turn, so every byte is
@@ -773,11 +776,6 @@ const COMPACTION_KIND_BODY: Record<CompactionCandidate["kind"], string> = {
     bloated into prose down to one line plus a [[pointer]]. Do NOT remove
     standing facts about your owner, trust rules, or infrastructure state that
     has no home elsewhere — move those, don't delete them.`,
-  daily: `This day is CLOSED and fully distilled — every stage completed and its
-    contents are already filed in the drawers and the KB. Reduce it to: the
-    date heading, the items that were promoted (one line each), and any
-    capture lines. Drop transcript-shaped narration, tool output and
-    working-notes. If you cannot tell whether something was promoted, keep it.`,
 };
 
 /**

@@ -48,8 +48,6 @@ import {
   dateRecord,
   loadNightlyState,
   NIGHTLY_STAGES,
-  type NightlyDateRecord,
-  type NightlyState,
   type NightlyStage,
   nightlyConversationKey,
   type PendingDate,
@@ -121,8 +119,6 @@ export interface RunNightlyInput {
    * rewrite MEMORY.md.
    */
   skipCompaction?: boolean;
-  /** Test seam — override the daily-file age gate. */
-  compactMinAgeDays?: number;
   out?: WriteSink;
   err?: WriteSink;
   /** Test seam — override the clock. */
@@ -247,17 +243,12 @@ export async function runCompaction(opts: {
   personaDir: string;
   persona: string;
   today: string;
-  state: NightlyState;
-  minAgeDays?: number;
   runOne: (prompt: string) => Promise<TurnResult>;
   /** Re-index after the stage ran. Always called: see the call site. */
   reconcileIndex?: () => Promise<void>;
   out: WriteSink;
 }): Promise<{ outcomes: CompactionOutcome[]; error?: string } | null> {
-  const candidates = await compactionCandidates(opts.personaDir, opts.state, {
-    today: opts.today,
-    ...(opts.minAgeDays !== undefined ? { minAgeDays: opts.minAgeDays } : {}),
-  });
+  const candidates = await compactionCandidates(opts.personaDir);
   if (candidates.length === 0) return null;
 
   const archiveDir = archiveDirPath(opts.personaDir, opts.today);
@@ -278,41 +269,6 @@ export async function runCompaction(opts: {
   }
   opts.out.write(formatCompactionSummary(outcomes));
 
-  // Reconcile the ledger for every daily file this pass touched.
-  //
-  // The ledger keys "has this date been distilled?" on mtime + size + hash of
-  // the daily file. Compaction rewrites that file — and so does a rollback —
-  // so leaving the pre-compaction record in place makes the NEXT sweep see the
-  // date as `changed`, re-queue it, and pay for both LLM stages again on a day
-  // whose content was only ever removed. Left alone it re-bills every single
-  // night, forever. The distillation verdict (stages_done/status) is carried
-  // over untouched: what changed is the file's fingerprint, not its history.
-  const touched = outcomes.filter(
-    (o) => o.kind === "daily" && o.bytesAfter !== o.bytesBefore,
-  ).length;
-  // NOT `status !== "unchanged"`: `unchanged` is a SIZE verdict, and the stage
-  // can rewrite a file to different content of exactly the same byte length —
-  // in which case the index kept serving the pre-compaction text for a file
-  // that had in fact changed, which is the one outcome this stage exists to
-  // prevent. The stage only runs when there were candidates at all (the
-  // no-candidate case returned above), so reconcile unconditionally: a refresh
-  // over genuinely untouched files is a stat-cheap no-op, a missed one is
-  // stale memory that stays searchable.
-  const ledgerPatch: Record<string, NightlyDateRecord> = {};
-  for (const c of candidates) {
-    if (c.kind !== "daily" || c.date === undefined) continue;
-    const prev = opts.state.processed?.[c.date];
-    if (!prev) continue;
-    const fresh = await pendingForDate(opts.personaDir, c.date);
-    if (!fresh) continue;
-    ledgerPatch[c.date] = {
-      ...prev,
-      mtime_ms: fresh.mtime_ms,
-      size: fresh.size,
-      hash: fresh.hash,
-    };
-  }
-
   await saveNightlyState(opts.personaDir, {
     compaction: {
       ran_at: new Date().toISOString(),
@@ -321,7 +277,6 @@ export async function runCompaction(opts: {
       bytes_before: outcomes.reduce((n, o) => n + o.bytesBefore, 0),
       bytes_after: outcomes.reduce((n, o) => n + o.bytesAfter, 0),
     },
-    ...(Object.keys(ledgerPatch).length > 0 ? { processed: ledgerPatch } : {}),
   });
 
   // The sweep's index refresh ran BEFORE this stage, so any file compaction
@@ -330,7 +285,6 @@ export async function runCompaction(opts: {
   log.info("nightly: compaction settled", {
     persona: opts.persona,
     files: outcomes.length,
-    dailies_reledgered: touched,
   });
   return { outcomes, ...(r.errored ? { error: r.errored } : {}) };
 }
@@ -608,8 +562,6 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
         personaDir: dir,
         persona,
         today: now.toISOString().slice(0, 10),
-        state: await loadNightlyState(dir),
-        minAgeDays: input.compactMinAgeDays,
         runOne: async (prompt) =>
           input.runStage
             ? await input.runStage({

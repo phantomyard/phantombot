@@ -20,6 +20,18 @@
  *   3. ONLY OVER-BUDGET FILES ARE TOUCHED. A file inside its budget costs one
  *      `stat` and is left alone, so a healthy persona pays nothing.
  *
+ * DAILY FILES ARE NOT IN SCOPE (issue #461). They used to be: a day's markdown
+ * was the live journal, it was injected verbatim on every turn, and it grew
+ * without bound — so trimming a closed one was a real saving. Since the journal
+ * became `journal_entries` rows the file is a DERIVED artefact rendered once,
+ * for closed days only, and recall never reads a day older than yesterday.
+ * Compacting one therefore saved nothing in the prompt while costing an LLM
+ * stage, and — because the archive pre-image is kept forever — it cost disk
+ * rather than reclaiming it. Worse, `renderClosedDays` prunes a day's rows once
+ * the file verifies, so from then on the file is the ONLY copy of that day:
+ * the pass was summarising the last surviving record to save bytes nobody was
+ * paying for. Budget the journal at the row layer, not with a rewrite.
+ *
  * The drawers are NOT in scope here either, and no longer even measured:
  * `commitments.md`, `decisions.md` and `lessons.md` were append-only logs
  * whose dedupe/merge lifecycle has since moved into `drawer_entries` rows
@@ -29,16 +41,22 @@
  */
 
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { writeFileAtomic } from "./io.ts";
 import { log } from "./logger.ts";
-import type { NightlyState } from "./nightly.ts";
-import { isDailyDistilled } from "./nightly.ts";
 
-/** What kind of file a compaction target is — drives the prompt wording. */
-export type CompactionKind = "memory" | "daily";
+/**
+ * What kind of file a compaction target is — drives the prompt wording.
+ *
+ * One member today. It stays a named union rather than collapsing into the
+ * literal because `CompactionOutcome` is PERSISTED in the nightly ledger, and
+ * records written before #461 carry `kind: "daily"`; a reader that narrowed to
+ * a bare literal would be asserting something about old state.json files that
+ * is not true of them.
+ */
+export type CompactionKind = "memory";
 
 export interface CompactionBudget {
   /** Persona-relative path, e.g. `memory/MEMORY.md`. */
@@ -48,35 +66,16 @@ export interface CompactionBudget {
   budgetBytes: number;
   /**
    * Largest share of the file a single pass may remove. Exceeding it reverts
-   * the pass. Daily files are allowed to lose most of their bulk because the
-   * whole point is to reduce a closed, fully-distilled day to its promoted
-   * items; MEMORY.md is prose in the prompt and must only be pruned.
+   * the pass. MEMORY.md is prose in the prompt and must only be pruned, never
+   * rebuilt from scratch.
    */
   maxShrinkPct: number;
 }
 
 /** 16KB of orientation text is already ~4k tokens on EVERY turn. */
 export const MEMORY_BUDGET_BYTES = 16 * 1024;
-/** A closed day that has been fully distilled should be a summary, not a log. */
-export const DAILY_BUDGET_BYTES = 8 * 1024;
-
-/**
- * A daily file is only ever trimmed once it is this old AND fully distilled.
- * The age gate is not about safety — the ledger already proves distillation —
- * it is so a day is still readable in full while it is recent enough that
- * someone might go back and check what actually happened.
- */
-export const DAILY_MIN_AGE_DAYS = 30;
-
 /** Optional per-persona override, e.g. `{"memory/MEMORY.md": 32768}`. */
 export const BUDGET_OVERRIDE_FILE = "memory/.compaction-budgets.json";
-
-/**
- * Override key for the daily-file budget. Daily files are per-date, so they
- * cannot be keyed by their own path like the drawers are — one glob-shaped
- * key covers them all.
- */
-export const DAILY_BUDGET_KEY = "memory/*.md";
 
 export function defaultBudgets(): CompactionBudget[] {
   return [
@@ -120,78 +119,27 @@ export async function resolveBudgets(
   }
 }
 
-/**
- * The persona's daily-file byte budget: the default, or their override.
- *
- * Read by BOTH the sweep (what to compact) and daily recall (how much journal
- * reaches the prompt), so raising it can never leave the two disagreeing about
- * what "at budget" means.
- */
-export async function resolveDailyBudgetBytes(
-  personaDir: string,
-): Promise<number> {
-  const p = join(personaDir, BUDGET_OVERRIDE_FILE);
-  if (!existsSync(p)) return DAILY_BUDGET_BYTES;
-  try {
-    const raw = JSON.parse(await readFile(p, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    const v = raw[DAILY_BUDGET_KEY];
-    return typeof v === "number" && Number.isFinite(v) && v > 0
-      ? Math.floor(v)
-      : DAILY_BUDGET_BYTES;
-  } catch (e) {
-    log.warn(
-      "nightly: budget override unreadable; using default daily budget",
-      {
-        path: p,
-        error: (e as Error).message,
-      },
-    );
-    return DAILY_BUDGET_BYTES;
-  }
-}
-
 /** One file this sweep intends to compact. */
 export interface CompactionCandidate extends CompactionBudget {
   /** Absolute path. */
   absPath: string;
   sizeBytes: number;
-  /** For `daily` candidates only: the date the file covers. */
-  date?: string;
-}
-
-const DAILY_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.md$/;
-
-function daysBetween(a: string, b: string): number {
-  const ms = Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`);
-  return Number.isNaN(ms) ? 0 : Math.floor(ms / 86_400_000);
 }
 
 /**
  * Which files are over budget right now.
  *
- * Daily files carry two extra conditions on top of the byte budget: the day
- * must be distilled by the same fingerprint-aware test the sweep and daily
- * recall apply (so everything worth keeping really is in a drawer or a KB
- * note, including anything appended after the sweep), and the date must be at
- * least `minAgeDays` old. Anything else is left alone.
+ * Daily files are deliberately never candidates — see the note at the top of
+ * this module. A persona with no over-budget file pays one `stat` for the
+ * whole stage.
  */
 export async function compactionCandidates(
   personaDir: string,
-  state: NightlyState,
   opts: {
-    today: string;
     budgets?: CompactionBudget[];
-    minAgeDays?: number;
-    dailyBudgetBytes?: number;
-  },
+  } = {},
 ): Promise<CompactionCandidate[]> {
   const budgets = opts.budgets ?? (await resolveBudgets(personaDir));
-  const minAge = opts.minAgeDays ?? DAILY_MIN_AGE_DAYS;
-  const dailyBudget =
-    opts.dailyBudgetBytes ?? (await resolveDailyBudgetBytes(personaDir));
   const out: CompactionCandidate[] = [];
 
   for (const b of budgets) {
@@ -205,40 +153,6 @@ export async function compactionCandidates(
     if (size > b.budgetBytes) out.push({ ...b, absPath, sizeBytes: size });
   }
 
-  const memDir = join(personaDir, "memory");
-  if (!existsSync(memDir)) return out;
-  const ledger = state.processed ?? {};
-  for (const file of (await readdir(memDir)).sort()) {
-    const m = DAILY_FILE_RE.exec(file);
-    if (!m) continue;
-    const date = m[1]!;
-    const rec = ledger[date];
-    if (daysBetween(date, opts.today) < minAge) continue;
-    const absPath = join(memDir, file);
-    let size: number;
-    try {
-      size = (await stat(absPath)).size;
-    } catch {
-      continue;
-    }
-    // Fingerprint-aware, not just the ledger record: a day APPENDED TO after
-    // its sweep holds content that was never promoted to a drawer or a note,
-    // and truncating it here would be the only place that tail ever existed.
-    // Same predicate the sweep and daily recall use, or the three disagree.
-    if (!(await isDailyDistilled(absPath, rec))) continue;
-    if (size <= dailyBudget) continue;
-    out.push({
-      path: join("memory", file),
-      kind: "daily",
-      budgetBytes: dailyBudget,
-      // A fully-distilled day is expected to collapse to a stub; the guard
-      // here only catches a pass that truncates it to nothing at all.
-      maxShrinkPct: 90,
-      absPath,
-      sizeBytes: size,
-      date,
-    });
-  }
   return out;
 }
 
@@ -286,9 +200,9 @@ export async function archiveForCompaction(
  * Put the archived bytes back over the live file.
  *
  * Atomic, via tempfile + fsync + rename. A plain `copyFile` over the live path
- * truncates the target first, so a crash mid-restore leaves MEMORY.md or a
- * daily file half-written — turning a recoverable bad pass into real data
- * loss, in the exact code path whose whole job is to prevent that.
+ * truncates the target first, so a crash mid-restore leaves MEMORY.md
+ * half-written — turning a recoverable bad pass into real data loss, in the
+ * exact code path whose whole job is to prevent that.
  */
 export async function restoreFromArchive(
   archivePath: string,

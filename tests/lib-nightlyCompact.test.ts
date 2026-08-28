@@ -8,24 +8,13 @@ import {
   type CompactionCandidate,
   compactionCandidates,
   compactionVerdict,
-  DAILY_BUDGET_BYTES,
   defaultBudgets,
   formatCompactionSummary,
   resolveBudgets,
   settleCompaction,
 } from "../src/lib/nightlyCompact.ts";
-import { NIGHTLY_STAGES, type NightlyState } from "../src/lib/nightly.ts";
 
 let dir: string;
-
-const okRecord = {
-  mtime_ms: 1,
-  size: 1,
-  hash: "h",
-  stages_done: [...NIGHTLY_STAGES],
-  completed_at: "2026-01-01T00:00:00.000Z",
-  status: "ok" as const,
-};
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "phantombot-compact-"));
@@ -37,28 +26,18 @@ afterEach(async () => {
 
 const big = (n: number) => "x".repeat(n);
 
-/**
- * A ledger record whose fingerprint MATCHES the file on disk — i.e. the day is
- * distilled and nothing has been appended since the sweep. Anything else and
- * the shared `isDailyDistilled` predicate rightly refuses to compact it.
- */
-const sweptRecord = async (date: string) => {
-  const st = await stat(join(dir, "memory", `${date}.md`));
-  return { ...okRecord, mtime_ms: Math.floor(st.mtimeMs), size: st.size };
-};
-
 describe("compactionCandidates", () => {
   test("picks only files over budget", async () => {
     await writeFile(join(dir, "MEMORY.md"), big(20 * 1024));
     await writeFile(join(dir, "memory", "decisions.md"), big(1024));
-    const got = await compactionCandidates(dir, {}, { today: "2026-08-20" });
+    const got = await compactionCandidates(dir);
     expect(got.map((c) => c.path)).toEqual(["MEMORY.md"]);
     expect(got[0]!.kind).toBe("memory");
     expect(got[0]!.sizeBytes).toBe(20 * 1024);
   });
 
   test("ignores drawers that do not exist", async () => {
-    const got = await compactionCandidates(dir, {}, { today: "2026-08-20" });
+    const got = await compactionCandidates(dir);
     expect(got).toEqual([]);
   });
 
@@ -69,58 +48,22 @@ describe("compactionCandidates", () => {
     // measure it — there is no drawer budget left to report.
     await writeFile(join(dir, "memory", "commitments.md"), big(700 * 1024));
     await writeFile(join(dir, "memory", "decisions.md"), big(700 * 1024));
-    expect(await compactionCandidates(dir, {}, { today: "2026-08-20" })).toEqual([]);
+    expect(await compactionCandidates(dir)).toEqual([]);
     expect(defaultBudgets().map((b) => b.path)).toEqual(["MEMORY.md"]);
   });
 
-  test("daily file needs BOTH stages ok before it is a candidate", async () => {
-    await writeFile(join(dir, "memory", "2026-01-01.md"), big(DAILY_BUDGET_BYTES + 1));
-    const partial: NightlyState = {
-      processed: { "2026-01-01": { ...okRecord, status: "partial", stages_done: ["distill"] } },
-    };
-    expect(await compactionCandidates(dir, partial, { today: "2026-08-20" })).toEqual([]);
-
-    const done: NightlyState = {
-      processed: { "2026-01-01": await sweptRecord("2026-01-01") },
-    };
-    const got = await compactionCandidates(dir, done, { today: "2026-08-20" });
-    expect(got.map((c) => c.path)).toEqual([join("memory", "2026-01-01.md")]);
-    expect(got[0]!.date).toBe("2026-01-01");
+  test("a distilled, old, over-budget daily file is NEVER a candidate", async () => {
+    // #461: the journal is `journal_entries` rows and a daily file is the
+    // DERIVED artefact rendered for a closed day. Recall never reads a day
+    // older than yesterday, so rewriting one saves nothing in the prompt —
+    // and `renderClosedDays` prunes the rows once the file verifies, which
+    // makes that file the only surviving copy of the day. This case used to
+    // be the whole point of the stage; it must now select nothing at all.
+    await writeFile(join(dir, "memory", "2026-01-01.md"), big(64 * 1024));
+    await writeFile(join(dir, "memory", "2020-01-01.md"), big(512 * 1024));
+    expect(await compactionCandidates(dir)).toEqual([]);
   });
 
-  test("a day APPENDED TO after its sweep is not a candidate", async () => {
-    // The tail was never promoted to a drawer or a KB note, so this is the one
-    // place it exists. `dailyRecall` re-injects exactly this case; if the
-    // compactor disagreed it would truncate the tail to a stub instead.
-    const file = join(dir, "memory", "2026-01-01.md");
-    await writeFile(file, big(DAILY_BUDGET_BYTES + 1));
-    const rec = await sweptRecord("2026-01-01");
-    await writeFile(file, `${big(DAILY_BUDGET_BYTES + 1)}\n- [lesson] late capture\n`);
-
-    const stale: NightlyState = { processed: { "2026-01-01": rec } };
-    expect(await compactionCandidates(dir, stale, { today: "2026-08-20" })).toEqual([]);
-
-    // Re-swept: same file, fingerprint caught up — now it may be compacted.
-    const fresh: NightlyState = {
-      processed: { "2026-01-01": await sweptRecord("2026-01-01") },
-    };
-    expect(
-      (await compactionCandidates(dir, fresh, { today: "2026-08-20" })).map((c) => c.date),
-    ).toEqual(["2026-01-01"]);
-  });
-
-  test("daily file inside the age window is left alone", async () => {
-    await writeFile(join(dir, "memory", "2026-08-19.md"), big(DAILY_BUDGET_BYTES + 1));
-    const state: NightlyState = {
-      processed: { "2026-08-19": await sweptRecord("2026-08-19") },
-    };
-    expect(await compactionCandidates(dir, state, { today: "2026-08-20" })).toEqual([]);
-    const got = await compactionCandidates(dir, state, {
-      today: "2026-08-20",
-      minAgeDays: 0,
-    });
-    expect(got).toHaveLength(1);
-  });
 });
 
 describe("resolveBudgets", () => {
@@ -165,7 +108,7 @@ describe("compactionVerdict", () => {
     expect(over.note).toContain("limit 40%");
   });
 
-  test("a daily file may lose most of its bulk", () => {
+  test("the shrink allowance is read off the candidate, not a constant", () => {
     expect(compactionVerdict(c(1000, 90), 100).status).toBe("compacted");
     expect(compactionVerdict(c(1000, 90), 99).status).toBe("reverted");
   });
