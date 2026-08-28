@@ -11,7 +11,7 @@
  * dashboard is that what you are looking at is what is on disk.
  */
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import {
@@ -58,7 +58,7 @@ import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
 import { mouse } from "./mouse.ts";
 import { logBuffer } from "./logBuffer.ts";
-import { TerminalSizeContext, terminalSize } from "./terminal.ts";
+import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfigForPersona, type Config } from "../config.ts";
 import { runMemorySearch } from "../cli/memory.ts";
 
@@ -108,18 +108,31 @@ export function App(props: AppProps): React.ReactElement {
   const [screen, setScreen] = useState<Screen>(
     props.wizardStartAt ? "wizard" : props.startPersona ? "chat" : "wizard",
   );
+  // Navigation history. `esc` means "the screen you came from" on every
+  // screen, and a screen is reachable by more than one route — logs from chat
+  // and from a phantom, doctor from the table and from a phantom — so a
+  // hardcoded parent per screen would send you somewhere you never were. `go`
+  // records the route as it is walked, `back` replays it in reverse, and chat
+  // is the floor: the stack can never strand you outside the app.
+  const screenRef = useRef<Screen>(screen);
+  screenRef.current = screen;
+  const navRef = useRef<Screen[]>([]);
+  const go = useCallback((next: Screen) => {
+    if (screenRef.current !== next) {
+      navRef.current.push(screenRef.current);
+      // Bounded: a long wander must not grow the stack without limit.
+      if (navRef.current.length > 32) navRef.current.shift();
+    }
+    setScreen(next);
+  }, []);
+  const back = useCallback(() => {
+    setScreen(navRef.current.pop() ?? "chat");
+  }, []);
+
   const [personaName, setPersonaName] = useState(
     props.startPersona ?? host.defaultPersona,
   );
   const [session, setSession] = useState<ChatSession | undefined>();
-  /**
-   * Where the persona settings screen was entered FROM, so `←`/`esc` goes back
-   * there. Arriving from a conversation and being returned to a host-wide table
-   * is a dead end you have to navigate out of.
-   */
-  const [personaOrigin, setPersonaOrigin] = useState<"chat" | "dashboard">(
-    "dashboard",
-  );
   /**
    * Latched the first time chat is reached — including from the wizard's
    * `onFinish`, which is the path that had no way to set it before.
@@ -281,17 +294,23 @@ export function App(props: AppProps): React.ReactElement {
     // (they used to be painted over the frame), so there has to be one key
     // that shows them. Toggles, so ^l gets you back out of it too.
     if (key.ctrl && char === "l") {
-      setScreen((current) => (current === "logs" ? "chat" : "logs"));
+      if (screenRef.current === "logs") back();
+      else go("logs");
       return;
     }
-    // A global safety net: esc from any leaf screen goes back to chat rather
-    // than to a shell, so there is never a dead end.
-    if (key.escape && screen !== "chat" && screen !== "dashboard") {
-      // The settings screen goes back where it was ENTERED from — both this
-      // net and the screen's own handler see the same escape, so they have to
-      // agree or the last writer wins and `^s`, esc lands you in the host
-      // table you never asked for.
-      setScreen(screen === "persona" ? personaOrigin : "dashboard");
+    // A global safety net for the ONE state that renders no screen component,
+    // and so owns no keyboard: a per-phantom screen with no phantom to show.
+    // Every real screen handles its own esc through `back`, and this net must
+    // not also fire for those — two handlers popping the same history entry
+    // would skip a level.
+    if (
+      key.escape &&
+      !persona &&
+      screen !== "chat" &&
+      screen !== "wizard" &&
+      screen !== "dashboard"
+    ) {
+      back();
       return;
     }
     // The one state no screen owns the keyboard for: chat before its session
@@ -437,15 +456,20 @@ export function App(props: AppProps): React.ReactElement {
     if (screen === "wizard") {
       return (
         <WizardScreen
-          version={host.version}
           startAt={props.wizardStartAt}
           initial={{ name: props.startPersona ?? "" }}
           defaultExists={host.personas.length > 0}
+          // Only when the wizard was reached from another screen; on first
+          // run the stack is empty and `back` would fall through to chat,
+          // which does not exist yet.
+          onBack={navRef.current.length > 0 ? back : undefined}
           onQuit={exit}
           onFinish={async (answers) => {
             await props.onCreatePersona(answers);
             await refresh();
             setPersonaName(answers.name);
+            // A finished wizard is not a place to go back to.
+            navRef.current = [];
             setScreen("chat");
           }}
         />
@@ -462,7 +486,7 @@ export function App(props: AppProps): React.ReactElement {
           <Frame
             title={["phantombot", personaName]}
             status="starting"
-            footer={[{ key: "^q", label: "quit" }]}
+            footer={[{ key: "^q", label: "Quit" }]}
           >
             <Text color={theme.dim}>opening {personaName}…</Text>
           </Frame>
@@ -471,20 +495,19 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <ChatScreen
           session={session}
-          status={[
-            persona?.resolvedHarness?.id ?? persona?.chain[0] ?? "no brain",
-            persona?.channels.join(", ") ?? "",
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-          // `^s` = the settings OF THIS PHANTOM; `^p` = the list of phantoms
-          // on this host. Wiring both to the dashboard (the first cut) made
-          // the settings key answer a question the user did not ask.
-          onSettings={() => {
-            setPersonaOrigin("chat");
-            setScreen("persona");
-          }}
-          onSwitchPersona={() => setScreen("dashboard")}
+          // The header answers "which phantombot am I talking to, and which
+          // release ring is it on" — the two facts that change what you should
+          // expect from the app. The brain and the channel list are settings,
+          // not status: they live on `^s`, and printing them here made the top
+          // line read `claude · cli only` on a screen that is self-evidently a
+          // chat with a phantom.
+          status={`channel: ${host.updateChannel}`}
+          // `^s` is chat's ONLY way out to configuration, and it lands on the
+          // PHANTOM TABLE: "which phantom am I configuring" is the question
+          // you have to answer before any of the per-phantom settings mean
+          // anything, so the table IS the settings screen and a phantom's own
+          // sections are one level in from it.
+          onSettings={() => go("dashboard")}
           onQuit={exit}
         />
       );
@@ -496,25 +519,24 @@ export function App(props: AppProps): React.ReactElement {
           host={{ ...host, ...(serviceActive === undefined ? {} : { serviceActive }) }}
           onOpen={(name) => {
             setPersonaName(name);
-            setPersonaOrigin("dashboard");
-            setScreen("persona");
+            go("persona");
           }}
           onChat={(name) => {
             setPersonaName(name);
-            setScreen("chat");
+            go("chat");
           }}
-          onNew={() => setScreen("wizard")}
+          onNew={() => go("wizard")}
           onDoctor={() => {
-            setScreen("doctor");
+            go("doctor");
             void runTheDoctor();
           }}
           onKeys={(name) => {
             setPersonaName(name);
-            setScreen("keys");
+            go("keys");
           }}
           onMcp={(name) => {
             setPersonaName(name);
-            setScreen("mcp");
+            go("mcp");
           }}
           onRestart={async () => {
             const r = await restartService();
@@ -522,7 +544,7 @@ export function App(props: AppProps): React.ReactElement {
             await refresh();
             await probeService();
           }}
-          onBack={() => setScreen("chat")}
+          onBack={back}
         />
       );
     }
@@ -539,8 +561,8 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <PersonaDetailScreen
           persona={persona}
-          onBack={() => setScreen(personaOrigin)}
-          onLogs={() => setScreen("logs")}
+          onBack={back}
+          onLogs={() => go("logs")}
           onEditIdentity={() => void editIdentity(persona)}
           onChangeBrain={() => void changeBrain(persona)}
           onChangeChannels={() => void changeChannels(persona)}
@@ -594,10 +616,10 @@ export function App(props: AppProps): React.ReactElement {
           }}
           onOpen={(target) => {
             if (target === "doctor") {
-              setScreen("doctor");
+              go("doctor");
               void runTheDoctor();
             } else {
-              setScreen(target);
+              go(target);
             }
           }}
         />
@@ -659,7 +681,7 @@ export function App(props: AppProps): React.ReactElement {
               },
             })
           }
-          onBack={() => setScreen("persona")}
+          onBack={back}
         />
       );
     }
@@ -736,7 +758,7 @@ export function App(props: AppProps): React.ReactElement {
             });
           }}
           onReindex={() => setNotice("reindex queued")}
-          onBack={() => setScreen("persona")}
+          onBack={back}
         />
       );
     }
@@ -768,11 +790,11 @@ export function App(props: AppProps): React.ReactElement {
                 });
                 setNotice(r.ok ? "voice saved and restarted" : `failed: ${r.error}`);
                 await refresh();
-                setScreen("persona");
+                back();
               },
             });
           }}
-          onBack={() => setScreen("persona")}
+          onBack={back}
         />
       );
     }
@@ -781,7 +803,7 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <LogsScreen
           personaName={personaName}
-          onBack={() => setScreen("chat")}
+          onBack={back}
         />
       );
     }
@@ -792,7 +814,7 @@ export function App(props: AppProps): React.ReactElement {
           report={doctorReport}
           running={doctorRunning}
           onRerun={() => void runTheDoctor()}
-          onBack={() => setScreen("dashboard")}
+          onBack={back}
         />
       );
     }
@@ -802,7 +824,7 @@ export function App(props: AppProps): React.ReactElement {
         personaName={persona.name}
         servers={[]}
         onTest={() => setNotice("mcp test not wired yet")}
-        onBack={() => setScreen("persona")}
+        onBack={back}
       />
     );
   })();
@@ -816,8 +838,11 @@ export function App(props: AppProps): React.ReactElement {
     <TerminalSizeContext.Provider value={size}>
       {/* `height` is what makes this a full-screen app rather than a block of
           output in the shell's scrollback: without it the column lays out to
-          its content, and the frame neither fills the window nor stays put. */}
-      <Box flexDirection="column" height={size.rows}>
+          its content, and the frame neither fills the window nor stays put.
+          It is the window MINUS one row (`renderRows`): a frame exactly as
+          tall as the terminal puts Ink on its clear-and-redraw path, which is
+          what made typing and the spinner flicker. */}
+      <Box flexDirection="column" height={renderRows(size)}>
         {body}
         {notice ? (
           <Box paddingX={2}>

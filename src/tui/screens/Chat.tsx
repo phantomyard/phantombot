@@ -28,116 +28,68 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
-import { glyph, humanDuration, theme } from "../theme.ts";
+import { badge, humanDuration, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
-import { visibleMessages } from "../transcript.ts";
+import { frameChromeRows } from "../chrome.ts";
+import { transcriptLines, transcriptWindow } from "../transcript.ts";
+import type { TranscriptLine } from "../transcript.ts";
+import { mouse } from "../mouse.ts";
 import { applyTextChunk } from "../textInput.ts";
-import type { ChatMessage, ChatSession, ChatToolCall } from "../chatSession.ts";
+import type { ChatMessage, ChatSession } from "../chatSession.ts";
 
 /**
- * Rows the chat chrome takes: frame border (2), title (1), title gap (1),
- * activity line (1), input box (3), footer (1), and one row of slack.
+ * Rows the chat chrome takes INSIDE the frame: header (1), header gap (1),
+ * activity line (1), input box (3), footer (1), and one row of slack. The
+ * frame's own cost (a border, or nothing) is added by `frameChromeRows`, so
+ * dropping the border hands those two rows to the transcript instead of
+ * leaving a gap where the border used to be.
  *
  * A constant, not a measurement: measuring would mean a component reading the
  * layout back out of Yoga mid-render, and being one row conservative costs a
  * blank line while being one row optimistic tears the frame.
  */
-export const CHAT_CHROME_ROWS = 10;
+export const CHAT_CHROME_ROWS = 8;
 
 /**
- * `14:07`, or nothing at all.
+ * One transcript row.
  *
- * History loaded from the memory store carries no timestamp (`at: 0`), and
- * stamping those rows with `new Date()` labelled yesterday's conversation with
- * this minute — every message in a reopened thread claimed to have been sent
- * seconds ago. An absent time is honest; a wrong one is not.
+ * The screen draws exactly the lines `transcript.ts` produced — no component
+ * decides how tall a message is any more, because the thing that measures and
+ * the thing that draws are now the same list. That is what makes a row of
+ * scroll mean a row on screen.
  */
-function timeOf(at: number): string {
-  if (!at) return "";
-  const d = new Date(at);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-/**
- * The tool calls behind one reply — collapsed to a single summary row, or
- * expanded to one row per call.
- *
- * The first cut rendered the same single line in both states, because a
- * progress note is one line long: `^t` was wired, handled, and had no visible
- * effect whatsoever, which reads to a user as a broken key. Collapsed is now
- * genuinely a SUMMARY — how many steps and how long they took, which is what
- * you want while reading an answer — and expanded is the itemised list with
- * each step's own duration.
- *
- * `transcript.ts` measures these rows for clipping, so the two must agree on
- * how many lines each state occupies.
- */
-function Tools(props: {
-  tools: ChatToolCall[];
-  expanded: boolean;
-}): React.ReactElement | null {
-  if (props.tools.length === 0) return null;
-  if (props.expanded) {
+function Line(props: { line: TranscriptLine }): React.ReactElement {
+  const line = props.line;
+  if (line.kind === "gap") return <Text> </Text>;
+  if (line.kind === "header") {
     return (
-      <>
-        {props.tools.map((tool, i) => (
-          <Box key={i} paddingLeft={2}>
-            <Text color={theme.dim}>
-              {"› "}
-              {tool.title}
-            </Text>
-            <Box flexGrow={1} />
-            <Text color={theme.dim}>
-              {tool.durationMs === undefined
-                ? "…"
-                : humanDuration(tool.durationMs)}
-            </Text>
-          </Box>
-        ))}
-      </>
-    );
-  }
-  const done = props.tools.filter((t) => t.durationMs !== undefined);
-  const total = done.reduce((ms, t) => ms + (t.durationMs ?? 0), 0);
-  const running = props.tools.length - done.length;
-  return (
-    <Box paddingLeft={2}>
-      <Text color={theme.dim}>
-        {`› ${props.tools.length} step${props.tools.length === 1 ? "" : "s"}`}
-        {running > 0 ? " · running" : total > 0 ? ` · ${humanDuration(total)}` : ""}
-      </Text>
-      <Box flexGrow={1} />
-      <Text color={theme.dim}>^t details</Text>
-    </Box>
-  );
-}
-
-function Message(props: {
-  message: ChatMessage;
-  showTools: boolean;
-  personaName: string;
-}): React.ReactElement {
-  const isUser = props.message.role === "user";
-  return (
-    <Box flexDirection="column" marginBottom={1}>
       <Box>
         <Text
-          backgroundColor={isUser ? theme.accent : theme.ok}
+          backgroundColor={line.role === "user" ? theme.accent : theme.ok}
           color="black"
           bold
         >
-          {` ${isUser ? "you" : props.personaName} `}
+          {` ${line.name} `}
         </Text>
-        <Text color={theme.dim}>
-          {props.message.at ? `  ${timeOf(props.message.at)}` : ""}
-        </Text>
+        <Text color={theme.dim}>{line.time ? `  ${line.time}` : ""}</Text>
       </Box>
-      <Tools tools={props.message.tools ?? []} expanded={props.showTools} />
+    );
+  }
+  if (line.kind === "tool") {
+    return (
       <Box paddingLeft={2}>
-        <Text color={props.message.error ? theme.bad : undefined}>
-          {props.message.error ?? props.message.text}
+        <Text color={theme.dim}>
+          {"\u203a "}
+          {line.title}
         </Text>
+        <Box flexGrow={1} />
+        <Text color={theme.dim}>{line.duration}</Text>
       </Box>
+    );
+  }
+  return (
+    <Box paddingLeft={2}>
+      <Text color={line.error ? theme.bad : undefined}>{line.text}</Text>
     </Box>
   );
 }
@@ -173,7 +125,6 @@ export function ChatScreen(props: {
   /** Title-bar status: brain, service state, channels. */
   status: string;
   onSettings: () => void;
-  onSwitchPersona: () => void;
   onQuit: () => void;
 }): React.ReactElement {
   const [messages, setMessages] = useState<ChatMessage[]>(
@@ -191,13 +142,35 @@ export function ChatScreen(props: {
   const [busySince, setBusySince] = useState<number | undefined>();
   /** What the phantom is doing right now: a tool title, or "thinking". */
   const [activity, setActivity] = useState("thinking");
-  const [showTools, setShowTools] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  /**
+   * Rows scrolled UP from the live bottom. 0 means "stuck to the bottom", and
+   * new output keeps it there; anything else is the user reading back, and is
+   * left exactly where they put it.
+   */
+  const [scroll, setScroll] = useState(0);
+  /** Mirrors `scroll` so a burst of wheel events cannot lose one (see input). */
+  const scrollRef = useRef(0);
+  /**
+   * How many transcript rows are on screen, for PgUp/PgDn.
+   *
+   * A ref, written during render: the key handler is created before the size
+   * is known, and reading it out of the closure would page by whatever the
+   * window was when the handler was made — wrong after any resize.
+   */
+  const pageRef = useRef(10);
+  const scrollBy = useCallback((rows: number) => {
+    const next = Math.max(0, scrollRef.current + rows);
+    scrollRef.current = next;
+    setScroll(next);
+  }, []);
   const abortRef = useRef<AbortController | null>(null);
 
   // Reset the transcript when the session changes (^p switched phantom).
   useEffect(() => {
     setMessages(props.session.history);
+    scrollRef.current = 0;
+    setScroll(0);
   }, [props.session]);
 
   const submit = useCallback(
@@ -206,6 +179,10 @@ export function ChatScreen(props: {
       abortRef.current = controller;
       setBusy(true);
       setBusySince(Date.now());
+      // Sending is an implicit "take me back to the live end": the reply you
+      // just asked for must not arrive off screen above you.
+      scrollRef.current = 0;
+      setScroll(0);
       setActivity("thinking");
       setMessages((prev) => [
         ...prev,
@@ -262,6 +239,16 @@ export function ChatScreen(props: {
     [props.session],
   );
 
+  // The wheel scrolls the transcript. Three rows per notch is what every
+  // terminal pager does; one row feels broken and a page feels like a jump.
+  useEffect(() => {
+    if (!mouse.enabled) return;
+    return mouse.onMouse((event) => {
+      if (event.kind === "wheel-up") scrollBy(3);
+      else if (event.kind === "wheel-down") scrollBy(-3);
+    });
+  }, [scrollBy]);
+
   useInput((char, key) => {
     // ^c interrupts the TURN. It never quits: losing an app mid-answer because
     // you wanted the answer to stop is the wrong trade.
@@ -277,14 +264,15 @@ export function ChatScreen(props: {
       props.onSettings();
       return;
     }
-    if (key.ctrl && char === "p") {
-      props.onSwitchPersona();
-      return;
-    }
-    if (key.ctrl && char === "t") {
-      setShowTools((v) => !v);
-      return;
-    }
+    // Scrolling works WHILE A TURN IS RUNNING — reading back is exactly what
+    // you do while waiting — so it sits above the `busy` gate.
+    const page = Math.max(1, pageRef.current - 1);
+    if (key.pageUp) return scrollBy(page);
+    if (key.pageDown) return scrollBy(-page);
+    if (key.shift && key.upArrow) return scrollBy(1);
+    if (key.shift && key.downArrow) return scrollBy(-1);
+    if (key.home) return scrollBy(Number.MAX_SAFE_INTEGER);
+    if (key.end) return scrollBy(-Number.MAX_SAFE_INTEGER);
     if (busy) return;
     if (key.upArrow || key.downArrow) {
       const sent = messages.filter((m) => m.role === "user").map((m) => m.text);
@@ -330,39 +318,65 @@ export function ChatScreen(props: {
   });
 
   const size = useTerminalSize();
-  const rows = viewportRows(size, CHAT_CHROME_ROWS);
-  // Clip before layout: overflowing the window is what pushes the border off
-  // the bottom of the screen. See `transcript.ts`.
-  const shown = visibleMessages(messages, rows, size.columns, { showTools });
+  const rows = viewportRows(size, CHAT_CHROME_ROWS + frameChromeRows());
+  pageRef.current = rows;
+  // ONE flat list of rows: what is measured is what is drawn. Clipping happens
+  // before layout — overflowing the window is what pushes the border off the
+  // bottom of the screen. See `transcript.ts`.
+  const lines = transcriptLines(messages, size.columns, {
+    personaName: props.session.persona,
+    formatDuration: (ms) => (ms === undefined ? "\u2026" : humanDuration(ms)),
+  });
+  // The marker row is reserved whenever the conversation is TALLER than the
+  // window — not only while scrolled. Reserving it lazily means the row that
+  // turns the marker on is the row that pushes the bottom line off screen.
+  const overflowing = lines.length > rows;
+  const view = transcriptWindow(lines, overflowing ? rows - 1 : rows, scroll);
+  // Clamp: the conversation grows and the window resizes underneath us, so an
+  // offset that was valid a moment ago may now be past the top.
+  useEffect(() => {
+    if (view.offset !== scrollRef.current) {
+      scrollRef.current = view.offset;
+      setScroll(view.offset);
+    }
+  }, [view.offset]);
 
   return (
     <Frame
       title={[props.session.persona]}
       status={props.status}
       footer={[
-        { key: "↵", label: "send" },
-        { key: "↑↓", label: "history" },
-        { key: "^t", label: showTools ? "hide steps" : "steps" },
-        { key: "^c", label: "interrupt" },
-        { key: `${glyph.gear} ^s`, label: "settings", onPress: props.onSettings },
-        { key: "^p", label: "phantoms" },
-        { key: "^q", label: "quit" },
+        { icon: badge.send, key: "↵", label: "Send" },
+        { icon: badge.history, key: "↑↓", label: "History" },
+        { icon: badge.scroll, key: "PgUp/PgDn", label: "Scroll" },
+        {
+          icon: badge.settings,
+          key: "^s",
+          label: "Settings",
+          onPress: props.onSettings,
+        },
+        { icon: badge.quit, key: "^q", label: "Quit" },
       ]}
     >
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {shown.length === 0 ? (
+        {lines.length === 0 ? (
           <Text color={theme.dim}>
             Say something to {props.session.persona}. ^s for settings.
           </Text>
         ) : (
-          shown.map((message, i) => (
-            <Message
-              key={`${messages.length - shown.length + i}`}
-              message={message}
-              showTools={showTools}
-              personaName={props.session.persona}
-            />
-          ))
+          <>
+            {overflowing ? (
+              <Text color={theme.dim}>
+                {`\u25b2 ${view.above} above` +
+                  (view.below > 0
+                    ? ` \u00b7 \u25bc ${view.below} below \u00b7 End to catch up`
+                    : "")}
+              </Text>
+            ) : null}
+            {view.lines.map((line, i) => (
+              <Line key={`${view.above + i}`} line={line} />
+            ))}
+          </>
         )}
       </Box>
       {busy && busySince !== undefined ? (

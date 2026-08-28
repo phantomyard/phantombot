@@ -26,9 +26,10 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { MenuItem } from "../components/Menu.tsx";
-import { glyph, humanBytes, humanCount, humanWhen, theme } from "../theme.ts";
+import { badge, glyph, humanBytes, humanCount, humanWhen, theme } from "../theme.ts";
 import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
+import { frameChromeRows } from "../chrome.ts";
 import { providerHearsVoice } from "../../lib/voice.ts";
 import type { ChannelDetail, PersonaSnapshot } from "../snapshot.ts";
 import type { VoiceProvider } from "../../lib/voice.ts";
@@ -169,7 +170,7 @@ export function PersonaDetailScreen(props: {
   // one row conservative costs a blank line while one row optimistic tears the
   // frame.
   const size = useTerminalSize();
-  const budget = viewportRows(size, 7);
+  const budget = viewportRows(size, 5 + frameChromeRows());
 
   const blocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
     {
@@ -418,11 +419,11 @@ export function PersonaDetailScreen(props: {
           : `${glyph.warn} setup unfinished`
       }
       footer={[
-        { key: "↑↓", label: "move" },
-        { key: "↵", label: "edit" },
-        { key: "r", label: "restart" },
-        { key: "L", label: "logs" },
-        { key: "←", label: "back" },
+        { icon: badge.move, key: "↑↓", label: "Move" },
+        { icon: badge.edit, key: "↵", label: "Edit" },
+        { icon: badge.restart, key: "r", label: "Restart" },
+        { icon: badge.logs, key: "L", label: "Logs" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Text color={theme.dim}>

@@ -78,7 +78,6 @@ async function mount(session: ChatSession) {
       session={session}
       status="claude"
       onSettings={() => {}}
-      onSwitchPersona={() => {}}
       onQuit={() => {}}
     />,
     {

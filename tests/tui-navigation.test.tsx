@@ -86,7 +86,6 @@ async function mountChat() {
       session={sessionWithTools()}
       status="claude"
       onSettings={() => pressed.push("settings")}
-      onSwitchPersona={() => pressed.push("phantoms")}
       onQuit={() => pressed.push("quit")}
     />,
     {
@@ -111,21 +110,20 @@ async function mountChat() {
 }
 
 describe("chat keys", () => {
-  test("^t changes what the transcript shows", async () => {
+  test("tool calls are always listed, with no key needed to reveal them", async () => {
+    // The `^t` collapse is gone: the steps ARE the answer to "what is it
+    // doing", so they are on screen from the first frame and there is no
+    // summary row standing in for them. Pressing the old key must be inert
+    // rather than toggling a state that no longer exists.
     const app = await mountChat();
-    const collapsed = app.frame();
-    // Collapsed is a SUMMARY, not the first line of the first call.
-    expect(collapsed).toContain("2 steps");
-    expect(collapsed).not.toContain("gh release view");
+    const frame = app.frame();
+    expect(frame).toContain("gh release view");
+    expect(frame).toContain("bun test");
+    expect(frame).not.toContain("2 steps");
 
-    await app.press("\x14"); // ^t
-    const expanded = app.frame();
-    expect(expanded).toContain("gh release view");
-    expect(expanded).toContain("bun test");
-    expect(expanded).not.toContain("2 steps");
-
-    await app.press("\x14");
-    expect(app.frame()).toContain("2 steps");
+    await app.press("\x14"); // ^t — no longer bound
+    expect(app.frame()).toContain("gh release view");
+    expect(app.frame()).not.toContain("2 steps");
     app.instance.unmount();
   });
 
@@ -148,18 +146,22 @@ describe("chat keys", () => {
     app.instance.unmount();
   });
 
-  test("^s and ^p are different destinations", async () => {
+  test("^s is the only way out of chat; ^p is no longer bound here", async () => {
+    // The phantom list moved BEHIND settings, so chat must not keep a stale
+    // second exit: a key that silently does nothing is better than one that
+    // still routes somewhere after the destination moved.
     const app = await mountChat();
     await app.press("\x13"); // ^s
-    await app.press("\x10"); // ^p
-    expect(app.pressed).toEqual(["settings", "phantoms"]);
+    await app.press("\x10"); // ^p — inert now
+    expect(app.pressed).toEqual(["settings"]);
+    expect(app.frame()).not.toContain("phantoms");
     app.instance.unmount();
   });
 });
 
 // ---------------------------------------------------------------------------
-// The same two keys, at the App level: it is the ROUTER that had them wired to
-// one destination, so a ChatScreen test alone would not have caught it.
+// The same route, at the App level: it is the ROUTER that owns where a key
+// lands, so a ChatScreen test alone would not have caught it.
 // ---------------------------------------------------------------------------
 
 import { afterAll, afterEach, beforeAll } from "bun:test";
@@ -263,38 +265,69 @@ async function mountApp() {
   };
 }
 
-describe("^s and ^p from chat", () => {
-  test("^s opens THIS phantom's settings, not the host table", async () => {
+describe("reaching settings and the phantom list", () => {
+  test("^s opens the phantom TABLE — settings starts with 'which phantom'", async () => {
     const app = await mountApp();
     await app.press("\x13"); // ^s
     const frame = app.frame();
-    expect(frame).toContain("phantombot ▸ alice");
-    // The tell: the settings screen has this phantom's own sections…
+    expect(frame).toContain("PHANTOMS");
+    expect(frame).toContain("▸ settings");
+    // The tell: this is the host table, not one phantom's own sections.
+    expect(frame).not.toContain("Identity");
+  });
+
+  test("a phantom's own settings are one level in from the table", async () => {
+    // ^s (table) then ↵ (open the selected phantom). Chat has no second exit:
+    // ^p there must leave you in the conversation.
+    const app = await mountApp();
+    await app.press("\x10"); // ^p from chat: inert
+    expect(app.frame()).not.toContain("PHANTOMS");
+
+    await app.press("\x13"); // ^s
+    await app.press("\r"); // open alice
+    const frame = app.frame();
+    expect(frame).toContain("▸ alice");
     expect(frame).toContain("Identity");
     expect(frame).toContain("Brain");
-    // …and not the host-wide phantom table.
-    expect(frame).not.toContain("PHANTOMS");
+
+    await app.press("\x1b"); // esc goes back to the table it was opened from
+    expect(app.frame()).toContain("PHANTOMS");
   });
 
-  test("^p opens the host table, and esc returns to the conversation", async () => {
-    const app = await mountApp();
-    await app.press("\x10"); // ^p
-    const frame = app.frame();
-    expect(frame).toContain("PHANTOMS");
-    expect(frame).toContain("phantombot ▸ settings");
-
-    await app.press("\x1b"); // esc
-    expect(app.frame()).toContain("^s");
-  });
-
-  test("esc from settings reached via ^s goes back to the conversation", async () => {
-    // Not to the dashboard: arriving from a conversation and being returned to
-    // a host-wide table is a dead end the user has to navigate out of.
+  test("esc from the settings table goes back to the conversation", async () => {
+    // One esc out of settings, one more out of a phantom: the way back to the
+    // chat is never more than the key you came in on.
     const app = await mountApp();
     await app.press("\x13");
     await app.press("\x1b");
     const frame = app.frame();
     expect(frame).not.toContain("PHANTOMS");
-    expect(frame).toContain("send");
+    expect(frame).toContain("Send");
+  });
+  test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
+    // The logs pane is reachable two ways, and a hardcoded parent gets one of
+    // them wrong: entered with ^l from the chat it must return to the chat,
+    // entered with L from a phantom it must return to that phantom — same key,
+    // same screen, different way back.
+    const app = await mountApp();
+    await app.press("\x0c"); // ^l from chat
+    expect(app.frame()).toContain("logs");
+    await app.press("\x1b");
+    expect(app.frame()).toContain("Send");
+
+    await app.press("\x13"); // ^s -> table
+    await app.press("\r"); // open alice
+    await app.press("L"); // logs, this time from the phantom
+    expect(app.frame()).toContain("logs");
+    await app.press("\x1b");
+    const frame = app.frame();
+    expect(frame).toContain("Identity"); // back at the phantom, not the chat
+    expect(frame).not.toContain("Send");
+
+    // And the walk unwinds one level per esc, all the way to the floor.
+    await app.press("\x1b");
+    expect(app.frame()).toContain("PHANTOMS");
+    await app.press("\x1b");
+    expect(app.frame()).toContain("Send");
   });
 });

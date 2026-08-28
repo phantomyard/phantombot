@@ -210,7 +210,7 @@ describe("first run", () => {
     // is exactly the window the bug lived in. It must still be a real screen.
     const frame = app.frame();
     expect(frame).toContain("alice");
-    expect(frame).toContain("quit");
+    expect(frame).toContain("Quit");
 
     let exited = false;
     void app.instance.waitUntilExit().then(() => void (exited = true));
@@ -249,7 +249,9 @@ describe("first run", () => {
     // And the chat screen is actually mounted, not the placeholder.
     const frame = app.lastFrame();
     expect(frame).not.toContain("opening alice");
-    expect(frame).toContain("interrupt");
+    // Footer items unique to the chat screen (`^c interrupt` left the footer
+    // when the activity line took over announcing it).
+    expect(frame).toContain("Send");
     expect(frame).toContain("settings");
   });
 

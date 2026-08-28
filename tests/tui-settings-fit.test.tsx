@@ -167,19 +167,41 @@ async function openSettings(rows: number) {
   );
   mounted.push(() => instance.unmount());
   await sleep(80);
-  stdin.write("\x13"); // ^s
+  stdin.write("\x13"); // ^s — the phantom table
+  await sleep(80);
+  stdin.write("\r"); // open the selected phantom's own settings
   await sleep(80);
   return (stdout.frames.at(-1) ?? "").split("\n");
 }
 
 describe("settings screen in a short window", () => {
-  test("the frame survives and the hidden rows are announced", async () => {
+  test("the boxed frame survives and the hidden rows are announced", async () => {
+    // The border only exists in `boxed`, so this — the original shearing
+    // regression — has to be asserted in that variant explicitly. The default
+    // `bare` frame is covered by the next test: it has no border to shear,
+    // but it can still push its own footer off the window.
+    process.env.PHANTOMBOT_TUI_FRAME = "boxed";
     const lines = await openSettings(20);
+    delete process.env.PHANTOMBOT_TUI_FRAME;
 
     // The bottom border is a border: nothing from a row may be drawn INTO it.
     const bottom = lines.find((l) => l.trimStart().startsWith("╰"))!;
     expect(bottom).toBeDefined();
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
+
+    // Content was dropped rather than compressed, and the screen says so.
+    expect(lines.join("\n")).toContain("more below");
+    expect(lines.join("\n")).not.toContain("indexedngs");
+  });
+
+  test("the bare frame keeps its footer and drops rows instead", async () => {
+    const lines = await openSettings(20);
+
+    // The footer is the last thing on screen — if the body overflowed it
+    // would be pushed out of the window entirely, which is how you lose the
+    // only visible way back.
+    const last = lines.filter((l) => l.trim().length > 0).at(-1) ?? "";
+    expect(last).toContain("Back");
 
     // Content was dropped rather than compressed, and the screen says so.
     expect(lines.join("\n")).toContain("more below");
