@@ -521,10 +521,6 @@ export function App(props: AppProps): React.ReactElement {
             go("persona");
           }}
           onNew={() => go("wizard")}
-          onDoctor={() => {
-            go("doctor");
-            void runTheDoctor();
-          }}
           onBack={back}
         />
       );

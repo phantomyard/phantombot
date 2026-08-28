@@ -94,7 +94,6 @@ export function DashboardScreen(props: {
   host: HostSnapshot;
   onOpen: (persona: string) => void;
   onNew: () => void;
-  onDoctor: () => void;
   onBack: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -108,7 +107,6 @@ export function DashboardScreen(props: {
       setCursor((c) => Math.min(personas.length - 1, c + 1));
     else if (key.return && current) props.onOpen(current.name);
     else if (char === "n") props.onNew();
-    else if (char === "d") props.onDoctor();
   });
 
   // A host with more phantoms than rows must show FEWER, not squeezed ones —
@@ -141,7 +139,6 @@ export function DashboardScreen(props: {
       footer={[
         { icon: badge.open, key: "↵", label: "Open" },
         { icon: badge.new, key: "n", label: "New" },
-        { icon: badge.doctor, key: "d", label: "Doctor" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >

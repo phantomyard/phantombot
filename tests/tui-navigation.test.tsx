@@ -346,6 +346,27 @@ describe("reaching settings and the phantom list", () => {
     expect(frame).toContain("Vault");
   });
 
+  test("the table has no 'd Doctor' key — doctor is per-phantom", async () => {
+    // runDoctor takes a persona: memory_db, nightly, capture and embeddings all
+    // resolve against ONE phantom's dir. From the table it ran against the
+    // active chat persona regardless of the row cursor, and still rendered a
+    // plausible report with someone else's name on it. Both halves: not
+    // advertised, and INERT.
+    const app = await mountApp();
+    await app.press("\x13"); // ^s -> the table
+    expect(app.frame()).toContain("PHANTOMS");
+    expect(app.frame()).not.toContain("Doctor");
+
+    await app.press("d");
+    expect(app.frame()).toContain("PHANTOMS"); // still the table
+
+    // Reachable the honest way: inside the phantom it belongs to.
+    await app.press("\r");
+    const frame = app.frame();
+    expect(frame).toContain("▸ alice");
+    expect(frame.toLowerCase()).toContain("doctor");
+  });
+
   test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
     // The logs pane is reachable two ways, and a hardcoded parent gets one of
     // them wrong: entered with ^l from the chat it must return to the chat,
