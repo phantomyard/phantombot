@@ -14,7 +14,7 @@ import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame, Field, Section } from "../components/Frame.tsx";
-import { humanBytes, humanCount, glyph, theme } from "../theme.ts";
+import { badge, humanBytes, humanCount, glyph, theme } from "../theme.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 
 export interface SearchHit {
@@ -64,10 +64,15 @@ export function MemoryScreen(props: {
     <Frame
       title={["phantombot", props.persona.name, "memory"]}
       footer={[
-        { key: "type", label: "search" },
-        { key: "e", label: "embeddings", onPress: props.onChangeEmbedding },
-        { key: "ctrl-r", label: "reindex" },
-        { key: "left", label: "back" },
+        { icon: badge.search, key: "type", label: "Search" },
+        {
+          icon: badge.embeddings,
+          key: "e",
+          label: "Embeddings",
+          onPress: props.onChangeEmbedding,
+        },
+        { icon: badge.reindex, key: "^r", label: "Reindex" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Section title="store" />

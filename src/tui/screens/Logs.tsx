@@ -16,8 +16,9 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { logBuffer, type LogLine } from "../logBuffer.ts";
-import { theme } from "../theme.ts";
+import { badge, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
+import { frameChromeRows } from "../chrome.ts";
 
 const LEVEL_COLOR: Record<string, string> = {
   error: theme.bad,
@@ -37,7 +38,7 @@ export function LogsScreen(props: {
   onBack: () => void;
 }): React.ReactElement {
   const size = useTerminalSize();
-  const rows = viewportRows(size, 8);
+  const rows = viewportRows(size, 6 + frameChromeRows());
   const [lines, setLines] = useState<LogLine[]>(() => logBuffer.tail(rows));
 
   // Re-read on every push rather than holding a copy: the buffer is the store.
@@ -55,7 +56,7 @@ export function LogsScreen(props: {
     <Frame
       title={["phantombot", props.personaName, "logs"]}
       status={`${logBuffer.all().length} lines captured`}
-      footer={[{ key: "esc", label: "back" }]}
+      footer={[{ icon: badge.back, key: "esc", label: "Back" }]}
     >
       <Box flexDirection="column" overflow="hidden">
         {lines.length === 0 ? (

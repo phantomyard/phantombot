@@ -16,7 +16,7 @@ import React from "react";
 import { Box, Text } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
-import { humanCount, humanDuration, theme } from "../theme.ts";
+import { badge, humanCount, humanDuration, theme } from "../theme.ts";
 
 export interface ReembedState {
   done: number;
@@ -56,8 +56,12 @@ export function ReembedScreen(props: {
       title={["re-embedding"]}
       status={props.space}
       footer={[
-        { key: "b", label: "run in background" },
-        { key: "ctrl-c", label: "cancel (keeps what's done)" },
+        { icon: badge.background, key: "b", label: "Run in background" },
+        {
+          icon: badge.cancel,
+          key: "^c",
+          label: "Cancel (keeps what's done)",
+        },
       ]}
     >
       <Box>

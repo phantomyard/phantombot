@@ -15,7 +15,7 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { Selectable } from "../components/Selectable.tsx";
-import { glyph, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 
 /**
@@ -90,9 +90,9 @@ export function KeysScreen(props: {
     <Frame
       title={["phantombot", props.persona.name, "vault"]}
       footer={[
-        { key: "return", label: "set" },
-        { key: "x", label: "unset" },
-        { key: "left", label: "back" },
+        { icon: badge.edit, key: "↵", label: "Set" },
+        { icon: badge.unset, key: "x", label: "Unset" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Box>

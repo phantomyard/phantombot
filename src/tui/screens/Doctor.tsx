@@ -10,7 +10,7 @@ import React from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
-import { glyph, humanBytes, theme } from "../theme.ts";
+import { badge, glyph, humanBytes, theme } from "../theme.ts";
 import type { DoctorReport } from "../../cli/doctor.ts";
 
 function Check(props: {
@@ -56,8 +56,8 @@ export function DoctorScreen(props: {
       title={["phantombot", "doctor"]}
       status={props.running ? "running..." : undefined}
       footer={[
-        { key: "a", label: "run again", onPress: props.onRerun },
-        { key: "left", label: "back" },
+        { icon: badge.run, key: "a", label: "Run again", onPress: props.onRerun },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       {!r ? (

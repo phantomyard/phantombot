@@ -21,7 +21,7 @@ import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame, Field } from "../components/Frame.tsx";
-import { glyph, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 import { providerHearsVoice, type VoiceProvider } from "../../lib/voice.ts";
 
 /**
@@ -70,10 +70,10 @@ export function VoiceScreen(props: {
     <Frame
       title={["phantombot", props.personaName, "voice"]}
       footer={[
-        { key: "left/right", label: "change" },
-        { key: "p", label: "preview", onPress: props.onPreview },
-        { key: "return", label: "save" },
-        { key: "esc", label: "back" },
+        { icon: badge.change, key: "←→", label: "Change" },
+        { icon: badge.preview, key: "p", label: "Preview", onPress: props.onPreview },
+        { icon: badge.save, key: "↵", label: "Save" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Field

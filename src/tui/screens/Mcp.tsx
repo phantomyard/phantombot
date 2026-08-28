@@ -11,7 +11,7 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { Selectable } from "../components/Selectable.tsx";
-import { glyph, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 
 export interface McpServerRow {
   name: string;
@@ -43,8 +43,8 @@ export function McpScreen(props: {
     <Frame
       title={["phantombot", props.personaName, "mcp"]}
       footer={[
-        { key: "t", label: "test" },
-        { key: "left", label: "back" },
+        { icon: badge.test, key: "t", label: "Test" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Box>
