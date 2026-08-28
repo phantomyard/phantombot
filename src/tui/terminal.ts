@@ -58,12 +58,48 @@ export function useTerminalSize(): TerminalSize {
 }
 
 /**
- * How many rows a scrolling region may use: the window minus the chrome drawn
- * around it. Clamped to at least one row so a tiny window renders something
- * rather than throwing at the layout engine.
+ * One row of the window is deliberately left unpainted.
+ *
+ * ## Why the app flickered
+ *
+ * Ink has two ways to put a frame on the screen. Normally it rewrites only the
+ * lines that changed. But when a frame is as tall as the window it decides the
+ * app is "fullscreen" and switches to CLEAR THE WHOLE TERMINAL AND REDRAW
+ * (`ink/build/ink.js`, the `lastOutputHeight >= rows` branch) — on EVERY
+ * render. With a spinner ticking at 12 fps and a keystroke repainting on every
+ * character, that is a full erase-and-repaint of the window several times a
+ * second, which is exactly what a flicker is.
+ *
+ * Measured on a 24-row fake TTY, 400ms of a ticking app:
+ *
+ *     height = rows      7317 bytes, 2 whole-terminal clears
+ *     height = rows - 1  3472 bytes, 0 clears
+ *
+ * So the root asks for one row less than the window. The frame still fills the
+ * screen visually (the alternate screen is empty underneath and the cursor
+ * parks on the spare line); what changes is that Ink stays on its incremental
+ * path and writes only the lines that actually differ.
+ *
+ * This has to be subtracted in ONE place, not at the call sites: if the root
+ * shrinks but a scrolling region still budgets for the full window, the content
+ * is one row too tall and Yoga compresses it — the border shearing we already
+ * fixed once. Hence `renderRows` below, which both the root and `viewportRows`
+ * are built on.
+ */
+export const RESERVED_ROWS = 1;
+
+/** Height the root box paints: the window, less the reserved row. */
+export function renderRows(size: TerminalSize): number {
+  return Math.max(1, size.rows - RESERVED_ROWS);
+}
+
+/**
+ * How many rows a scrolling region may use: the painted height minus the
+ * chrome drawn around it. Clamped to at least one row so a tiny window renders
+ * something rather than throwing at the layout engine.
  */
 export function viewportRows(size: TerminalSize, chromeRows: number): number {
-  return Math.max(1, size.rows - chromeRows);
+  return Math.max(1, renderRows(size) - chromeRows);
 }
 
 export interface FullScreen {
@@ -101,6 +137,48 @@ export interface GatedStdout {
 }
 
 /**
+ * Swallow the line advance Ink puts after the LAST line of a frame.
+ *
+ * ## Why a frame full of stale rows appeared
+ *
+ * Ink decides a frame is "fullscreen" with `outputHeight >= stdout.rows`
+ * (`ink/build/ink.js`), and ONLY a fullscreen frame is written without a
+ * trailing newline. We deliberately paint one row less than the window
+ * (`RESERVED_ROWS`, so Ink stays off its clear-the-whole-terminal path), which
+ * means every frame arrives with that trailing `\n` — and the incremental
+ * writer's cursor arithmetic assumes it did not.
+ *
+ * It positions the next frame with `cursorUp(previousVisible - 1)` from where
+ * it thinks the cursor is: the LAST line of the block. The trailing newline
+ * leaves it one row lower, so each frame is written one row further down. When
+ * the block already reaches the bottom of the window, that final newline
+ * SCROLLS the screen instead, which cancels the drift for the lines Ink
+ * rewrites — and moves every line it skipped as unchanged one row up. That is
+ * the reported failure exactly: a screen of correct-looking rows at wrong
+ * positions, duplicated headers and timestamps, no footer.
+ *
+ * So the gate drops one trailing advance per frame: a `\n`, or the
+ * `cursorNextLine` Ink emits instead when the last line did not change. The
+ * cursor then sits where the arithmetic expects it, and no frame ever pushes
+ * the window. Verified by replaying a streaming session through a terminal
+ * emulator and diffing the resulting SCREEN against the non-incremental
+ * renderer's (`tests/tui-frame-drift.test.tsx`).
+ *
+ * Scoped to the stream handed to `render()`, so it can only ever affect Ink's
+ * own frames — not the alternate-screen escapes, not a borrowed prompt.
+ */
+export function trimFrameAdvance(chunk: string): string {
+  if (chunk.endsWith("\n")) return chunk.slice(0, -1);
+  if (chunk.endsWith(CURSOR_NEXT_LINE)) {
+    return chunk.slice(0, -CURSOR_NEXT_LINE.length);
+  }
+  return chunk;
+}
+
+/** `cursorNextLine` — what Ink emits to step over an unchanged line. */
+const CURSOR_NEXT_LINE = "\x1b[E";
+
+/**
  * A write gate in front of stdout.
  *
  * Settings prompts are `@clack/prompts`, which are line-mode and draw on the
@@ -120,6 +198,12 @@ export function gateStdout(
   const facade = {
     write(chunk: string | Uint8Array, ...rest: unknown[]): boolean {
       if (suspended) return true;
+      if (typeof chunk === "string") {
+        return (stdout.write as (...args: unknown[]) => boolean)(
+          trimFrameAdvance(chunk),
+          ...rest,
+        );
+      }
       return (stdout.write as (...args: unknown[]) => boolean)(chunk, ...rest);
     },
     get columns() {

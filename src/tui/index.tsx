@@ -84,6 +84,13 @@ export async function startTui(): Promise<number> {
     stdin: installed.stdin,
     stdout: gate.stream,
     exitOnCtrlC: false,
+    // Rewrite only the lines that changed. The default redraws the whole frame
+    // on every render, which at a 12fps spinner plus one repaint per keystroke
+    // is visible as flicker; with it on, a tick costs a few dozen bytes on one
+    // line instead of a full screen. Pairs with the reserved row in
+    // `terminal.ts` — Ink only takes this path for a frame shorter than the
+    // window.
+    incrementalRendering: true,
   });
 
   /**

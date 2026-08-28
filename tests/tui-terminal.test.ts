@@ -15,6 +15,7 @@ import {
   DEFAULT_SIZE,
   enterFullScreen,
   gateStdout,
+  RESERVED_ROWS,
   terminalSize,
   viewportRows,
 } from "../src/tui/terminal.ts";
@@ -54,8 +55,15 @@ describe("terminalSize", () => {
 });
 
 describe("viewportRows", () => {
-  test("subtracts the chrome and never returns a non-positive height", () => {
-    expect(viewportRows({ rows: 40, columns: 80 }, 10)).toBe(30);
+  test("subtracts the chrome AND the reserved row", () => {
+    // The reserved row is what keeps Ink off its clear-the-terminal repaint
+    // path (see tui-repaint.test.tsx). It has to come off here too: if a
+    // scrolling region budgeted for the full window while the root painted one
+    // row less, the content would be a row too tall and Yoga would compress it
+    // rather than clip — the sheared border we already fixed once.
+    expect(viewportRows({ rows: 40, columns: 80 }, 10)).toBe(
+      40 - RESERVED_ROWS - 10,
+    );
     // A 6-row terminal is absurd but must still render something rather than
     // handing Yoga a negative height.
     expect(viewportRows({ rows: 6, columns: 80 }, 10)).toBe(1);
