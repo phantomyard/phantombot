@@ -11,7 +11,7 @@ import * as p from "@clack/prompts";
 
 import { existsSync } from "node:fs";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import { type Config, loadConfig, personaDir, resolvePersona } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
@@ -118,7 +118,7 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
   // Load the TARGET persona's layered config, so "Existing config" shows what
   // that persona actually runs with rather than the default persona's voice.
   const config = input.config ?? (await loadConfig(input.persona));
-  const persona = input.persona ?? config.defaultPersona;
+  const persona = resolvePersona(input.persona, config);
   // An explicit `--persona` must EXIST before anything is written. Without
   // this check a typo is silently "successful": `loadConfig("robbei")` reads a
   // missing persona file as an empty layer, and the writes below CREATE

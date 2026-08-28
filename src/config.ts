@@ -1458,7 +1458,7 @@ export async function loadConfigForPersona(
   base?: Config,
 ): Promise<{ config: Config; persona: string; host: Config }> {
   const host = base ?? (await loadConfig());
-  const target = persona ?? host.defaultPersona;
+  const target = resolvePersona(persona, host);
   // `host` already IS the target's layer when it was loaded for it — or when
   // the caller injected a config that names no layer, in which case there is
   // nothing else to load.
@@ -2305,6 +2305,23 @@ export function parseAutostartPersonas(
 /** Resolve the on-disk directory for a named persona. */
 export function personaDir(config: Config, name: string): string {
   return join(config.personasDir, name);
+}
+
+/**
+ * Resolve which persona a persona-aware command targets.
+ *
+ * Precedence: an explicit --persona flag, then the harness-injected
+ * PHANTOMBOT_PERSONA env var, then the configured default persona. Every
+ * CLI command that touches persona-scoped state (memory, tasks, vault,
+ * ask, notify, ...) must go through this — falling back straight to
+ * `defaultPersona` makes a non-default persona's harness silently operate
+ * on ANOTHER persona's data (phantombot#473).
+ */
+export function resolvePersona(
+  explicit: string | undefined,
+  config: Config,
+): string {
+  return explicit || process.env.PHANTOMBOT_PERSONA || config.defaultPersona;
 }
 
 /**

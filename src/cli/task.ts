@@ -4,9 +4,10 @@
  * `phantombot tasks` Clack TUI exists for human use but isn't expected
  * to be the main path.
  *
- * Tasks are persona-scoped. `add`, `list` and `selftest` target the default
- * persona unless `--persona <name>` names another one (phantombot#439) — with
- * several personas autostarted in one process, "the current persona" is no
+ * Tasks are persona-scoped. `add`, `list` and `selftest` target the current
+ * persona — an explicit `--persona <name>` wins, then the harness-injected
+ * PHANTOMBOT_PERSONA, then the host default (phantombot#439, phantombot#469).
+ * With several personas autostarted in one process, "the current persona" is no
  * longer a single answer, and a task filed against the wrong persona simply
  * never fires because tick runs each persona's own queue.
  *
@@ -35,7 +36,12 @@
 import { defineCommand } from "citty";
 
 import { existsSync } from "node:fs";
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  personaDir,
+  resolvePersona,
+} from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
 import {
@@ -79,7 +85,7 @@ export interface RunTaskAddInput {
   command?: string;
   /** --secret NAME — env var names to expose to a command task. */
   commandSecrets?: string[];
-  /** --persona NAME — file the task against this persona. Default: the host default. */
+  /** --persona NAME — file the task against this persona. Default: PHANTOMBOT_PERSONA / host default. */
   persona?: string;
   config?: Config;
   store?: TaskStore;
@@ -100,7 +106,7 @@ function resolveTaskPersona(
   requested: string | undefined,
   err: WriteSink,
 ): string | undefined {
-  if (!requested) return config.defaultPersona;
+  if (!requested) return resolvePersona(requested, config);
   const dir = personaDir(config, requested);
   if (!existsSync(dir)) {
     err.write(`no persona '${requested}' at ${dir}\n`);
@@ -340,7 +346,7 @@ async function writeCommitmentToDaily(config: Config, t: Task): Promise<string |
 
 export interface RunTaskListInput {
   includeInactive?: boolean;
-  /** --persona NAME — list this persona's tasks. Default: the host default. */
+  /** --persona NAME — list this persona's tasks. Default: PHANTOMBOT_PERSONA / host default. */
   persona?: string;
   config?: Config;
   store?: TaskStore;

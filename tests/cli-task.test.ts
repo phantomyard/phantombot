@@ -29,6 +29,7 @@ let store: TaskStore;
 let config: Config;
 
 let savedXdgDataHome: string | undefined;
+let savedPersonaEnv: string | undefined;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-task-cli-"));
@@ -37,6 +38,10 @@ beforeEach(async () => {
   // into the developer's real memory index.
   savedXdgDataHome = process.env.XDG_DATA_HOME;
   process.env.XDG_DATA_HOME = join(workdir, "xdg-data");
+  // Ambient PHANTOMBOT_PERSONA would redirect every no-flag call in this file
+  // at some other persona's queue (phantombot#473) — pin the env off.
+  savedPersonaEnv = process.env.PHANTOMBOT_PERSONA;
+  delete process.env.PHANTOMBOT_PERSONA;
   store = await openTaskStore(join(workdir, "tasks.sqlite"));
   config = {
     defaultPersona: "phantom",
@@ -59,6 +64,8 @@ afterEach(async () => {
   store.close();
   if (savedXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
   else process.env.XDG_DATA_HOME = savedXdgDataHome;
+  if (savedPersonaEnv === undefined) delete process.env.PHANTOMBOT_PERSONA;
+  else process.env.PHANTOMBOT_PERSONA = savedPersonaEnv;
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -430,5 +437,66 @@ describe("task --persona", () => {
       err: new CaptureStream(),
     });
     expect(store.list("phantom", {})).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PHANTOMBOT_PERSONA env fallback (phantombot#473)
+// ---------------------------------------------------------------------------
+
+describe("task PHANTOMBOT_PERSONA fallback", () => {
+  beforeEach(async () => {
+    await mkdir(join(workdir, "personas", "leo"), { recursive: true });
+    process.env.PHANTOMBOT_PERSONA = "leo";
+  });
+
+  afterEach(() => {
+    delete process.env.PHANTOMBOT_PERSONA;
+  });
+
+  test("add files against the env persona when --persona is omitted", async () => {
+    const code = await runTaskAdd({
+      config,
+      store,
+      relIn: "10m",
+      prompt: "check the oven",
+      description: "oven",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(code).toBe(0);
+    expect(store.list("leo", {})).toHaveLength(1);
+    expect(store.list("phantom", {})).toHaveLength(0);
+  });
+
+  test("list targets the env persona", async () => {
+    await runTaskAdd({
+      config,
+      store,
+      relIn: "10m",
+      prompt: "check the oven",
+      description: "oven",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    const leo = new CaptureStream();
+    await runTaskList({ config, store, out: leo });
+    expect(leo.text).toContain("oven");
+  });
+
+  test("explicit --persona still wins over the env var", async () => {
+    await mkdir(join(workdir, "personas", "lena"), { recursive: true });
+    await runTaskAdd({
+      config,
+      store,
+      persona: "lena",
+      relIn: "10m",
+      prompt: "x",
+      description: "x",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(store.list("lena", {})).toHaveLength(1);
+    expect(store.list("leo", {})).toHaveLength(0);
   });
 });

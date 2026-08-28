@@ -45,6 +45,7 @@ import {
   loadConfig,
   memoryIndexPath,
   personaDir,
+  resolvePersona,
 } from "../config.ts";
 import {
   defaultEmbedderWithFetch,
@@ -97,7 +98,7 @@ function resolvePersonaDir(config: Config, persona?: string): {
   persona: string;
   dir: string;
 } {
-  const name = persona ?? config.defaultPersona;
+  const name = resolvePersona(persona, config);
   return { persona: name, dir: personaDir(config, name) };
 }
 

@@ -33,6 +33,7 @@ import {
   memoryIndexPath,
   personaDir,
   loadConfigForPersona,
+  resolvePersona,
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
@@ -346,7 +347,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
   let { config, persona } = input.config
     ? {
         config: input.config,
-        persona: input.persona ?? input.config.defaultPersona,
+        persona: resolvePersona(input.persona, input.config),
       }
     : await loadConfigForPersona(input.persona);
   const dir = personaDir(config, persona);

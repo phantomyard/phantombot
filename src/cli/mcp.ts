@@ -17,7 +17,11 @@
 import { defineCommand } from "citty";
 import { readFile } from "node:fs/promises";
 
-import { loadConfig, personaDir } from "../config.ts";
+import {
+  loadConfig,
+  personaDir,
+  resolvePersona,
+} from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { openPersonaVault, type Vault } from "../lib/vault.ts";
 import { staticClientVaultKey, writeStaticClient } from "../mcp/authProvider.ts";
@@ -40,7 +44,7 @@ import {
 /** Resolve the persona dir the same way the rest of the CLI does. */
 async function resolvePersonaDir(explicitPersona?: string): Promise<string> {
   const cfg = await loadConfig();
-  const persona = explicitPersona || process.env.PHANTOMBOT_PERSONA || cfg.defaultPersona;
+  const persona = resolvePersona(explicitPersona, cfg);
   return personaDir(cfg, persona);
 }
 

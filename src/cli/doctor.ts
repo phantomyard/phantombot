@@ -20,7 +20,7 @@ import { defineCommand } from "citty";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
-import { type Config, loadConfig, personaDir } from "../config.ts";
+import { type Config, loadConfig, personaDir, resolvePersona } from "../config.ts";
 import {
   checkConfiguredHarnesses,
   expandSystemdPath,
@@ -468,7 +468,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const repair = input.repair ?? true;
 
   const config = input.config ?? (await loadConfig());
-  const persona = input.persona ?? config.defaultPersona;
+  const persona = resolvePersona(input.persona, config);
   const personaConfigs = new Map(input.personaConfigs ?? []);
   if (!input.config) {
     const names = new Set(config.autostartPersonas ?? []);

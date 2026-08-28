@@ -20,6 +20,7 @@ import {
   isConfigOwnedEnvMirror,
   loadConfig,
   personaDir,
+  resolvePersona,
   type Config,
 } from "../config.ts";
 import { openPersonaVault, type Vault } from "../lib/vault.ts";
@@ -28,17 +29,16 @@ import type { WriteSink } from "../lib/io.ts";
 const ENV_VAR_NAME = /^[A-Z_][A-Z0-9_]*$/i;
 
 /**
- * Resolve which persona's vault to operate on. Same precedence the rest of the
- * CLI uses: an explicit --persona wins, then the harness-injected
- * PHANTOMBOT_PERSONA, then the resolved default persona.
+ * Resolve which persona's vault to operate on: an explicit --persona wins,
+ * then the harness-injected PHANTOMBOT_PERSONA, then the resolved default
+ * persona (shared resolvePersona precedence).
  */
 export async function resolveVaultPersonaDir(
   explicitPersona?: string,
   config?: Config,
 ): Promise<string> {
   const cfg = config ?? (await loadConfig());
-  const persona =
-    explicitPersona || process.env.PHANTOMBOT_PERSONA || cfg.defaultPersona;
+  const persona = resolvePersona(explicitPersona, cfg);
   return personaDir(cfg, persona);
 }
 

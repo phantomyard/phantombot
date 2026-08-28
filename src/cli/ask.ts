@@ -34,6 +34,7 @@ import {
   type Config,
   personaDir,
   loadConfigForPersona,
+  resolvePersona,
 } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
@@ -52,7 +53,7 @@ import { makeScreener, type ScreenVerdict } from "../orchestrator/screen.ts";
 export interface RunAskInput {
   /** The user prompt. Required. */
   prompt: string;
-  /** Override the persona (default: config.defaultPersona). */
+  /** Override the persona. Default: PHANTOMBOT_PERSONA env, then config.defaultPersona. */
   persona?: string;
   /** Conversation key for history scoping. Default "cli:ask". */
   conversation?: string;
@@ -105,7 +106,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
   let { config, persona } = input.config
     ? {
         config: input.config,
-        persona: input.persona ?? input.config.defaultPersona,
+        persona: resolvePersona(input.persona, input.config),
       }
     : await loadConfigForPersona(input.persona);
   const agentDir = personaDir(config, persona);
@@ -277,7 +278,7 @@ export default defineCommand({
     persona: {
       type: "string",
       description:
-        "Persona name to use (default: the configured default persona).",
+        "Persona name to use. Default: PHANTOMBOT_PERSONA env, then the configured default persona.",
     },
     conversation: {
       type: "string",

@@ -42,6 +42,7 @@ import {
   type Config,
   type TelegramAccount,
   loadConfigForPersona,
+  resolvePersona,
 } from "../config.ts";
 import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
 import { type AudioSupport, synthesize, ttsSupport } from "../lib/audio.ts";
@@ -136,7 +137,7 @@ export async function runNotify(input: RunNotifyInput = {}): Promise<number> {
   const { config, persona, host } = input.config
     ? {
         config: input.config,
-        persona: input.persona ?? input.config.defaultPersona,
+        persona: resolvePersona(input.persona, input.config),
         host: input.config,
       }
     : await loadConfigForPersona(input.persona);
