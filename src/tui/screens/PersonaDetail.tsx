@@ -180,7 +180,7 @@ export function PersonaDetailScreen(props: {
             icon="◐"
             label="Identity"
             description={p.identity.description ?? p.name}
-            activateHint="↵ edit in $EDITOR"
+            activateHint="↵ edit"
             selected={row === "identity"}
             onPress={() => press("identity")}
           />

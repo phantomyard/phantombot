@@ -375,6 +375,23 @@ export async function unsetSecret(input: {
   }
 }
 
+export const FRIENDLY_EDITORS = ["nano", "micro", "pico", "vi"] as const;
+
+/**
+ * First entry of {@link FRIENDLY_EDITORS} present on PATH, or `vi`.
+ *
+ * `onPath` is injectable so tests do not depend on what this machine happens
+ * to have installed.
+ */
+export function resolveFallbackEditor(
+  onPath: (cmd: string) => boolean = (cmd) => Bun.which(cmd) !== null,
+): string {
+  for (const candidate of FRIENDLY_EDITORS) {
+    if (onPath(candidate)) return candidate;
+  }
+  return "vi";
+}
+
 /**
  * Open a persona's prompt file in the user's editor.
  *
@@ -386,8 +403,13 @@ export async function unsetSecret(input: {
  * stops forwarding keystrokes to Ink first.
  *
  * `$VISUAL` wins over `$EDITOR` because that is what the variables mean: VISUAL
- * is the full-screen editor, EDITOR the line editor of last resort. Falls back
- * to `vi`, which POSIX requires to exist.
+ * is the full-screen editor, EDITOR the line editor of last resort. When
+ * NEITHER is set we do NOT go straight to `vi`: an unset $EDITOR means the user
+ * never chose one, and dropping a first-time user into modal vi to edit prose
+ * is a trap they cannot even quit. So we probe for a friendly modeless editor
+ * first (nano, micro, pico) and keep `vi` as the last resort, since POSIX
+ * requires it to exist. An explicitly configured $VISUAL/$EDITOR always wins —
+ * this only decides what to do in the absence of a choice.
  */
 export async function openInEditor(
   path: string,
@@ -396,7 +418,8 @@ export async function openInEditor(
     args: string[],
   ) => Promise<{ exitCode: number }>,
 ): Promise<{ ok: boolean; error?: string }> {
-  const editor = process.env.VISUAL || process.env.EDITOR || "vi";
+  const editor =
+    process.env.VISUAL || process.env.EDITOR || resolveFallbackEditor();
   // Editors are habitually configured with flags ("code --wait", "emacs -nw"),
   // so the variable is a COMMAND LINE, not a program name.
   const parts = editor.split(/\s+/).filter(Boolean);
