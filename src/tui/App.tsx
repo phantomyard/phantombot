@@ -486,10 +486,13 @@ export function App(props: AppProps): React.ReactElement {
         });
         if (!choice) return;
         const r = await withPromptTerminal(() => openInEditor(choice));
+        const file = choice.split("/").pop();
         setNotice(
-          r.ok
-            ? `${choice.split("/").pop()} saved — restart to load it`
-            : `editor failed: ${r.error}`,
+          !r.ok
+            ? `editor failed: ${r.error}`
+            : r.changed
+              ? `${file} saved — restart to load it`
+              : `${file} unchanged`,
         );
       } finally {
         setPrompting(false);

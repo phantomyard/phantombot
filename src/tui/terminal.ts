@@ -237,3 +237,24 @@ export function gateStdout(
     suspended: () => suspended,
   };
 }
+
+/**
+ * Force Ink to repaint the WHOLE frame after something else owned the screen.
+ *
+ * `instance.clear()` is not enough and is in fact the trap: it erases the
+ * lines and then SYNCS log-update's belief back to the frame it just erased,
+ * so Ink still thinks that frame is on the screen. Re-entering the alternate
+ * screen empties it underneath, the next render diffs identical output and
+ * writes nothing — a black window with only the one line that happened to
+ * change (the notice) on it, which is exactly what returning from `$EDITOR`
+ * looked like.
+ *
+ * Ink already has a supported path for "the screen is not what I think it is":
+ * the resize handler, which drops `lastOutput` and repaints from scratch. So
+ * take that path rather than reaching into its internals. The listener is
+ * registered on the REAL stdout (the gate delegates `on`), so the event has to
+ * be emitted there too.
+ */
+export function forceRepaint(stdout: NodeJS.WriteStream = process.stdout): void {
+  stdout.emit("resize");
+}

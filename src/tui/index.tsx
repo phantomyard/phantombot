@@ -16,7 +16,7 @@ import { render } from "ink";
 
 import { App } from "./App.tsx";
 import { installMouse } from "./mouse.ts";
-import { enterFullScreen, gateStdout } from "./terminal.ts";
+import { enterFullScreen, gateStdout, forceRepaint } from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
@@ -99,7 +99,7 @@ export async function startTui(): Promise<number> {
    * Ink cannot be paused, so the suspension is done around it: writes are
    * dropped, keystrokes stop being forwarded, mouse reporting goes off, and the
    * alternate screen is left so the prompt draws where the user's shell is. On
-   * the way back the frame is repainted in full — `clear()` first, because
+   * the way back the frame is repainted in full via `forceRepaint`, because
    * Ink diffs against a frame that is no longer on the screen and would
    * otherwise redraw only the part it thinks changed.
    */
@@ -124,8 +124,10 @@ export async function startTui(): Promise<number> {
       installed.setForwarding(true);
       gate.resume();
       if (process.stdin.isTTY) process.stdin.setRawMode?.(true);
-      instance.clear();
       instance.rerender(element);
+      // NOT `instance.clear()`: it re-syncs Ink to the frame it just erased.
+      // See `forceRepaint`.
+      forceRepaint();
     }
   });
 

@@ -393,6 +393,25 @@ export function resolveFallbackEditor(
 }
 
 /**
+ * A cheap identity for a file: size and mtime, or `null` when it is absent.
+ *
+ * Used to tell "saved" from "looked at and quit". Claiming a file was saved —
+ * and telling the user to restart for it — when they changed nothing is worse
+ * than saying nothing: it invites a pointless restart and teaches them the
+ * message means nothing. Absent counts as a stamp of its own, so creating a
+ * file by opening it reads as a change.
+ */
+async function fileStamp(path: string): Promise<string | null> {
+  try {
+    const f = Bun.file(path);
+    if (!(await f.exists())) return null;
+    return `${f.size}:${f.lastModified}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open a persona's prompt file in the user's editor.
  *
  * SOUL.md, IDENTITY.md and USER.md are the only settings whose value is prose,
@@ -417,7 +436,7 @@ export async function openInEditor(
     command: string,
     args: string[],
   ) => Promise<{ exitCode: number }>,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; changed?: boolean }> {
   const editor =
     process.env.VISUAL || process.env.EDITOR || resolveFallbackEditor();
   // Editors are habitually configured with flags ("code --wait", "emacs -nw"),
@@ -436,10 +455,13 @@ export async function openInEditor(
         });
         return { exitCode: await proc.exited };
       });
+    const before = await fileStamp(path);
     const { exitCode } = await run(command, args);
-    return exitCode === 0
-      ? { ok: true }
-      : { ok: false, error: `${command} exited ${exitCode}` };
+    if (exitCode !== 0) {
+      return { ok: false, error: `${command} exited ${exitCode}` };
+    }
+    const after = await fileStamp(path);
+    return { ok: true, changed: after !== before };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
