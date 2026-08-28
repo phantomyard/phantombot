@@ -136,16 +136,24 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
   const memory = input.memory ?? (await openMemoryStore(config.memoryDbPath));
   const ownsMemory = !input.memory;
 
-  const prior = await memory.recentTurns(
+  const prior = await memory.recentTurnsForConversationDisplay(
     persona,
     conversation,
     input.historyLimit ?? 40,
   );
-  const history: ChatMessage[] = prior.map((turn) => ({
-    role: turn.role === "user" ? "user" : "assistant",
-    text: turn.text,
-    at: 0,
-  }));
+  // Replayed turns keep the time they actually happened. `at: 0` here is what
+  // made the transcript "lose" every timestamp the moment the app restarted:
+  // the rows were fine, they just had no clock on them. Date.parse of a bad or
+  // missing stamp is NaN, so fall back to 0 (renders as no time) rather than
+  // 1970.
+  const history: ChatMessage[] = prior.map((turn) => {
+    const at = turn.createdAt?.getTime?.() ?? NaN;
+    return {
+      role: turn.role === "user" ? ("user" as const) : ("assistant" as const),
+      text: turn.text,
+      at: Number.isFinite(at) ? at : 0,
+    };
+  });
 
   async function* send(
     text: string,
