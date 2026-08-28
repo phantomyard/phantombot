@@ -6,18 +6,23 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  ensureExecAlias,
+  execAliasPath,
   generateHeartbeatPlist,
   generatePhantombotPlist,
   generateTickPlist,
   installPhantombotPlists,
   type LaunchctlResult,
   type LaunchctlRunner,
+  removeExecAliases,
   uninstallPhantombotPlists,
+  HEARTBEAT_EXEC_ALIAS,
+  TICK_EXEC_ALIAS,
   PHANTOMBOT_PLIST_LABEL,
   HEARTBEAT_PLIST_LABEL,
   NIGHTLY_PLIST_LABEL,
@@ -298,5 +303,151 @@ describe("uninstallPhantombotPlists", () => {
     expect(out.text).toContain("(no plist at");
     // bootout failures are logged but don't fail the uninstall.
     expect(out.text).toContain("returned 1 (continuing)");
+  });
+});
+
+describe("exec aliases", () => {
+  test("execAliasPath resolves next to the binary", () => {
+    expect(execAliasPath("/opt/bin/phantombot", TICK_EXEC_ALIAS)).toBe(
+      "/opt/bin/phantombot-tick",
+    );
+  });
+
+  test("ensureExecAlias creates a symlink to the binary and is idempotent", async () => {
+    const bin = join(workdir, "phantombot");
+    await writeFile(bin, "#!/bin/sh\n", "utf8");
+
+    const first = await ensureExecAlias(bin, TICK_EXEC_ALIAS);
+    expect(first).toBe(join(workdir, TICK_EXEC_ALIAS));
+    expect(await readlink(first)).toBe(bin);
+
+    // Re-running install must not throw on the existing link.
+    const second = await ensureExecAlias(bin, TICK_EXEC_ALIAS);
+    expect(second).toBe(first);
+    expect(await readlink(second)).toBe(bin);
+  });
+
+  test("ensureExecAlias repoints a stale alias at the new binary path", async () => {
+    const oldBin = join(workdir, "phantombot.old");
+    const newBin = join(workdir, "phantombot");
+    await writeFile(oldBin, "", "utf8");
+    await writeFile(newBin, "", "utf8");
+    await ensureExecAlias(oldBin, TICK_EXEC_ALIAS);
+    const path = await ensureExecAlias(newBin, TICK_EXEC_ALIAS);
+    expect(await readlink(path)).toBe(newBin);
+  });
+
+  test("ensureExecAlias falls back to the binary when the alias name is a real file", async () => {
+    const bin = join(workdir, "phantombot");
+    await writeFile(bin, "", "utf8");
+    await writeFile(join(workdir, TICK_EXEC_ALIAS), "not ours", "utf8");
+    expect(await ensureExecAlias(bin, TICK_EXEC_ALIAS)).toBe(bin);
+    // The intruding file survives untouched.
+    expect(await readFile(join(workdir, TICK_EXEC_ALIAS), "utf8")).toBe(
+      "not ours",
+    );
+  });
+
+  test("ensureExecAlias falls back when the directory does not exist", async () => {
+    const bin = "/definitely/not/here/phantombot";
+    expect(await ensureExecAlias(bin, TICK_EXEC_ALIAS)).toBe(bin);
+  });
+
+  test("removeExecAliases deletes only symlinks", async () => {
+    const bin = join(workdir, "phantombot");
+    await writeFile(bin, "", "utf8");
+    await ensureExecAlias(bin, TICK_EXEC_ALIAS);
+    await writeFile(join(workdir, HEARTBEAT_EXEC_ALIAS), "real file", "utf8");
+
+    const removed = await removeExecAliases(bin);
+    expect(removed).toEqual([join(workdir, TICK_EXEC_ALIAS)]);
+    expect(existsSync(join(workdir, TICK_EXEC_ALIAS))).toBe(false);
+    expect(existsSync(join(workdir, HEARTBEAT_EXEC_ALIAS))).toBe(true);
+  });
+
+  test("install points the periodic plists at the aliases, not the binary", async () => {
+    const bin = join(workdir, "phantombot");
+    await writeFile(bin, "", "utf8");
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lc = new FakeLaunchctl();
+    const result = await installPhantombotPlists({
+      binPath: bin,
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      domain: "gui/501",
+      launchctl: lc,
+      out,
+      err,
+    });
+    expect(result.installed).toBe(true);
+
+    const hb = await readFile(hbPath, "utf8");
+    expect(hb).toContain(`<string>${join(workdir, HEARTBEAT_EXEC_ALIAS)}</string>`);
+    expect(hb).toContain("<string>heartbeat</string>");
+
+    const tk = await readFile(tkPath, "utf8");
+    expect(tk).toContain(`<string>${join(workdir, TICK_EXEC_ALIAS)}</string>`);
+    expect(tk).toContain("<string>tick</string>");
+
+    // The daemon keeps the real binary name — it SHOULD read "phantombot".
+    const main = await readFile(mainPath, "utf8");
+    expect(main).toContain(`<string>${bin}</string>`);
+  });
+
+  test("install still succeeds when the alias cannot be created", async () => {
+    // Binary in a directory that doesn't exist: no symlink is possible, and
+    // the heartbeat plist falls back to the binary path itself.
+    const bin = "/definitely/not/here/phantombot";
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const result = await installPhantombotPlists({
+      binPath: bin,
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      domain: "gui/501",
+      launchctl: new FakeLaunchctl(),
+      out,
+      err,
+    });
+    expect(result.installed).toBe(true);
+    expect(await readFile(hbPath, "utf8")).toContain(`<string>${bin}</string>`);
+  });
+
+  test("uninstall removes the aliases it installed", async () => {
+    const bin = join(workdir, "phantombot");
+    await writeFile(bin, "", "utf8");
+    await installPhantombotPlists({
+      binPath: bin,
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      domain: "gui/501",
+      launchctl: new FakeLaunchctl(),
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+    });
+    expect(existsSync(join(workdir, TICK_EXEC_ALIAS))).toBe(true);
+
+    const out = new CaptureStream();
+    await uninstallPhantombotPlists({
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      domain: "gui/501",
+      binPath: bin,
+      launchctl: new FakeLaunchctl(),
+      out,
+      err: new CaptureStream(),
+    });
+    expect(existsSync(join(workdir, TICK_EXEC_ALIAS))).toBe(false);
+    expect(existsSync(join(workdir, HEARTBEAT_EXEC_ALIAS))).toBe(false);
+    expect(out.text).toContain(TICK_EXEC_ALIAS);
   });
 });

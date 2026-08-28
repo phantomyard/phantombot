@@ -13,6 +13,10 @@
  *   ~/Library/LaunchAgents/dev.phantombot.heartbeat.plist
  *   ~/Library/LaunchAgents/dev.phantombot.tick.plist
  *
+ * The two periodic agents exec the binary through a name-carrying symlink
+ * (phantombot-heartbeat / phantombot-tick) so macOS doesn't report three
+ * indistinguishable "phantombot" processes — see EXEC_ALIASES below.
+ *
  * Logs go to ~/Library/Logs/phantombot/<unit>.{out,err}.log (no journald
  * on Mac, and `log show` is a poor fit for free-form bot output). launchd
  * appends to them forever with no size cap, so the heartbeat rotates them
@@ -25,8 +29,8 @@
  * process.env on every platform without per-plist env entries here.
  */
 
-import { existsSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync } from "node:fs";
+import { mkdir, readFile, readlink, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isPhantombotBinary } from "./binaryIdentity.ts";
@@ -42,6 +46,100 @@ export const HEARTBEAT_PLIST_LABEL = "dev.phantombot.heartbeat";
  */
 export const NIGHTLY_PLIST_LABEL = "dev.phantombot.nightly";
 export const TICK_PLIST_LABEL = "dev.phantombot.tick";
+
+/**
+ * Basenames of the per-unit EXEC ALIASES — symlinks to the phantombot binary
+ * that exist purely so each agent shows up under its own name.
+ *
+ * macOS reports a process by `p_comm`, which the kernel takes from the last
+ * path segment of the file that was exec'd. It is NOT argv[0] and NOT
+ * `process.title`, so nothing the process does at runtime can change it: with
+ * every agent exec'ing the same `phantombot` binary, Activity Monitor / `ps`
+ * show three identical "phantombot" rows and the only way to tell the daemon
+ * apart from the timers is to read the full command line. Exec'ing the timers
+ * through a differently-named symlink makes the kernel record THAT name, so
+ * they self-identify.
+ *
+ * Only the periodic agents get an alias: the long-running daemon is the one
+ * process that *should* be called "phantombot".
+ *
+ * Safe for the rest of the codebase, because a symlinked exec does not change
+ * `process.execPath` — Bun resolves it to the real binary, so
+ * `isPhantombotBinary()` and every self-heal gate hanging off it behave
+ * exactly as before.
+ */
+export const HEARTBEAT_EXEC_ALIAS = "phantombot-heartbeat";
+export const TICK_EXEC_ALIAS = "phantombot-tick";
+
+/** Every alias name install creates and uninstall removes. */
+export const EXEC_ALIASES = [
+  HEARTBEAT_EXEC_ALIAS,
+  TICK_EXEC_ALIAS,
+] as const;
+
+/** Absolute path of `alias`, resolved next to the phantombot binary. */
+export function execAliasPath(binPath: string, alias: string): string {
+  return join(dirname(binPath), alias);
+}
+
+/**
+ * Ensure `<dir of binPath>/<alias>` is a symlink to `binPath`, and return the
+ * path the plist should exec.
+ *
+ * Degrades rather than fails: if the directory is missing or read-only, or if
+ * something that is NOT our symlink already occupies the name, the original
+ * `binPath` comes back and the agent installs exactly as it did before the
+ * alias existed. An unreadable name is never overwritten — a real file there
+ * belongs to someone else.
+ */
+export async function ensureExecAlias(
+  binPath: string,
+  alias: string,
+  aliasDir?: string,
+): Promise<string> {
+  const path = aliasDir ? join(aliasDir, alias) : execAliasPath(binPath, alias);
+  try {
+    if (!existsSync(dirname(path))) return binPath;
+    let existing: string | undefined;
+    try {
+      const st = lstatSync(path);
+      if (!st.isSymbolicLink()) return binPath; // not ours — leave it alone
+      existing = await readlink(path);
+    } catch {
+      existing = undefined;
+    }
+    if (existing === binPath) return path;
+    if (existing !== undefined) await unlink(path);
+    await symlink(binPath, path);
+    return path;
+  } catch {
+    return binPath;
+  }
+}
+
+/**
+ * Remove the exec-alias symlinks. Best-effort and symlink-only: anything that
+ * is not a symlink at that path is left untouched. Returns the paths removed.
+ */
+export async function removeExecAliases(
+  binPath: string,
+  aliasDir?: string,
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const alias of EXEC_ALIASES) {
+    const path = aliasDir
+      ? join(aliasDir, alias)
+      : execAliasPath(binPath, alias);
+    try {
+      if (!lstatSync(path).isSymbolicLink()) continue;
+      await unlink(path);
+      removed.push(path);
+    } catch {
+      // absent or unreadable — nothing to clean up
+    }
+  }
+  return removed;
+}
 
 function launchAgentsDir(): string {
   return join(homedir(), "Library", "LaunchAgents");
@@ -290,6 +388,11 @@ export interface InstallLaunchdOptions {
   tickPlistPath?: string;
   /** Override gui domain (e.g. gui/501). Defaults to gui/<current uid>. */
   domain?: string;
+  /**
+   * Directory the exec-alias symlinks are written into. Defaults to the
+   * directory holding `binPath`; tests point it at a tmpdir.
+   */
+  execAliasDir?: string;
   launchctl: LaunchctlRunner;
   out: WriteSink;
   err: WriteSink;
@@ -313,6 +416,20 @@ export async function installPhantombotPlists(
   const ngPath = opts.nightlyPlistPath ?? nightlyPlistPath();
   const tkPath = opts.tickPlistPath ?? tickPlistPath();
 
+  // Exec aliases so the periodic agents don't all show up as "phantombot"
+  // in Activity Monitor. Falls back to the binary itself if the symlink
+  // can't be created, so install never fails over cosmetics.
+  const hbBin = await ensureExecAlias(
+    opts.binPath,
+    HEARTBEAT_EXEC_ALIAS,
+    opts.execAliasDir,
+  );
+  const tkBin = await ensureExecAlias(
+    opts.binPath,
+    TICK_EXEC_ALIAS,
+    opts.execAliasDir,
+  );
+
   const plists: Array<{ path: string; label: string; body: string }> = [
     {
       path: mainPath,
@@ -322,12 +439,12 @@ export async function installPhantombotPlists(
     {
       path: hbPath,
       label: HEARTBEAT_PLIST_LABEL,
-      body: generateHeartbeatPlist(opts.binPath),
+      body: generateHeartbeatPlist(hbBin),
     },
     {
       path: tkPath,
       label: TICK_PLIST_LABEL,
-      body: generateTickPlist(opts.binPath),
+      body: generateTickPlist(tkBin),
     },
   ];
 
@@ -380,6 +497,14 @@ export interface UninstallLaunchdOptions {
   nightlyPlistPath?: string;
   tickPlistPath?: string;
   domain?: string;
+  /**
+   * Binary whose sibling exec aliases should be removed. Defaults to
+   * `process.execPath`; pass explicitly when uninstalling on behalf of a
+   * binary other than the running one (and in tests).
+   */
+  binPath?: string;
+  /** Directory holding the exec aliases. Defaults to the dir of `binPath`. */
+  execAliasDir?: string;
   launchctl: LaunchctlRunner;
   out: WriteSink;
   err: WriteSink;
@@ -424,6 +549,13 @@ export async function uninstallPhantombotPlists(
       await unlink(p);
       opts.out.write(`removed ${p}\n`);
     }
+  }
+
+  for (const path of await removeExecAliases(
+    opts.binPath ?? process.execPath,
+    opts.execAliasDir,
+  )) {
+    opts.out.write(`removed ${path}\n`);
   }
 
   return { removed: true };

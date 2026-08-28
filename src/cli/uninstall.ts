@@ -52,6 +52,10 @@ export interface RunUninstallInput {
   ensureSystemdEnv?: () => UserSystemdEnv;
   platform?: "linux" | "darwin" | "windows" | "unsupported";
   domain?: string;
+  /** Binary whose launchd exec aliases to remove (defaults to process.execPath). */
+  binPath?: string;
+  /** Directory holding the launchd exec aliases (tests). */
+  execAliasDir?: string;
   /** Persona whose Windows tasks to remove (defaults to current persona). */
   persona?: string;
   /** Override the current Windows user's SID (tests). Production resolves
@@ -127,6 +131,8 @@ async function runUninstallDarwin(
     nightlyPlistPath: input.nightlyPlistPath ?? launchdNightlyPath(),
     tickPlistPath: input.tickPlistPath ?? launchdTickPath(),
     domain,
+    binPath: input.binPath,
+    execAliasDir: input.execAliasDir,
     launchctl,
     out,
     err,
