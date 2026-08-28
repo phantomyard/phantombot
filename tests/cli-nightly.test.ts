@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { NIGHTLY_TOOLS, runNightly, runNightlyTurn } from "../src/cli/nightly.ts";
@@ -805,47 +805,31 @@ describe("runNightly — compaction stage (#410)", () => {
     expect(events.filter((e) => e === "index")).toHaveLength(2);
   });
 
-  test("a rewritten daily is re-ledgered so the next sweep does not re-bill it", async () => {
-    // Compaction rewrites the daily file, which changes the mtime/size/hash the
-    // ledger keys on. Without reconciliation the next sweep sees `changed`,
-    // re-queues the date and pays for both LLM stages again — every night.
+  test("an old over-budget daily file is never offered to the stage", async () => {
+    // #461: the journal is rows and the daily file is the derived artefact.
+    // Recall never reads a day older than yesterday, and `renderClosedDays`
+    // prunes the rows once the file verifies — so the file is the only copy
+    // of that day and there is nothing to gain by rewriting it. It must not
+    // reach the prompt, must not be ledgered as an outcome, and must come out
+    // of the sweep byte-for-byte unchanged.
     await daily("2026-05-01", "y".repeat(20 * 1024));
-    const first = {
-      calls: [] as string[],
-      runStage: async (a: { stage: string }) => {
-        first.calls.push(a.stage);
-        if (a.stage === "compact") {
-          await writeFile(
-            join(personaDir, "memory", "2026-05-01.md"),
-            "y".repeat(4 * 1024),
-            "utf8",
-          );
-        }
+    await writeFile(join(personaDir, "MEMORY.md"), over, "utf8");
+    const dailyPath = join(personaDir, "memory", "2026-05-01.md");
+    const before = await Bun.file(dailyPath).text();
+    let compactPrompt = "";
+    await runNightly({
+      config, now, out: new CaptureStream(),
+      runStage: async (a: { stage: string; prompt: string }) => {
+        if (a.stage === "compact") compactPrompt = a.prompt;
         return { finalReply: "done", durationMs: 1 };
       },
-    };
-    // `now` is well past the daily age gate for 2026-05-01.
-    await runNightly({
-      config, now, out: new CaptureStream(), compactMinAgeDays: 1,
-      runStage: first.runStage as never, refreshIndex: async () => {},
+      refreshIndex: async () => {},
     });
+    expect(compactPrompt).toContain("MEMORY.md");
+    expect(compactPrompt).not.toContain("2026-05-01.md");
     const state = await loadNightlyState(personaDir);
-    expect(state.compaction?.files.some((f) => f.kind === "daily")).toBe(true);
-    const rec = state.processed?.["2026-05-01"]!;
-    const st = await stat(join(personaDir, "memory", "2026-05-01.md"));
-    expect(rec.size).toBe(st.size);
-    expect(rec.status).toBe("ok");
-    expect(rec.stages_done).toEqual([...NIGHTLY_STAGES]);
-
-    // Next sweep: nothing pending, so no distill/kb turn is spent on it again.
-    const second = compactHarness("x");
-    const out = new CaptureStream();
-    await runNightly({
-      config, now, out, compactMinAgeDays: 1,
-      runStage: second.runStage as never, refreshIndex: async () => {},
-    });
-    expect(out.text).toContain("nothing pending");
-    expect(second.calls).not.toContain("distill");
+    expect(state.compaction?.files.map((f) => f.path)).toEqual(["MEMORY.md"]);
+    expect(await Bun.file(dailyPath).text()).toBe(before);
   });
 
   test("index is refreshed again after a rewrite, never before it", async () => {

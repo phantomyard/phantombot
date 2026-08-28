@@ -184,8 +184,9 @@ Three properties worth knowing when touching this code:
    repairs it, so the job has one owner. A third stage, `compact`, runs ONCE per
    sweep (its inputs are whole-file sizes, not one day's events) and is the only
    stage that removes anything: it archives every over-budget file verbatim
-   first, then reverts any rewrite that overshoots its shrink allowance. Drawer
-   dedupe is deliberately NOT part of it — that lifecycle moves to the database.
+   first, then reverts any rewrite that overshoots its shrink allowance. Its
+   only candidate is `MEMORY.md`: drawer dedupe belongs to the database, and
+   daily files stopped being candidates when the journal became rows (#461).
 
 4. **Which daily files a turn sees is decided in CODE, not in prose.**
    `src/lib/dailyRecall.ts` runs on the prompt path for every turn
@@ -193,8 +194,7 @@ Three properties worth knowing when touching this code:
    always, yesterday's **only** when the `.nightly-state.json` ledger has no
    `ok`-with-all-stages record for that date whose mtime+size still match the
    file (`isDailyDistilled` in `lib/nightly.ts` — one predicate, shared with
-   the sweep and the compactor, so they cannot disagree about what "done"
-   means). This used to be an instruction
+   the sweep, so the two cannot disagree about what "done" means). This used to be an instruction
    in a persona's `AGENTS.md`, which failed in both directions — an agent
    could forget it, and anything that can write the persona directory could
    rewrite it. There is deliberately no config switch (a persona that turns it
@@ -206,8 +206,8 @@ Three properties worth knowing when touching this code:
    files are byte-capped at `DAILY_RECALL_CEILING_BYTES` (32 KB each) and at
    `DAILY_RECALL_COMBINED_CEILING_BYTES` (48 KB together) — derived from
    Linux's 131,071-byte per-argv-string limit on the assembled system prompt,
-   not from taste, and deliberately NOT the persona's daily compaction budget,
-   which measures how large a closed day may stay on disk — keeping the tail
+   not from taste, and never tied to a compaction budget — the compactor does
+   not touch daily files at all since #461 — keeping the tail
    and warning when they trim. Journal text is run through `inertBlock`
    first: leading `#` escaped, control/bidi/zero-width stripped, so a journal
    line cannot forge a section of the system prompt (invariant 20).
