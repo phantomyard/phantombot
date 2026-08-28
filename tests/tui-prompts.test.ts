@@ -1,5 +1,6 @@
 /**
- * Settings prompts are clack, and the terminal is handed over around them.
+ * Value and choice prompts are clack, and the terminal is handed over around
+ * them. (Yes/no lives in the app now — see tests/tui-confirm.test.tsx.)
  *
  * Two things have to hold or the app breaks in ways a screenshot does not
  * show: a CANCELLED prompt must change nothing, and the renderer must be
@@ -11,7 +12,6 @@
 import { describe, expect, mock, test } from "bun:test";
 
 const CANCEL = Symbol.for("clack.cancel");
-let confirmAnswer: unknown = true;
 let passwordAnswer: unknown = "hunter2";
 
 mock.module("@clack/prompts", () => ({
@@ -20,35 +20,13 @@ mock.module("@clack/prompts", () => ({
   cancel: () => {},
   note: () => {},
   isCancel: (v: unknown) => v === CANCEL,
-  confirm: async () => confirmAnswer,
   password: async () => passwordAnswer,
   text: async () => passwordAnswer,
   select: async () => passwordAnswer,
 }));
 
-const { promptConfirm, promptValue, setPromptHost, withPromptTerminal } =
+const { promptValue, setPromptHost, withPromptTerminal } =
   await import("../src/tui/prompts.ts");
-
-const consequence = {
-  summary: "the service restarts",
-  detail: "detail",
-  longRunning: false,
-  restarts: true,
-};
-
-describe("promptConfirm", () => {
-  test("yes means yes", async () => {
-    confirmAnswer = true;
-    expect(await promptConfirm({ title: "t", consequence })).toBe(true);
-  });
-
-  test("no and cancel both mean nothing happens", async () => {
-    confirmAnswer = false;
-    expect(await promptConfirm({ title: "t", consequence })).toBe(false);
-    confirmAnswer = CANCEL;
-    expect(await promptConfirm({ title: "t", consequence })).toBe(false);
-  });
-});
 
 describe("promptValue", () => {
   test("a cancelled secret is undefined, never an empty string", async () => {
@@ -77,8 +55,8 @@ describe("the prompt host", () => {
       }
     });
     try {
-      confirmAnswer = true;
-      await promptConfirm({ title: "t", consequence });
+      passwordAnswer = "hunter2";
+      await promptValue({ message: "Set TOKEN", masked: true });
       expect(events).toEqual(["suspend", "resume"]);
       events.length = 0;
       await expect(
@@ -95,7 +73,9 @@ describe("the prompt host", () => {
   });
 
   test("without a host installed the prompt still runs — tests and non-TUI callers", async () => {
-    confirmAnswer = true;
-    expect(await promptConfirm({ title: "t", consequence })).toBe(true);
+    passwordAnswer = "hunter2";
+    expect(await promptValue({ message: "Set TOKEN", masked: true })).toBe(
+      "hunter2",
+    );
   });
 });

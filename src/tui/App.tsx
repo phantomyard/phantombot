@@ -36,11 +36,11 @@ import {
 } from "./actions.ts";
 import { Frame } from "./components/Frame.tsx";
 import {
-  promptConfirm,
   promptSelect,
   promptValue,
   withPromptTerminal,
 } from "./prompts.ts";
+import { ConfirmScreen, type ConfirmRequest } from "./screens/Confirm.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
@@ -150,6 +150,18 @@ export function App(props: AppProps): React.ReactElement {
    * on a screen the user cannot currently see.
    */
   const [prompting, setPrompting] = useState(false);
+  /**
+   * The pending confirmation, held with the resolver that answers it.
+   *
+   * A question drawn as a SCREEN cannot be awaited inline the way a clack
+   * panel was, so `askConfirm` parks the promise here and the screen resolves
+   * it. Holding the resolver in state (rather than a ref) is what makes the
+   * question render at all: the answer arrives on a keystroke, in a different
+   * turn of the event loop from the call that asked it.
+   */
+  const [confirm, setConfirm] = useState<
+    (ConfirmRequest & { resolve: (yes: boolean) => void }) | undefined
+  >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
@@ -189,17 +201,16 @@ export function App(props: AppProps): React.ReactElement {
       danger?: boolean;
       run: () => Promise<void>;
     }) => {
-      setPrompting(true);
-      try {
-        const yes = await promptConfirm({
+      const yes = await new Promise<boolean>((resolve) => {
+        setConfirm({
           title: input.title,
           consequence: input.consequence,
           danger: input.danger,
+          resolve,
         });
-        if (yes) await input.run();
-      } finally {
-        setPrompting(false);
-      }
+      });
+      setConfirm(undefined);
+      if (yes) await input.run();
     },
     [],
   );
@@ -289,6 +300,10 @@ export function App(props: AppProps): React.ReactElement {
     // While a clack prompt owns the terminal the app is not on screen. Acting
     // on a keystroke here would change something the user cannot see.
     if (prompting) return;
+    // The confirmation is a screen with its own keys. Without this the app's
+    // global esc would answer the question AND pop a level of history behind
+    // it, landing the user a screen further back than they asked for.
+    if (confirm) return;
     // The log pane, from anywhere: log lines are captured while the TUI runs
     // (they used to be painted over the frame), so there has to be one key
     // that shows them. Toggles, so ^l gets you back out of it too.
@@ -814,6 +829,19 @@ export function App(props: AppProps): React.ReactElement {
 
   // A running job takes over the screen; the screen underneath keeps its state,
   // so returning from it lands exactly where the user was.
+  if (confirm) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <ConfirmScreen
+            request={confirm}
+            onAnswer={(yes) => confirm.resolve(yes)}
+          />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
   if (reembed) {
     return <ReembedScreen space={reembed.space} state={reembed.state} />;
   }

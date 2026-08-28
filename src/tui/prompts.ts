@@ -3,7 +3,7 @@
  *
  * The split is deliberate: **Ink renders the app** (chat, dashboard, the
  * screens you look at), **clack renders the questions** (a value to type, a
- * choice to make, a confirmation to give). Clack is what every existing
+ * choice to make). Clack is what every existing
  * `phantombot` subcommand already asks with — `create-persona`, `voice`,
  * `embedding` — so a question looks and behaves identically whether it was
  * reached from the TUI or from a subcommand, and there is one implementation of
@@ -26,14 +26,14 @@
  * ## Cancel is a first-class answer
  *
  * `clack.isCancel` (^c or esc) resolves as `undefined` here, never as an empty
- * string and never as `false`. A cancelled confirmation must not read as "no,
- * and by the way I answered" — the caller has to be able to tell "the user went
- * back" from "the user said no".
+ * string. A cancelled value must not read as "the user typed nothing" — `""`
+ * would be written to the vault and erase a credential they only looked at.
+ *
+ * Yes/no questions are NOT here: they are `screens/Confirm.tsx`, an Ink screen
+ * inside the app with the same header, footer and `esc` as everything else.
  */
 
 import * as clack from "@clack/prompts";
-
-import type { Consequence } from "./actions.ts";
 
 export type PromptHost = <T>(fn: () => Promise<T>) => Promise<T>;
 
@@ -98,42 +98,5 @@ export async function promptSelect<T extends string>(input: {
     });
     if (clack.isCancel(answer)) return undefined;
     return answer as T;
-  });
-}
-
-/**
- * A confirmation that STATES ITS CONSEQUENCE first.
- *
- * The consequence panel is the rule this whole surface exists for: a settings
- * screen that silently writes config is a trap, because the user believes they
- * changed something and only half did. `danger` pre-selects "no" — the
- * default-persona change reassigns ownership of `/update` and `/restart`, and
- * control of a box must never move on a mis-tapped Enter.
- */
-export async function promptConfirm(input: {
-  title: string;
-  consequence: Consequence;
-  danger?: boolean;
-}): Promise<boolean> {
-  return withPromptTerminal(async () => {
-    clack.intro(input.title);
-    const lines = [input.consequence.summary, input.consequence.detail];
-    if (input.consequence.restarts) {
-      lines.push("The service restarts as part of this.");
-    }
-    if (input.consequence.longRunning) {
-      lines.push("This takes a while; progress is shown as it runs.");
-    }
-    clack.note(lines.filter(Boolean).join("\n"), "what this does");
-    const answer = await clack.confirm({
-      message: input.danger ? "Are you sure?" : "Apply this change?",
-      initialValue: !input.danger,
-    });
-    if (clack.isCancel(answer) || answer !== true) {
-      clack.cancel("nothing was changed");
-      return false;
-    }
-    clack.outro("applying…");
-    return true;
   });
 }
