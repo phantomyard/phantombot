@@ -47,6 +47,26 @@ export function humanCount(n: number | undefined): string {
   return n === undefined ? "—" : n.toLocaleString();
 }
 
+/**
+ * An ISO timestamp as `today 08:03`, `yesterday 23:14` or `2026-08-21 03:14`.
+ *
+ * A settings screen is read at a glance, and a raw
+ * `2026-08-28T08:03:01.316Z` makes the reader do timezone arithmetic to answer
+ * "did the nightly run?". Unparseable input is returned unchanged rather than
+ * rendered as `Invalid Date`.
+ */
+export function humanWhen(iso: string | undefined, now = new Date()): string {
+  if (!iso) return "never";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  const day = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const yesterday = new Date(now.getTime() - 86_400_000);
+  if (day(at) === day(now)) return `today ${time}`;
+  if (day(at) === day(yesterday)) return `yesterday ${time}`;
+  return `${at.toISOString().slice(0, 10)} ${time}`;
+}
+
 /** `2m 41s`. */
 export function humanDuration(ms: number): string {
   const s = Math.round(ms / 1000);

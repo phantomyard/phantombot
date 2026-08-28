@@ -52,7 +52,18 @@ export function Frame(props: {
           <Box flexGrow={1} />
           {props.status ? <Text color={theme.dim}>{props.status}</Text> : null}
         </Box>
-        <Box flexDirection="column" flexGrow={1} marginTop={1}>
+        {/* CLIP, never overflow. A screen whose content is taller than the
+            window otherwise draws straight through the bottom border: rows
+            overwrite each other and the border comes out as `╰─ ─ ─✚─Doctor─`.
+            This is the backstop — screens that can grow (a long transcript, a
+            long settings list) also window their own content so the part you
+            need stays on screen, see `scroll.ts`. */}
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          marginTop={1}
+          overflow="hidden"
+        >
           {props.children}
         </Box>
       </Box>
@@ -86,6 +97,25 @@ export function Field(props: {
       </Box>
       {props.hint ? <Text color={theme.dim}>{props.hint}</Text> : null}
     </Box>
+  );
+}
+
+/**
+ * A full-width horizontal rule.
+ *
+ * Drawn as a box with only its bottom border enabled, never as a run of `─`
+ * characters: a hand-built rule encodes a column count and is the exact thing
+ * that shears on a resize. The layout engine sizes this one.
+ */
+export function Rule(): React.ReactElement {
+  return (
+    <Box
+      borderStyle="single"
+      borderColor={theme.dim}
+      borderTop={false}
+      borderLeft={false}
+      borderRight={false}
+    />
   );
 }
 

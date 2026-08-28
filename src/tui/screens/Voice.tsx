@@ -22,7 +22,7 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame, Field } from "../components/Frame.tsx";
 import { glyph, theme } from "../theme.ts";
-import type { VoiceProvider } from "../../lib/voice.ts";
+import { providerHearsVoice, type VoiceProvider } from "../../lib/voice.ts";
 
 /**
  * Providers in the order the wizard offers them: `azure_edge` leads the real
@@ -35,13 +35,7 @@ export const VOICE_PROVIDERS: VoiceProvider[] = [
   "elevenlabs",
 ];
 
-/**
- * Can this provider TRANSCRIBE? Mirrors the dispatch in `lib/audio.ts`. If a
- * new STT backend is added there, this list is what has to move with it.
- */
-export function providerHearsVoice(provider: VoiceProvider): boolean {
-  return provider === "openai" || provider === "elevenlabs";
-}
+export { providerHearsVoice };
 
 export function VoiceScreen(props: {
   personaName: string;

@@ -274,10 +274,10 @@ Settings live one keypress away:
 
 | Key | What it does |
 |---|---|
-| `^s` | Open the dashboard: every phantom, its brain, channels, boot state and memory |
+| `^s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
 | `esc` | Back to the conversation, mid-thread, nothing lost |
-| `^p` | Switch which phantom you are talking to, without leaving chat |
-| `^t` | Expand collapsed tool calls |
+| `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
+| `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
 | `^l` | Show captured log lines |
 | `^c` | Interrupt the turn (it does **not** quit) |
 | `^q` | Quit |
@@ -309,7 +309,11 @@ the questions that change something — a value to type, a choice to make, a
 confirmation to give — are the same [`@clack`](https://github.com/bombshell-dev/clack)
 prompts every `phantombot` subcommand uses. The app steps out of the way while
 you answer and repaints when you are done, so a setting looks and behaves the
-same whether you reached it from the dashboard or from the command line.
+same whether you reached it from the settings screen or from the command line.
+
+Long screens **window their content** rather than squeezing it: a settings
+screen that does not fit says `▼ 4 more below` and scrolls with the cursor. The
+frame is never allowed to deform.
 
 **Mouse is supported** — click a row to select it, click a footer action to run
 it, scroll a list with the wheel. It is always optional: every clickable target

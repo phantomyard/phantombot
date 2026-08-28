@@ -42,35 +42,54 @@ export function MenuItem(props: MenuItemProps): React.ReactElement {
   const selected = Boolean(props.selected);
   return (
     <Selectable selected={selected} onPress={props.onPress}>
-      <Box>
+      {/* `width="100%"` so the row actually spans its container: without it the
+          row shrinks to its content and a right-aligned badge lands wherever
+          the description happened to end. */}
+      <Box width="100%">
         {/* The selection bar: one padded cell, filled only when current. */}
         <Box marginRight={1}>
           <Text backgroundColor={selected ? theme.accent : undefined}> </Text>
         </Box>
         {props.icon ? (
-          <Box marginRight={1}>
+          <Box marginRight={1} flexShrink={0}>
             <Text color={selected ? theme.accent : theme.dim}>
               {props.icon}
             </Text>
           </Box>
         ) : null}
-        <Box width="22%">
-          <Text bold={selected} color={selected ? theme.accent : undefined}>
+        {/* A fixed label column, not a percentage: at 22% of a narrow window
+            "Channels" wrapped onto a second line and the row sheared. This is
+            a flex child's width, not a hand-drawn border — the frame still
+            comes from `borderStyle`, so nothing here can deform it. */}
+        <Box width={14} flexShrink={0}>
+          <Text
+            bold={selected}
+            color={selected ? theme.accent : undefined}
+            wrap="truncate"
+          >
             {props.label}
           </Text>
         </Box>
-        <Box flexGrow={1}>
+        <Box flexGrow={1} flexShrink={1}>
           <Text color={theme.dim} wrap="truncate">
             {props.description ?? ""}
           </Text>
         </Box>
+        {/* An explicit spacer: a `flexGrow` box whose child is short does not
+            claim the slack on its own, so without this the badge sat glued to
+            the end of the description instead of on the right edge. */}
+        <Box flexGrow={1} />
         {props.badge ? (
-          <Box marginLeft={1}>
+          <Box marginLeft={1} flexShrink={0}>
             <Text color={props.badgeColor ?? theme.dim}>{props.badge}</Text>
           </Box>
         ) : null}
+        {/* `flexShrink={0}`: the hint and badge are FIXED, the description is
+            what gives. Without it "↵ edit in $EDITOR" wrapped onto a second
+            line and the row became two rows tall — which then disagrees with
+            the height the scroll window reserved for it. */}
         {selected && props.activateHint ? (
-          <Box marginLeft={1}>
+          <Box marginLeft={1} flexShrink={0}>
             <Text backgroundColor={theme.accent} color="black">
               {` ${props.activateHint} `}
             </Text>

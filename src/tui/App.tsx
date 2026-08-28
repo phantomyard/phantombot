@@ -14,7 +14,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
-import { hostSnapshot, type HostSnapshot } from "./snapshot.ts";
+import {
+  hostSnapshot,
+  probeServiceActive,
+  type HostSnapshot,
+  type PersonaSnapshot,
+} from "./snapshot.ts";
 import {
   applyAutostart,
   applyDefaultPersona,
@@ -24,13 +29,19 @@ import {
   describeDefaultPersonaChange,
   describeEmbeddingChange,
   describeVoiceChange,
+  openInEditor,
   restartService,
   setSecret,
   unsetSecret,
   type Consequence,
 } from "./actions.ts";
 import { Frame } from "./components/Frame.tsx";
-import { promptConfirm, promptValue } from "./prompts.ts";
+import {
+  promptConfirm,
+  promptSelect,
+  promptValue,
+  withPromptTerminal,
+} from "./prompts.ts";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
@@ -50,6 +61,7 @@ import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, terminalSize } from "./terminal.ts";
 import { loadConfigForPersona, type Config } from "../config.ts";
 import { runMemorySearch } from "../cli/memory.ts";
+
 import { runDoctor, type DoctorReport } from "../cli/doctor.ts";
 import type { WizardStep } from "../lib/personaComplete.ts";
 import type { VoiceProvider } from "../lib/voice.ts";
@@ -100,6 +112,14 @@ export function App(props: AppProps): React.ReactElement {
     props.startPersona ?? host.defaultPersona,
   );
   const [session, setSession] = useState<ChatSession | undefined>();
+  /**
+   * Where the persona settings screen was entered FROM, so `←`/`esc` goes back
+   * there. Arriving from a conversation and being returned to a host-wide table
+   * is a dead end you have to navigate out of.
+   */
+  const [personaOrigin, setPersonaOrigin] = useState<"chat" | "dashboard">(
+    "dashboard",
+  );
   /**
    * Latched the first time chat is reached — including from the wizard's
    * `onFinish`, which is the path that had no way to set it before.
@@ -220,6 +240,25 @@ export function App(props: AppProps): React.ReactElement {
     setHost(await hostSnapshot());
   }, []);
 
+  /**
+   * The service state, probed off the render path. See `probeServiceActive`:
+   * it costs a subprocess, so it is never awaited by a screen transition —
+   * it lands in the dashboard's badge whenever it lands.
+   */
+  const [serviceActive, setServiceActive] = useState<boolean | undefined>();
+  const probeService = useCallback(async () => {
+    setServiceActive(await probeServiceActive());
+  }, []);
+  // Probed only once the screen that SHOWS it is open. At mount it cost a
+  // subprocess on the startup path for a badge nobody was looking at, and the
+  // first-run regression test caught the consequence: the event loop was busy
+  // enough that keystrokes batched and the wizard read "alice\n" as a name.
+  useEffect(() => {
+    if (screen === "dashboard" && serviceActive === undefined) {
+      void probeService();
+    }
+  }, [screen, serviceActive, probeService]);
+
   const persona =
     host.personas.find((p) => p.name === personaName) ?? host.personas[0];
 
@@ -248,7 +287,11 @@ export function App(props: AppProps): React.ReactElement {
     // A global safety net: esc from any leaf screen goes back to chat rather
     // than to a shell, so there is never a dead end.
     if (key.escape && screen !== "chat" && screen !== "dashboard") {
-      setScreen("dashboard");
+      // The settings screen goes back where it was ENTERED from — both this
+      // net and the screen's own handler see the same escape, so they have to
+      // agree or the last writer wins and `^s`, esc lands you in the host
+      // table you never asked for.
+      setScreen(screen === "persona" ? personaOrigin : "dashboard");
       return;
     }
     // The one state no screen owns the keyboard for: chat before its session
@@ -308,6 +351,88 @@ export function App(props: AppProps): React.ReactElement {
     }
   }, [personaName]);
 
+  /**
+   * Hand the terminal to an existing `@clack` subcommand flow.
+   *
+   * The brain and channel questions already exist, are already tested, and are
+   * already what `phantombot harness` / `phantombot telegram` ask — including
+   * token validation via getMe and the three-layer chain resolution. Reusing
+   * them keeps ONE implementation of each question (the rule in prompts.ts):
+   * a second copy inside the TUI would drift from the CLI, and the CLI is the
+   * copy that has the tests.
+   */
+  const runFlow = useCallback(
+    async (label: string, fn: () => Promise<number>) => {
+      setPrompting(true);
+      try {
+        const code = await withPromptTerminal(fn);
+        setNotice(code === 0 ? `${label} updated` : `${label} unchanged`);
+      } catch (e) {
+        setNotice(`${label} failed: ${(e as Error).message}`);
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh],
+  );
+
+  const changeBrain = useCallback(
+    (target: PersonaSnapshot) =>
+      // Imported ON DEMAND: pulling the whole `harness`/`telegram` subcommand
+      // graph (clack, the Telegram client) at module scope delayed the app's
+      // first render enough that the opening keystrokes were dropped — the
+      // first-run test caught it as a wizard whose name box stayed empty.
+      runFlow("brain", async () => {
+        const { runHarness } = await import("../cli/harness.ts");
+        return runHarness({ persona: target.name });
+      }),
+    [runFlow],
+  );
+
+  const changeChannels = useCallback(
+    (target: PersonaSnapshot) =>
+      runFlow("channels", async () => {
+        const { runTelegram } = await import("../cli/telegram.ts");
+        return runTelegram({ persona: target.name });
+      }),
+    [runFlow],
+  );
+
+  /**
+   * Pick one of the prompt files and open it in `$EDITOR`.
+   *
+   * A missing file is offered too, and creating it by opening it is the
+   * correct behaviour: a persona with no USER.md is a persona that has never
+   * been told who it works for, and the way to fix that is to write one.
+   */
+  const editIdentity = useCallback(
+    async (target: PersonaSnapshot) => {
+      setPrompting(true);
+      try {
+        const choice = await promptSelect({
+          message: `Which file for ${target.name}?`,
+          options: target.identity.files.map((f) => ({
+            value: f.path,
+            label: f.name,
+            hint: f.present ? undefined : "does not exist yet",
+          })),
+        });
+        if (!choice) return;
+        const r = await withPromptTerminal(() => openInEditor(choice));
+        setNotice(
+          r.ok
+            ? `${choice.split("/").pop()} saved — restart to load it`
+            : `editor failed: ${r.error}`,
+        );
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh],
+  );
+
   const body = (() => {
     if (screen === "wizard") {
       return (
@@ -352,7 +477,13 @@ export function App(props: AppProps): React.ReactElement {
           ]
             .filter(Boolean)
             .join(" · ")}
-          onSettings={() => setScreen("dashboard")}
+          // `^s` = the settings OF THIS PHANTOM; `^p` = the list of phantoms
+          // on this host. Wiring both to the dashboard (the first cut) made
+          // the settings key answer a question the user did not ask.
+          onSettings={() => {
+            setPersonaOrigin("chat");
+            setScreen("persona");
+          }}
           onSwitchPersona={() => setScreen("dashboard")}
           onQuit={exit}
         />
@@ -362,9 +493,10 @@ export function App(props: AppProps): React.ReactElement {
     if (screen === "dashboard") {
       return (
         <DashboardScreen
-          host={host}
+          host={{ ...host, ...(serviceActive === undefined ? {} : { serviceActive }) }}
           onOpen={(name) => {
             setPersonaName(name);
+            setPersonaOrigin("dashboard");
             setScreen("persona");
           }}
           onChat={(name) => {
@@ -388,6 +520,7 @@ export function App(props: AppProps): React.ReactElement {
             const r = await restartService();
             setNotice(r.ok ? "service restarted" : `restart failed: ${r.error}`);
             await refresh();
+            await probeService();
           }}
           onBack={() => setScreen("chat")}
         />
@@ -406,7 +539,11 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <PersonaDetailScreen
           persona={persona}
-          onBack={() => setScreen("dashboard")}
+          onBack={() => setScreen(personaOrigin)}
+          onLogs={() => setScreen("logs")}
+          onEditIdentity={() => void editIdentity(persona)}
+          onChangeBrain={() => void changeBrain(persona)}
+          onChangeChannels={() => void changeChannels(persona)}
           onToggleAutostart={() => {
             const on = !(persona.autostart || persona.isDefault);
             void askConfirm({

@@ -31,12 +31,17 @@ export function messageHeight(
   const bodyRows = body
     .split("\n")
     .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / width)), 0);
+  // Collapsed, a message's tool calls are ONE summary row — not one row each.
+  // Counting them per-call while the screen draws a single line made the
+  // clipper reserve space that was never used, so a thread with tool calls
+  // scrolled itself off the top early. Must stay in step with `Message` in
+  // screens/Chat.tsx.
+  const tools = message.tools ?? [];
   const toolRows = options.showTools
-    ? (message.tools ?? []).reduce(
-        (rows, tool) => rows + Math.max(1, tool.title.split("\n").length),
-        0,
-      )
-    : (message.tools ?? []).length;
+    ? tools.reduce((rows, tool) => rows + Math.max(1, tool.title.split("\n").length), 0)
+    : tools.length > 0
+      ? 1
+      : 0;
   // header + tools + body + the blank line between messages
   return 1 + toolRows + Math.max(1, bodyRows) + 1;
 }

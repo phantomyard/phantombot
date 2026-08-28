@@ -20,7 +20,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -39,6 +39,7 @@ import {
 import { resolveHarnessAvailability } from "../lib/harnessAvailability.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
+import { providerHearsVoice } from "../lib/voice.ts";
 import { log } from "../lib/logger.ts";
 
 /** Run a read that must never take a screen down. */
@@ -101,6 +102,48 @@ export interface MemorySnapshot {
   indexedTotal?: number;
 }
 
+/**
+ * The three prompt files a persona is BUILT from, as paths plus presence.
+ *
+ * These are shown first on the settings screen because they are the only
+ * settings whose value is prose: everything else on that screen is a value you
+ * pick, these are values you write. `↵` opens the file in `$EDITOR` rather than
+ * trying to edit multi-kilobyte markdown inside a list row.
+ */
+export interface IdentityFile {
+  name: string;
+  path: string;
+  present: boolean;
+}
+
+export interface IdentitySnapshot {
+  files: IdentityFile[];
+  /** One-line self-description, lifted from IDENTITY.md's first prose line. */
+  description?: string;
+}
+
+/**
+ * A channel as a STATE, not a name.
+ *
+ * "telegram" in a list tells you a channel was configured. It does not tell you
+ * the token resolved, which is exactly the failure a settings screen exists to
+ * surface — `telegramStated` without an account is a phantom that looks
+ * connected in every listing and answers nobody.
+ */
+export interface ChannelDetail {
+  id: string;
+  label: string;
+  state: "connected" | "broken" | "off";
+  /** The line under the label: who may talk to it, or why it is not up. */
+  detail: string;
+}
+
+export interface NightlySnapshot {
+  status: string;
+  detail: string;
+  lastRun?: string;
+}
+
 export interface PersonaSnapshot {
   name: string;
   dir: string;
@@ -111,6 +154,13 @@ export interface PersonaSnapshot {
   resolvedHarness?: { id: string; path: string };
   channels: string[];
   voiceProvider?: string;
+  /** The configured voice NAME for that provider ("en-US-JennyNeural"). */
+  voiceName?: string;
+  /** Whether the configured provider can transcribe, not just speak. */
+  voiceHears?: boolean;
+  identity: IdentitySnapshot;
+  channelDetails: ChannelDetail[];
+  nightly?: NightlySnapshot;
   /** Secret NAMES only. Values are never read into the TUI. */
   secretNames?: string[];
   memory: MemorySnapshot;
@@ -119,6 +169,13 @@ export interface PersonaSnapshot {
 
 export interface HostSnapshot {
   version: string;
+  /**
+   * Is the phantombot SERVICE up? Deliberately not inferred from this process:
+   * the TUI runs in your shell, the daemon is what answers Telegram, and a
+   * dashboard that reports its own liveness as the host's would be a lie you
+   * only catch when a message goes unanswered.
+   */
+  serviceActive?: boolean;
   updateChannel: string;
   defaultPersona: string;
   personasDir: string;
@@ -146,6 +203,90 @@ function channelsFor(config: Config, dir: string): string[] {
   // is exactly the one screen 0 opens on.
   if (out.length === 0) out.push("cli only");
   return out;
+}
+
+/** The prompt files, in the order the settings screen lists them. */
+const IDENTITY_FILES = ["SOUL.md", "IDENTITY.md", "USER.md"];
+
+function readIdentity(dir: string): IdentitySnapshot {
+  const files = IDENTITY_FILES.map((name) => {
+    const path = join(dir, name);
+    return { name, path, present: existsSync(path) };
+  });
+  const identityPath = join(dir, "IDENTITY.md");
+  const description = safe("read IDENTITY.md", () => {
+    if (!existsSync(identityPath)) return undefined;
+    // First non-blank, non-heading line: headings are the persona's name, the
+    // line after them is what it says it is FOR.
+    for (const line of readFileSync(identityPath, "utf-8").split("\n")) {
+      const text = line.trim();
+      if (!text || text.startsWith("#") || text.startsWith(">")) continue;
+      return text.length > 120 ? `${text.slice(0, 119)}…` : text;
+    }
+    return undefined;
+  });
+  return { files, ...(description ? { description } : {}) };
+}
+
+/**
+ * Channels as states. Mirrors `channelsFor` but keeps the reason a channel is
+ * down — see `ChannelDetail`.
+ */
+function channelDetailsFor(config: Config, dir: string): ChannelDetail[] {
+  const out: ChannelDetail[] = [];
+  const telegram = config.channels?.telegram;
+  if (telegram) {
+    const allowed = telegram.allowedUserIds ?? [];
+    out.push({
+      id: "telegram",
+      label: "Telegram",
+      state: "connected",
+      detail:
+        allowed.length > 0
+          ? `allowed  ${allowed.join(", ")}`
+          : "open to anyone who finds the bot",
+    });
+  } else if (config.channels?.telegramStated) {
+    out.push({
+      id: "telegram",
+      label: "Telegram",
+      state: "broken",
+      detail: "configured but no token resolved — it will answer nobody",
+    });
+  } else {
+    out.push({
+      id: "telegram",
+      label: "Telegram",
+      state: "off",
+      detail: "not configured",
+    });
+  }
+  out.push(
+    existsSync(join(dir, "phantomchat.json"))
+      ? {
+          id: "chat",
+          label: "phantomchat",
+          state: "connected",
+          detail: "nostr DMs · phantomchat.json",
+        }
+      : {
+          id: "chat",
+          label: "phantomchat",
+          state: "off",
+          detail: "not configured",
+        },
+  );
+  return out;
+}
+
+/** The configured voice name for whichever provider is selected. */
+function voiceNameOf(config: Config): string | undefined {
+  const voice = config.voice;
+  if (!voice) return undefined;
+  if (voice.provider === "azure_edge") return voice.azure_edge?.voice;
+  if (voice.provider === "openai") return voice.openai?.voice;
+  if (voice.provider === "elevenlabs") return voice.elevenlabs?.voiceId;
+  return undefined;
 }
 
 function readMemory(config: Config, persona: string): MemorySnapshot {
@@ -248,6 +389,22 @@ export async function personaSnapshot(
     }
   });
 
+  // The nightly is the one piece of persona health that is invisible until it
+  // has been broken for days — a backlog does not announce itself.
+  // Imported on demand: the nightly module pulls the whole memory stack in
+  // behind it, and this file is on the app's startup path.
+  const health = await safeAsync(async () => {
+    const { nightlyHealth } = await import("../lib/nightly.ts");
+    return nightlyHealth(dir);
+  });
+  const nightly: NightlySnapshot | undefined = health
+    ? {
+        status: health.status,
+        detail: health.detail,
+        ...(health.last_run ? { lastRun: health.last_run } : {}),
+      }
+    : undefined;
+
   return {
     name,
     dir,
@@ -257,6 +414,13 @@ export async function personaSnapshot(
     resolvedHarness,
     channels: channelsFor(config, dir),
     voiceProvider: config.voice?.provider,
+    voiceName: voiceNameOf(config),
+    voiceHears: config.voice
+      ? providerHearsVoice(config.voice.provider)
+      : false,
+    identity: readIdentity(dir),
+    channelDetails: channelDetailsFor(config, dir),
+    ...(nightly ? { nightly } : {}),
     secretNames,
     memory: readMemory(config, name),
     completeness: await personaCompleteness(config, name),
@@ -290,6 +454,23 @@ export async function hostSnapshot(): Promise<HostSnapshot> {
     personasDir: host.personasDir,
     personas,
   };
+}
+
+/**
+ * Is the phantombot service up?
+ *
+ * Deliberately NOT part of `hostSnapshot`: this shells out to systemctl (or
+ * launchctl, or schtasks), and every snapshot is on a path a screen is waiting
+ * for — folding a subprocess into it made finishing the wizard wait on
+ * systemd before the chat box appeared, which a regression test caught as the
+ * app being unquittable in that window. Screens render from disk state
+ * immediately; this fills its badge in when it arrives.
+ */
+export async function probeServiceActive(): Promise<boolean | undefined> {
+  return safeAsync(async () => {
+    const { defaultServiceControl } = await import("../lib/platform.ts");
+    return defaultServiceControl().isActive();
+  });
 }
 
 /** KB note count straight off the filesystem, for a persona with no index yet. */

@@ -28,13 +28,14 @@
  * wondering what happened.
  */
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { Selectable } from "../components/Selectable.tsx";
 import { glyph, theme } from "../theme.ts";
 import { WIZARD_STEPS, type WizardStep } from "../../lib/personaComplete.ts";
+import { applyTextChunk } from "../textInput.ts";
 
 /**
  * The three harness adapters. This list is the picker's whole vocabulary — see
@@ -184,6 +185,8 @@ export function WizardScreen(props: {
     ...props.initial,
   });
   const [cursor, setCursor] = useState(0);
+  /** The name field's live value — see the keystroke handler for why. */
+  const nameRef = useRef(answers.name);
 
   const stepIndex = WIZARD_STEPS.indexOf(step);
   const go = (delta: number) => {
@@ -211,10 +214,24 @@ export function WizardScreen(props: {
     }
     if (step === "name") {
       if (key.return && answers.name.trim()) go(1);
-      else if (key.backspace || key.delete)
-        setAnswers((a) => ({ ...a, name: a.name.slice(0, -1) }));
-      else if (char && !key.ctrl && !key.meta)
-        setAnswers((a) => ({ ...a, name: a.name + char }));
+      else if (key.backspace || key.delete) {
+        nameRef.current = nameRef.current.slice(0, -1);
+        setAnswers((a) => ({ ...a, name: nameRef.current }));
+      }
+      else if (char && !key.ctrl && !key.meta) {
+        // A chunk can carry its own newline (a paste, or batched keystrokes),
+        // and Ink reports `key.return` only for a chunk that is exactly "\r".
+        // Appending it verbatim named a persona "alice\n". See `textInput.ts`.
+        //
+        // Read from the REF, never from `answers`: several chunks can arrive
+        // before React re-renders, and a closure-read `answers.name` is one
+        // render stale — typing "alice" quickly then kept only the last
+        // letters. The ref is written synchronously on every keystroke.
+        const applied = applyTextChunk(nameRef.current, char);
+        nameRef.current = applied.submit ?? applied.text;
+        setAnswers((a) => ({ ...a, name: nameRef.current }));
+        if (applied.submit) go(1);
+      }
       return;
     }
     if (step === "done") {

@@ -19,7 +19,9 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 
-import { Frame } from "../components/Frame.tsx";
+import { Frame, Rule } from "../components/Frame.tsx";
+import { scrollWindow } from "../scroll.ts";
+import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { Selectable } from "../components/Selectable.tsx";
 import { glyph, humanBytes, theme } from "../theme.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../snapshot.ts";
@@ -116,10 +118,32 @@ export function DashboardScreen(props: {
     else if (char === "r") props.onRestart();
   });
 
+  // A host with more phantoms than rows must show FEWER, not squeezed ones —
+  // Yoga compresses overflow and prints rows on top of each other. See
+  // `scroll.ts`. Chrome: border 2, title 2, PHANTOMS heading 1, header row 1,
+  // three rules 3, overflow marker 1, HOST block 5, footer 1.
+  const size = useTerminalSize();
+  const view = scrollWindow(
+    personas.map(() => 1),
+    viewportRows(size, 16),
+    cursor,
+  );
+
   return (
     <Frame
       title={["phantombot", "settings"]}
-      status={`${props.host.version} · ${props.host.updateChannel}`}
+      status={[
+        props.host.version,
+        props.host.updateChannel,
+        // The SERVICE's state, not this process's — see HostSnapshot.
+        props.host.serviceActive === undefined
+          ? undefined
+          : props.host.serviceActive
+            ? `${glyph.up} running`
+            : `${glyph.down} stopped`,
+      ]
+        .filter(Boolean)
+        .join(" · ")}
       footer={[
         { key: "↵", label: "open" },
         { key: "c", label: "chat" },
@@ -140,6 +164,7 @@ export function DashboardScreen(props: {
           {`${props.host.personas.length} on this host`}
         </Text>
       </Box>
+      <Rule />
       <Box>
         {/* Lead-in matching a row's two gutters — `Selectable`'s pointer and
             the selection bar — so the header sits over its own columns. */}
@@ -168,20 +193,27 @@ export function DashboardScreen(props: {
           {" "}
         </Cell>
       </Box>
+      <Rule />
       {personas.length === 0 ? (
         <Text color={theme.dim}>
           No phantoms yet — press n to make one.
         </Text>
       ) : (
-        personas.map((persona, i) => (
+        personas.slice(view.start, view.end).map((persona) => (
           <PersonaRow
             key={persona.name}
             persona={persona}
-            selected={i === cursor}
+            selected={personas.indexOf(persona) === cursor}
             onPress={() => props.onOpen(persona.name)}
           />
         ))
       )}
+      {view.below > 0 || view.above > 0 ? (
+        <Text color={theme.dim}>
+          {`${view.above > 0 ? `▲ ${view.above} above  ` : ""}${view.below > 0 ? `▼ ${view.below} below` : ""}`}
+        </Text>
+      ) : null}
+      <Rule />
 
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.accent} bold>
@@ -196,6 +228,32 @@ export function DashboardScreen(props: {
             version
           </Cell>
           <Cell width="34%">{props.host.version}</Cell>
+        </Box>
+        <Box>
+          <Cell width="24%" dim>
+            service
+          </Cell>
+          <Cell width="26%">
+            <Text
+              color={
+                props.host.serviceActive === undefined
+                  ? theme.dim
+                  : props.host.serviceActive
+                    ? theme.ok
+                    : theme.warn
+              }
+            >
+              {props.host.serviceActive === undefined
+                ? "unknown"
+                : props.host.serviceActive
+                  ? `${glyph.up} running`
+                  : `${glyph.down} stopped`}
+            </Text>
+          </Cell>
+          <Cell width="16%" dim>
+            default
+          </Cell>
+          <Cell width="34%">{props.host.defaultPersona}</Cell>
         </Box>
         <Box>
           <Cell width="24%" dim>

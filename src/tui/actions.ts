@@ -382,3 +382,50 @@ export async function restartService(
   const r = await svc.restart();
   return r.ok ? { ok: true } : { ok: false, error: r.stderr ?? "restart failed" };
 }
+
+/**
+ * Open a persona's prompt file in the user's editor.
+ *
+ * SOUL.md, IDENTITY.md and USER.md are the only settings whose value is prose,
+ * and prose is not something to edit inside a list row: it is multi-kilobyte
+ * markdown the user already has an editor for. So the TUI's job is to hand the
+ * terminal over cleanly and take it back — the caller runs this inside the
+ * prompt bracket (`withPromptTerminal`), which leaves the alternate screen and
+ * stops forwarding keystrokes to Ink first.
+ *
+ * `$VISUAL` wins over `$EDITOR` because that is what the variables mean: VISUAL
+ * is the full-screen editor, EDITOR the line editor of last resort. Falls back
+ * to `vi`, which POSIX requires to exist.
+ */
+export async function openInEditor(
+  path: string,
+  spawn?: (
+    command: string,
+    args: string[],
+  ) => Promise<{ exitCode: number }>,
+): Promise<{ ok: boolean; error?: string }> {
+  const editor = process.env.VISUAL || process.env.EDITOR || "vi";
+  // Editors are habitually configured with flags ("code --wait", "emacs -nw"),
+  // so the variable is a COMMAND LINE, not a program name.
+  const parts = editor.split(/\s+/).filter(Boolean);
+  const command = parts[0]!;
+  const args = [...parts.slice(1), path];
+  try {
+    const run =
+      spawn ??
+      (async (cmd: string, argv: string[]) => {
+        const proc = Bun.spawn([cmd, ...argv], {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        return { exitCode: await proc.exited };
+      });
+    const { exitCode } = await run(command, args);
+    return exitCode === 0
+      ? { ok: true }
+      : { ok: false, error: `${command} exited ${exitCode}` };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}

@@ -31,7 +31,8 @@ import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
 import { glyph, humanDuration, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { visibleMessages } from "../transcript.ts";
-import type { ChatMessage, ChatSession } from "../chatSession.ts";
+import { applyTextChunk } from "../textInput.ts";
+import type { ChatMessage, ChatSession, ChatToolCall } from "../chatSession.ts";
 
 /**
  * Rows the chat chrome takes: frame border (2), title (1), title gap (1),
@@ -57,6 +58,60 @@ function timeOf(at: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/**
+ * The tool calls behind one reply — collapsed to a single summary row, or
+ * expanded to one row per call.
+ *
+ * The first cut rendered the same single line in both states, because a
+ * progress note is one line long: `^t` was wired, handled, and had no visible
+ * effect whatsoever, which reads to a user as a broken key. Collapsed is now
+ * genuinely a SUMMARY — how many steps and how long they took, which is what
+ * you want while reading an answer — and expanded is the itemised list with
+ * each step's own duration.
+ *
+ * `transcript.ts` measures these rows for clipping, so the two must agree on
+ * how many lines each state occupies.
+ */
+function Tools(props: {
+  tools: ChatToolCall[];
+  expanded: boolean;
+}): React.ReactElement | null {
+  if (props.tools.length === 0) return null;
+  if (props.expanded) {
+    return (
+      <>
+        {props.tools.map((tool, i) => (
+          <Box key={i} paddingLeft={2}>
+            <Text color={theme.dim}>
+              {"› "}
+              {tool.title}
+            </Text>
+            <Box flexGrow={1} />
+            <Text color={theme.dim}>
+              {tool.durationMs === undefined
+                ? "…"
+                : humanDuration(tool.durationMs)}
+            </Text>
+          </Box>
+        ))}
+      </>
+    );
+  }
+  const done = props.tools.filter((t) => t.durationMs !== undefined);
+  const total = done.reduce((ms, t) => ms + (t.durationMs ?? 0), 0);
+  const running = props.tools.length - done.length;
+  return (
+    <Box paddingLeft={2}>
+      <Text color={theme.dim}>
+        {`› ${props.tools.length} step${props.tools.length === 1 ? "" : "s"}`}
+        {running > 0 ? " · running" : total > 0 ? ` · ${humanDuration(total)}` : ""}
+      </Text>
+      <Box flexGrow={1} />
+      <Text color={theme.dim}>^t details</Text>
+    </Box>
+  );
+}
+
 function Message(props: {
   message: ChatMessage;
   showTools: boolean;
@@ -77,20 +132,7 @@ function Message(props: {
           {props.message.at ? `  ${timeOf(props.message.at)}` : ""}
         </Text>
       </Box>
-      {(props.message.tools ?? []).map((tool, i) => (
-        <Box key={i} paddingLeft={2}>
-          <Text color={theme.dim}>
-            {"› "}
-            {props.showTools ? tool.title : tool.title.split("\n")[0]}
-          </Text>
-          <Box flexGrow={1} />
-          <Text color={theme.dim}>
-            {tool.durationMs === undefined
-              ? "…"
-              : humanDuration(tool.durationMs)}
-          </Text>
-        </Box>
-      ))}
+      <Tools tools={props.message.tools ?? []} expanded={props.showTools} />
       <Box paddingLeft={2}>
         <Text color={props.message.error ? theme.bad : undefined}>
           {props.message.error ?? props.message.text}
@@ -137,7 +179,13 @@ export function ChatScreen(props: {
   const [messages, setMessages] = useState<ChatMessage[]>(
     props.session.history,
   );
-  const [input, setInput] = useState("");
+  const [input, setInputState] = useState("");
+  /** Mirrors `input` synchronously so a burst of keystrokes cannot lose one. */
+  const inputRef = useRef("");
+  const setInputValue = useCallback((next: string) => {
+    inputRef.current = next;
+    setInputState(next);
+  }, []);
   const [busy, setBusy] = useState(false);
   /** When the in-flight turn started, for the elapsed counter. */
   const [busySince, setBusySince] = useState<number | undefined>();
@@ -251,37 +299,33 @@ export function ChatScreen(props: {
               Math.max(0, historyIndex + (key.upArrow ? -1 : 1)),
             );
       setHistoryIndex(at);
-      setInput(at === null ? "" : (sent[at] ?? ""));
+      setInputValue(at === null ? "" : (sent[at] ?? ""));
       return;
     }
     if (key.return) {
       const text = input.trim();
       if (!text) return;
-      setInput("");
+      setInputValue("");
       setHistoryIndex(null);
       void submit(text);
       return;
     }
     if (key.backspace || key.delete) {
-      setInput((v) => v.slice(0, -1));
+      setInputValue(inputRef.current.slice(0, -1));
       return;
     }
     if (char && !key.ctrl && !key.meta) {
       // A chunk can carry a newline INSIDE it: a paste, or a terminal that
-      // batched keystrokes. Ink only reports `key.return` for a chunk that is
-      // exactly "\r", so without this the newline is typed into the box as a
-      // literal character and the message is never sent.
-      const parts = char.split(/\r\n|\r|\n/);
-      if (parts.length === 1) {
-        setInput((v) => v + char);
-        return;
+      // batched keystrokes. Shared with the wizard's name field, which had the
+      // same bug — see `textInput.ts`.
+      // From the REF: two keystrokes can land between renders, and reading
+      // `input` out of the closure loses the first of them.
+      const applied = applyTextChunk(inputRef.current, char);
+      setInputValue(applied.text);
+      if (applied.submit) {
+        setHistoryIndex(null);
+        if (!busy) void submit(applied.submit);
       }
-      const head = parts[0] ?? "";
-      const rest = parts.slice(1).join(" ").trim();
-      const text = (input + head).trim();
-      setInput(rest);
-      setHistoryIndex(null);
-      if (text && !busy) void submit(text);
     }
   });
 
@@ -298,10 +342,10 @@ export function ChatScreen(props: {
       footer={[
         { key: "↵", label: "send" },
         { key: "↑↓", label: "history" },
-        { key: "^t", label: "tools" },
+        { key: "^t", label: showTools ? "hide steps" : "steps" },
         { key: "^c", label: "interrupt" },
         { key: `${glyph.gear} ^s`, label: "settings", onPress: props.onSettings },
-        { key: "^p", label: "phantom" },
+        { key: "^p", label: "phantoms" },
         { key: "^q", label: "quit" },
       ]}
     >
