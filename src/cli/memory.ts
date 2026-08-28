@@ -1166,7 +1166,7 @@ const searchCmd = defineCommand({
       description: "What to search for.",
       required: true,
     },
-    persona: { type: "string", description: "Persona name (default: configured default)." },
+    persona: { type: "string", description: "Persona name (default: PHANTOMBOT_PERSONA env, then the configured default persona)." },
     scope: {
       type: "string",
       description: "memory | kb | all (default: all)",

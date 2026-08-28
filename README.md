@@ -636,6 +636,15 @@ phantombot persona robbie          # interactive: prompts to confirm
 phantombot persona robbie --yes    # non-interactive: explicit consent
 ```
 
+Persona-scoped CLI commands (`memory`, `task`, `vault`, `mcp`, `ask`,
+`notify`, `voice`, `heartbeat`, `nightly`, `doctor`) resolve their target
+persona the same way: an explicit `--persona <name>` wins, then the
+harness-injected `PHANTOMBOT_PERSONA` env var, then the configured default
+persona. A phantom whose harness injects `PHANTOMBOT_PERSONA=leo` therefore
+reads and writes its own memory, tasks and config layer without passing
+`--persona` on every call — and an explicit `--persona` always overrides the
+environment.
+
 Runtime:
 
 | Command | Purpose |

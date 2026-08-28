@@ -20,7 +20,13 @@ import { defineCommand } from "citty";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
-import { type Config, loadConfig, personaDir, resolvePersona } from "../config.ts";
+import {
+  type Config,
+  loadConfig,
+  loadConfigForPersona,
+  personaDir,
+  resolvePersona,
+} from "../config.ts";
 import {
   checkConfiguredHarnesses,
   expandSystemdPath,
@@ -467,14 +473,30 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
   const repair = input.repair ?? true;
 
-  const config = input.config ?? (await loadConfig());
-  const persona = resolvePersona(input.persona, config);
+  // Resolve the target persona BEFORE loading config, and diagnose/repair
+  // with THAT persona's layer: embeddings, the harness chain and the Pi
+  // routing are per-persona settings, and labelling the report `persona X`
+  // while reading the default persona's layer answers the wrong question
+  // (phantombot#474 review). `host` is kept for host-wide roster/account
+  // data (autostart roster, memory db path, update channel). With an
+  // injected config the seam stays hermetic: resolve against it, never
+  // read from disk.
+  const resolved = input.config
+    ? {
+        config: input.config,
+        host: input.config,
+        persona: resolvePersona(input.persona, input.config),
+      }
+    : await loadConfigForPersona(input.persona);
+  const host = resolved.host;
+  const config = resolved.config;
+  const persona = resolved.persona;
   const personaConfigs = new Map(input.personaConfigs ?? []);
   if (!input.config) {
-    const names = new Set(config.autostartPersonas ?? []);
-    if (persona !== config.defaultPersona) names.add(persona);
+    const names = new Set(host.autostartPersonas ?? []);
+    if (persona !== host.defaultPersona) names.add(persona);
     for (const name of names) {
-      if (name === config.defaultPersona || personaConfigs.has(name)) continue;
+      if (name === host.defaultPersona || personaConfigs.has(name)) continue;
       try {
         personaConfigs.set(name, await loadConfig(name));
       } catch (e) {
@@ -485,7 +507,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       }
     }
   }
-  const dir = personaDir(config, persona);
+  const dir = personaDir(host, persona);
   if (!existsSync(dir)) {
     err.write(`persona '${persona}' not found at ${dir}\n`);
     return 2;
@@ -506,9 +528,9 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // A database that does not exist yet is NOT a fault: phantombot creates it
   // on first use, so a box installed this afternoon has none, and reporting
   // that as broken would teach an operator to ignore this line.
-  const dbPresent = existsSync(config.memoryDbPath);
+  const dbPresent = existsSync(host.memoryDbPath);
   const dbHealth = dbPresent
-    ? checkIntegrity(config.memoryDbPath)
+    ? checkIntegrity(host.memoryDbPath)
     : { ok: true, detail: "not created yet" };
 
   // Capture health — compare real user turns vs captures over 24h. Skipped
@@ -520,7 +542,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   if (dbHealth.ok) {
     // Opens (and, on a fresh box, creates) the database — the pre-#417
     // behaviour, kept for every case except the corrupt one.
-    const memory = await openMemoryStore(config.memoryDbPath);
+    const memory = await openMemoryStore(host.memoryDbPath);
     try {
       userTurns = await memory.countUserTurnsForPersonaSince(
         persona,
@@ -533,11 +555,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
   const dryDay = userTurns >= DRY_DAY_TURN_THRESHOLD && captures === 0;
-  const telegramReport = telegramHealthReport(config, personaConfigs);
+  const telegramReport = telegramHealthReport(host, personaConfigs);
 
   // Embeddings status — informational only. Vector search is live only when
   // the selected provider has enough configuration to make a request.
-  const updateChannel = config.updateChannel ?? DEFAULT_UPDATE_CHANNEL;
+  const updateChannel = host.updateChannel ?? DEFAULT_UPDATE_CHANNEL;
 
   const embProvider = config.embeddings.provider;
   const semanticSearch =
@@ -683,7 +705,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
 
   // Restore points for the database checked above (#417).
-  const restorePoints = await listRestorePoints(config.memoryDbPath);
+  const restorePoints = await listRestorePoints(host.memoryDbPath);
   // Only the newest point is integrity-checked in the common case: each check
   // reads the whole file, and walking five 300 MB snapshots on every doctor
   // run would turn a diagnostic into an I/O event. When the newest one is bad
@@ -728,11 +750,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
         }
       : {}),
     memory_db: {
-      path: config.memoryDbPath,
+      path: host.memoryDbPath,
       healthy: dbHealth.ok,
       detail: dbHealth.detail,
-      bytes: existsSync(config.memoryDbPath)
-        ? statSync(config.memoryDbPath).size
+      bytes: existsSync(host.memoryDbPath)
+        ? statSync(host.memoryDbPath).size
         : 0,
       restore_points: restorePoints.map((p) => ({
         taken_at: p.takenAt.toISOString(),
@@ -1260,7 +1282,7 @@ export default defineCommand({
   args: {
     persona: {
       type: "string",
-      description: "Persona name (default: configured default).",
+      description: "Persona name (default: PHANTOMBOT_PERSONA env, then the configured default persona).",
     },
     repair: {
       type: "boolean",

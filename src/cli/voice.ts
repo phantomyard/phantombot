@@ -11,7 +11,12 @@ import * as p from "@clack/prompts";
 
 import { existsSync } from "node:fs";
 
-import { type Config, loadConfig, personaDir, resolvePersona } from "../config.ts";
+import {
+  type Config,
+  loadConfigForPersona,
+  personaDir,
+  resolvePersona,
+} from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { setIn, updateConfigToml } from "../lib/configWriter.ts";
@@ -35,7 +40,7 @@ export interface ApplyVoiceInput {
   configPath: string;
   /** Host config — resolves which persona's vault the key is written to. */
   config: Config;
-  /** Persona whose vault receives the key. Defaults to the default persona. */
+  /** Persona whose vault receives the key. Default: PHANTOMBOT_PERSONA env, then the default persona. */
   persona?: string;
   voice: VoiceConfig;
   /** If set, store in the persona vault. If undefined, leave secrets alone. */
@@ -94,7 +99,7 @@ interface RunInput {
    * Persona to configure (phantombot#439). Voice is persona-scoped — each
    * phantom gets its own voice — so the settings are written to
    * `<personas-root>/<persona>/config.toml`, not to the host's global file.
-   * Defaults to the host's default persona.
+   * Defaults to PHANTOMBOT_PERSONA env, then the host's default persona.
    */
   persona?: string;
   config?: Config;
@@ -115,10 +120,17 @@ interface RunInput {
 
 export async function runVoice(input: RunInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
-  // Load the TARGET persona's layered config, so "Existing config" shows what
-  // that persona actually runs with rather than the default persona's voice.
-  const config = input.config ?? (await loadConfig(input.persona));
-  const persona = resolvePersona(input.persona, config);
+  // Resolve the target persona BEFORE loading config, so the env-fallback
+  // persona gets ITS layer — "Existing config" then shows what that persona
+  // actually runs with rather than the default persona's voice
+  // (phantombot#474 review). With an injected config the seam stays hermetic:
+  // resolve against it, never read from disk.
+  const { config, persona } = input.config
+    ? {
+        config: input.config,
+        persona: resolvePersona(input.persona, input.config),
+      }
+    : await loadConfigForPersona(input.persona);
   // An explicit `--persona` must EXIST before anything is written. Without
   // this check a typo is silently "successful": `loadConfig("robbei")` reads a
   // missing persona file as an empty layer, and the writes below CREATE
@@ -428,7 +440,7 @@ export default defineCommand({
       type: "string",
       required: false,
       description:
-        "Persona to configure voice for. Defaults to the host's default persona.",
+        "Persona to configure voice for. Default: PHANTOMBOT_PERSONA env, then the host's default persona.",
     },
   },
   async run({ args }) {

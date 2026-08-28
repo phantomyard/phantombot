@@ -412,7 +412,7 @@ export default defineCommand({
   args: {
     persona: {
       type: "string",
-      description: "Persona name (default: configured default).",
+      description: "Persona name (default: PHANTOMBOT_PERSONA env, then the configured default persona).",
     },
   },
   async run({ args }) {
