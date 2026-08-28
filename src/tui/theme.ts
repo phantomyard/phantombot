@@ -14,6 +14,21 @@ export const theme = {
   bad: "red",
   /** Selected-row background. */
   selection: "blueBright",
+  /**
+   * The header/footer bars.
+   *
+   * A bar is a filled Box, never a run of spaces: the layout engine paints the
+   * background across the box's own width, so it stays flush on any resize.
+   * Bar text has its OWN colours and never uses `theme.dim`: the bar is light
+   * grey, so the body's light-on-dark palette has no contrast on it. Bar text
+   * is DARK — both grey-on-grey and white-on-grey are unreadable here.
+   */
+  bar: {
+    bg: "blackBright",
+    fg: "black",
+    accent: "blue",
+    dim: "black",
+  },
 } as const;
 
 export const glyph = {
@@ -27,6 +42,49 @@ export const glyph = {
   arrow: "→",
   gear: "⚙",
   play: "▶",
+} as const;
+
+/**
+ * Footer badges: one glyph per ACTION, not per key.
+ *
+ * The badge says what the key DOES, so the same action carries the same mark
+ * on every screen — `↵ send` and `↵ open` are different things and read
+ * differently, while `⚙ settings` is the same thing wherever it appears. Keys
+ * differ per screen (`esc` here, `←` there); actions do not. Single-width
+ * glyphs only: a double-width emoji advances two columns in some fonts and one
+ * in others, which is how a footer row starts shearing.
+ */
+export const badge = {
+  send: "➤",
+  history: "⇅",
+  scroll: "↕",
+  move: "⇅",
+  select: "⇅",
+  settings: "⚙",
+  phantoms: "◈",
+  quit: "✖",
+  back: "←",
+  open: "⏎",
+  chat: "✉",
+  new: "+",
+  restart: "↻",
+  doctor: "✚",
+  keys: "✻",
+  mcp: "⚭",
+  logs: "▤",
+  search: "⌕",
+  run: "▶",
+  edit: "✎",
+  save: "✓",
+  cancel: "✗",
+  unset: "✗",
+  preview: "♪",
+  change: "⇄",
+  embeddings: "❋",
+  reindex: "↻",
+  background: "⇥",
+  continue: "→",
+  test: "◉",
 } as const;
 
 /** `42 MB`, `1.2 GB`, or `—` when the number is unknown. */

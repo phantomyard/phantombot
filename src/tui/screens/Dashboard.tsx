@@ -22,8 +22,9 @@ import { Box, Text, useInput } from "ink";
 import { Frame, Rule } from "../components/Frame.tsx";
 import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
+import { frameChromeRows } from "../chrome.ts";
 import { Selectable } from "../components/Selectable.tsx";
-import { glyph, humanBytes, theme } from "../theme.ts";
+import { badge, glyph, humanBytes, theme } from "../theme.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../snapshot.ts";
 
 function Cell(props: {
@@ -125,16 +126,17 @@ export function DashboardScreen(props: {
   const size = useTerminalSize();
   const view = scrollWindow(
     personas.map(() => 1),
-    viewportRows(size, 16),
+    viewportRows(size, 14 + frameChromeRows()),
     cursor,
   );
 
   return (
     <Frame
       title={["phantombot", "settings"]}
+      // The header already prints the version — repeating it here gave
+      // `phantombot v1.1.316 ▸ settings ... 1.1.316 · stable`.
       status={[
-        props.host.version,
-        props.host.updateChannel,
+        `channel: ${props.host.updateChannel}`,
         // The SERVICE's state, not this process's — see HostSnapshot.
         props.host.serviceActive === undefined
           ? undefined
@@ -145,14 +147,14 @@ export function DashboardScreen(props: {
         .filter(Boolean)
         .join(" · ")}
       footer={[
-        { key: "↵", label: "open" },
-        { key: "c", label: "chat" },
-        { key: "n", label: "new" },
-        { key: "r", label: "restart" },
-        { key: "d", label: "doctor" },
-        { key: "k", label: "keys" },
-        { key: "m", label: "mcp" },
-        { key: "esc", label: "back to chat" },
+        { icon: badge.open, key: "↵", label: "Open" },
+        { icon: badge.chat, key: "c", label: "Chat" },
+        { icon: badge.new, key: "n", label: "New" },
+        { icon: badge.restart, key: "r", label: "Restart" },
+        { icon: badge.doctor, key: "d", label: "Doctor" },
+        { icon: badge.keys, key: "k", label: "Keys" },
+        { icon: badge.mcp, key: "m", label: "MCP" },
+        { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
       <Box>
