@@ -43,8 +43,17 @@ import type { ChatMessage, ChatSession } from "../chatSession.ts";
  */
 export const CHAT_CHROME_ROWS = 10;
 
+/**
+ * `14:07`, or nothing at all.
+ *
+ * History loaded from the memory store carries no timestamp (`at: 0`), and
+ * stamping those rows with `new Date()` labelled yesterday's conversation with
+ * this minute — every message in a reopened thread claimed to have been sent
+ * seconds ago. An absent time is honest; a wrong one is not.
+ */
 function timeOf(at: number): string {
-  const d = at ? new Date(at) : new Date();
+  if (!at) return "";
+  const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
@@ -64,7 +73,9 @@ function Message(props: {
         >
           {` ${isUser ? "you" : props.personaName} `}
         </Text>
-        <Text color={theme.dim}>{"  " + timeOf(props.message.at)}</Text>
+        <Text color={theme.dim}>
+          {props.message.at ? `  ${timeOf(props.message.at)}` : ""}
+        </Text>
       </Box>
       {(props.message.tools ?? []).map((tool, i) => (
         <Box key={i} paddingLeft={2}>

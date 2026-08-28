@@ -195,3 +195,26 @@ describe("chat activity indicator", () => {
     }
   });
 });
+
+describe("message timestamps", () => {
+  test("history with no stored time shows no time, rather than claiming now", async () => {
+    // Turns loaded from the memory store arrive with `at: 0`. Stamping them
+    // with `new Date()` labelled a thread from last week with this minute.
+    const session: ChatSession = {
+      persona: "alice",
+      conversation: "cli:tui:alice",
+      history: [{ role: "user", text: "from yesterday", at: 0 }],
+      async *send() {},
+      async close() {},
+    };
+    const { stdout, instance } = await mount(session);
+    try {
+      const frame = lastFrame(stdout.frames);
+      expect(frame).toContain("from yesterday");
+      expect(frame).not.toMatch(/from yesterday[\s\S]*?\d\d:\d\d/);
+      expect(frame).not.toMatch(/you\s+\d\d:\d\d/);
+    } finally {
+      instance.unmount();
+    }
+  });
+});
