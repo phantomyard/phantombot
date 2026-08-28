@@ -139,19 +139,31 @@ describe("installMouse", () => {
   function fakeTty() {
     const written: string[] = [];
     const handlers: Array<(chunk: string) => void> = [];
+    const calls: string[] = [];
     const stdin = {
       isTTY: true,
       on(_event: string, fn: (chunk: string) => void) {
         handlers.push(fn);
       },
       off() {},
-      setRawMode() {},
+      setRawMode(mode: boolean) {
+        calls.push(`rawMode:${mode}`);
+      },
+      pause() {
+        calls.push("pause");
+      },
+      resume() {
+        calls.push("resume");
+      },
+      unref() {
+        calls.push("unref");
+      },
     } as unknown as NodeJS.ReadStream;
     const stdout = {
       isTTY: true,
       write: (chunk: string) => written.push(chunk),
     } as unknown as NodeJS.WriteStream;
-    return { stdin, stdout, written, handlers };
+    return { stdin, stdout, written, handlers, calls };
   }
 
   test("enables reporting on install and restores the terminal on teardown", () => {
@@ -163,6 +175,23 @@ describe("installMouse", () => {
     // Idempotent: a crash path may call it after `exit` already did.
     installed.teardown();
     expect(written.filter((w) => w === MOUSE_OFF)).toHaveLength(1);
+  });
+
+  test("teardown RELEASES the real stdin so the process can exit", () => {
+    // `^q` used to leave the process alive with no frame on the screen: Ink
+    // only ever cleans up the FILTERED stream it was handed, so the TTY we
+    // resumed stayed a referenced handle and held the event loop open. Nothing
+    // about the frame shows this, which is why the assertion is on the stream.
+    const { stdin, stdout, calls } = fakeTty();
+    const installed = installMouse({
+      stdin,
+      stdout,
+      dispatcher: new MouseDispatcher(),
+    });
+    installed.teardown();
+    expect(calls).toContain("pause");
+    expect(calls).toContain("unref");
+    expect(calls).toContain("rawMode:false");
   });
 
   test("Ink's stdin receives keystrokes but never mouse bytes", async () => {

@@ -330,6 +330,18 @@ export function installMouse(options: InstallMouseOptions = {}): InstalledMouse 
       stdin.off("data", onData);
       dispatcher.enabled = false;
       stdout.write(MOUSE_OFF);
+      // RELEASE THE REAL STDIN, or the process never exits.
+      //
+      // Ink is handed the FILTERED stream, so the cleanup it does on unmount —
+      // drop raw mode, pause, unref — lands on the PassThrough, not on the TTY
+      // we actually resumed. A resumed TTY stdin is a referenced handle: the
+      // event loop stays alive with nothing drawing on the screen, which is
+      // exactly the `^q` symptom (frame gone, shell not back, only SIGINT
+      // ends it). Removing our `data` listener is not enough; the stream has
+      // to be paused and unreferenced.
+      stdin.setRawMode?.(false);
+      stdin.pause?.();
+      stdin.unref?.();
     },
   };
 }
