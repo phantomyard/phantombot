@@ -31,6 +31,7 @@ import { render } from "ink";
 import React from "react";
 
 import { App } from "../src/tui/App.tsx";
+import type { ChatSession } from "../src/tui/chatSession.ts";
 import type { HostSnapshot } from "../src/tui/snapshot.ts";
 
 /**
@@ -65,6 +66,26 @@ function fakeStdout() {
   s.frames = frames;
   s.write = (c: string) => void frames.push(c);
   return s;
+}
+
+/**
+ * A `ChatSession` that opens instantly and needs nothing on disk. The real
+ * opener is injected in production; here it is stubbed so the session-gate
+ * bug is OBSERVABLE. With `openChat`, a temp persona that does not exist
+ * rejects on both the fixed and the broken gate, so the frame reads
+ * `opening alice…` either way and the regression passes a green suite.
+ */
+function fakeSession(persona: string): ChatSession {
+  return {
+    persona,
+    conversation: `cli:tui:${persona}`,
+    history: [],
+    // eslint-disable-next-line require-yield
+    async *send() {
+      return;
+    },
+    close: async () => {},
+  } as unknown as ChatSession;
 }
 
 const HOST: HostSnapshot = {
@@ -138,6 +159,10 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
     instance,
     created,
     frame: () => stdout.frames.join(""),
+    // `debug: true` rewrites the WHOLE screen on every render, so the last
+    // write is the current frame. Needed wherever a test asserts what a screen
+    // is NOT showing — `frame()` still holds every earlier screen.
+    lastFrame: () => stdout.frames[stdout.frames.length - 1] ?? "",
     press: async (bytes: string) => {
       stdin.write(bytes);
       await tick();
@@ -172,6 +197,40 @@ describe("first run", () => {
     await app.press("\x11"); // ^q
     await tick();
     expect(exited).toBe(true);
+  });
+
+  test("completing the wizard opens a chat session for the name typed", async () => {
+    // The pinning test for bug 1. `<App>` renders ONCE, so the broken gate
+    // (`if (!props.startPersona) return`) can never fire on this path: the
+    // prop is `undefined` for the whole life of the app. With a working
+    // opener injected, the difference is visible — the fixed gate mounts the
+    // chat screen, the broken one sits on the placeholder forever.
+    const opened: string[] = [];
+    const app = mount({
+      startPersona: undefined,
+      openSession: async ({ persona }) => {
+        opened.push(persona);
+        return fakeSession(persona);
+      },
+    });
+    await tick();
+
+    await app.press("alice");
+    for (let i = 0; i < 12 && app.created.length === 0; i++) {
+      await app.press("\r");
+    }
+    expect(app.created).toEqual(["alice"]);
+    await tick();
+
+    // Opened for the name the USER typed, not the host default — the wizard
+    // builds a persona that did not exist when `<App>` was constructed.
+    expect(opened).toEqual(["alice"]);
+
+    // And the chat screen is actually mounted, not the placeholder.
+    const frame = app.lastFrame();
+    expect(frame).not.toContain("opening alice");
+    expect(frame).toContain("interrupt");
+    expect(frame).toContain("settings");
   });
 
   test("an incomplete persona opens the wizard, not chat", async () => {

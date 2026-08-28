@@ -46,7 +46,7 @@ import { McpScreen } from "./screens/Mcp.tsx";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
 import { mouse } from "./mouse.ts";
-import { loadConfigForPersona } from "../config.ts";
+import { loadConfigForPersona, type Config } from "../config.ts";
 import { runMemorySearch } from "../cli/memory.ts";
 import { runDoctor, type DoctorReport } from "../cli/doctor.ts";
 import type { WizardStep } from "../lib/personaComplete.ts";
@@ -70,6 +70,16 @@ export interface AppProps {
   /** Where the wizard resumes, when it is the opening screen. */
   wizardStartAt?: WizardStep;
   onCreatePersona: (answers: WizardAnswers) => Promise<void>;
+  /**
+   * Seam for tests only; production always uses `openChat`. Injectable so the
+   * session gate can be pinned by a test that FAILS when the gate regresses —
+   * with the real opener, a nonexistent temp persona rejects either way and the
+   * frame reads "opening …" in both worlds, so the bug survives a green suite.
+   */
+  openSession?: (input: {
+    config: Config;
+    persona: string;
+  }) => Promise<ChatSession>;
 }
 
 export function App(props: AppProps): React.ReactElement {
@@ -147,7 +157,10 @@ export function App(props: AppProps): React.ReactElement {
     let opened: ChatSession | undefined;
     void (async () => {
       const { config } = await loadConfigForPersona(personaName);
-      const chat = await openChat({ config, persona: personaName });
+      const chat = await (props.openSession ?? openChat)({
+        config,
+        persona: personaName,
+      });
       if (cancelled) {
         await chat.close();
         return;
