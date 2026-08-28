@@ -16,8 +16,12 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import { hostSnapshot, type HostSnapshot } from "./snapshot.ts";
 import {
+  applyAutostart,
+  applyDefaultPersona,
   applyEmbedding,
   applyVoice,
+  describeAutostartChange,
+  describeDefaultPersonaChange,
   describeEmbeddingChange,
   describeVoiceChange,
   restartService,
@@ -25,6 +29,7 @@ import {
   unsetSecret,
   type Consequence,
 } from "./actions.ts";
+import { Frame } from "./components/Frame.tsx";
 import { Prompt } from "./components/Prompt.tsx";
 import { Confirm } from "./components/Confirm.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
@@ -71,13 +76,24 @@ export function App(props: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [host, setHost] = useState(props.host);
+  // An INCOMPLETE persona arrives with both a name and a resume point, so the
+  // wizard must win over chat here — otherwise `resolveOpeningScreen`'s resume
+  // path is unreachable and a user whose harness is uninstalled lands in a chat
+  // box wired to a brain that does not exist.
   const [screen, setScreen] = useState<Screen>(
-    props.startPersona ? "chat" : "wizard",
+    props.wizardStartAt ? "wizard" : props.startPersona ? "chat" : "wizard",
   );
   const [personaName, setPersonaName] = useState(
     props.startPersona ?? host.defaultPersona,
   );
   const [session, setSession] = useState<ChatSession | undefined>();
+  /**
+   * Latched the first time chat is reached — including from the wizard's
+   * `onFinish`, which is the path that had no way to set it before.
+   */
+  const [chatArmed, setChatArmed] = useState(
+    Boolean(props.startPersona) && !props.wizardStartAt,
+  );
   const [doctorReport, setDoctorReport] = useState<DoctorReport | undefined>();
   const [doctorRunning, setDoctorRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
@@ -116,7 +132,17 @@ export function App(props: AppProps): React.ReactElement {
   // One chat session per persona, opened lazily and kept across screen
   // switches so `^s` then `esc` returns to the same thread.
   useEffect(() => {
-    if (!props.startPersona) return;
+    if (screen === "chat") setChatArmed(true);
+  }, [screen]);
+
+  useEffect(() => {
+    // Keyed on `chatArmed`, never on the initial prop: `<App>` is rendered
+    // once, so gating on `props.startPersona` leaves the session undefined
+    // forever after the wizard finishes — a frozen, keyless screen. And armed
+    // ONCE rather than tracking `screen`, because a session that closed on `^s`
+    // and reopened on `esc` would re-read history and lose the thread, which is
+    // the whole reason the session is held above the screen switch.
+    if (!chatArmed || !personaName) return;
     let cancelled = false;
     let opened: ChatSession | undefined;
     void (async () => {
@@ -128,12 +154,17 @@ export function App(props: AppProps): React.ReactElement {
       }
       opened = chat;
       setSession(chat);
-    })();
+    })().catch((e: unknown) => {
+      // A session that cannot open must SAY so and stay quittable. Without
+      // this the app sits on "opening …" forever with nothing but an unhandled
+      // rejection in a log the user is not reading.
+      if (!cancelled) setNotice(`could not open ${personaName}: ${(e as Error).message}`);
+    });
     return () => {
       cancelled = true;
       void opened?.close();
     };
-  }, [personaName, props.startPersona]);
+  }, [personaName, chatArmed]);
 
   const refresh = useCallback(async () => {
     setHost(await hostSnapshot());
@@ -153,11 +184,20 @@ export function App(props: AppProps): React.ReactElement {
     });
   }, []);
 
-  useInput((_char, key) => {
+  useInput((char, key) => {
     // A global safety net: esc from any leaf screen goes back to chat rather
     // than to a shell, so there is never a dead end.
     if (key.escape && screen !== "chat" && screen !== "dashboard") {
       setScreen("dashboard");
+      return;
+    }
+    // The one state no screen owns the keyboard for: chat before its session
+    // has opened. `exitOnCtrlC: false` means Ink will not rescue us either, so
+    // without this the window between "wizard finished" and "session ready" —
+    // or a session that never opens because the harness is gone — is
+    // unquittable except by killing the terminal, with mouse reporting still on.
+    if (screen === "chat" && !session && !modal) {
+      if ((key.ctrl && (char === "q" || char === "c")) || key.escape) exit();
     }
   });
 
@@ -229,10 +269,18 @@ export function App(props: AppProps): React.ReactElement {
 
     if (screen === "chat") {
       if (!session) {
+        // NEVER a bare Text: a reachable state without a Frame is a state
+        // without a footer and without a key that leaves it. `^q` is handled by
+        // the global handler below precisely for this window, because
+        // `ChatScreen` — which owns quit everywhere else — is not mounted yet.
         return (
-          <Box>
+          <Frame
+            title={["phantombot", personaName]}
+            status="starting"
+            footer={[{ key: "^q", label: "quit" }]}
+          >
             <Text color={theme.dim}>opening {personaName}…</Text>
-          </Box>
+          </Frame>
         );
       }
       return (
@@ -299,6 +347,52 @@ export function App(props: AppProps): React.ReactElement {
         <PersonaDetailScreen
           persona={persona}
           onBack={() => setScreen("dashboard")}
+          onToggleAutostart={() => {
+            const on = !(persona.autostart || persona.isDefault);
+            setModal({
+              kind: "confirm",
+              title: `${on ? "Start" : "Stop starting"} ${persona.name} with the daemon?`,
+              consequence: describeAutostartChange(persona.name, on),
+              run: async () => {
+                const { config } = await loadConfigForPersona(persona.name);
+                const r = await applyAutostart({
+                  config,
+                  persona: persona.name,
+                  on,
+                });
+                setNotice(
+                  r.ok
+                    ? `autostart: ${r.list.join(", ") || "none"}`
+                    : `failed: ${r.error}`,
+                );
+                await refresh();
+              },
+            });
+          }}
+          onMakeDefault={() =>
+            setModal({
+              kind: "confirm",
+              title: `Make ${persona.name} the default persona?`,
+              danger: true,
+              consequence: describeDefaultPersonaChange(
+                host.defaultPersona,
+                persona.name,
+              ),
+              run: async () => {
+                const { config } = await loadConfigForPersona(persona.name);
+                const r = await applyDefaultPersona({
+                  config,
+                  persona: persona.name,
+                });
+                setNotice(
+                  r.ok
+                    ? `default_persona: ${host.defaultPersona} → ${persona.name}`
+                    : `failed: ${r.error}`,
+                );
+                await refresh();
+              },
+            })
+          }
           onRestart={async () => {
             const r = await restartService();
             setNotice(r.ok ? "service restarted" : `restart failed: ${r.error}`);

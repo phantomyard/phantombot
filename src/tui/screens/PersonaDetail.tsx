@@ -21,6 +21,13 @@ import type { PersonaSnapshot } from "../snapshot.ts";
 
 type Target = "memory" | "voice" | "keys" | "mcp" | "doctor";
 
+/**
+ * The boot rows are ACTIONS, not readings. They sit above the settings list in
+ * one cursor so a user can never be looking at `autostart: no` with no way to
+ * change it from the screen that reports it.
+ */
+type BootRow = "autostart" | "default";
+
 const TARGETS: Array<{ id: Target; label: string }> = [
   { id: "memory", label: "Memory" },
   { id: "voice", label: "Voice" },
@@ -29,20 +36,33 @@ const TARGETS: Array<{ id: Target; label: string }> = [
   { id: "doctor", label: "Doctor" },
 ];
 
+const BOOT_ROWS: BootRow[] = ["autostart", "default"];
+
 export function PersonaDetailScreen(props: {
   persona: PersonaSnapshot;
   onOpen: (target: Target) => void;
+  onToggleAutostart: () => void;
+  onMakeDefault: () => void;
   onBack: () => void;
   onRestart: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
   const p = props.persona;
+  const rows = BOOT_ROWS.length + TARGETS.length;
+
+  const press = (index: number) => {
+    if (index === 0) return props.onToggleAutostart();
+    // Already the default: there is nothing to switch to, and offering the
+    // confirm panel for a no-op would state a consequence that cannot happen.
+    if (index === 1) return p.isDefault ? undefined : props.onMakeDefault();
+    props.onOpen(TARGETS[index - BOOT_ROWS.length]!.id);
+  };
 
   useInput((char, key) => {
     if (key.escape || key.leftArrow) return props.onBack();
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
-    else if (key.downArrow) setCursor((c) => Math.min(TARGETS.length - 1, c + 1));
-    else if (key.return) props.onOpen(TARGETS[cursor]!.id);
+    else if (key.downArrow) setCursor((c) => Math.min(rows - 1, c + 1));
+    else if (key.return) press(cursor);
     else if (char === "r") props.onRestart();
   });
 
@@ -72,26 +92,31 @@ export function PersonaDetailScreen(props: {
       <Field label="configured" value={p.channels.join(", ")} />
 
       <Section title="boot" />
-      <Field
-        label="autostart"
-        value={p.autostart || p.isDefault ? `${glyph.ok} yes` : `${glyph.bad} no`}
-        hint="host setting"
-      />
-      <Field
-        label="default"
-        value={
-          p.isDefault
-            ? `${glyph.ok} yes — owns /update and /restart`
-            : `${glyph.bad} no`
-        }
-      />
+      <Selectable selected={cursor === 0} onPress={() => press(0)}>
+        <Field
+          label="autostart"
+          value={p.autostart || p.isDefault ? `${glyph.ok} yes` : `${glyph.bad} no`}
+          hint="host setting · ↵ toggles"
+        />
+      </Selectable>
+      <Selectable selected={cursor === 1} onPress={() => press(1)}>
+        <Field
+          label="default"
+          value={
+            p.isDefault
+              ? `${glyph.ok} yes — owns /update and /restart`
+              : `${glyph.bad} no`
+          }
+          hint={p.isDefault ? undefined : "↵ hands over /update and /restart"}
+        />
+      </Selectable>
 
       <Section title="settings" />
       {TARGETS.map((target, i) => (
         <Selectable
           key={target.id}
-          selected={i === cursor}
-          onPress={() => props.onOpen(target.id)}
+          selected={i + BOOT_ROWS.length === cursor}
+          onPress={() => press(i + BOOT_ROWS.length)}
         >
           <Box>
             <Box width="20%">

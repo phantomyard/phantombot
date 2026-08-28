@@ -20,7 +20,7 @@ import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
 import { loadConfig, loadConfigForPersona } from "../config.ts";
-import { personaCompleteness } from "../lib/personaComplete.ts";
+import { personaCompleteness, type WizardStep } from "../lib/personaComplete.ts";
 import { runPersonaNew } from "../cli/persona-new.ts";
 import { log } from "../lib/logger.ts";
 
@@ -34,7 +34,7 @@ import { log } from "../lib/logger.ts";
  */
 export async function resolveOpeningScreen(): Promise<{
   persona?: string;
-  wizardStartAt?: ReturnType<typeof String>;
+  wizardStartAt?: WizardStep;
 }> {
   const host = await loadConfig();
   const { personas } = await hostSnapshot();
@@ -59,7 +59,7 @@ export async function startTui(): Promise<number> {
     <App
       host={host}
       startPersona={opening.persona}
-      wizardStartAt={opening.wizardStartAt as never}
+      wizardStartAt={opening.wizardStartAt}
       onCreatePersona={async (answers: WizardAnswers) => {
         await createPhantomFromWizard(answers);
       }}

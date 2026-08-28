@@ -39,7 +39,7 @@ import type { EmbedProgress } from "../lib/embedJob.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
-import { updateConfigToml } from "../lib/configWriter.ts";
+import { loadState, saveState } from "../state.ts";
 import {
   defaultServiceControl,
   type ServiceControl,
@@ -290,14 +290,44 @@ export function describeDefaultPersonaChange(
   };
 }
 
+/**
+ * Reassign the host-wide default persona.
+ *
+ * WRITES state.json, NOT config.toml. `config.ts` resolves the default as
+ * `state.default_persona ?? globalToml.default_persona` — state WINS — so a
+ * config-only write returns success and changes nothing on any host that has
+ * ever created a persona, switched with `phantombot persona <name>`, or been
+ * healed by `healDefaultPersonaIfBroken`. That is every host in practice.
+ * `saveState` also emits the append-only `state-audit.log` record, which is how
+ * the writer of a bad default stays identifiable after the fact.
+ *
+ * Mirrors `runSwitchDefault` (cli/persona.ts) deliberately, including its
+ * refusal under `PHANTOMBOT_PERSONA`: a persona agent must not be able to
+ * re-point the daemon-wide default, and the TUI is reachable from one.
+ */
 export async function applyDefaultPersona(input: {
   config: Config;
   persona: string;
   serviceControl?: ServiceControl;
 }): Promise<{ ok: boolean; error?: string }> {
-  await updateConfigToml(input.config.configPath, (toml) => {
-    toml.default_persona = input.persona;
-  });
+  const agentPersona = process.env.PHANTOMBOT_PERSONA?.trim();
+  if (agentPersona) {
+    return {
+      ok: false,
+      error:
+        `refusing to switch default_persona to '${input.persona}': running as ` +
+        `persona '${agentPersona}' (PHANTOMBOT_PERSONA).`,
+    };
+  }
+  // Re-load rather than trusting a snapshot: another writer (harness_bins
+  // discovery, the daemon) may have touched state while the confirm panel was
+  // open, and writing a stale object would clobber its fields.
+  const state = await loadState();
+  if ((state.default_persona ?? input.config.defaultPersona) === input.persona) {
+    return { ok: true };
+  }
+  state.default_persona = input.persona;
+  await saveState(state);
   input.config.defaultPersona = input.persona;
   const svc = input.serviceControl ?? defaultServiceControl();
   const r = await svc.restart();
