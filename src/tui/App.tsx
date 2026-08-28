@@ -51,6 +51,7 @@ import { KeysScreen } from "./screens/Keys.tsx";
 import { MemoryScreen, type SearchHit } from "./screens/Memory.tsx";
 import { VoiceScreen } from "./screens/Voice.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
+import { gatherStatus, type StatusRows } from "./status.ts";
 import { McpScreen } from "./screens/Mcp.tsx";
 import { LogsScreen } from "./screens/Logs.tsx";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
@@ -140,6 +141,7 @@ export function App(props: AppProps): React.ReactElement {
     Boolean(props.startPersona) && !props.wizardStartAt,
   );
   const [doctorReport, setDoctorReport] = useState<DoctorReport | undefined>();
+  const [doctorStatus, setDoctorStatus] = useState<StatusRows | undefined>();
   const [doctorRunning, setDoctorRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
   /**
@@ -418,6 +420,16 @@ export function App(props: AppProps): React.ReactElement {
         out: { write: (chunk: string) => void (buffer += chunk) },
       });
       setDoctorReport(JSON.parse(buffer) as DoctorReport);
+      // The live `/status` probes, alongside the checks. Gathered second and
+      // guarded separately: they reach the network, so a slow or failing probe
+      // must not cost the user the report that already succeeded.
+      try {
+        setDoctorStatus(
+          await gatherStatus({ persona: personaName, chain: persona?.chain }),
+        );
+      } catch {
+        setDoctorStatus(undefined);
+      }
     } catch (e) {
       setNotice(`doctor failed: ${(e as Error).message}`);
     } finally {
@@ -690,7 +702,19 @@ export function App(props: AppProps): React.ReactElement {
               },
             });
           }}
-          onMakeDefault={() =>
+          onMakeDefault={() => {
+            // The default is EXCLUSIVE — exactly one phantom owns /update and
+            // /restart — so there is no "off" to toggle to. Pressing the row on
+            // the phantom that already holds it used to be inert, which reads
+            // as a broken row; say what the key would do instead.
+            if (persona.isDefault) {
+              setNotice(
+                host.personas.length > 1
+                  ? `${persona.name} is already the default — open another phantom and press ↵ on Default to hand it over`
+                  : `${persona.name} is the only phantom on this host, so it is the default`,
+              );
+              return;
+            }
             void askConfirm({
               title: `Make ${persona.name} the default persona?`,
               danger: true,
@@ -711,8 +735,8 @@ export function App(props: AppProps): React.ReactElement {
                 );
                 await refresh();
               },
-            })
-          }
+            });
+          }}
           onOpen={(target) => {
             if (target === "doctor") {
               go("doctor");
@@ -911,6 +935,7 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <DoctorScreen
           report={doctorReport}
+          status={doctorStatus}
           running={doctorRunning}
           onRerun={() => void runTheDoctor()}
           onBack={back}

@@ -35,7 +35,7 @@ import type { ChannelDetail, PersonaSnapshot } from "../snapshot.ts";
 import type { VoiceProvider } from "../../lib/voice.ts";
 
 /** Screens this one leads to. */
-export type Target = "memory" | "voice" | "keys" | "mcp" | "doctor";
+export type Target = "memory" | "voice" | "doctor";
 
 /**
  * Everything the cursor can land on, in screen order.
@@ -52,8 +52,6 @@ export type Row =
   | "voice"
   | "autostart"
   | "default"
-  | "mcp"
-  | "keys"
   | "doctor";
 
 const ROWS: Row[] = [
@@ -64,8 +62,6 @@ const ROWS: Row[] = [
   "voice",
   "autostart",
   "default",
-  "mcp",
-  "keys",
   "doctor",
 ];
 
@@ -131,9 +127,7 @@ export function PersonaDetailScreen(props: {
     if (id === "brain") return props.onChangeBrain();
     if (id === "channels") return props.onChangeChannels();
     if (id === "autostart") return props.onToggleAutostart();
-    // Already the default: there is nothing to switch to, and offering the
-    // confirm panel for a no-op would state a consequence that cannot happen.
-    if (id === "default") return p.isDefault ? undefined : props.onMakeDefault();
+    if (id === "default") return props.onMakeDefault();
     return props.onOpen(id);
   };
 
@@ -317,7 +311,7 @@ export function PersonaDetailScreen(props: {
       node: (
         <MenuItem
           icon="⏻"
-          label="Boot"
+          label="Autostart"
           description="starts with the daemon"
           badge={
             p.autostart || p.isDefault ? `${glyph.ok} on` : `${glyph.bad} off`
@@ -344,40 +338,12 @@ export function PersonaDetailScreen(props: {
             }
             badge={p.isDefault ? `${glyph.ok} yes` : `${glyph.bad} no`}
             badgeColor={p.isDefault ? theme.ok : theme.dim}
-            activateHint={p.isDefault ? undefined : "↵ change"}
+            activateHint="↵ change"
             selected={row === "default"}
             onPress={() => press("default")}
           />
           <Box marginBottom={1} />
         </>
-      ),
-    },
-    {
-      id: "mcp",
-      height: 1,
-      node: (
-        <MenuItem
-          icon="◇"
-          label="MCP"
-          description="external servers and their tools"
-          activateHint="↵ manage"
-          selected={row === "mcp"}
-          onPress={() => press("mcp")}
-        />
-      ),
-    },
-    {
-      id: "keys",
-      height: 1,
-      node: (
-        <MenuItem
-          icon="⚿"
-          label="Vault"
-          description={`${p.secretNames?.length ?? 0} secrets`}
-          activateHint="↵ manage"
-          selected={row === "keys"}
-          onPress={() => press("keys")}
-        />
       ),
     },
     {

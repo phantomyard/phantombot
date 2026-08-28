@@ -344,11 +344,12 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("PHANTOMS");
   });
 
-  test("the table has no Keys/MCP keys — both are scoped to ONE phantom", async () => {
-    // Vault and MCP are per-persona, so acting on them from a host-level table
-    // means silently acting on whichever row the cursor happens to sit on.
-    // They live inside a phantom's own settings; the table must not shortcut
-    // there. Both halves: not advertised, and INERT.
+  test("Vault and MCP are gone from both the table and the settings screen", async () => {
+    // They were rows on a settings screen whose job is the setup `phantombot
+    // init` performs — harness, channels, voice, autostart. A secret store and
+    // an external-server registry are neither, and each one on the screen was a
+    // row a first-time user had to decide about. Removed, not moved: the CLI
+    // (`phantombot vault`, `phantombot mcp`) still owns both.
     const app = await mountApp();
     await app.press("\x13"); // ^s -> the table
     expect(app.frame()).toContain("PHANTOMS");
@@ -360,12 +361,12 @@ describe("reaching settings and the phantom list", () => {
     await app.press("m");
     expect(app.frame()).toContain("PHANTOMS");
 
-    // Still reachable the one honest way: open the phantom first.
+    // And not on the phantom's own settings screen either.
     await app.press("c");
     const frame = app.frame();
     expect(frame).toContain("▸ alice");
-    expect(frame).toContain("MCP");
-    expect(frame).toContain("Vault");
+    expect(frame).not.toContain("MCP");
+    expect(frame).not.toContain("Vault");
   });
 
   test("the table has no 'd Doctor' key — doctor is per-phantom", async () => {

@@ -12,6 +12,7 @@ import { Box, Text, useInput } from "ink";
 import { Frame } from "../components/Frame.tsx";
 import { badge, glyph, humanBytes, theme } from "../theme.ts";
 import type { DoctorReport } from "../../cli/doctor.ts";
+import type { StatusRows } from "../status.ts";
 
 function Check(props: {
   ok: boolean | "warn";
@@ -41,6 +42,8 @@ function Check(props: {
 
 export function DoctorScreen(props: {
   report?: DoctorReport;
+  /** The `/status` reading — live subsystem probes, gathered alongside. */
+  status?: StatusRows;
   running: boolean;
   onRerun: () => void;
   onBack: () => void;
@@ -96,6 +99,24 @@ export function DoctorScreen(props: {
               label="nightly backlog"
               detail={`${r.nightly.backlog} day(s) pending${r.nightly.oldest_pending ? `, oldest ${r.nightly.oldest_pending}` : ""}`}
             />
+          ) : null}
+          {props.status && props.status.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              <Text color={theme.dim} bold>
+                STATUS
+              </Text>
+              {props.status.map(([label, value]) => (
+                <Box key={label}>
+                  <Box width="6%" />
+                  <Box width="34%">
+                    <Text color={theme.dim}>{label}</Text>
+                  </Box>
+                  <Box flexGrow={1}>
+                    <Text wrap="truncate">{value}</Text>
+                  </Box>
+                </Box>
+              ))}
+            </Box>
           ) : null}
         </Box>
       )}
