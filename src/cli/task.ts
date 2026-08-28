@@ -634,7 +634,7 @@ export default defineCommand({
           type: "string",
           required: false,
           description:
-            "Persona to file this task against. Defaults to the host's default persona.",
+            "Persona to file this task against. Defaults to PHANTOMBOT_PERSONA, then the host's default persona.",
         },
       },
       async run({ args }) {
@@ -668,7 +668,7 @@ export default defineCommand({
           type: "string",
           required: false,
           description:
-            "Persona whose tasks to list. Defaults to the host's default persona.",
+            "Persona whose tasks to list. Defaults to PHANTOMBOT_PERSONA, then the host's default persona.",
         },
       },
       async run({ args }) {
@@ -716,7 +716,7 @@ export default defineCommand({
           type: "string",
           required: false,
           description:
-            "Persona to run the selftest under. Defaults to the host's default persona.",
+            "Persona to run the selftest under. Defaults to PHANTOMBOT_PERSONA, then the host's default persona.",
         },
       },
       async run({ args }) {
