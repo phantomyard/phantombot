@@ -1,73 +1,128 @@
 /**
- * Which part of a conversation fits on screen.
+ * The conversation, as ROWS.
  *
- * A full-screen app has a FIXED height, so the transcript has to be clipped
- * before it is handed to the layout engine. Letting Yoga overflow instead is
- * what tears a frame: the content grows past the window, the border is pushed
- * off the bottom, and the terminal scrolls the alternate screen — which is
- * precisely the deformation this rewrite exists to remove.
+ * A full-screen app has a fixed height, so the transcript has to be clipped
+ * before it is handed to the layout engine: letting Yoga overflow is what
+ * tears a frame (the border is pushed off the bottom and the alternate screen
+ * scrolls). This module decides which rows are on screen.
  *
- * Clipping keeps the NEWEST messages: a chat scrolled to the bottom is the
- * only sane default, since the thing you are waiting for is the reply being
- * written right now.
+ * It used to clip whole MESSAGES and separately GUESS how many rows each one
+ * would occupy — two descriptions of the same thing, which drifted apart every
+ * time the screen changed (the `^t` removal broke it once already). Now there
+ * is one description: every message is flattened into typed lines here, the
+ * screen draws exactly those lines, and a row of scroll is a row of this
+ * array. Measurement and rendering cannot disagree, and a message taller than
+ * the window can be scrolled THROUGH rather than being all-or-nothing.
  *
- * This module is deliberately pure and free of React and of `process.stdout`.
- * The root measures the window (see `terminal.ts`) and passes the numbers in;
- * nothing here reaches for them. It is also the ONLY place a column count is
- * used for arithmetic, and it uses it to count rows, never to draw anything —
- * borders still come from `borderStyle`, so no glyph width can shear them.
+ * Deliberately pure: no React, no `process.stdout`. The root measures the
+ * window (`terminal.ts`) and passes the numbers in. Columns are used to count
+ * rows, never to draw — borders still come from `borderStyle`, so no glyph
+ * width can shear them.
  */
 
 import type { ChatMessage } from "./chatSession.ts";
 
-/** Rows one message occupies: a header, its tool lines, its wrapped body. */
-export function messageHeight(
-  message: ChatMessage,
+export type TranscriptLine =
+  | { kind: "header"; role: "user" | "assistant"; name: string; time: string }
+  | { kind: "tool"; title: string; duration: string }
+  | { kind: "text"; text: string; error: boolean }
+  | { kind: "gap" };
+
+/** `14:07`, or nothing at all — history from the store carries no timestamp. */
+function timeOf(at: number): string {
+  if (!at) return "";
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Hard-wrap one logical line to `width`, keeping at least one row. */
+function wrap(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.length <= width) {
+      out.push(line);
+      continue;
+    }
+    for (let i = 0; i < line.length; i += width) out.push(line.slice(i, i + width));
+  }
+  return out.length === 0 ? [""] : out;
+}
+
+export interface TranscriptOptions {
+  /** Name shown on the assistant's header row. */
+  personaName: string;
+  /** Formats a tool's duration; `undefined` while the call is still running. */
+  formatDuration: (ms: number | undefined) => string;
+}
+
+/** Every row of the conversation, oldest first. */
+export function transcriptLines(
+  messages: readonly ChatMessage[],
   columns: number,
-  options: { showTools?: boolean } = {},
-): number {
+  options: TranscriptOptions,
+): TranscriptLine[] {
   const width = Math.max(20, columns - 6);
-  const body = message.error ?? message.text ?? "";
-  const bodyRows = body
-    .split("\n")
-    .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / width)), 0);
-  // Collapsed, a message's tool calls are ONE summary row — not one row each.
-  // Counting them per-call while the screen draws a single line made the
-  // clipper reserve space that was never used, so a thread with tool calls
-  // scrolled itself off the top early. Must stay in step with `Message` in
-  // screens/Chat.tsx.
-  const tools = message.tools ?? [];
-  const toolRows = options.showTools
-    ? tools.reduce((rows, tool) => rows + Math.max(1, tool.title.split("\n").length), 0)
-    : tools.length > 0
-      ? 1
-      : 0;
-  // header + tools + body + the blank line between messages
-  return 1 + toolRows + Math.max(1, bodyRows) + 1;
+  const lines: TranscriptLine[] = [];
+  for (const message of messages) {
+    const isUser = message.role === "user";
+    lines.push({
+      kind: "header",
+      role: isUser ? "user" : "assistant",
+      name: isUser ? "you" : options.personaName,
+      time: timeOf(message.at),
+    });
+    for (const tool of message.tools ?? []) {
+      for (const title of tool.title.split("\n")) {
+        lines.push({
+          kind: "tool",
+          title,
+          duration: options.formatDuration(tool.durationMs),
+        });
+      }
+    }
+    const body = message.error ?? message.text ?? "";
+    for (const row of wrap(body, width)) {
+      lines.push({ kind: "text", text: row, error: message.error !== undefined });
+    }
+    lines.push({ kind: "gap" });
+  }
+  return lines;
+}
+
+export interface TranscriptWindow {
+  lines: TranscriptLine[];
+  /** Rows hidden above and below what is drawn. */
+  above: number;
+  below: number;
+  /** The offset actually used, after clamping. */
+  offset: number;
+  /** The largest offset that still shows content — how far up you can go. */
+  maxOffset: number;
 }
 
 /**
- * The tail of the transcript that fits in `rows`.
+ * The `rows` of transcript on screen, `offset` rows up from the bottom.
  *
- * Always returns at least one message when there is one, even if that message
- * is taller than the window: showing a truncated latest reply beats showing
- * nothing at all while a long answer streams in.
+ * Offset 0 is the live bottom of the conversation, which is the only sane
+ * default: the thing you are waiting for is the reply being written right now.
+ * Scrolling past the top is clamped rather than wrapped or blanked — an empty
+ * window would look exactly like a crash.
  */
-export function visibleMessages(
-  messages: readonly ChatMessage[],
+export function transcriptWindow(
+  lines: readonly TranscriptLine[],
   rows: number,
-  columns: number,
-  options: { showTools?: boolean } = {},
-): ChatMessage[] {
-  if (messages.length === 0) return [];
-  const out: ChatMessage[] = [];
-  let used = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    const height = messageHeight(message, columns, options);
-    if (out.length > 0 && used + height > rows) break;
-    out.unshift(message);
-    used += height;
-  }
-  return out;
+  offset: number,
+): TranscriptWindow {
+  const height = Math.max(1, rows);
+  const maxOffset = Math.max(0, lines.length - height);
+  const at = Math.min(Math.max(Math.round(offset), 0), maxOffset);
+  const end = lines.length - at;
+  const start = Math.max(0, end - height);
+  return {
+    lines: lines.slice(start, end),
+    above: start,
+    below: lines.length - end,
+    offset: at,
+    maxOffset,
+  };
 }
