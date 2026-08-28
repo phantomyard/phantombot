@@ -19,6 +19,7 @@ import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
+import { stripAnsi } from "./helpers/ansi.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -171,7 +172,9 @@ async function openSettings(rows: number) {
   await sleep(80);
   stdin.write("\r"); // open the selected phantom's own settings
   await sleep(80);
-  return (stdout.frames.at(-1) ?? "").split("\n");
+  // Colour codes out: chalk is on in CI (and a sibling suite forces it on
+  // the shared singleton), so assert on the text a user reads.
+  return stripAnsi(stdout.frames.at(-1) ?? "").split("\n");
 }
 
 describe("settings screen in a short window", () => {

@@ -31,6 +31,7 @@ import { App } from "../src/tui/App.tsx";
 import type { ChatSession } from "../src/tui/chatSession.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 import { VERSION } from "../src/version.ts";
+import { stripAnsi } from "./helpers/ansi.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -63,15 +64,7 @@ function fakeStdout() {
 
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
-/**
- * Colour codes out. Whether chalk emits any is not this file's business — a
- * sibling suite forces `chalk.level = 3` on the shared singleton to test the
- * bars, so the SAME frame contains `^q Quit` in isolation and
- * `^q<esc>[39mQuit` in the full run. Assert on the text a user reads.
- */
-const strip = (s: string) =>
-  // eslint-disable-next-line no-control-regex
-  s.replace(/\u001b\[[0-9;]*m/g, "");
+const strip = stripAnsi;
 
 function fakeSession(persona: string): ChatSession {
   return {

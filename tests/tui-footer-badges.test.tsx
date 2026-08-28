@@ -18,6 +18,7 @@ import { render } from "ink";
 
 import { ChatScreen } from "../src/tui/screens/Chat.tsx";
 import { badge } from "../src/tui/theme.ts";
+import { stripAnsi } from "./helpers/ansi.ts";
 import type { ChatSession } from "../src/tui/chatSession.ts";
 
 function fakeStdin() {
@@ -85,7 +86,9 @@ describe("footer badges", () => {
   test("every chat footer item is badged, not only settings", async () => {
     const { stdout, instance } = await mount();
     try {
-      const frame = lastFrame(stdout.frames);
+      // Colour codes out: CI turns chalk on, and the badge/key pair is
+      // rendered with a style change BETWEEN the glyph and the key.
+      const frame = stripAnsi(lastFrame(stdout.frames));
       const expected: Array<[string, string]> = [
         [badge.send, "↵"],
         [badge.history, "↑↓"],
