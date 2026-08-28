@@ -375,14 +375,6 @@ export async function unsetSecret(input: {
   }
 }
 
-export async function restartService(
-  serviceControl?: ServiceControl,
-): Promise<{ ok: boolean; error?: string }> {
-  const svc = serviceControl ?? defaultServiceControl();
-  const r = await svc.restart();
-  return r.ok ? { ok: true } : { ok: false, error: r.stderr ?? "restart failed" };
-}
-
 /**
  * Open a persona's prompt file in the user's editor.
  *

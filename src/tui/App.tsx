@@ -30,7 +30,6 @@ import {
   describeEmbeddingChange,
   describeVoiceChange,
   openInEditor,
-  restartService,
   setSecret,
   unsetSecret,
   type Consequence,
@@ -521,10 +520,6 @@ export function App(props: AppProps): React.ReactElement {
             setPersonaName(name);
             go("persona");
           }}
-          onChat={(name) => {
-            setPersonaName(name);
-            go("chat");
-          }}
           onNew={() => go("wizard")}
           onDoctor={() => {
             go("doctor");
@@ -537,12 +532,6 @@ export function App(props: AppProps): React.ReactElement {
           onMcp={(name) => {
             setPersonaName(name);
             go("mcp");
-          }}
-          onRestart={async () => {
-            const r = await restartService();
-            setNotice(r.ok ? "service restarted" : `restart failed: ${r.error}`);
-            await refresh();
-            await probeService();
           }}
           onBack={back}
         />
@@ -610,10 +599,6 @@ export function App(props: AppProps): React.ReactElement {
               },
             })
           }
-          onRestart={async () => {
-            const r = await restartService();
-            setNotice(r.ok ? "service restarted" : `restart failed: ${r.error}`);
-          }}
           onOpen={(target) => {
             if (target === "doctor") {
               go("doctor");

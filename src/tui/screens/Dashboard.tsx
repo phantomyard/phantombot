@@ -93,12 +93,10 @@ function PersonaRow(props: {
 export function DashboardScreen(props: {
   host: HostSnapshot;
   onOpen: (persona: string) => void;
-  onChat: (persona: string) => void;
   onNew: () => void;
   onDoctor: () => void;
   onKeys: (persona: string) => void;
   onMcp: (persona: string) => void;
-  onRestart: () => void;
   onBack: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -111,12 +109,10 @@ export function DashboardScreen(props: {
     else if (key.downArrow)
       setCursor((c) => Math.min(personas.length - 1, c + 1));
     else if (key.return && current) props.onOpen(current.name);
-    else if (char === "c" && current) props.onChat(current.name);
     else if (char === "n") props.onNew();
     else if (char === "d") props.onDoctor();
     else if (char === "k" && current) props.onKeys(current.name);
     else if (char === "m" && current) props.onMcp(current.name);
-    else if (char === "r") props.onRestart();
   });
 
   // A host with more phantoms than rows must show FEWER, not squeezed ones —
@@ -148,9 +144,7 @@ export function DashboardScreen(props: {
         .join(" · ")}
       footer={[
         { icon: badge.open, key: "↵", label: "Open" },
-        { icon: badge.chat, key: "c", label: "Chat" },
         { icon: badge.new, key: "n", label: "New" },
-        { icon: badge.restart, key: "r", label: "Restart" },
         { icon: badge.doctor, key: "d", label: "Doctor" },
         { icon: badge.keys, key: "k", label: "Keys" },
         { icon: badge.mcp, key: "m", label: "MCP" },

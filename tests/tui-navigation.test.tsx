@@ -304,6 +304,24 @@ describe("reaching settings and the phantom list", () => {
     expect(frame).not.toContain("PHANTOMS");
     expect(frame).toContain("Send");
   });
+  test("the table has no 'c Chat' key — esc IS the way back to the chat", async () => {
+    // Two keys for one destination is two things to keep in sync, and `c` sat
+    // on the row cursor while `esc` returns to the conversation you came from.
+    // Removing the badge alone would leave the key live and invisible, so this
+    // asserts both halves: not advertised, and INERT.
+    const app = await mountApp();
+    await app.press("\x13"); // ^s -> the table
+    expect(app.frame()).toContain("PHANTOMS");
+    expect(app.frame()).not.toContain("Chat");
+
+    await app.press("c");
+    expect(app.frame()).toContain("PHANTOMS"); // still the table
+    expect(app.frame()).not.toContain("Send"); // never fell into the chat
+
+    await app.press("\x1b"); // and esc still gets you there
+    expect(app.frame()).toContain("Send");
+  });
+
   test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
     // The logs pane is reachable two ways, and a hardcoded parent gets one of
     // them wrong: entered with ^l from the chat it must return to the chat,

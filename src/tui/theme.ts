@@ -67,7 +67,6 @@ export const badge = {
   open: "⏎",
   chat: "✉",
   new: "+",
-  restart: "↻",
   doctor: "✚",
   keys: "✻",
   mcp: "⚭",

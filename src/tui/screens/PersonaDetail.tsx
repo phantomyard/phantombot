@@ -120,7 +120,6 @@ export function PersonaDetailScreen(props: {
   onToggleAutostart: () => void;
   onMakeDefault: () => void;
   onBack: () => void;
-  onRestart: () => void;
   onLogs: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -143,7 +142,6 @@ export function PersonaDetailScreen(props: {
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
     else if (key.downArrow) setCursor((c) => Math.min(ROWS.length - 1, c + 1));
     else if (key.return) press(row);
-    else if (char === "r") props.onRestart();
     else if (char === "L") props.onLogs();
   });
 
@@ -421,7 +419,6 @@ export function PersonaDetailScreen(props: {
       footer={[
         { icon: badge.move, key: "↑↓", label: "Move" },
         { icon: badge.edit, key: "↵", label: "Edit" },
-        { icon: badge.restart, key: "r", label: "Restart" },
         { icon: badge.logs, key: "L", label: "Logs" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
