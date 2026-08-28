@@ -1,50 +1,21 @@
 /**
- * Value and choice prompts are clack, and the terminal is handed over around
- * them. (Yes/no lives in the app now — see tests/tui-confirm.test.tsx.)
+ * The terminal hand-over bracket.
  *
- * Two things have to hold or the app breaks in ways a screenshot does not
- * show: a CANCELLED prompt must change nothing, and the renderer must be
- * suspended for the whole prompt and resumed exactly once afterwards — Ink
- * cannot be paused, so an un-bracketed prompt interleaves two applications on
- * one screen.
+ * Nothing is ASKED here any more — yes/no, a typed value and a list are all
+ * screens inside the app (tests/tui-confirm.test.tsx, tests/tui-ask.test.tsx).
+ * What is left is the bracket that lends the terminal to `$EDITOR` and to the
+ * remaining clack subcommand flows, and it has to suspend for the whole call
+ * and resume exactly once afterwards — Ink cannot be paused, so an
+ * un-bracketed hand-over interleaves two applications on one screen.
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
-const CANCEL = Symbol.for("clack.cancel");
-let passwordAnswer: unknown = "hunter2";
-
-mock.module("@clack/prompts", () => ({
-  intro: () => {},
-  outro: () => {},
-  cancel: () => {},
-  note: () => {},
-  isCancel: (v: unknown) => v === CANCEL,
-  password: async () => passwordAnswer,
-  text: async () => passwordAnswer,
-  select: async () => passwordAnswer,
-}));
-
-const { promptValue, setPromptHost, withPromptTerminal } =
+const { setPromptHost, withPromptTerminal } =
   await import("../src/tui/prompts.ts");
 
-describe("promptValue", () => {
-  test("a cancelled secret is undefined, never an empty string", async () => {
-    // The difference matters: "" would be written to the vault as a value,
-    // erasing a credential the user only meant to look at.
-    passwordAnswer = CANCEL;
-    expect(
-      await promptValue({ message: "Set TOKEN", masked: true }),
-    ).toBeUndefined();
-    passwordAnswer = "hunter2";
-    expect(await promptValue({ message: "Set TOKEN", masked: true })).toBe(
-      "hunter2",
-    );
-  });
-});
-
 describe("the prompt host", () => {
-  test("brackets the prompt, and unbrackets even when it throws", async () => {
+  test("brackets the call, and unbrackets even when it throws", async () => {
     const events: string[] = [];
     const restore = setPromptHost(async (fn) => {
       events.push("suspend");
@@ -55,8 +26,7 @@ describe("the prompt host", () => {
       }
     });
     try {
-      passwordAnswer = "hunter2";
-      await promptValue({ message: "Set TOKEN", masked: true });
+      expect(await withPromptTerminal(async () => "ok")).toBe("ok");
       expect(events).toEqual(["suspend", "resume"]);
       events.length = 0;
       await expect(
@@ -64,18 +34,15 @@ describe("the prompt host", () => {
           throw new Error("prompt blew up");
         }),
       ).rejects.toThrow("prompt blew up");
-      // A throwing prompt that never resumed would leave the user staring at a
-      // frozen frame with mouse reporting off and no keys forwarded.
+      // A throwing hand-over that never resumed would leave the user staring
+      // at a frozen frame with mouse reporting off and no keys forwarded.
       expect(events).toEqual(["suspend", "resume"]);
     } finally {
       restore();
     }
   });
 
-  test("without a host installed the prompt still runs — tests and non-TUI callers", async () => {
-    passwordAnswer = "hunter2";
-    expect(await promptValue({ message: "Set TOKEN", masked: true })).toBe(
-      "hunter2",
-    );
+  test("without a host installed the call still runs — tests and non-TUI callers", async () => {
+    expect(await withPromptTerminal(async () => "ran")).toBe("ran");
   });
 });

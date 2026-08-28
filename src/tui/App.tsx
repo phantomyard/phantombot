@@ -36,11 +36,11 @@ import {
 } from "./actions.ts";
 import { Frame } from "./components/Frame.tsx";
 import {
-  promptSelect,
-  promptValue,
   withPromptTerminal,
 } from "./prompts.ts";
 import { ConfirmScreen, type ConfirmRequest } from "./screens/Confirm.tsx";
+import { AskScreen, type AskRequest } from "./screens/Ask.tsx";
+import { ChooseScreen, type ChooseRequest } from "./screens/Choose.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
@@ -162,6 +162,18 @@ export function App(props: AppProps): React.ReactElement {
   const [confirm, setConfirm] = useState<
     (ConfirmRequest & { resolve: (yes: boolean) => void }) | undefined
   >();
+  /**
+   * The pending typed value and the pending list choice, each held with the
+   * resolver that answers it — the same parking trick as `confirm`, and for
+   * the same reason: a question drawn as a SCREEN resolves on a keystroke in a
+   * later turn of the event loop, so the resolver cannot live on the stack.
+   */
+  const [ask, setAsk] = useState<
+    (AskRequest & { resolve: (value: string | undefined) => void }) | undefined
+  >();
+  const [choose, setChoose] = useState<
+    (ChooseRequest & { resolve: (value: string | undefined) => void }) | undefined
+  >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
@@ -214,6 +226,24 @@ export function App(props: AppProps): React.ReactElement {
     },
     [],
   );
+
+  /** Ask for a typed value on a screen. `undefined` means cancelled. */
+  const askValue = useCallback(async (input: AskRequest) => {
+    const value = await new Promise<string | undefined>((resolve) => {
+      setAsk({ ...input, resolve });
+    });
+    setAsk(undefined);
+    return value;
+  }, []);
+
+  /** Ask for one of a list on a screen. `undefined` means cancelled. */
+  const askChoice = useCallback(async (input: ChooseRequest) => {
+    const value = await new Promise<string | undefined>((resolve) => {
+      setChoose({ ...input, resolve });
+    });
+    setChoose(undefined);
+    return value;
+  }, []);
 
   // One chat session per persona, opened lazily and kept across screen
   // switches so `^s` then `esc` returns to the same thread.
@@ -304,6 +334,9 @@ export function App(props: AppProps): React.ReactElement {
     // global esc would answer the question AND pop a level of history behind
     // it, landing the user a screen further back than they asked for.
     if (confirm) return;
+    // Same for the two other question screens: they own their keys, and the
+    // global esc would answer the question AND pop a level behind it.
+    if (ask || choose) return;
     // The log pane, from anywhere: log lines are captured while the TUI runs
     // (they used to be painted over the frame), so there has to be one key
     // that shows them. Toggles, so ^l gets you back out of it too.
@@ -443,8 +476,8 @@ export function App(props: AppProps): React.ReactElement {
     async (target: PersonaSnapshot) => {
       setPrompting(true);
       try {
-        const choice = await promptSelect({
-          message: `Which file for ${target.name}?`,
+        const choice = await askChoice({
+          title: `Which file for ${target.name}?`,
           options: target.identity.files.map((f) => ({
             value: f.path,
             label: f.name,
@@ -463,7 +496,7 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh],
+    [refresh, askChoice],
   );
 
   const body = (() => {
@@ -632,8 +665,8 @@ export function App(props: AppProps): React.ReactElement {
             void (async () => {
               setPrompting(true);
               try {
-                const value = await promptValue({
-                  message: `Set ${name} for ${persona.name}`,
+                const value = await askValue({
+                  title: `Set ${name} for ${persona.name}`,
                   hint: "written straight to the persona vault, never displayed again",
                   masked: true,
                 });
@@ -837,6 +870,26 @@ export function App(props: AppProps): React.ReactElement {
             request={confirm}
             onAnswer={(yes) => confirm.resolve(yes)}
           />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (ask) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <AskScreen request={ask} onAnswer={(v) => ask.resolve(v)} />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (choose) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <ChooseScreen request={choose} onAnswer={(v) => choose.resolve(v)} />
         </Box>
       </TerminalSizeContext.Provider>
     );
