@@ -485,19 +485,76 @@ export function App(props: AppProps): React.ReactElement {
   const changeChannels = useCallback(
     async (target: PersonaSnapshot) => {
       setPrompting(true);
+      const notices: string[] = [];
       try {
         // Imported ON DEMAND for the same reason as the harness graph: pulling
         // the Telegram client in at module scope delays first render enough to
         // drop opening keystrokes.
         const { applyTelegramConfig } = await import("../cli/telegram.ts");
         const { telegramGetMe } = await import("../lib/telegramApi.ts");
-        const { loadConfig } = await import("../config.ts");
+        const { loadConfig, personaDir } = await import("../config.ts");
         const { resolvePersonaWriteTarget } = await import(
           "../lib/personaConfig.ts"
         );
-        const { configureTelegram } = await import("./channelsFlow.ts");
+        const {
+          configurePhantomchat,
+          configureTelegram,
+          offerChannel,
+        } = await import("./channelsFlow.ts");
+        const {
+          ensurePhantomchatIdentity,
+          savePhantomchatAllowlist,
+        } = await import("../cli/phantomchat.ts");
+        const { loadPhantomchatPersonaConfig } = await import(
+          "../channels/phantomchat/personaStore.ts"
+        );
 
+        const questions = {
+          choose: askChoice,
+          value: askValue,
+          confirm: askConfirmValue,
+        };
         const global = await loadConfig();
+        const agentDir = personaDir(global, target.name);
+
+        // Same order as `phantombot init`: phantomchat, then telegram. BOTH are
+        // optional and each one is gated on its own choice, so a phantom that
+        // already has a channel is never walked back through its setup to reach
+        // the other one.
+        const chat = loadPhantomchatPersonaConfig(agentDir);
+        if (
+          await offerChannel(questions, {
+            title: `PhantomChat for ${target.name}`,
+            configured: chat
+              ? chat.allowedNpubs.length > 0
+                ? `${chat.allowedNpubs.length} allowed npub(s)`
+                : "trust-on-first-use armed"
+              : undefined,
+          })
+        ) {
+          notices.push(
+            await configurePhantomchat(target.name, questions, {
+              identity: async () => {
+                const id = await ensurePhantomchatIdentity(agentDir);
+                return {
+                  npub: id.npub,
+                  allowedNpubs:
+                    loadPhantomchatPersonaConfig(agentDir)?.allowedNpubs ?? [],
+                };
+              },
+              save: async ({ allowedNpubs }) => {
+                const id = await ensurePhantomchatIdentity(agentDir);
+                const saved = await savePhantomchatAllowlist({
+                  agentDir,
+                  nsec: id.nsec,
+                  allowedNpubs,
+                });
+                return saved.path;
+              },
+            }),
+          );
+        }
+
         const personaConfig = await loadConfig(target.name);
         const writeTarget = await resolvePersonaWriteTarget({
           configPath: global.configPath,
@@ -510,28 +567,36 @@ export function App(props: AppProps): React.ReactElement {
           personaConfig.channels.telegram ??
           global.channels.telegramPersonas?.[target.name];
 
-        const notice = await configureTelegram(
-          target.name,
-          { choose: askChoice, value: askValue, confirm: askConfirmValue },
-          {
-            existing: existing?.token
-              ? {
-                  token: existing.token,
-                  allowedUserIds: existing.allowedUserIds,
-                }
+        if (
+          await offerChannel(questions, {
+            title: `Telegram for ${target.name}`,
+            configured: existing?.token
+              ? `${existing.allowedUserIds?.length ?? 0} allowed user(s)`
               : undefined,
-            validateToken: telegramGetMe,
-            save: (inputs) =>
-              applyTelegramConfig(
-                writeTarget.path,
-                { ...inputs, pollTimeoutS: 30 },
-                target.name,
-                writeTarget.scope,
-              ),
-            targetPath: writeTarget.path,
-          },
-        );
-        setNotice(notice);
+          })
+        ) {
+          notices.push(
+            await configureTelegram(target.name, questions, {
+              existing: existing?.token
+                ? {
+                    token: existing.token,
+                    allowedUserIds: existing.allowedUserIds,
+                  }
+                : undefined,
+              validateToken: telegramGetMe,
+              save: (inputs) =>
+                applyTelegramConfig(
+                  writeTarget.path,
+                  { ...inputs, pollTimeoutS: 30 },
+                  target.name,
+                  writeTarget.scope,
+                ),
+              targetPath: writeTarget.path,
+            }),
+          );
+        }
+
+        setNotice(notices.join(" · ") || "channels unchanged");
       } catch (e) {
         setNotice(`channels failed: ${(e as Error).message}`);
       } finally {
@@ -900,22 +965,63 @@ export function App(props: AppProps): React.ReactElement {
             )
           }
           onSave={() => {
-            const consequence = describeVoiceChange({ provider: voiceProvider });
-            void askConfirm({
-              title: `Set ${persona.name}'s voice to ${voiceProvider}?`,
-              consequence,
-              run: async () => {
+            void (async () => {
+              setPrompting(true);
+              try {
+                // Saving a provider ALONE used to write `[voice] provider =
+                // "openai"` with no key and no voice: a phantom that reads as
+                // configured and is mute on its first turn. The rest of the
+                // questions `phantombot voice` asks are asked here first.
+                const { configureVoice } = await import("./voiceFlow.ts");
+                const { ENV_KEY_FOR_PROVIDER, validateElevenLabsKey, validateOpenAIKey } =
+                  await import("../lib/voice.ts");
                 const { config } = await loadConfigForPersona(persona.name);
-                const r = await applyVoice({
-                  config,
-                  persona: persona.name,
-                  voice: { provider: voiceProvider },
+                const chosen = await configureVoice(
+                  persona.name,
+                  voiceProvider,
+                  { choose: askChoice, value: askValue, confirm: askConfirmValue },
+                  {
+                    existing: config.voice,
+                    hasKey: (provider) => {
+                      const envVar =
+                        ENV_KEY_FOR_PROVIDER[
+                          provider as "openai" | "elevenlabs"
+                        ];
+                      return Boolean(envVar && process.env[envVar]);
+                    },
+                    validateKey: (provider, key) =>
+                      provider === "openai"
+                        ? validateOpenAIKey(key)
+                        : validateElevenLabsKey(key),
+                  },
+                );
+                if (!chosen) return setNotice("voice unchanged");
+                if ("rejected" in chosen)
+                  return setNotice(`voice unchanged — key rejected: ${chosen.rejected}`);
+
+                await askConfirm({
+                  title: `Set ${persona.name}'s voice to ${chosen.summary}?`,
+                  consequence: describeVoiceChange(chosen.voice),
+                  run: async () => {
+                    const r = await applyVoice({
+                      config,
+                      persona: persona.name,
+                      voice: chosen.voice,
+                      apiKey: chosen.apiKey,
+                    });
+                    setNotice(
+                      r.ok
+                        ? `voice saved: ${chosen.summary}`
+                        : `failed: ${r.error}`,
+                    );
+                    await refresh();
+                    back();
+                  },
                 });
-                setNotice(r.ok ? "voice saved and restarted" : `failed: ${r.error}`);
-                await refresh();
-                back();
-              },
-            });
+              } finally {
+                setPrompting(false);
+              }
+            })();
           }}
           onBack={back}
         />

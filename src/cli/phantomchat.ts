@@ -100,6 +100,75 @@ interface RunInput {
   savePersonaConfig?: typeof savePhantomchatPersonaConfig;
 }
 
+/**
+ * The persona's Nostr identity, minting one only if it genuinely has none.
+ *
+ * Adoption order is load-bearing and belongs in ONE place: identity.json also
+ * derives the persona's VAULT key, so generating a second nsec would orphan
+ * every secret already encrypted under the first. Order: phantomchat.json →
+ * identity.json → mint (atomic create-if-absent, so a vault minting one
+ * concurrently wins and we adopt it).
+ *
+ * `minted` says whether this call created the key — the CLI prints the
+ * back-it-up warning on that, and the TUI shows it in its notice.
+ */
+export async function ensurePhantomchatIdentity(
+  agentDir: string,
+  generate: () => { nsec: string; npub: string } = generateIdentity,
+  load: typeof loadPhantomchatPersonaConfig = loadPhantomchatPersonaConfig,
+): Promise<{ nsec: string; npub: string; minted: boolean }> {
+  const existing = load(agentDir);
+  if (existing) {
+    return {
+      nsec: existing.identity.nsec,
+      npub: existing.identity.npub,
+      minted: false,
+    };
+  }
+  const adopted = readPersonaIdentityNsec(agentDir);
+  if (adopted) {
+    const identity = identityFromNsec(adopted);
+    return { nsec: identity.nsec, npub: identity.npub, minted: false };
+  }
+  const persistedNsec = await createPersonaIdentityIfAbsent(
+    agentDir,
+    generate().nsec,
+  );
+  const persisted = identityFromNsec(persistedNsec);
+  return { nsec: persisted.nsec, npub: persisted.npub, minted: true };
+}
+
+/**
+ * Write the persona's phantomchat block. Shared by the CLI flow and the TUI so
+ * the two cannot write different files for the same answers.
+ *
+ * Relays are never asked for: canonical list → whatever was cached → the PWA
+ * seed. `greeted` is preserved so editing the allowlist does not re-greet
+ * contacts already onboarded. An empty allowlist arms trust-on-first-use.
+ */
+export async function savePhantomchatAllowlist(input: {
+  agentDir: string;
+  nsec: string;
+  allowedNpubs: string[];
+  save?: typeof savePhantomchatPersonaConfig;
+  load?: typeof loadPhantomchatPersonaConfig;
+}): Promise<{ path: string; relays: number; tofu: boolean }> {
+  const existing = (input.load ?? loadPhantomchatPersonaConfig)(input.agentDir);
+  const relays =
+    (await fetchCanonicalRelays()) ??
+    existing?.relays ??
+    [...DEFAULT_PHANTOMCHAT_RELAYS];
+  const save = input.save ?? savePhantomchatPersonaConfig;
+  const path = await save(input.agentDir, {
+    nsec: input.nsec,
+    relays,
+    allowedNpubs: input.allowedNpubs,
+    tofu: input.allowedNpubs.length === 0,
+    greeted: existing?.greeted,
+  });
+  return { path, relays: relays.length, tofu: input.allowedNpubs.length === 0 };
+}
+
 export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   const config = input.config ?? (await loadConfig());
   const svc = input.serviceControl ?? defaultServiceControl();
@@ -126,69 +195,39 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
   p.intro(`Configure phantomchat (Nostr NIP-17 DMs) for persona '${persona}'`);
 
   // 1. Ensure a key exists for THIS persona. Existing → reuse; absent → make.
+  //    The adoption order lives in ensurePhantomchatIdentity so the TUI's
+  //    Channels screen cannot mint a second nsec where this flow reuses one.
   const existing = loadPersonaConfig(agentDir);
-  let nsec: string;
-  let npub: string;
-  if (existing) {
-    nsec = existing.identity.nsec;
-    npub = existing.identity.npub;
+  const { nsec, npub, minted } = await ensurePhantomchatIdentity(
+    agentDir,
+    generate,
+    loadPersonaConfig,
+  );
+  if (!minted) {
     p.note(
-      `Persona '${persona}' already has a phantomchat identity.\n\n` +
+      `Persona '${persona}' already has a Nostr identity. Reusing it.\n\n` +
         `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
         `  ${npub}`,
       "Existing identity",
     );
   } else {
-    // No phantomchat.json yet — but identity.json may already exist (e.g. the
-    // vault minted it first). ADOPT an existing identity rather than generating
-    // a fresh nsec, which would orphan everything the vault already encrypted
-    // under the old key. Only mint when there is genuinely no identity yet.
-    const adopted = readPersonaIdentityNsec(agentDir);
-    if (adopted) {
-      const identity = identityFromNsec(adopted);
-      nsec = identity.nsec;
-      npub = identity.npub;
-      p.note(
-        `Persona '${persona}' already has a Nostr identity (identity.json). Reusing it.\n\n` +
-          `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
-          `  ${npub}`,
-        "Existing identity",
-      );
-    } else {
-      const identity = generate();
-      // The nsec is the persona's SHARED identity (used by the vault too), so it
-      // lives in <persona-dir>/identity.json (mode 0600), not phantomchat.json.
-      // Atomic create-if-absent: if the vault minted one between the read above
-      // and here, we adopt its identity rather than overwriting it — and display
-      // whatever is durably on disk so the npub we show is the real one.
-      const persistedNsec = await createPersonaIdentityIfAbsent(agentDir, identity.nsec);
-      const persisted = identityFromNsec(persistedNsec);
-      nsec = persisted.nsec;
-      npub = persisted.npub;
-      p.note(
-        `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
-          `saved to <persona-dir>/identity.json (mode 0600). Back it up — this\n` +
-          `nsec now also derives the persona's VAULT encryption key, so losing it\n` +
-          `means a new identity (re-add the new npub in the app) AND the existing\n` +
-          `vault ciphertext can no longer be decrypted. This is a reconfigure, not\n` +
-          `a catastrophe: if you lose it, mint a fresh identity, re-add your secrets\n` +
-          `with 'phantombot vault set', and re-pair PhantomChat with the new npub.\n\n` +
-          `  nsec (one-time display): ${nsec}\n\n` +
-          `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
-          `  ${npub}`,
-        "New identity created",
-      );
-    }
+    p.note(
+      `Generated a new Nostr keypair for '${persona}'. The secret (nsec) will be\n` +
+        `saved to <persona-dir>/identity.json (mode 0600). Back it up — this\n` +
+        `nsec now also derives the persona's VAULT encryption key, so losing it\n` +
+        `means a new identity (re-add the new npub in the app) AND the existing\n` +
+        `vault ciphertext can no longer be decrypted. This is a reconfigure, not\n` +
+        `a catastrophe: if you lose it, mint a fresh identity, re-add your secrets\n` +
+        `with 'phantombot vault set', and re-pair PhantomChat with the new npub.\n\n` +
+        `  nsec (one-time display): ${nsec}\n\n` +
+        `Its npub (paste this into the PhantomChat app to DM '${persona}'):\n\n` +
+        `  ${npub}`,
+      "New identity created",
+    );
   }
 
   // 2. Relays are NOT prompted any more — they come from the canonical
-  //    /relays.json (single source of truth shared with the PWA). We warm the
-  //    cache here best-effort; startup re-fetches and re-caches on every run.
-  //    Fallback chain: canonical fetch → existing cached relays → PWA seed.
-  const relays =
-    (await fetchCanonicalRelays()) ??
-    existing?.relays ??
-    [...DEFAULT_PHANTOMCHAT_RELAYS];
+  //    /relays.json, resolved inside savePhantomchatAllowlist below.
 
   // 3. Tell the operator how to get PhantomChat on their own device and where
   //    to find THEIR npub, so the allowlist prompt below has a sensible value to
@@ -244,19 +283,18 @@ export async function runPhantomchat(input: RunInput = {}): Promise<number> {
     );
   }
 
-  const savedPath = await savePersonaConfig(agentDir, {
+  const saved = await savePhantomchatAllowlist({
+    agentDir,
     nsec,
-    relays,
     allowedNpubs,
-    tofu,
-    // Preserve the greeted markers across edits so adding/removing an npub
-    // doesn't re-trigger greetings for contacts already onboarded.
-    greeted: existing?.greeted,
+    save: savePersonaConfig,
+    load: loadPersonaConfig,
   });
+  const savedPath = saved.path;
   p.note(
     `persona: ${persona}\n` +
       `npub: ${npub}\n` +
-      `relays: ${relays.length}\n` +
+      `relays: ${saved.relays}\n` +
       `allowed npubs: ${
         allowedNpubs.length === 0
           ? "(TOFU — first DM trusted)"

@@ -13,6 +13,7 @@
  */
 
 import { parseAllowedUserIds } from "../cli/telegram.ts";
+import { parseAllowedNpubs } from "../cli/phantomchat.ts";
 
 export interface ChannelsQuestions {
   choose(input: {
@@ -64,6 +65,76 @@ const HELP =
  * Run the flow. Returns the line to show in the notice bar — every exit,
  * including a cancel, names what happened to the config.
  */
+/** What the persona's phantomchat identity and allowlist look like now. */
+export interface PhantomchatExisting {
+  npub: string;
+  allowedNpubs: readonly string[];
+}
+
+export interface PhantomchatDeps {
+  /**
+   * Reads the persona's identity, MINTING one only if it has none. Adoption
+   * order matters and belongs to the CLI helper, not here: identity.json also
+   * derives the vault key, so generating a second nsec would orphan every
+   * secret already encrypted under the first.
+   */
+  identity(): Promise<PhantomchatExisting>;
+  save(inputs: { allowedNpubs: string[] }): Promise<string>;
+}
+
+/**
+ * PhantomChat (Nostr DMs) for one persona.
+ *
+ * Only one question is ever asked — the allowlist — because everything else
+ * (`the keypair, the relays`) is either already on disk or fetched from the
+ * canonical relay list. An empty answer is not a cancel: it arms
+ * trust-on-first-use, which is the documented way to pair a fresh phantom.
+ */
+export async function configurePhantomchat(
+  persona: string,
+  q: ChannelsQuestions,
+  deps: PhantomchatDeps,
+): Promise<string> {
+  const existing = await deps.identity();
+  const raw = await q.value({
+    title: `Allowed npubs for ${persona}`,
+    hint: `${persona} is ${existing.npub} — paste YOUR npub from the PhantomChat app; empty arms trust-on-first-use`,
+    initial: existing.allowedNpubs.join(", "),
+  });
+  if (raw === undefined) return "phantomchat unchanged";
+  const allowedNpubs = parseAllowedNpubs(raw);
+  const savedPath = await deps.save({ allowedNpubs });
+  return allowedNpubs.length === 0
+    ? `phantomchat saved to ${savedPath} — trust-on-first-use armed`
+    : `phantomchat saved to ${savedPath}`;
+}
+
+/**
+ * Ask whether to touch a channel at all.
+ *
+ * Both channels are OPTIONAL, and a phantom that already has one configured
+ * must not be walked back through its setup to get past it. So each channel is
+ * gated on an explicit choice whose default is to leave it alone.
+ */
+export async function offerChannel(
+  q: ChannelsQuestions,
+  input: { title: string; configured: string | undefined },
+): Promise<boolean> {
+  const answer = await q.choose({
+    title: input.title,
+    options: [
+      input.configured
+        ? { value: "skip", label: "Keep as it is", hint: input.configured }
+        : { value: "skip", label: "Skip", hint: "optional — set it up later" },
+      {
+        value: "go",
+        label: input.configured ? "Change it" : "Set it up now",
+      },
+    ],
+  });
+  return answer === "go";
+}
+
 export async function configureTelegram(
   persona: string,
   q: ChannelsQuestions,
