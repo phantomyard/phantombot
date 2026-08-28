@@ -126,6 +126,11 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
       stdout: stdout as never,
       exitOnCtrlC: false,
       patchConsole: false,
+      // Ink writes NOTHING to stdout until unmount when `is-in-ci` says it is
+      // in CI (ink/build/ink.js buffers into `lastOutput`), so a frame
+      // assertion passes locally and fails on every runner. `debug` makes each
+      // render write its full output on both paths.
+      debug: true,
     },
   );
   cleanup.push(() => instance.unmount());
