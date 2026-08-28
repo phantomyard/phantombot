@@ -206,6 +206,22 @@ export function App(props: AppProps): React.ReactElement {
    * cancelled prompt is a cancelled ACTION: `run` is only reached on an
    * explicit yes.
    */
+  /** Ask the yes/no question and hand back the answer. */
+  const askConfirmValue = useCallback(
+    async (input: {
+      title: string;
+      consequence: Consequence;
+      danger?: boolean;
+    }) => {
+      const yes = await new Promise<boolean>((resolve) => {
+        setConfirm({ ...input, resolve });
+      });
+      setConfirm(undefined);
+      return yes;
+    },
+    [],
+  );
+
   const askConfirm = useCallback(
     async (input: {
       title: string;
@@ -213,18 +229,10 @@ export function App(props: AppProps): React.ReactElement {
       danger?: boolean;
       run: () => Promise<void>;
     }) => {
-      const yes = await new Promise<boolean>((resolve) => {
-        setConfirm({
-          title: input.title,
-          consequence: input.consequence,
-          danger: input.danger,
-          resolve,
-        });
-      });
-      setConfirm(undefined);
-      if (yes) await input.run();
+      const { run, ...question } = input;
+      if (await askConfirmValue(question)) await run();
     },
-    [],
+    [askConfirmValue],
   );
 
   /** Ask for a typed value on a screen. `undefined` means cancelled. */
@@ -456,13 +464,70 @@ export function App(props: AppProps): React.ReactElement {
     [runFlow],
   );
 
+  /**
+   * Configure the persona's Telegram bot, on screens rather than in the
+   * `phantombot telegram` clack flow. The WRITE path is still that command's
+   * (`applyTelegramConfig` + `resolvePersonaWriteTarget`), so the TUI and the
+   * CLI cannot write different shapes of the same block.
+   */
   const changeChannels = useCallback(
-    (target: PersonaSnapshot) =>
-      runFlow("channels", async () => {
-        const { runTelegram } = await import("../cli/telegram.ts");
-        return runTelegram({ persona: target.name });
-      }),
-    [runFlow],
+    async (target: PersonaSnapshot) => {
+      setPrompting(true);
+      try {
+        // Imported ON DEMAND for the same reason as the harness graph: pulling
+        // the Telegram client in at module scope delays first render enough to
+        // drop opening keystrokes.
+        const { applyTelegramConfig } = await import("../cli/telegram.ts");
+        const { telegramGetMe } = await import("../lib/telegramApi.ts");
+        const { loadConfig } = await import("../config.ts");
+        const { resolvePersonaWriteTarget } = await import(
+          "../lib/personaConfig.ts"
+        );
+        const { configureTelegram } = await import("./channelsFlow.ts");
+
+        const global = await loadConfig();
+        const personaConfig = await loadConfig(target.name);
+        const writeTarget = await resolvePersonaWriteTarget({
+          configPath: global.configPath,
+          personasDir: global.personasDir,
+          persona: target.name,
+        });
+        // Read the way the daemon reads: the persona's own layered block
+        // first, and only then the legacy per-persona routing table.
+        const existing =
+          personaConfig.channels.telegram ??
+          global.channels.telegramPersonas?.[target.name];
+
+        const notice = await configureTelegram(
+          target.name,
+          { choose: askChoice, value: askValue, confirm: askConfirmValue },
+          {
+            existing: existing?.token
+              ? {
+                  token: existing.token,
+                  allowedUserIds: existing.allowedUserIds,
+                }
+              : undefined,
+            validateToken: telegramGetMe,
+            save: (inputs) =>
+              applyTelegramConfig(
+                writeTarget.path,
+                { ...inputs, pollTimeoutS: 30 },
+                target.name,
+                writeTarget.scope,
+              ),
+            targetPath: writeTarget.path,
+          },
+        );
+        setNotice(notice);
+      } catch (e) {
+        setNotice(`channels failed: ${(e as Error).message}`);
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh, askChoice, askValue, askConfirmValue],
   );
 
   /**

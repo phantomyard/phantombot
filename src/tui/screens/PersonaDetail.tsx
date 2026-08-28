@@ -196,7 +196,7 @@ export function PersonaDetailScreen(props: {
           <MenuItem
             icon="◉"
             label="Brain"
-            description={p.chain.join(" → ") || "none configured"}
+            description={`harness: ${p.chain.join(" → ") || "none configured"}`}
             badge={
               p.resolvedHarness ? `${glyph.ok} resolved` : `${glyph.bad} missing`
             }
