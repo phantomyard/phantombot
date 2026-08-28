@@ -141,7 +141,9 @@ export function DashboardScreen(props: {
         </Text>
       </Box>
       <Box>
-        <Box marginRight={1}>
+        {/* Lead-in matching a row's two gutters — `Selectable`'s pointer and
+            the selection bar — so the header sits over its own columns. */}
+        <Box width={4}>
           <Text> </Text>
         </Box>
         <Cell width="16%" dim>
