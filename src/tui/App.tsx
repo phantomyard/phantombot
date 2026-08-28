@@ -516,7 +516,17 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <DashboardScreen
           host={{ ...host, ...(serviceActive === undefined ? {} : { serviceActive }) }}
-          onOpen={(name) => {
+          onChat={(name) => {
+            // Chat is the FLOOR, not somewhere you push onto: arriving here
+            // ends the walk, so the stack is cleared rather than left holding
+            // a table you already used esc-equivalent to leave. This is also
+            // the only persona SWITCHER in the app — the chat screen has no
+            // key for it, so the row you pick is the thread you get.
+            setPersonaName(name);
+            navRef.current = [];
+            setScreen("chat");
+          }}
+          onConfigure={(name) => {
             setPersonaName(name);
             go("persona");
           }}

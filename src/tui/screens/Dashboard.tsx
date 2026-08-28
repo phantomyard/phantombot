@@ -92,7 +92,13 @@ function PersonaRow(props: {
 
 export function DashboardScreen(props: {
   host: HostSnapshot;
-  onOpen: (persona: string) => void;
+  // Two verbs, because a row is two different things depending on why you came
+  // here: someone to TALK to, or something to CONFIGURE. `↵` takes the common
+  // one (and doubles as the persona switcher the chat screen has no key for);
+  // `c` takes the other. Neither reads the cursor implicitly — both are handed
+  // the row they act on.
+  onChat: (persona: string) => void;
+  onConfigure: (persona: string) => void;
   onNew: () => void;
   onBack: () => void;
 }): React.ReactElement {
@@ -105,7 +111,8 @@ export function DashboardScreen(props: {
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
     else if (key.downArrow)
       setCursor((c) => Math.min(personas.length - 1, c + 1));
-    else if (key.return && current) props.onOpen(current.name);
+    else if (key.return && current) props.onChat(current.name);
+    else if (char === "c" && current) props.onConfigure(current.name);
     else if (char === "n") props.onNew();
   });
 
@@ -137,7 +144,8 @@ export function DashboardScreen(props: {
         .filter(Boolean)
         .join(" · ")}
       footer={[
-        { icon: badge.open, key: "↵", label: "Open" },
+        { icon: badge.chat, key: "↵", label: "Chat" },
+        { icon: badge.settings, key: "c", label: "Configure" },
         { icon: badge.new, key: "n", label: "New" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
@@ -191,7 +199,7 @@ export function DashboardScreen(props: {
             key={persona.name}
             persona={persona}
             selected={personas.indexOf(persona) === cursor}
-            onPress={() => props.onOpen(persona.name)}
+            onPress={() => props.onChat(persona.name)}
           />
         ))
       )}

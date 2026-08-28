@@ -229,13 +229,16 @@ afterEach(() => {
   mounted = [];
 });
 
-async function mountApp() {
+const BOB: PersonaSnapshot = { ...ALICE, name: "bob", isDefault: false };
+const TWO_PERSONA_HOST: HostSnapshot = { ...HOST, personas: [ALICE, BOB] };
+
+async function mountApp(host: HostSnapshot = HOST) {
   const stdin = fakeStdin();
   const stdout = fakeStdout();
   stdout.rows = 40;
   const instance = render(
     <App
-      host={HOST}
+      host={host}
       startPersona="alice"
       onCreatePersona={async () => {}}
       openSession={async ({ persona }) => ({
@@ -284,7 +287,7 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).not.toContain("PHANTOMS");
 
     await app.press("\x13"); // ^s
-    await app.press("\r"); // open alice
+    await app.press("c"); // configure alice
     const frame = app.frame();
     expect(frame).toContain("▸ alice");
     expect(frame).toContain("Identity");
@@ -304,22 +307,41 @@ describe("reaching settings and the phantom list", () => {
     expect(frame).not.toContain("PHANTOMS");
     expect(frame).toContain("Send");
   });
-  test("the table has no 'c Chat' key — esc IS the way back to the chat", async () => {
-    // Two keys for one destination is two things to keep in sync, and `c` sat
-    // on the row cursor while `esc` returns to the conversation you came from.
-    // Removing the badge alone would leave the key live and invisible, so this
-    // asserts both halves: not advertised, and INERT.
-    const app = await mountApp();
+  test("↵ chats with the row you picked, and it SWITCHES the thread", async () => {
+    // The table's rows are the only persona switcher in the app — the chat
+    // screen has no key for it — so this asserts the persona that actually
+    // opened, not merely that a chat appeared. With one row it would pass
+    // against a hardcoded `personaName`, hence two.
+    const app = await mountApp(TWO_PERSONA_HOST);
     await app.press("\x13"); // ^s -> the table
     expect(app.frame()).toContain("PHANTOMS");
-    expect(app.frame()).not.toContain("Chat");
+    expect(app.frame()).toContain("Chat");
 
+    await app.press("\x1b[B"); // down to bob
+    await app.press("\r");
+    const frame = app.frame();
+    expect(frame).toContain("Send"); // in a conversation
+    expect(frame).toContain("bob"); // and it is BOB's, not the one we started in
+    expect(frame).not.toContain("PHANTOMS");
+  });
+
+  test("c configures the row you picked — ↵ no longer goes there", async () => {
+    // Two verbs on one row: `↵` talks to it, `c` opens its own settings. The
+    // old build had `↵` on the settings screen, so this pins the swap from
+    // both sides rather than just checking `c` works.
+    const app = await mountApp(TWO_PERSONA_HOST);
+    await app.press("\x13");
+    expect(app.frame()).toContain("Configure");
+
+    await app.press("\x1b[B"); // down to bob
     await app.press("c");
-    expect(app.frame()).toContain("PHANTOMS"); // still the table
-    expect(app.frame()).not.toContain("Send"); // never fell into the chat
+    const frame = app.frame();
+    expect(frame).toContain("▸ bob"); // bob's sections, not alice's
+    expect(frame).toContain("Identity");
+    expect(frame).not.toContain("Send");
 
-    await app.press("\x1b"); // and esc still gets you there
-    expect(app.frame()).toContain("Send");
+    await app.press("\x1b"); // esc still unwinds to the table it came from
+    expect(app.frame()).toContain("PHANTOMS");
   });
 
   test("the table has no Keys/MCP keys — both are scoped to ONE phantom", async () => {
@@ -339,7 +361,7 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("PHANTOMS");
 
     // Still reachable the one honest way: open the phantom first.
-    await app.press("\r");
+    await app.press("c");
     const frame = app.frame();
     expect(frame).toContain("▸ alice");
     expect(frame).toContain("MCP");
@@ -361,7 +383,7 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("PHANTOMS"); // still the table
 
     // Reachable the honest way: inside the phantom it belongs to.
-    await app.press("\r");
+    await app.press("c");
     const frame = app.frame();
     expect(frame).toContain("▸ alice");
     expect(frame.toLowerCase()).toContain("doctor");
@@ -379,7 +401,7 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("Send");
 
     await app.press("\x13"); // ^s -> table
-    await app.press("\r"); // open alice
+    await app.press("c"); // configure alice
     await app.press("L"); // logs, this time from the phantom
     expect(app.frame()).toContain("logs");
     await app.press("\x1b");

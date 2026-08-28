@@ -210,7 +210,7 @@ describe("the restart key is removed", () => {
   test("a phantom's own screen neither advertises nor handles r", async () => {
     const { stdin, frame, pressUntil, settle } = await open();
     await settle();
-    await pressUntil("\r", "Logs"); // open the selected phantom
+    await pressUntil("c", "Logs"); // Configure the selected phantom
     expect(frame()).toContain("Logs");
     expect(frame()).not.toContain("Restart");
 

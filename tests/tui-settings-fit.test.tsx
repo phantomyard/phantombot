@@ -170,7 +170,7 @@ async function openSettings(rows: number) {
   await sleep(80);
   stdin.write("\x13"); // ^s — the phantom table
   await sleep(80);
-  stdin.write("\r"); // open the selected phantom's own settings
+  stdin.write("c"); // Configure the selected phantom
   await sleep(80);
   // Colour codes out: chalk is on in CI (and a sibling suite forces it on
   // the shared singleton), so assert on the text a user reads.
