@@ -83,9 +83,11 @@ export function ConfirmScreen(props: {
           {title}
         </Text>
       </Box>
-      <Box marginTop={1}>
-        <Text color={theme.accent}>{consequence.summary}</Text>
-      </Box>
+      {consequence.summary ? (
+        <Box marginTop={1}>
+          <Text color={theme.accent}>{consequence.summary}</Text>
+        </Box>
+      ) : null}
       {consequence.detail ? (
         <Box marginTop={1}>
           <Text color={theme.dim}>{consequence.detail}</Text>

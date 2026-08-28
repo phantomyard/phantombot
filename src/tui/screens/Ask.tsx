@@ -29,13 +29,22 @@ export interface AskRequest {
   hint?: string;
   masked?: boolean;
   initial?: string;
+  /**
+   * When true, an empty box IS an answer — it resolves `""`.
+   *
+   * The harness flow needs this: "blank = keep the current key" and "blank =
+   * no model override" are real answers there, and refusing them would leave
+   * the user with no way past the question except typing something they do not
+   * mean. Off by default, because for a credential `""` erases what it names.
+   */
+  allowEmpty?: boolean;
 }
 
 export function AskScreen(props: {
   request: AskRequest;
   onAnswer: (value: string | undefined) => void;
 }): React.ReactElement {
-  const { title, hint, masked, initial } = props.request;
+  const { title, hint, masked, initial, allowEmpty } = props.request;
   const [value, setValue] = useState(initial ?? "");
   // Written synchronously on every keystroke: several chunks can arrive before
   // React re-renders, and a closure-read `value` is one render stale — the
@@ -44,9 +53,10 @@ export function AskScreen(props: {
 
   const submit = (text: string) => {
     const trimmed = text.trim();
-    // An empty box is not an answer. Treating it as one would clear the very
-    // setting the user opened this screen to fill in.
-    if (!trimmed) return;
+    // An empty box is not an answer — unless the caller said it is. Treating
+    // it as one by default would clear the very setting the user opened this
+    // screen to fill in.
+    if (!trimmed && !allowEmpty) return;
     props.onAnswer(trimmed);
   };
 

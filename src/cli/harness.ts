@@ -6,6 +6,7 @@
 
 import { defineCommand } from "citty";
 import * as p from "@clack/prompts";
+import { clackPrompts, type HarnessPrompts } from "./harnessPrompts.ts";
 
 import { type Config, loadConfig } from "../config.ts";
 import {
@@ -235,7 +236,7 @@ function setRoutingKey(
   setIn(toml, ["harnesses", "pi", "routing", key], value);
 }
 
-interface RunInput {
+export interface RunInput {
   /** Write a persona override. Omit to configure the global fallback chain. */
   persona?: string;
   config?: Config;
@@ -246,9 +247,18 @@ interface RunInput {
    * availability and we don't want to re-walk PATH for every harness.
    */
   availability?: Record<HarnessId, string | undefined>;
+  /**
+   * Who asks the questions. Default: @clack, i.e. the CLI as it always was.
+   * The TUI passes an implementation backed by its own screens so the whole
+   * flow runs inside the app — same writes, same order, no terminal hand-over.
+   */
+  prompts?: HarnessPrompts;
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
+  // Injected asking (see harnessPrompts.ts): the CLI passes nothing and gets
+  // @clack; the TUI passes screens and the SAME flow runs inside the app.
+  const q = input.prompts ?? clackPrompts;
   const persona = input.persona?.trim() || undefined;
   // Read the persona's EFFECTIVE config, so the picker pre-selects the chain
   // that persona actually runs with rather than the default persona's.
@@ -261,9 +271,9 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   await saveHarnessBins(availability);
   const svc = input.serviceControl ?? defaultServiceControl();
 
-  p.intro("Configure the harness chain");
+  q.intro("Configure the harness chain");
 
-  p.note(
+  q.note(
     SUPPORTED_HARNESSES.map(
       (id) => `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
     ).join("\n"),
@@ -272,7 +282,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
 
   const hasAnyHarness = Object.values(availability).some((path) => path !== undefined);
   if (!hasAnyHarness) {
-    p.note(
+    q.note(
       "No supported harness (claude, pi, codex) was found on your PATH.\n" +
       "You will need to install at least one of them before the agent can think.\n" +
       "We will continue the setup anyway so your configuration is ready.",
@@ -280,7 +290,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     );
   }
 
-  const primary = await p.select<HarnessId>({
+  const primary = await q.select<HarnessId>({
     message: "Primary harness",
     options: SUPPORTED_HARNESSES.map((id) => ({
       value: id,
@@ -291,8 +301,8 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     initialValue:
       (currentChain[0] as HarnessId) ?? SUPPORTED_HARNESSES[0],
   });
-  if (p.isCancel(primary)) {
-    p.cancel("cancelled");
+  if (primary === undefined) {
+    q.cancel("cancelled");
     return 1;
   }
 
@@ -300,9 +310,9 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   // missing (the install can put it on PATH, so the fallback picker below then
   // shows it as available), then run the now/later → API key → routing flow.
   if (primary === "pi") {
-    const cancelled = await configurePi(config, availability, "primary", target);
+    const cancelled = await configurePi(config, availability, "primary", target, q);
     if (cancelled) {
-      p.cancel("cancelled");
+      q.cancel("cancelled");
       return 1;
     }
   }
@@ -320,13 +330,13 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     })),
   ];
 
-  const fallbackPick = await p.select<HarnessId | "none">({
+  const fallbackPick = await q.select<HarnessId | "none">({
     message: "Fallback harness",
     options: fallbackOptions,
     initialValue: (currentChain[1] as HarnessId | undefined) ?? "none",
   });
-  if (p.isCancel(fallbackPick)) {
-    p.cancel("cancelled");
+  if (fallbackPick === undefined) {
+    q.cancel("cancelled");
     return 1;
   }
 
@@ -336,9 +346,9 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   // the primary's. (When Pi is the primary it was already handled above; it can
   // only appear once in the chain, so this never double-runs.)
   if (fallbackPick === "pi") {
-    const cancelled = await configurePi(config, availability, "fallback", target);
+    const cancelled = await configurePi(config, availability, "fallback", target, q);
     if (cancelled) {
-      p.cancel("cancelled");
+      q.cancel("cancelled");
       return 1;
     }
   }
@@ -347,14 +357,18 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
 
   await applyHarnessChain(target.path, chain, persona, target.scope);
-  p.note(
+  q.note(
     `harness chain${persona ? ` for '${persona}'` : ""}: ${chain.join(" → ")}\nsaved to ${target.path}`,
     "Saved",
   );
 
-  await maybePromptRestart(svc);
+  await maybePromptRestart(
+    svc,
+    async (message) => (await q.confirm({ message, initialValue: true })) === true,
+    q,
+  );
 
-  p.outro("done");
+  q.outro("done");
   return 0;
 }
 
@@ -383,10 +397,11 @@ const defaultInstallRunner: InstallRunner = async (cmd) => {
 
 async function installPi(
   runner: InstallRunner = defaultInstallRunner,
+  q: HarnessPrompts = clackPrompts,
 ): Promise<boolean> {
   const r = await runner(piInstallCommand());
   if (r.exitCode === 0) return true;
-  p.note(
+  q.note(
     `pi install exited ${r.exitCode}.\n${(r.stderr || "(no stderr)").trim()}`,
     "Install failed",
   );
@@ -422,22 +437,31 @@ async function configurePi(
   availability: Record<HarnessId, string | undefined>,
   role: "primary" | "fallback",
   target: HarnessWriteTarget,
+  q: HarnessPrompts = clackPrompts,
 ): Promise<boolean> {
   if (!availability.pi) {
-    const doInstall = await p.confirm({
+    const doInstall = await q.confirm({
       message: `Pi isn't installed. Install it now (official installer, user-space)?`,
       initialValue: true,
     });
-    if (p.isCancel(doInstall)) return true;
-    if (doInstall) {
-      const ok = await installPi();
+    if (doInstall === undefined) return true;
+    if (doInstall && !q.canRunInteractiveInstaller) {
+      // The installer inherits stdin and draws its own onboarding. Inside the
+      // TUI that is a hand-over mid-render, i.e. the wedge this whole port
+      // exists to remove — so hand the operator the command instead.
+      q.note(
+        `run this in a terminal, then come back:\n\n  ${piInstallCommand().join(" ")}`,
+        "Install Pi",
+      );
+    } else if (doInstall) {
+      const ok = await installPi(defaultInstallRunner, q);
       if (ok) {
         // Redetect against the broad search path (Pi may land in ~/.local/bin or
         // ~/.pi/agent/bin, not the current process PATH).
         const resolved = await resolveHarnessBinary("pi");
         availability.pi = resolved.path;
         await saveHarnessBins(availability);
-        p.note(
+        q.note(
           availability.pi
             ? `pi installed: ${availability.pi}`
             : "pi installed, but not yet detected on the search path — you can still configure routing by hand below.",
@@ -447,7 +471,7 @@ async function configurePi(
     }
   }
 
-  const mode = await p.select<"configure" | "local">({
+  const mode = await q.select<"configure" | "local">({
     message: `Pi (${role}): how should models be configured?`,
     options: [
       {
@@ -463,7 +487,7 @@ async function configurePi(
     ],
     initialValue: "configure",
   });
-  if (p.isCancel(mode)) return true;
+  if (mode === undefined) return true;
   if (mode === "local") {
     // ACTIVELY clear both stores — see clearPiRouting/computeRoutingClears. The
     // old "later" branch returned without clearing, so any previously-configured
@@ -476,7 +500,7 @@ async function configurePi(
       // no layer above it to fall back to.
       tombstone: target.scope === "persona",
     });
-    p.note(
+    q.note(
       [
         "Pi will use its own local config (~/.pi/agent/settings.json) — the",
         "provider + model you set by running `pi` and logging in.",
@@ -503,7 +527,7 @@ async function configurePi(
   // (its own config.toml wins per key), and pre-selecting the host's models for
   // a persona that overrode them is how an operator silently resets them.
   const currentRouting = config.harnesses.pi.routing ?? {};
-  const provider = await pickProvider(models, currentRouting.provider);
+  const provider = await pickProvider(models, currentRouting.provider, q);
   if (provider === CANCELLED) return true;
 
   // Collect the API key, LABELLED by the chosen provider so it's unambiguous
@@ -511,10 +535,10 @@ async function configurePi(
   // leave whatever's already in ~/.env (or nothing) — we never force a key,
   // because the local-store fallback covers the absent case.
   const keyLabel = provider ? `${provider} API key` : "Pi API key";
-  const apiKey = await p.password({
+  const apiKey = await q.password({
     message: `${keyLabel} (passed per-turn; blank to keep current / use Pi's own)`,
   });
-  if (p.isCancel(apiKey)) return true;
+  if (apiKey === undefined) return true;
   // Blank means "keep current" ONLY when the provider is unchanged. The api-key
   // is provider-scoped (threaded onto `--api-key` alongside `--provider`), so a
   // blank key after a provider switch/clear must DROP the stale key — otherwise
@@ -529,13 +553,13 @@ async function configurePi(
       target.persona,
     );
     if (!stored.ok) {
-      p.note(
+      q.note(
         `could not save ${ENV_PI_API_KEY} to the ${stored.persona} vault: ${stored.error}\n` +
           "Pi will fall back to its own local store until this is fixed.",
         "Pi API key",
       );
     } else {
-      p.note(`saved ${ENV_PI_API_KEY} to the ${stored.persona} vault`, "Pi API key");
+      q.note(`saved ${ENV_PI_API_KEY} to the ${stored.persona} vault`, "Pi API key");
     }
     // Refresh the catalog with the key we just took. On a fresh install the
     // first listing was EMPTY (Pi had no key, so `--list-models` printed "No
@@ -559,12 +583,12 @@ async function configurePi(
     if (provider) {
       const authWrite = await writePiApiKey(provider, keyWrite.value);
       if (authWrite.ok && !authWrite.skipped) {
-        p.note(
+        q.note(
           `also keyed Pi's own store (${authWrite.path}) so \`pi --list-models\` works`,
           "Pi API key",
         );
       } else if (!authWrite.ok) {
-        p.note(
+        q.note(
           `couldn't write Pi's auth store: ${authWrite.reason}\n` +
             `falling back to an env-injected model refresh`,
           "Pi API key",
@@ -588,7 +612,7 @@ async function configurePi(
     if (refreshed.length > 0) models = refreshed;
   } else if (keyWrite.action === "clear") {
     await unsetPersonaSecret(config, ENV_PI_API_KEY, target.persona);
-    p.note(
+    q.note(
       `provider changed and no new key entered — cleared the stale ${ENV_PI_API_KEY} ` +
         `so Pi falls back to its own local store`,
       "Pi API key",
@@ -602,7 +626,7 @@ async function configurePi(
   // "" is the explicit "clear the provider" sentinel; collapsing it to undefined
   // here (the old `provider || undefined`) made runRoutingWizard fall back to the
   // existing provider, so "(none)" could never clear a previously-set one.
-  return runRoutingWizard(config, availability.pi, {
+  return runRoutingWizard(config, availability.pi, q, {
     forceCustom: true,
     provider,
     models,
@@ -628,6 +652,7 @@ async function configurePi(
 async function runRoutingWizard(
   config: Config,
   piBin: string | undefined,
+  q: HarnessPrompts = clackPrompts,
   opts: {
     forceCustom?: boolean;
     /**
@@ -654,15 +679,15 @@ async function runRoutingWizard(
   // model selection — Pi is already the chosen harness, so the "use defaults?"
   // detour would be redundant. Otherwise we offer it as before.
   if (!opts.forceCustom) {
-    const useDefaults = await p.confirm({
+    const useDefaults = await q.confirm({
       message: "Model: use configured defaults?",
       // Default = no override when nothing is configured yet, otherwise keep the
       // existing routing. Either way the safe answer leaves things as they are.
       initialValue: current.primaryModel === undefined,
     });
-    if (p.isCancel(useDefaults)) return true;
+    if (useDefaults === undefined) return true;
     if (useDefaults) {
-      p.note(
+      q.note(
         current.primaryModel
           ? `keeping: primary=${current.primaryModel}` +
               (current.imageModel ? ` image=${current.imageModel}` : "") +
@@ -679,7 +704,7 @@ async function runRoutingWizard(
   // to free-text if pi can't be queried (not installed, or output unparseable).
   const allModels = opts.models ?? (piBin ? await listPiModels(piBin) : []);
   if (allModels.length === 0) {
-    p.note(
+    q.note(
       "Couldn't read `pi --list-models` — entering model ids by hand.\n" +
         "Use the bare name as printed by `pi --list-models` (e.g. gpt-5.2).",
       "Routing",
@@ -701,6 +726,7 @@ async function runRoutingWizard(
     models,
     current.primaryModel,
     { allowNone: true },
+    q,
   );
   if (primaryModel === CANCELLED) return true;
 
@@ -720,6 +746,7 @@ async function runRoutingWizard(
     multimodal ? models : models.filter((m) => m.supportsImages),
     imageInitial,
     { allowNone: true },
+    q,
   );
   if (imageModelPick === CANCELLED) return true;
   const imageModel = imageModelPick || undefined;
@@ -730,6 +757,7 @@ async function runRoutingWizard(
     models,
     current.codingModel,
     { allowNone: true },
+    q,
   );
   if (codingModel === CANCELLED) return true;
 
@@ -740,7 +768,7 @@ async function runRoutingWizard(
     codingModel,
   };
   const writes = await applyRouting(target.path, choices);
-  p.note(
+  q.note(
     [
       `provider: ${writes.toml.provider ?? "(none — Pi's default)"}`,
       `primary: ${writes.toml.primary_model}`,
@@ -774,15 +802,16 @@ const CANCELLED = Symbol("cancelled");
 async function pickProvider(
   models: readonly PiModel[],
   initial: string | undefined,
+  q: HarnessPrompts = clackPrompts,
 ): Promise<string | typeof CANCELLED> {
   const providers = providerChoices(models);
   if (providers.length === 0) {
-    const r = await p.text({
+    const r = await q.text({
       message: "Pi provider (e.g. openrouter, openai) — blank = Pi's default",
       placeholder: "openrouter",
       initialValue: initial ?? "",
     });
-    if (p.isCancel(r)) return CANCELLED;
+    if (r === undefined) return CANCELLED;
     return r.trim();
   }
   const NONE = "";
@@ -797,12 +826,12 @@ async function pickProvider(
     })),
   ];
   const known = initial !== undefined && providers.some((pr) => pr.id === initial);
-  const r = await p.select<string>({
+  const r = await q.select<string>({
     message: "Provider (scopes the API key + model list)",
     options,
     initialValue: known ? initial : NONE,
   });
-  if (p.isCancel(r)) return CANCELLED;
+  if (r === undefined) return CANCELLED;
   return r;
 }
 
@@ -816,14 +845,15 @@ async function pickModel(
   models: readonly PiModel[],
   initial: string | undefined,
   opts: { allowNone?: boolean } = {},
+  q: HarnessPrompts = clackPrompts,
 ): Promise<string | typeof CANCELLED> {
   if (models.length === 0) {
-    const r = await p.text({
+    const r = await q.text({
       message: opts.allowNone ? `${message} (blank = none)` : message,
       placeholder: "e.g. gpt-5.2",
       initialValue: initial ?? "",
     });
-    if (p.isCancel(r)) return CANCELLED;
+    if (r === undefined) return CANCELLED;
     return r.trim();
   }
   // When optional, prepend a "(none)" sentinel (value "") so the operator can
@@ -840,7 +870,7 @@ async function pickModel(
     })),
   ];
   const known = initial && models.some((m) => modelId(m) === initial);
-  const r = await p.select<string>({
+  const r = await q.select<string>({
     message,
     options,
     initialValue: known
@@ -849,7 +879,7 @@ async function pickModel(
         ? NONE
         : modelId(models[0]!),
   });
-  if (p.isCancel(r)) return CANCELLED;
+  if (r === undefined) return CANCELLED;
   return r;
 }
 
@@ -882,21 +912,22 @@ export const defaultConfirm: ConfirmFn = async (message) => {
 export async function maybePromptRestart(
   svc: ServiceControl,
   confirm: ConfirmFn = defaultConfirm,
+  q: HarnessPrompts = clackPrompts,
 ): Promise<void> {
-  await maybeUpgradeUnit(svc);
+  await maybeUpgradeUnit(svc, q);
   if (!(await svc.isActive())) return;
   const proceed = await confirm(
     "phantombot is currently running. Restart to apply changes?",
   );
   if (!proceed) {
-    p.note(
+    q.note(
       `skipped — restart later with: ${await restartCommand()}`,
       "Restart",
     );
     return;
   }
   const r = await svc.restart();
-  p.note(
+  q.note(
     r.ok ? "restarted" : `restart failed: ${r.stderr ?? "unknown"}`,
     "Restart",
   );
@@ -911,13 +942,14 @@ export async function maybePromptRestart(
  */
 export async function maybeUpgradeUnit(
   svc: ServiceControl,
+  q: HarnessPrompts = clackPrompts,
 ): Promise<{ rerendered: boolean; backupPath?: string }> {
   const r = await svc.rerenderUnitIfStale();
   if (r.rerendered) {
     const note = r.backupPath
       ? `service-manager unit upgraded to current template\nprevious contents saved to ${r.backupPath}`
       : "service-manager unit upgraded to current template";
-    p.note(note, "Unit");
+    q.note(note, "Unit");
   }
   return r;
 }

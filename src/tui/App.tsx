@@ -438,42 +438,87 @@ export function App(props: AppProps): React.ReactElement {
   }, [personaName]);
 
   /**
-   * Hand the terminal to an existing `@clack` subcommand flow.
+   * The harness chain, on screens.
    *
-   * The brain and channel questions already exist, are already tested, and are
-   * already what `phantombot harness` / `phantombot telegram` ask — including
-   * token validation via getMe and the three-layer chain resolution. Reusing
-   * them keeps ONE implementation of each question (the rule in prompts.ts):
-   * a second copy inside the TUI would drift from the CLI, and the CLI is the
-   * copy that has the tests.
+   * `runHarness` is the SAME function `phantombot harness` runs — it writes the
+   * chain, Pi's routing, the provider key and the "use Pi's own config"
+   * tombstone, and none of that is worth a second implementation. Only the
+   * ASKING is swapped: every question becomes one of this app's own screens, so
+   * the flow keeps the frame and never hands the terminal over.
    */
-  const runFlow = useCallback(
-    async (label: string, fn: () => Promise<number>) => {
+  const changeBrain = useCallback(
+    async (target: PersonaSnapshot) => {
       setPrompting(true);
       try {
-        const code = await withPromptTerminal(fn);
-        setNotice(code === 0 ? `${label} updated` : `${label} unchanged`);
+        // Imported ON DEMAND: pulling the whole `harness` subcommand graph in at
+        // module scope delayed the app's first render enough that the opening
+        // keystrokes were dropped — the first-run test caught it as a wizard
+        // whose name box stayed empty.
+        const { runHarness } = await import("../cli/harness.ts");
+        const firstLine = (text: string) =>
+          text.split("\n").find((l) => l.trim().length > 0) ?? "";
+        await runHarness({
+          persona: target.name,
+          prompts: {
+            // The Pi installer inherits stdin and paints its own onboarding:
+            // a hand-over mid-render, which is the wedge this port removes.
+            canRunInteractiveInstaller: false,
+            select: async (input) =>
+              (await askChoice({
+                title: input.message,
+                options: input.options.map((o) => ({
+                  value: o.value,
+                  label: o.label,
+                  hint: o.hint,
+                })),
+                initial: input.initialValue,
+              })) as never,
+            text: async (input) =>
+              await askValue({
+                title: input.message,
+                hint: input.placeholder,
+                initial: input.initialValue ?? input.defaultValue,
+                // "blank = keep current / none" is a real answer in this flow.
+                allowEmpty: true,
+              }),
+            password: async (input) =>
+              await askValue({
+                title: input.message,
+                hint: "stored in this phantom's vault, never displayed again",
+                masked: true,
+                allowEmpty: true,
+              }),
+            // The flow's own wording is the whole question — repeating it as a
+            // "consequence" said the same sentence twice, and a fixed detail
+            // line would be wrong for at least one of the questions asked here.
+            confirm: async (input) =>
+              await askConfirmValue({
+                title: input.message,
+                consequence: {
+                  summary: "",
+                  detail: "",
+                  longRunning: false,
+                  restarts: false,
+                },
+              }),
+            // Clack panels have nowhere to live on a framed screen, so a note
+            // becomes the notice line. The body's first line carries the fact;
+            // the rest is the CLI's prose.
+            note: (body, title) =>
+              setNotice(title ? `${title}: ${firstLine(body)}` : firstLine(body)),
+            intro: () => {},
+            outro: () => {},
+            cancel: () => setNotice("brain unchanged"),
+          },
+        });
       } catch (e) {
-        setNotice(`${label} failed: ${(e as Error).message}`);
+        setNotice(`brain failed: ${(e as Error).message}`);
       } finally {
         setPrompting(false);
         await refresh();
       }
     },
-    [refresh],
-  );
-
-  const changeBrain = useCallback(
-    (target: PersonaSnapshot) =>
-      // Imported ON DEMAND: pulling the whole `harness`/`telegram` subcommand
-      // graph (clack, the Telegram client) at module scope delayed the app's
-      // first render enough that the opening keystrokes were dropped — the
-      // first-run test caught it as a wizard whose name box stayed empty.
-      runFlow("brain", async () => {
-        const { runHarness } = await import("../cli/harness.ts");
-        return runHarness({ persona: target.name });
-      }),
-    [runFlow],
+    [refresh, askChoice, askValue, askConfirmValue],
   );
 
   /**

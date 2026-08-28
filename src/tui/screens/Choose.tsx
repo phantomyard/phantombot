@@ -28,14 +28,22 @@ export interface ChooseOption {
 export interface ChooseRequest {
   title: string;
   options: readonly ChooseOption[];
+  /** Value the cursor starts on — the setting's CURRENT value, when there is one. */
+  initial?: string;
 }
 
 export function ChooseScreen(props: {
   request: ChooseRequest;
   onAnswer: (value: string | undefined) => void;
 }): React.ReactElement {
-  const { title, options } = props.request;
-  const [index, setIndex] = useState(0);
+  const { title, options, initial } = props.request;
+  // Starting the cursor on the current value is what makes ↵ mean "leave it as
+  // it is": a picker that always opens on row one turns every pass through a
+  // long wizard into a chance to silently change a setting nobody asked about.
+  const [index, setIndex] = useState(() => {
+    const at = options.findIndex((o) => o.value === initial);
+    return at >= 0 ? at : 0;
+  });
 
   useInput((_char, key) => {
     if (key.escape) return props.onAnswer(undefined);
