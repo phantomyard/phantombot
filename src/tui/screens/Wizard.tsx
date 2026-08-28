@@ -33,7 +33,7 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { Selectable } from "../components/Selectable.tsx";
-import { glyph, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 import { WIZARD_STEPS, type WizardStep } from "../../lib/personaComplete.ts";
 import { applyTextChunk } from "../textInput.ts";
 
@@ -170,12 +170,16 @@ function Choice(props: {
 }
 
 export function WizardScreen(props: {
-  version: string;
   /** Resume point. "name" for a brand new phantom. */
   startAt?: WizardStep;
   initial?: Partial<WizardAnswers>;
   /** True when a default persona already exists — see the default-persona fix. */
   defaultExists: boolean;
+  /**
+   * Where esc goes from the FIRST step. Absent on genuine first run, where
+   * there is no screen behind the wizard to return to.
+   */
+  onBack?: () => void;
   onFinish: (answers: WizardAnswers) => void;
   onQuit: () => void;
 }): React.ReactElement {
@@ -204,12 +208,19 @@ export function WizardScreen(props: {
   };
 
   useInput((char, key) => {
-    if (key.ctrl && char === "c") {
+    // `^q` is the app-wide quit key; `^c` stays bound because a half-built
+    // phantom is exactly when a user reaches for a hard exit. Neither is
+    // advertised once the wizard has a screen behind it — see the footer.
+    if (key.ctrl && (char === "q" || char === "c")) {
       props.onQuit();
       return;
     }
-    if (key.leftArrow && step !== "name") {
-      go(-1);
+    // Back is esc everywhere, and `←` is not a back key anywhere — see the
+    // menu-language rule. Within the wizard esc walks one step back; on the
+    // first step it leaves the wizard, when there is somewhere to leave to.
+    if (key.escape) {
+      if (step !== "name") go(-1);
+      else props.onBack?.();
       return;
     }
     if (step === "name") {
@@ -257,25 +268,31 @@ export function WizardScreen(props: {
 
   return (
     <Frame
-      title={["phantombot"]}
-      status={`${props.version} · setup`}
-      footer={
-        step === "name"
-          ? [
-              { key: "↵", label: "continue" },
-              { key: "^c", label: "quit" },
-            ]
-          : step === "done"
-            ? [
-                { key: "↵", label: "start talking" },
-                { key: "←", label: "back" },
-              ]
+      // The header bar prints the version itself, so a status of
+      // `0.1.0-dev · setup` repeated it — the same duplication the phantom
+      // table already dropped. The crumb carries the screen's name instead:
+      // this is the installer on first run and `n New` from the table after.
+      title={["phantombot", props.defaultExists ? "new" : "setup"]}
+      footer={[
+        ...(step === "done"
+          ? [{ icon: badge.chat, key: "↵", label: "Start talking" }]
+          : step === "name"
+            ? [{ icon: badge.continue, key: "↵", label: "Continue" }]
             : [
-                { key: "↑↓", label: "select" },
-                { key: "↵", label: "continue" },
-                { key: "←", label: "back" },
-              ]
-      }
+                { icon: badge.select, key: "↑↓", label: "Select" },
+                { icon: badge.continue, key: "↵", label: "Continue" },
+              ]),
+        // Offered on the first step only when esc has somewhere to go: a
+        // footer key that does nothing is worse than no key at all.
+        ...(step !== "name" || props.onBack
+          ? [{ icon: badge.back, key: "esc", label: "Back" }]
+          : []),
+        // Quit is advertised ONLY on genuine first run, where the wizard IS
+        // the app and esc has nowhere to go. Opened from the phantom table it
+        // is a wizard inside the app: leaving it means going back one screen,
+        // not killing the process, so the footer offers Back and nothing else.
+        ...(props.onBack ? [] : [{ icon: badge.quit, key: "^q", label: "Quit" }]),
+      ]}
     >
       <Progress step={step} />
 
