@@ -21,7 +21,7 @@
  * Wrapped so a bootstrap hiccup never blocks the CLI from running.
  */
 
-import { runMain } from "citty";
+import { runMain, showUsage } from "citty";
 import { mainCommand } from "./cli/index.ts";
 import { loadConfig, personaDir } from "./config.ts";
 import { isReadOnlyInvocation } from "./lib/cliInvocation.ts";
@@ -89,5 +89,22 @@ if (bareMode === "tui") {
   const { runRepl } = await import("./tui/index.tsx");
   process.exitCode = await runRepl();
 } else {
-  runMain(mainCommand);
+  runMain(mainCommand, {
+    // `persona new` is dispatched by hand rather than through citty's
+    // `subCommands` (see cli/persona.ts — registering it there breaks
+    // `persona <name>`), so citty resolves `persona new --help` to the
+    // PARENT command. Redirect that one case back to the real usage.
+    async showUsage(cmd, parent) {
+      const positionals = process.argv
+        .slice(2)
+        .filter((a) => !a.startsWith("-"));
+      if (positionals[0] === "persona" && positionals[1] === "new") {
+        const { default: personaNewCmd } = await import(
+          "./cli/persona-new.ts"
+        );
+        return showUsage(personaNewCmd);
+      }
+      return showUsage(cmd, parent);
+    },
+  });
 }

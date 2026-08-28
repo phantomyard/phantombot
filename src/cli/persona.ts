@@ -21,7 +21,7 @@
  * dispatcher only exposes the consolidated entry point.
  */
 
-import { defineCommand } from "citty";
+import { defineCommand, runCommand, showUsage } from "citty";
 import { existsSync, readdirSync } from "node:fs";
 import * as p from "@clack/prompts";
 
@@ -474,12 +474,13 @@ export function listExistingPersonas(config: Config): string[] {
 }
 
 export default defineCommand({
-  subCommands: {
-    // `persona new` is ADDITIVE — bare `persona` and `persona <name>` keep
-    // their exact behaviour (issue #471's hard non-goal: the CLI does not
-    // change).
-    new: personaNewCmd,
-  },
+  // NOTE: `new` is deliberately NOT registered in citty's `subCommands`.
+  // citty treats the first positional under a command that HAS subCommands as
+  // a subcommand name and throws `Unknown command` when it doesn't match — so
+  // registering it there silently killed `phantombot persona <name>`, the
+  // documented default-persona switch (shipped broken in v1.1.316). Dispatch
+  // it by hand instead, which keeps `persona <name>` on citty's positional
+  // path and honours #471's hard non-goal: the CLI does not change.
   meta: {
     name: "persona",
     description:
@@ -515,7 +516,16 @@ export default defineCommand({
       default: false,
     },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
+    if (rawArgs[0] === "new") {
+      const rest = rawArgs.slice(1);
+      if (rest.includes("--help") || rest.includes("-h")) {
+        await showUsage(personaNewCmd);
+        return;
+      }
+      await runCommand(personaNewCmd, { rawArgs: rest });
+      return;
+    }
     process.exitCode = await runPersona({
       name: args.name ? String(args.name) : undefined,
       import: args.import ? String(args.import) : undefined,
