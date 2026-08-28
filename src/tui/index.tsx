@@ -127,7 +127,7 @@ export async function startTui(): Promise<number> {
       instance.rerender(element);
       // NOT `instance.clear()`: it re-syncs Ink to the frame it just erased.
       // See `forceRepaint`.
-      forceRepaint();
+      forceRepaint(gate);
     }
   });
 

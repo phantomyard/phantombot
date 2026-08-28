@@ -134,6 +134,13 @@ export interface GatedStdout {
   suspend: () => void;
   resume: () => void;
   suspended: () => boolean;
+  /**
+   * Lie about the terminal width to Ink, or stop lying (`undefined`).
+   *
+   * Used by `forceRepaint` — Ink only forgets the frame it thinks is on the
+   * screen when the width SHRINKS.
+   */
+  setColumns: (columns: number | undefined) => void;
 }
 
 /**
@@ -195,6 +202,7 @@ export function gateStdout(
   stdout: NodeJS.WriteStream = process.stdout,
 ): GatedStdout {
   let suspended = false;
+  let columnsOverride: number | undefined;
   const facade = {
     write(chunk: string | Uint8Array, ...rest: unknown[]): boolean {
       if (suspended) return true;
@@ -207,7 +215,7 @@ export function gateStdout(
       return (stdout.write as (...args: unknown[]) => boolean)(chunk, ...rest);
     },
     get columns() {
-      return stdout.columns;
+      return columnsOverride ?? stdout.columns;
     },
     get rows() {
       return stdout.rows;
@@ -235,26 +243,40 @@ export function gateStdout(
       suspended = false;
     },
     suspended: () => suspended,
+    setColumns: (columns: number | undefined) => {
+      columnsOverride = columns;
+    },
   };
 }
 
 /**
  * Force Ink to repaint the WHOLE frame after something else owned the screen.
  *
- * `instance.clear()` is not enough and is in fact the trap: it erases the
- * lines and then SYNCS log-update's belief back to the frame it just erased,
- * so Ink still thinks that frame is on the screen. Re-entering the alternate
- * screen empties it underneath, the next render diffs identical output and
- * writes nothing — a black window with only the one line that happened to
- * change (the notice) on it, which is exactly what returning from `$EDITOR`
- * looked like.
+ * Ink keeps the frame it believes is on the screen and writes only the diff, so
+ * after `$EDITOR` (or any borrower) has wiped the alternate screen the next
+ * render matches byte for byte and writes NOTHING — a black window with only
+ * the one line that happened to change on it.
  *
- * Ink already has a supported path for "the screen is not what I think it is":
- * the resize handler, which drops `lastOutput` and repaints from scratch. So
- * take that path rather than reaching into its internals. The listener is
- * registered on the REAL stdout (the gate delegates `on`), so the event has to
- * be emitted there too.
+ * `instance.clear()` is not the fix and is in fact the trap: it erases the
+ * lines and then SYNCS log-update's belief back to the frame it just erased.
+ *
+ * The one supported path that drops that belief is Ink's own resize handler —
+ * but only on the branch where the terminal got NARROWER (`log.clear()` plus
+ * `lastOutput = ""`). So take exactly that branch: claim one column less,
+ * resize (clears, repaints narrow), then hand the real width back and resize
+ * again. The second frame differs from the narrow one, so it is written in
+ * full. No Ink internals are touched.
+ *
+ * The listener lives on the REAL stdout (the gate delegates `on`), so the
+ * event has to be emitted there.
  */
-export function forceRepaint(stdout: NodeJS.WriteStream = process.stdout): void {
+export function forceRepaint(
+  gate: Pick<GatedStdout, "setColumns">,
+  stdout: NodeJS.WriteStream = process.stdout,
+): void {
+  const width = stdout.columns ?? 80;
+  gate.setColumns(Math.max(1, width - 1));
+  stdout.emit("resize");
+  gate.setColumns(undefined);
   stdout.emit("resize");
 }
