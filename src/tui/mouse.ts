@@ -232,12 +232,23 @@ export interface InstalledMouse {
    */
   stdin: NodeJS.ReadStream;
   /**
-   * Stop or resume feeding Ink, and turn mouse reporting off/on with it.
+   * Hand the real stdin over to a line-mode prompt or a child process, and take
+   * it back afterwards.
    *
-   * Used while a line-mode `@clack` prompt owns the terminal: the prompt reads
-   * the REAL stdin, so anything still forwarded to Ink would be typed into a
-   * screen the user cannot see, and mouse reports would arrive at the prompt as
-   * garbage keystrokes.
+   * This is a full DETACH, not a flag. `false` removes our `data` listener and
+   * drops raw mode; `true` re-attaches, restores raw mode and — the part that
+   * matters — calls `resume()` on the real stdin.
+   *
+   * Resuming is not belt-and-braces. `@clack` reads through `readline`, and
+   * closing a readline interface PAUSES its input stream; an editor spawned
+   * with an inherited stdin can leave it paused too. A paused stdin never emits
+   * `data` again, so the tap goes quiet, nothing reaches Ink, and the app comes
+   * back from the prompt DEAF to every keystroke while still drawing perfectly.
+   * Verified in a pty: after one clack prompt, `process.stdin.isPaused()` is
+   * true and stays true.
+   *
+   * Detaching (rather than merely not forwarding) also stops us competing with
+   * the prompt for the same bytes while it owns the terminal.
    */
   setForwarding: (on: boolean) => void;
   /** Restore the terminal. Idempotent; call it from every exit path. */
@@ -299,6 +310,18 @@ export function installMouse(options: InstallMouseOptions = {}): InstalledMouse 
       if (on === forwarding) return;
       forwarding = on;
       dispatcher.enabled = on;
+      if (on) {
+        stdin.setRawMode?.(true);
+        stdin.on("data", onData);
+        // See the doc comment on `setForwarding`: a readline close or an
+        // inherited-stdin child leaves the stream paused, and a paused stdin
+        // never emits `data` again.
+        stdin.resume?.();
+      } else {
+        stdin.off("data", onData);
+        // The prompt wants a cooked terminal; Ink is not reading anyway.
+        stdin.setRawMode?.(false);
+      }
       stdout.write(on ? MOUSE_ON : MOUSE_OFF);
     },
     teardown: () => {

@@ -17,6 +17,7 @@ import {
   installMouse,
   type MouseEvent,
 } from "../src/tui/mouse.ts";
+import { captureStdinListeners } from "../src/tui/stdinHandover.ts";
 
 describe("stripMouseSequences", () => {
   test("decodes a left-click press and release", () => {
@@ -202,24 +203,35 @@ describe("installMouse", () => {
 describe("installMouse forwarding gate", () => {
   function fakeTty() {
     const written: string[] = [];
-    const handlers: Array<(chunk: string) => void> = [];
+    const handlers = new Set<(chunk: string) => void>();
+    const calls: string[] = [];
     const stdin = {
       isTTY: true,
       on(_event: string, fn: (chunk: string) => void) {
-        handlers.push(fn);
+        handlers.add(fn);
       },
-      off() {},
-      setRawMode() {},
+      off(_event: string, fn: (chunk: string) => void) {
+        handlers.delete(fn);
+      },
+      setRawMode(mode: boolean) {
+        calls.push(`raw:${mode}`);
+      },
+      resume() {
+        calls.push("resume");
+      },
     } as unknown as NodeJS.ReadStream;
     const stdout = {
       isTTY: true,
       write: (chunk: string) => written.push(chunk),
     } as unknown as NodeJS.WriteStream;
-    return { stdin, stdout, written, handlers };
+    const feed = (chunk: string) => {
+      for (const fn of [...handlers]) fn(chunk);
+    };
+    return { stdin, stdout, written, feed, handlers, calls };
   }
 
   test("stops feeding Ink and turns reporting off, then restores both", async () => {
-    const { stdin, stdout, written, handlers } = fakeTty();
+    const { stdin, stdout, written, feed } = fakeTty();
     const dispatcher = new MouseDispatcher();
     const installed = installMouse({ stdin, stdout, dispatcher });
     const seen: string[] = [];
@@ -227,21 +239,90 @@ describe("installMouse forwarding gate", () => {
       seen.push(chunk.toString()),
     );
 
-    handlers[0]!("a");
+    feed("a");
     installed.setForwarding(false);
     expect(dispatcher.enabled).toBe(false);
     expect(written.at(-1)).toBe(MOUSE_OFF);
     // Typed at the clack prompt: it must reach the prompt, and NOT the hidden
     // Ink screen underneath it.
-    handlers[0]!("b");
+    feed("b");
 
     installed.setForwarding(true);
     expect(dispatcher.enabled).toBe(true);
     expect(written.at(-1)).toBe(MOUSE_ON);
-    handlers[0]!("c");
+    feed("c");
     await new Promise((r) => setTimeout(r, 5));
 
     expect(seen.join("")).toBe("ac");
     installed.teardown();
+  });
+
+  /**
+   * The `$EDITOR` freeze (dogfooded on Kai): open settings → edit identity →
+   * leave the editor, and the app repaints perfectly and then ignores every
+   * key.
+   *
+   * Verified in a real pty: `@clack` reads through `readline`, and closing a
+   * readline interface PAUSES its input stream — `process.stdin.isPaused()` is
+   * true afterwards and stays true. A paused stdin never emits `data` again, so
+   * our tap goes quiet forever and Ink is fed nothing. Merely flipping a
+   * forwarding flag back on cannot fix that; the stream has to be RESUMED.
+   */
+  test("taking the terminal back detaches, then re-attaches and resumes stdin", () => {
+    const { stdin, stdout, handlers, calls } = fakeTty();
+    const installed = installMouse({ stdin, stdout, dispatcher: new MouseDispatcher() });
+    expect(handlers.size).toBe(1);
+
+    installed.setForwarding(false);
+    // While the prompt owns the terminal we must not be reading the same bytes.
+    expect(handlers.size).toBe(0);
+    expect(calls).toContain("raw:false");
+
+    installed.setForwarding(true);
+    expect(handlers.size).toBe(1);
+    expect(calls).toContain("raw:true");
+    expect(calls).toContain("resume");
+    installed.teardown();
+    expect(handlers.size).toBe(0);
+  });
+});
+
+/**
+ * Listener hygiene across the handover.
+ *
+ * A closed readline interface leaves its handlers on stdin. Without this, every
+ * visit to a settings prompt leaks one — and Node eventually prints a
+ * max-listeners warning onto the canvas the TUI is drawing on.
+ */
+describe("captureStdinListeners", () => {
+  function fakeStream() {
+    const map = new Map<string, Array<(...a: unknown[]) => void>>();
+    return {
+      listeners: (event: string) => [...(map.get(event) ?? [])],
+      listenerCount: (event: string) => (map.get(event) ?? []).length,
+      off(event: string, fn: (...a: unknown[]) => void) {
+        map.set(event, (map.get(event) ?? []).filter((f) => f !== fn));
+        return this;
+      },
+      add(event: string, fn: (...a: unknown[]) => void) {
+        map.set(event, [...(map.get(event) ?? []), fn]);
+      },
+    };
+  }
+
+  test("removes handlers the borrower left behind, and only those", () => {
+    const stream = fakeStream();
+    const ours = () => {};
+    stream.add("data", ours);
+    const restore = captureStdinListeners(stream as never);
+
+    const borrowed = () => {};
+    stream.add("data", borrowed);
+    stream.add("keypress", () => {});
+    expect(stream.listenerCount("data")).toBe(2);
+
+    restore();
+    expect(stream.listeners("data")).toEqual([ours]);
+    expect(stream.listenerCount("keypress")).toBe(0);
   });
 });

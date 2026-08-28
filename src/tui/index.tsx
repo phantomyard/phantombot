@@ -19,6 +19,7 @@ import { installMouse } from "./mouse.ts";
 import { enterFullScreen, gateStdout } from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
+import { captureStdinListeners } from "./stdinHandover.ts";
 import { setLogSink } from "../lib/logSink.ts";
 import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
@@ -97,16 +98,23 @@ export async function startTui(): Promise<number> {
    */
   const restoreHost = setPromptHost(async (fn) => {
     gate.suspend();
+    // A full detach, not just "stop forwarding": while the prompt or the editor
+    // owns the terminal we must not be reading the same bytes it is.
     installed.setForwarding(false);
     fullScreen.restore();
+    // Whatever borrows stdin next may leave its own handlers on it.
+    const dropBorrowedListeners = captureStdinListeners(process.stdin);
     try {
       return await fn();
     } finally {
+      dropBorrowedListeners();
       fullScreen.enter();
+      // Re-attaches the tap, restores raw mode, and RESUMES stdin — a readline
+      // close or an inherited-stdin child leaves it paused, and a paused stdin
+      // never emits `data` again, which is exactly what made the app come back
+      // from `$EDITOR` deaf to every keystroke.
       installed.setForwarding(true);
       gate.resume();
-      // Clack leaves the terminal in cooked mode; Ink's input layer needs raw
-      // mode back or the app returns deaf to every keystroke.
       if (process.stdin.isTTY) process.stdin.setRawMode?.(true);
       instance.clear();
       instance.rerender(element);
