@@ -66,3 +66,52 @@ describe("lendStdin", () => {
     expect(() => lendStdin(stream as never)()).not.toThrow();
   });
 });
+
+describe("lendStdin keeps the stream flowing for the WHOLE borrow", () => {
+  /**
+   * A borrow is not always one prompt. `phantombot harness` asks a sequence,
+   * and each readline interface pauses stdin when it closes — so the second
+   * prompt onwards renders against a dead stream even though the borrow
+   * resumed it on the way in. That is the Brain wedge.
+   */
+  test("re-resumes a stream that a closed prompt paused", async () => {
+    const stream = fakeStream();
+    let paused = false;
+    const borrowable = {
+      ...stream,
+      isPaused: () => paused,
+      resume() {
+        paused = false;
+        stream.resume();
+      },
+    };
+    const takeBack = lendStdin(borrowable as never, { pollMs: 5 });
+    const afterLend = stream.resumeCount();
+
+    paused = true; // a clack prompt closed its readline
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(stream.resumeCount()).toBeGreaterThan(afterLend);
+    expect(paused).toBe(false);
+    takeBack();
+  });
+
+  test("stops re-resuming once the terminal is taken back", async () => {
+    const stream = fakeStream();
+    let paused = false;
+    const borrowable = {
+      ...stream,
+      isPaused: () => paused,
+      resume() {
+        paused = false;
+        stream.resume();
+      },
+    };
+    const takeBack = lendStdin(borrowable as never, { pollMs: 5 });
+    takeBack();
+    const settled = stream.resumeCount();
+    paused = true;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(stream.resumeCount()).toBe(settled);
+  });
+});

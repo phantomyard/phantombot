@@ -51,7 +51,10 @@ export function captureStdinListeners(
 }
 
 /** The subset of stdin a borrow needs: listeners, plus the flow control. */
-type Borrowable = Emitterish & { resume?: () => unknown };
+type Borrowable = Emitterish & {
+  resume?: () => unknown;
+  isPaused?: () => boolean;
+};
 
 /**
  * Lend stdin to a prompt or a child process, and take it back intact.
@@ -69,8 +72,27 @@ type Borrowable = Emitterish & { resume?: () => unknown };
  *
  * Returns the take-it-back function.
  */
-export function lendStdin(stream: Borrowable = process.stdin): () => void {
+export function lendStdin(
+  stream: Borrowable = process.stdin,
+  options: { pollMs?: number } = {},
+): () => void {
   const restoreListeners = captureStdinListeners(stream);
   stream.resume?.();
-  return restoreListeners;
+  // A borrow is not always ONE prompt. `phantombot harness` asks a whole
+  // sequence, and each `readline` interface PAUSES the stream when it closes —
+  // so prompt two onwards renders against a dead stdin even though the borrow
+  // resumed it on the way in. Nothing tells us a prompt ended, so the flow is
+  // re-asserted on a timer for as long as the borrow lasts. Resuming an already
+  // flowing stream is a no-op, and the timer is unref'd so it can never hold
+  // the process open.
+  const pollMs = options.pollMs ?? 50;
+  const keepFlowing = setInterval(() => {
+    if (stream.isPaused?.() === false) return;
+    stream.resume?.();
+  }, pollMs);
+  (keepFlowing as { unref?: () => void }).unref?.();
+  return () => {
+    clearInterval(keepFlowing as unknown as ReturnType<typeof setInterval>);
+    restoreListeners();
+  };
 }
