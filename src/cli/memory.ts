@@ -1099,6 +1099,15 @@ export async function runMemoryBackup(input: {
           `\n`,
       );
       return 0;
+    case "fresh":
+      // Only reachable when a sibling process holds the snapshot lock: the CLI
+      // path never coalesces. Saying so is better than barging in and deleting
+      // the file that process is writing.
+      write(
+        `another snapshot of ${config.memoryDbPath} is already in flight — ` +
+          `nothing taken. Check 'phantombot memory backup --list'.\n`,
+      );
+      return 0;
     case "skipped":
       write(`no memory database at ${config.memoryDbPath}\n`);
       return 1;
