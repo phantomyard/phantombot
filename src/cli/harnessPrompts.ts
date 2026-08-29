@@ -65,7 +65,15 @@ export const clackPrompts: HarnessPrompts = {
   },
   async password(input) {
     const r = await p.password(input);
-    return p.isCancel(r) ? undefined : (r as string);
+    // clack's password prompt resolves `undefined` (NOT the cancel symbol) when
+    // the user submits an empty line — verified against @clack/prompts 1.3:
+    // Enter on empty → undefined with isCancel(undefined) === false. Passing
+    // that through made the harness wizard treat "blank = keep current" as a
+    // cancellation and abort the whole flow. Map it to "" so the caller's
+    // blank-means-keep semantics apply; only a real cancel (Esc / Ctrl+C)
+    // stays undefined.
+    if (p.isCancel(r)) return undefined;
+    return (r as string | undefined) ?? "";
   },
   async confirm(input) {
     const r = await p.confirm({
