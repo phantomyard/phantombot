@@ -913,14 +913,16 @@ describe("ensureSystemdUnitsCurrent", () => {
       { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
       isEnabledActive(), // tick: unchanged → left alone
       isActiveActive(),
-      // lena: enabled + active, template rewrote → restart
+      // lena: enabled + active, template rewrote → restart + active re-probe
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" },
-      // kai: enabled + active, template rewrote → restart
+      isActiveActive(),
+      // kai: enabled + active, template rewrote → restart + active re-probe
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" },
+      isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
     ];
     const r = await ensureSystemdUnitsCurrent({
@@ -944,6 +946,90 @@ describe("ensureSystemdUnitsCurrent", () => {
       "restart",
       "phantombot-heartbeat@kai.timer",
     ]);
+  });
+
+  test("a failed instance restart keeps the legacy heartbeat unit", async () => {
+    // Migration ordering, restart path: the default persona's instance was
+    // enabled+active, the template rewrite triggers a restart, and that
+    // restart FAILS (or leaves the unit dead). The pre-restart probe said
+    // active, but the replacement is now unverifiable — the legacy unit
+    // must stay, or the host goes heartbeat-less.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    // Corrupt the TEMPLATE timer so the heal rewrites it and restarts the
+    // instances.
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(), // tick: unchanged → left alone
+      isActiveActive(),
+      // lena: enabled + active, template rewrote → restart FAILS
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 1, stdout: "", stderr: "Job for phantombot-heartbeat@lena.timer failed" },
+      // kai: enabled + active, restart ok + active re-probe
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena", "kai"],
+    });
+    expect(r.rewrote).toEqual(["phantombot-heartbeat@.timer"]);
+    // Only kai's verified restart counts as repaired.
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat@kai.timer"]);
+    // The legacy unit and its files survive — retried on the next heal.
+    expect(r.removedRetired).toEqual([]);
+    expect(existsSync(legacyHbServicePath)).toBe(true);
+    expect(existsSync(legacyHbTimerPath)).toBe(true);
+  });
+
+  test("a restart that exits 0 but leaves the instance inactive keeps the legacy unit", async () => {
+    // Same guarantee via the re-probe: restart claims success but the unit
+    // did not come back active — `ready` must drop to false.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(), // tick
+      isActiveActive(),
+      // lena: enabled + active → restart ok, but re-probe says inactive
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena"],
+    });
+    expect(r.repairedTimers).toEqual([]);
+    expect(r.removedRetired).toEqual([]);
+    expect(existsSync(legacyHbServicePath)).toBe(true);
+    expect(existsSync(legacyHbTimerPath)).toBe(true);
   });
 });
 

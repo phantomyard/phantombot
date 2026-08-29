@@ -912,8 +912,17 @@ export async function ensureSystemdUnitsCurrent(
       let ready = isEnabled && isActive;
       if (ready) {
         if (forceRearm.has(unit) || templateRewrote) {
-          await opts.systemctl.run(["--user", "restart", unit]);
-          repairedTimers.push(unit);
+          // A failed restart can leave the instance stopped; only keep
+          // `ready` when the unit is verifiably active afterwards, so the
+          // legacy retirement below never fires on a dead replacement.
+          const r = await opts.systemctl.run(["--user", "restart", unit]);
+          if (r.exitCode === 0) {
+            const re = await opts.systemctl.run(["--user", "is-active", unit]);
+            ready = re.exitCode === 0 && re.stdout.trim() === "active";
+          } else {
+            ready = false;
+          }
+          if (ready) repairedTimers.push(unit);
         }
       } else {
         const r = await opts.systemctl.run(["--user", "enable", "--now", unit]);

@@ -2532,7 +2532,7 @@ Installed user units:
 |---|---|---|
 | `phantombot.service` | Always on | Multi-persona Telegram + PhantomChat runtime and P2P nodes |
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
-| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance + fires the nightly sweep on day rollover |
+| `phantombot-heartbeat@<persona>.timer` | Every 30 minutes | Per-persona mechanical maintenance + fires that persona's nightly sweep on day rollover (one instance per served persona; the legacy single `phantombot-heartbeat.timer` is retired automatically) |
 
 Update commands:
 
