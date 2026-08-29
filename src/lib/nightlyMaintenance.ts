@@ -174,9 +174,16 @@ export async function runMemoryMaintenance(input: {
       // the snapshot seconds ago, so this host IS backed up. Writing it to the
       // ledger would leave `doctor` permanently red on a healthy box, which is
       // how operators learn to stop reading doctor at all.
+      // Two different shapes share `fresh`: a sibling's restore point already
+      // covers this rollover (we have a path), or the lock stayed held and
+      // nothing was taken at all. Say which — an operator reading the ledger
+      // should not have to guess whether a snapshot exists.
       write(
-        `nightly: memory snapshot skipped — a restore point from this ` +
-          `rollover already exists${backup.path ? ` (${backup.path})` : ""}\n`,
+        backup.path
+          ? `nightly: memory snapshot skipped — a restore point from this ` +
+              `rollover already exists (${backup.path})\n`
+          : `nightly: memory snapshot skipped — another snapshot is in ` +
+              `flight, nothing taken this run\n`,
       );
     } else if (backup.status === "refused") {
       // Loud on purpose: an unhealthy memory database is the one condition

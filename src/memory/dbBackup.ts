@@ -52,12 +52,14 @@ import {
   copyFile,
   mkdir,
   open as openFile,
+  readFile,
   readdir,
   rename,
   rm,
   stat,
   unlink,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -120,8 +122,12 @@ function lockPath(dbPath: string): string {
  * "someone else is snapshotting this exact database right now" is good news
  * for the nightly and merely informational for an operator who typed the
  * command.
+ *
+ * Exported for tests: the takeover case (a slow holder's lock cleared as
+ * stale, then re-taken by a sibling) cannot be provoked deterministically
+ * through `backupMemoryDb` alone.
  */
-async function acquireSnapshotLock(
+export async function acquireSnapshotLock(
   dbPath: string,
   waitMs: number,
 ): Promise<(() => Promise<void>) | null> {
@@ -129,10 +135,27 @@ async function acquireSnapshotLock(
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
+      const token = `${process.pid}:${randomUUID()}`;
       const handle = await openFile(path, "wx");
-      await handle.writeFile(`${process.pid} ${new Date().toISOString()}\n`);
+      await handle.writeFile(`${token} ${new Date().toISOString()}\n`);
       await handle.close();
       return async () => {
+        // Only remove the lock if it is still OURS. A holder whose snapshot
+        // ran past LOCK_STALE_MS has had its lock cleared and re-taken by a
+        // sibling; an unconditional `rm` here would delete the SIBLING's lock
+        // and let a third caller in while it was mid-`VACUUM INTO` — exactly
+        // the race this lock exists to close.
+        try {
+          const held = await readFile(path, "utf8");
+          if (!held.startsWith(`${token} `)) {
+            log.warn("dbBackup: snapshot lock was taken over; not releasing", {
+              path,
+            });
+            return;
+          }
+        } catch {
+          return; // Already gone — nothing to release.
+        }
         await rm(path, { force: true });
       };
     } catch (e) {

@@ -12,13 +12,22 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile, readdir } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 
 import {
+  acquireSnapshotLock,
   backupDir,
   backupMemoryDb,
   listRestorePoints,
@@ -161,12 +170,45 @@ describe("concurrent snapshots (#495)", () => {
     await mkdir(backupDir(dbPath), { recursive: true });
     await writeFile(lock, "999999 old\n");
     // Backdate it past the stale threshold — a holder that died mid-VACUUM.
+    // Backdated with `utimes`, not `touch -d`: coreutils is not on a stock
+    // Windows dev box and this repo supports Windows development.
     const old = new Date(Date.now() - 30 * 60_000);
-    await Bun.spawn(["touch", "-d", old.toISOString(), lock]).exited;
+    await utimes(lock, old, old);
 
     const r = await backupMemoryDb({ dbPath, coalesceMs: 60_000, lockWaitMs: 100 });
     expect(r.status).toBe("taken");
     expect(await listRestorePoints(dbPath)).toHaveLength(1);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("a holder whose lock went stale does not delete its successor's lock", async () => {
+    const dir = await workdir();
+    const dbPath = join(dir, "memory.sqlite");
+    seed(dbPath, 50);
+    const lock = join(backupDir(dbPath), ".snapshot.lock");
+    await mkdir(backupDir(dbPath), { recursive: true });
+
+    // A: acquires, then runs long enough that its lock reads as abandoned.
+    const releaseA = await acquireSnapshotLock(dbPath, 100);
+    expect(releaseA).not.toBeNull();
+    const stale = new Date(Date.now() - 30 * 60_000);
+    await utimes(lock, stale, stale);
+
+    // B: clears the stale lock and takes it for itself.
+    const releaseB = await acquireSnapshotLock(dbPath, 100);
+    expect(releaseB).not.toBeNull();
+    const heldByB = await readFile(lock, "utf8");
+
+    // A finally finishes. Releasing must not touch B's lock — an
+    // unconditional rm here would let a third caller in mid-snapshot.
+    await releaseA?.();
+    expect(existsSync(lock)).toBe(true);
+    expect(await readFile(lock, "utf8")).toBe(heldByB);
+
+    // B still owns it, and its own release does clear it.
+    await releaseB?.();
+    expect(existsSync(lock)).toBe(false);
 
     await rm(dir, { recursive: true, force: true });
   });
