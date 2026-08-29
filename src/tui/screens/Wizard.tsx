@@ -36,6 +36,7 @@ import { Selectable } from "../components/Selectable.tsx";
 import { badge, glyph, theme } from "../theme.ts";
 import { WIZARD_STEPS, type WizardStep } from "../../lib/personaComplete.ts";
 import { applyTextChunk } from "../textInput.ts";
+import { validPersonaName } from "../../cli/persona-new.ts";
 
 /**
  * The three harness adapters. This list is the picker's whole vocabulary — see
@@ -139,7 +140,12 @@ function Progress(props: { step: WizardStep }): React.ReactElement {
 }
 
 function Choice(props: {
-  options: readonly { id: string; label: string; detail?: string; hint?: string }[];
+  options: readonly {
+    id: string;
+    label: string;
+    detail?: string;
+    hint?: string;
+  }[];
   value: string;
   cursor: number;
   onPick: (id: string) => void;
@@ -154,7 +160,9 @@ function Choice(props: {
         >
           <Box>
             <Box width="24%">
-              <Text color={option.id === props.value ? theme.accent : undefined}>
+              <Text
+                color={option.id === props.value ? theme.accent : undefined}
+              >
                 {`${option.id === props.value ? "◉" : "○"} ${option.id}`}
               </Text>
             </Box>
@@ -175,6 +183,10 @@ export function WizardScreen(props: {
   initial?: Partial<WizardAnswers>;
   /** True when a default persona already exists — see the default-persona fix. */
   defaultExists: boolean;
+  /** Existing directory names, used for inline validation before any write. */
+  existingNames?: readonly string[];
+  /** Absolute root used by the review step to name the files it will create. */
+  personasDir?: string;
   /**
    * Where esc goes from the FIRST step. Absent on genuine first run, where
    * there is no screen behind the wizard to return to.
@@ -189,22 +201,32 @@ export function WizardScreen(props: {
     ...props.initial,
   });
   const [cursor, setCursor] = useState(0);
+  const [nameError, setNameError] = useState<string | undefined>();
   /** The name field's live value — see the keystroke handler for why. */
   const nameRef = useRef(answers.name);
 
   const stepIndex = WIZARD_STEPS.indexOf(step);
+  const choicesFor = (target: WizardStep): readonly { id: string }[] => {
+    if (target === "brain") return BRAIN_OPTIONS;
+    if (target === "channel") return CHANNEL_OPTIONS;
+    if (target === "memory") return MEMORY_OPTIONS;
+    if (target === "voice") return VOICE_OPTIONS;
+    return [];
+  };
   const go = (delta: number) => {
-    const next = WIZARD_STEPS[Math.min(WIZARD_STEPS.length - 1, Math.max(0, stepIndex + delta))]!;
+    const next =
+      WIZARD_STEPS[
+        Math.min(WIZARD_STEPS.length - 1, Math.max(0, stepIndex + delta))
+      ]!;
     setStep(next);
-    setCursor(0);
+    const selected = choicesFor(next).findIndex(
+      (option) => option.id === answers[next as keyof WizardAnswers],
+    );
+    setCursor(Math.max(0, selected));
   };
 
   const optionsFor = (): readonly { id: string }[] => {
-    if (step === "brain") return BRAIN_OPTIONS;
-    if (step === "channel") return CHANNEL_OPTIONS;
-    if (step === "memory") return MEMORY_OPTIONS;
-    if (step === "voice") return VOICE_OPTIONS;
-    return [];
+    return choicesFor(step);
   };
 
   useInput((char, key) => {
@@ -224,12 +246,23 @@ export function WizardScreen(props: {
       return;
     }
     if (step === "name") {
-      if (key.return && answers.name.trim()) go(1);
-      else if (key.backspace || key.delete) {
+      if (key.return) {
+        const name = answers.name.trim();
+        const error = !name
+          ? "Required — enter a persona name."
+          : !validPersonaName(name)
+            ? "Use lowercase letters, digits, '-' or '_'; start with a letter or digit."
+            : name !== props.initial?.name?.trim() &&
+                props.existingNames?.includes(name)
+              ? `A persona named '${name}' already exists.`
+              : undefined;
+        setNameError(error);
+        if (!error) go(1);
+      } else if (key.backspace || key.delete) {
         nameRef.current = nameRef.current.slice(0, -1);
         setAnswers((a) => ({ ...a, name: nameRef.current }));
-      }
-      else if (char && !key.ctrl && !key.meta) {
+        setNameError(undefined);
+      } else if (char && !key.ctrl && !key.meta) {
         // A chunk can carry its own newline (a paste, or batched keystrokes),
         // and Ink reports `key.return` only for a chunk that is exactly "\r".
         // Appending it verbatim named a persona "alice\n". See `textInput.ts`.
@@ -241,7 +274,18 @@ export function WizardScreen(props: {
         const applied = applyTextChunk(nameRef.current, char);
         nameRef.current = applied.submit ?? applied.text;
         setAnswers((a) => ({ ...a, name: nameRef.current }));
-        if (applied.submit) go(1);
+        setNameError(undefined);
+        if (applied.submit) {
+          const name = nameRef.current.trim();
+          const error = !validPersonaName(name)
+            ? "Use lowercase letters, digits, '-' or '_'; start with a letter or digit."
+            : name !== props.initial?.name?.trim() &&
+                props.existingNames?.includes(name)
+              ? `A persona named '${name}' already exists.`
+              : undefined;
+          setNameError(error);
+          if (!error) go(1);
+        }
       }
       return;
     }
@@ -251,7 +295,8 @@ export function WizardScreen(props: {
     }
     const options = optionsFor();
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
-    else if (key.downArrow) setCursor((c) => Math.min(options.length - 1, c + 1));
+    else if (key.downArrow)
+      setCursor((c) => Math.min(options.length - 1, c + 1));
     else if (key.return) {
       const picked = options[cursor]?.id;
       if (picked) {
@@ -291,7 +336,9 @@ export function WizardScreen(props: {
         // the app and esc has nowhere to go. Opened from the phantom table it
         // is a wizard inside the app: leaving it means going back one screen,
         // not killing the process, so the footer offers Back and nothing else.
-        ...(props.onBack ? [] : [{ icon: badge.quit, key: "^q", label: "Quit" }]),
+        ...(props.onBack
+          ? []
+          : [{ icon: badge.quit, key: "^q", label: "Quit" }]),
       ]}
     >
       <Progress step={step} />
@@ -299,12 +346,20 @@ export function WizardScreen(props: {
       {step === "name" ? (
         <Box flexDirection="column">
           <Text>What should it be called?</Text>
-          <Box borderStyle="round" borderColor={theme.dim} paddingX={1} marginY={1}>
+          <Box
+            borderStyle="round"
+            borderColor={theme.dim}
+            paddingX={1}
+            marginY={1}
+          >
             <Text>{answers.name}▌</Text>
           </Box>
           <Text color={theme.dim}>
-            lowercase, no spaces · becomes the persona directory
+            Required · lowercase, no spaces · becomes the persona directory
           </Text>
+          {nameError ? (
+            <Text color={theme.bad}>{`${glyph.bad} ${nameError}`}</Text>
+          ) : null}
         </Box>
       ) : null}
 
@@ -320,8 +375,8 @@ export function WizardScreen(props: {
             />
           </Box>
           <Text color={theme.dim}>
-            Only these three are harnesses. Gemini is an embedding provider,
-            not a brain — it appears in step 4, not here.
+            Only these three are harnesses. Gemini is an embedding provider, not
+            a brain — it appears in step 4, not here.
           </Text>
         </Box>
       ) : null}
@@ -355,11 +410,16 @@ export function WizardScreen(props: {
               onPick={pick}
             />
           </Box>
-          <Box borderStyle="round" borderColor={theme.dim} paddingX={1} flexDirection="column">
+          <Box
+            borderStyle="round"
+            borderColor={theme.dim}
+            paddingX={1}
+            flexDirection="column"
+          >
             <Text color={theme.dim}>
               {'"no key" gives OKF field-weighted BM25 plus link-graph '}
-              expansion: frontmatter title/description/tags/aliases outrank
-              body text, and a hit walks [[wikilinks]] outward. No semantic
+              expansion: frontmatter title/description/tags/aliases outrank body
+              text, and a hit walks [[wikilinks]] outward. No semantic
               similarity — but markedly stronger than plain keyword search.
             </Text>
             <Text color={theme.dim}>
@@ -399,14 +459,16 @@ export function WizardScreen(props: {
             paddingX={1}
             flexDirection="column"
           >
-            <Text color={theme.ok}>{`${glyph.ok}  ${answers.name} is live`}</Text>
+            <Text
+              color={theme.accent}
+            >{`Review ${answers.name} — nothing has been written yet`}</Text>
             <Box marginTop={1} flexDirection="column">
               <Text>{`   brain      ${answers.brain}`}</Text>
               <Text>{`   channel    ${answers.channel}`}</Text>
               <Text>{`   memory     ${answers.memory}`}</Text>
               <Text>{`   voice      ${answers.voice}${answers.voice === "azure_edge" ? " (TTS only)" : ""}`}</Text>
               <Text>
-                {`   default    ${answers.makeDefault ? "yes — owns /update, /restart" : "no"}`}
+                {`   default    ${!props.defaultExists || answers.makeDefault ? "yes — owns /update, /restart" : "no"}`}
               </Text>
             </Box>
           </Box>
@@ -418,7 +480,16 @@ export function WizardScreen(props: {
             </Text>
           </Box>
           <Box marginTop={1}>
-            <Text>{`${glyph.arrow} Say hello. You're about to land in the chat.`}</Text>
+            <Box flexDirection="column">
+              <Text>{"Will create:"}</Text>
+              <Text
+                color={theme.dim}
+              >{`   persona dir   ${props.personasDir ?? "<personas>"}/${answers.name}`}</Text>
+              <Text color={theme.dim}>
+                {"   files         identity.json · config.toml"}
+              </Text>
+              <Text>{`${glyph.arrow} Press Enter to create it and start talking.`}</Text>
+            </Box>
           </Box>
         </Box>
       ) : null}

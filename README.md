@@ -327,6 +327,14 @@ starting from the beginning. "Configured" means a resolvable harness, an
 `identity.json` and a memory database that opens. Channels are deliberately not
 part of it: a phantom you only talk to from the terminal is a finished phantom.
 
+For a new phantom, the final wizard page is a review: it writes nothing until
+you confirm, then reports the persona directory plus `identity.json` and
+`config.toml`. Invalid or duplicate directory names are rejected inline.
+
+Per-phantom settings label each effective value as a **persona override**,
+**inherited from global config**, or a **built-in default**. Removing a persona
+key means “inherit”; explicit empty/tombstone values remain persona overrides.
+
 **Questions are asked in line mode.** The screens you read are rendered by Ink;
 the questions that change something — a value to type, a choice to make, a
 confirmation to give — are the same [`@clack`](https://github.com/bombshell-dev/clack)

@@ -21,7 +21,14 @@
  * because both bugs typecheck, render, and pass every unit test around them.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -190,6 +197,38 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
 }
 
 describe("first run", () => {
+  test("invalid names stay on the field with an inline error", async () => {
+    const app = mount({ startPersona: undefined });
+    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.press("Bad Name\r");
+    await app.waitFor((f) => f.includes("Use lowercase letters"));
+    expect(app.lastFrame()).toContain("What should it be called?");
+    expect(app.created).toEqual([]);
+  });
+
+  test("reviews exact artifacts before the creation callback runs", async () => {
+    const app = mount({ startPersona: undefined });
+    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.press("alice");
+    for (
+      let i = 0;
+      i < 12 && !app.lastFrame().includes("nothing has been written yet");
+      i++
+    ) {
+      await app.press("\r");
+    }
+    await app.waitFor((f) => f.includes("nothing has been written yet"));
+    const frame = app.lastFrame();
+    expect(frame).toContain("/tmp/does-not-exist/alice");
+    expect(frame).toContain("identity.json");
+    expect(frame).toContain("config.toml");
+    expect(frame).toContain("channel    cli");
+    expect(frame).toContain("default    yes");
+    expect(app.created).toEqual([]);
+    await app.press("\r");
+    expect(app.created).toEqual(["alice"]);
+  });
+
   test("completing the wizard leaves an app that can still be quit", async () => {
     const app = mount({ startPersona: undefined });
     await app.waitFor((f) => f.includes("What should it be called?"));
@@ -261,6 +300,39 @@ describe("first run", () => {
     // The wizard's brain step, resumed — not a chat box wired to a brain that
     // is not installed.
     expect(app.frame()).toContain("Claude Code CLI");
+  });
+
+  test("a resumed persona can walk back through its seeded name", async () => {
+    const app = mount({
+      host: {
+        ...HOST,
+        personas: [
+          {
+            name: "alice",
+            dir: "/tmp/does-not-exist/alice",
+          } as HostSnapshot["personas"][number],
+        ],
+      },
+      startPersona: "alice",
+      wizardStartAt: "brain",
+    });
+    await tick();
+    await app.press("\u001b");
+    await app.press("\r");
+    expect(app.frame()).toContain("Claude Code CLI");
+    expect(app.frame()).not.toContain("already exists");
+  });
+
+  test("a resumed persona reports an update, not newly created identity files", async () => {
+    const app = mount({
+      startPersona: "alice",
+      wizardStartAt: "done",
+      onCreatePersona: async () => ({ created: false }),
+    });
+    await app.waitFor((f) => f.includes("nothing has been written yet"));
+    await app.press("\r");
+    await app.waitFor((f) => f.includes("updated alice · config.toml"));
+    expect(app.lastFrame()).not.toContain("created /tmp/does-not-exist/alice");
   });
 
   test("a complete persona opens chat", async () => {

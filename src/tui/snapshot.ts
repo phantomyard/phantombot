@@ -41,6 +41,32 @@ import { openPersonaVault } from "../lib/vault.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
 import { providerHearsVoice } from "../lib/voice.ts";
 import { log } from "../lib/logger.ts";
+import { readConfigToml, getIn } from "../lib/configWriter.ts";
+import { personaConfigPath } from "../lib/personaConfig.ts";
+
+export type ConfigSource = "persona" | "global" | "default";
+
+export function sourceOf(
+  personaToml: Record<string, unknown>,
+  globalToml: Record<string, unknown>,
+  path: readonly string[],
+): ConfigSource {
+  if (getIn(personaToml, path) !== undefined) return "persona";
+  if (getIn(globalToml, path) !== undefined) return "global";
+  return "default";
+}
+
+export function configSourcesOf(
+  personaToml: Record<string, unknown>,
+  globalToml: Record<string, unknown>,
+): PersonaSnapshot["configSources"] {
+  return {
+    brain: sourceOf(personaToml, globalToml, ["harnesses", "chain"]),
+    channels: sourceOf(personaToml, globalToml, ["channels"]),
+    embeddings: sourceOf(personaToml, globalToml, ["embeddings"]),
+    voice: sourceOf(personaToml, globalToml, ["voice"]),
+  };
+}
 
 /** Run a read that must never take a screen down. */
 function safe<T>(what: string, fn: () => T): T | undefined {
@@ -68,9 +94,9 @@ function count(
 ): number | undefined {
   if (!db) return undefined;
   return safe(sql, () => {
-    const row = db.query(sql).get(...(params as never[])) as
-      | { n?: number }
-      | null;
+    const row = db.query(sql).get(...(params as never[])) as {
+      n?: number;
+    } | null;
     return typeof row?.n === "number" ? row.n : undefined;
   });
 }
@@ -165,6 +191,13 @@ export interface PersonaSnapshot {
   secretNames?: string[];
   memory: MemorySnapshot;
   completeness: PersonaCompleteness;
+  /** Where the effective value came from; absence means inherit. */
+  configSources?: {
+    brain: ConfigSource;
+    channels: ConfigSource;
+    embeddings: ConfigSource;
+    voice: ConfigSource;
+  };
 }
 
 export interface HostSnapshot {
@@ -329,10 +362,7 @@ function readMemory(config: Config, persona: string): MemorySnapshot {
       "SELECT COUNT(*) AS n FROM files WHERE path LIKE 'kb/%'",
     );
     snapshot.kbLinks = count(indexDb, "SELECT COUNT(*) AS n FROM note_links");
-    snapshot.indexedTotal = count(
-      indexDb,
-      "SELECT COUNT(*) AS n FROM leaves",
-    );
+    snapshot.indexedTotal = count(indexDb, "SELECT COUNT(*) AS n FROM leaves");
     snapshot.indexedInSpace = count(
       indexDb,
       "SELECT COUNT(*) AS n FROM note_embeddings",
@@ -365,6 +395,12 @@ export async function personaSnapshot(
 ): Promise<PersonaSnapshot> {
   const dir = personaDir(config, name);
   const chain = config.harnesses?.chain ?? [];
+  const globalToml =
+    (await safeAsync(() => readConfigToml(host.configPath))) ?? {};
+  const personaToml =
+    (await safeAsync(() =>
+      readConfigToml(personaConfigPath(host.personasDir, name)),
+    )) ?? {};
 
   let resolvedHarness: PersonaSnapshot["resolvedHarness"];
   for (const id of chain) {
@@ -424,6 +460,7 @@ export async function personaSnapshot(
     secretNames,
     memory: readMemory(config, name),
     completeness: await personaCompleteness(config, name),
+    configSources: configSourcesOf(personaToml, globalToml),
   };
 }
 
