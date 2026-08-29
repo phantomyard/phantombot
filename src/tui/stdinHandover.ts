@@ -8,7 +8,7 @@
  * cannot live with, and both failures look identical to the user — the app
  * repaints correctly and then ignores every key.
  *
- * `installMouse().setForwarding(true)` fixes the paused-stream half of that.
+ * `installStdinTap().setForwarding(true)` fixes the paused-stream half of that.
  * This module fixes the other half: LISTENERS THAT DO NOT LEAVE. A closed
  * readline interface leaves a `data` (and `keypress`) handler attached to
  * stdin; open the settings screen a dozen times and you accumulate a dozen of

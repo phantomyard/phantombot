@@ -35,7 +35,7 @@ describe("the prompt host", () => {
         }),
       ).rejects.toThrow("prompt blew up");
       // A throwing hand-over that never resumed would leave the user staring
-      // at a frozen frame with mouse reporting off and no keys forwarded.
+      // at a frozen frame with no keys forwarded.
       expect(events).toEqual(["suspend", "resume"]);
     } finally {
       restore();

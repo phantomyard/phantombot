@@ -10,7 +10,7 @@
  *      session, which rendered a bare `opening alice…` with no Frame, no
  *      footer, and no `useInput` mounted. With `exitOnCtrlC: false`, `^q`,
  *      `^c` and `esc` were all inert: the only way out was killing the
- *      terminal, with mouse reporting still on.
+ *      terminal.
  *
  *   2. The opening screen was chosen on `startPersona` alone, so an INCOMPLETE
  *      persona — which arrives with a name AND a resume point — opened chat

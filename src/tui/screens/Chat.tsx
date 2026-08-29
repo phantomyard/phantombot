@@ -40,7 +40,6 @@ import { frameChromeRows } from "../chrome.ts";
 import { transcriptLines, transcriptWindow } from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
-import { mouse } from "../mouse.ts";
 import { applyTextChunk } from "../textInput.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
@@ -347,16 +346,6 @@ export function ChatScreen(props: {
     },
     [props.session],
   );
-
-  // The wheel scrolls the transcript. Three rows per notch is what every
-  // terminal pager does; one row feels broken and a page feels like a jump.
-  useEffect(() => {
-    if (!mouse.enabled) return;
-    return mouse.onMouse((event) => {
-      if (event.kind === "wheel-up") scrollBy(3);
-      else if (event.kind === "wheel-down") scrollBy(-3);
-    });
-  }, [scrollBy]);
 
   useInput((char, key) => {
     // ^c interrupts the TURN. It never quits: losing an app mid-answer because

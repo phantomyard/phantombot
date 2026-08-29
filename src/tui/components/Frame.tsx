@@ -32,7 +32,7 @@ export interface FooterKey {
    * footer of bare `^t ^c ^s ^p` reads as noise until you have memorised it.
    */
   icon?: string;
-  /** Set when this hint is also a click target (mouse is always optional). */
+  /** Set when this hint is also an actionable item. */
   onPress?: () => void;
 }
 

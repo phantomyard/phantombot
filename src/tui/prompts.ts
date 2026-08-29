@@ -13,9 +13,8 @@
  * Clack writes to the terminal directly and reads the real stdin; Ink cannot be
  * paused. Running both at once interleaves two applications on one screen. So a
  * prompt is bracketed by a HOST that suspends the renderer: Ink's writes are
- * gated off, keystrokes stop being forwarded to it, mouse reporting is
- * disabled, and the alternate screen is left so the prompt appears on the
- * user's normal terminal. Afterwards the reverse happens and a full frame is
+ * gated off, keystrokes stop being forwarded to it, and the alternate screen
+ * is left so the prompt appears on the user's normal terminal. Afterwards the reverse happens and a full frame is
  * repainted.
  *
  * The host is installed by the entrypoint. Its default is a pass-through, so

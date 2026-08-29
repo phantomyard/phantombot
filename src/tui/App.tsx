@@ -56,7 +56,6 @@ import { McpScreen } from "./screens/Mcp.tsx";
 import { LogsScreen } from "./screens/Logs.tsx";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
-import { mouse } from "./mouse.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfigForPersona, type Config } from "../config.ts";
@@ -327,17 +326,6 @@ export function App(props: AppProps): React.ReactElement {
   const persona =
     host.personas.find((p) => p.name === personaName) ?? host.personas[0];
 
-  // Mouse clicks are routed centrally to the topmost registered rect. A click
-  // that hits nothing is simply ignored — it must never fall through to a
-  // keyboard handler.
-  useEffect(() => {
-    if (!mouse.enabled) return;
-    return mouse.onMouse((event) => {
-      if (event.kind !== "down") return;
-      mouse.click(event.column, event.row);
-    });
-  }, []);
-
   useInput((char, key) => {
     // While a clack prompt owns the terminal the app is not on screen. Acting
     // on a keystroke here would change something the user cannot see.
@@ -376,7 +364,7 @@ export function App(props: AppProps): React.ReactElement {
     // has opened. `exitOnCtrlC: false` means Ink will not rescue us either, so
     // without this the window between "wizard finished" and "session ready" —
     // or a session that never opens because the harness is gone — is
-    // unquittable except by killing the terminal, with mouse reporting still on.
+    // unquittable except by killing the terminal.
     if (screen === "chat" && !session) {
       if ((key.ctrl && (char === "q" || char === "c")) || key.escape) exit();
     }

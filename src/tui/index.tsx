@@ -6,16 +6,15 @@
  * also the honest degradation path: a terminal that cannot do full-screen still
  * gets a working conversation.
  *
- * Terminal hygiene is this module's responsibility, not a component's: mouse
- * reporting is enabled BEFORE `render()` (see `mouse.ts`) and disabled on every
- * exit path, including a crash, so nothing can leave the user's shell emitting
- * escape codes.
+ * Terminal hygiene is this module's responsibility, not a component's: the
+ * stdin tap is installed BEFORE `render()` (see `stdinTap.ts`) and released on
+ * every exit path, including a crash.
  */
 
 import { render } from "ink";
 
 import { App } from "./App.tsx";
-import { installMouse } from "./mouse.ts";
+import { installStdinTap } from "./stdinTap.ts";
 import { enterFullScreen, gateStdout, forceRepaint } from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
@@ -79,9 +78,8 @@ export async function startTui(): Promise<number> {
   // Logs are CAPTURED, not printed: stderr is the same terminal being drawn on,
   // so every log line used to land on top of the frame. `^l` shows the buffer.
   const restoreLogs = setLogSink((line) => logBuffer.push(line));
-  // BEFORE render(): with the stdin tap attached from a useEffect instead, the
-  // mouse RELEASE event is swallowed reproducibly. See mouse.ts.
-  const installed = installMouse();
+  // BEFORE render(): the tap must exist before Ink attaches to its stdin.
+  const installed = installStdinTap();
 
   const element = (
     <App
@@ -111,8 +109,8 @@ export async function startTui(): Promise<number> {
    * Hand the terminal to `@clack` and take it back.
    *
    * Ink cannot be paused, so the suspension is done around it: writes are
-   * dropped, keystrokes stop being forwarded, mouse reporting goes off, and the
-   * alternate screen is left so the prompt draws where the user's shell is. On
+   * dropped, keystrokes stop being forwarded, and the alternate screen is left
+   * so the prompt draws where the user's shell is. On
    * the way back the frame is repainted in full via `forceRepaint`, because
    * Ink diffs against a frame that is no longer on the screen and would
    * otherwise redraw only the part it thinks changed.
@@ -281,7 +279,7 @@ export async function createPhantomFromWizard(
 /**
  * `phantombot --no-tui` — the same conversation, line mode.
  *
- * No cursor addressing, no frame, no mouse. Pipeable, and the fallback for any
+ * No cursor addressing, no frame. Pipeable, and the fallback for any
  * terminal the full-screen renderer cannot drive.
  */
 export async function runRepl(
