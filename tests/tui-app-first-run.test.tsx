@@ -21,7 +21,14 @@
  * because both bugs typecheck, render, and pass every unit test around them.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -293,6 +300,15 @@ describe("first run", () => {
     // The wizard's brain step, resumed — not a chat box wired to a brain that
     // is not installed.
     expect(app.frame()).toContain("Claude Code CLI");
+  });
+
+  test("a resumed persona can walk back through its seeded name", async () => {
+    const app = mount({ startPersona: "alice", wizardStartAt: "brain" });
+    await tick();
+    await app.press("\u001b");
+    await app.press("\r");
+    expect(app.frame()).toContain("Claude Code CLI");
+    expect(app.frame()).not.toContain("already exists");
   });
 
   test("a complete persona opens chat", async () => {

@@ -24,4 +24,10 @@ describe("TUI config provenance", () => {
       ),
     ).toBe("persona");
   });
+
+  test("embedding provenance follows the embeddings key", () => {
+    const global = { embeddings: { provider: "openai" } };
+    expect(sourceOf({}, global, ["embeddings"])).toBe("global");
+    expect(sourceOf({}, global, ["retrieval"])).toBe("default");
+  });
 });

@@ -252,7 +252,8 @@ export function WizardScreen(props: {
           ? "Required — enter a persona name."
           : !validPersonaName(name)
             ? "Use lowercase letters, digits, '-' or '_'; start with a letter or digit."
-            : props.existingNames?.includes(name)
+            : name !== props.initial?.name?.trim() &&
+                props.existingNames?.includes(name)
               ? `A persona named '${name}' already exists.`
               : undefined;
         setNameError(error);
@@ -278,7 +279,8 @@ export function WizardScreen(props: {
           const name = nameRef.current.trim();
           const error = !validPersonaName(name)
             ? "Use lowercase letters, digits, '-' or '_'; start with a letter or digit."
-            : props.existingNames?.includes(name)
+            : name !== props.initial?.name?.trim() &&
+                props.existingNames?.includes(name)
               ? `A persona named '${name}' already exists.`
               : undefined;
           setNameError(error);

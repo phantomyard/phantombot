@@ -205,7 +205,7 @@ export function PersonaDetailScreen(props: {
           <MenuItem
             icon="◉"
             label="Brain"
-            description={`harness: ${p.chain.join(" → ") || "none configured"}`}
+            description={`harness: ${p.chain.join(" → ") || "none configured"} · ${sourceLabel(p.configSources?.brain)}`}
             badge={
               p.resolvedHarness
                 ? `${glyph.ok} resolved`
@@ -219,7 +219,10 @@ export function PersonaDetailScreen(props: {
           <Detail
             lines={[
               ["binary", p.resolvedHarness?.path ?? "not found on PATH"],
-              ["from", sourceLabel(p.configSources?.brain)],
+              [
+                "from",
+                "state.json harness_bins > config.toml [harnesses.<h>] bin > default",
+              ],
             ]}
           />
         </>
@@ -280,7 +283,7 @@ export function PersonaDetailScreen(props: {
                   ? `${embedding.provider} · ${embedding.model} · ${embedding.dimensions}`
                   : "off",
               ],
-              ["from", sourceLabel(p.configSources?.memory)],
+              ["from", sourceLabel(p.configSources?.embeddings)],
               [
                 "indexed",
                 `${humanCount(p.memory.indexedInSpace)} / ${humanCount(p.memory.indexedTotal)}  ${

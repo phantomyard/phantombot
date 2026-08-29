@@ -183,7 +183,7 @@ export interface PersonaSnapshot {
   configSources?: {
     brain: ConfigSource;
     channels: ConfigSource;
-    memory: ConfigSource;
+    embeddings: ConfigSource;
     voice: ConfigSource;
   };
 }
@@ -451,7 +451,7 @@ export async function personaSnapshot(
     configSources: {
       brain: sourceOf(personaToml, globalToml, ["harnesses", "chain"]),
       channels: sourceOf(personaToml, globalToml, ["channels"]),
-      memory: sourceOf(personaToml, globalToml, ["retrieval"]),
+      embeddings: sourceOf(personaToml, globalToml, ["embeddings"]),
       voice: sourceOf(personaToml, globalToml, ["voice"]),
     },
   };
