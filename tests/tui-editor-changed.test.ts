@@ -15,7 +15,7 @@ test("quitting the editor without saving does not claim a save", async () => {
 });
 
 test("a write in the editor is reported as changed", async () => {
-  const path = join(dir, "USER.md");
+  const path = join(dir, "AGENTS.md");
   await Bun.write(path, "hello");
   const r = await openInEditor(path, async () => {
     await Bun.write(path, "hello there");

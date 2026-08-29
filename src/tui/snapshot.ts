@@ -238,8 +238,13 @@ function channelsFor(config: Config, dir: string): string[] {
   return out;
 }
 
-/** The prompt files, in the order the settings screen lists them. */
-const IDENTITY_FILES = ["SOUL.md", "IDENTITY.md", "USER.md"];
+/**
+ * The prompt files, in the order the settings screen lists them. These are
+ * exactly the per-persona files the runtime loader actually reads
+ * (see src/persona/loader.ts); USER.md is legacy and is deliberately
+ * not offered.
+ */
+const IDENTITY_FILES = ["SOUL.md", "IDENTITY.md", "AGENTS.md"];
 
 function readIdentity(dir: string): IdentitySnapshot {
   const files = IDENTITY_FILES.map((name) => {

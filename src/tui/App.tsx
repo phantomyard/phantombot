@@ -658,8 +658,8 @@ export function App(props: AppProps): React.ReactElement {
    * Pick one of the prompt files and open it in `$EDITOR`.
    *
    * A missing file is offered too, and creating it by opening it is the
-   * correct behaviour: a persona with no USER.md is a persona that has never
-   * been told who it works for, and the way to fix that is to write one.
+   * correct behaviour: a persona with no IDENTITY.md is a persona that has
+   * never been told who it is, and the way to fix that is to write one.
    */
   const editIdentity = useCallback(
     async (target: PersonaSnapshot) => {

@@ -64,7 +64,7 @@ const ALICE: PersonaSnapshot = {
     files: [
       { name: "SOUL.md", path: "/x/SOUL.md", present: true },
       { name: "IDENTITY.md", path: "/x/IDENTITY.md", present: true },
-      { name: "USER.md", path: "/x/USER.md", present: false },
+      { name: "AGENTS.md", path: "/x/AGENTS.md", present: false },
     ],
     description: "a test phantom",
   },

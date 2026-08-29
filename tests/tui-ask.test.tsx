@@ -122,7 +122,7 @@ describe("the list question is an app screen", () => {
     title: "Which file for alice?",
     options: [
       { value: "/p/SOUL.md", label: "SOUL.md" },
-      { value: "/p/USER.md", label: "USER.md", hint: "does not exist yet" },
+      { value: "/p/AGENTS.md", label: "AGENTS.md", hint: "does not exist yet" },
     ],
   };
 
@@ -140,7 +140,7 @@ describe("the list question is an app screen", () => {
     await app.press("\r");
     // Answering the SECOND row is the assertion: with one option, a hardcoded
     // answer would pass.
-    expect(answers).toEqual(["/p/USER.md"]);
+    expect(answers).toEqual(["/p/AGENTS.md"]);
   });
 
   test("esc picks nothing at all", async () => {

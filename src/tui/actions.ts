@@ -431,7 +431,7 @@ async function fileStamp(path: string): Promise<string | null> {
 /**
  * Open a persona's prompt file in the user's editor.
  *
- * SOUL.md, IDENTITY.md and USER.md are the only settings whose value is prose,
+ * SOUL.md, IDENTITY.md and AGENTS.md are the only settings whose value is prose,
  * and prose is not something to edit inside a list row: it is multi-kilobyte
  * markdown the user already has an editor for. So the TUI's job is to hand the
  * terminal over cleanly and take it back — the caller runs this inside the
