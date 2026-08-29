@@ -137,9 +137,7 @@ export async function startTui(): Promise<number> {
     installed.teardown();
     fullScreen.restore();
   };
-  process.once("exit", restore);
-  process.once("SIGINT", restore);
-  process.once("SIGTERM", restore);
+  installSignalExit(restore);
 
   try {
     await instance.waitUntilExit();
@@ -147,6 +145,42 @@ export async function startTui(): Promise<number> {
   } finally {
     restore();
   }
+}
+
+/**
+ * Wire the TUI's exit paths: plain `exit`, plus SIGINT/SIGTERM from an outside
+ * `kill` or a systemd stop (`^c` and `^q` go through Ink — raw mode means the
+ * terminal generates no SIGINT).
+ *
+ * A signal listener suppresses Node's default termination, so restoring the
+ * terminal and then RETURNING leaves a deaf app painting over the user's shell
+ * — a second signal would be needed because `once` has already consumed the
+ * handler. Restore, then exit with the conventional code (128 + signal). The
+ * `exit` handler is the idempotent backstop; `FullScreen.restore` and
+ * `installed.teardown` are both guarded, so the double call is harmless.
+ *
+ * Returns a teardown that removes the listeners — used by tests.
+ */
+export function installSignalExit(
+  restore: () => void,
+  exit: (code: number) => never = process.exit,
+): () => void {
+  const onSigint = () => {
+    restore();
+    exit(130);
+  };
+  const onSigterm = () => {
+    restore();
+    exit(143);
+  };
+  process.once("exit", restore);
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  return () => {
+    process.off("exit", restore);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  };
 }
 
 /**
