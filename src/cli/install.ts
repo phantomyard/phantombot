@@ -49,6 +49,11 @@ import {
 } from "../lib/taskScheduler.ts";
 import { openPersonaVault, vaultPath } from "../lib/vault.ts";
 import { resolveVaultPersonaDir } from "./vault.ts";
+import {
+  loadConfig,
+  personaDir,
+  servedPersonasOf,
+} from "../config.ts";
 import { existsSync } from "node:fs";
 import type { WriteSink } from "../lib/io.ts";
 
@@ -90,10 +95,19 @@ export interface RunInstallInput {
    */
   heartbeatServicePath?: string;
   heartbeatTimerPath?: string;
+  /** Test overrides for the retired pre-#486 heartbeat units (Linux). */
+  legacyHeartbeatServicePath?: string;
+  legacyHeartbeatTimerPath?: string;
   nightlyServicePath?: string;
   nightlyTimerPath?: string;
   tickServicePath?: string;
   tickTimerPath?: string;
+  /**
+   * Personas to arm heartbeat instances for (Linux, #486). Production
+   * leaves this undefined and install derives it from the loaded config;
+   * tests pass it explicitly to stay hermetic.
+   */
+  personas?: readonly string[];
   heartbeatPlistPath?: string;
   nightlyPlistPath?: string;
   tickPlistPath?: string;
@@ -229,11 +243,31 @@ async function runInstallLinux(
   const systemctl =
     input.systemctl ?? new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
 
+  // One heartbeat timer instance per served persona (#486). A config that
+  // can't be loaded yet (pre-init box) must not fail the install — skip
+  // instance arming; the startup doctor / first heartbeat heal provisions
+  // instances once a config exists. Personas with no directory on disk
+  // (stale autostart entries) are skipped: their services would only fail.
+  let personas = input.personas;
+  if (personas === undefined) {
+    try {
+      const config = await loadConfig();
+      personas = servedPersonasOf(config).filter((name) =>
+        existsSync(personaDir(config, name)),
+      );
+    } catch {
+      personas = undefined;
+    }
+  }
+
   const result = await installPhantombotUnit({
     binPath,
     unitPath,
+    personas,
     heartbeatServicePath: input.heartbeatServicePath,
     heartbeatTimerPath: input.heartbeatTimerPath,
+    legacyHeartbeatServicePath: input.legacyHeartbeatServicePath,
+    legacyHeartbeatTimerPath: input.legacyHeartbeatTimerPath,
     nightlyServicePath: input.nightlyServicePath,
     nightlyTimerPath: input.nightlyTimerPath,
     tickServicePath: input.tickServicePath,

@@ -8,6 +8,7 @@ import {
   TICK_STALE_MINUTES,
   heartbeatMarkerPath,
   loadHeartbeatLastFired,
+  loadPersonaHeartbeatLastFired,
   loadTickLastFired,
   recordHeartbeatFired,
   recordTickFired,
@@ -88,6 +89,38 @@ describe("timerHealth", () => {
     // Falls back to mtime-derived iso, age should be small.
     expect(r.iso).toBeDefined();
     expect(r.ageMinutes).toBeLessThanOrEqual(1);
+  });
+
+  test("per-persona markers are separate files (#486)", async () => {
+    await recordHeartbeatFired("lena");
+    await recordHeartbeatFired("kai");
+    expect(heartbeatMarkerPath("lena")).not.toBe(heartbeatMarkerPath("kai"));
+    expect(existsSync(heartbeatMarkerPath("lena"))).toBe(true);
+    expect(existsSync(heartbeatMarkerPath("kai"))).toBe(true);
+    // And distinct from the legacy timer-scoped marker.
+    expect(heartbeatMarkerPath("lena")).not.toBe(heartbeatMarkerPath());
+  });
+
+  test("loadPersonaHeartbeatLastFired reads only the persona's own marker", async () => {
+    await recordHeartbeatFired("kai");
+    const own = loadPersonaHeartbeatLastFired("kai");
+    expect(own.iso).toBeDefined();
+    // Another persona with no marker sees nothing — not kai's fire.
+    expect(loadPersonaHeartbeatLastFired("lena").iso).toBeUndefined();
+  });
+
+  test("the default persona falls back to the legacy marker; a non-default does not (#486)", async () => {
+    // Pre-#486 upgrade state: only the timer-scoped marker exists.
+    await recordHeartbeatFired();
+    expect(
+      loadPersonaHeartbeatLastFired("lena", { isDefault: true }).iso,
+    ).toBeDefined();
+    expect(loadPersonaHeartbeatLastFired("kai").iso).toBeUndefined();
+    // Once the default has its own per-persona marker, it wins over legacy.
+    await recordHeartbeatFired("lena");
+    const r = loadPersonaHeartbeatLastFired("lena", { isDefault: true });
+    expect(r.iso).toBeDefined();
+    expect(r.runs).toBe(1); // the persona file's own counter, not legacy's
   });
 
   test("default thresholds are sane (heartbeat > tick)", () => {

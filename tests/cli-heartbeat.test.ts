@@ -112,7 +112,9 @@ describe("runHeartbeatCli", () => {
       healSystemd: false,
     });
     expect(code).toBe(0);
-    expect(existsSync(heartbeatMarkerPath())).toBe(true);
+    // Per-persona marker (#486): the fire is recorded against the persona
+    // the heartbeat swept, not a host-global file.
+    expect(existsSync(heartbeatMarkerPath("phantom"))).toBe(true);
   });
 
   test("healSystemd seam runs after the heartbeat body", async () => {
@@ -161,6 +163,51 @@ describe("runHeartbeatCli", () => {
     expect(code).toBe(0);
     expect(spawned).toEqual([["phantom", "rollover"]]);
     expect(out.text).toContain("day rolled over");
+  });
+
+  test("a non-default persona's rollover is not consumed by the default's marker (#486)", async () => {
+    // The legacy timer-scoped marker (written by the default persona's
+    // fires) must NOT satisfy a non-default persona's rollover check —
+    // sharing it was how the first-firing persona after midnight starved
+    // every other persona of its nightly sweep. Kai has no marker of his
+    // own yet → no rollover, no sweep.
+    await mkdir(join(workdir, "personas", "kai", "memory"), { recursive: true });
+    await writeMarker(new Date(Date.now() - 36 * 3_600_000));
+    const spawned: string[] = [];
+    const code = await runHeartbeatCli({
+      config,
+      persona: "kai",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: (persona) => spawned.push(persona),
+    });
+    expect(code).toBe(0);
+    expect(spawned).toEqual([]);
+  });
+
+  test("a non-default persona rolls over on its OWN marker (#486)", async () => {
+    await mkdir(join(workdir, "personas", "kai", "memory"), { recursive: true });
+    const p = heartbeatMarkerPath("kai");
+    await mkdir(dirname(p), { recursive: true });
+    await writeFile(
+      p,
+      `ISO=${new Date(Date.now() - 36 * 3_600_000).toISOString()} runs=1\n`,
+      "utf8",
+    );
+    const spawned: string[] = [];
+    const code = await runHeartbeatCli({
+      config,
+      persona: "kai",
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      healSystemd: false,
+      embedNotes: false,
+      triggerNightly: (persona) => spawned.push(persona),
+    });
+    expect(code).toBe(0);
+    expect(spawned).toEqual(["kai"]);
   });
 
   test("a fire earlier the same day does not spawn a sweep", async () => {

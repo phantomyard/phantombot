@@ -2325,6 +2325,25 @@ export function resolvePersona(
 }
 
 /**
+ * Personas this host serves — `{default_persona} ∪ autostart_personas`,
+ * DEFAULT FIRST (#486). This is the set that gets per-persona host
+ * maintenance: a `phantombot-heartbeat@<persona>.timer` instance each,
+ * per-persona doctor coverage, and a startup nightly sweep. The default
+ * leads because migrations key off it (the legacy single-persona
+ * heartbeat unit is only retired once the default's instance is armed).
+ */
+export function servedPersonasOf(
+  config: Pick<Config, "defaultPersona" | "autostartPersonas">,
+): string[] {
+  return [
+    config.defaultPersona,
+    ...(config.autostartPersonas ?? []).filter(
+      (n) => n !== config.defaultPersona,
+    ),
+  ];
+}
+
+/**
  * Path to the per-persona FTS5 + embeddings index. One file per persona so a
  * single persona can be rebuilt without touching others. Shared by
  * `phantombot memory ...` and the turn-time auto-retrieval so both read and

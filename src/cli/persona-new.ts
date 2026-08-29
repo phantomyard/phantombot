@@ -18,13 +18,14 @@
 
 import { defineCommand } from "citty";
 
-import { type Config, loadConfig } from "../config.ts";
+import { type Config, loadConfig, servedPersonasOf } from "../config.ts";
 import { applyPersona } from "./create-persona.ts";
 import type { WriteSink } from "../lib/io.ts";
 import {
   listPersonaDirs,
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
+import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import type { PersonaTone } from "../lib/personaTemplate.ts";
 
 export interface RunPersonaNewInput {
@@ -39,6 +40,8 @@ export interface RunPersonaNewInput {
   config?: Config;
   out?: WriteSink;
   err?: WriteSink;
+  /** Test seam for the heartbeat-instance sync (#486). */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
 }
 
 /** Persona directory names must survive being a directory name. */
@@ -83,6 +86,22 @@ export async function runPersonaNew(
       name,
     ]);
     out.write(`autostart: ${list.join(", ")}\n`);
+    // Provision the new persona's heartbeat timer instance right away
+    // (#486) — best-effort; the next heartbeat heal reconciles the same
+    // state if this fails.
+    const sync = input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+    try {
+      await sync(
+        servedPersonasOf({
+          defaultPersona: config.defaultPersona,
+          autostartPersonas: list,
+        }),
+      );
+    } catch (e) {
+      err.write(
+        `warning: could not provision the heartbeat timer instance: ${(e as Error).message}\n`,
+      );
+    }
   }
 
   out.write(`created ${result.name} at ${result.dir}\n`);

@@ -30,13 +30,14 @@
  * untested surface.
  */
 
-import { type Config, personaDir } from "../config.ts";
+import { type Config, personaDir, servedPersonasOf } from "../config.ts";
 import { applyEmbeddingConfig } from "../cli/embedding.ts";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { applyVoiceConfig } from "../cli/voice.ts";
 import { runMemoryIndex } from "../cli/memory.ts";
 import type { EmbedProgress } from "../lib/embedJob.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { loadState, saveState } from "../state.ts";
@@ -263,11 +264,27 @@ export async function applyAutostart(input: {
   persona: string;
   on: boolean;
   serviceControl?: ServiceControl;
+  /** Test seam for the heartbeat-instance sync (#486). */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
 }): Promise<{ ok: boolean; list: string[]; error?: string }> {
   const current = new Set(input.config.autostartPersonas ?? []);
   if (input.on) current.add(input.persona);
   else current.delete(input.persona);
   const list = await writeAutostartPersonas(input.config, [...current]);
+  // Provision/retire the persona's heartbeat timer instance right away
+  // (#486) — best-effort; the next heartbeat heal reconciles regardless.
+  try {
+    const sync = input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+    await sync(
+      servedPersonasOf({
+        defaultPersona: input.config.defaultPersona,
+        autostartPersonas: list,
+      }),
+    );
+  } catch {
+    // The restart below still applies the autostart change; a failed
+    // instance sync is healed on the next heartbeat pass.
+  }
   const svc = input.serviceControl ?? defaultServiceControl();
   const r = await svc.restart();
   return r.ok

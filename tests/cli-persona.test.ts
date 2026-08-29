@@ -464,6 +464,23 @@ describe("runAutostartPicker", () => {
     expect(out.text).toContain("phantom + lena");
   });
 
+  test("syncs heartbeat timer instances to the new served set (#486)", async () => {
+    let synced: string[] | undefined;
+    await runAutostartPicker({
+      config: makeConfig(),
+      personas: ["phantom", "lena", "kai"],
+      serviceControl: svcInactive,
+      out: new CaptureStream(),
+      err: new CaptureStream(),
+      choose: async () => ["kai"],
+      syncHeartbeatInstances: async (personas) => {
+        synced = personas;
+      },
+    });
+    // Default first, then the chosen autostart set.
+    expect(synced).toEqual(["phantom", "kai"]);
+  });
+
   test("clearing the selection removes the key rather than writing []", async () => {
     await runAutostartPicker({
       config: makeConfig({ autostartPersonas: ["lena"] }),

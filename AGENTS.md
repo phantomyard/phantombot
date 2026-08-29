@@ -236,7 +236,7 @@ On Linux, `phantombot install` creates **three** systemd-user units:
 | Unit | Cadence | What it does |
 |---|---|---|
 | `phantombot.service` | always-on | `phantombot run` — Telegram listener |
-| `phantombot-heartbeat.timer` → `.service` | every 30 min | mechanical maintenance, no LLM |
+| `phantombot-heartbeat@<persona>.timer` → `@.service` template | every 30 min, one instance per served persona (default ∪ autostart) | mechanical maintenance for that persona, no LLM |
 | `phantombot-tick.timer` → `.service` | every 1 min | fires due scheduled tasks |
 
 There is deliberately no nightly unit. The cognitive pass is event-driven —

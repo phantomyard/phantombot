@@ -597,6 +597,7 @@ describe("runUpdate post-swap systemd heal", () => {
           backups: [],
           repairedTimers: [],
           removedRetired: [],
+          disabledInstances: [],
         };
       },
     });
@@ -623,6 +624,7 @@ describe("runUpdate post-swap systemd heal", () => {
         rewrote: ["phantombot-tick.timer", "phantombot.service"],
         backups: [],
         repairedTimers: ["phantombot-tick.timer"],
+        disabledInstances: [],
         removedRetired: [],
       }),
     });

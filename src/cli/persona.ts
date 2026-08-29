@@ -29,9 +29,11 @@ import {
   type Config,
   loadConfig,
   personaDir,
+  servedPersonasOf,
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import personaNewCmd from "./persona-new.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
@@ -385,6 +387,12 @@ export interface RunAutostartPickerInput {
     selected: string[];
     defaultPersona: string;
   }) => Promise<string[] | null>;
+  /**
+   * Test seam for the heartbeat-instance sync after the autostart set
+   * changes (#486). Production leaves this undefined and the real sync
+   * runs (it self-gates to the installed binary on Linux).
+   */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
 }
 
 /**
@@ -436,6 +444,24 @@ export async function runAutostartPicker(
   // Ordering (preserve what is on disk, append what is new) lives in the
   // writer, so the TUI and this picker cannot drift apart on it.
   const chosen = await writeAutostartPersonas(config, picked);
+
+  // Provision the heartbeat timer instance for newly-served personas (and
+  // retire removed ones) right away (#486). Best-effort: the next
+  // heartbeat heal reconciles the same state if this fails.
+  const sync =
+    input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+  try {
+    await sync(
+      servedPersonasOf({
+        defaultPersona: config.defaultPersona,
+        autostartPersonas: chosen,
+      }),
+    );
+  } catch (e) {
+    input.err.write(
+      `warning: could not sync heartbeat timer instances: ${(e as Error).message}\n`,
+    );
+  }
 
   input.out.write(
     chosen.length === 0

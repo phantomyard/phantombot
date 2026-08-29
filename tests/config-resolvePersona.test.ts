@@ -1,6 +1,6 @@
 import { describe, expect, test, afterEach } from "bun:test";
 
-import { resolvePersona, type Config } from "../src/config.ts";
+import { resolvePersona, servedPersonasOf, type Config } from "../src/config.ts";
 
 const config = { defaultPersona: "phantom" } as Config;
 
@@ -34,5 +34,31 @@ describe("resolvePersona", () => {
   test("empty-string env var does not shadow the default", () => {
     process.env.PHANTOMBOT_PERSONA = "";
     expect(resolvePersona(undefined, config)).toBe("phantom");
+  });
+});
+
+describe("servedPersonasOf (#486)", () => {
+  test("default first, then autostart, deduplicated", () => {
+    expect(
+      servedPersonasOf({
+        defaultPersona: "lena",
+        autostartPersonas: ["kai", "jake"],
+      }),
+    ).toEqual(["lena", "kai", "jake"]);
+  });
+
+  test("the default listed in autostart is not duplicated", () => {
+    expect(
+      servedPersonasOf({
+        defaultPersona: "lena",
+        autostartPersonas: ["lena", "kai"],
+      }),
+    ).toEqual(["lena", "kai"]);
+  });
+
+  test("no autostart → only the default", () => {
+    expect(
+      servedPersonasOf({ defaultPersona: "lena", autostartPersonas: undefined }),
+    ).toEqual(["lena"]);
   });
 });

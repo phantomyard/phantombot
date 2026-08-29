@@ -102,6 +102,22 @@ describe("runPersonaNew", () => {
     expect(out.lines.join("")).toContain("autostart: lena");
   });
 
+  test("--autostart provisions the heartbeat timer instance for the served set (#486)", async () => {
+    const config = freshConfig("robbie");
+    let synced: string[] | undefined;
+    await runPersonaNew({
+      name: "lena",
+      autostart: true,
+      config,
+      out: sink(),
+      err: sink(),
+      syncHeartbeatInstances: async (personas) => {
+        synced = personas;
+      },
+    });
+    expect(synced).toEqual(["robbie", "lena"]);
+  });
+
   test("refuses a duplicate name rather than archiving the existing one", async () => {
     const config = freshConfig("robbie");
     const err = sink();

@@ -588,7 +588,14 @@ export function generateLoginFallbackTaskXml(
   });
 }
 
-/** Generate the heartbeat task XML — fires every 30 minutes. */
+/**
+ * Generate the heartbeat task XML — fires every 30 minutes.
+ *
+ * The task is named per-persona (`heartbeat-<persona>`) and now also RUNS
+ * per-persona (#486): without the explicit `--persona`, the heartbeat CLI
+ * resolves PHANTOMBOT_PERSONA → default persona, so a non-default
+ * persona's task would silently sweep the default persona's memory.
+ */
 export function generateHeartbeatTaskXml(
   sid: string,
   binPath: string,
@@ -602,7 +609,7 @@ export function generateHeartbeatTaskXml(
     persona,
     label: "heartbeat",
     binPath,
-    args: ["heartbeat"],
+    args: ["heartbeat", "--persona", persona],
     triggersXml: repeatingTimeTrigger("PT30M"),
     executionTimeLimit: "PT1H",
     logon,

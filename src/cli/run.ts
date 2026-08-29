@@ -40,6 +40,7 @@ import {
   DEFAULT_P2P,
   loadConfig,
   personaDir,
+  servedPersonasOf,
   type TelegramAccount,
   withHostHarnessBins,
 } from "../config.ts";
@@ -795,7 +796,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Detached, so a long backlog sweep outlives neither this promise nor the
   // daemon's own lifecycle concerns, and a crash there can never take the
   // channel loop with it.
-  spawnStartupNightly(alertPersona);
+  //
+  // One sweep per SERVED persona (#486) — the startup trigger used to fire
+  // only for the default persona, so a non-default persona whose heartbeat
+  // never ran got no nightly at all. Skips personas with no directory (a
+  // stale autostart entry) — their sweeps would only log an error.
+  for (const p of servedPersonasOf(config)) {
+    if (p !== alertPersona && !existsSync(personaDir(config, p))) continue;
+    spawnStartupNightly(p);
+  }
 
   // Self-provision the managed Pi capability-routing extension: when a routable
   // capability (image and/or coding model) is configured, stamp the embedded
