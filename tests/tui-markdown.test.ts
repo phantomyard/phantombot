@@ -12,8 +12,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   fitColumns,
+  fittableColumns,
   inlineSpans,
   markdownLines,
+  textWidth,
   wrapSpans,
   type RichLine,
 } from "../src/tui/markdown.ts";
@@ -21,8 +23,13 @@ import {
 const plain = (lines: readonly RichLine[]) =>
   lines.map((l) => " ".repeat(l.indent) + l.spans.map((s) => s.text).join(""));
 
+// Measured the way Ink measures: terminal COLUMNS, so a CJK glyph counts two
+// and a combining mark counts none. Measuring with `.length` here would let a
+// twice-too-wide row pass the width invariant.
 const widest = (lines: readonly RichLine[]) =>
-  Math.max(0, ...lines.map((l) => l.indent + l.spans.reduce((a, s) => a + s.text.length, 0)));
+  Math.max(0, ...lines.map((l) => l.indent + l.spans.reduce((a, s) => a + textWidth(s.text), 0)));
+
+const lonelySurrogate = (text: string) => /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
 
 describe("markdownLines", () => {
   test("no row is wider than the width it was given, whatever the block", () => {
@@ -193,5 +200,80 @@ describe("fitColumns", () => {
 
   test("no column is shrunk below three columns of content", () => {
     expect(fitColumns([10, 10], 4)).toEqual([3, 3]);
+  });
+});
+
+describe("width is measured in terminal columns", () => {
+  test("wide glyphs do not overflow the window", () => {
+    // "界" is one UTF-16 unit and two columns: a `.length` renderer emits one
+    // 40-column row here and Yoga shears the frame around it.
+    for (const width of [12, 20, 33]) {
+      expect(widest(markdownLines("界".repeat(30), width))).toBeLessThanOrEqual(width);
+    }
+  });
+
+  test("emoji and combining marks are measured, not counted", () => {
+    expect(widest(markdownLines("🙂".repeat(20), 20))).toBeLessThanOrEqual(20);
+    // Twelve base letters plus twelve combining acutes: twelve columns, not 24.
+    expect(plain(markdownLines("e\u0301".repeat(12), 20))).toEqual(["e\u0301".repeat(12)]);
+  });
+
+  test("truncation and wrapping cut between graphemes, never mid-pair", () => {
+    const cases = [
+      markdownLines("```\n" + "🙂".repeat(30) + "\n```", 21),
+      markdownLines("| a | b |\n| - | - |\n| " + "🙂".repeat(30) + " | x |", 21),
+      markdownLines("🙂".repeat(30), 21),
+    ];
+    for (const lines of cases) {
+      for (const line of lines) {
+        for (const span of line.spans) expect(lonelySurrogate(span.text)).toBe(false);
+      }
+    }
+  });
+
+  test("a wide-glyph word longer than the row is split on a column boundary", () => {
+    const rows = wrapSpans([{ text: "界".repeat(6) }], 5);
+    // Five columns holds two ideographs, not two-and-a-half.
+    expect(rows.map((r) => textWidth(r.map((s) => s.text).join("")))).toEqual([4, 4, 4]);
+  });
+});
+
+describe("tables narrower than their columns", () => {
+  const wide = [
+    "| a | b | c | d | e | f |",
+    "| - | - | - | - | - | - |",
+    "| 111 | 222 | 333 | 444 | 555 | 666 |",
+  ].join("\n");
+
+  test("a table with more columns than the viewport can hold still fits", () => {
+    // Six columns cannot fit below 33 at any cell width (6*3 + 5*3): the
+    // trailing columns are dropped rather than allowed to overflow.
+    for (const width of [12, 20, 24, 30, 33, 60]) {
+      expect(widest(markdownLines(wide, width))).toBeLessThanOrEqual(width);
+    }
+  });
+
+  test("dropped columns are admitted with an ellipsis", () => {
+    const rows = plain(markdownLines(wide, 24));
+    expect(rows[0]).toContain("…");
+    expect(rows[0]).not.toContain("f");
+  });
+
+  test("every column survives once the table fits", () => {
+    expect(plain(markdownLines(wide, 60))[0]).toContain("f");
+  });
+});
+
+describe("fittableColumns", () => {
+  test("counts what fits at the cell floor plus separators", () => {
+    expect(fittableColumns(6, 33)).toBe(6);
+    expect(fittableColumns(6, 32)).toBe(5);
+    expect(fittableColumns(6, 20)).toBe(3);
+    expect(fittableColumns(6, 8)).toBe(1);
+  });
+
+  test("never invents columns and never renders none", () => {
+    expect(fittableColumns(2, 200)).toBe(2);
+    expect(fittableColumns(6, 1)).toBe(1);
   });
 });

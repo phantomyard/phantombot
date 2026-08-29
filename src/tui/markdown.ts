@@ -33,6 +33,8 @@
  * pipe tables, lists, quotes, rules, and inline bold/italic/code/links.
  */
 
+import stringWidth from "string-width";
+
 /** One run of text with uniform attributes. */
 export interface Span {
   text: string;
@@ -54,10 +56,52 @@ export interface RichLine {
 const BULLET = "•";
 const ELLIPSIS = "…";
 
-/** The visible width of a span run. */
+const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * Visible width in TERMINAL COLUMNS — not UTF-16 code units.
+ *
+ * `String.length` is wrong in both directions for real transcript text: a CJK
+ * ideograph or an emoji occupies two columns for one unit, and a combining
+ * mark occupies none. Measuring with `.length` would let a "fitted" row be
+ * twice the window wide, which is precisely the deformation this module
+ * exists to prevent, so every measurement here goes through `string-width` —
+ * the same measure Ink itself uses to lay rows out.
+ */
+export function textWidth(text: string): number {
+  return stringWidth(text, { countAnsiEscapeCodes: false });
+}
+
+/** The grapheme clusters of a string: the smallest unit safe to cut between. */
+function graphemes(text: string): string[] {
+  const out: string[] = [];
+  for (const { segment } of SEGMENTER.segment(text)) out.push(segment);
+  return out;
+}
+
+/**
+ * The longest prefix of `text` that fits `width` columns, cut only between
+ * grapheme clusters so a surrogate pair or a base+combining-mark pair is never
+ * split down the middle.
+ */
+function sliceToWidth(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (textWidth(text) <= width) return text;
+  let used = 0;
+  let out = "";
+  for (const g of graphemes(text)) {
+    const w = textWidth(g);
+    if (used + w > width) break;
+    out += g;
+    used += w;
+  }
+  return out;
+}
+
+/** The visible width of a span run, in terminal columns. */
 function widthOf(spans: readonly Span[]): number {
   let n = 0;
-  for (const s of spans) n += s.text.length;
+  for (const s of spans) n += textWidth(s.text);
   return n;
 }
 
@@ -66,12 +110,14 @@ function truncateSpans(spans: readonly Span[], width: number): Span[] {
   if (width <= 0) return [];
   if (widthOf(spans) <= width) return [...spans];
   const out: Span[] = [];
+  // The ellipsis itself costs a column, so the content budget is one short.
   let left = width - 1;
   for (const span of spans) {
     if (left <= 0) break;
-    const text = span.text.slice(0, left);
-    left -= text.length;
-    if (text) out.push({ ...span, text });
+    const text = sliceToWidth(span.text, left);
+    if (!text) continue;
+    left -= textWidth(text);
+    out.push({ ...span, text });
   }
   out.push({ text: ELLIPSIS, tone: "dim" });
   return out;
@@ -94,7 +140,7 @@ export function wrapSpans(spans: readonly Span[], width: number): Span[][] {
     const last = row[row.length - 1];
     if (last && sameStyle(last, span)) last.text += text;
     else row.push({ ...span, text });
-    used += text.length;
+    used += textWidth(text);
   };
   const breakRow = () => {
     rows.push(row);
@@ -110,13 +156,13 @@ export function wrapSpans(spans: readonly Span[], width: number): Span[][] {
       if (/^\s+$/.test(piece)) {
         // Trailing whitespace never starts a row — it would look like a stray
         // indent after the break.
-        if (used > 0 && used < limit) push(span, piece.slice(0, limit - used));
+        if (used > 0 && used < limit) push(span, sliceToWidth(piece, limit - used));
         continue;
       }
       let word = piece;
       while (word.length > 0) {
         const room = limit - used;
-        if (word.length <= room) {
+        if (textWidth(word) <= room) {
           push(span, word);
           break;
         }
@@ -124,9 +170,13 @@ export function wrapSpans(spans: readonly Span[], width: number): Span[][] {
           breakRow();
           continue;
         }
-        // Longer than a whole row: hard-split it.
-        push(span, word.slice(0, limit));
-        word = word.slice(limit);
+        // Longer than a whole row: hard-split it, between graphemes.
+        // A single cluster wider than the whole row (a two-column glyph in a
+        // one-column box) is emitted anyway — nothing narrower exists, and
+        // taking it is what guarantees the loop makes progress.
+        const head = sliceToWidth(word, limit) || (graphemes(word)[0] ?? word);
+        push(span, head);
+        word = word.slice(head.length);
         breakRow();
       }
     }
@@ -355,6 +405,22 @@ function splitRow(line: string): string[] {
   return trimmed.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
 }
 
+const CELL_FLOOR = 3;
+const GAP = 3; // " │ "
+
+/**
+ * How many columns can be shown at all in `cols` terminal columns.
+ *
+ * Every shown column costs at least `CELL_FLOOR`, and every column after the
+ * first also costs a `GAP` separator. Below one column there is nothing to
+ * draw, so a viewport narrower than a single floored cell still shows one
+ * (truncated) column rather than an empty row.
+ */
+export function fittableColumns(count: number, cols: number): number {
+  const room = Math.max(1, Math.floor((cols + GAP) / (CELL_FLOOR + GAP)));
+  return Math.max(1, Math.min(count, room));
+}
+
 /**
  * A pipe table, fitted to the terminal.
  *
@@ -362,23 +428,33 @@ function splitRow(line: string): string[] {
  * WIDEST columns are shrunk first (never below three columns) and cells are
  * truncated with an ellipsis — Yoga would otherwise compress the row and shear
  * the frame, and a silently squashed table reads as a rendering bug.
+ *
+ * Shrinking alone is not enough: a wide-enough table cannot fit at ANY cell
+ * width, because `count * CELL_FLOOR + (count - 1) * GAP` already exceeds the
+ * viewport. Those trailing columns are DROPPED rather than allowed to overflow,
+ * and the loss is marked with a dim ellipsis column when the slack for one
+ * exists — an admitted "there is more to the right" beats a sheared frame.
  */
 function tableLines(header: string[], rows: string[][], cols: number): RichLine[] {
-  const count = Math.max(header.length, ...rows.map((r) => r.length), 1);
+  const all = Math.max(header.length, ...rows.map((r) => r.length), 1);
+  const count = fittableColumns(all, cols);
+  const dropped = all - count;
   const cells = [header, ...rows].map((r) =>
     Array.from({ length: count }, (_, c) => r[c] ?? ""),
   );
   const natural = Array.from({ length: count }, (_, c) =>
-    Math.max(3, ...cells.map((r) => plainWidth(r[c]!))),
+    Math.max(CELL_FLOOR, ...cells.map((r) => plainWidth(r[c]!))),
   );
-  const gap = 3; // " │ "
-  const budget = cols - gap * (count - 1);
-  const widths = fitColumns(natural, Math.max(count * 3, budget));
+  const gap = GAP;
+  // Reserve " …" for the drop marker, but only when it genuinely fits.
+  const marker = dropped > 0 && cols - (count * CELL_FLOOR + gap * (count - 1)) >= 2 ? 2 : 0;
+  const budget = cols - marker - gap * (count - 1);
+  const widths = fitColumns(natural, budget);
 
   const sep = (): Span => ({ text: " │ ", tone: "dim" });
   const line = (row: string[], bold: boolean): RichLine => {
     const spans: Span[] = [];
-    row.forEach((cell, c) => {
+    row.slice(0, count).forEach((cell, c) => {
       if (c > 0) spans.push(sep());
       const w = widths[c]!;
       const content = truncateSpans(inlineSpans(cell, { text: "", bold }), w);
@@ -386,6 +462,7 @@ function tableLines(header: string[], rows: string[][], cols: number): RichLine[
       const pad = w - widthOf(content);
       if (pad > 0) spans.push({ text: " ".repeat(pad) });
     });
+    if (marker > 0) spans.push({ text: ` ${ELLIPSIS}`, tone: "dim" });
     return { indent: 0, spans };
   };
 
