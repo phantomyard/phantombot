@@ -10,8 +10,14 @@
  * Path layout (per-user LaunchAgents — equivalent of systemd --user):
  *
  *   ~/Library/LaunchAgents/dev.phantombot.phantombot.plist
- *   ~/Library/LaunchAgents/dev.phantombot.heartbeat.plist
+ *   ~/Library/LaunchAgents/dev.phantombot.heartbeat.<persona>.plist  (one per served persona, #491)
  *   ~/Library/LaunchAgents/dev.phantombot.tick.plist
+ *
+ * The pre-#491 single `dev.phantombot.heartbeat.plist` is the LEGACY
+ * heartbeat: installs/heals that know the served-persona roster replace it
+ * with per-persona plists (mirroring systemd's `phantombot-heartbeat@`
+ * template instances), retiring the legacy plist only after the default
+ * persona's replacement is verifiably loaded.
  *
  * Logs go to ~/Library/Logs/phantombot/<unit>.{out,err}.log (no journald
  * on Mac, and `log show` is a poor fit for free-form bot output). launchd
@@ -25,7 +31,7 @@
  * process.env on every platform without per-plist env entries here.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,7 +39,18 @@ import { isPhantombotBinary } from "./binaryIdentity.ts";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_PLIST_LABEL = "dev.phantombot.phantombot";
+/**
+ * LEGACY single-persona heartbeat label (pre-#491). Served-persona rigs use
+ * one `dev.phantombot.heartbeat.<persona>` plist per persona instead; this
+ * label survives so installs/heals/uninstalls can boot out and delete what
+ * an older install left behind.
+ */
 export const HEARTBEAT_PLIST_LABEL = "dev.phantombot.heartbeat";
+
+/** Per-persona heartbeat label (#491): `dev.phantombot.heartbeat.<persona>`. */
+export function heartbeatPlistLabelFor(persona: string): string {
+  return `${HEARTBEAT_PLIST_LABEL}.${persona}`;
+}
 /**
  * RETIRED label. The nightly no longer runs on a clock (startup + the
  * heartbeat's day-rollover check trigger it now — see nightlyTrigger.ts), so
@@ -74,8 +91,34 @@ export function launchdLogPaths(): { out: string; err: string } {
   return { out: `${base}.out.log`, err: `${base}.err.log` };
 }
 
+/** Path of the LEGACY single-persona heartbeat plist (kept for cleanup). */
 export function heartbeatPlistPath(): string {
   return join(launchAgentsDir(), `${HEARTBEAT_PLIST_LABEL}.plist`);
+}
+
+/** Path of a per-persona heartbeat plist (#491). */
+export function heartbeatPlistPathFor(persona: string, dir?: string): string {
+  return join(
+    dir ?? launchAgentsDir(),
+    `${heartbeatPlistLabelFor(persona)}.plist`,
+  );
+}
+
+/**
+ * Persona names with an on-disk per-persona heartbeat plist, discovered by
+ * listing the LaunchAgents dir — the launchd analogue of systemd's
+ * `list-unit-files phantombot-heartbeat@*.timer`. File-based (not
+ * `launchctl list`) so it also finds plists that failed to bootstrap.
+ */
+export function listHeartbeatInstancePlists(dir?: string): string[] {
+  const d = dir ?? launchAgentsDir();
+  if (!existsSync(d)) return [];
+  const personas: string[] = [];
+  for (const name of readdirSync(d)) {
+    const m = /^dev\.phantombot\.heartbeat\.(.+)\.plist$/.exec(name);
+    if (m && m[1]!.length > 0) personas.push(m[1]!);
+  }
+  return personas.sort();
 }
 
 /** Path of the retired nightly plist (kept for cleanup only). */
@@ -216,12 +259,18 @@ export function generatePhantombotPlist(params: LaunchdUnitParams): string {
   });
 }
 
-/** Generate the heartbeat plist — fires every 30 minutes. */
-export function generateHeartbeatPlist(binPath: string): string {
+/**
+ * Generate a heartbeat plist — fires every 30 minutes. With `persona` the
+ * plist is per-persona (#491): own label, `heartbeat --persona <name>` args.
+ * Without it the LEGACY single-persona plist is generated (kept so pre-init
+ * installs with no roster still get a heartbeat, and so tests/cleanup can
+ * reproduce the old unit).
+ */
+export function generateHeartbeatPlist(binPath: string, persona?: string): string {
   return generatePlist({
-    label: HEARTBEAT_PLIST_LABEL,
+    label: persona ? heartbeatPlistLabelFor(persona) : HEARTBEAT_PLIST_LABEL,
     binPath,
-    args: ["heartbeat"],
+    args: persona ? ["heartbeat", "--persona", persona] : ["heartbeat"],
     startIntervalSec: 30 * 60,
   });
 }
@@ -283,11 +332,21 @@ export function guiDomain(uid?: number): string {
 
 export interface InstallLaunchdOptions {
   binPath: string;
+  /**
+   * Personas to install per-persona heartbeat plists for (#491) — default
+   * persona FIRST, same contract as systemd's `installPhantombotUnit`.
+   * When omitted (no config on a pre-init box), the LEGACY single-persona
+   * heartbeat plist is installed instead; the first heartbeat heal replaces
+   * it once a config exists.
+   */
+  personas?: readonly string[];
   /** Path overrides — tests use these to keep writes inside a tmpdir. */
   plistPath?: string;
   heartbeatPlistPath?: string;
   nightlyPlistPath?: string;
   tickPlistPath?: string;
+  /** Override the LaunchAgents dir for per-persona plists (tests). */
+  agentsDir?: string;
   /** Override gui domain (e.g. gui/501). Defaults to gui/<current uid>. */
   domain?: string;
   launchctl: LaunchctlRunner;
@@ -319,17 +378,29 @@ export async function installPhantombotPlists(
       label: PHANTOMBOT_PLIST_LABEL,
       body: generatePhantombotPlist({ binPath: opts.binPath, args: ["run"] }),
     },
-    {
+  ];
+  // One heartbeat plist per served persona (#491) when the roster is known;
+  // the legacy single-persona plist when it isn't (pre-init box).
+  if (opts.personas === undefined) {
+    plists.push({
       path: hbPath,
       label: HEARTBEAT_PLIST_LABEL,
       body: generateHeartbeatPlist(opts.binPath),
-    },
-    {
-      path: tkPath,
-      label: TICK_PLIST_LABEL,
-      body: generateTickPlist(opts.binPath),
-    },
-  ];
+    });
+  } else {
+    for (const persona of opts.personas) {
+      plists.push({
+        path: heartbeatPlistPathFor(persona, opts.agentsDir),
+        label: heartbeatPlistLabelFor(persona),
+        body: generateHeartbeatPlist(opts.binPath, persona),
+      });
+    }
+  }
+  plists.push({
+    path: tkPath,
+    label: TICK_PLIST_LABEL,
+    body: generateTickPlist(opts.binPath),
+  });
 
   // Make sure the logs dir exists — launchd will refuse to start the
   // service if StandardOutPath/StandardErrorPath point at a non-existent
@@ -348,6 +419,14 @@ export async function installPhantombotPlists(
   for (const p of plists) {
     await opts.launchctl.run(["bootout", `${domain}/${p.label}`]);
   }
+  // Track whether the default persona's heartbeat plist loaded — the
+  // legacy single-persona plist is only retired once its replacement is
+  // verifiably in the domain (same migration rule as the systemd heal).
+  const defaultLabel =
+    opts.personas !== undefined && opts.personas.length > 0
+      ? heartbeatPlistLabelFor(opts.personas[0]!)
+      : undefined;
+  let defaultInstanceReady = opts.personas === undefined;
   for (const p of plists) {
     const r = await opts.launchctl.run(["bootstrap", domain, p.path]);
     if (r.exitCode !== 0) {
@@ -356,19 +435,38 @@ export async function installPhantombotPlists(
       );
       return { installed: false };
     }
+    if (defaultLabel !== undefined && p.label === defaultLabel) {
+      defaultInstanceReady = true;
+    }
+  }
+
+  // Migration: boot out + delete the legacy single-persona heartbeat plist
+  // once the default persona's per-persona replacement is loaded. Only
+  // after a CONFIRMED unload — a transient bootout failure must keep the
+  // plist on disk so a later heal/install can retry the unload.
+  if (
+    opts.personas !== undefined &&
+    defaultInstanceReady &&
+    existsSync(hbPath) &&
+    (await confirmedUnload(opts.launchctl, domain, HEARTBEAT_PLIST_LABEL))
+  ) {
+    await unlink(hbPath);
+    opts.out.write(`removed retired plist: ${hbPath}\n`);
   }
 
   // Upgrade cleanup: an install from before the nightly timer was retired
   // still has the 02:00 agent loaded. Bootout + delete it so it can't fire a
   // duplicate sweep. Guarded on the plist existing, so a fresh Mac issues no
-  // extra launchctl call at all.
-  if (existsSync(ngPath)) {
-    await opts.launchctl.run(["bootout", `${domain}/${NIGHTLY_PLIST_LABEL}`]);
+  // extra launchctl call at all. Confirmed-unload for the same reason.
+  if (
+    existsSync(ngPath) &&
+    (await confirmedUnload(opts.launchctl, domain, NIGHTLY_PLIST_LABEL))
+  ) {
     await unlink(ngPath);
     opts.out.write(`removed retired plist: ${ngPath}\n`);
   }
   opts.out.write(
-    `bootstrapped ${PHANTOMBOT_PLIST_LABEL} + heartbeat + tick into ${domain}\n`,
+    `bootstrapped ${PHANTOMBOT_PLIST_LABEL} + ${opts.personas?.length ?? 1} heartbeat plist(s) + tick into ${domain}\n`,
   );
   return { installed: true };
 }
@@ -379,6 +477,8 @@ export interface UninstallLaunchdOptions {
   heartbeatPlistPath?: string;
   nightlyPlistPath?: string;
   tickPlistPath?: string;
+  /** Override the LaunchAgents dir for per-persona plist discovery (tests). */
+  agentsDir?: string;
   domain?: string;
   launchctl: LaunchctlRunner;
   out: WriteSink;
@@ -394,9 +494,15 @@ export async function uninstallPhantombotPlists(
   const ngPath = opts.nightlyPlistPath ?? nightlyPlistPath();
   const tkPath = opts.tickPlistPath ?? tickPlistPath();
 
+  // Every per-persona heartbeat plist on disk (#491), then the retired
+  // labels, then the main agent. Discovery defaults to the resolved
+  // heartbeat plist's own directory so test path overrides stay hermetic.
+  const agentsDir = opts.agentsDir ?? dirname(hbPath);
+  const instancePersonas = listHeartbeatInstancePlists(agentsDir);
   const labels = [
     TICK_PLIST_LABEL,
     NIGHTLY_PLIST_LABEL,
+    ...instancePersonas.map(heartbeatPlistLabelFor),
     HEARTBEAT_PLIST_LABEL,
     PHANTOMBOT_PLIST_LABEL,
   ];
@@ -425,8 +531,212 @@ export async function uninstallPhantombotPlists(
       opts.out.write(`removed ${p}\n`);
     }
   }
+  for (const persona of instancePersonas) {
+    const p = heartbeatPlistPathFor(persona, agentsDir);
+    if (existsSync(p)) {
+      await unlink(p);
+      opts.out.write(`removed ${p}\n`);
+    }
+  }
 
   return { removed: true };
+}
+
+export interface EnsureLaunchdHeartbeatOptions {
+  binPath: string;
+  /** Served personas — default FIRST (servedPersonasOf contract). */
+  personas: readonly string[];
+  domain: string;
+  launchctl: LaunchctlRunner;
+  /** Override the LaunchAgents dir (tests). */
+  agentsDir?: string;
+  /** Override the legacy heartbeat plist path (tests). */
+  legacyHeartbeatPath?: string;
+}
+
+export interface EnsureLaunchdHeartbeatResult {
+  /** Plist files (re)written because content drifted. */
+  rewrote: string[];
+  backups: string[];
+  /** Labels (re)bootstrapped into the gui domain this pass. */
+  bootstrapped: string[];
+  /** Per-persona labels removed because their persona is no longer served. */
+  removed: string[];
+  /** Per-persona labels whose reload was skipped: a stale job stayed
+   *  loaded because bootout failed. The on-disk body still matches the
+   *  loaded job, so the next heal retries instead of mistaking the old
+   *  job for a healthy reload. */
+  reloadFailed: string[];
+  /** Per-persona labels whose plist was left in place because bootout
+   *  failed and launchd still has the job loaded. */
+  removeFailed: string[];
+  /** True when the legacy single-persona heartbeat plist was retired. */
+  retiredLegacy: boolean;
+}
+
+/**
+ * Boot a label out of the domain and confirm the unload before any caller
+ * removes the backing plist. Returns true only when the job is verifiably
+ * NOT loaded afterwards — bootout succeeded, or a `print` probe confirms
+ * the job is absent. Deleting a plist without this check turns a
+ * transient bootout failure into an unrecoverable state: launchd keeps
+ * the job registered but the file a later heal needs to find and retry
+ * the unload is gone (#494 review).
+ */
+async function confirmedUnload(
+  launchctl: LaunchctlRunner,
+  domain: string,
+  label: string,
+): Promise<boolean> {
+  const out = await launchctl.run(["bootout", `${domain}/${label}`]);
+  if (out.exitCode === 0) return true;
+  const probe = await launchctl.run(["print", `${domain}/${label}`]);
+  return probe.exitCode !== 0;
+}
+
+/**
+ * Reconcile per-persona heartbeat plists with the served-persona roster
+ * (#491) — the launchd analogue of the systemd heal's instance
+ * reconciliation. Idempotent; called by `phantombot install`, the persona
+ * lifecycle sync, and the heartbeat's own periodic heal.
+ *
+ * Per persona: write the plist if missing/stale (backing up the old body),
+ * then bootout+bootstrap when it was rewritten or isn't loaded. Personas
+ * with a plist on disk that are no longer served get booted out and
+ * deleted. The legacy single-persona plist is retired only AFTER the
+ * default persona's plist is verifiably loaded — a failed bootstrap keeps
+ * the legacy heartbeat rather than leaving the host with none.
+ */
+export async function ensureLaunchdHeartbeatInstances(
+  opts: EnsureLaunchdHeartbeatOptions,
+): Promise<EnsureLaunchdHeartbeatResult> {
+  const dir = opts.agentsDir ?? launchAgentsDir();
+  const legacyPath = opts.legacyHeartbeatPath ?? heartbeatPlistPath();
+  const result: EnsureLaunchdHeartbeatResult = {
+    rewrote: [],
+    backups: [],
+    bootstrapped: [],
+    removed: [],
+    reloadFailed: [],
+    removeFailed: [],
+    retiredLegacy: false,
+  };
+  await mkdir(dir, { recursive: true });
+  await mkdir(logsDir(), { recursive: true });
+
+  let defaultReady = false;
+  for (let i = 0; i < opts.personas.length; i++) {
+    const persona = opts.personas[i]!;
+    const label = heartbeatPlistLabelFor(persona);
+    const path = heartbeatPlistPathFor(persona, dir);
+    const expected = generateHeartbeatPlist(opts.binPath, persona);
+    let current: string | undefined;
+    if (existsSync(path)) {
+      current = await readFile(path, "utf8");
+    }
+    const dirty = current !== expected;
+    const loaded = await opts.launchctl.run([
+      "print",
+      `${opts.domain}/${label}`,
+    ]);
+    const wasLoaded = loaded.exitCode === 0;
+    if (wasLoaded && !dirty) {
+      if (i === 0) defaultReady = true;
+      continue;
+    }
+    // Missing, stale, or not loaded: reload from disk. When a stale job
+    // is still loaded, bootout must succeed BEFORE the plist is
+    // rewritten — a failed bootout would otherwise leave the on-disk
+    // body matching `expected` while launchd keeps running the old job,
+    // and the next heal would mistake that stale job for a healthy
+    // reload (#494 review). Leaving the old body in place keeps disk and
+    // launchd consistent, so the next heal retries the reload.
+    if (wasLoaded && dirty) {
+      const out = await opts.launchctl.run([
+        "bootout",
+        `${opts.domain}/${label}`,
+      ]);
+      if (out.exitCode !== 0) {
+        result.reloadFailed.push(label);
+        continue;
+      }
+    }
+    if (dirty) {
+      if (current !== undefined) {
+        const bak = `${path}.bak`;
+        await writeFile(bak, current, "utf8");
+        result.backups.push(bak);
+      }
+      await writeFile(path, expected, "utf8");
+      result.rewrote.push(label);
+    }
+    const r = await opts.launchctl.run(["bootstrap", opts.domain, path]);
+    if (r.exitCode === 0) {
+      result.bootstrapped.push(label);
+      if (i === 0) defaultReady = true;
+    }
+  }
+
+  // Retire plists whose persona is no longer served. The plist file is
+  // the only handle a later heal has to find/retry the unload, so it is
+  // deleted only after the job is verifiably gone from the domain.
+  const served = new Set(opts.personas);
+  for (const persona of listHeartbeatInstancePlists(dir)) {
+    if (served.has(persona)) continue;
+    const label = heartbeatPlistLabelFor(persona);
+    const p = heartbeatPlistPathFor(persona, dir);
+    if (await confirmedUnload(opts.launchctl, opts.domain, label)) {
+      if (existsSync(p)) await unlink(p);
+      result.removed.push(label);
+    } else {
+      result.removeFailed.push(label);
+    }
+  }
+
+  // Retire the legacy single-persona heartbeat only once its replacement
+  // (the default persona's plist) is loaded and the legacy job itself is
+  // verifiably unloaded — same retry-handle rule as above.
+  if (
+    defaultReady &&
+    existsSync(legacyPath) &&
+    (await confirmedUnload(opts.launchctl, opts.domain, HEARTBEAT_PLIST_LABEL))
+  ) {
+    await unlink(legacyPath);
+    result.retiredLegacy = true;
+  }
+  return result;
+}
+
+/**
+ * Persona-lifecycle caller of the #491 reconciliation — the launchd half
+ * of the heartbeat-instance sync seam (mirrors systemd's
+ * `defaultSyncHeartbeatInstances`). Invoked after `autostart_personas`
+ * changes so a newly-served persona's first maintenance pass is at most 30
+ * minutes away instead of waiting for the next heal.
+ *
+ * Returns null when instance management isn't possible here (not a real
+ * installed binary — arming launchd agents from a dev `bun` run or a test
+ * would touch the developer's actual host), so callers stay silent on dev
+ * boxes. The periodic heartbeat heal reconciles the same state.
+ */
+export async function defaultSyncLaunchdHeartbeatInstances(
+  personas: readonly string[],
+): Promise<{ armed: string[]; disabled: string[] } | null> {
+  if (process.platform !== "darwin") return null;
+  if (!isPhantombotBinary()) return null;
+  let domain: string;
+  try {
+    domain = guiDomain();
+  } catch {
+    return null;
+  }
+  const r = await ensureLaunchdHeartbeatInstances({
+    binPath: process.execPath,
+    personas,
+    domain,
+    launchctl: new BunLaunchctlRunner(),
+  });
+  return { armed: r.bootstrapped, disabled: r.removed };
 }
 
 export interface LaunchdServiceControl {

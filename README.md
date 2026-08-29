@@ -2565,6 +2565,13 @@ Installed user units:
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
 | `phantombot-heartbeat@<persona>.timer` | Every 30 minutes | Per-persona mechanical maintenance + fires that persona's nightly sweep on day rollover (one instance per served persona; the legacy single `phantombot-heartbeat.timer` is retired automatically) |
 
+The macOS equivalents are per-user LaunchAgents: `dev.phantombot.phantombot`
+(always on), `dev.phantombot.tick`, and one
+`dev.phantombot.heartbeat.<persona>` plist per served persona — the legacy
+single `dev.phantombot.heartbeat` plist is retired automatically once the
+default persona's replacement is loaded. On Windows the per-persona
+`heartbeat-<persona>` tasks play the same role.
+
 Update commands:
 
 ```bash

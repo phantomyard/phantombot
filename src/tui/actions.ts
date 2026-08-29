@@ -37,13 +37,13 @@ import { applyVoiceConfig } from "../cli/voice.ts";
 import { runMemoryIndex } from "../cli/memory.ts";
 import type { EmbedProgress } from "../lib/embedJob.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
-import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { loadState, saveState } from "../state.ts";
 import {
   defaultServiceControl,
   type ServiceControl,
+  syncHeartbeatInstances,
 } from "../lib/platform.ts";
 import type { VoiceConfig } from "../lib/voice.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
@@ -274,7 +274,7 @@ export async function applyAutostart(input: {
   // Provision/retire the persona's heartbeat timer instance right away
   // (#486) — best-effort; the next heartbeat heal reconciles regardless.
   try {
-    const sync = input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+    const sync = input.syncHeartbeatInstances ?? syncHeartbeatInstances;
     await sync(
       servedPersonasOf({
         defaultPersona: input.config.defaultPersona,

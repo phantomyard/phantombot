@@ -51,6 +51,11 @@ import {
   ensureTasksCurrent,
 } from "../lib/taskScheduler.ts";
 import {
+  BunLaunchctlRunner,
+  ensureLaunchdHeartbeatInstances,
+  guiDomain,
+} from "../lib/launchd.ts";
+import {
   loadPersonaHeartbeatLastFired,
   recordHeartbeatFired,
 } from "../lib/timerHealth.ts";
@@ -368,10 +373,52 @@ async function defaultHealService(
   switch (currentPlatform()) {
     case "linux":
       return defaultHealSystemd(config);
+    case "darwin":
+      return defaultHealLaunchd(config);
     case "windows":
       return defaultHealTaskScheduler(persona);
     default:
-      return; // macOS (launchd self-heals via KeepAlive) and unsupported hosts
+      return; // unsupported hosts
+  }
+}
+
+/**
+ * macOS analogue of `defaultHealSystemd` (#491): reconcile one per-persona
+ * heartbeat plist per served persona, bootout plists of personas no longer
+ * served, and retire the legacy single-persona heartbeat once its
+ * replacement is loaded. Idempotent; silent when nothing drifted.
+ */
+async function defaultHealLaunchd(config: Config): Promise<void> {
+  const binPath = process.execPath;
+  if (!isPhantombotBinary(binPath)) return;
+  let domain: string;
+  try {
+    domain = guiDomain();
+  } catch {
+    return;
+  }
+  const r = await ensureLaunchdHeartbeatInstances({
+    binPath,
+    personas: servedPersonasOf(config),
+    domain,
+    launchctl: new BunLaunchctlRunner(),
+  });
+  if (
+    r.rewrote.length > 0 ||
+    r.bootstrapped.length > 0 ||
+    r.removed.length > 0 ||
+    r.retiredLegacy ||
+    r.reloadFailed.length > 0 ||
+    r.removeFailed.length > 0
+  ) {
+    log.info("heartbeat: healed launchd heartbeat plists", {
+      rewrote: r.rewrote,
+      bootstrapped: r.bootstrapped,
+      removed: r.removed,
+      retiredLegacy: r.retiredLegacy,
+      reloadFailed: r.reloadFailed,
+      removeFailed: r.removeFailed,
+    });
   }
 }
 
