@@ -407,13 +407,17 @@ async function defaultHealLaunchd(config: Config): Promise<void> {
     r.rewrote.length > 0 ||
     r.bootstrapped.length > 0 ||
     r.removed.length > 0 ||
-    r.retiredLegacy
+    r.retiredLegacy ||
+    r.reloadFailed.length > 0 ||
+    r.removeFailed.length > 0
   ) {
     log.info("heartbeat: healed launchd heartbeat plists", {
       rewrote: r.rewrote,
       bootstrapped: r.bootstrapped,
       removed: r.removed,
       retiredLegacy: r.retiredLegacy,
+      reloadFailed: r.reloadFailed,
+      removeFailed: r.removeFailed,
     });
   }
 }

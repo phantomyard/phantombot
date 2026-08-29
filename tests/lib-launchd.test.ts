@@ -421,15 +421,13 @@ describe("ensureLaunchdHeartbeatInstances (#491)", () => {
     await writeFile(hbPath, generateHeartbeatPlist("/usr/local/bin/phantombot"));
     const lc = new FakeLaunchctl();
     lc.responses = [
-      // print lena → not loaded; bootout; bootstrap ok
+      // print lena → not loaded (no bootout needed); bootstrap ok
       { exitCode: 5, stdout: "", stderr: "" },
-      { exitCode: 1, stdout: "", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
-      // print kai → not loaded; bootout; bootstrap ok
+      // print kai → not loaded; bootstrap ok
       { exitCode: 5, stdout: "", stderr: "" },
-      { exitCode: 1, stdout: "", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
-      // legacy retire bootout
+      // legacy retire bootout (confirmed unload)
       { exitCode: 0, stdout: "", stderr: "" },
     ];
     const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena", "kai"]));
@@ -486,6 +484,91 @@ describe("ensureLaunchdHeartbeatInstances (#491)", () => {
     expect(r.bootstrapped).toEqual(["dev.phantombot.heartbeat.lena"]);
   });
 
+  test("bootout failure during stale reload leaves the old plist; next heal retries", async () => {
+    const lenaPath = join(workdir, "dev.phantombot.heartbeat.lena.plist");
+    const stale = generateHeartbeatPlist("/old/bin/phantombot", "lena");
+    await writeFile(lenaPath, stale);
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      // print lena → loaded, but content stale → bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" },
+      { exitCode: 1, stdout: "", stderr: "bootout failed" },
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.reloadFailed).toEqual(["dev.phantombot.heartbeat.lena"]);
+    expect(r.bootstrapped).toEqual([]);
+    // The on-disk body still matches the loaded (stale) job — no rewrite,
+    // no backup, nothing the next heal can mistake for a healthy reload.
+    expect(await readFile(lenaPath, "utf8")).toBe(stale);
+    expect(existsSync(`${lenaPath}.bak`)).toBe(false);
+    // Next heal: bootout succeeds this time → reload proceeds.
+    const lc2 = new FakeLaunchctl();
+    lc2.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print → loaded, stale
+      { exitCode: 0, stdout: "", stderr: "" }, // bootout ok
+      { exitCode: 0, stdout: "", stderr: "" }, // bootstrap ok
+    ];
+    const r2 = await ensureLaunchdHeartbeatInstances(opts(lc2, ["lena"]));
+    expect(r2.rewrote).toEqual(["dev.phantombot.heartbeat.lena"]);
+    expect(r2.bootstrapped).toEqual(["dev.phantombot.heartbeat.lena"]);
+    expect(await readFile(lenaPath, "utf8")).toContain("/usr/local/bin");
+  });
+
+  test("unserved persona's plist is kept when bootout fails and the job is still loaded", async () => {
+    const robbiePath = join(workdir, "dev.phantombot.heartbeat.robbie.plist");
+    await writeFile(robbiePath, "x");
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print lena → loaded
+      { exitCode: 1, stdout: "", stderr: "" }, // robbie bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" }, // probe print → still loaded
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.removed).toEqual([]);
+    expect(r.removeFailed).toEqual(["dev.phantombot.heartbeat.robbie"]);
+    // The plist stays — it's the only handle a later heal has.
+    expect(existsSync(robbiePath)).toBe(true);
+  });
+
+  test("unserved persona's plist is removed when bootout fails but the job is confirmed absent", async () => {
+    const robbiePath = join(workdir, "dev.phantombot.heartbeat.robbie.plist");
+    await writeFile(robbiePath, "x");
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print lena → loaded
+      { exitCode: 1, stdout: "", stderr: "" }, // robbie bootout fails
+      { exitCode: 5, stdout: "", stderr: "" }, // probe print → not loaded
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.removed).toEqual(["dev.phantombot.heartbeat.robbie"]);
+    expect(existsSync(robbiePath)).toBe(false);
+  });
+
+  test("legacy plist is kept when its bootout fails during retirement", async () => {
+    await writeFile(hbPath, "legacy");
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print lena → loaded
+      { exitCode: 1, stdout: "", stderr: "" }, // legacy bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" }, // probe print → still loaded
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.retiredLegacy).toBe(false);
+    expect(existsSync(hbPath)).toBe(true);
+  });
+
   test("unserved personas are booted out and deleted", async () => {
     await writeFile(
       join(workdir, "dev.phantombot.heartbeat.robbie.plist"),
@@ -521,9 +604,8 @@ describe("ensureLaunchdHeartbeatInstances (#491)", () => {
     await writeFile(hbPath, "legacy");
     const lc = new FakeLaunchctl();
     lc.responses = [
-      // print lena → not loaded; bootout; bootstrap FAILS
+      // print lena → not loaded (no bootout needed); bootstrap FAILS
       { exitCode: 5, stdout: "", stderr: "" },
-      { exitCode: 1, stdout: "", stderr: "" },
       { exitCode: 5, stdout: "", stderr: "nope" },
     ];
     const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
@@ -561,5 +643,48 @@ describe("uninstallPhantombotPlists removes per-persona plists (#491)", () => {
           c[1] === "gui/501/dev.phantombot.heartbeat.kai",
       ),
     ).toBe(true);
+  });
+
+  test("install keeps the legacy + nightly plists when their bootouts fail", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const lc = new FakeLaunchctl();
+    await writeFile(hbPath, "legacy");
+    await writeFile(ngPath, "nightly");
+    // Install's own bootouts/bootstraps default to ok; then the legacy
+    // and nightly retirements each get a FAILING bootout whose probe
+    // confirms the job is still loaded.
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // bootout main
+      { exitCode: 0, stdout: "", stderr: "" }, // bootout hb lena
+      { exitCode: 0, stdout: "", stderr: "" }, // bootout tick
+      { exitCode: 0, stdout: "", stderr: "" }, // bootstrap main
+      { exitCode: 0, stdout: "", stderr: "" }, // bootstrap hb lena
+      { exitCode: 0, stdout: "", stderr: "" }, // bootstrap tick
+      { exitCode: 1, stdout: "", stderr: "" }, // legacy bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" }, // probe print → still loaded
+      { exitCode: 1, stdout: "", stderr: "" }, // nightly bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" }, // probe print → still loaded
+    ];
+    const result = await installPhantombotPlists({
+      binPath: "/usr/local/bin/phantombot",
+      personas: ["lena"],
+      plistPath: mainPath,
+      heartbeatPlistPath: hbPath,
+      nightlyPlistPath: ngPath,
+      tickPlistPath: tkPath,
+      agentsDir: workdir,
+      domain: "gui/501",
+      launchctl: lc,
+      out,
+      err,
+    });
+    // Install itself succeeded (bootout ×3 best-effort, bootstrap ×3 ok).
+    expect(result.installed).toBe(true);
+    // But retirement is deferred: bootout failed and the probe confirms
+    // the jobs are still loaded, so the plists stay for a later retry.
+    expect(existsSync(hbPath)).toBe(true);
+    expect(existsSync(ngPath)).toBe(true);
+    expect(out.text).not.toContain(`removed retired plist: ${hbPath}`);
   });
 });

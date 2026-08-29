@@ -441,13 +441,15 @@ export async function installPhantombotPlists(
   }
 
   // Migration: boot out + delete the legacy single-persona heartbeat plist
-  // once the default persona's per-persona replacement is loaded.
+  // once the default persona's per-persona replacement is loaded. Only
+  // after a CONFIRMED unload — a transient bootout failure must keep the
+  // plist on disk so a later heal/install can retry the unload.
   if (
     opts.personas !== undefined &&
     defaultInstanceReady &&
-    existsSync(hbPath)
+    existsSync(hbPath) &&
+    (await confirmedUnload(opts.launchctl, domain, HEARTBEAT_PLIST_LABEL))
   ) {
-    await opts.launchctl.run(["bootout", `${domain}/${HEARTBEAT_PLIST_LABEL}`]);
     await unlink(hbPath);
     opts.out.write(`removed retired plist: ${hbPath}\n`);
   }
@@ -455,9 +457,11 @@ export async function installPhantombotPlists(
   // Upgrade cleanup: an install from before the nightly timer was retired
   // still has the 02:00 agent loaded. Bootout + delete it so it can't fire a
   // duplicate sweep. Guarded on the plist existing, so a fresh Mac issues no
-  // extra launchctl call at all.
-  if (existsSync(ngPath)) {
-    await opts.launchctl.run(["bootout", `${domain}/${NIGHTLY_PLIST_LABEL}`]);
+  // extra launchctl call at all. Confirmed-unload for the same reason.
+  if (
+    existsSync(ngPath) &&
+    (await confirmedUnload(opts.launchctl, domain, NIGHTLY_PLIST_LABEL))
+  ) {
     await unlink(ngPath);
     opts.out.write(`removed retired plist: ${ngPath}\n`);
   }
@@ -558,8 +562,36 @@ export interface EnsureLaunchdHeartbeatResult {
   bootstrapped: string[];
   /** Per-persona labels removed because their persona is no longer served. */
   removed: string[];
+  /** Per-persona labels whose reload was skipped: a stale job stayed
+   *  loaded because bootout failed. The on-disk body still matches the
+   *  loaded job, so the next heal retries instead of mistaking the old
+   *  job for a healthy reload. */
+  reloadFailed: string[];
+  /** Per-persona labels whose plist was left in place because bootout
+   *  failed and launchd still has the job loaded. */
+  removeFailed: string[];
   /** True when the legacy single-persona heartbeat plist was retired. */
   retiredLegacy: boolean;
+}
+
+/**
+ * Boot a label out of the domain and confirm the unload before any caller
+ * removes the backing plist. Returns true only when the job is verifiably
+ * NOT loaded afterwards — bootout succeeded, or a `print` probe confirms
+ * the job is absent. Deleting a plist without this check turns a
+ * transient bootout failure into an unrecoverable state: launchd keeps
+ * the job registered but the file a later heal needs to find and retry
+ * the unload is gone (#494 review).
+ */
+async function confirmedUnload(
+  launchctl: LaunchctlRunner,
+  domain: string,
+  label: string,
+): Promise<boolean> {
+  const out = await launchctl.run(["bootout", `${domain}/${label}`]);
+  if (out.exitCode === 0) return true;
+  const probe = await launchctl.run(["print", `${domain}/${label}`]);
+  return probe.exitCode !== 0;
 }
 
 /**
@@ -585,6 +617,8 @@ export async function ensureLaunchdHeartbeatInstances(
     backups: [],
     bootstrapped: [],
     removed: [],
+    reloadFailed: [],
+    removeFailed: [],
     retiredLegacy: false,
   };
   await mkdir(dir, { recursive: true });
@@ -600,7 +634,33 @@ export async function ensureLaunchdHeartbeatInstances(
     if (existsSync(path)) {
       current = await readFile(path, "utf8");
     }
-    let dirty = current !== expected;
+    const dirty = current !== expected;
+    const loaded = await opts.launchctl.run([
+      "print",
+      `${opts.domain}/${label}`,
+    ]);
+    const wasLoaded = loaded.exitCode === 0;
+    if (wasLoaded && !dirty) {
+      if (i === 0) defaultReady = true;
+      continue;
+    }
+    // Missing, stale, or not loaded: reload from disk. When a stale job
+    // is still loaded, bootout must succeed BEFORE the plist is
+    // rewritten — a failed bootout would otherwise leave the on-disk
+    // body matching `expected` while launchd keeps running the old job,
+    // and the next heal would mistake that stale job for a healthy
+    // reload (#494 review). Leaving the old body in place keeps disk and
+    // launchd consistent, so the next heal retries the reload.
+    if (wasLoaded && dirty) {
+      const out = await opts.launchctl.run([
+        "bootout",
+        `${opts.domain}/${label}`,
+      ]);
+      if (out.exitCode !== 0) {
+        result.reloadFailed.push(label);
+        continue;
+      }
+    }
     if (dirty) {
       if (current !== undefined) {
         const bak = `${path}.bak`;
@@ -610,16 +670,6 @@ export async function ensureLaunchdHeartbeatInstances(
       await writeFile(path, expected, "utf8");
       result.rewrote.push(label);
     }
-    const loaded = await opts.launchctl.run([
-      "print",
-      `${opts.domain}/${label}`,
-    ]);
-    if (loaded.exitCode === 0 && !dirty) {
-      if (i === 0) defaultReady = true;
-      continue;
-    }
-    // Missing, stale, or not loaded: reload from disk.
-    await opts.launchctl.run(["bootout", `${opts.domain}/${label}`]);
     const r = await opts.launchctl.run(["bootstrap", opts.domain, path]);
     if (r.exitCode === 0) {
       result.bootstrapped.push(label);
@@ -627,24 +677,30 @@ export async function ensureLaunchdHeartbeatInstances(
     }
   }
 
-  // Retire plists whose persona is no longer served.
+  // Retire plists whose persona is no longer served. The plist file is
+  // the only handle a later heal has to find/retry the unload, so it is
+  // deleted only after the job is verifiably gone from the domain.
   const served = new Set(opts.personas);
   for (const persona of listHeartbeatInstancePlists(dir)) {
     if (served.has(persona)) continue;
     const label = heartbeatPlistLabelFor(persona);
-    await opts.launchctl.run(["bootout", `${opts.domain}/${label}`]);
     const p = heartbeatPlistPathFor(persona, dir);
-    if (existsSync(p)) await unlink(p);
-    result.removed.push(label);
+    if (await confirmedUnload(opts.launchctl, opts.domain, label)) {
+      if (existsSync(p)) await unlink(p);
+      result.removed.push(label);
+    } else {
+      result.removeFailed.push(label);
+    }
   }
 
   // Retire the legacy single-persona heartbeat only once its replacement
-  // (the default persona's plist) is loaded.
-  if (defaultReady && existsSync(legacyPath)) {
-    await opts.launchctl.run([
-      "bootout",
-      `${opts.domain}/${HEARTBEAT_PLIST_LABEL}`,
-    ]);
+  // (the default persona's plist) is loaded and the legacy job itself is
+  // verifiably unloaded — same retry-handle rule as above.
+  if (
+    defaultReady &&
+    existsSync(legacyPath) &&
+    (await confirmedUnload(opts.launchctl, opts.domain, HEARTBEAT_PLIST_LABEL))
+  ) {
     await unlink(legacyPath);
     result.retiredLegacy = true;
   }
