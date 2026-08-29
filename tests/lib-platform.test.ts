@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  syncHeartbeatInstances,
   currentPlatform,
   defaultServiceControl,
   isSandbox,
@@ -334,5 +335,16 @@ describe("sandbox service suppression", () => {
     // platform it refuses, on linux/darwin/windows it is a real object.
     expect(typeof plain.restart).toBe("function");
     expect(plain).not.toBe(sandboxed);
+  });
+});
+
+describe("syncHeartbeatInstances dispatcher (#486/#491)", () => {
+  test("delegates to the host backend and stays null on a dev box", async () => {
+    // On the Linux test host this routes to the systemd sync, whose own
+    // gates (installed-binary check, user bus) return null — the contract
+    // callers rely on to stay silent on dev machines. The darwin branch is
+    // gated identically inside defaultSyncLaunchdHeartbeatInstances.
+    const result = await syncHeartbeatInstances(["lena"]);
+    expect(result).toBeNull();
   });
 });

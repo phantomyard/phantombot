@@ -13,7 +13,7 @@
  */
 
 import { defineCommand } from "citty";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import * as p from "@clack/prompts";
 
 import { installCompletions } from "../lib/completionInstall.ts";
@@ -220,6 +220,29 @@ export async function runInstall(input: RunInstallInput = {}): Promise<number> {
   }
 }
 
+/**
+ * Served personas to arm per-persona maintenance units for (#486/#491),
+ * resolved the same way on every platform. A config that can't be loaded
+ * yet (pre-init box) must not fail the install — return undefined so the
+ * backend installs its single-persona fallback; the startup doctor / first
+ * heartbeat heal provisions per-persona units once a config exists.
+ * Personas with no directory on disk (stale autostart entries) are
+ * skipped: their units would only fail.
+ */
+async function resolveInstallPersonas(
+  input: RunInstallInput,
+): Promise<readonly string[] | undefined> {
+  if (input.personas !== undefined) return input.personas;
+  try {
+    const config = await loadConfig();
+    return servedPersonasOf(config).filter((name) =>
+      existsSync(personaDir(config, name)),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 async function runInstallLinux(
   input: RunInstallInput,
   binPath: string,
@@ -243,22 +266,7 @@ async function runInstallLinux(
   const systemctl =
     input.systemctl ?? new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
 
-  // One heartbeat timer instance per served persona (#486). A config that
-  // can't be loaded yet (pre-init box) must not fail the install — skip
-  // instance arming; the startup doctor / first heartbeat heal provisions
-  // instances once a config exists. Personas with no directory on disk
-  // (stale autostart entries) are skipped: their services would only fail.
-  let personas = input.personas;
-  if (personas === undefined) {
-    try {
-      const config = await loadConfig();
-      personas = servedPersonasOf(config).filter((name) =>
-        existsSync(personaDir(config, name)),
-      );
-    } catch {
-      personas = undefined;
-    }
-  }
+  const personas = await resolveInstallPersonas(input);
 
   const result = await installPhantombotUnit({
     binPath,
@@ -297,13 +305,18 @@ async function runInstallDarwin(
     return 2;
   }
 
+  const hbPath = input.heartbeatPlistPath ?? launchdHeartbeatPath();
   const result = await installPhantombotPlists({
     binPath,
+    personas: await resolveInstallPersonas(input),
     plistPath: input.plistPath ?? defaultPlistPath(),
-    heartbeatPlistPath:
-      input.heartbeatPlistPath ?? launchdHeartbeatPath(),
+    heartbeatPlistPath: hbPath,
     nightlyPlistPath: input.nightlyPlistPath ?? launchdNightlyPath(),
     tickPlistPath: input.tickPlistPath ?? launchdTickPath(),
+    // Per-persona plists live beside the legacy heartbeat plist — in
+    // production that IS the LaunchAgents dir; in tests it keeps writes
+    // inside the tmpdir.
+    agentsDir: dirname(hbPath),
     domain,
     launchctl,
     out,

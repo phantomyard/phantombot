@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
@@ -245,6 +245,8 @@ describe("runInstall (darwin/launchd)", () => {
     const lc = new FakeLaunchctl();
     const code = await runInstall({
       binPath: "/Users/andrew/.local/bin/phantombot",
+      // Hermetic: never let a test derive personas from the real config.
+      personas: ["testbot", "helper"],
       plistPath: join(workdir, "dev.phantombot.phantombot.plist"),
       heartbeatPlistPath: join(workdir, "dev.phantombot.heartbeat.plist"),
       nightlyPlistPath: join(workdir, "dev.phantombot.nightly.plist"),
@@ -256,14 +258,17 @@ describe("runInstall (darwin/launchd)", () => {
       platform: "darwin",
     });
     expect(code).toBe(0);
-    // bootouts of nothing × 3, then bootstrap each plist × 3 (the retired
-    // nightly agent is neither written nor bootstrapped). We check the verb
-    // sequence rather than full strings so the test stays readable.
+    // bootouts of nothing × 4 (main + one heartbeat plist per persona +
+    // tick), then bootstrap each × 4 (the retired nightly agent is neither
+    // written nor bootstrapped). We check the verb sequence rather than
+    // full strings so the test stays readable.
     const verbs = lc.calls.map((c) => c[0]);
     expect(verbs).toEqual([
       "bootout",
       "bootout",
       "bootout",
+      "bootout",
+      "bootstrap",
       "bootstrap",
       "bootstrap",
       "bootstrap",
@@ -272,6 +277,13 @@ describe("runInstall (darwin/launchd)", () => {
     for (const c of lc.calls.filter((c) => c[0] === "bootstrap")) {
       expect(c[1]).toBe("gui/501");
     }
+    // Per-persona heartbeat plists carry --persona args (#491).
+    const helperBody = await readFile(
+      join(workdir, "dev.phantombot.heartbeat.helper.plist"),
+      "utf8",
+    );
+    expect(helperBody).toContain("--persona");
+    expect(helperBody).toContain("<string>helper</string>");
   });
 
   test("doesn't fall through to systemctl on darwin (the bug Andrew hit on his Mac)", async () => {

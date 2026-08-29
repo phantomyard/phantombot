@@ -21,11 +21,11 @@ import { defineCommand } from "citty";
 import { type Config, loadConfig, servedPersonasOf } from "../config.ts";
 import { applyPersona } from "./create-persona.ts";
 import type { WriteSink } from "../lib/io.ts";
+import { syncHeartbeatInstances } from "../lib/platform.ts";
 import {
   listPersonaDirs,
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
-import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import type { PersonaTone } from "../lib/personaTemplate.ts";
 
 export interface RunPersonaNewInput {
@@ -89,7 +89,7 @@ export async function runPersonaNew(
     // Provision the new persona's heartbeat timer instance right away
     // (#486) — best-effort; the next heartbeat heal reconciles the same
     // state if this fails.
-    const sync = input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+    const sync = input.syncHeartbeatInstances ?? syncHeartbeatInstances;
     try {
       await sync(
         servedPersonasOf({

@@ -33,11 +33,14 @@ import {
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
-import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 import personaNewCmd from "./persona-new.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
+import {
+  defaultServiceControl,
+  type ServiceControl,
+  syncHeartbeatInstances,
+} from "../lib/platform.ts";
 import { loadState, saveState } from "../state.ts";
 import { runCreatePersona } from "./create-persona.ts";
 import { runImportPersona } from "./import-persona.ts";
@@ -449,7 +452,7 @@ export async function runAutostartPicker(
   // retire removed ones) right away (#486). Best-effort: the next
   // heartbeat heal reconciles the same state if this fails.
   const sync =
-    input.syncHeartbeatInstances ?? defaultSyncHeartbeatInstances;
+    input.syncHeartbeatInstances ?? syncHeartbeatInstances;
   try {
     await sync(
       servedPersonasOf({

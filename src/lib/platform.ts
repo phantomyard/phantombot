@@ -28,10 +28,12 @@
 
 import {
   defaultLaunchdServiceControl,
+  defaultSyncLaunchdHeartbeatInstances,
   launchdLogPaths,
   launchdLogsDir,
 } from "./launchd.ts";
 import {
+  defaultSyncHeartbeatInstances as syncSystemdHeartbeatInstances,
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
@@ -53,6 +55,27 @@ export function currentPlatform(): Platform {
   if (process.platform === "darwin") return "darwin";
   if (process.platform === "win32") return "windows";
   return "unsupported";
+}
+
+/**
+ * Platform-dispatching heartbeat-instance sync (#486/#491): reconcile the
+ * service manager's per-persona maintenance units with the served-persona
+ * roster after `autostart_personas` changes. Linux → systemd timer
+ * instances, macOS → launchd per-persona plists, elsewhere → null (Windows
+ * re-registers its per-persona tasks via the heartbeat heal). Both backends
+ * return null on dev boxes, so callers can stay silent there.
+ */
+export function syncHeartbeatInstances(
+  personas: readonly string[],
+): Promise<unknown> {
+  switch (currentPlatform()) {
+    case "linux":
+      return syncSystemdHeartbeatInstances(personas);
+    case "darwin":
+      return defaultSyncLaunchdHeartbeatInstances(personas);
+    default:
+      return Promise.resolve(null);
+  }
 }
 
 /**
