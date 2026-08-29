@@ -26,7 +26,7 @@ class FakeHarness implements Harness {
   invocations = 0;
   constructor(
     public readonly id: string,
-    private readonly script: HarnessChunk[],
+    public script: HarnessChunk[],
     public readonly maxPayloadBytes?: number,
   ) {}
   async available(): Promise<boolean> {
@@ -232,6 +232,57 @@ describe("runWithFallback — empty done falls through", () => {
     expect(empty.invocations).toBe(1);
     expect(chunks.map((c) => c.type)).toEqual(["done"]);
     expect(chunks[0]).toMatchObject({ type: "done", finalText: "" });
+  });
+
+  test("empty done does NOT put the harness into cooldown (#499)", async () => {
+    // An empty `done` means the process ran cleanly — a model-output
+    // flake, not a harness-health failure. Cooling it would bench the
+    // one healthy fallback behind a dead primary on the next turn.
+    const cooldown = new CooldownStore(() => 0.5);
+    const empty = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    const filler = new FakeHarness("claude", [
+      { type: "text", text: "real reply" },
+      { type: "done", finalText: "real reply" },
+    ]);
+    await collect(runWithFallback([empty, filler], newRequest(), { cooldown }));
+    expect(empty.invocations).toBe(1);
+    expect(filler.invocations).toBe(1);
+    expect(cooldown.isCooledDown("pi").cooled).toBe(false);
+    expect(cooldown.isCooledDown("pi").consecutiveFailures).toBe(0);
+  });
+
+  test("a harness that emitted an empty reply last turn is tried again next turn (#499)", async () => {
+    // Regression for the kw-phantombot 2026-08-29 incident: one empty
+    // reply from pi (the only healthy harness, primary dead on usage
+    // limit) cooled it, so the NEXT turn skipped pi, hit the dead
+    // primary, and served recovery text. Here: turn 1 pi flakes empty
+    // and claude covers; turn 2 pi must be tried again — and this time
+    // it answers.
+    const cooldown = new CooldownStore(() => 0.5);
+    const flaky = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    const cover = new FakeHarness("claude", [
+      { type: "text", text: "cover" },
+      { type: "done", finalText: "cover" },
+    ]);
+    await collect(runWithFallback([flaky, cover], newRequest(), { cooldown }));
+    expect(flaky.invocations).toBe(1);
+    expect(cover.invocations).toBe(1);
+
+    // Turn 2: pi is healthy again (no cooldown from the empty), so it
+    // is invoked first and its real answer is served.
+    flaky.script = [
+      { type: "text", text: "real reply" },
+      { type: "done", finalText: "real reply" },
+    ];
+    const chunks = await collect(
+      runWithFallback([flaky, cover], newRequest(), { cooldown }),
+    );
+    expect(flaky.invocations).toBe(2);
+    expect(cover.invocations).toBe(1); // never reached
+    const last = chunks[chunks.length - 1];
+    expect(last && last.type === "done" ? last.finalText : "").toBe(
+      "real reply",
+    );
   });
 });
 

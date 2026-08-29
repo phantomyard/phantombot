@@ -13,9 +13,12 @@
  * which has no payload ceiling).
  *
  * Cooldown semantics (see src/lib/cooldown.ts):
- *   - Each recoverable failure (recoverable error chunk OR empty done
- *     that triggers a non-last fall-through) bumps the harness's
- *     cooldown counter.
+ *   - Each recoverable failure (recoverable error chunk, or a harness
+ *     that throws) bumps the harness's cooldown counter. An empty `done`
+ *     does NOT: the process ran cleanly, so the empty output is a
+ *     model-output flake rather than a health signal — cooling the
+ *     harness for it benches the one working fallback behind a dead
+ *     primary (#499).
  *   - A successful turn (done with non-empty finalText, OR a "best we
  *     can do" empty-done from the last harness) clears the harness's
  *     counter.
@@ -340,7 +343,16 @@ export async function* runWithFallback(
             "orchestrator: harness produced empty reply, falling through",
             { harnessId: harness.id },
           );
-          cooldown.markFailure(harness.id);
+          // Deliberately NO cooldown.markFailure here (#499). An empty
+          // `done` means the harness process exited cleanly — the model
+          // just produced no text. That is usually a transient flake
+          // (reasoning model that spent its whole output budget), not a
+          // harness-health failure, and cooling the harness for it can
+          // bench the only healthy fallback while a dead primary gets
+          // tried instead on the next turn. A persistently-empty harness
+          // is still caught: noteFailure() keeps the alerter's incident
+          // counter going, so 3 consecutive empty turns fire a DEGRADED
+          // push. The cost of a flake is one wasted round-trip.
           alerter.noteFailure(harness.id, "empty reply");
           firstFailure ??= { harnessId: harness.id, error: "empty reply" };
           recoverableError = true;
