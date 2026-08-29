@@ -71,4 +71,33 @@ describe("runMemoryMaintenance", () => {
     expect(out.text()).toContain("phantombot memory restore");
     await rm(dir, { recursive: true, force: true });
   });
+
+  test("a sibling's fresh snapshot is not an error in the ledger (#495)", async () => {
+    // Two personas, one shared memory.sqlite, one day rollover: since #490
+    // both sweeps run. The second must not record `snapshot: disk I/O error`,
+    // because that failure sticks in the nightly ledger and leaves
+    // `doctor --persona <p>` permanently red on a host that is in fact backed
+    // up by its sibling.
+    const dir = await workdir();
+    const dbPath = join(dir, "memory.sqlite");
+    const now = new Date("2026-08-29T14:43:18.000Z");
+
+    const first = await runMemoryMaintenance({ dbPath, persona: "lena", now });
+    expect(first.backup?.status).toBe("taken");
+    expect(first.errors).toEqual([]);
+
+    const out = sink();
+    const second = await runMemoryMaintenance({
+      dbPath,
+      persona: "kai",
+      now: new Date(now.getTime() + 60),
+      out,
+    });
+    expect(second.backup?.status).toBe("fresh");
+    expect(second.errors).toEqual([]);
+    expect(out.text()).toContain("snapshot skipped");
+    expect(await listRestorePoints(dbPath)).toHaveLength(1);
+
+    await rm(dir, { recursive: true, force: true });
+  });
 });
