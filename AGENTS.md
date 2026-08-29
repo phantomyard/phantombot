@@ -458,9 +458,9 @@ than an exact token guarantee, and must not be described as a llama.cpp
 protocol limit. Chunking preserves source text exactly, prunes obsolete tail
 chunks, and uses explicit chunk/file accounting.
 
-## Process for updating this file
+The TUI creation wizard is transactional from the user's perspective: validate inline, show a review that explicitly says nothing has been written, then create and name the persona directory, `identity.json`, and persona-local `config.toml`. Settings snapshots must preserve config-layer provenance; absence is inheritance, while an explicitly stated empty/tombstone value is still a persona override. Environment overrides are applied after TOML resolution and are not represented by these config-layer labels.
 
-The TUI creation wizard is transactional from the user's perspective: validate inline, show a review that explicitly says nothing has been written, then create and name the persona directory, `identity.json`, and persona-local `config.toml`. Settings snapshots must preserve config provenance; absence is inheritance, while an explicitly stated empty/tombstone value is still a persona override.
+## Process for updating this file
 
 If your PR does any of the things in the "contributing discipline" list above, **before opening the PR**:
 

@@ -221,7 +221,7 @@ export function PersonaDetailScreen(props: {
               ["binary", p.resolvedHarness?.path ?? "not found on PATH"],
               [
                 "from",
-                "state.json harness_bins > config.toml [harnesses.<h>] bin > default",
+                "env > config.toml [harnesses.<h>] bin > state.json harness_bins > default",
               ],
             ]}
           />

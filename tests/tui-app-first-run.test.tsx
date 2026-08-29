@@ -303,7 +303,19 @@ describe("first run", () => {
   });
 
   test("a resumed persona can walk back through its seeded name", async () => {
-    const app = mount({ startPersona: "alice", wizardStartAt: "brain" });
+    const app = mount({
+      host: {
+        ...HOST,
+        personas: [
+          {
+            name: "alice",
+            dir: "/tmp/does-not-exist/alice",
+          } as HostSnapshot["personas"][number],
+        ],
+      },
+      startPersona: "alice",
+      wizardStartAt: "brain",
+    });
     await tick();
     await app.press("\u001b");
     await app.press("\r");

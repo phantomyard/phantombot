@@ -56,6 +56,18 @@ export function sourceOf(
   return "default";
 }
 
+export function configSourcesOf(
+  personaToml: Record<string, unknown>,
+  globalToml: Record<string, unknown>,
+): PersonaSnapshot["configSources"] {
+  return {
+    brain: sourceOf(personaToml, globalToml, ["harnesses", "chain"]),
+    channels: sourceOf(personaToml, globalToml, ["channels"]),
+    embeddings: sourceOf(personaToml, globalToml, ["embeddings"]),
+    voice: sourceOf(personaToml, globalToml, ["voice"]),
+  };
+}
+
 /** Run a read that must never take a screen down. */
 function safe<T>(what: string, fn: () => T): T | undefined {
   try {
@@ -448,12 +460,7 @@ export async function personaSnapshot(
     secretNames,
     memory: readMemory(config, name),
     completeness: await personaCompleteness(config, name),
-    configSources: {
-      brain: sourceOf(personaToml, globalToml, ["harnesses", "chain"]),
-      channels: sourceOf(personaToml, globalToml, ["channels"]),
-      embeddings: sourceOf(personaToml, globalToml, ["embeddings"]),
-      voice: sourceOf(personaToml, globalToml, ["voice"]),
-    },
+    configSources: configSourcesOf(personaToml, globalToml),
   };
 }
 

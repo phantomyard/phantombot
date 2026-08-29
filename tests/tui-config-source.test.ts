@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { sourceOf } from "../src/tui/snapshot.ts";
+import { configSourcesOf, sourceOf } from "../src/tui/snapshot.ts";
 
 describe("TUI config provenance", () => {
   test("absence inherits and a persona value wins", () => {
@@ -26,8 +26,8 @@ describe("TUI config provenance", () => {
   });
 
   test("embedding provenance follows the embeddings key", () => {
+    const persona = { retrieval: { scope: "memory" } };
     const global = { embeddings: { provider: "openai" } };
-    expect(sourceOf({}, global, ["embeddings"])).toBe("global");
-    expect(sourceOf({}, global, ["retrieval"])).toBe("default");
+    expect(configSourcesOf(persona, global)!.embeddings).toBe("global");
   });
 });
