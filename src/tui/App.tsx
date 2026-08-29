@@ -29,16 +29,16 @@ import {
   describeDefaultPersonaChange,
   describeEmbeddingChange,
   describeVoiceChange,
-  openInEditor,
   setSecret,
   unsetSecret,
   type Consequence,
 } from "./actions.ts";
 import { Frame } from "./components/Frame.tsx";
-import {
-  withPromptTerminal,
-} from "./prompts.ts";
 import { ConfirmScreen, type ConfirmRequest } from "./screens/Confirm.tsx";
+import {
+  FileEditorScreen,
+  type FileEditorResult,
+} from "./screens/FileEditor.tsx";
 import { AskScreen, type AskRequest } from "./screens/Ask.tsx";
 import { ChooseScreen, type ChooseRequest } from "./screens/Choose.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
@@ -75,7 +75,8 @@ type Screen =
   | "doctor"
   | "mcp"
   | "logs"
-  | "wizard";
+  | "wizard"
+  | "editor";
 
 export interface AppProps {
   host: HostSnapshot;
@@ -145,6 +146,7 @@ export function App(props: AppProps): React.ReactElement {
   const [doctorStatus, setDoctorStatus] = useState<StatusRows | undefined>();
   const [doctorRunning, setDoctorRunning] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
+  const [editorPath, setEditorPath] = useState<string | null>(null);
   /**
    * True while a `@clack` prompt owns the terminal.
    *
@@ -643,16 +645,15 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
-   * Pick one of the prompt files and open it in `$EDITOR`.
+   * Pick one of the prompt files and edit it in the app's own editor.
    *
    * A missing file is offered too, and creating it by opening it is the
    * correct behaviour: a persona with no IDENTITY.md is a persona that has
    * never been told who it is, and the way to fix that is to write one.
    */
   const editIdentity = useCallback(
-    async (target: PersonaSnapshot) => {
-      setPrompting(true);
-      try {
+    (target: PersonaSnapshot) => {
+      void (async () => {
         const choice = await askChoice({
           title: `Which file for ${target.name}?`,
           options: target.identity.files.map((f) => ({
@@ -662,21 +663,11 @@ export function App(props: AppProps): React.ReactElement {
           })),
         });
         if (!choice) return;
-        const r = await withPromptTerminal(() => openInEditor(choice));
-        const file = choice.split("/").pop();
-        setNotice(
-          !r.ok
-            ? `editor failed: ${r.error}`
-            : r.changed
-              ? `${file} saved — restart to load it`
-              : `${file} unchanged`,
-        );
-      } finally {
-        setPrompting(false);
-        await refresh();
-      }
+        setEditorPath(choice);
+        go("editor");
+      })();
     },
-    [refresh, askChoice],
+    [askChoice, go],
   );
 
   const body = (() => {
@@ -709,6 +700,30 @@ export function App(props: AppProps): React.ReactElement {
             } catch (e) {
               setNotice(`could not create ${answers.name}: ${(e as Error).message}`);
             }
+          }}
+        />
+      );
+    }
+
+    if (screen === "editor" && editorPath !== null) {
+      const editing = host.personas.find((p) => editorPath.includes(p.name));
+      return (
+        <FileEditorScreen
+          path={editorPath}
+          personaName={editing?.name ?? ""}
+          onBack={(r: FileEditorResult) => {
+            const file = editorPath.split("/").pop();
+            setNotice(
+              r.error
+                ? `save failed: ${r.error}`
+                : r.saved
+                  ? `${file} saved — restart to load it`
+                  : r.changed
+                    ? `${file} discarded`
+                    : `${file} unchanged`,
+            );
+            setEditorPath(null);
+            back();
           }}
         />
       );

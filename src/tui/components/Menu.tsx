@@ -60,8 +60,9 @@ export function MenuItem(props: MenuItemProps): React.ReactElement {
         {/* A fixed label column, not a percentage: at 22% of a narrow window
             "Channels" wrapped onto a second line and the row sheared. This is
             a flex child's width, not a hand-drawn border — the frame still
-            comes from `borderStyle`, so nothing here can deform it. */}
-        <Box width={14} flexShrink={0}>
+            comes from `borderStyle`, so nothing here can deform it. Wide
+            enough for the longest label in the app ("Discard changes"). */}
+        <Box width={16} flexShrink={0}>
           <Text
             bold={selected}
             color={selected ? theme.accent : undefined}
