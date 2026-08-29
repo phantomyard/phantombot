@@ -26,13 +26,28 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { MenuItem } from "../components/Menu.tsx";
-import { badge, glyph, humanBytes, humanCount, humanWhen, theme } from "../theme.ts";
+import {
+  badge,
+  glyph,
+  humanBytes,
+  humanCount,
+  humanWhen,
+  theme,
+} from "../theme.ts";
 import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeRows } from "../chrome.ts";
 import { providerHearsVoice } from "../../lib/voice.ts";
 import type { ChannelDetail, PersonaSnapshot } from "../snapshot.ts";
 import type { VoiceProvider } from "../../lib/voice.ts";
+
+function sourceLabel(
+  source: "persona" | "global" | "default" | undefined,
+): string {
+  if (source === "persona") return "persona override";
+  if (source === "global") return "inherited from global config";
+  return "built-in default (no key set)";
+}
 
 /** Screens this one leads to. */
 export type Target = "memory" | "voice" | "doctor";
@@ -192,7 +207,9 @@ export function PersonaDetailScreen(props: {
             label="Brain"
             description={`harness: ${p.chain.join(" → ") || "none configured"}`}
             badge={
-              p.resolvedHarness ? `${glyph.ok} resolved` : `${glyph.bad} missing`
+              p.resolvedHarness
+                ? `${glyph.ok} resolved`
+                : `${glyph.bad} missing`
             }
             badgeColor={p.resolvedHarness ? theme.ok : theme.bad}
             activateHint="↵ change"
@@ -202,10 +219,7 @@ export function PersonaDetailScreen(props: {
           <Detail
             lines={[
               ["binary", p.resolvedHarness?.path ?? "not found on PATH"],
-              [
-                "from",
-                "state.json harness_bins > config.toml [harnesses.<h>] bin > default",
-              ],
+              ["from", sourceLabel(p.configSources?.brain)],
             ]}
           />
         </>
@@ -213,7 +227,7 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "channels",
-      height: 2 + p.channelDetails.length,
+      height: 3 + p.channelDetails.length,
       node: (
         <>
           <MenuItem
@@ -224,13 +238,18 @@ export function PersonaDetailScreen(props: {
             selected={row === "channels"}
             onPress={() => press("channels")}
           />
-          <Detail lines={p.channelDetails.map(channelLine)} />
+          <Detail
+            lines={[
+              ["from", sourceLabel(p.configSources?.channels)],
+              ...p.channelDetails.map(channelLine),
+            ]}
+          />
         </>
       ),
     },
     {
       id: "memory",
-      height: 5,
+      height: 6,
       node: (
         <>
           <MenuItem
@@ -261,6 +280,7 @@ export function PersonaDetailScreen(props: {
                   ? `${embedding.provider} · ${embedding.model} · ${embedding.dimensions}`
                   : "off",
               ],
+              ["from", sourceLabel(p.configSources?.memory)],
               [
                 "indexed",
                 `${humanCount(p.memory.indexedInSpace)} / ${humanCount(p.memory.indexedTotal)}  ${
@@ -278,7 +298,7 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "voice",
-      height: 3,
+      height: 4,
       node: (
         <>
           <MenuItem
@@ -291,6 +311,7 @@ export function PersonaDetailScreen(props: {
           />
           <Detail
             lines={[
+              ["from", sourceLabel(p.configSources?.voice)],
               // The azure_edge trap, stated as a live reading: one config key
               // drives both speaking and hearing, and the provider that needs
               // no credential cannot transcribe. See screens/Voice.tsx.

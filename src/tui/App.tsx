@@ -696,18 +696,27 @@ export function App(props: AppProps): React.ReactElement {
           startAt={props.wizardStartAt}
           initial={{ name: props.startPersona ?? "" }}
           defaultExists={host.personas.length > 0}
+          existingNames={host.personas.map((p) => p.name)}
+          personasDir={host.personasDir}
           // Only when the wizard was reached from another screen; on first
           // run the stack is empty and `back` would fall through to chat,
           // which does not exist yet.
           onBack={navRef.current.length > 0 ? back : undefined}
           onQuit={exit}
           onFinish={async (answers) => {
-            await props.onCreatePersona(answers);
-            await refresh();
-            setPersonaName(answers.name);
-            // A finished wizard is not a place to go back to.
-            navRef.current = [];
-            setScreen("chat");
+            try {
+              await props.onCreatePersona(answers);
+              await refresh();
+              setPersonaName(answers.name);
+              setNotice(
+                `created ${host.personasDir}/${answers.name} · identity.json · config.toml`,
+              );
+              // A finished wizard is not a place to go back to.
+              navRef.current = [];
+              setScreen("chat");
+            } catch (e) {
+              setNotice(`could not create ${answers.name}: ${(e as Error).message}`);
+            }
           }}
         />
       );

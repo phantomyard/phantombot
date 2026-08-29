@@ -460,6 +460,8 @@ chunks, and uses explicit chunk/file accounting.
 
 ## Process for updating this file
 
+The TUI creation wizard is transactional from the user's perspective: validate inline, show a review that explicitly says nothing has been written, then create and name the persona directory, `identity.json`, and persona-local `config.toml`. Settings snapshots must preserve config provenance; absence is inheritance, while an explicitly stated empty/tombstone value is still a persona override.
+
 If your PR does any of the things in the "contributing discipline" list above, **before opening the PR**:
 
 1. Re-read the relevant section here. Does it still describe what the code does?

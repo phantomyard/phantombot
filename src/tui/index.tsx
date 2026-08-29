@@ -25,9 +25,14 @@ import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
 import { loadConfig, loadConfigForPersona } from "../config.ts";
-import { personaCompleteness, type WizardStep } from "../lib/personaComplete.ts";
+import {
+  personaCompleteness,
+  type WizardStep,
+} from "../lib/personaComplete.ts";
 import { runPersonaNew } from "../cli/persona-new.ts";
 import { log } from "../lib/logger.ts";
+import { personaConfigPath } from "../lib/personaConfig.ts";
+import { updateConfigToml, setIn } from "../lib/configWriter.ts";
 
 /**
  * Decide what the app opens on.
@@ -209,6 +214,15 @@ export async function createPhantomFromWizard(
     err: { write: () => {} },
   });
   if (code !== 0) throw new Error(`could not create persona '${answers.name}'`);
+
+  // The review screen promises a persona-local config file. Record the chosen
+  // brain there so the daemon reads the same choice the user just reviewed;
+  // an empty file would merely inherit the host layer and make the choice a lie.
+  const host = await loadConfig();
+  await updateConfigToml(
+    personaConfigPath(host.personasDir, answers.name),
+    (toml) => setIn(toml, ["harnesses", "chain"], [answers.brain]),
+  );
 }
 
 /**
@@ -231,7 +245,8 @@ export async function runRepl(
       for await (const event of chat.send(text)) {
         if (event.type === "text") out.write(event.text);
         else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
-        else if (event.type === "error") out.write(`\nerror: ${event.message}\n`);
+        else if (event.type === "error")
+          out.write(`\nerror: ${event.message}\n`);
       }
       out.write("\n");
     }

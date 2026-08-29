@@ -190,6 +190,38 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
 }
 
 describe("first run", () => {
+  test("invalid names stay on the field with an inline error", async () => {
+    const app = mount({ startPersona: undefined });
+    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.press("Bad Name\r");
+    await app.waitFor((f) => f.includes("Use lowercase letters"));
+    expect(app.lastFrame()).toContain("What should it be called?");
+    expect(app.created).toEqual([]);
+  });
+
+  test("reviews exact artifacts before the creation callback runs", async () => {
+    const app = mount({ startPersona: undefined });
+    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.press("alice");
+    for (
+      let i = 0;
+      i < 12 && !app.lastFrame().includes("nothing has been written yet");
+      i++
+    ) {
+      await app.press("\r");
+    }
+    await app.waitFor((f) => f.includes("nothing has been written yet"));
+    const frame = app.lastFrame();
+    expect(frame).toContain("/tmp/does-not-exist/alice");
+    expect(frame).toContain("identity.json");
+    expect(frame).toContain("config.toml");
+    expect(frame).toContain("channel    cli");
+    expect(frame).toContain("default    yes");
+    expect(app.created).toEqual([]);
+    await app.press("\r");
+    expect(app.created).toEqual(["alice"]);
+  });
+
   test("completing the wizard leaves an app that can still be quit", async () => {
     const app = mount({ startPersona: undefined });
     await app.waitFor((f) => f.includes("What should it be called?"));
