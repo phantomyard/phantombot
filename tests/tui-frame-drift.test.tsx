@@ -69,6 +69,9 @@ function session(turns: number): ChatSession {
     conversation: "cli:tui:lab",
     history: history(turns),
     async *send(): AsyncGenerator<ChatEvent> {},
+    async command() {
+      return null;
+    },
     async close() {},
   };
 }

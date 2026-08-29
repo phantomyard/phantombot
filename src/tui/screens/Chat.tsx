@@ -18,6 +18,12 @@
  *   - **`^c` interrupts the turn, it does not kill the app.** `^q` quits.
  *     Quitting is never something you do by accident mid-answer.
  *   - **Streaming, not a blob** — text lands as it is produced.
+ *   - **Slash commands are phantombot's, not the model's** (#480) — `/status`,
+ *     `/stop`, `/update` and the rest are dispatched ahead of the harness
+ *     through the same handler Telegram and phantomchat use, so a command works
+ *     while a turn is hung, which is exactly when you need it.
+ *   - **Replies are rendered markdown** (#481) — headings, lists, tables and
+ *     fenced code, flattened to rows by `markdown.ts` before layout sees them.
  *   - **Scrollback IS the conversation store.** History comes from the memory
  *     store on open, so leaving for settings and coming back shows the same
  *     thread, and so does reopening the app tomorrow.
@@ -33,8 +39,10 @@ import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeRows } from "../chrome.ts";
 import { transcriptLines, transcriptWindow } from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
+import type { Span } from "../markdown.ts";
 import { mouse } from "../mouse.ts";
 import { applyTextChunk } from "../textInput.ts";
+import { commandHints, commandName, completeCommand } from "../slash.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
 
 /**
@@ -49,6 +57,15 @@ import type { ChatMessage, ChatSession } from "../chatSession.ts";
  * blank line while being one row optimistic tears the frame.
  */
 export const CHAT_CHROME_ROWS = 8;
+
+/**
+ * The type-ahead never grows the chrome without paying for it: the rows it
+ * occupies are subtracted from the transcript in the same render, so on a full
+ * screen the drawn height is unchanged and a `/` keystroke cannot push the
+ * frame off the bottom. Capped so a long command list cannot eat the
+ * conversation.
+ */
+export const MAX_COMMAND_HINTS = 5;
 
 /**
  * One transcript row.
@@ -87,11 +104,49 @@ function Line(props: { line: TranscriptLine }): React.ReactElement {
       </Box>
     );
   }
+  if (line.kind === "rich") {
+    // A blank markdown row must still DRAW a row. An empty Ink box collapses
+    // to zero height, and a row that measures one and draws none is exactly
+    // the measurement/rendering drift this transcript is built to prevent —
+    // every scroll offset below it would be out by one.
+    if (line.spans.length === 0) return <Text> </Text>;
+    // Markdown, already flattened to ONE row by `markdown.ts`: the spans carry
+    // attributes, never a line break, so this stays a single Ink row and the
+    // transcript's row arithmetic still holds (phantombot#481).
+    return (
+      <Box paddingLeft={2 + line.indent}>
+        <Text>
+          {line.spans.map((span, i) => (
+            <Text
+              key={i}
+              bold={span.bold}
+              italic={span.italic}
+              underline={span.underline}
+              color={toneColor(span)}
+            >
+              {span.text}
+            </Text>
+          ))}
+        </Text>
+      </Box>
+    );
+  }
   return (
     <Box paddingLeft={2}>
       <Text color={line.error ? theme.bad : undefined}>{line.text}</Text>
     </Box>
   );
+}
+
+/**
+ * A span's semantic tone, resolved to the theme's colours. Code carries one
+ * whether or not the renderer gave it an explicit tone.
+ */
+function toneColor(span: Span): string | undefined {
+  if (span.tone === "dim") return theme.dim;
+  if (span.tone === "accent") return theme.accent;
+  if (span.tone === "ok") return theme.ok;
+  return span.code ? theme.ok : undefined;
 }
 
 /**
@@ -184,16 +239,27 @@ export function ChatScreen(props: {
       scrollRef.current = 0;
       setScroll(0);
       setActivity("thinking");
+      // Patch by IDENTITY, not by "the last message": a slash command can be
+      // typed while this turn is streaming (that is what `/stop` is for), and
+      // its bubble lands after this one — "the last message" would then be the
+      // command's, and the streaming text would overwrite its reply.
+      let slot: ChatMessage = {
+        role: "assistant",
+        text: "",
+        at: Date.now(),
+        tools: [],
+      };
       setMessages((prev) => [
         ...prev,
         { role: "user", text, at: Date.now() },
-        { role: "assistant", text: "", at: Date.now(), tools: [] },
+        slot,
       ]);
       const patch = (fn: (m: ChatMessage) => ChatMessage) =>
         setMessages((prev) => {
-          const next = [...prev];
-          next[next.length - 1] = fn(next[next.length - 1]!);
-          return next;
+          const next = fn(slot);
+          const out = prev.map((m) => (m === slot ? next : m));
+          slot = next;
+          return out;
         });
       try {
         for await (const event of props.session.send(text, controller.signal)) {
@@ -239,6 +305,49 @@ export function ChatScreen(props: {
     [props.session],
   );
 
+  /**
+   * A slash command: answered by phantombot itself, never by the model.
+   *
+   * Deliberately does NOT take the `busy` lock. `/stop` is only useful while a
+   * turn is running and `/status` is most useful then too — gating commands on
+   * the turn they exist to inspect or interrupt is the bug the other channels
+   * already avoid by dispatching ahead of the harness.
+   */
+  const runCommand = useCallback(
+    async (text: string) => {
+      scrollRef.current = 0;
+      setScroll(0);
+      let slot: ChatMessage = {
+        role: "assistant",
+        text: "\u2026",
+        at: Date.now(),
+      };
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text, at: Date.now() },
+        slot,
+      ]);
+      const patch = (fn: (m: ChatMessage) => ChatMessage) =>
+        setMessages((prev) => {
+          const next = fn(slot);
+          const out = prev.map((m) => (m === slot ? next : m));
+          slot = next;
+          return out;
+        });
+      try {
+        const result = await props.session.command(text);
+        patch((m) => ({ ...m, text: result?.reply ?? "" }));
+        // Strictly after the reply is on screen: /update and /restart end this
+        // process, and a heads-up that lands after the process dies is no
+        // heads-up at all.
+        if (result?.afterSend) await result.afterSend();
+      } catch (e) {
+        patch((m) => ({ ...m, error: (e as Error).message }));
+      }
+    },
+    [props.session],
+  );
+
   // The wheel scrolls the transcript. Three rows per notch is what every
   // terminal pager does; one row feels broken and a page feels like a jump.
   useEffect(() => {
@@ -273,8 +382,32 @@ export function ChatScreen(props: {
     if (key.shift && key.downArrow) return scrollBy(-1);
     if (key.home) return scrollBy(Number.MAX_SAFE_INTEGER);
     if (key.end) return scrollBy(-Number.MAX_SAFE_INTEGER);
-    if (busy) return;
+    // Tab completes a half-typed command. Only there: anywhere else a tab is a
+    // literal character the user meant to type.
+    if (key.tab && !key.shift) {
+      const completed = completeCommand(inputRef.current);
+      if (completed !== inputRef.current) setInputValue(completed);
+      return;
+    }
+    if (key.return) {
+      const text = inputRef.current.trim();
+      if (!text) return;
+      // Commands are dispatched ahead of the harness, so they work WHILE a
+      // turn is in flight; ordinary prompts still wait their turn.
+      const isCommand = commandName(text) !== undefined;
+      if (busy && !isCommand) return;
+      setInputValue("");
+      setHistoryIndex(null);
+      if (isCommand) void runCommand(text);
+      else void submit(text);
+      return;
+    }
+    // History recall is gated on `busy` — replacing the input under a running
+    // turn is confusing — but TYPING is not: `/stop` cannot be typed on a
+    // keyboard that stops accepting characters exactly when the turn you want
+    // to interrupt is the one blocking it.
     if (key.upArrow || key.downArrow) {
+      if (busy) return;
       const sent = messages.filter((m) => m.role === "user").map((m) => m.text);
       if (sent.length === 0) return;
       const at =
@@ -288,14 +421,6 @@ export function ChatScreen(props: {
             );
       setHistoryIndex(at);
       setInputValue(at === null ? "" : (sent[at] ?? ""));
-      return;
-    }
-    if (key.return) {
-      const text = input.trim();
-      if (!text) return;
-      setInputValue("");
-      setHistoryIndex(null);
-      void submit(text);
       return;
     }
     if (key.backspace || key.delete) {
@@ -312,13 +437,21 @@ export function ChatScreen(props: {
       setInputValue(applied.text);
       if (applied.submit) {
         setHistoryIndex(null);
-        if (!busy) void submit(applied.submit);
+        const text = applied.submit;
+        if (commandName(text) !== undefined) void runCommand(text);
+        else if (!busy) void submit(text);
       }
     }
   });
 
   const size = useTerminalSize();
-  const rows = viewportRows(size, CHAT_CHROME_ROWS + frameChromeRows());
+  // The type-ahead is part of the chrome while it is up, so the transcript
+  // gives back exactly the rows it takes.
+  const hints = commandHints(input).slice(0, MAX_COMMAND_HINTS);
+  const rows = viewportRows(
+    size,
+    CHAT_CHROME_ROWS + hints.length + frameChromeRows(),
+  );
   pageRef.current = rows;
   // ONE flat list of rows: what is measured is what is drawn. Clipping happens
   // before layout — overflowing the window is what pushes the border off the
@@ -347,6 +480,7 @@ export function ChatScreen(props: {
       status={props.status}
       footer={[
         { icon: badge.send, key: "↵", label: "Send" },
+        { icon: badge.run, key: "/", label: "Commands" },
         { icon: badge.history, key: "↑↓", label: "History" },
         { icon: badge.scroll, key: "PgUp/PgDn", label: "Scroll" },
         {
@@ -386,6 +520,16 @@ export function ChatScreen(props: {
           <Text color={theme.dim}> </Text>
         </Box>
       )}
+      {hints.length > 0 ? (
+        <Box flexDirection="column" paddingX={2}>
+          {hints.map((hint) => (
+            <Text key={hint.name} color={theme.dim}>
+              <Text color={theme.accent}>{`/${hint.name}`}</Text>
+              {`  ${hint.description}`}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       <Box
         borderStyle="round"
         borderColor={busy ? theme.dim : theme.accent}

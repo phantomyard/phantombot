@@ -73,6 +73,9 @@ function sessionWithTools(): ChatSession {
       },
     ],
     async *send() {},
+    async command() {
+      return null;
+    },
     async close() {},
   };
 }
@@ -246,6 +249,9 @@ async function mountApp(host: HostSnapshot = HOST) {
         conversation: `cli:tui:${persona}`,
         history: [],
         async *send() {},
+        async command() {
+          return null;
+        },
         close: async () => {},
       })}
     />,

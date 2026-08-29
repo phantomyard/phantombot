@@ -35,6 +35,16 @@ import { homedir } from "node:os";
 
 import type { Config } from "../config.ts";
 import { personaDir } from "../config.ts";
+import {
+  handleSlashCommand,
+  type ActiveTurnHandle,
+} from "../channels/commands.ts";
+import type { ServiceControl } from "../lib/systemd.ts";
+import {
+  isKnownCommand,
+  isUnknownCommand,
+  unknownCommandReply,
+} from "./slash.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { Harness } from "../harnesses/types.ts";
 import { resolveHarnessBinsForConfig } from "../lib/harnessAvailability.ts";
@@ -73,6 +83,17 @@ export interface ChatMessage {
   error?: string;
 }
 
+/** A handled slash command: what to print, and what to do after printing it. */
+export interface ChatCommandResult {
+  reply: string;
+  /**
+   * Runs strictly AFTER the reply is on screen — `/update` and `/restart` use
+   * it to bounce the service, and doing that before the text lands means the
+   * user watches the app die having been told nothing.
+   */
+  afterSend?: () => Promise<void>;
+}
+
 export interface ChatSession {
   persona: string;
   conversation: string;
@@ -80,6 +101,15 @@ export interface ChatSession {
   history: ChatMessage[];
   /** Run one user message. Yields UI events as the turn streams. */
   send(text: string, signal?: AbortSignal): AsyncGenerator<ChatEvent>;
+  /**
+   * Run a slash command, or return null when this text is not one and must go
+   * to the harness instead (phantombot#480).
+   *
+   * Delegates to the shared dispatcher, so `/stop` here aborts the same way it
+   * does on Telegram — including while a turn is streaming, which is exactly
+   * when you need it and exactly when the harness cannot answer.
+   */
+  command(text: string): Promise<ChatCommandResult | null>;
   close(): Promise<void>;
 }
 
@@ -112,6 +142,12 @@ export interface OpenChatInput {
   /** Test seams. */
   memory?: MemoryStore;
   harnesses?: Harness[];
+  /**
+   * Injected by tests so a `/restart` in the suite never bounces the
+   * developer's own phantombot.service. Production leaves it undefined and the
+   * dispatcher picks up `defaultServiceControl()`.
+   */
+  serviceControl?: ServiceControl;
 }
 
 export async function openChat(input: OpenChatInput): Promise<ChatSession> {
@@ -135,6 +171,16 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
 
   const memory = input.memory ?? (await openMemoryStore(config.memoryDbPath));
   const ownsMemory = !input.memory;
+  const startedAt = Date.now();
+  /**
+   * The turn in flight, for `/stop` and for `/status`'s "what is it doing".
+   *
+   * The screen owns a controller too (it is what `^c` aborts), so the session
+   * keeps its OWN and forwards the screen's abort into it. Two entry points to
+   * one interrupt: without this, `/stop` would have nothing to abort, because
+   * an `AbortSignal` cannot be aborted by whoever merely holds it.
+   */
+  let activeTurn: ActiveTurnHandle | undefined;
 
   const prior = await memory.recentTurnsForConversationDisplay(
     persona,
@@ -169,6 +215,12 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     }
     const tools: ChatToolCall[] = [];
     let final = "";
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+    activeTurn = { controller, startTime: Date.now() };
     try {
       for await (const chunk of runTurn({
         persona,
@@ -208,13 +260,14 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
         // silence begins, which is the whole reason tool calls are visible on
         // this screen.
         toolNarration: true,
-        signal,
+        signal: controller.signal,
       })) {
         if (chunk.type === "text") {
           final += chunk.text;
           yield { type: "text", text: chunk.text };
         } else if (chunk.type === "progress") {
           const now = Date.now();
+          if (activeTurn) activeTurn.lastProgressNote = chunk.note;
           const last = tools[tools.length - 1];
           if (last && last.durationMs === undefined) {
             last.durationMs = now - last.startedAt;
@@ -244,13 +297,40 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
         }
       }
     } catch (e) {
-      // An aborted turn is the user pressing ^c, not a failure to report as one.
-      if (signal?.aborted) {
+      // An aborted turn is the user pressing ^c (or typing /stop), not a
+      // failure to report as one.
+      if (controller.signal.aborted) {
         yield { type: "done", text: final };
         return;
       }
       yield { type: "error", message: (e as Error).message };
+    } finally {
+      activeTurn = undefined;
     }
+  }
+
+  async function command(text: string): Promise<ChatCommandResult | null> {
+    // Command-SHAPED but not ours: answered here rather than sent to the
+    // harness, so a typo gets a list instead of a paragraph of improvisation.
+    if (isUnknownCommand(text)) return { reply: unknownCommandReply(text) };
+    if (!isKnownCommand(text)) return null;
+    const result = await handleSlashCommand(text, {
+      // The terminal has no chat id; the conversation key is the only
+      // identifier there is, and it is what the logs should name.
+      chatId: conversation,
+      persona,
+      conversation,
+      memory,
+      harnesses: harnesses!,
+      startedAt,
+      activeTurn,
+      config,
+      serviceControl: input.serviceControl,
+    });
+    // Advertised but unhandled should be impossible; say so rather than
+    // silently falling through to the model with a command the user believes
+    // this surface owns.
+    return result ?? { reply: unknownCommandReply(text) };
   }
 
   return {
@@ -258,6 +338,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     conversation,
     history,
     send,
+    command,
     async close() {
       if (ownsMemory) await memory.close();
     },

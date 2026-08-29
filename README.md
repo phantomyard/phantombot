@@ -281,6 +281,7 @@ Settings live one keypress away:
 | `^l` | Show captured log lines |
 | `^c` | Interrupt the turn (it does **not** quit) |
 | `^q` | Quit |
+| `/` | Open the command list; `Tab` completes what you have typed |
 
 It takes the whole window — the app runs on the alternate screen buffer, like
 `less` or `htop`, and leaves your shell and its scrollback exactly as it found
@@ -297,6 +298,28 @@ A conversation here is a real turn: same harness chain, same memory, same tools
 and the same journal as a message from any channel. The scrollback IS the
 conversation store, so closing the app and reopening it tomorrow continues the
 same thread.
+
+**Slash commands work here, and they are phantombot's — not the model's.**
+`/status`, `/stop`, `/reset`, `/harness`, `/model`, `/coder`, `/chattiness`,
+`/update`, `/restart` and `/help` are the same commands Telegram and
+phantomchat expose, handled by the same code. Type `/` and the list appears
+under the input box; `Tab` completes it.
+
+They are dispatched **ahead of the harness**, so they answer while a turn is
+running — which is the only moment `/stop` is any use — and typing is never
+blocked by a turn in flight. `/update` and `/restart` act on the whole host, so
+they are accepted only from the default phantom and refused, with the reason,
+anywhere else. A command that is not one of ours (`/wat`) is answered here
+rather than improvised by the model, while a line that only *looks* like one
+(`/usr/bin/env is on PATH?`, `/etc/hosts`) goes to the phantom untouched.
+
+**Replies are rendered, not dumped.** Headings, **bold**, *italic*, `inline
+code`, bullet and numbered lists, block quotes, fenced code blocks and pipe
+tables all come out as the terminal's own formatting instead of raw markup.
+Tables are fitted to the window — the widest columns shrink first and cells
+truncate with an ellipsis — and code blocks are truncated rather than re-wrapped,
+because a re-flowed command line looks copy-pasteable and is not. Everything
+re-renders at the new width when you resize.
 
 **If the default phantom is not configured yet**, the same command opens the
 setup wizard instead — and resumes at the first unanswered step rather than

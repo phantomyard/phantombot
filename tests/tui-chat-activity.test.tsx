@@ -66,6 +66,9 @@ function pendingSession(events: ChatEvent[]): ChatSession {
       // Never returns: the harness is still working.
       await new Promise(() => {});
     },
+    async command() {
+      return null;
+    },
     async close() {},
   };
 }
@@ -179,6 +182,9 @@ describe("chat activity indicator", () => {
         yield { type: "text", text: "hello back" } as ChatEvent;
         yield { type: "done", text: "hello back" } as ChatEvent;
       },
+      async command() {
+        return null;
+      },
       async close() {},
     };
     const { stdin, stdout, instance } = await mount(session);
@@ -204,6 +210,9 @@ describe("message timestamps", () => {
       conversation: "cli:tui:alice",
       history: [{ role: "user", text: "from yesterday", at: 0 }],
       async *send() {},
+      async command() {
+        return null;
+      },
       async close() {},
     };
     const { stdout, instance } = await mount(session);

@@ -21,11 +21,18 @@
  */
 
 import type { ChatMessage } from "./chatSession.ts";
+import { markdownLines, type Span } from "./markdown.ts";
 
 export type TranscriptLine =
   | { kind: "header"; role: "user" | "assistant"; name: string; time: string }
   | { kind: "tool"; title: string; duration: string }
   | { kind: "text"; text: string; error: boolean }
+  /**
+   * A rendered markdown row (phantombot#481): styled runs plus a left indent.
+   * Still ONE row — the renderer is width-aware and wraps or truncates itself,
+   * so measurement and drawing stay the same list they were before.
+   */
+  | { kind: "rich"; spans: Span[]; indent: number }
   | { kind: "gap" };
 
 /** `14:07`, or nothing at all — history from the store carries no timestamp. */
@@ -80,9 +87,23 @@ export function transcriptLines(
         });
       }
     }
-    const body = message.error ?? message.text ?? "";
-    for (const row of wrap(body, width)) {
-      lines.push({ kind: "text", text: row, error: message.error !== undefined });
+    if (message.error !== undefined) {
+      // An error is not markdown and must not be reinterpreted as any: a
+      // stack trace full of `*` would come out italicised and half-eaten.
+      for (const row of wrap(message.error, width)) {
+        lines.push({ kind: "text", text: row, error: true });
+      }
+    } else if (isUser) {
+      // What the user typed is shown back verbatim. Rendering their own
+      // markdown would make the line they sent differ from the line they see,
+      // and `**` in their message is usually them talking ABOUT markdown.
+      for (const row of wrap(message.text ?? "", width)) {
+        lines.push({ kind: "text", text: row, error: false });
+      }
+    } else {
+      for (const row of markdownLines(message.text ?? "", width)) {
+        lines.push({ kind: "rich", spans: row.spans, indent: row.indent });
+      }
     }
     lines.push({ kind: "gap" });
   }

@@ -58,6 +58,9 @@ const idleSession: ChatSession = {
   conversation: "cli:tui:alice",
   history: [],
   async *send() {},
+  async command() {
+    return null;
+  },
   async close() {},
 };
 

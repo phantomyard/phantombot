@@ -154,6 +154,9 @@ async function openChat(rows: number) {
         conversation: `cli:tui:${persona}`,
         history: [],
         async *send() {},
+        async command() {
+          return null;
+        },
         close: async () => {},
       })}
     />,
