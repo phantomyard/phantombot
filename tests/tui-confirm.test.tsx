@@ -129,6 +129,9 @@ async function mountApp() {
         conversation: `cli:tui:${persona}`,
         history: [],
         async *send() {},
+        async command() {
+          return null;
+        },
         close: async () => {},
       })}
     />,

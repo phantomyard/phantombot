@@ -32,14 +32,26 @@ const msg = (text: string, tools: string[] = []): ChatMessage => ({
 });
 
 const kinds = (lines: readonly TranscriptLine[]) => lines.map((l) => l.kind);
+/**
+ * The plain text of a body row, whichever kind it is: a user message is a
+ * `text` row and an assistant message is a `rich` (rendered markdown) one
+ * since phantombot#481, and the row arithmetic these tests pin is the same
+ * for both.
+ */
 const texts = (lines: readonly TranscriptLine[]) =>
-  lines.filter((l) => l.kind === "text").map((l) => (l as { text: string }).text);
+  lines
+    .filter((l) => l.kind === "text" || l.kind === "rich")
+    .map((l) =>
+      l.kind === "text"
+        ? l.text
+        : l.spans.map((s) => s.text).join(""),
+    );
 
 describe("transcriptLines", () => {
   test("a message is a header, its tools, its wrapped body and a gap", () => {
     expect(kinds(transcriptLines([msg("short")], 80, options))).toEqual([
       "header",
-      "text",
+      "rich",
       "gap",
     ]);
     // 200 chars at an effective width of 74 wraps to three rows.

@@ -63,6 +63,9 @@ const session: ChatSession = {
   conversation: "cli:tui:lab",
   history,
   async *send() {},
+  async command() {
+    return null;
+  },
   async close() {},
 };
 

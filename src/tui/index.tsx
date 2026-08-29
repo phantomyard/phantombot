@@ -228,6 +228,14 @@ export async function runRepl(
     for await (const line of console) {
       const text = String(line).trim();
       if (!text) continue;
+      // Same dispatcher as the full-screen screen and as every channel: a
+      // `/stop` typed into line mode must not be prompt text either.
+      const command = await chat.command(text);
+      if (command) {
+        out.write(`${command.reply}\n`);
+        if (command.afterSend) await command.afterSend();
+        continue;
+      }
       for await (const event of chat.send(text)) {
         if (event.type === "text") out.write(event.text);
         else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
