@@ -237,26 +237,37 @@ export class HarnessAlerter {
   }
 
   /**
-   * The primary failed but `servedBy` answered the turn. Alerts once the
-   * failure run crosses DEGRADE_AFTER_FAILURES, and only for causes a human
-   * can act on: `auth` (go re-auth) and `empty` (a harness that returns no
+   * The harness failed but the turn still ended. Alerts once the failure
+   * run crosses DEGRADE_AFTER_FAILURES, and only for causes a human can
+   * act on: `auth` (go re-auth) and `empty` (a harness that returns no
    * text on every turn is dead however clean its exit, #499 — without
    * this, removing the empty-reply cooldown would bench nothing and say
    * nothing, forever). A transient `other`/`rate_limit` that a fallback
    * absorbs is exactly the case #284 wanted silent.
+   *
+   * `servedBy` is who covered for the failing harness — omitted when
+   * nobody did. That is the single-harness empty-reply shape (#501): the
+   * turn "completed" and the user got "(no reply)", so there is no
+   * fallback to name, but it is still the loudest thing we know.
    */
   async noteDegraded(input: {
     harnessId: string;
-    servedBy: string;
+    servedBy?: string;
   }): Promise<void> {
     const state = this.incidents.get(input.harnessId);
     if (!state) return;
     if (state.cause !== "auth" && state.cause !== "empty") return;
     if (state.consecutiveFailures < DEGRADE_AFTER_FAILURES) return;
+    // "pi serving" vs "no fallback left" is the difference between "you are
+    // still being answered, fix this when you can" and "you are getting
+    // nothing right now" — never render the first when we mean the second.
+    const served = input.servedBy
+      ? `${input.servedBy} serving`
+      : "no fallback left";
     const line =
       state.cause === "auth"
-        ? `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, run \`${input.harnessId} /login\``
-        : `\u{1f507} ${input.harnessId} empty reply \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, harness returns no text`;
+        ? `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${served}, run \`${input.harnessId} /login\``
+        : `\u{1f507} ${input.harnessId} empty reply \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${served}, harness returns no text`;
     await this.emit(input.harnessId, "degraded", line);
   }
 

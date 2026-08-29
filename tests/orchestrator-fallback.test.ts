@@ -574,6 +574,68 @@ describe("health alerting", () => {
     expect(sent[0]).toContain("rate limited 429");
   });
 
+  test("a single-harness chain going empty every turn alerts (#501)", async () => {
+    // The kw-phantombot 2026-08-29 shape: pi is the ONLY harness, its
+    // per-user model catalogue is empty, so every turn comes back with no
+    // text. Before #501 the empty done on the last harness was reported to
+    // the alerter as a success, which closed the incident every turn — the
+    // consecutive-empty counter never reached the threshold and the owner
+    // saw "(no reply)" forever with no signal anywhere.
+    const { alerter, sent } = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+      const chunks = await collect(
+        runWithFallback([only], newRequest(), {
+          cooldown: new CooldownStore(),
+          alerter,
+        }),
+      );
+      // The reply path is untouched: the empty done still reaches the
+      // channel so the user gets "(no reply)" rather than silence.
+      expect(chunks).toEqual([{ type: "done", finalText: "" }]);
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("empty reply");
+    expect(sent[0]).toContain("\u00d73");
+    // Nothing covered the turn, so the alert must not claim a fallback did.
+    expect(sent[0]).toContain("no fallback left");
+    expect(sent[0]).not.toContain("serving");
+  });
+
+  test("one empty reply on a single-harness chain stays quiet (#499)", async () => {
+    // The flake case #499 protects: below the threshold, and a real reply
+    // afterwards closes the incident so the run starts over.
+    const { alerter, sent } = recordingAlerter();
+    const cooldown = new CooldownStore();
+    const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+    expect(sent).toEqual([]);
+
+    only.script = [{ type: "done", finalText: "back" }];
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+
+    // Two more empties would be 3 in total but only 2 consecutive.
+    only.script = [{ type: "done", finalText: "" }];
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES - 1; i++) {
+      await collect(
+        runWithFallback([only], newRequest(), { cooldown, alerter }),
+      );
+    }
+    expect(sent).toEqual([]);
+  });
+
+  test("an empty reply from the last harness does not cool it (#499/#501)", async () => {
+    // Counting the empty for the ALERTER must not leak into the scheduler:
+    // the harness is still the only one we have, so it must be tried first
+    // again next turn rather than benched behind a backoff.
+    const cooldown = new CooldownStore(() => 0.5);
+    const { alerter } = recordingAlerter();
+    const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+    expect(cooldown.isCooledDown("pi").cooled).toBe(false);
+    expect(cooldown.isCooledDown("pi").consecutiveFailures).toBe(0);
+  });
+
   test("a terminal (non-recoverable) error does not alert", async () => {
     const { alerter, sent } = recordingAlerter();
     const only = new FakeHarness("claude", [

@@ -191,6 +191,30 @@ describe("degraded alert", () => {
     await failNTimes(alerter, DEGRADE_AFTER_FAILURES - 1, "empty reply");
     expect(sent.length).toBe(1);
   });
+
+  test("with no servedBy the alert says nobody covered the turn (#501)", async () => {
+    // The single-harness empty-reply shape: the turn "completed" and the
+    // user got "(no reply)". Naming a fallback here would tell the owner
+    // they are still being answered, which is the opposite of the truth.
+    const { alerter, sent } = newAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      alerter.noteFailure("pi", "empty reply");
+      await alerter.noteDegraded({ harnessId: "pi" });
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("pi empty reply");
+    expect(sent[0]).toContain("no fallback left");
+    expect(sent[0]).not.toContain("serving");
+  });
+
+  test("below the threshold an uncovered empty stays silent (#501)", async () => {
+    const { alerter, sent } = newAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES - 1; i++) {
+      alerter.noteFailure("pi", "empty reply");
+      await alerter.noteDegraded({ harnessId: "pi" });
+    }
+    expect(sent).toEqual([]);
+  });
 });
 
 describe("mixed causes in one incident", () => {

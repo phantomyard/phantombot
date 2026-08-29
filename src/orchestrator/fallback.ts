@@ -21,7 +21,9 @@
  *     primary (#499).
  *   - A successful turn (done with non-empty finalText, OR a "best we
  *     can do" empty-done from the last harness) clears the harness's
- *     counter.
+ *     counter. Note that the alerter does NOT treat that empty-done as a
+ *     success: nothing was delivered, so its incident stays open and three
+ *     in a row fire a DEGRADED push (#501).
  * Resume-with-context (issue #459): a harness killed by the idle watchdog
  * AFTER it had already streamed output is respawned ONCE, in the same chain
  * slot, with a preamble describing what it had said and which tool calls were
@@ -187,6 +189,10 @@ export async function* runWithFallback(
 
     let succeeded = false;
     let recoverableError = false;
+    // The done we served was empty and there was nowhere else to go (#501).
+    // Distinct from `succeeded`: the harness exited cleanly, but the user
+    // got "(no reply)", so it must not close the alerter's incident.
+    let servedEmpty = false;
     // A harness that THROWS rather than yielding an error chunk. The most
     // important case is a spawn failure — `Bun.spawn` throws E2BIG/ENOENT/
     // EACCES synchronously, before the generator has produced anything — but
@@ -376,7 +382,10 @@ export async function* runWithFallback(
         // titles, dropped the moment the attempt ends any other way.
         partial.record(chunk);
         yield emitted;
-        if (emitted.type === "done") succeeded = true;
+        if (emitted.type === "done") {
+          succeeded = true;
+          if (emitted.finalText.length === 0) servedEmpty = true;
+        }
       }
       } catch (e) {
         thrown = e;
@@ -416,8 +425,28 @@ export async function* runWithFallback(
     if (succeeded) {
       // A clean turn — even if the text was empty and we're on the last
       // harness, the CLI did its job. Clear any prior cooldown so the
-      // next turn picks the chain back up at the top.
+      // next turn picks the chain back up at the top. This stays
+      // unconditional on purpose: cooldown decides what to TRY, and an
+      // empty done is not a reason to bench a harness (#499).
       cooldown.markSuccess(harness.id);
+      if (servedEmpty) {
+        // #501: the chain ran out and the last harness produced no text.
+        // Reporting that as a success laundered the whole failure away —
+        // noteSuccess() closed the incident, so the consecutive-empty
+        // counter never advanced and a harness that is empty on EVERY turn
+        // (the kw-phantombot pi-with-an-empty-models-catalogue shape) alerted
+        // never, however long it went on. On a multi-harness chain the empty
+        // done is a fall-through and already counted upstream; here it is
+        // the end of the line, so count it in the same currency.
+        log.warn("orchestrator: chain exhausted with an empty reply", {
+          harnessId: harness.id,
+        });
+        alerter.noteFailure(harness.id, "empty reply");
+        // No `servedBy`: nobody covered this turn. Below the threshold this
+        // is a no-op, so a one-off empty stays as quiet as #499 wants.
+        await alerter.noteDegraded({ harnessId: harness.id });
+        return;
+      }
       alerter.noteSuccess(harness.id);
       // Served, but not by the head of the chain: the owner is paying a
       // fallback to cover a broken primary and nothing else would tell them.
