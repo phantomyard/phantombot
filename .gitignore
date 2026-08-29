@@ -26,3 +26,6 @@ data/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+
+# TUI sandbox isolated data root
+.sandbox/

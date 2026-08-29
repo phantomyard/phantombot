@@ -1,7 +1,7 @@
 {
   "name": "phantombot",
   "version": "0.1.0",
-  "description": "Giving the harness a Soul. The harness can do its own tools — let it. Personality-first chat agent CLI on Bun.",
+  "description": "Giving the harness a Soul. The harness can do its own tools \u2014 let it. Personality-first chat agent CLI on Bun.",
   "private": true,
   "type": "module",
   "module": "src/index.ts",
@@ -18,7 +18,8 @@
     "build": "bun run build:x64",
     "build:x64": "bun build --compile --target=bun-linux-x64-baseline ./src/index.ts --outfile dist/phantombot",
     "build:arm64": "bun build --compile --target=bun-linux-arm64 ./src/index.ts --outfile dist/phantombot-arm64",
-    "build:win": "bun build --compile --target=bun-windows-x64 ./src/index.ts --outfile dist/phantombot.exe"
+    "build:win": "bun build --compile --target=bun-windows-x64 ./src/index.ts --outfile dist/phantombot.exe",
+    "tui:sandbox": "bun src/dev/tui-sandbox.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.3.0",
