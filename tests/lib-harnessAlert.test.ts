@@ -87,6 +87,16 @@ describe("classifyFailure", () => {
   test("anything else is 'other'", () => {
     expect(classifyFailure("claude exited with code 1")).toBe("other");
   });
+
+  test("an empty reply is its own cause (#499)", () => {
+    expect(classifyFailure("empty reply")).toBe("empty");
+    expect(classifyFailure("harness produced empty reply")).toBe("empty");
+    // ...but only the stamped literal — a harness error merely mentioning
+    // emptiness stays `other`.
+    expect(classifyFailure("claude exited with code 1: empty file")).toBe(
+      "other",
+    );
+  });
 });
 
 describe("degraded alert", () => {
@@ -165,6 +175,22 @@ describe("degraded alert", () => {
     // deliberate silence, and splitting it out of `other` must not change that.
     expect(sent).toEqual([]);
   });
+
+  test("persistent empty replies degrade like auth (#499)", async () => {
+    const { alerter, sent } = newAlerter();
+    // A single flake stays free — no cooldown (#499), no alert.
+    await failNTimes(alerter, 1, "empty reply");
+    expect(sent.length).toBe(0);
+    // But empty on EVERY turn is dead, however clean the exit.
+    await failNTimes(alerter, DEGRADE_AFTER_FAILURES - 1, "empty reply");
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("empty reply");
+    expect(sent[0]).toContain("pi serving");
+    // A success closes the incident like any other cause.
+    alerter.noteSuccess("claude");
+    await failNTimes(alerter, DEGRADE_AFTER_FAILURES - 1, "empty reply");
+    expect(sent.length).toBe(1);
+  });
 });
 
 describe("mixed causes in one incident", () => {
@@ -206,8 +232,10 @@ describe("mixed causes in one incident", () => {
     expect(sent.length).toBe(1);
     alerter.noteSuccess("claude");
 
-    // An empty reply counts as a failure (fallback.ts) and classifies as
-    // `other`. Landing mid-run must not silence the rest of the incident.
+    // An empty reply counts as a failure (fallback.ts) and is its own
+    // `empty` cause now (#499). Landing mid-run resets the auth tally —
+    // a fresh run then has to build up to the threshold again, and the
+    // re-alert floor keeps the second crossing silent within REALERT_MS.
     await failNTimes(alerter, 2, "claude api error: authentication_failed");
     await failNTimes(alerter, 1, "empty reply");
     await failNTimes(

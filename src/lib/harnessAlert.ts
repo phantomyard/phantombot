@@ -74,8 +74,20 @@ export const ALERT_SEND_TIMEOUT_MS = 20_000;
  * the reader to the journals to find out which (observed on
  * kw-phantombot 2026-08-20 — a 300s idle kill on a single-harness chain).
  * It changes no policy: like `other` it never fires the degraded alert.
+ *
+ * `empty` marks a harness that exited cleanly but produced no assistant
+ * text — the literal "empty reply" fallback.ts stamps (#499). One empty is
+ * a model-output flake and deliberately gets no cooldown, but a harness
+ * that returns empty on EVERY turn is just as dead as a dead token, so
+ * like `auth` it fires the degraded alert once its run crosses the
+ * threshold.
  */
-export type HarnessFailureCause = "auth" | "rate_limit" | "timeout" | "other";
+export type HarnessFailureCause =
+  | "auth"
+  | "rate_limit"
+  | "timeout"
+  | "empty"
+  | "other";
 
 /**
  * Statuses the claude CLI stamps that mean "this credential/account is not
@@ -104,6 +116,13 @@ const RATE_LIMIT_MARKERS = ["rate_limit", "quota", "resource_exhausted"];
 const TIMEOUT_MARKERS = ["timed out after", "produced no output within"];
 
 /**
+ * The literal fallback.ts stamps into noteFailure() when a harness exits
+ * cleanly with no assistant text (#499). A substring like the lists above,
+ * for the same reason: a reworded stamp must not silently de-classify.
+ */
+const EMPTY_MARKERS = ["empty reply"];
+
+/**
  * Classify a harness error chunk. Matching is on lowercased substrings
  * because the text is harness-authored and varies by CLI ("claude api
  * error: authentication_failed", "pi: 401 unauthorized"). HTTP status
@@ -121,6 +140,7 @@ export function classifyFailure(
   if (AUTH_MARKERS.some((m) => text.includes(m))) return "auth";
   if (RATE_LIMIT_MARKERS.some((m) => text.includes(m))) return "rate_limit";
   if (TIMEOUT_MARKERS.some((m) => text.includes(m))) return "timeout";
+  if (EMPTY_MARKERS.some((m) => text.includes(m))) return "empty";
   return "other";
 }
 
@@ -219,7 +239,10 @@ export class HarnessAlerter {
   /**
    * The primary failed but `servedBy` answered the turn. Alerts once the
    * failure run crosses DEGRADE_AFTER_FAILURES, and only for causes a human
-   * can act on (auth). A transient `other`/`rate_limit` that a fallback
+   * can act on: `auth` (go re-auth) and `empty` (a harness that returns no
+   * text on every turn is dead however clean its exit, #499 — without
+   * this, removing the empty-reply cooldown would bench nothing and say
+   * nothing, forever). A transient `other`/`rate_limit` that a fallback
    * absorbs is exactly the case #284 wanted silent.
    */
   async noteDegraded(input: {
@@ -228,13 +251,13 @@ export class HarnessAlerter {
   }): Promise<void> {
     const state = this.incidents.get(input.harnessId);
     if (!state) return;
-    if (state.cause !== "auth") return;
+    if (state.cause !== "auth" && state.cause !== "empty") return;
     if (state.consecutiveFailures < DEGRADE_AFTER_FAILURES) return;
-    await this.emit(
-      input.harnessId,
-      "degraded",
-      `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, run \`${input.harnessId} /login\``,
-    );
+    const line =
+      state.cause === "auth"
+        ? `\u{1f511} ${input.harnessId} auth failure \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, run \`${input.harnessId} /login\``
+        : `\u{1f507} ${input.harnessId} empty reply \u00d7${state.consecutiveFailures}${this.hostTag()} \u00b7 ${input.servedBy} serving, harness returns no text`;
+    await this.emit(input.harnessId, "degraded", line);
   }
 
   /**

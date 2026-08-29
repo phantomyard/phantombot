@@ -351,7 +351,8 @@ export async function* runWithFallback(
           // bench the only healthy fallback while a dead primary gets
           // tried instead on the next turn. A persistently-empty harness
           // is still caught: noteFailure() keeps the alerter's incident
-          // counter going, so 3 consecutive empty turns fire a DEGRADED
+          // counter going, and the alerter classifies "empty reply" as its
+          // own `empty` cause, so 3 consecutive empty turns fire a DEGRADED
           // push. The cost of a flake is one wasted round-trip.
           alerter.noteFailure(harness.id, "empty reply");
           firstFailure ??= { harnessId: harness.id, error: "empty reply" };
