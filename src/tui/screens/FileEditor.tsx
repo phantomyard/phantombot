@@ -16,6 +16,8 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
+import { frameChromeRows } from "../chrome.ts";
+import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { MenuItem } from "../components/Menu.tsx";
 import { badge, glyph, theme } from "../theme.ts";
 import {
@@ -56,6 +58,8 @@ export function FileEditorScreen(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuCursor, setMenuCursor] = useState(0);
   const [error, setError] = useState<string | undefined>(undefined);
+
+  const size = useTerminalSize();
 
   const filename = props.path.split("/").pop() ?? props.path;
 
@@ -126,9 +130,9 @@ export function FileEditorScreen(props: {
     }
     const move = editorApplyKeys(key);
     if (move) {
-      const next = editorMove(buf, move, VIEW_ROWS);
+      const next = editorMove(buf, move, textRows);
       setBuf(next);
-      setFirstRow(clampView(next.row, firstRow, VIEW_ROWS));
+      setFirstRow(clampView(next.row, firstRow, textRows));
       setFirstCol(clampView(next.col, firstCol, VIEW_COLS));
       return;
     }
@@ -164,7 +168,18 @@ export function FileEditorScreen(props: {
     );
   }
 
-  const view = editorViewport(buf, firstRow, firstCol, VIEW_ROWS, VIEW_COLS);
+  // Fill the window, like every other screen: the text area runs from the
+  // header to the footer, never a fixed block floating in dead space. Chrome
+  // inside the frame: header (1), body gap (1), footer (1); the frame's own
+  // border cost is added by `frameChromeRows`. The exit menu and any error
+  // line render UNDER the text, so the text shrinks for them rather than
+  // overflowing the clipped body.
+  let textRows = viewportRows(size, EDITOR_CHROME_ROWS + frameChromeRows());
+  if (menuOpen) textRows -= MENU.length + 1;
+  if (error) textRows -= 1;
+  textRows = Math.max(3, textRows);
+
+  const view = editorViewport(buf, firstRow, firstCol, textRows, VIEW_COLS);
   const lineNo = buf.row + 1;
   const colNo = buf.col + 1;
 
@@ -195,6 +210,12 @@ export function FileEditorScreen(props: {
           </Text>
         );
       })}
+      {Array.from(
+        { length: Math.max(0, textRows - view.rows.length) },
+        (_, i) => (
+          <Text key={`fill-${i}`}> </Text>
+        ),
+      )}
       {menuOpen ? (
         <Box flexDirection="column" marginTop={1}>
           {MENU.map((label, i) => (
@@ -215,6 +236,8 @@ export function FileEditorScreen(props: {
   );
 }
 
-/** Rows and columns budgeted for the text area, under the frame chrome. */
-const VIEW_ROWS = 20;
+/** Rows of chrome the editor draws around its text area, inside the frame. */
+const EDITOR_CHROME_ROWS = 3;
+
+/** Columns budgeted for the text area before horizontal scrolling. */
 const VIEW_COLS = 110;

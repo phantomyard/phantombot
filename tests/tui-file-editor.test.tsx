@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { render } from "ink";
 
 import { FileEditorScreen } from "../src/tui/screens/FileEditor.tsx";
+import { TerminalSizeContext } from "../src/tui/terminal.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "tui-file-editor-"));
@@ -28,7 +29,11 @@ afterEach(() => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function mount(path: string, onBack: (r: unknown) => void) {
+function mount(
+  path: string,
+  onBack: (r: unknown) => void,
+  size?: { rows: number; columns: number },
+) {
   const stdin = new PassThrough() as PassThrough & {
     isTTY: boolean;
     setRawMode: () => void;
@@ -49,11 +54,17 @@ function mount(path: string, onBack: (r: unknown) => void) {
   stdout.rows = 40;
   stdout.write = (c: string) => void frames.push(c);
   const instance = render(
-    <FileEditorScreen
-      path={path}
-      personaName="testbot"
-      onBack={onBack}
-    />,
+    size ? (
+      <TerminalSizeContext.Provider value={size}>
+        <FileEditorScreen path={path} personaName="testbot" onBack={onBack} />
+      </TerminalSizeContext.Provider>
+    ) : (
+      <FileEditorScreen
+        path={path}
+        personaName="testbot"
+        onBack={onBack}
+      />
+    ),
     {
       stdin: stdin as never,
       stdout: stdout as never,
@@ -75,6 +86,18 @@ function mount(path: string, onBack: (r: unknown) => void) {
 }
 
 describe("the file editor is an app screen", () => {
+  test("the text area fills the window down to the footer", async () => {
+    const path = join(dir, "SOUL-fill.md");
+    writeFileSync(path, "# Soul\nshort file");
+    const app = mount(path, () => {}, { rows: 40, columns: 140 });
+    await sleep(80);
+    const lines = app.frame().split("\n");
+    // The whole window is painted (minus Ink's reserved row) and the footer
+    // key-hint bar is the LAST row — the editor never floats above dead space.
+    expect(lines.length).toBe(39);
+    expect(lines[lines.length - 1]).toContain("Back");
+  });
+
   test("it renders the file and wears the chrome", async () => {
     const path = join(dir, "SOUL-chrome.md");
     writeFileSync(path, "# Soul\nbe brief");
