@@ -84,7 +84,9 @@ export interface AppProps {
   startPersona?: string;
   /** Where the wizard resumes, when it is the opening screen. */
   wizardStartAt?: WizardStep;
-  onCreatePersona: (answers: WizardAnswers) => Promise<void>;
+  onCreatePersona: (
+    answers: WizardAnswers,
+  ) => Promise<void | { created: boolean }>;
   /**
    * Seam for tests only; production always uses `openChat`. Injectable so the
    * session gate can be pinned by a test that FAILS when the gate regresses —
@@ -705,11 +707,13 @@ export function App(props: AppProps): React.ReactElement {
           onQuit={exit}
           onFinish={async (answers) => {
             try {
-              await props.onCreatePersona(answers);
+              const result = await props.onCreatePersona(answers);
               await refresh();
               setPersonaName(answers.name);
               setNotice(
-                `created ${host.personasDir}/${answers.name} · identity.json · config.toml`,
+                result?.created === false
+                  ? `updated ${answers.name} · config.toml`
+                  : `created ${host.personasDir}/${answers.name} · identity.json · config.toml`,
               );
               // A finished wizard is not a place to go back to.
               navRef.current = [];

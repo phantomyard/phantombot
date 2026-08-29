@@ -323,6 +323,18 @@ describe("first run", () => {
     expect(app.frame()).not.toContain("already exists");
   });
 
+  test("a resumed persona reports an update, not newly created identity files", async () => {
+    const app = mount({
+      startPersona: "alice",
+      wizardStartAt: "done",
+      onCreatePersona: async () => ({ created: false }),
+    });
+    await app.waitFor((f) => f.includes("nothing has been written yet"));
+    await app.press("\r");
+    await app.waitFor((f) => f.includes("updated alice · config.toml"));
+    expect(app.lastFrame()).not.toContain("created /tmp/does-not-exist/alice");
+  });
+
   test("a complete persona opens chat", async () => {
     const app = mount({ startPersona: "alice" });
     await tick();

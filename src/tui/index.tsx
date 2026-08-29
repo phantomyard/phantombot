@@ -24,7 +24,11 @@ import { setLogSink } from "../lib/logSink.ts";
 import { hostSnapshot } from "./snapshot.ts";
 import { openChat } from "./chatSession.ts";
 import type { WizardAnswers } from "./screens/Wizard.tsx";
-import { loadConfig, loadConfigForPersona } from "../config.ts";
+import {
+  loadConfig,
+  loadConfigForPersona,
+  servedPersonasOf,
+} from "../config.ts";
 import {
   personaCompleteness,
   type WizardStep,
@@ -33,7 +37,11 @@ import { runPersonaNew } from "../cli/persona-new.ts";
 import { log } from "../lib/logger.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { updateConfigToml, setIn } from "../lib/configWriter.ts";
-import { listPersonaDirs } from "../lib/personaDefault.ts";
+import {
+  listPersonaDirs,
+  writeAutostartPersonas,
+} from "../lib/personaDefault.ts";
+import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 
 /**
  * Decide what the app opens on.
@@ -81,7 +89,7 @@ export async function startTui(): Promise<number> {
       startPersona={opening.persona}
       wizardStartAt={opening.wizardStartAt}
       onCreatePersona={async (answers: WizardAnswers) => {
-        await createPhantomFromWizard(answers);
+        return await createPhantomFromWizard(answers);
       }}
     />
   );
@@ -203,17 +211,24 @@ export function installSignalExit(
  */
 export async function createPhantomFromWizard(
   answers: WizardAnswers,
-): Promise<void> {
+  syncHeartbeatInstances: (
+    personas: readonly string[],
+  ) => Promise<unknown> = defaultSyncHeartbeatInstances,
+): Promise<{ created: boolean }> {
   // Load the target's effective layer before creating it. With no persona file
   // yet this is the host chain; on a retry it also preserves any partial layer
   // that did make it to disk instead of borrowing the current default's chain.
   const target = await loadConfig(answers.name);
-  if (!listPersonaDirs(target).includes(answers.name)) {
+  const created = !listPersonaDirs(target).includes(answers.name);
+  if (created) {
     let stderr = "";
     const code = await runPersonaNew({
       name: answers.name,
       harness: answers.brain,
-      autostart: true,
+      // Applied below for both new and resumed personas. Keeping this outside
+      // the creation-only branch preserves the side effects on an incomplete
+      // existing persona without asking `persona new` to overwrite it.
+      autostart: false,
       makeDefault: answers.makeDefault,
       // The wizard's own output is the summary screen; the subcommand's stdout
       // would land underneath the rendered frame.
@@ -225,6 +240,26 @@ export async function createPhantomFromWizard(
         stderr.trim() || `could not create persona '${answers.name}'`,
       );
     }
+  }
+
+  const autostartPersonas = await writeAutostartPersonas(target, [
+    ...(target.autostartPersonas ?? []),
+    answers.name,
+  ]);
+  try {
+    await syncHeartbeatInstances(
+      servedPersonasOf({
+        defaultPersona: answers.makeDefault
+          ? answers.name
+          : target.defaultPersona,
+        autostartPersonas,
+      }),
+    );
+  } catch (e) {
+    log.warn("could not provision wizard persona heartbeat instance", {
+      persona: answers.name,
+      error: (e as Error).message,
+    });
   }
 
   // The review screen promises a persona-local config file. Record the chosen
@@ -240,6 +275,7 @@ export async function createPhantomFromWizard(
     personaConfigPath(target.personasDir, answers.name),
     (toml) => setIn(toml, ["harnesses", "chain"], chain),
   );
+  return { created };
 }
 
 /**
