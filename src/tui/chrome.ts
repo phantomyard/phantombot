@@ -39,3 +39,16 @@ export function frameChromeRows(
 ): number {
   return variant === "boxed" ? 2 : 0;
 }
+
+/**
+ * Columns the frame itself consumes, on top of the terminal width: the border
+ * costs two, and the body's `paddingX={1}` costs two more — on BOTH variants,
+ * since the bare frame pads its body directly. Screens that do their own
+ * width arithmetic (wrapping estimates) subtract this first, or every line
+ * wraps two-to-four columns earlier than the estimate assumed.
+ */
+export function frameChromeColumns(
+  variant: FrameVariant = frameVariant(),
+): number {
+  return variant === "boxed" ? 4 : 2;
+}

@@ -35,7 +35,7 @@ function fakeStdin() {
   return s;
 }
 
-function fakeStdout(rows: number) {
+function fakeStdout(rows: number, columns = 100) {
   const frames: string[] = [];
   const s = new EventEmitter() as EventEmitter & {
     columns: number;
@@ -43,7 +43,7 @@ function fakeStdout(rows: number) {
     write: (c: string) => void;
     frames: string[];
   };
-  s.columns = 100;
+  s.columns = columns;
   s.rows = rows;
   s.frames = frames;
   s.write = (c: string) => void frames.push(c);
@@ -142,9 +142,9 @@ afterEach(() => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function openSettings(rows: number) {
+async function openSettings(rows: number, columns = 100) {
   const stdin = fakeStdin();
-  const stdout = fakeStdout(rows);
+  const stdout = fakeStdout(rows, columns);
   const instance = render(
     <App
       host={HOST}
@@ -181,26 +181,29 @@ async function openSettings(rows: number) {
 }
 
 describe("settings screen in a short window", () => {
-  test("the boxed frame survives and the hidden rows are announced", async () => {
-    // The border only exists in `boxed`, so this — the original shearing
-    // regression — has to be asserted in that variant explicitly. The default
-    // `bare` frame is covered by the next test: it has no border to shear,
-    // but it can still push its own footer off the window.
+  // Since the screen became a single squared table (one row per setting, no
+  // detail blocks), the whole thing fits a 20-row window. The original
+  // shearing regression is still worth pinning — the frame must survive —
+  // but the expected shape changed: every row visible, no scrolling.
+  test("the boxed frame survives and every row fits", async () => {
     process.env.PHANTOMBOT_TUI_FRAME = "boxed";
     const lines = await openSettings(20);
     delete process.env.PHANTOMBOT_TUI_FRAME;
+
+    const text = lines.join("\n");
 
     // The bottom border is a border: nothing from a row may be drawn INTO it.
     const bottom = lines.find((l) => l.trimStart().startsWith("╰"))!;
     expect(bottom).toBeDefined();
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
 
-    // Content was dropped rather than compressed, and the screen says so.
-    expect(lines.join("\n")).toContain("more below");
-    expect(lines.join("\n")).not.toContain("indexedngs");
+    // All eight settings fit — first and last row both painted.
+    expect(text).toContain("Identity");
+    expect(text).toContain("Doctor");
+    expect(text).not.toContain("more below");
   });
 
-  test("the bare frame keeps its footer and drops rows instead", async () => {
+  test("the bare frame keeps its footer below the table", async () => {
     const lines = await openSettings(20);
 
     // The footer is the last thing on screen — if the body overflowed it
@@ -209,15 +212,52 @@ describe("settings screen in a short window", () => {
     const last = lines.filter((l) => l.trim().length > 0).at(-1) ?? "";
     expect(last).toContain("Back");
 
-    // Content was dropped rather than compressed, and the screen says so.
-    expect(lines.join("\n")).toContain("more below");
-    // The collision signature: two readings sharing one line.
+    // The collision signature of the original bug: two readings sharing a
+    // line. Still asserted even though the layout that caused it is gone.
     expect(lines.join("\n")).not.toContain("indexedngs");
+  });
+
+  test("a narrow window wraps descriptions and windowing returns", async () => {
+    // At 60 columns the identity marks and probe lines no longer fit on one
+    // line — descriptions wrap, rows grow, and the screen is taller than 20
+    // rows again. Windowing must drop rows (announced) rather than compress.
+    process.env.PHANTOMBOT_TUI_FRAME = "boxed";
+    const lines = await openSettings(20, 60);
+    delete process.env.PHANTOMBOT_TUI_FRAME;
+
+    const bottom = lines.find((l) => l.trimStart().startsWith("╰"))!;
+    expect(bottom).toBeDefined();
+    expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
+    expect(lines.join("\n")).toContain("more below");
   });
 
   test("a tall window needs no marker", async () => {
     const lines = await openSettings(44);
     expect(lines.join("\n")).toContain("Doctor");
     expect(lines.join("\n")).not.toContain("more below");
+  });
+
+  test("the table reads as name · what /status says · state", async () => {
+    const lines = await openSettings(44);
+    const text = lines.join("\n");
+
+    // The channels row is "Chat Channels" now, and its description is the
+    // /status probe output — not the old config-source diagnostics.
+    expect(text).toContain("Chat Channels");
+    expect(text).not.toContain("harness_bins");
+    expect(text).not.toContain("env > config.toml");
+    expect(text).not.toContain("persona override");
+
+    // Identity has a missing file in the fixture: the badge must say so in
+    // the required state, not a green check.
+    expect(text).toContain("required");
+
+    // Brain shows the chain and the per-harness models, as /status prints them.
+    expect(text).toContain("models:");
+
+    // Badges sit in one right-aligned column: the autostart row's state is
+    // flush against the frame border, not wherever its description ended.
+    const autostart = lines.find((l) => l.includes("Autostart"))!;
+    expect(autostart.trimEnd().endsWith("✓ on")).toBe(true);
   });
 });

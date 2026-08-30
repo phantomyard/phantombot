@@ -35,6 +35,20 @@ export interface MenuItemProps {
   selected?: boolean;
   /** Shown reversed on the selected row: the key that activates it. */
   activateHint?: string;
+  /**
+   * Let a long description FLOW onto the next line instead of truncating.
+   * Off by default: menus describe short hops ("run the checks"), where a
+   * wrapped row would break the one-row-per-entry rhythm. The settings
+   * table turns it on — its descriptions are live readings that must be
+   * readable in full when the window narrows.
+   */
+  wrap?: boolean;
+  /**
+   * Fixed width for the badge column, so badges line up as a table column
+   * across rows instead of sitting wherever each description ends. Text is
+   * right-aligned inside the column. Without it the badge hugs the row end.
+   */
+  badgeWidth?: number;
   onPress?: () => void;
 }
 
@@ -71,17 +85,25 @@ export function MenuItem(props: MenuItemProps): React.ReactElement {
             {props.label}
           </Text>
         </Box>
-        <Box flexGrow={1} flexShrink={1}>
-          <Text color={theme.dim} wrap="truncate">
+        {/* `flexBasis={0}` + `flexGrow={1}`: this cell takes ALL the space
+            the fixed columns leave — deterministically. The first cut relied
+            on a second flexGrow spacer after it to push the badge right, but
+            Yoga splits free space between two growing siblings, so the
+            description got roughly HALF its width and wrapped far too early
+            in narrow windows (the settings table rendered as overlapping
+            rows). One growing child, basis zero: no arithmetic to drift. */}
+        <Box flexGrow={1} flexShrink={1} flexBasis={0}>
+          <Text color={theme.dim} wrap={props.wrap ? undefined : "truncate"}>
             {props.description ?? ""}
           </Text>
         </Box>
-        {/* An explicit spacer: a `flexGrow` box whose child is short does not
-            claim the slack on its own, so without this the badge sat glued to
-            the end of the description instead of on the right edge. */}
-        <Box flexGrow={1} />
         {props.badge ? (
-          <Box marginLeft={1} flexShrink={0}>
+          <Box
+            marginLeft={1}
+            flexShrink={0}
+            width={props.badgeWidth}
+            justifyContent={props.badgeWidth ? "flex-end" : undefined}
+          >
             <Text color={props.badgeColor ?? theme.dim}>{props.badge}</Text>
           </Box>
         ) : null}

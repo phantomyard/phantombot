@@ -149,6 +149,12 @@ export function App(props: AppProps): React.ReactElement {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | undefined>();
   const [doctorStatus, setDoctorStatus] = useState<StatusRows | undefined>();
   const [doctorRunning, setDoctorRunning] = useState(false);
+  // The settings screen's live /status reading for the persona it is open on.
+  // Undefined = still gathering; the descriptions read `…` until this lands.
+  const [detailStatus, setDetailStatus] = useState<StatusRows | undefined>();
+  // Bumped whenever settings-affecting writes happen, so the reading refreshes
+  // instead of describing the config as it was before the edit.
+  const [detailNonce, setDetailNonce] = useState(0);
   const [notice, setNotice] = useState<string | undefined>();
   const [editorPath, setEditorPath] = useState<string | null>(null);
   /**
@@ -320,7 +326,30 @@ export function App(props: AppProps): React.ReactElement {
 
   const refresh = useCallback(async () => {
     setHost(await hostSnapshot());
+    // Any refresh follows a write; the settings screen's /status reading
+    // must not keep describing the pre-write config. The gather effect
+    // no-ops when the settings screen is not open, so the bump is free.
+    setDetailNonce((n) => n + 1);
   }, []);
+
+  // The settings screen's live probes. Gathered off the render path (they
+  // reach the network, 5s deadline) and shown as `…` until they land, so the
+  // screen paints instantly and fills in.
+  useEffect(() => {
+    if (screen !== "persona") return;
+    let cancelled = false;
+    setDetailStatus(undefined);
+    gatherStatus({ persona: personaName })
+      .then((rows) => {
+        if (!cancelled) setDetailStatus(rows);
+      })
+      .catch(() => {
+        /* leave the cells at `…`; a failed probe must not blank the screen */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [screen, personaName, detailNonce]);
 
   /**
    * The service state, probed off the render path. See `probeServiceActive`:
@@ -851,6 +880,7 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <PersonaDetailScreen
           persona={persona}
+          status={detailStatus}
           onBack={back}
           onLogs={() => go("logs")}
           onEditIdentity={() => void editIdentity(persona)}

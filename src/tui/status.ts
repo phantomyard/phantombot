@@ -30,11 +30,38 @@ export async function gatherStatus(input: {
   const config = await loadConfig(input.persona);
   const probes = await gatherStatusProbes(config, input.persona, input.probes);
 
+  // The harness chain and the per-harness models, in the same words /status
+  // prints them (issue #313's models line). Built here rather than taken from
+  // the caller: the settings screen wants availability markers and models it
+  // does not otherwise have, and Doctor wanted the chain as /status shows it —
+  // one reader, so the two screens cannot disagree. Imported on demand: the
+  // harness graph at module scope delayed the app's first render once already
+  // (see the note on the Brain row in App.tsx).
   const rows: StatusRows = [
     ["phantom", `${input.persona} · v${VERSION}`],
     ["channel", config.updateChannel ?? DEFAULT_UPDATE_CHANNEL],
   ];
-  if (input.chain?.length) rows.push(["chain", input.chain.join(" → ")]);
+  const { buildHarnessChain } = await import("../harnesses/buildChain.ts");
+  const harnesses = buildHarnessChain(config, { write: () => {} }, input.persona);
+  if (harnesses.length > 0) {
+    const availability = await Promise.all(harnesses.map((h) => h.available()));
+    rows.push([
+      "chain",
+      harnesses
+        .map((h, i) => `${h.id}${availability[i] ? "" : " (unavailable)"}`)
+        .join(" → "),
+    ]);
+    const modelParts = harnesses
+      .map((h) => {
+        const mi = h.modelInfo?.();
+        if (!mi) return undefined;
+        return `${h.id}: ${mi.model}${mi.provider ? ` (${mi.provider})` : ""}`;
+      })
+      .filter((p): p is string => p !== undefined);
+    if (modelParts.length > 0) rows.push(["models", modelParts.join(" | ")]);
+  } else if (input.chain?.length) {
+    rows.push(["chain", input.chain.join(" → ")]);
+  }
   // Each probe line is omitted when its subsystem is not configured — same
   // rule as /status, so an absent line means "not set up", never "broken".
   if (probes.telegram) rows.push(["telegram", probes.telegram]);
