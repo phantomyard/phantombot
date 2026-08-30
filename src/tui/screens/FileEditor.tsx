@@ -58,6 +58,7 @@ export function FileEditorScreen(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuCursor, setMenuCursor] = useState(0);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [loadError, setLoadError] = useState<string | undefined>(undefined);
 
   const size = useTerminalSize();
 
@@ -67,9 +68,22 @@ export function FileEditorScreen(props: {
     let alive = true;
     Bun.file(props.path)
       .text()
-      .catch(() => "")
+      .catch((e: unknown) => e as Error)
       .then((text) => {
         if (!alive) return;
+        if (text instanceof Error) {
+          // ENOENT legitimately means "new file, empty buffer". Any other
+          // read failure (EACCES, EISDIR, transient I/O) must NOT collapse
+          // to "": the editor would then happily save that empty buffer back
+          // and destroy the file. Refuse to open instead.
+          if ((text as NodeJS.ErrnoException).code === "ENOENT") {
+            setOriginal("");
+            setBuf(editorFromText(""));
+          } else {
+            setLoadError(text.message);
+          }
+          return;
+        }
         setOriginal(text);
         setBuf(editorFromText(text));
       });
@@ -95,6 +109,12 @@ export function FileEditorScreen(props: {
   }
 
   useInput((input, key) => {
+    if (loadError) {
+      // The file never opened; there is no buffer to edit and saving would
+      // be destructive. esc is the only way out.
+      if (key.escape) props.onBack({ saved: false, changed: false });
+      return;
+    }
     if (buf === null) return;
     if (menuOpen) {
       if (key.upArrow) setMenuCursor((c) => Math.max(0, c - 1));
@@ -163,7 +183,13 @@ export function FileEditorScreen(props: {
         title={["phantombot", props.personaName, "edit", filename]}
         footer={[{ icon: badge.back, key: "esc", label: "Back" }]}
       >
-        <Text color={theme.dim}>loading {filename}…</Text>
+        {loadError ? (
+          <Text color={theme.bad}>
+            cannot read {filename}: {loadError}
+          </Text>
+        ) : (
+          <Text color={theme.dim}>loading {filename}…</Text>
+        )}
       </Frame>
     );
   }

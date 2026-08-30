@@ -139,6 +139,8 @@ export function PersonaDetailScreen(props: {
   onToggleRelease: () => void;
   /** False on a single-phantom host: the default row is informational there. */
   canSetDefault: boolean;
+  /** False when running as a persona agent: the release ring is host-only. */
+  canSetRelease: boolean;
   onBack: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -154,7 +156,10 @@ export function PersonaDetailScreen(props: {
       if (props.canSetDefault) return props.onMakeDefault();
       return; // greyed out — a lone phantom IS the default, nothing to do
     }
-    if (id === "release") return props.onToggleRelease();
+    if (id === "release") {
+      if (props.canSetRelease) return props.onToggleRelease();
+      return; // greyed out — a persona agent may not move the host's ring
+    }
     return props.onOpen(id);
   };
 
@@ -391,8 +396,13 @@ export function PersonaDetailScreen(props: {
         <MenuItem
           icon="⇅"
           label="Release Channel"
-          description="update ring this HOST follows; stable lags, preview tracks main"
+          description={
+            props.canSetRelease
+              ? "update ring this HOST follows; stable lags, preview tracks main"
+              : "host-only setting; run the TUI as the host operator to change it"
+          }
           badge={props.releaseChannel}
+          badgeColor={props.canSetRelease ? undefined : theme.dim}
           selected={row === "release"}
           onPress={() => press("release")}
           {...tableProps}

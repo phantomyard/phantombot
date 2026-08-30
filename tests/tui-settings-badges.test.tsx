@@ -118,6 +118,7 @@ async function renderSettings(status: StatusRows) {
       releaseChannel="stable"
       onToggleRelease={noop}
       canSetDefault
+      canSetRelease
       onBack={noop}
     />,
     {
@@ -213,6 +214,7 @@ describe("settings badge semantics", () => {
         releaseChannel="stable"
         onToggleRelease={noop}
         canSetDefault={false}
+        canSetRelease
         onBack={noop}
       />,
       {

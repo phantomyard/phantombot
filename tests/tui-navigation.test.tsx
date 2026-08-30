@@ -211,6 +211,18 @@ const FAKE_REPORT: DoctorReport = {
   capture: { window_hours: 24, user_turns: 10, captures: 9, dry_day: false },
   embeddings: { provider: "gemini", semantic_search: true },
   update: { channel: "stable", version: "0.0.0-test" },
+  default_persona: {
+    resolved: "alice",
+    provenance: "config" as const,
+    exists: true,
+    served: true,
+    defect: null,
+    mcp_servers: 0,
+    mcp_elsewhere: [],
+    healthy: true,
+    detail: "resolved from config.toml",
+  },
+
 };
 
 const HOST: HostSnapshot = {

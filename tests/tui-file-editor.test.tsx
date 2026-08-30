@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink";
@@ -86,6 +86,33 @@ function mount(
 }
 
 describe("the file editor is an app screen", () => {
+  test("an unreadable file shows the error and never lets a save through", async () => {
+    // The regression: a read failure used to collapse to an EMPTY buffer,
+    // and ^s would write that emptiness back over the real contents.
+    // chmod 0000 makes the read fail while any later write would succeed —
+    // exactly the dangerous direction.
+    const path = join(dir, "SOUL-locked.md");
+    writeFileSync(path, "IMPORTANT CONTENT\nline2\n");
+    chmodSync(path, 0o000);
+    try {
+      let back: { saved: boolean; changed: boolean } | undefined;
+      const app = mount(path, (r) => {
+        back = r as { saved: boolean; changed: boolean };
+      });
+      await sleep(120);
+      expect(app.frame()).toContain("cannot read");
+      // ^s must do nothing — the buffer never existed.
+      await app.press("\x13");
+      // esc is the only way out, and it reports a clean exit.
+      await app.press("\x1b");
+      expect(back).toEqual({ saved: false, changed: false });
+    } finally {
+      chmodSync(path, 0o644);
+    }
+    // The contents survived the whole encounter with the editor.
+    expect(readFileSync(path, "utf8")).toContain("IMPORTANT CONTENT");
+  });
+
   test("the text area fills the window down to the footer", async () => {
     const path = join(dir, "SOUL-fill.md");
     writeFileSync(path, "# Soul\nshort file");

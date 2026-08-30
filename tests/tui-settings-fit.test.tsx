@@ -141,6 +141,18 @@ const FAKE_REPORT: DoctorReport = {
   capture: { window_hours: 24, user_turns: 10, captures: 9, dry_day: false },
   embeddings: { provider: "gemini", semantic_search: true },
   update: { channel: "stable", version: "0.0.0-test" },
+  default_persona: {
+    resolved: "alice",
+    provenance: "config" as const,
+    exists: true,
+    served: true,
+    defect: null,
+    mcp_servers: 0,
+    mcp_elsewhere: [],
+    healthy: true,
+    detail: "resolved from config.toml",
+  },
+
 };
 
 const saved: Record<string, string | undefined> = {};
@@ -211,7 +223,15 @@ async function openSettings(rows: number, columns = 100) {
   stdin.write("\x13"); // ^s — the phantom table
   await sleep(80);
   stdin.write("c"); // Configure the selected phantom
-  await sleep(200); // the doctor gathers off-render once the screen opens
+  // The configure screen opens async, and its /status probes gather off-render.
+  // Poll for the settled frame instead of sleeping a fixed interval — a loaded
+  // runner can easily miss a fixed sleep and the STATUS block would still read
+  // `gathering…` (or the screen not have opened at all).
+  for (let i = 0; i < 120; i++) {
+    const frame = stripAnsi(stdout.frames.at(-1) ?? "");
+    if (frame.includes("description") && !frame.includes("gathering…")) break;
+    await sleep(50);
+  }
   // Colour codes out: chalk is on in CI (and a sibling suite forces it on
   // the shared singleton), so assert on the text a user reads.
   return stripAnsi(stdout.frames.at(-1) ?? "").split("\n");

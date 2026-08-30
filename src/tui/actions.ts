@@ -316,11 +316,25 @@ export function describeUpdateChannelChange(to: string): Consequence {
  * ring is per-host (#432). "stable" is the resolved default, so choosing it
  * DELETES the key rather than writing it: an explicit value that equals the
  * default is just noise for every later reader.
+ *
+ * Mirrors `applyDefaultPersona`'s refusal under `PHANTOMBOT_PERSONA`: a
+ * persona agent must not be able to change the release ring the whole box
+ * follows (personaConfig.ts doctrine: a persona cannot "change the release
+ * ring the box follows"), and the TUI is reachable from one.
  */
 export async function applyUpdateChannel(input: {
   config: Config;
   channel: "stable" | "preview";
 }): Promise<{ ok: boolean; error?: string }> {
+  const agentPersona = process.env.PHANTOMBOT_PERSONA?.trim();
+  if (agentPersona) {
+    return {
+      ok: false,
+      error:
+        `refusing to set update_channel to '${input.channel}': running as ` +
+        `persona '${agentPersona}' (PHANTOMBOT_PERSONA).`,
+    };
+  }
   try {
     await updateConfigToml(input.config.configPath, (toml: TomlObject) => {
       if (input.channel === "stable") delete toml.update_channel;

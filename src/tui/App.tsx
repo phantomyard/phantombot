@@ -1176,6 +1176,7 @@ export function App(props: AppProps): React.ReactElement {
           }}
           releaseChannel={host.updateChannel}
           canSetDefault={host.personas.length > 1}
+          canSetRelease={!process.env.PHANTOMBOT_PERSONA?.trim()}
           onToggleRelease={() => {
             const next =
               host.updateChannel === "preview" ? "stable" : "preview";

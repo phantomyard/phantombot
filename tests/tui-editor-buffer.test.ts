@@ -120,6 +120,17 @@ describe("dirtiness", () => {
     expect(editorIsDirty(b, "same")).toBe(false);
     expect(editorIsDirty(editorInsert(b, "!"), "same")).toBe(true);
   });
+
+  test("a file with tabs or CRLF line endings is NOT dirty on open", () => {
+    // The loader normalises tabs → two spaces and CRLF/CR → LF; the dirty
+    // baseline must apply the same normalisation, or every tab- or CRLF-
+    // containing file opens "dirty" with zero keystrokes (and esc pops the
+    // discard menu for edits that do not exist).
+    expect(editorIsDirty(editorFromText("a\r\nb\n"), "a\r\nb\r\n")).toBe(false);
+    expect(editorIsDirty(editorFromText("a  b"), "a\tb")).toBe(false);
+    // A real edit is still dirty.
+    expect(editorIsDirty(editorInsert(editorFromText("a\r\nb"), "!"), "a\r\nb")).toBe(true);
+  });
 });
 
 describe("viewport", () => {

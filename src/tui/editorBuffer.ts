@@ -182,9 +182,19 @@ export function editorMove(
   }
 }
 
-/** Whether the buffer differs from the file it was loaded from. */
+/**
+ * Whether the buffer differs from the file it was loaded from.
+ *
+ * The original is run through the SAME normalisation the loader applies
+ * (CRLF/CR → LF, tabs → two spaces), so a file the user only looked at —
+ * one with tabs or Windows line endings — is not "dirty" with zero
+ * keystrokes, and a bare save does not silently rewrite every line ending.
+ */
 export function editorIsDirty(buf: EditorBuffer, original: string): boolean {
-  return editorText(buf) !== original;
+  const baseline = original.split(/\r\n|\r|\n/)
+    .map((l) => l.replace(/\t/g, "  "))
+    .join("\n");
+  return editorText(buf) !== baseline;
 }
 
 /**
