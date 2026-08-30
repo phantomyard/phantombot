@@ -48,14 +48,11 @@ import {
   type SearchListRequest,
 } from "./screens/SearchList.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
-import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
 import { ChatScreen } from "./screens/Chat.tsx";
 import { DashboardScreen } from "./screens/Dashboard.tsx";
 import { PersonaDetailScreen } from "./screens/PersonaDetail.tsx";
 import { KeysScreen } from "./screens/Keys.tsx";
-import { MemoryScreen, type SearchHit } from "./screens/Memory.tsx";
-import { VoiceScreen } from "./screens/Voice.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
 import { gatherStatus, type StatusRows } from "./status.ts";
 import { McpScreen } from "./screens/Mcp.tsx";
@@ -65,19 +62,14 @@ import { theme } from "./theme.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfigForPersona, type Config } from "../config.ts";
-import { runMemorySearch } from "../cli/memory.ts";
-
 import { runDoctor, type DoctorReport } from "../cli/doctor.ts";
 import type { WizardStep } from "../lib/personaComplete.ts";
-import type { VoiceProvider } from "../lib/voice.ts";
 
 type Screen =
   | "chat"
   | "dashboard"
   | "persona"
   | "keys"
-  | "memory"
-  | "voice"
   | "doctor"
   | "mcp"
   | "logs"
@@ -204,7 +196,6 @@ export function App(props: AppProps): React.ReactElement {
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
-  const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>("none");
   /**
    * The window, measured HERE and nowhere else.
    *
@@ -425,33 +416,6 @@ export function App(props: AppProps): React.ReactElement {
       if ((key.ctrl && (char === "q" || char === "c")) || key.escape) exit();
     }
   });
-
-  const search = useCallback(
-    async (query: string): Promise<SearchHit[]> => {
-      // Reuse the SUBCOMMAND's search rather than reimplementing scoring, so
-      // the two surfaces can never disagree about what recall returns.
-      let buffer = "";
-      await runMemorySearch({
-        query,
-        persona: personaName,
-        limit: 5,
-        out: { write: (chunk: string) => void (buffer += chunk) },
-      });
-      try {
-        const parsed = JSON.parse(buffer) as {
-          results?: Array<{
-            path: string;
-            ftsScore?: number;
-            vecScore?: number;
-          }>;
-        };
-        return parsed.results ?? [];
-      } catch {
-        return [];
-      }
-    },
-    [personaName],
-  );
 
   const runTheDoctor = useCallback(async (who?: string) => {
     const target = who ?? personaName;
@@ -778,6 +742,245 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
+   * The Memory row, as the embeddings flow (`memoryFlow.ts`).
+   *
+   * The clack wizard's walkthrough — provider, key/endpoint validation,
+   * defaults prefilled from the live config — asked on screens; the WRITE
+   * path stays `applyEmbedding` (the same `applyEmbeddingConfig` the CLI
+   * calls, plus the in-app re-embed when the space changes). No test screen:
+   * recall is judged by using the phantom. Setup is IDEMPOTENT — re-running
+   * the flow and keeping every answer writes nothing.
+   */
+  const changeMemory = useCallback(
+    async (target: PersonaSnapshot) => {
+      setPrompting(true);
+      try {
+        const { configureMemory, embeddingUpdateEquals } = await import(
+          "./memoryFlow.ts"
+        );
+        const { geminiEmbed } = await import("../lib/geminiEmbed.ts");
+        const { openaiCompatibleEmbed } = await import(
+          "../lib/openaiCompatibleEmbed.ts"
+        );
+        const { config } = await loadConfigForPersona(target.name);
+        const chosen = await configureMemory(
+          target.name,
+          { choose: askChoice, value: askValue },
+          {
+            existing: config.embeddings,
+            validateGemini: (key) =>
+              geminiEmbed(key, "phantombot key validation test", {
+                model: "gemini-embedding-001",
+                dims: 1536,
+              }),
+            validateOpenAI: (settings) =>
+              openaiCompatibleEmbed(
+                "phantombot embedding validation test",
+                settings,
+              ),
+          },
+        );
+        if (!chosen) return setNotice("memory unchanged");
+        if ("rejected" in chosen)
+          return setNotice(`memory unchanged — rejected: ${chosen.rejected}`);
+        if (embeddingUpdateEquals(config.embeddings, chosen.update))
+          return setNotice("memory unchanged — already set");
+
+        const change = {
+          next: chosen.update,
+          indexedChunks: target.memory.indexedTotal,
+        };
+        await askConfirm({
+          title: `Change ${target.name}'s embeddings to ${chosen.summary}?`,
+          consequence: describeEmbeddingChange(config, change),
+          run: async () => {
+            const space =
+              target.memory.embedding?.fingerprint ?? "new space";
+            setReembed({
+              space,
+              state: {
+                done: 0,
+                total: target.memory.indexedTotal ?? 0,
+                path: "",
+                startedAt: Date.now(),
+                errors: 0,
+              },
+            });
+            const r = await applyEmbedding({
+              config,
+              persona: target.name,
+              change,
+              onProgress: (progress) =>
+                setReembed((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        state: {
+                          ...prev.state,
+                          done: progress.done,
+                          total: progress.total,
+                          path: progress.path,
+                        },
+                      }
+                    : prev,
+                ),
+            });
+            setReembed(undefined);
+            setNotice(
+              r.ok
+                ? r.reembedded
+                  ? "embeddings changed and the index is back in sync"
+                  : "embedding settings saved; no re-embed was needed"
+                : `failed: ${r.error}`,
+            );
+            await refresh();
+          },
+        });
+      } catch (e) {
+        setNotice(`memory failed: ${(e as Error).message}`);
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh, askChoice, askValue, askConfirmValue],
+  );
+
+  /**
+   * The Voice row, as a flow — the `phantombot voice` clack walkthrough
+   * (provider picker, key keep/replace, voice selection) asked on screens.
+   * The WRITE path stays `applyVoice` (`applyVoiceConfig`). No preview:
+   * the phantom's first spoken turn is the audition. Setup is idempotent —
+   * esc or keeping the offered defaults leaves the config untouched.
+   */
+  const changeVoice = useCallback(
+    async (target: PersonaSnapshot) => {
+      setPrompting(true);
+      try {
+        const { configureVoice } = await import("./voiceFlow.ts");
+        const {
+          ENV_KEY_FOR_PROVIDER,
+          validateElevenLabsKey,
+          validateOpenAIKey,
+        } = await import("../lib/voice.ts");
+        const { maybePromptRestart } = await import("../cli/harness.ts");
+        const { defaultServiceControl } = await import("../lib/platform.ts");
+        const { config } = await loadConfigForPersona(target.name);
+
+        const provider = await askChoice({
+          title: `Voice for ${target.name}`,
+          description: "how this phantom speaks and hears voice notes",
+          options: [
+            {
+              value: "elevenlabs",
+              label: "ElevenLabs",
+              hint:
+                config.voice.provider === "elevenlabs"
+                  ? "current · premium · paid (API key required)"
+                  : "premium · paid (API key required)",
+            },
+            {
+              value: "openai",
+              label: "OpenAI",
+              hint:
+                config.voice.provider === "openai"
+                  ? "current · 6 built-in voices · paid (API key required)"
+                  : "6 built-in voices · paid (API key required)",
+            },
+            {
+              value: "azure_edge",
+              label: "Azure Edge TTS",
+              hint:
+                config.voice.provider === "azure_edge"
+                  ? "current · free · no key · speaks only"
+                  : "free · no key · speaks only",
+            },
+            {
+              value: "none",
+              label: "None — disable TTS/STT",
+              hint:
+                config.voice.provider === "none"
+                  ? "current · text only"
+                  : "text only",
+            },
+          ],
+          initial: config.voice.provider,
+        });
+        // esc on the picker is "did nothing".
+        if (!provider) return setNotice("voice unchanged");
+
+        const chosen = await configureVoice(
+          target.name,
+          provider as "openai" | "elevenlabs" | "azure_edge" | "none",
+          { choose: askChoice, value: askValue, confirm: askConfirmValue },
+          {
+            existing: config.voice,
+            hasKey: (p) => {
+              const envVar = ENV_KEY_FOR_PROVIDER[p as "openai" | "elevenlabs"];
+              return Boolean(envVar && process.env[envVar]);
+            },
+            validateKey: (p, key) =>
+              p === "openai"
+                ? validateOpenAIKey(key)
+                : validateElevenLabsKey(key),
+          },
+        );
+        if (!chosen) return setNotice("voice unchanged");
+        if ("rejected" in chosen)
+          return setNotice(`voice unchanged — key rejected: ${chosen.rejected}`);
+
+        // The restart offer below belongs to a SAVE, not to a visit — a
+        // cancelled confirm must not fire it.
+        let saved = false;
+        await askConfirm({
+          title: `Set ${target.name}'s voice to ${chosen.summary}?`,
+          consequence: describeVoiceChange(chosen.voice),
+          run: async () => {
+            const r = await applyVoice({
+              config,
+              persona: target.name,
+              voice: chosen.voice,
+              apiKey: chosen.apiKey,
+            });
+            saved = r.ok;
+            setNotice(
+              r.ok ? `voice saved: ${chosen.summary}` : `failed: ${r.error}`,
+            );
+            await refresh();
+          },
+        });
+
+        // Same post-apply hook the CLI runs: the voice block is read on the
+        // next service spawn, so offer the restart when something was saved.
+        if (saved)
+          await maybePromptRestart(
+          defaultServiceControl(),
+          async (message) =>
+            await askConfirmValue({
+              title: message,
+              consequence: {
+                summary: "",
+                detail: "",
+                longRunning: false,
+                restarts: true,
+              },
+            }),
+          {
+            note: (body: string, title?: string) =>
+              setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
+          } as never,
+        );
+      } catch (e) {
+        setNotice(`voice failed: ${(e as Error).message}`);
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh, askChoice, askValue, askConfirmValue],
+  );
+
+  /**
    * Pick one of the prompt files and edit it in the app's own editor.
    *
    * A missing file is offered too, and creating it by opening it is the
@@ -1030,7 +1233,10 @@ export function App(props: AppProps): React.ReactElement {
             });
           }}
           onOpen={(target) => {
-            go(target);
+            // Memory and Voice are FLOWS now, not screens — the same clack
+            // walkthroughs the Brain and Channels rows run.
+            if (target === "memory") void changeMemory(persona);
+            else void changeVoice(persona);
           }}
         />
       );
@@ -1091,160 +1297,6 @@ export function App(props: AppProps): React.ReactElement {
               },
             })
           }
-          onBack={back}
-        />
-      );
-    }
-
-    if (screen === "memory") {
-      return (
-        <MemoryScreen
-          persona={persona}
-          onSearch={search}
-          onChangeEmbedding={async () => {
-            // Demonstrates the whole rule: the change states its consequence,
-            // then PERFORMS it. There is no "now go and run" anywhere here.
-            const { config } = await loadConfigForPersona(persona.name);
-            const next: EmbeddingConfigUpdate = {
-              provider: "openai-compatible",
-              openaiCompatible: {
-                // Default to OpenAI proper. The base URL is an ADVANCED field
-                // (blank unless the user fills it) — today's CLI pre-fills a
-                // local llama-server, which assumes an endpoint most users do
-                // not run.
-                baseUrl: "https://api.openai.com/v1",
-                model: "text-embedding-3-small",
-                dims: 1536,
-              },
-            };
-            const consequence = describeEmbeddingChange(config, {
-              next,
-              indexedChunks: persona.memory.indexedTotal,
-            });
-            void askConfirm({
-              title: "Change the embedding provider?",
-              consequence,
-              run: async () => {
-                const space = persona.memory.embedding?.fingerprint ?? "new space";
-                setReembed({
-                  space,
-                  state: {
-                    done: 0,
-                    total: persona.memory.indexedTotal ?? 0,
-                    path: "",
-                    startedAt: Date.now(),
-                    errors: 0,
-                  },
-                });
-                const r = await applyEmbedding({
-                  config,
-                  persona: persona.name,
-                  change: { next, indexedChunks: persona.memory.indexedTotal },
-                  onProgress: (progress) =>
-                    setReembed((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            state: {
-                              ...prev.state,
-                              done: progress.done,
-                              total: progress.total,
-                              path: progress.path,
-                            },
-                          }
-                        : prev,
-                    ),
-                });
-                setReembed(undefined);
-                setNotice(
-                  r.ok
-                    ? r.reembedded
-                      ? "embeddings changed and the index is back in sync"
-                      : "embedding settings saved; no re-embed was needed"
-                    : `failed: ${r.error}`,
-                );
-                await refresh();
-              },
-            });
-          }}
-          onReindex={() => setNotice("reindex queued")}
-          onBack={back}
-        />
-      );
-    }
-
-    if (screen === "voice") {
-      return (
-        <VoiceScreen
-          personaName={persona.name}
-          provider={voiceProvider}
-          onChangeProvider={setVoiceProvider}
-          onPreview={() =>
-            setNotice(
-              voiceProvider === "none"
-                ? "nothing to play — pick a provider first"
-                : `previewing ${voiceProvider}`,
-            )
-          }
-          onSave={() => {
-            void (async () => {
-              setPrompting(true);
-              try {
-                // Saving a provider ALONE used to write `[voice] provider =
-                // "openai"` with no key and no voice: a phantom that reads as
-                // configured and is mute on its first turn. The rest of the
-                // questions `phantombot voice` asks are asked here first.
-                const { configureVoice } = await import("./voiceFlow.ts");
-                const { ENV_KEY_FOR_PROVIDER, validateElevenLabsKey, validateOpenAIKey } =
-                  await import("../lib/voice.ts");
-                const { config } = await loadConfigForPersona(persona.name);
-                const chosen = await configureVoice(
-                  persona.name,
-                  voiceProvider,
-                  { choose: askChoice, value: askValue, confirm: askConfirmValue },
-                  {
-                    existing: config.voice,
-                    hasKey: (provider) => {
-                      const envVar =
-                        ENV_KEY_FOR_PROVIDER[
-                          provider as "openai" | "elevenlabs"
-                        ];
-                      return Boolean(envVar && process.env[envVar]);
-                    },
-                    validateKey: (provider, key) =>
-                      provider === "openai"
-                        ? validateOpenAIKey(key)
-                        : validateElevenLabsKey(key),
-                  },
-                );
-                if (!chosen) return setNotice("voice unchanged");
-                if ("rejected" in chosen)
-                  return setNotice(`voice unchanged — key rejected: ${chosen.rejected}`);
-
-                await askConfirm({
-                  title: `Set ${persona.name}'s voice to ${chosen.summary}?`,
-                  consequence: describeVoiceChange(chosen.voice),
-                  run: async () => {
-                    const r = await applyVoice({
-                      config,
-                      persona: persona.name,
-                      voice: chosen.voice,
-                      apiKey: chosen.apiKey,
-                    });
-                    setNotice(
-                      r.ok
-                        ? `voice saved: ${chosen.summary}`
-                        : `failed: ${r.error}`,
-                    );
-                    await refresh();
-                    back();
-                  },
-                });
-              } finally {
-                setPrompting(false);
-              }
-            })();
-          }}
           onBack={back}
         />
       );
