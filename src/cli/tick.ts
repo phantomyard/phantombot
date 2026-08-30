@@ -551,6 +551,21 @@ async function buildCommandEnv(
   for (const name of allowlist) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
+  // #505 — the command MUST know which persona owns it.
+  //
+  // A command task is per-persona, exactly like an agent-backed one, and the
+  // documented contract tells the checker to shell back into `phantombot`
+  // (`ask`, `notify`, `mcp call`, `memory ...`). Those commands resolve their
+  // persona through `resolvePersona`: --persona, then PHANTOMBOT_PERSONA, then
+  // the HOST DEFAULT. With no PHANTOMBOT_PERSONA in this minimal env, every
+  // poller silently fell through to the default persona — reading another
+  // persona's vault, memory and MCP registry. That is a correctness bug, not
+  // an ergonomic one, and its quiet form (an empty registry behind a stale
+  // default) is what silently stopped email triage for ~200 fires.
+  //
+  // Set AFTER the allowlist copy so the owning persona always wins over an
+  // ambient PHANTOMBOT_PERSONA inherited by the tick process itself.
+  env.PHANTOMBOT_PERSONA = persona;
   if (env.PATH === undefined && process.platform !== "win32") {
     env.PATH = "/usr/local/bin:/usr/bin:/bin";
   }

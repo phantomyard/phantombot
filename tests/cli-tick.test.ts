@@ -427,6 +427,47 @@ describe("runTick — normal task fire", () => {
     }
   });
 
+  test("a command task is told which persona owns it (#505)", async () => {
+    // The documented contract tells a poller to shell back into `phantombot`
+    // (ask / notify / mcp call / memory). Those resolve --persona, then
+    // PHANTOMBOT_PERSONA, then the HOST DEFAULT — so with no PHANTOMBOT_PERSONA
+    // in the command env, every poller silently ran against the default
+    // persona's vault, memory and MCP registry instead of its own.
+    const oldEnv = process.env.PHANTOMBOT_PERSONA;
+    // An ambient value from the tick process itself must not win over the
+    // task's own owner.
+    process.env.PHANTOMBOT_PERSONA = "someoneelse";
+    try {
+      await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+      const markerPath = join(workdir, "command-persona.txt");
+      const created = store.add({
+        persona: "kai",
+        description: "command poll",
+        schedule: "0 * * * *",
+        prompt: "audit context only",
+        command: `printf "[%s]" "$PHANTOMBOT_PERSONA" > ${markerPath}`,
+        reviewIntervalMs: 1,
+        now: new Date("2026-05-02T09:30:00Z"),
+      });
+      if (!created.ok) throw new Error("setup");
+      const code = await runTick({
+        config,
+        taskStore: store,
+        memory,
+        harnesses: [
+          new ScriptedHarness("h", [{ type: "done", finalText: "should not run" }]),
+        ],
+        lockPath,
+        now: new Date("2026-05-02T10:00:00Z"),
+      });
+      expect(code).toBe(0);
+      expect(await readFile(markerPath, "utf8")).toBe("[kai]");
+    } finally {
+      if (oldEnv === undefined) delete process.env.PHANTOMBOT_PERSONA;
+      else process.env.PHANTOMBOT_PERSONA = oldEnv;
+    }
+  });
+
   test("--secret resolves from the TASK's persona vault, not the startup persona's", async () => {
     // One tick process runs tasks for EVERY persona, but only the startup
     // persona's vault is injected into process.env. Reading the ambient env

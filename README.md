@@ -572,6 +572,33 @@ in health checks or deploy hooks. These are the *external* controls (run from a
 terminal); the in-chat `/restart` and `/update` commands still bounce the running
 service from inside itself.
 
+**`PHANTOMBOT_SANDBOX` — a global kill-switch for all four verbs.** Set it to
+anything other than `""` or `0` and every service *mutation* in the process
+becomes a no-op: `start`, `stop` and `restart` return success without touching
+the host's service, while the unit-file re-render writes nothing and reports
+`{ rerendered: false }`. Queries still tell the truth, so `phantombot doctor`
+and the TUI keep showing the real service state.
+
+It exists for **development checkouts**. Running `bun run src/index.ts` from a
+working tree gives you a second phantombot *process* but not a second
+*service* — so a config save in your branch would bounce the production daemon
+that is serving live conversations, killing whatever turn was in flight.
+
+Because it is read by `defaultServiceControl()`, it applies to *every* caller,
+not just the TUI: with the variable set, in-chat `/update` and `/restart` also
+stop restarting anything while still reporting success. Every suppression is
+logged, naming the op: `start`, `stop` and `restart` log
+`platform: service change suppressed` at **warn**, and the re-render logs
+`platform: unit re-render skipped` at **info** — so a process running at
+`PHANTOMBOT_LOG_LEVEL=warn` keeps the three that report a false success and
+drops the one that does not. Those lines go to the **stderr of the process
+that has the variable set** — your terminal for a `bun run src/index.ts`
+checkout, and the `^l` log pane inside the TUI
+(which swaps the sink for its own ring buffer). It reaches `phantombot logs`
+only if the *daemon itself* was started with the variable set — which is the
+case you never want: **never set it on a host running the real service**, or
+the daemon will silently stop taking updates.
+
 ## Configuration
 
 Phantombot resolves configuration in this order:
@@ -888,6 +915,19 @@ anything it does not mention falling back to the host file — never to a
 built-in default. Env vars still win over both. `default_persona`,
 `autostart_personas`, `update_channel`, `personas_dir` and `memory_db` describe
 the machine, so they are ignored inside a persona file.
+
+**Who am I when I omit `--persona`?** `phantombot doctor` answers it on its
+first line: the resolved default persona, WHERE it came from, whether it is
+usable and how many MCP servers it has. Provenance matters because the layer
+operators reach for first is the one that loses — resolution is
+`PHANTOMBOT_DEFAULT_PERSONA` env > `state.json` > `config.toml` > the built-in
+`phantom`, so editing `default_persona` in `config.toml` on a host that has ever
+created or switched a persona changes nothing at all. Doctor fails (exit 1) when
+the default has no persona directory, or when its `mcp.json` will not parse. It
+WARNS, without failing, when the default has no MCP servers while another
+persona on the box does — the signature of a default left pointing at a persona
+that has been migrated away, where every persona-scoped read still succeeds
+against the wrong, empty persona.
 
 **Lifecycle commands belong to the default persona.** `/update` and `/restart`
 swap the binary and bounce the service for *everyone* in the process, so they
@@ -1604,6 +1644,10 @@ Task behavior:
 - LLM-backed tasks spawn the configured harness.
 - Command-backed tasks run a local shell command directly.
 - Command tasks receive a minimal environment plus only named `--secret` vars.
+- That environment always includes `PHANTOMBOT_PERSONA`, set to the persona
+  that OWNS the task. A command that shells back into `phantombot` (`ask`,
+  `notify`, `mcp call`, `memory ...`) therefore acts as its own persona rather
+  than falling through to the host default.
 - Task stdout, stderr, exit status, and next run are recorded.
 - Tasks run silently by default.
 - Missed runs are skipped rather than replayed in a burst.

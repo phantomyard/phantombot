@@ -4,11 +4,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   adoptAsDefaultIfMissing,
+  defaultPersonaDefect,
+  defaultPersonaProvenance,
   healDefaultPersonaIfBroken,
 } from "../src/lib/personaDefault.ts";
 import type { Config } from "../src/config.ts";
@@ -115,7 +117,7 @@ describe("healDefaultPersonaIfBroken", () => {
 
 describe("adoptAsDefaultIfMissing", () => {
   test("no-ops when default already exists on disk", async () => {
-    await mkdir(join(personasDir, "phantom"), { recursive: true });
+    await makePersona("phantom");
     const config = makeConfig(personasDir, "phantom");
     const changed = await adoptAsDefaultIfMissing(config, "kai");
     expect(changed).toBe(false);
@@ -131,5 +133,167 @@ describe("adoptAsDefaultIfMissing", () => {
 
     const state = await loadState();
     expect(state.default_persona).toBe("kai");
+  });
+});
+
+/**
+ * A persona dir that looks like a real phantom: one marker file is enough
+ * (`PERSONA_MARKERS`), which is what separates a live persona from the husk a
+ * half-finished create or a moved-out migration leaves behind.
+ */
+async function makePersona(name: string): Promise<string> {
+  const dir = join(personasDir, name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "identity.json"), "{}", "utf8");
+  return dir;
+}
+
+describe("defaultPersonaDefect (#505)", () => {
+  test("a populated persona dir is usable", async () => {
+    await makePersona("phantom");
+    expect(defaultPersonaDefect(makeConfig(personasDir, "phantom"), "phantom"))
+      .toBeNull();
+  });
+
+  test("a missing dir is a defect", () => {
+    expect(defaultPersonaDefect(makeConfig(personasDir, "ghost"), "ghost"))
+      .toBe("no persona dir on disk");
+  });
+
+  test("an EMPTY dir is a defect — the bug existsSync could not see", async () => {
+    await mkdir(join(personasDir, "husk"), { recursive: true });
+    expect(defaultPersonaDefect(makeConfig(personasDir, "husk"), "husk"))
+      .toMatch(/empty/);
+  });
+
+  test("any single marker is enough, so a lazily-created identity is not required", async () => {
+    const dir = join(personasDir, "fresh");
+    await mkdir(dir, { recursive: true });
+    // identity.json is written LAZILY on first vault open. A persona created
+    // seconds ago has only its config, and must NOT be judged broken — heal
+    // would otherwise repoint a brand-new host's default at an older persona.
+    await writeFile(join(dir, "config.toml"), "", "utf8");
+    expect(defaultPersonaDefect(makeConfig(personasDir, "fresh"), "fresh"))
+      .toBeNull();
+  });
+});
+
+describe("healDefaultPersonaIfBroken — husk defaults (#505)", () => {
+  test("heals away from an empty default dir", async () => {
+    await mkdir(join(personasDir, "husk"), { recursive: true });
+    await makePersona("real");
+    const out = new CaptureStream();
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "husk"),
+      out,
+    );
+    expect(healed).toBe("real");
+    expect((await loadState()).default_persona).toBe("real");
+    expect(out.text).toMatch(/empty/);
+  });
+
+  test("prefers a populated candidate over an alphabetically earlier husk", async () => {
+    await mkdir(join(personasDir, "husk"), { recursive: true });
+    await mkdir(join(personasDir, "ahusk"), { recursive: true });
+    await makePersona("zreal");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "husk"),
+    );
+    expect(healed).toBe("zreal");
+  });
+
+  test("a case-only name match must itself be usable to win (#506 review)", async () => {
+    // `kai` is broken and `Kai` is another husk: preferring the case match
+    // would write a still-broken name to state.json while `real` was right
+    // there. Case-insensitive is a HINT, not a licence to heal into a husk.
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await mkdir(join(personasDir, "Kai"), { recursive: true });
+    await makePersona("real");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("real");
+    expect((await loadState()).default_persona).toBe("real");
+  });
+
+  test("a USABLE case-only match still wins over an unrelated persona", async () => {
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await makePersona("Kai");
+    await makePersona("areal");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("Kai");
+  });
+
+  test("falls back to the case match when every candidate is a husk", async () => {
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await mkdir(join(personasDir, "Kai"), { recursive: true });
+    await mkdir(join(personasDir, "ahusk"), { recursive: true });
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("Kai");
+  });
+
+  test("leaves a populated default alone even when other personas exist", async () => {
+    await makePersona("phantom");
+    await makePersona("kai");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "phantom"),
+    );
+    expect(healed).toBe("phantom");
+    expect((await loadState()).default_persona).toBeUndefined();
+  });
+});
+
+describe("defaultPersonaProvenance (#505)", () => {
+  const SAVED_ENV = process.env.PHANTOMBOT_DEFAULT_PERSONA;
+  afterEach(() => {
+    if (SAVED_ENV === undefined) delete process.env.PHANTOMBOT_DEFAULT_PERSONA;
+    else process.env.PHANTOMBOT_DEFAULT_PERSONA = SAVED_ENV;
+  });
+
+  test("state.json wins over config.toml, and says so", async () => {
+    await writeFile(
+      join(workdir, "config.toml"),
+      'default_persona = "fromtoml"\n',
+      "utf8",
+    );
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ default_persona: "fromstate" }),
+      "utf8",
+    );
+    expect(await defaultPersonaProvenance(makeConfig(personasDir))).toBe(
+      "state",
+    );
+  });
+
+  test("config.toml is reported only when state.json is silent", async () => {
+    await writeFile(
+      join(workdir, "config.toml"),
+      'default_persona = "fromtoml"\n',
+      "utf8",
+    );
+    expect(await defaultPersonaProvenance(makeConfig(personasDir))).toBe(
+      "config",
+    );
+  });
+
+  test("no state, no toml key → built-in fallback", async () => {
+    expect(await defaultPersonaProvenance(makeConfig(personasDir))).toBe(
+      "builtin",
+    );
+  });
+
+  test("the env override outranks everything", async () => {
+    process.env.PHANTOMBOT_DEFAULT_PERSONA = "fromenv";
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ default_persona: "fromstate" }),
+      "utf8",
+    );
+    expect(await defaultPersonaProvenance(makeConfig(personasDir))).toBe("env");
   });
 });

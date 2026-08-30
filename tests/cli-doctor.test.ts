@@ -1389,3 +1389,98 @@ describe("runDoctor per-persona maintenance coverage (#486)", () => {
     ]);
   });
 });
+
+describe("runDoctor — the host default persona (#505)", () => {
+  const SAVED_STATE = process.env.PHANTOMBOT_STATE;
+  beforeEach(() => {
+    // Hermetic: provenance reads state.json, and the real one must not leak in.
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+  });
+  afterEach(() => {
+    if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = SAVED_STATE;
+  });
+
+  test("names the resolved default, its provenance, and stays exit 0", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("default persona: ok — 'phantom' (from state.json)");
+    // The lever operators reach for first is the one that loses.
+    expect(out.text).toContain("state.json OUTRANKS config.toml");
+  });
+
+  test("an empty MCP registry next to a populated sibling WARNs, but never fails", async () => {
+    // The exact shape of a migrated-away default: the dir is still here, so
+    // every persona-scoped read succeeds against the wrong, empty persona.
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(
+      join(workdir, "personas", "kai", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          mailspring: { transport: "http", url: "http://127.0.0.1:2587" },
+        },
+      }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    // Warn-only: plenty of hosts legitimately register no MCP servers.
+    expect(code).toBe(0);
+    expect(out.text).toContain("default persona: WARN");
+    expect(out.text).toContain("no MCP servers registered while kai has some");
+  });
+
+  test("a default whose dir is gone fails doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config: { ...config, defaultPersona: "ghost" },
+      persona: "phantom",
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("NOT usable: no persona dir on disk");
+  });
+
+  test("json mode carries the whole default-persona block", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      json: true,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    const report = JSON.parse(out.text);
+    expect(report.default_persona.resolved).toBe("phantom");
+    expect(report.default_persona.exists).toBe(true);
+    expect(report.default_persona.served).toBe(true);
+    expect(report.default_persona.defect).toBeNull();
+    expect(report.default_persona.provenance).toBe("builtin");
+  });
+});
