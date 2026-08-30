@@ -233,8 +233,12 @@ describe("settings screen in a short window", () => {
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
 
     // Rows are dropped, not squeezed — and the screen says so.
-    expect(text).toContain("Identity");
     expect(text).toContain("more below");
+    // No collision signature: a row's label must never share a line with
+    // another row's (the Brainity / chainel shear the budget math once
+    // under-counted the bottom block).
+    expect(text).not.toContain("Brainity");
+    expect(text).not.toContain("chainel");
   });
 
   test("the bare frame keeps its footer below the table", async () => {
@@ -263,33 +267,37 @@ describe("settings screen in a short window", () => {
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
   });
 
-  test("a tall window shows the whole screen, doctor included", async () => {
+  test("a tall window shows the whole screen, status included", async () => {
     const lines = await openSettings(44);
     const text = lines.join("\n");
 
     expect(text).not.toContain("more below");
 
     // The Dashboard skeleton: dim header row between two rules, a rule under
-    // the rows, and the DOCTOR telemetry block below that.
+    // the rows, and the STATUS telemetry block below that. The doctor is NOT
+    // on this screen — its full report is a `d` away on the phantoms list.
     expect(text).toContain("setting");
-    expect(text).toContain("configured");
+    expect(text).toContain("description");
     expect(text).toContain("state");
-    expect(text).toContain("DOCTOR");
-    expect(text).toContain("telegram");
-    expect(text).toContain("memory db");
-    expect(text).toContain("nightly");
+    expect(text).toContain("STATUS");
+    expect(text).toContain("phantom");
+    expect(text).toContain("chain");
+    expect(text).toContain("memory");
+    expect(text).not.toContain("DOCTOR");
 
     // The Doctor menu row is gone — no old description, no leading ✚.
     expect(text).not.toContain("run the checks");
   });
 
-  test("the table reads as name · what /status says · state", async () => {
+  test("the table reads as name · description · state", async () => {
     const lines = await openSettings(44);
     const text = lines.join("\n");
 
-    // The channels row is "Chat Channels" now, and its description is the
-    // /status probe output — not the old config-source diagnostics.
+    // The channels row is "Chat Channels" now, and the description column is
+    // a STATIC one-liner on what the setting is for — the live /status output
+    // lives in the STATUS block below, not in the table.
     expect(text).toContain("Chat Channels");
+    expect(text).toContain("the chat surfaces this phantom answers on");
     expect(text).not.toContain("harness_bins");
     expect(text).not.toContain("env > config.toml");
     expect(text).not.toContain("persona override");
@@ -299,12 +307,11 @@ describe("settings screen in a short window", () => {
     expect(text).toContain("configured");
     expect(text).not.toContain("required");
 
-    // Brain shows the chain and the per-harness models, as /status prints them.
-    expect(text).toContain("models:");
-
-    // Badges sit in one right-aligned column: the autostart row's state is
-    // flush against the frame border, not wherever its description ended.
+    // The informational group shows VALUES where badges sit: on|off, yes|no,
+    // stable|preview — dim, no glyph, no red/green.
     const autostart = lines.find((l) => l.includes("Autostart"))!;
-    expect(autostart.trimEnd().endsWith("✓ on")).toBe(true);
+    expect(autostart.trimEnd().endsWith("on")).toBe(true);
+    const release = lines.find((l) => l.includes("Release Channel"))!;
+    expect(release).toContain("stable");
   });
 });

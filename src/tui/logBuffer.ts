@@ -23,7 +23,7 @@ export class LogBuffer {
   private lines: LogLine[] = [];
   private listeners = new Set<() => void>();
 
-  constructor(private readonly limit = 500) {}
+  constructor(private readonly limit = 100) {}
 
   /** Accepts a raw sink line (may contain several newline-separated lines). */
   push(chunk: string): void {

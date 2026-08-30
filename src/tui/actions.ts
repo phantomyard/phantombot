@@ -36,6 +36,10 @@ import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { applyVoiceConfig } from "../cli/voice.ts";
 import { runMemoryIndex } from "../cli/memory.ts";
 import type { EmbedProgress } from "../lib/embedJob.ts";
+import {
+  updateConfigToml,
+  type TomlObject,
+} from "../lib/configWriter.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
@@ -290,6 +294,43 @@ export async function applyAutostart(input: {
   return r.ok
     ? { ok: true, list }
     : { ok: false, list, error: r.stderr ?? "restart failed" };
+}
+
+export function describeUpdateChannelChange(to: string): Consequence {
+  return {
+    summary: `this host follows the ${to} release ring`,
+    detail:
+      "update_channel is a HOST setting in the global config.toml. " +
+      (to === "preview"
+        ? "'preview' installs every merge to main, within an hour of it landing."
+        : "'stable' only moves when a preview build is promoted, so it lags main by days."),
+    longRunning: false,
+    restarts: false,
+  };
+}
+
+/**
+ * Point the host's release ring at "stable" or "preview".
+ *
+ * WRITES the global config.toml (`update_channel`), not a persona file — the
+ * ring is per-host (#432). "stable" is the resolved default, so choosing it
+ * DELETES the key rather than writing it: an explicit value that equals the
+ * default is just noise for every later reader.
+ */
+export async function applyUpdateChannel(input: {
+  config: Config;
+  channel: "stable" | "preview";
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await updateConfigToml(input.config.configPath, (toml: TomlObject) => {
+      if (input.channel === "stable") delete toml.update_channel;
+      else toml.update_channel = input.channel;
+    });
+    input.config.updateChannel = input.channel;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }
 
 export function describeDefaultPersonaChange(

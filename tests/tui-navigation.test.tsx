@@ -173,6 +173,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { App } from "../src/tui/App.tsx";
+import type { DoctorReport } from "../src/cli/doctor.ts";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
 
 const ALICE: PersonaSnapshot = {
@@ -191,6 +192,25 @@ const ALICE: PersonaSnapshot = {
     resumeAt: "done",
     requirements: [],
   },
+};
+
+// A well-formed report for the table's `d` seam: the fixture persona has no
+// directory, so the real checks would fail against the test env.
+const FAKE_REPORT: DoctorReport = {
+  persona: "alice",
+  telegram: { healthy: true, listeners: 2, personas: [] },
+  memory_db: {
+    path: "/x/db",
+    healthy: true,
+    detail: "integrity ok",
+    bytes: 44040192,
+    restore_points: [],
+    unretired_drawers: [],
+  },
+  nightly: { age_hours: 2, health: "ok", detail: "no backlog", backlog: 0 },
+  capture: { window_hours: 24, user_turns: 10, captures: 9, dry_day: false },
+  embeddings: { provider: "gemini", semantic_search: true },
+  update: { channel: "stable", version: "0.0.0-test" },
 };
 
 const HOST: HostSnapshot = {
@@ -243,6 +263,13 @@ async function mountApp(host: HostSnapshot = HOST) {
     <App
       host={host}
       startPersona="alice"
+      // The table's `d` runs the doctor; the fixture persona has no directory,
+      // so inject a well-formed report via the seam instead of letting the
+      // real checks run against the test env.
+      runDoctorImpl={async (opts) => {
+        opts?.out?.write(JSON.stringify(FAKE_REPORT));
+        return 0;
+      }}
       onCreatePersona={async () => {}}
       openSession={async ({ persona }) => ({
         persona,
@@ -375,32 +402,35 @@ describe("reaching settings and the phantom list", () => {
     expect(frame).not.toContain("Vault");
   });
 
-  test("the table has no 'd Doctor' key — doctor is per-phantom", async () => {
-    // runDoctor takes a persona: memory_db, nightly, capture and embeddings all
-    // resolve against ONE phantom's dir. From the table it ran against the
-    // active chat persona regardless of the row cursor, and still rendered a
-    // plausible report with someone else's name on it. Both halves: not
-    // advertised, and INERT.
-    const app = await mountApp();
+  test("the table's 'd' runs the doctor FOR THE ROW under the cursor", async () => {
+    // Doctor is off the settings screen entirely; the full report is the
+    // table's `d`, and it takes the ROW's persona — the original bug ran the
+    // checks against the active chat persona regardless of the cursor and
+    // rendered a plausible report with someone else's name on it.
+    const app = await mountApp(TWO_PERSONA_HOST);
     await app.press("\x13"); // ^s -> the table
     expect(app.frame()).toContain("PHANTOMS");
-    expect(app.frame()).not.toContain("Doctor");
 
-    await app.press("d");
-    expect(app.frame()).toContain("PHANTOMS"); // still the table
-
-    // Reachable the honest way: inside the phantom it belongs to.
-    await app.press("c");
+    await app.press("d"); // doctor for the row the cursor sits on
     const frame = app.frame();
-    expect(frame).toContain("▸ alice");
     expect(frame.toLowerCase()).toContain("doctor");
+    expect(frame).toContain("ALICE"); // the ROW's persona, not the chat one
+
+    // And esc lands you back on the table, where you came from.
+    await app.press("\x1b");
+    expect(app.frame()).toContain("PHANTOMS");
+
+    // Not on the phantom's settings screen — doctor is gone from there.
+    await app.press("c");
+    expect(app.frame()).toContain("▸ alice");
+    expect(app.frame()).not.toContain("Doctor");
   });
 
   test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
     // The logs pane is reachable two ways, and a hardcoded parent gets one of
     // them wrong: entered with ^l from the chat it must return to the chat,
-    // entered with L from a phantom it must return to that phantom — same key,
-    // same screen, different way back.
+    // entered with L from the phantoms table it must return to the table —
+    // same key, same screen, different way back.
     const app = await mountApp();
     await app.press("\x0c"); // ^l from chat
     expect(app.frame()).toContain("logs");
@@ -408,17 +438,14 @@ describe("reaching settings and the phantom list", () => {
     expect(app.frame()).toContain("Send");
 
     await app.press("\x13"); // ^s -> table
-    await app.press("c"); // configure alice
-    await app.press("L"); // logs, this time from the phantom
+    await app.press("L"); // logs, this time from the table
     expect(app.frame()).toContain("logs");
     await app.press("\x1b");
     const frame = app.frame();
-    expect(frame).toContain("Identity"); // back at the phantom, not the chat
+    expect(frame).toContain("PHANTOMS"); // back at the table, not the chat
     expect(frame).not.toContain("Send");
 
     // And the walk unwinds one level per esc, all the way to the floor.
-    await app.press("\x1b");
-    expect(app.frame()).toContain("PHANTOMS");
     await app.press("\x1b");
     expect(app.frame()).toContain("Send");
   });

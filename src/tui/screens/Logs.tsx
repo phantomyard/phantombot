@@ -20,7 +20,7 @@ import { badge, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeRows } from "../chrome.ts";
 
-const LEVEL_COLOR: Record<string, string> = {
+export const LEVEL_COLOR: Record<string, string> = {
   error: theme.bad,
   warn: theme.warn,
   info: theme.ok,
@@ -28,13 +28,12 @@ const LEVEL_COLOR: Record<string, string> = {
   raw: theme.dim,
 };
 
-function timeOf(at: number): string {
+export function timeOf(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
 }
 
 export function LogsScreen(props: {
-  personaName: string;
   onBack: () => void;
 }): React.ReactElement {
   const size = useTerminalSize();
@@ -54,7 +53,7 @@ export function LogsScreen(props: {
 
   return (
     <Frame
-      title={["phantombot", props.personaName, "logs"]}
+      title={["phantombot", "host logs"]}
       status={`${logBuffer.all().length} lines captured`}
       footer={[{ icon: badge.back, key: "esc", label: "Back" }]}
     >

@@ -25,6 +25,10 @@ export interface ChannelsQuestions {
     hint?: string;
     masked?: boolean;
     initial?: string;
+    /** When true an empty box IS an answer — resolves "" (the npub prompt's
+     * trust-on-first-use). Off by default: for a token "" erases nothing but
+     * proves nothing either. */
+    allowEmpty?: boolean;
   }): Promise<string | undefined>;
   confirm(input: {
     title: string;
@@ -58,8 +62,7 @@ export interface ChannelsDeps {
 
 const TOKEN_RE = /^\d+:[A-Za-z0-9_-]{30,}$/;
 
-const HELP =
-  "from @BotFather: /newbot, then copy the HTTP API token";
+const APP_URL = "https://chat.phantomyard.ai";
 
 /**
  * Run the flow. Returns the line to show in the notice bar — every exit,
@@ -97,9 +100,21 @@ export async function configurePhantomchat(
 ): Promise<string> {
   const existing = await deps.identity();
   const raw = await q.value({
-    title: `Allowed npubs for ${persona}`,
-    hint: `${persona} is ${existing.npub} — paste YOUR npub from the PhantomChat app; empty arms trust-on-first-use`,
+    title: `Paste YOUR npub from the PhantomChat app (starts with npub1…)`,
+    // The clack wizard's "Set up PhantomChat on your device" note, carried over
+    // whole: without it the prompt assumes an app and an npub the user may not
+    // have yet (the exact gap that was issue #333 on the CLI side).
+    hint:
+      `To message '${persona}' you need the PhantomChat app on your device.\n\n` +
+      `1. Get PhantomChat: ${APP_URL}\n` +
+      `   (open in a browser, or install the PWA / mobile app from there)\n` +
+      `2. Create your identity in the app, then copy YOUR npub\n` +
+      `   (Settings → Profile → "Copy npub"). It starts with 'npub1…'.\n` +
+      `3. Paste your npub below so '${persona}' can reach you.\n\n` +
+      `${persona} is ${existing.npub} — paste YOUR npub from the app; ` +
+      `empty arms trust-on-first-use.`,
     initial: existing.allowedNpubs.join(", "),
+    allowEmpty: true,
   });
   if (raw === undefined) return "phantomchat unchanged";
   const allowedNpubs = parseAllowedNpubs(raw);
@@ -143,6 +158,7 @@ export async function configureTelegram(
   const { existing } = deps;
 
   let token = existing?.token;
+  let botUsername: string | undefined;
   if (existing) {
     const action = await q.choose({
       title: `Telegram for ${persona}`,
@@ -156,23 +172,45 @@ export async function configureTelegram(
   }
 
   if (!token) {
-    const typed = await q.value({
-      title: `Bot token for ${persona}`,
-      hint: HELP,
-      masked: true,
-    });
-    if (!typed) return "channels unchanged";
-    if (!TOKEN_RE.test(typed)) return "channels unchanged — not a bot token";
-    const me = await deps.validateToken(typed);
-    // A token is only accepted once Telegram itself has answered to it:
-    // writing an unvalidated one leaves a persona that looks configured and
-    // silently never receives a message.
-    if (!me.ok) return `channels unchanged — token rejected: ${me.error}`;
-    token = typed;
+    // A malformed token is a TYPO, not a decision — re-ask until the shape is
+    // right or the user backs out, the way the CLI's clack `validate` does. A
+    // token that fails getMe still ends the flow: Telegram itself refused it.
+    let hint =
+      `How to get a Telegram Bot Token:\n` +
+      `  1. Open Telegram and search for "@BotFather"\n` +
+      `  2. Send him: /newbot\n` +
+      `  3. Give it a name and a username (must end in 'bot')\n` +
+      `  4. Copy the HTTP API Token he gives you.\n\n` +
+      `How to find your User ID:\n` +
+      `  1. Search for "@userinfobot" in Telegram\n` +
+      `  2. Start the chat, it will reply with your ID (e.g. 123456789).`;
+    for (;;) {
+      const typed = await q.value({
+        title: `Paste the bot token from @BotFather (looks like 123456789:ABC…)`,
+        hint,
+        masked: true,
+      });
+      if (!typed) return "channels unchanged";
+      if (!TOKEN_RE.test(typed)) {
+        hint =
+          `That doesn't look like a bot token — it should read\n` +
+          `NNNNNNNNN:AAAA... (digits, a colon, then 30+ letters/digits).\n\n` +
+          hint;
+        continue;
+      }
+      const me = await deps.validateToken(typed);
+      // A token is only accepted once Telegram itself has answered to it:
+      // writing an unvalidated one leaves a persona that looks configured and
+      // silently never receives a message.
+      if (!me.ok) return `channels unchanged — token rejected: ${me.error}`;
+      token = typed;
+      botUsername = me.username;
+      break;
+    }
   }
 
   const raw = await q.value({
-    title: "Allowed Telegram user IDs",
+    title: `Paste your Telegram user ID from @userinfobot (e.g. 123456789) — comma-separate for more`,
     hint: "comma-separated; the first ID receives incident alerts",
     initial: existing?.allowedUserIds.join(", ") ?? "",
   });
@@ -196,6 +234,6 @@ export async function configureTelegram(
 
   await deps.save({ token, allowedUserIds });
   return `channels saved to ${deps.targetPath}${
-    allowedUserIds.length === 0 ? " — allowlist OPEN" : ""
-  }`;
+    botUsername ? ` — bot @${botUsername}` : ""
+  }${allowedUserIds.length === 0 ? " — allowlist OPEN" : ""}`;
 }

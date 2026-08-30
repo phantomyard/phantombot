@@ -86,15 +86,15 @@ export function AskScreen(props: {
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
-      <Box>
-        <Text bold>{title}</Text>
-      </Box>
       {hint ? (
-        <Box marginTop={1}>
+        <Box>
           <Text color={theme.dim}>{hint}</Text>
         </Box>
       ) : null}
       <Box marginTop={1}>
+        <Text bold>{title}</Text>
+      </Box>
+      <Box>
         <Text color={theme.accent}>{"› "}</Text>
         <Text>{shown}</Text>
         <Text color={theme.accent}>▌</Text>

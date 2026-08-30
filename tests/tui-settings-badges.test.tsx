@@ -110,17 +110,15 @@ async function renderSettings(status: StatusRows) {
       persona={ALICE}
       status={status}
       onOpen={noop}
-      doctor={undefined}
-      doctorRunning={false}
-      onRunDoctor={noop}
-      onFullDoctor={noop}
       onEditIdentity={noop}
       onChangeBrain={noop}
       onChangeChannels={noop}
       onToggleAutostart={noop}
       onMakeDefault={noop}
+      releaseChannel="stable"
+      onToggleRelease={noop}
+      canSetDefault
       onBack={noop}
-      onLogs={noop}
     />,
     {
       stdin: fakeStdin() as never,
@@ -163,11 +161,12 @@ describe("settings badge semantics", () => {
 
   test("chat channels badge reads /status, not the persona snapshot", async () => {
     // p.channels is non-empty, but /status has no channel lines: the badge
-    // must agree with the "none configured" description, i.e. yellow optional.
+    // must agree with the /status reading, i.e. yellow optional. The
+    // description column is a static one-liner, not the probe output.
     const text = await renderSettings([]);
     const row = rowOf(text, "Chat Channels");
     expect(row.endsWith("optional")).toBe(true);
-    expect(row).toContain("none configured");
+    expect(row).toContain("the chat surfaces this phantom answers on");
   });
 
   test("a failing channel probe is an error badge, not green", async () => {
@@ -183,7 +182,9 @@ describe("settings badge semantics", () => {
     const text = await renderSettings([]);
     const row = rowOf(text, "Identity");
     expect(row.endsWith("✓ configured")).toBe(true);
-    expect(row).toContain("AGENTS.md ✗");
+    // The description column is the static one-liner — the missing-file
+    // detail lives in the /status rows (STATUS block), not in the row.
+    expect(row).toContain("the persona files that define who this phantom is");
   });
 
   test("a missing SOUL.md is required", async () => {
@@ -204,17 +205,15 @@ describe("settings badge semantics", () => {
         persona={lonely}
         status={[]}
         onOpen={noop}
-      doctor={undefined}
-      doctorRunning={false}
-      onRunDoctor={noop}
-      onFullDoctor={noop}
         onEditIdentity={noop}
         onChangeBrain={noop}
         onChangeChannels={noop}
         onToggleAutostart={noop}
         onMakeDefault={noop}
+        releaseChannel="stable"
+        onToggleRelease={noop}
+        canSetDefault={false}
         onBack={noop}
-        onLogs={noop}
       />,
       {
         stdin: fakeStdin() as never,

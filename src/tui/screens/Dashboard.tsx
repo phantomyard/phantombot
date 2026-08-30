@@ -100,6 +100,9 @@ export function DashboardScreen(props: {
   onChat: (persona: string) => void;
   onConfigure: (persona: string) => void;
   onNew: () => void;
+  onLogs: () => void;
+  /** Full Doctor run for the row the cursor sits on. */
+  onDoctor: (persona: string) => void;
   onBack: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
@@ -114,6 +117,8 @@ export function DashboardScreen(props: {
     else if (key.return && current) props.onChat(current.name);
     else if (char === "c" && current) props.onConfigure(current.name);
     else if (char === "n") props.onNew();
+    else if (char === "L") props.onLogs();
+    else if (char === "d" && current) props.onDoctor(current.name);
   });
 
   // A host with more phantoms than rows must show FEWER, not squeezed ones —
@@ -147,6 +152,8 @@ export function DashboardScreen(props: {
         { icon: badge.chat, key: "↵", label: "Chat" },
         { icon: badge.settings, key: "c", label: "Configure" },
         { icon: badge.new, key: "n", label: "New" },
+        { icon: badge.doctor, key: "d", label: "Doctor" },
+        { icon: badge.logs, key: "L", label: "Logs" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >

@@ -3,7 +3,7 @@
  *
  * One invisible, squared table — three aligned columns on every row:
  *
- *   name        what is configured (live /status readings)     state badge
+ *   name        one-liner on what the setting is for            state badge
  *
  * The first cut hung detail lines under each row and showed WHERE every value
  * came from (`env > config.toml > state.json`); that read like diagnostics,
@@ -19,10 +19,9 @@
  *
  * The table is framed in the Dashboard's exact design language — a `Rule`
  * above and below a dim header row (`setting · configured · state`) and a
- * third rule under the rows — and the Doctor menu row is gone: its checks
- * render as a DOCTOR telemetry block under the bottom rule, the same way the
- * Dashboard renders HOST. The checks run when the screen opens and `a`
- * re-runs them; `d` still opens the full Doctor screen for the whole report.
+ * third rule under the rows — and the Doctor menu row is gone: the bottom
+ * telemetry block carries the persona's full /status reading, the way the
+ * Dashboard renders HOST.
  *
  * Scoped to ONE persona on purpose. `^s` from a conversation means "the
  * settings of the phantom I am talking to" — it does not mean a host-wide list,
@@ -34,13 +33,12 @@ import { Box, Text, useInput } from "ink";
 
 import { Frame, Rule } from "../components/Frame.tsx";
 import { MenuItem } from "../components/Menu.tsx";
-import { badge, glyph, humanBytes, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 import type { StatusRows } from "../status.ts";
-import type { DoctorReport } from "../../cli/doctor.ts";
 
 /** Fixed geometry of a settings row, in terminal columns. */
 const BAR_COLS = 4; // TWO selection bars: Selectable's outer glyph cell and
@@ -107,7 +105,8 @@ export type Row =
   | "memory"
   | "voice"
   | "autostart"
-  | "default";
+  | "default"
+  | "release";
 
 const ROWS: Row[] = [
   "identity",
@@ -117,6 +116,7 @@ const ROWS: Row[] = [
   "voice",
   "autostart",
   "default",
+  "release",
 ];
 
 export function PersonaDetailScreen(props: {
@@ -128,23 +128,18 @@ export function PersonaDetailScreen(props: {
    * read `…` and fill in when it lands.
    */
   status?: StatusRows;
-  /**
-   * The doctor's latest report, for the telemetry block under the table.
-   * The App gathers it when the screen opens; `a` re-runs via
-   * `onRunDoctor`, `d` opens the full Doctor screen via `onFullDoctor`.
-   */
-  doctor?: DoctorReport;
-  doctorRunning?: boolean;
-  onRunDoctor: () => void;
-  onFullDoctor: () => void;
   onOpen: (target: Target) => void;
   onEditIdentity: () => void;
   onChangeBrain: () => void;
   onChangeChannels: () => void;
   onToggleAutostart: () => void;
   onMakeDefault: () => void;
+  /** The host's current release ring — shown on the Release Channel row. */
+  releaseChannel: string;
+  onToggleRelease: () => void;
+  /** False on a single-phantom host: the default row is informational there. */
+  canSetDefault: boolean;
   onBack: () => void;
-  onLogs: () => void;
 }): React.ReactElement {
   const [cursor, setCursor] = useState(0);
   const p = props.persona;
@@ -155,18 +150,19 @@ export function PersonaDetailScreen(props: {
     if (id === "brain") return props.onChangeBrain();
     if (id === "channels") return props.onChangeChannels();
     if (id === "autostart") return props.onToggleAutostart();
-    if (id === "default") return props.onMakeDefault();
+    if (id === "default") {
+      if (props.canSetDefault) return props.onMakeDefault();
+      return; // greyed out — a lone phantom IS the default, nothing to do
+    }
+    if (id === "release") return props.onToggleRelease();
     return props.onOpen(id);
   };
 
-  useInput((char, key) => {
+  useInput((_char, key) => {
     if (key.escape || key.leftArrow) return props.onBack();
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
     else if (key.downArrow) setCursor((c) => Math.min(ROWS.length - 1, c + 1));
     else if (key.return) press(row);
-    else if (char === "a") props.onRunDoctor();
-    else if (char === "d") props.onFullDoctor();
-    else if (char === "L") props.onLogs();
   });
 
   // The live /status reading, as a key→value lookup. `undefined` status means
@@ -197,9 +193,6 @@ export function PersonaDetailScreen(props: {
     return { badge: `${glyph.ok} ${okLabel}`, badgeColor: theme.ok };
   };
 
-  const identityMarks = p.identity.files
-    .map((f) => `${f.name} ${f.present ? glyph.ok : glyph.bad}`)
-    .join("   ");
   // Only SOUL.md / IDENTITY.md are load-bearing (loader.ts: at least one must
   // exist, else PersonaNotFoundError). AGENTS.md is an optional tools-hints
   // file (first match wins vs tools.md) — its absence must not trip the badge.
@@ -207,34 +200,24 @@ export function PersonaDetailScreen(props: {
     (f) => !f.present && (f.name === "SOUL.md" || f.name === "IDENTITY.md"),
   );
 
-  const chainLine = line("chain");
-  const modelsLine = line("models");
-  const brainDesc =
-    status === undefined
-      ? "…"
-      : [chainLine, modelsLine ? `models: ${modelsLine}` : undefined]
-          .filter((s): s is string => Boolean(s))
-          .join(" · ") || "none configured";
-
+  // The badge reads the same /status lines the STATUS block prints — one
+  // reader, no second opinion to drift — while the DESCRIPTION column is a
+  // static one-liner on what the setting is for, not live probe output.
   const channelParts = [line("telegram"), line("acp")].filter(
     (s): s is string => Boolean(s),
   );
-  const channelsDesc =
-    status === undefined
-      ? "…"
-      : channelParts.length > 0
-        ? channelParts.join(" · ")
-        : "none configured";
 
   // Chrome around the scrolling region: border (2), title (1), title gap (1),
   // the two "more" markers (2), footer (1), the framed header (three rules +
-  // the header row = 4), and the DOCTOR telemetry block (margin 1 + heading 1
-  // + up to four check lines = 6). A constant, like the chat screen's:
-  // measuring would mean reading the layout back out of Yoga mid-render, and
-  // one row conservative costs a blank line while one row optimistic tears the
-  // frame.
+  // the header row = 4), the rule under the rows (1), and the STATUS telemetry
+  // block (margin 1 + heading 1 + one line per /status row + the blank row
+  // under it = N + 3). A constant, like the chat screen's: measuring would
+  // mean reading the layout back out of Yoga mid-render, and one row
+  // conservative costs a blank line while one row optimistic tears the frame.
+  // While /status is still gathering the block is one line ("gathering…").
+  const statusLines = props.status?.length ?? 1;
   const size = useTerminalSize();
-  const budget = viewportRows(size, 15 + frameChromeRows());
+  const budget = viewportRows(size, 12 + statusLines + frameChromeRows());
 
   // Row height follows the live window width: a wrapped description is a
   // two-row cell, and the scroll window must reserve what the paint will
@@ -248,15 +231,15 @@ export function PersonaDetailScreen(props: {
   // out of column and break the table).
   const tableProps = { wrap: true, badgeWidth: 13 } as const;
 
-  const blocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
+  const mainBlocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
     {
       id: "identity",
-      height: h(identityMarks),
+      height: h("the persona files that define who this phantom is"),
       node: (
         <MenuItem
           icon="◐"
           label="Identity"
-          description={identityMarks}
+          description="the persona files that define who this phantom is"
           badge={identityMissing ? "required" : `${glyph.ok} configured`}
           badgeColor={identityMissing ? theme.bad : theme.ok}
           selected={row === "identity"}
@@ -267,12 +250,12 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "brain",
-      height: h(brainDesc),
+      height: h("which model and harness power this phantom"),
       node: (
         <MenuItem
           icon="◉"
           label="Brain"
-          description={brainDesc}
+          description="which model and harness power this phantom"
           badge={
             status === undefined
               ? "…"
@@ -291,12 +274,12 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "channels",
-      height: h(channelsDesc),
+      height: h("the chat surfaces this phantom answers on"),
       node: (
         <MenuItem
           icon="◎"
           label="Chat Channels"
-          description={channelsDesc}
+          description="the chat surfaces this phantom answers on"
           // Same source as the description (the /status lines), so the badge
           // and the text can never disagree — p.channels is a different
           // reader and testbot proved they drift (green badge over "none
@@ -327,12 +310,12 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "memory",
-      height: h(line("memory") ?? "…"),
+      height: h("the long-term memory database"),
       node: (
         <MenuItem
           icon="◆"
           label="Memory"
-          description={status === undefined ? "…" : (line("memory") ?? "not configured")}
+          description="the long-term memory database"
           {...probeBadge(line("memory"), "healthy")}
           selected={row === "memory"}
           onPress={() => press("memory")}
@@ -342,12 +325,12 @@ export function PersonaDetailScreen(props: {
     },
     {
       id: "voice",
-      height: h(line("voice") ?? "…"),
+      height: h("spoken replies, text-to-speech"),
       node: (
         <MenuItem
           icon="◈"
           label="Voice"
-          description={status === undefined ? "…" : (line("voice") ?? "not configured")}
+          description="spoken replies, text-to-speech"
           {...probeBadge(line("voice"), "configured")}
           selected={row === "voice"}
           onPress={() => press("voice")}
@@ -355,6 +338,17 @@ export function PersonaDetailScreen(props: {
         />
       ),
     },
+  ];
+
+  // The informational group — toggles, not health checks. They carry the
+  // VALUE where the badges sit (on|off, yes|no, stable|preview, dim, no
+  // glyph, no colour) and sit under their own rule, separated from the
+  // required/optional rows above.
+  const infoBlocks: Array<{
+    id: Row;
+    height: number;
+    node: React.ReactNode;
+  }> = [
     {
       id: "autostart",
       height: 1,
@@ -362,11 +356,8 @@ export function PersonaDetailScreen(props: {
         <MenuItem
           icon="⏻"
           label="Autostart"
-          description="starts with the daemon"
-          badge={
-            p.autostart || p.isDefault ? `${glyph.ok} on` : "optional"
-          }
-          badgeColor={p.autostart || p.isDefault ? theme.ok : theme.warn}
+          description="start this phantom with the daemon"
+          badge={p.autostart ? "on" : "off"}
           selected={row === "autostart"}
           onPress={() => press("autostart")}
           {...tableProps}
@@ -381,25 +372,51 @@ export function PersonaDetailScreen(props: {
           icon="★"
           label="Default"
           description={
-            p.isDefault
-              ? "owns /update and /restart"
-              : "not the host default"
+            props.canSetDefault
+              ? "the host default; owns /update and /restart"
+              : "the only phantom on this host, so it is the default"
           }
-          badge={p.isDefault ? `${glyph.ok} yes` : "optional"}
-          badgeColor={p.isDefault ? theme.ok : theme.warn}
+          badge={p.isDefault ? "yes" : "no"}
+          badgeColor={props.canSetDefault ? undefined : theme.dim}
           selected={row === "default"}
           onPress={() => press("default")}
           {...tableProps}
         />
       ),
     },
+    {
+      id: "release",
+      height: 1,
+      node: (
+        <MenuItem
+          icon="⇅"
+          label="Release Channel"
+          description="update ring this HOST follows; stable lags, preview tracks main"
+          badge={props.releaseChannel}
+          selected={row === "release"}
+          onPress={() => press("release")}
+          {...tableProps}
+        />
+      ),
+    },
   ];
 
-  // `blocks` is in ROWS order, so the cursor indexes both.
+  // Both groups render through one scroll window; the rule between them is a
+  // fixed one-row separator. The cursor indexes ROWS, which skips the
+  // separator — shift anything at or past autostart down by one so the
+  // window always reveals the row the cursor is actually on.
+  const blocks = [
+    ...mainBlocks,
+    { id: "sep" as const, height: 1, node: <Rule /> },
+    ...infoBlocks,
+  ];
+  const cursorBlock =
+    cursor >= ROWS.indexOf("autostart") ? cursor + 1 : cursor;
+
   const view = scrollWindow(
     blocks.map((b) => b.height),
     budget,
-    cursor,
+    cursorBlock,
   );
 
   return (
@@ -413,8 +430,6 @@ export function PersonaDetailScreen(props: {
       footer={[
         { icon: badge.move, key: "↑↓", label: "Move" },
         { icon: badge.edit, key: "↵", label: "Edit" },
-        { icon: badge.run, key: "a", label: "Doctor" },
-        { icon: badge.logs, key: "L", label: "Logs" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
@@ -431,7 +446,7 @@ export function PersonaDetailScreen(props: {
           <Text color={theme.dim}>setting</Text>
         </Box>
         <Box flexGrow={1} flexBasis={0}>
-          <Text color={theme.dim}>configured</Text>
+          <Text color={theme.dim}>description</Text>
         </Box>
         <Box marginLeft={1} flexShrink={0} width={13} justifyContent="flex-end">
           <Text color={theme.dim}>state</Text>
@@ -451,26 +466,24 @@ export function PersonaDetailScreen(props: {
         {view.below > 0 ? `▼ ${view.below} more below` : " "}
       </Text>
       <Rule />
-      <DoctorBlock report={props.doctor} running={Boolean(props.doctorRunning)} />
+      <StatusBlock status={props.status} />
+      {/* One blank row between the STATUS telemetry and the footer — the same
+          breathing room the footer gets on every other screen. */}
+      <Box height={1} />
     </Frame>
   );
 }
 
-/** One doctor check, in the Dashboard's HOST-block style: mark, label, dim
+/** One telemetry line, in the Dashboard's HOST-block style: mark, label, dim
  * detail — fixed columns, truncated detail, never a wrapped telemetry line. */
-function DoctorLine(props: {
-  ok: boolean | "warn";
+function StatusLine(props: {
   label: string;
   detail?: string;
 }): React.ReactElement {
-  const colour =
-    props.ok === true ? theme.ok : props.ok === "warn" ? theme.warn : theme.bad;
-  const mark =
-    props.ok === true ? glyph.ok : props.ok === "warn" ? glyph.warn : glyph.bad;
   return (
     <Box>
       <Box width={2} flexShrink={0}>
-        <Text color={colour}>{mark}</Text>
+        <Text color={theme.ok}>{glyph.ok}</Text>
       </Box>
       <Box width={14} flexShrink={0}>
         <Text>{props.label}</Text>
@@ -484,62 +497,27 @@ function DoctorLine(props: {
   );
 }
 
-/** The doctor as telemetry, where the Dashboard puts HOST: an accent heading
- * and label/value lines under the bottom rule. No menu row, no separate
- * screen for the at-a-glance state — the checks gather off the render path
- * when the screen opens (App) and `a` re-runs them. */
-function DoctorBlock(props: {
-  report?: DoctorReport;
-  running: boolean;
+/** The full telemetry, where the Dashboard puts HOST: the persona's complete
+ * /status reading — heading, label/value dim pairs under the bottom rule.
+ * Status is already gathered for the table's badges. */
+function StatusBlock(props: {
+  status?: StatusRows;
 }): React.ReactElement {
-  const r = props.report;
   return (
     <Box marginTop={1} flexDirection="column">
       <Box>
         <Text color={theme.accent} bold>
-          DOCTOR
-        </Text>
-        <Box flexGrow={1} />
-        <Text color={theme.dim}>
-          {props.running ? "running checks…" : "a run again"}
+          STATUS
         </Text>
       </Box>
-      {!r ? (
-        <Text color={theme.dim}>
-          {props.running ? "running checks..." : "no report yet — press a"}
-        </Text>
+      {!props.status ? (
+        <Text color={theme.dim}>gathering…</Text>
       ) : (
-        <>
-          <DoctorLine
-            ok={r.telegram.healthy}
-            label="telegram"
-            detail={`${r.telegram.listeners} listener(s)`}
-          />
-          <DoctorLine
-            ok={r.memory_db.healthy}
-            label="memory db"
-            detail={humanBytes(r.memory_db.bytes)}
-          />
-          <DoctorLine
-            ok={
-              r.nightly.health === "ok"
-                ? true
-                : r.nightly.health === "error"
-                  ? false
-                  : "warn"
-            }
-            label="nightly"
-            detail={r.nightly.detail}
-          />
-          {r.nightly.backlog > 0 ? (
-            <DoctorLine
-              ok="warn"
-              label="backlog"
-              detail={`${r.nightly.backlog} day(s) pending${r.nightly.oldest_pending ? `, oldest ${r.nightly.oldest_pending}` : ""}`}
-            />
-          ) : null}
-        </>
+        props.status.map(([label, detail]) => (
+          <StatusLine key={label} label={label} detail={detail} />
+        ))
       )}
     </Box>
   );
 }
+

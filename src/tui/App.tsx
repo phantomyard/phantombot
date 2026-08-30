@@ -24,10 +24,12 @@ import {
   applyAutostart,
   applyDefaultPersona,
   applyEmbedding,
+  applyUpdateChannel,
   applyVoice,
   describeAutostartChange,
   describeDefaultPersonaChange,
   describeEmbeddingChange,
+  describeUpdateChannelChange,
   describeVoiceChange,
   setSecret,
   unsetSecret,
@@ -451,12 +453,13 @@ export function App(props: AppProps): React.ReactElement {
     [personaName],
   );
 
-  const runTheDoctor = useCallback(async () => {
+  const runTheDoctor = useCallback(async (who?: string) => {
+    const target = who ?? personaName;
     setDoctorRunning(true);
     try {
       let buffer = "";
       await (props.runDoctorImpl ?? runDoctor)({
-        persona: personaName,
+        persona: target,
         json: true,
         // Read-only: opening a health screen must not repair anything behind
         // the user's back.
@@ -469,7 +472,10 @@ export function App(props: AppProps): React.ReactElement {
       // must not cost the user the report that already succeeded.
       try {
         setDoctorStatus(
-          await gatherStatus({ persona: personaName, chain: persona?.chain }),
+          await gatherStatus({
+            persona: target,
+            chain: host.personas.find((p) => p.name === target)?.chain,
+          }),
         );
       } catch {
         setDoctorStatus(undefined);
@@ -479,17 +485,11 @@ export function App(props: AppProps): React.ReactElement {
     } finally {
       setDoctorRunning(false);
     }
-  }, [personaName]);
+  }, [personaName, host]);
 
-  // The settings screen's doctor telemetry: gathered when the screen opens
-  // (once per persona — a report for another phantom is stale) and re-runnable
-  // with `a`. Same read-only run the Doctor screen uses; nothing is repaired
-  // behind the user's back.
-  useEffect(() => {
-    if (screen !== "persona" || doctorRunning) return;
-    if (doctorReport?.persona === personaName) return;
-    void runTheDoctor();
-  }, [screen, personaName, doctorReport, doctorRunning, runTheDoctor]);
+  // The settings screen no longer runs the doctor — its telemetry block shows
+  // the persona's /status reading only. The full Doctor screen (from the
+  // phantoms list) still gathers its report via runTheDoctor on open.
 
   /**
    * The Brain row, as the redesigned flow (`brainFlow.ts`).
@@ -579,9 +579,11 @@ export function App(props: AppProps): React.ReactElement {
 
         // Same post-apply hook the CLI runs: offer the restart when the
         // service is live, since a chain change only bites on the next spawn.
+        // A cancel that left the config untouched ("brain unchanged") must NOT
+        // offer one — the restart belongs to a change, not to a visit.
         // The q shim only needs `note` (unit upgrades, the skip message);
         // `confirm` is passed explicitly, mapped onto our own confirm screen.
-        await maybePromptRestart(
+        if (notice !== "brain unchanged") await maybePromptRestart(
           defaultServiceControl(),
           async (message) =>
             await askConfirmValue({
@@ -624,15 +626,15 @@ export function App(props: AppProps): React.ReactElement {
         // drop opening keystrokes.
         const { applyTelegramConfig } = await import("../cli/telegram.ts");
         const { telegramGetMe } = await import("../lib/telegramApi.ts");
+        const { maybePromptRestart } = await import("../cli/harness.ts");
+        const { defaultServiceControl } = await import("../lib/platform.ts");
         const { loadConfig, personaDir } = await import("../config.ts");
         const { resolvePersonaWriteTarget } = await import(
           "../lib/personaConfig.ts"
         );
-        const {
-          configurePhantomchat,
-          configureTelegram,
-          offerChannel,
-        } = await import("./channelsFlow.ts");
+        const { configurePhantomchat, configureTelegram } = await import(
+          "./channelsFlow.ts"
+        );
         const {
           ensurePhantomchatIdentity,
           savePhantomchatAllowlist,
@@ -648,22 +650,56 @@ export function App(props: AppProps): React.ReactElement {
         };
         const global = await loadConfig();
         const agentDir = personaDir(global, target.name);
-
-        // Same order as `phantombot init`: phantomchat, then telegram. BOTH are
-        // optional and each one is gated on its own choice, so a phantom that
-        // already has a channel is never walked back through its setup to reach
-        // the other one.
         const chat = loadPhantomchatPersonaConfig(agentDir);
-        if (
-          await offerChannel(questions, {
-            title: `PhantomChat for ${target.name}`,
-            configured: chat
-              ? chat.allowedNpubs.length > 0
-                ? `${chat.allowedNpubs.length} allowed npub(s)`
-                : "trust-on-first-use armed"
-              : undefined,
-          })
-        ) {
+        const personaConfig = await loadConfig(target.name);
+        const writeTarget = await resolvePersonaWriteTarget({
+          configPath: global.configPath,
+          personasDir: global.personasDir,
+          persona: target.name,
+        });
+        // Read the way the daemon reads: the persona's own layered block
+        // first, and only then the legacy per-persona routing table.
+        const existing =
+          personaConfig.channels.telegram ??
+          global.channels.telegramPersonas?.[target.name];
+
+        // Which channel to walk? The Choose screen — the same picker the
+        // Brain and Identity flows use. The current state sits in each row's
+        // hint so the pick is an informed one.
+        const which = await askChoice({
+          title: `Chat channel for ${target.name}`,
+          description: "which chat surface this phantom answers on",
+          options: [
+            {
+              value: "phantomchat",
+              label: "PhantomChat",
+              hint: chat
+                ? chat.allowedNpubs.length > 0
+                  ? `${chat.allowedNpubs.length} allowed npub(s)`
+                  : "trust-on-first-use armed"
+                : "not set up",
+            },
+            {
+              value: "telegram",
+              label: "Telegram",
+              hint: existing?.token
+                ? `${existing.allowedUserIds?.length ?? 0} allowed user(s)`
+                : "not set up",
+            },
+          ],
+        });
+        // esc on the picker is "did nothing" — no gate, no walkthrough.
+        if (!which) {
+          setNotice("channels unchanged");
+          return;
+        }
+
+        // The user PICKED the channel, so there is no offer/skip gate here —
+        // this is the same walkthrough `phantombot phantomchat --persona` or
+        // `phantombot telegram --persona` runs, asked on screens instead of
+        // @clack. The WRITE paths are those commands' own, so the TUI and the
+        // CLI cannot write different shapes of the same block.
+        if (which === "phantomchat") {
           notices.push(
             await configurePhantomchat(target.name, questions, {
               identity: async () => {
@@ -685,28 +721,7 @@ export function App(props: AppProps): React.ReactElement {
               },
             }),
           );
-        }
-
-        const personaConfig = await loadConfig(target.name);
-        const writeTarget = await resolvePersonaWriteTarget({
-          configPath: global.configPath,
-          personasDir: global.personasDir,
-          persona: target.name,
-        });
-        // Read the way the daemon reads: the persona's own layered block
-        // first, and only then the legacy per-persona routing table.
-        const existing =
-          personaConfig.channels.telegram ??
-          global.channels.telegramPersonas?.[target.name];
-
-        if (
-          await offerChannel(questions, {
-            title: `Telegram for ${target.name}`,
-            configured: existing?.token
-              ? `${existing.allowedUserIds?.length ?? 0} allowed user(s)`
-              : undefined,
-          })
-        ) {
+        } else {
           notices.push(
             await configureTelegram(target.name, questions, {
               existing: existing?.token
@@ -729,6 +744,29 @@ export function App(props: AppProps): React.ReactElement {
         }
 
         setNotice(notices.join(" · ") || "channels unchanged");
+
+        // Same post-apply hook the Brain flow runs: a channel change (token,
+        // allowlist, identity) only bites on the next service spawn, so offer
+        // the restart here — but only when something was actually SAVED.
+        if (notices.some((n) => n.includes("saved"))) {
+          await maybePromptRestart(
+            defaultServiceControl(),
+            async (message) =>
+              await askConfirmValue({
+                title: message,
+                consequence: {
+                  summary: "",
+                  detail: "",
+                  longRunning: false,
+                  restarts: true,
+                },
+              }),
+            {
+              note: (body: string, title?: string) =>
+                setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
+            } as never,
+          );
+        }
       } catch (e) {
         setNotice(`channels failed: ${(e as Error).message}`);
       } finally {
@@ -880,6 +918,16 @@ export function App(props: AppProps): React.ReactElement {
             go("persona");
           }}
           onNew={() => go("wizard")}
+          onLogs={() => go("logs")}
+          onDoctor={(name) => {
+            setPersonaName(name);
+            // A stale report from a previous run must not flash as THIS
+            // persona's — clear, then gather.
+            setDoctorReport(undefined);
+            setDoctorStatus(undefined);
+            go("doctor");
+            void runTheDoctor(name);
+          }}
           onBack={back}
         />
       );
@@ -898,12 +946,7 @@ export function App(props: AppProps): React.ReactElement {
         <PersonaDetailScreen
           persona={persona}
           status={detailStatus}
-          doctor={doctorReport}
-          doctorRunning={doctorRunning}
-          onRunDoctor={() => void runTheDoctor()}
-          onFullDoctor={() => go("doctor")}
           onBack={back}
-          onLogs={() => go("logs")}
           onEditIdentity={() => void editIdentity(persona)}
           onChangeBrain={() => void changeBrain(persona)}
           onChangeChannels={() => void changeChannels(persona)}
@@ -922,6 +965,29 @@ export function App(props: AppProps): React.ReactElement {
                 setNotice(
                   r.ok
                     ? `autostart: ${r.list.join(", ") || "none"}`
+                    : `failed: ${r.error}`,
+                );
+                await refresh();
+              },
+            });
+          }}
+          releaseChannel={host.updateChannel}
+          canSetDefault={host.personas.length > 1}
+          onToggleRelease={() => {
+            const next =
+              host.updateChannel === "preview" ? "stable" : "preview";
+            void askConfirm({
+              title: `Follow the ${next} release channel?`,
+              consequence: describeUpdateChannelChange(next),
+              run: async () => {
+                const { config } = await loadConfigForPersona(persona.name);
+                const r = await applyUpdateChannel({
+                  config,
+                  channel: next,
+                });
+                setNotice(
+                  r.ok
+                    ? `release channel: ${host.updateChannel} → ${next}`
                     : `failed: ${r.error}`,
                 );
                 await refresh();
@@ -1187,7 +1253,6 @@ export function App(props: AppProps): React.ReactElement {
     if (screen === "logs") {
       return (
         <LogsScreen
-          personaName={personaName}
           onBack={back}
         />
       );
