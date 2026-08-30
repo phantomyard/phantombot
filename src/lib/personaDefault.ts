@@ -116,9 +116,9 @@ export async function adoptAsDefaultIfMissing(
  *   1. If the resolved default is usable → return it (no-op). "Usable" is
  *      `defaultPersonaDefect`, not `existsSync` — see there for why.
  *   2. Scan the personas dir. If empty → return null (caller bails).
- *   3. Prefer a name matching the broken default (case mismatch / collision).
+ *   3. Prefer a USABLE name matching the broken default (case mismatch).
  *   4. Otherwise the first candidate that is itself usable.
- *   5. Otherwise the first name on disk, so a host with nothing but husks
+ *   5. Otherwise a husk (case-match first), so a host with nothing but husks
  *      still boots somewhere rather than staying pointed at a missing dir.
  *
  * Returns the healed persona name, or null if no personas exist at all.
@@ -133,23 +133,22 @@ export async function healDefaultPersonaIfBroken(
   const existing = listPersonaDirs(config);
   if (existing.length === 0) return null;
 
-  // Prefer a persona whose name matches the broken default (case-insensitive),
-  // then the first candidate that is itself usable, and only then fall back to
-  // the first name on disk. Without the middle step a host with two husks and
-  // one real phantom heals alphabetically into another husk (#505).
+  // Prefer a USABLE persona whose name matches the broken default
+  // (case-insensitive), then the first candidate that is itself usable, and
+  // only then fall back to a husk (case-match first, then first on disk).
+  // Without the middle step a host with two husks and one real phantom heals
+  // alphabetically into another husk (#505).
   const brokenName = config.defaultPersona.toLowerCase();
-  const match = existing.find(
-    (n) => n.toLowerCase() === brokenName && n !== config.defaultPersona,
-  );
-  let healed = match;
-  if (healed === undefined) {
-    healed = existing.find(
-      (n) =>
-        n !== config.defaultPersona &&
-        defaultPersonaDefect(config, n) === null,
-    );
-  }
-  healed ??= existing.find((n) => n !== config.defaultPersona) ?? existing[0]!;
+  const others = existing.filter((n) => n !== config.defaultPersona);
+  const usable = (n: string) => defaultPersonaDefect(config, n) === null;
+  const caseMatch = others.find((n) => n.toLowerCase() === brokenName);
+  // The case-only match only wins if it is itself usable: preferring a husk
+  // named `Kai` over a working `real` would write the broken name to
+  // state.json and leave the host unbootable (#506 review).
+  let healed = caseMatch !== undefined && usable(caseMatch) ? caseMatch : undefined;
+  healed ??= others.find(usable);
+  healed ??= caseMatch;
+  healed ??= others[0] ?? existing[0]!;
   if (healed === config.defaultPersona) return config.defaultPersona;
 
   const state = await loadState();

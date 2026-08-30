@@ -202,6 +202,40 @@ describe("healDefaultPersonaIfBroken — husk defaults (#505)", () => {
     expect(healed).toBe("zreal");
   });
 
+  test("a case-only name match must itself be usable to win (#506 review)", async () => {
+    // `kai` is broken and `Kai` is another husk: preferring the case match
+    // would write a still-broken name to state.json while `real` was right
+    // there. Case-insensitive is a HINT, not a licence to heal into a husk.
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await mkdir(join(personasDir, "Kai"), { recursive: true });
+    await makePersona("real");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("real");
+    expect((await loadState()).default_persona).toBe("real");
+  });
+
+  test("a USABLE case-only match still wins over an unrelated persona", async () => {
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await makePersona("Kai");
+    await makePersona("areal");
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("Kai");
+  });
+
+  test("falls back to the case match when every candidate is a husk", async () => {
+    await mkdir(join(personasDir, "kai"), { recursive: true });
+    await mkdir(join(personasDir, "Kai"), { recursive: true });
+    await mkdir(join(personasDir, "ahusk"), { recursive: true });
+    const healed = await healDefaultPersonaIfBroken(
+      makeConfig(personasDir, "kai"),
+    );
+    expect(healed).toBe("Kai");
+  });
+
   test("leaves a populated default alone even when other personas exist", async () => {
     await makePersona("phantom");
     await makePersona("kai");
