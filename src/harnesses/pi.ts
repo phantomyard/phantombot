@@ -63,6 +63,7 @@ import {
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
 import { createHarnessTempDir } from "../lib/harnessArgvFiles.ts";
+import { renderConversationPayload } from "./payload.ts";
 
 export interface PiHarnessConfig {
   /** Path to the `pi` CLI binary. Default: "pi" (looked up in PATH). */
@@ -489,16 +490,7 @@ export class PiHarness implements Harness {
  * Exported for testing.
  */
 export function renderPayload(req: HarnessRequest): string {
-  const parts: string[] = [];
-  for (const turn of req.history) {
-    if (turn.role === "user") {
-      parts.push(turn.text);
-    } else {
-      parts.push(`<previous_response>\n${turn.text}\n</previous_response>`);
-    }
-  }
-  parts.push(req.userMessage);
-  return parts.join("\n\n");
+  return renderConversationPayload(req);
 }
 
 /**

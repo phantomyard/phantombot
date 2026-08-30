@@ -1,13 +1,15 @@
 /**
  * Construct the system prompt for a turn.
  *
- * Order matters. Persona first (most stable, most cacheable). Memory next.
- * Channel context (sender name, timestamp) last so the LRU prompt-cache on
- * the Anthropic side stays warm for the persona-and-memory prefix.
+ * Serialization order is a cache optimization: keep stable persona material
+ * together and place changing channel context later so downstream prompt
+ * caches can reuse the longest stable prefix. Position does not assign trust,
+ * authority, or security meaning.
  */
 
 import { OKF_AGENT_TYPES, OKF_CORE_TYPES } from "../lib/okf.js";
 import type { PersonaFiles } from "./loader.js";
+import { TURN_CONTEXT_SYSTEM_RULE } from "./turnContext.ts";
 
 export interface ChannelContext {
   channel: string; // 'telegram' | 'signal' | 'googlechat'
@@ -34,68 +36,7 @@ export function buildSystemPrompt(
   durableFacts?: string,
   dailyRecall?: string,
 ): string {
-  const sections: string[] = [];
-
-  sections.push("# Identity\n\n" + persona.boot.trim());
-
-  if (persona.memory) {
-    sections.push("# Persistent memory\n\n" + persona.memory.trim());
-  }
-
-  if (persona.tools) {
-    sections.push("# Tools available to you\n\n" + persona.tools.trim());
-  }
-
-  // Always-on memory tool description + the two hard rules. Comes after
-  // the persona-supplied tools.md so user customizations stay primary,
-  // but always present so the harness knows the search/get/today
-  // commands exist and that it should use them.
-  sections.push(MEMORY_TOOLS_SECTION);
-
-  // Always-on scheduling rules. The Claude Code harness ships native
-  // CronCreate/Delete/List tools that are session-bound and invisible
-  // to the user — we want the agent to reach for `phantombot task`
-  // instead. Injected even when the persona has its own tools.md so
-  // every persona gets the same scheduling discipline.
-  sections.push(SCHEDULING_TOOLS_SECTION);
-
-  // Always-on MCP toolbox hint. One line, memory_search-style: advertise that
-  // `phantombot mcp` EXISTS and should be searched on demand, WITHOUT
-  // enumerating any tool schemas (lazy discovery — eager injection bloats every
-  // prompt and degrades tool selection). Present for every persona so an agent
-  // knows external MCP tools are reachable when a task needs external data.
-  sections.push(MCP_TOOLS_SECTION);
-
-  // Out-of-band notification rules. Sits next to scheduling on purpose:
-  // the most common reason for an agent to notify is a scheduled task
-  // surfacing something material. Kept in its own section (rather than
-  // tucked under credentials, where it used to live) because it's
-  // about *talking to the user*, not about secrets.
-  sections.push(NOTIFICATION_SECTION);
-
-  // Shared-checkout protocol (#405). Sits after notifications because it is
-  // about the agent's own hygiene rather than about talking to the user. It
-  // has to be in the prompt — an advisory lock nothing enforces only works if
-  // the agent knows to take it.
-  sections.push(WORKSPACE_LOCK_SECTION);
-
-  // Credential discovery + persistence rules. Same rationale as memory tools:
-  // injected after the persona's own tools.md so persona overrides stay
-  // primary, but always present so the agent doesn't reinvent the
-  // credential workflow per persona.
-  sections.push(CREDENTIALS_SECTION);
-
-  // Security perimeter. The block CHANGES with provenance — this is the
-  // prompt-layer half of the two-tier trust model. The structural half is
-  // the tool-less threat judge (orchestrator/screen.ts), which has
-  // already screened any untrusted content BEFORE this prompt runs.
-  // Placed late so it sits close to the channel context + user message
-  // and is among the last instructions the model reads.
-  sections.push(
-    channelCtx.trusted
-      ? SECURITY_PERIMETER_TRUSTED_SECTION
-      : SECURITY_PERIMETER_UNTRUSTED_SECTION,
-  );
+  const sections = buildStableSections(persona, channelCtx);
 
   // Durable facts established earlier in THIS conversation, pulled by a plain
   // SQL read (no model call) at prompt-assembly time. Sits just above the
@@ -128,6 +69,53 @@ export function buildSystemPrompt(
   );
 
   return sections.join("\n\n");
+}
+
+/**
+ * Build the stable system portion used by the cache-friendly path.
+ * Volatile facts, retrieval, daily recall, and display-only channel metadata
+ * are intentionally not accepted here. Security selection remains system
+ * material because explicit trust/threat-screen policy selects it; prompt
+ * placement is not an authority boundary.
+ */
+export function buildStableSystemPrompt(
+  persona: PersonaFiles,
+  channelCtx: ChannelContext,
+): string {
+  return [...buildStableSections(persona, channelCtx), TURN_CONTEXT_SYSTEM_RULE].join(
+    "\n\n",
+  );
+}
+
+function buildStableSections(
+  persona: PersonaFiles,
+  channelCtx: ChannelContext,
+): string[] {
+  const sections: string[] = [];
+
+  sections.push("# Identity\n\n" + persona.boot.trim());
+
+  if (persona.memory) {
+    sections.push("# Persistent memory\n\n" + persona.memory.trim());
+  }
+
+  if (persona.tools) {
+    sections.push("# Tools available to you\n\n" + persona.tools.trim());
+  }
+
+  sections.push(MEMORY_TOOLS_SECTION);
+  sections.push(SCHEDULING_TOOLS_SECTION);
+  sections.push(MCP_TOOLS_SECTION);
+  sections.push(NOTIFICATION_SECTION);
+  sections.push(WORKSPACE_LOCK_SECTION);
+  sections.push(CREDENTIALS_SECTION);
+  sections.push(
+    channelCtx.trusted
+      ? SECURITY_PERIMETER_TRUSTED_SECTION
+      : SECURITY_PERIMETER_UNTRUSTED_SECTION,
+  );
+
+  return sections;
 }
 
 /**

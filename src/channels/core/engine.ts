@@ -503,6 +503,7 @@ export async function runTelegramServer(
           idleTimeoutMs: input.config.harnessIdleTimeoutMs,
           hardTimeoutMs: input.config.harnessHardTimeoutMs,
           startupTimeoutMs: input.config.harnessStartupTimeoutMs,
+          promptCache: input.config.promptCache,
           // Reaction from an allow-listed principal → trusted, so the memory
           // capture may write. runReactionTurn skips the threat screen for it.
           trusted: true,
@@ -1297,6 +1298,7 @@ async function processChatMessage(
       idleTimeoutMs: input.config.harnessIdleTimeoutMs,
       hardTimeoutMs: input.config.harnessHardTimeoutMs,
       startupTimeoutMs: input.config.harnessStartupTimeoutMs,
+      promptCache: input.config.promptCache,
       signal: controller.signal,
       // Security perimeter: the ONLY place `trusted: true` originates.
       // True iff the sender is an allow-listed principal (see the

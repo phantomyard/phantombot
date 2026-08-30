@@ -72,6 +72,7 @@ import {
   buildForegroundMcpConfig,
   EMPTY_MCP_CONFIG,
 } from "../mcp/harnessConfig.ts";
+import { renderConversationPayload } from "./payload.ts";
 
 export interface ClaudeHarnessConfig {
   /** Path to the `claude` CLI binary. Default: "claude" (looked up in PATH). */
@@ -475,16 +476,7 @@ export function filterAuthEnv(
  * Exported for testing.
  */
 export function renderStdinPayload(req: HarnessRequest): string {
-  const parts: string[] = [];
-  for (const turn of req.history) {
-    if (turn.role === "user") {
-      parts.push(turn.text);
-    } else {
-      parts.push(`<previous_response>\n${turn.text}\n</previous_response>`);
-    }
-  }
-  parts.push(req.userMessage);
-  return parts.join("\n\n");
+  return renderConversationPayload(req);
 }
 
 /**

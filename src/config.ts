@@ -646,6 +646,18 @@ export const DEFAULT_TELEGRAM_STREAMING: TelegramStreamingSettings = {
   voiceMaxSentences: 3,
 };
 
+export interface PromptCacheSettings {
+  /** Enable cache-friendly serialization order and bounded append-only epochs. */
+  enabled: boolean;
+  /** Maximum rendered UTF-8 bytes retained in one disposable epoch. */
+  maxEpochBytes: number;
+}
+
+export const DEFAULT_PROMPT_CACHE: PromptCacheSettings = {
+  enabled: false,
+  maxEpochBytes: 80_000,
+};
+
 export interface Config {
   /** Persona used by `ask`/`chat` when --persona is omitted. */
   defaultPersona: string;
@@ -764,6 +776,9 @@ export interface Config {
   };
 
   telegramStreaming?: TelegramStreamingSettings;
+
+  /** One opt-in switch for prompt ordering plus bounded cache epochs. */
+  promptCache?: PromptCacheSettings;
 
   /**
    * Standing default for interim "progress narration" bubbles in the chat
@@ -1189,6 +1204,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     unknown
   >;
   const tomlVoice = (toml.voice ?? {}) as Record<string, unknown>;
+  const tomlPromptCache = (toml.prompt_cache ?? {}) as Record<string, unknown>;
 
   const configuredChain =
     harnessEnv("PHANTOMBOT_HARNESS_CHAIN", ["chain"])
@@ -1403,6 +1419,8 @@ export async function loadConfig(persona?: string): Promise<Config> {
     },
 
     telegramStreaming: buildTelegramStreamingConfig(tomlTelegram),
+
+    promptCache: buildPromptCacheConfig(tomlPromptCache),
 
     // Standing default for interim progress-narration bubbles. An explicit
     // value always wins (env for scripted/test setups, then `chattiness` in
@@ -2395,6 +2413,25 @@ function asBool(v: unknown): boolean | undefined {
     if (["0", "false", "no", "off"].includes(s)) return false;
   }
   return undefined;
+}
+
+function buildPromptCacheConfig(
+  toml: Record<string, unknown>,
+): PromptCacheSettings {
+  const configuredMax =
+    asInt(process.env.PHANTOMBOT_PROMPT_CACHE_MAX_EPOCH_BYTES) ??
+    asInt(toml.max_epoch_bytes);
+  const maxEpochBytes =
+    configuredMax !== undefined && configuredMax > 0
+      ? configuredMax
+      : DEFAULT_PROMPT_CACHE.maxEpochBytes;
+  return {
+    enabled:
+      asBool(process.env.PHANTOMBOT_PROMPT_CACHE_ENABLED) ??
+      asBool(toml.enabled) ??
+      DEFAULT_PROMPT_CACHE.enabled,
+    maxEpochBytes,
+  };
 }
 
 /**

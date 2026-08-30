@@ -171,6 +171,15 @@ phantombot builds the persona prompt, loads relevant memory, sends the turn to
 the harness, and relays the final answer to Telegram. The harness performs the
 SSH, file edits, searches, and command execution through its native tool loop.
 
+PhantomBot remains the owner of conversation history and durable memory. An
+opt-in prompt-cache setting keeps persona instructions and security policy in
+the stable system prompt, places each turn's retrieved context, durable facts,
+daily recall, and channel metadata after canonical history, and retains a
+bounded append-only chain of completed turns for exact-prefix reuse. Cache
+state is disposable acceleration; losing it never loses memory. The feature is
+disabled by default, and its benefit depends on the selected backend supporting
+exact prompt-prefix caching.
+
 ## Install
 
 ```bash
@@ -616,6 +625,82 @@ always has.
 Some keys describe the *machine* and are only ever read from the global file:
 `default_persona`, `autostart_personas`, `update_channel`, `personas_dir` and
 `memory_db`. A persona cannot elect itself default or move the personas root.
+
+### Prompt-cache optimization
+
+The optimization is one opt-in feature and is disabled by default:
+
+```toml
+[prompt_cache]
+enabled = false
+max_epoch_bytes = 80000
+```
+
+Use this primarily for self-hosted/local inference, such as llama.cpp or vLLM,
+where the operator controls the prefix/KV cache. Hosted-provider users should
+generally leave it disabled: hosted APIs manage caching differently, and an
+epoch can lengthen billed input while PhantomBot cannot control provider-side
+cache behavior.
+
+When enabled, PhantomBot keeps persona, policy, security, and instruction-bearing
+overlay material in the stable system prompt, then places the current
+PhantomBot-provided context and user message after canonical history. This
+ordering is only a cache/prefix-reuse optimization; prompt position does not
+grant trust or authority. Completed turns are appended to a small, in-process
+cache epoch so payload N is an exact textual prefix of payload N+1.
+The epoch is rebuilt from the canonical memory database when its byte budget is
+reached or its identity is no longer valid. That rebase causes one cold turn;
+it does not discard or rewrite durable memory.
+
+Epoch bookkeeping is disposable optimization state, not part of turn
+correctness. If no epoch state exists, PhantomBot starts a fresh cold epoch
+from canonical history. Invalid, corrupt, or inconsistent state is discarded;
+preparation failures fall back to the normal feature-off prompt path for that
+request. A failure while preparing, completing, or discarding cache bookkeeping
+is contained: a valid model response remains a successful user turn. Cache-error
+telemetry contains safe metadata only and never prompt content.
+
+Security authority comes from explicit trust state, threat screening,
+security/system policy, and epoch invalidation; prompt position is not a
+security mechanism. Retrieved memories, durable facts, daily recall, and
+historical snapshots are data/context, not a new instruction channel.
+Security boundaries are explicit cache boundaries too. Trusted/untrusted
+transitions rebase from canonical history even if prompt text would otherwise
+look unchanged. Persona entry is observed before screening and cache
+eligibility, including cache-disabled and no-history turns, so changing persona
+within a conversation discards the prior persona state and A → B → A cannot
+revive it. A held untrusted request discards the warm epoch before the hold
+returns. For untrusted turns, only a returned screen `pass` is fingerprinted as
+screened; a missing or throwing screener remains fail-open but is fingerprinted
+as unscreened, so recovery also crosses a cold boundary. Effective tool-surface
+changes also rebase. Channel authentication, allowlists, harness/MCP
+configuration, and other security settings use the existing restart-required
+configuration lifecycle; a process restart clears all in-process epoch state.
+Persona/policy prompt edits remain additionally covered by the full system
+fingerprint. These are security lifecycle rules, not claims about prompt
+position or authority.
+
+The epoch contains no backend handles, slot identifiers, sessions, or persisted
+conversation data. It disappears on process restart, persona/conversation
+changes, prompt-policy changes, history edits, and failed serialization checks.
+`max_epoch_bytes` measures PhantomBot-rendered UTF-8 bytes, not exact model
+tokens. Harness, chat-template, and tool tokens may exist outside this
+measurement, so it is an optimization bound rather than a backend context
+guarantee. Operators should choose it conservatively for their model/harness;
+the shipped `80000` value will be tuned from benchmark evidence later. There is
+no fixed speedup guarantee: backends that do not reuse exact prefixes receive
+the same correct conversation semantics, with only the opt-in serialization
+behavior.
+
+The serialized-prefix property is distinct from backend KV reuse. Pi, Claude,
+and Codex are stateless CLI harnesses, so the immediately previous generated
+assistant response is not guaranteed to be reusable in the model input on the
+very next request when the chat-template role boundary differs. The historical
+context and user message remain identical, and the wrapped assistant response
+becomes part of the reusable serialized prefix on a later request.
+
+Environment overrides are `PHANTOMBOT_PROMPT_CACHE_ENABLED` and
+`PHANTOMBOT_PROMPT_CACHE_MAX_EPOCH_BYTES`.
 
 The first time a newer phantombot starts, it **copies** the persona-scoped keys
 out of the global file into each persona's own file. It never deletes anything:

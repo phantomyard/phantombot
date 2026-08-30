@@ -964,6 +964,7 @@ export async function runPhantomchatServer(
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
         startupTimeoutMs: input.config.harnessStartupTimeoutMs,
+        promptCache: input.config.promptCache,
         signal: turnSignal,
         // The trust grant — see the auth gate above. False for a relay bridge,
         // which selects the UNTRUSTED perimeter block and arms the screen below.
@@ -1392,6 +1393,7 @@ export async function runPhantomchatServer(
         idleTimeoutMs: input.config.harnessIdleTimeoutMs,
         hardTimeoutMs: input.config.harnessHardTimeoutMs,
         startupTimeoutMs: input.config.harnessStartupTimeoutMs,
+        promptCache: input.config.promptCache,
         trusted: true,
         send: (text) => transport.sendMessage(reaction.conversationId, text),
         retrieve: makeRetriever(

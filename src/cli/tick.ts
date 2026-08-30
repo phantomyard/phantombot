@@ -306,6 +306,7 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
             memory,
             idleTimeoutMs: taskConfig.harnessIdleTimeoutMs,
             hardTimeoutMs: BACKGROUND_WAKE_HARD_TIMEOUT_MS,
+            promptCache: taskConfig.promptCache,
             // #324: an agent-woken task should wake with the same memory
             // instincts a conversation turn gets — semantic recall + durable
             // facts on the READ side, and consolidate its observations back on
