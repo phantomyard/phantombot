@@ -101,6 +101,13 @@ export interface AppProps {
     config: Config;
     persona: string;
   }) => Promise<ChatSession>;
+  /**
+   * Seam for tests, same reason as `openSession`: the settings screen runs
+   * the doctor when it opens, and the real checks need a real persona on
+   * disk. Injectable so a screen-level test can pin the DOCTOR telemetry
+   * block with a well-formed report instead of a failure notice.
+   */
+  runDoctorImpl?: typeof runDoctor;
 }
 
 export function App(props: AppProps): React.ReactElement {
@@ -448,7 +455,7 @@ export function App(props: AppProps): React.ReactElement {
     setDoctorRunning(true);
     try {
       let buffer = "";
-      await runDoctor({
+      await (props.runDoctorImpl ?? runDoctor)({
         persona: personaName,
         json: true,
         // Read-only: opening a health screen must not repair anything behind
@@ -473,6 +480,16 @@ export function App(props: AppProps): React.ReactElement {
       setDoctorRunning(false);
     }
   }, [personaName]);
+
+  // The settings screen's doctor telemetry: gathered when the screen opens
+  // (once per persona — a report for another phantom is stale) and re-runnable
+  // with `a`. Same read-only run the Doctor screen uses; nothing is repaired
+  // behind the user's back.
+  useEffect(() => {
+    if (screen !== "persona" || doctorRunning) return;
+    if (doctorReport?.persona === personaName) return;
+    void runTheDoctor();
+  }, [screen, personaName, doctorReport, doctorRunning, runTheDoctor]);
 
   /**
    * The Brain row, as the redesigned flow (`brainFlow.ts`).
@@ -881,6 +898,10 @@ export function App(props: AppProps): React.ReactElement {
         <PersonaDetailScreen
           persona={persona}
           status={detailStatus}
+          doctor={doctorReport}
+          doctorRunning={doctorRunning}
+          onRunDoctor={() => void runTheDoctor()}
+          onFullDoctor={() => go("doctor")}
           onBack={back}
           onLogs={() => go("logs")}
           onEditIdentity={() => void editIdentity(persona)}
@@ -943,12 +964,7 @@ export function App(props: AppProps): React.ReactElement {
             });
           }}
           onOpen={(target) => {
-            if (target === "doctor") {
-              go("doctor");
-              void runTheDoctor();
-            } else {
-              go(target);
-            }
+            go(target);
           }}
         />
       );

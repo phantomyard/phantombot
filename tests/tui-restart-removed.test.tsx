@@ -18,6 +18,7 @@ import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
+import type { DoctorReport } from "../src/cli/doctor.ts";
 
 function fakeStdin() {
   const s = new PassThrough() as PassThrough & {
@@ -141,6 +142,26 @@ afterEach(() => {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const strip = (s: string) => s.replace(/\u001B\[[0-9;]*m/g, "");
 
+// The persona screen runs the doctor when it opens; the real checks need a
+// real persona on disk and would fail late, shifting frames after settle().
+// Inject an instant report so the screen reaches a stable frame quickly.
+const FAKE_REPORT: DoctorReport = {
+  persona: "alice",
+  telegram: { healthy: true, listeners: 2, personas: [] },
+  memory_db: {
+    path: "/x/db",
+    healthy: true,
+    detail: "integrity ok",
+    bytes: 44040192,
+    restore_points: [],
+    unretired_drawers: [],
+  },
+  nightly: { age_hours: 2, health: "ok", detail: "no backlog", backlog: 0 },
+  capture: { window_hours: 24, user_turns: 10, captures: 9, dry_day: false },
+  embeddings: { provider: "gemini", semantic_search: true },
+  update: { channel: "stable", version: "0.0.0-test" },
+};
+
 async function open() {
   const stdin = fakeStdin();
   const stdout = fakeStdout(44);
@@ -148,6 +169,10 @@ async function open() {
     <App
       host={HOST}
       startPersona="alice"
+      runDoctorImpl={async (opts) => {
+        opts?.out?.write(JSON.stringify(FAKE_REPORT));
+        return 0;
+      }}
       onCreatePersona={async () => {}}
       openSession={async ({ persona }) => ({
         persona,

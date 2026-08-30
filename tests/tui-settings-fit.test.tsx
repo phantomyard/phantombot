@@ -2,11 +2,16 @@
  * A screen taller than the window must SHOW FEWER ROWS, not squeezed ones.
  *
  * Reported as "it deforms": on a 20-row terminal the settings screen drew all
- * ten of its sections regardless, and Yoga made them fit by compressing —
- * two readings printed on the same line (`indexedngs  12,904 … in sync001 ·
+ * of its sections regardless, and Yoga made them fit by compressing — two
+ * readings printed on the same line (`indexedngs  12,904 … in sync001 ·
  * 1536`) and the bottom border came out as `╰─ ─ ─✚─Doctor────────run the
  * checks───────╯`. Clipping the frame body stops the border tearing; only
  * windowing the content stops the rows colliding, so this test asserts BOTH.
+ *
+ * Since the Dashboard re-skin the table also gained a framed header (rule,
+ * dim `setting · configured · state` row, rule), a rule under the rows, and
+ * the DOCTOR telemetry block where the Doctor menu row used to be — so the
+ * screen is taller and windowing returns in short windows.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -19,6 +24,7 @@ import { render } from "ink";
 
 import { App } from "../src/tui/App.tsx";
 import type { HostSnapshot, PersonaSnapshot } from "../src/tui/snapshot.ts";
+import type { DoctorReport } from "../src/cli/doctor.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
 
 function fakeStdin() {
@@ -45,8 +51,8 @@ function fakeStdout(rows: number, columns = 100) {
   };
   s.columns = columns;
   s.rows = rows;
-  s.frames = frames;
   s.write = (c: string) => void frames.push(c);
+  s.frames = frames;
   return s;
 }
 
@@ -110,6 +116,33 @@ const HOST: HostSnapshot = {
   personas: [ALICE],
 };
 
+// The settings screen runs the doctor when it opens (the DOCTOR telemetry
+// block under the table). The fixture persona has no directory, so the real
+// checks would fail — inject a well-formed report instead, via App's
+// `runDoctorImpl` seam (a module-level mock would leak into every other
+// test file in the suite's process).
+const FAKE_REPORT: DoctorReport = {
+  persona: "alice",
+  telegram: { healthy: true, listeners: 2, personas: [] },
+  memory_db: {
+    path: "/x/db",
+    healthy: true,
+    detail: "integrity ok",
+    bytes: 44040192,
+    restore_points: [],
+    unretired_drawers: [],
+  },
+  nightly: {
+    age_hours: 2,
+    health: "ok",
+    detail: "no backlog",
+    backlog: 0,
+  },
+  capture: { window_hours: 24, user_turns: 10, captures: 9, dry_day: false },
+  embeddings: { provider: "gemini", semantic_search: true },
+  update: { channel: "stable", version: "0.0.0-test" },
+};
+
 const saved: Record<string, string | undefined> = {};
 const ENV = [
   "PHANTOMBOT_CONFIG",
@@ -149,6 +182,10 @@ async function openSettings(rows: number, columns = 100) {
     <App
       host={HOST}
       startPersona="alice"
+      runDoctorImpl={async (opts) => {
+        opts?.out?.write(JSON.stringify(FAKE_REPORT));
+        return 0;
+      }}
       onCreatePersona={async () => {}}
       openSession={async ({ persona }) => ({
         persona,
@@ -174,18 +211,16 @@ async function openSettings(rows: number, columns = 100) {
   stdin.write("\x13"); // ^s — the phantom table
   await sleep(80);
   stdin.write("c"); // Configure the selected phantom
-  await sleep(80);
+  await sleep(200); // the doctor gathers off-render once the screen opens
   // Colour codes out: chalk is on in CI (and a sibling suite forces it on
   // the shared singleton), so assert on the text a user reads.
   return stripAnsi(stdout.frames.at(-1) ?? "").split("\n");
 }
 
 describe("settings screen in a short window", () => {
-  // Since the screen became a single squared table (one row per setting, no
-  // detail blocks), the whole thing fits a 20-row window. The original
-  // shearing regression is still worth pinning — the frame must survive —
-  // but the expected shape changed: every row visible, no scrolling.
-  test("the boxed frame survives and every row fits", async () => {
+  // The framed header + DOCTOR block make the screen taller than it was, so
+  // a 20-row boxed window windows the rows. The frame must survive that.
+  test("the boxed frame survives, windowing announced", async () => {
     process.env.PHANTOMBOT_TUI_FRAME = "boxed";
     const lines = await openSettings(20);
     delete process.env.PHANTOMBOT_TUI_FRAME;
@@ -197,10 +232,9 @@ describe("settings screen in a short window", () => {
     expect(bottom).toBeDefined();
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
 
-    // All eight settings fit — first and last row both painted.
+    // Rows are dropped, not squeezed — and the screen says so.
     expect(text).toContain("Identity");
-    expect(text).toContain("Doctor");
-    expect(text).not.toContain("more below");
+    expect(text).toContain("more below");
   });
 
   test("the bare frame keeps its footer below the table", async () => {
@@ -217,24 +251,36 @@ describe("settings screen in a short window", () => {
     expect(lines.join("\n")).not.toContain("indexedngs");
   });
 
-  test("a narrow window wraps descriptions and windowing returns", async () => {
+  test("a narrow window wraps descriptions and keeps the frame intact", async () => {
     // At 60 columns the identity marks and probe lines no longer fit on one
-    // line — descriptions wrap, rows grow, and the screen is taller than 20
-    // rows again. Windowing must drop rows (announced) rather than compress.
+    // line — descriptions wrap, rows grow, and the screen is taller again.
     process.env.PHANTOMBOT_TUI_FRAME = "boxed";
-    const lines = await openSettings(20, 60);
+    const lines = await openSettings(30, 60);
     delete process.env.PHANTOMBOT_TUI_FRAME;
 
     const bottom = lines.find((l) => l.trimStart().startsWith("╰"))!;
     expect(bottom).toBeDefined();
     expect(/^╰─+╯$/.test(bottom.trim())).toBe(true);
-    expect(lines.join("\n")).toContain("more below");
   });
 
-  test("a tall window needs no marker", async () => {
+  test("a tall window shows the whole screen, doctor included", async () => {
     const lines = await openSettings(44);
-    expect(lines.join("\n")).toContain("Doctor");
-    expect(lines.join("\n")).not.toContain("more below");
+    const text = lines.join("\n");
+
+    expect(text).not.toContain("more below");
+
+    // The Dashboard skeleton: dim header row between two rules, a rule under
+    // the rows, and the DOCTOR telemetry block below that.
+    expect(text).toContain("setting");
+    expect(text).toContain("configured");
+    expect(text).toContain("state");
+    expect(text).toContain("DOCTOR");
+    expect(text).toContain("telegram");
+    expect(text).toContain("memory db");
+    expect(text).toContain("nightly");
+
+    // The Doctor menu row is gone — no old description, no leading ✚.
+    expect(text).not.toContain("run the checks");
   });
 
   test("the table reads as name · what /status says · state", async () => {

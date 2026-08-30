@@ -17,6 +17,13 @@
  * mandatory), yellow `optional` (not configured but nothing is wrong), green
  * `✓ …` (configured and healthy).
  *
+ * The table is framed in the Dashboard's exact design language — a `Rule`
+ * above and below a dim header row (`setting · configured · state`) and a
+ * third rule under the rows — and the Doctor menu row is gone: its checks
+ * render as a DOCTOR telemetry block under the bottom rule, the same way the
+ * Dashboard renders HOST. The checks run when the screen opens and `a`
+ * re-runs them; `d` still opens the full Doctor screen for the whole report.
+ *
  * Scoped to ONE persona on purpose. `^s` from a conversation means "the
  * settings of the phantom I am talking to" — it does not mean a host-wide list,
  * which is what `^p` is for.
@@ -25,14 +32,15 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 
-import { Frame } from "../components/Frame.tsx";
+import { Frame, Rule } from "../components/Frame.tsx";
 import { MenuItem } from "../components/Menu.tsx";
-import { badge, glyph, theme } from "../theme.ts";
+import { badge, glyph, humanBytes, theme } from "../theme.ts";
 import { scrollWindow } from "../scroll.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeColumns, frameChromeRows } from "../chrome.ts";
 import type { PersonaSnapshot } from "../snapshot.ts";
 import type { StatusRows } from "../status.ts";
+import type { DoctorReport } from "../../cli/doctor.ts";
 
 /** Fixed geometry of a settings row, in terminal columns. */
 const BAR_COLS = 4; // TWO selection bars: Selectable's outer glyph cell and
@@ -83,7 +91,7 @@ function descriptionLines(desc: string, columns: number): number {
 }
 
 /** Screens this one leads to. */
-export type Target = "memory" | "voice" | "doctor";
+export type Target = "memory" | "voice";
 
 /**
  * Everything the cursor can land on, in screen order.
@@ -99,8 +107,7 @@ export type Row =
   | "memory"
   | "voice"
   | "autostart"
-  | "default"
-  | "doctor";
+  | "default";
 
 const ROWS: Row[] = [
   "identity",
@@ -110,7 +117,6 @@ const ROWS: Row[] = [
   "voice",
   "autostart",
   "default",
-  "doctor",
 ];
 
 export function PersonaDetailScreen(props: {
@@ -122,6 +128,15 @@ export function PersonaDetailScreen(props: {
    * read `…` and fill in when it lands.
    */
   status?: StatusRows;
+  /**
+   * The doctor's latest report, for the telemetry block under the table.
+   * The App gathers it when the screen opens; `a` re-runs via
+   * `onRunDoctor`, `d` opens the full Doctor screen via `onFullDoctor`.
+   */
+  doctor?: DoctorReport;
+  doctorRunning?: boolean;
+  onRunDoctor: () => void;
+  onFullDoctor: () => void;
   onOpen: (target: Target) => void;
   onEditIdentity: () => void;
   onChangeBrain: () => void;
@@ -149,6 +164,8 @@ export function PersonaDetailScreen(props: {
     if (key.upArrow) setCursor((c) => Math.max(0, c - 1));
     else if (key.downArrow) setCursor((c) => Math.min(ROWS.length - 1, c + 1));
     else if (key.return) press(row);
+    else if (char === "a") props.onRunDoctor();
+    else if (char === "d") props.onFullDoctor();
     else if (char === "L") props.onLogs();
   });
 
@@ -210,12 +227,14 @@ export function PersonaDetailScreen(props: {
         : "none configured";
 
   // Chrome around the scrolling region: border (2), title (1), title gap (1),
-  // the two "more" markers (2), footer (1). A constant, like the chat screen's:
+  // the two "more" markers (2), footer (1), the framed header (three rules +
+  // the header row = 4), and the DOCTOR telemetry block (margin 1 + heading 1
+  // + up to four check lines = 6). A constant, like the chat screen's:
   // measuring would mean reading the layout back out of Yoga mid-render, and
   // one row conservative costs a blank line while one row optimistic tears the
   // frame.
   const size = useTerminalSize();
-  const budget = viewportRows(size, 5 + frameChromeRows());
+  const budget = viewportRows(size, 15 + frameChromeRows());
 
   // Row height follows the live window width: a wrapped description is a
   // two-row cell, and the scroll window must reserve what the paint will
@@ -374,24 +393,6 @@ export function PersonaDetailScreen(props: {
         />
       ),
     },
-    {
-      id: "doctor",
-      height: 1,
-      node: (
-        <MenuItem
-          icon="✚"
-          label="Doctor"
-          description="run the checks"
-          badge={
-            p.completeness.complete ? `${glyph.ok} ok` : `${glyph.warn} unfinished`
-          }
-          badgeColor={p.completeness.complete ? theme.ok : theme.warn}
-          selected={row === "doctor"}
-          onPress={() => press("doctor")}
-          {...tableProps}
-        />
-      ),
-    },
   ];
 
   // `blocks` is in ROWS order, so the cursor indexes both.
@@ -412,10 +413,31 @@ export function PersonaDetailScreen(props: {
       footer={[
         { icon: badge.move, key: "↑↓", label: "Move" },
         { icon: badge.edit, key: "↵", label: "Edit" },
+        { icon: badge.run, key: "a", label: "Doctor" },
         { icon: badge.logs, key: "L", label: "Logs" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >
+      {/* The framed header — the phantoms table's exact skeleton: a rule, a
+          dim lowercase header row sitting over the columns, a rule. The
+          lead-in matches a row's gutters (Selectable's pointer + MenuItem's
+          bar + the icon cell) so the labels sit over their columns. */}
+      <Rule />
+      <Box>
+        <Box width={6}>
+          <Text> </Text>
+        </Box>
+        <Box width={16} flexShrink={0}>
+          <Text color={theme.dim}>setting</Text>
+        </Box>
+        <Box flexGrow={1} flexBasis={0}>
+          <Text color={theme.dim}>configured</Text>
+        </Box>
+        <Box marginLeft={1} flexShrink={0} width={13} justifyContent="flex-end">
+          <Text color={theme.dim}>state</Text>
+        </Box>
+      </Box>
+      <Rule />
       <Text color={theme.dim}>
         {view.above > 0 ? `▲ ${view.above} more above` : " "}
       </Text>
@@ -428,6 +450,96 @@ export function PersonaDetailScreen(props: {
       <Text color={theme.dim}>
         {view.below > 0 ? `▼ ${view.below} more below` : " "}
       </Text>
+      <Rule />
+      <DoctorBlock report={props.doctor} running={Boolean(props.doctorRunning)} />
     </Frame>
+  );
+}
+
+/** One doctor check, in the Dashboard's HOST-block style: mark, label, dim
+ * detail — fixed columns, truncated detail, never a wrapped telemetry line. */
+function DoctorLine(props: {
+  ok: boolean | "warn";
+  label: string;
+  detail?: string;
+}): React.ReactElement {
+  const colour =
+    props.ok === true ? theme.ok : props.ok === "warn" ? theme.warn : theme.bad;
+  const mark =
+    props.ok === true ? glyph.ok : props.ok === "warn" ? glyph.warn : glyph.bad;
+  return (
+    <Box>
+      <Box width={2} flexShrink={0}>
+        <Text color={colour}>{mark}</Text>
+      </Box>
+      <Box width={14} flexShrink={0}>
+        <Text>{props.label}</Text>
+      </Box>
+      <Box flexGrow={1} flexBasis={0}>
+        <Text color={theme.dim} wrap="truncate">
+          {props.detail ?? ""}
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+/** The doctor as telemetry, where the Dashboard puts HOST: an accent heading
+ * and label/value lines under the bottom rule. No menu row, no separate
+ * screen for the at-a-glance state — the checks gather off the render path
+ * when the screen opens (App) and `a` re-runs them. */
+function DoctorBlock(props: {
+  report?: DoctorReport;
+  running: boolean;
+}): React.ReactElement {
+  const r = props.report;
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Box>
+        <Text color={theme.accent} bold>
+          DOCTOR
+        </Text>
+        <Box flexGrow={1} />
+        <Text color={theme.dim}>
+          {props.running ? "running checks…" : "a run again"}
+        </Text>
+      </Box>
+      {!r ? (
+        <Text color={theme.dim}>
+          {props.running ? "running checks..." : "no report yet — press a"}
+        </Text>
+      ) : (
+        <>
+          <DoctorLine
+            ok={r.telegram.healthy}
+            label="telegram"
+            detail={`${r.telegram.listeners} listener(s)`}
+          />
+          <DoctorLine
+            ok={r.memory_db.healthy}
+            label="memory db"
+            detail={humanBytes(r.memory_db.bytes)}
+          />
+          <DoctorLine
+            ok={
+              r.nightly.health === "ok"
+                ? true
+                : r.nightly.health === "error"
+                  ? false
+                  : "warn"
+            }
+            label="nightly"
+            detail={r.nightly.detail}
+          />
+          {r.nightly.backlog > 0 ? (
+            <DoctorLine
+              ok="warn"
+              label="backlog"
+              detail={`${r.nightly.backlog} day(s) pending${r.nightly.oldest_pending ? `, oldest ${r.nightly.oldest_pending}` : ""}`}
+            />
+          ) : null}
+        </>
+      )}
+    </Box>
   );
 }
