@@ -889,6 +889,19 @@ built-in default. Env vars still win over both. `default_persona`,
 `autostart_personas`, `update_channel`, `personas_dir` and `memory_db` describe
 the machine, so they are ignored inside a persona file.
 
+**Who am I when I omit `--persona`?** `phantombot doctor` answers it on its
+first line: the resolved default persona, WHERE it came from, whether it is
+usable and how many MCP servers it has. Provenance matters because the layer
+operators reach for first is the one that loses — resolution is
+`PHANTOMBOT_DEFAULT_PERSONA` env > `state.json` > `config.toml` > the built-in
+`phantom`, so editing `default_persona` in `config.toml` on a host that has ever
+created or switched a persona changes nothing at all. Doctor fails (exit 1) when
+the default has no persona directory, or when its `mcp.json` will not parse. It
+WARNS, without failing, when the default has no MCP servers while another
+persona on the box does — the signature of a default left pointing at a persona
+that has been migrated away, where every persona-scoped read still succeeds
+against the wrong, empty persona.
+
 **Lifecycle commands belong to the default persona.** `/update` and `/restart`
 swap the binary and bounce the service for *everyone* in the process, so they
 are only accepted in the default persona's chats; anywhere else they reply with
@@ -1604,6 +1617,10 @@ Task behavior:
 - LLM-backed tasks spawn the configured harness.
 - Command-backed tasks run a local shell command directly.
 - Command tasks receive a minimal environment plus only named `--secret` vars.
+- That environment always includes `PHANTOMBOT_PERSONA`, set to the persona
+  that OWNS the task. A command that shells back into `phantombot` (`ask`,
+  `notify`, `mcp call`, `memory ...`) therefore acts as its own persona rather
+  than falling through to the host default.
 - Task stdout, stderr, exit status, and next run are recorded.
 - Tasks run silently by default.
 - Missed runs are skipped rather than replayed in a burst.

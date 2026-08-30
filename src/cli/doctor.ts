@@ -65,6 +65,12 @@ import {
   reconcileEditorConnectors,
   type EditorConnectorResult,
 } from "../connectors/acp/autoInstall.ts";
+import {
+  defaultPersonaDefect,
+  defaultPersonaProvenance,
+  listPersonaDirs,
+} from "../lib/personaDefault.ts";
+import { loadRegistry } from "../mcp/registry.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
@@ -263,6 +269,38 @@ export interface DoctorReport {
     nightly_last_run?: string;
   }>;
   /**
+   * The HOST DEFAULT persona (#505): who am I when a command omits
+   * `--persona`, and is that persona actually usable?
+   *
+   * There was no way to answer that, and the failure is silent by
+   * construction: a stale default resolves to a real directory, so every
+   * persona-scoped read (vault, memory, MCP registry) succeeds against the
+   * WRONG, empty persona instead of failing. One line here turns an
+   * afternoon of debugging into a glance.
+   *
+   * `served` is `default ∪ autostart_personas` — the default is in it by
+   * definition, so a false here means the config is self-contradictory.
+   * `mcp_servers` counts entries in the resolved persona's `mcp.json`;
+   * `mcp_error` is set when the registry exists but does not load. An empty
+   * registry while ANOTHER persona has one is the exact shape of a
+   * migrated-away default, so it warns — but warn-only, because a
+   * legitimately MCP-free host must not fail its health check.
+   */
+  default_persona: {
+    resolved: string;
+    provenance: "env" | "state" | "config" | "builtin";
+    exists: boolean;
+    served: boolean;
+    /** null when usable; otherwise why it is not (missing identity, ...). */
+    defect: string | null;
+    mcp_servers: number;
+    mcp_error?: string;
+    /** Other personas on this host that DO have MCP servers registered. */
+    mcp_elsewhere: string[];
+    healthy: boolean;
+    detail: string;
+  };
+  /**
    * Configured harness binaries resolved from the service/runtime PATH.
    * Catches installs that work in an interactive shell but fail under the
    * daemon environment.
@@ -351,6 +389,12 @@ export interface RunDoctorInput {
   checkMaintenance?:
     | false
     | (() => Promise<DoctorReport["maintenance"] | undefined>);
+  /**
+   * Test seam for the default-persona check (#505). Pass a function to
+   * substitute a fake report. In production this is undefined and doctor
+   * reads state.json, the persona dirs and each persona's mcp.json.
+   */
+  checkDefaultPersona?: () => Promise<DoctorReport["default_persona"]>;
   /**
    * Test seam for harness binary availability. Pass false to skip. In
    * production, doctor checks the installed service PATH when running as the
@@ -623,6 +667,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     }
   }
 
+  // Host default-persona health (#505) — who am I when `--persona` is omitted?
+  const defaultPersonaReport = input.checkDefaultPersona
+    ? await input.checkDefaultPersona()
+    : await defaultCheckDefaultPersona(host);
+
   // Map any "fired before, then went stale" marker to its timer unit.
   // These are the `active (elapsed)` zombies that is-active can't see —
   // the heal step restarts them to force a reschedule. We deliberately
@@ -832,6 +881,7 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       channel: updateChannel,
       version: VERSION,
     },
+    default_persona: defaultPersonaReport,
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
     ...(maintenanceReport ? { maintenance: maintenanceReport } : {}),
@@ -878,10 +928,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // about the data. No restore point at all is NOT a failure on its own — a
   // box installed this afternoon has none yet, and crying WARN there would
   // teach an operator to ignore the line that matters.
+  // A default persona that is not usable (missing dir, missing identity,
+  // unopenable memory) is a genuine failure: every command that omits
+  // --persona is aimed at it. An EMPTY-but-loadable MCP registry is not —
+  // that is a warning, because plenty of hosts register no MCP servers at all.
+  const defaultPersonaBroken =
+    defaultPersonaReport.defect !== null ||
+    defaultPersonaReport.mcp_error !== undefined;
+
   const memoryDbBroken = dbPresent && !dbHealth.ok;
   const telegramBroken = !telegramReport.healthy;
   const exitCode =
     memoryDbBroken
+      ? 1
+      : defaultPersonaBroken
       ? 1
       : health.status === "error"
       ? 1
@@ -907,6 +967,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Human summary.
   const tick = (ok: boolean) => (ok ? "ok" : "WARN");
   out.write(`phantombot doctor — persona '${persona}'\n`);
+  {
+    const d = defaultPersonaReport;
+    out.write(
+      `  default persona: ${tick(d.healthy)} — '${d.resolved}' ` +
+        `(from ${provenanceLabel(d.provenance)})\n`,
+    );
+    out.write(`    ${d.detail}\n`);
+    if (d.provenance === "state") {
+      out.write(
+        "    note: state.json OUTRANKS config.toml's default_persona — " +
+          "editing the TOML key will not change this\n",
+      );
+    }
+  }
   out.write(
     `  telegram: ${tick(telegramReport.healthy)} — ` +
       `${telegramReport.listeners} listener(s) across ` +
@@ -1209,6 +1283,91 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   }
 
   return exitCode;
+}
+
+/** Human label for where the default persona came from. */
+function provenanceLabel(p: DoctorReport["default_persona"]["provenance"]): string {
+  switch (p) {
+    case "env":
+      return "PHANTOMBOT_DEFAULT_PERSONA env";
+    case "state":
+      return "state.json";
+    case "config":
+      return "config.toml";
+    case "builtin":
+      return "built-in fallback";
+  }
+}
+
+/**
+ * Production wiring for the default-persona check (#505).
+ *
+ * Everything here is cheap and read-only: state.json for provenance, the
+ * shared `defaultPersonaDefect` predicate for usability (the same one heal
+ * keys on, so doctor and heal can never disagree), and one `mcp.json` read
+ * per persona on disk. `loadRegistry` returns an empty registry when the file
+ * is absent and THROWS when it is present but malformed, so an unparseable
+ * registry is reported as an error rather than laundered into "0 servers".
+ */
+async function defaultCheckDefaultPersona(
+  host: Config,
+): Promise<DoctorReport["default_persona"]> {
+  const resolved = host.defaultPersona;
+  const provenance = await defaultPersonaProvenance(host);
+  const exists = existsSync(personaDir(host, resolved));
+  const served = servedPersonasOf(host).includes(resolved);
+  const defect = defaultPersonaDefect(host, resolved);
+
+  let mcpServers = 0;
+  let mcpError: string | undefined;
+  if (exists) {
+    try {
+      const registry = await loadRegistry(personaDir(host, resolved));
+      mcpServers = Object.keys(registry.mcpServers).length;
+    } catch (e) {
+      mcpError = (e as Error).message;
+    }
+  }
+
+  // Which OTHER personas have MCP servers? An empty default next to a
+  // populated sibling is the signature of a stale/migrated default — the
+  // exact state that silently sent a poller's `mcp call` into the void.
+  const mcpElsewhere: string[] = [];
+  for (const name of listPersonaDirs(host)) {
+    if (name === resolved) continue;
+    try {
+      const registry = await loadRegistry(personaDir(host, name));
+      if (Object.keys(registry.mcpServers).length > 0) mcpElsewhere.push(name);
+    } catch {
+      // A sibling's broken registry is not this check's business.
+    }
+  }
+
+  const detail = defect
+    ? `NOT usable: ${defect}`
+    : mcpError
+      ? `mcp.json does not load: ${mcpError}`
+      : mcpServers === 0 && mcpElsewhere.length > 0
+        ? `usable, but no MCP servers registered while ${mcpElsewhere.join(", ")} ` +
+          `has some — commands run without --persona will not see them`
+        : `usable; ${mcpServers} MCP server(s); ${served ? "served" : "NOT in the served set"}`;
+
+  return {
+    resolved,
+    provenance,
+    exists,
+    served,
+    defect,
+    mcp_servers: mcpServers,
+    ...(mcpError ? { mcp_error: mcpError } : {}),
+    mcp_elsewhere: mcpElsewhere,
+    healthy:
+      defect === null &&
+      mcpError === undefined &&
+      served &&
+      !(mcpServers === 0 && mcpElsewhere.length > 0),
+    detail,
+  };
 }
 
 async function computeHarnessReport(
