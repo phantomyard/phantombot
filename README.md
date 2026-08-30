@@ -586,9 +586,13 @@ that is serving live conversations, killing whatever turn was in flight.
 Because it is read by `defaultServiceControl()`, it applies to *every* caller,
 not just the TUI: with the variable set, in-chat `/update` and `/restart` also
 stop restarting anything while still reporting success. Every suppressed
-mutation logs `platform: service change suppressed` at warn level, so
-`phantombot logs` tells you why nothing happened. **Never set it on a host
-running the real service** — the daemon will silently stop taking updates.
+mutation logs `platform: service change suppressed`, naming the op. That line
+goes to the **stderr of the process that has the variable set** — your terminal
+for a `bun run src/index.ts` checkout, and the `^l` log pane inside the TUI
+(which swaps the sink for its own ring buffer). It reaches `phantombot logs`
+only if the *daemon itself* was started with the variable set — which is the
+case you never want: **never set it on a host running the real service**, or
+the daemon will silently stop taking updates.
 
 ## Configuration
 

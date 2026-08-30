@@ -141,6 +141,9 @@ export function isSandbox(
  * warning. Without it, `/update` on a host that happens to have the var
  * set reports success while never restarting anything, and the only
  * explanation goes to a `stderr` field most call sites never read.
+ * `rerenderUnitIfStale()` logs at info instead: it returns
+ * {rerendered:false}, which is honest rather than a false success, and is
+ * what the real backend returns in a dev checkout anyway.
  */
 export function sandboxServiceControl(inner: ServiceControl): ServiceControl {
   const suppressed = (op: string) => async () => {
@@ -158,8 +161,16 @@ export function sandboxServiceControl(inner: ServiceControl): ServiceControl {
     start: suppressed("start"),
     stop: suppressed("stop"),
     restart: suppressed("restart"),
+    // Logged, but NOT at warn — unlike the three verbs above, this one has
+    // no deceptive success to warn about. It answers {rerendered:false},
+    // which is exactly what the real POSIX backend answers in the sandbox's
+    // own headline case: `defaultRerenderUnitIfStale` bails on
+    // `isPhantombotBinary(process.execPath)`, false under `bun run`. Warning
+    // there would fire on a call that was never going to write anything, and
+    // a warn line that cries wolf in the common case is one contributors
+    // learn to ignore — including the three that do matter.
     async rerenderUnitIfStale() {
-      log.warn("platform: service change suppressed", {
+      log.info("platform: unit re-render skipped", {
         reason: "PHANTOMBOT_SANDBOX",
         op: "rerenderUnitIfStale",
       });

@@ -304,12 +304,21 @@ live conversations — when your branch saves config.
 The trap is the blast radius. `defaultServiceControl()` has ~15 callers,
 including `cli/update.ts`, `lib/serviceLifecycle.ts` and `channels/commands.ts`,
 and most of them only check `ok`. So on a host with the variable set, `/update`
-and `/restart` report success while restarting nothing. Every suppressed
-mutation therefore logs `platform: service change suppressed` with
-`reason: "PHANTOMBOT_SANDBOX"` and the op name — that warning is the only signal
+and `/restart` report success while restarting nothing. Each of those three
+therefore logs `platform: service change suppressed` at **warn** with
+`reason: "PHANTOMBOT_SANDBOX"` and the op name — that line is the only signal
 a caller who ignores `stderr` will ever see, so **do not remove it when adding
 a mutation to `ServiceControl`**: a new verb that suppresses silently
 reintroduces exactly this bug.
+
+`rerenderUnitIfStale` logs the same fields at **info**
+(`platform: unit re-render skipped`), not warn: it returns `{rerendered: false}`
+rather than a false success, and that is what the real backend returns under
+`bun run` anyway (`defaultRerenderUnitIfStale` bails on `isPhantombotBinary`).
+Warning on a call that would not have written anything is how a warn line
+gets ignored. The line goes to the stderr of whichever process has the
+variable set — your terminal in a dev checkout, the TUI's `^l` pane, and the
+service journal only if the daemon itself was started with it.
 
 ## Credentials
 

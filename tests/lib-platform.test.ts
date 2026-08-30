@@ -311,7 +311,7 @@ describe("sandbox service suppression", () => {
     expect(calls).toEqual([]);
   });
 
-  test("every suppressed mutation logs a warning naming the op", async () => {
+  test("every suppressed mutation logs, naming the op", async () => {
     // The whole hazard of this wrapper is that it reports ok=true, which is
     // indistinguishable from a real restart to the ~15 callers of
     // defaultServiceControl() that only check `ok`. The warn line is the only
@@ -335,8 +335,6 @@ describe("sandbox service suppression", () => {
     const lines = captured.map((l) => JSON.parse(l));
     expect(lines).toHaveLength(4);
     for (const line of lines) {
-      expect(line.level).toBe("warn");
-      expect(line.msg).toBe("platform: service change suppressed");
       expect(line.reason).toBe("PHANTOMBOT_SANDBOX");
     }
     expect(lines.map((l) => l.op)).toEqual([
@@ -345,6 +343,19 @@ describe("sandbox service suppression", () => {
       "restart",
       "rerenderUnitIfStale",
     ]);
+
+    // The three verbs that report ok=true are the deceptive ones, so they
+    // warn. rerenderUnitIfStale returns {rerendered:false} — the same answer
+    // the real backend gives under `bun run` — so it only informs; warning on
+    // a call that would not have written anything trains readers to ignore
+    // the line.
+    expect(lines.slice(0, 3).map((l) => [l.level, l.msg])).toEqual([
+      ["warn", "platform: service change suppressed"],
+      ["warn", "platform: service change suppressed"],
+      ["warn", "platform: service change suppressed"],
+    ]);
+    expect(lines[3].level).toBe("info");
+    expect(lines[3].msg).toBe("platform: unit re-render skipped");
   });
 
   test("isActive still delegates, so status is the truth", async () => {
