@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { setLogSink } from "../src/lib/logSink.ts";
 import {
   syncHeartbeatInstances,
   currentPlatform,
@@ -308,6 +309,42 @@ describe("sandbox service suppression", () => {
     });
 
     expect(calls).toEqual([]);
+  });
+
+  test("every suppressed mutation logs a warning naming the op", async () => {
+    // The whole hazard of this wrapper is that it reports ok=true, which is
+    // indistinguishable from a real restart to the ~15 callers of
+    // defaultServiceControl() that only check `ok`. The warn line is the only
+    // signal those callers leave behind, so pin it: a future verb added to
+    // ServiceControl that suppresses SILENTLY reintroduces #484.
+    const captured: string[] = [];
+    const restore = setLogSink((line) => captured.push(line));
+    try {
+      const { control } = trackingBackend(true);
+      const sandboxed = sandboxServiceControl(control);
+      await sandboxed.start();
+      await sandboxed.stop();
+      await sandboxed.restart();
+      await sandboxed.rerenderUnitIfStale();
+      // A query is not a mutation — it must stay silent.
+      await sandboxed.isActive();
+    } finally {
+      restore();
+    }
+
+    const lines = captured.map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line.level).toBe("warn");
+      expect(line.msg).toBe("platform: service change suppressed");
+      expect(line.reason).toBe("PHANTOMBOT_SANDBOX");
+    }
+    expect(lines.map((l) => l.op)).toEqual([
+      "start",
+      "stop",
+      "restart",
+      "rerenderUnitIfStale",
+    ]);
   });
 
   test("isActive still delegates, so status is the truth", async () => {

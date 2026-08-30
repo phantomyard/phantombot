@@ -293,6 +293,24 @@ cannot truncate a developer's real logs.
 
 If you change a unit body (any `generate*` function in `src/lib/systemd.ts`), `ensureUnitCurrent` will detect the on-disk unit as stale on the next `phantombot voice` / `phantombot harness` / etc. run and rewrite it automatically. The previous body is preserved as `${unitPath}.bak` for rollback.
 
+**`PHANTOMBOT_SANDBOX` is a GLOBAL kill-switch, not a TUI one (#484).** When it
+is set to anything but `""` or `0`, `defaultServiceControl()` wraps the host
+backend in `sandboxServiceControl()`: `isActive()` still delegates (queries tell
+the truth), while `start`, `stop`, `restart` and `rerenderUnitIfStale` become
+no-ops that report `ok: true`. It exists so a `bun run src/index.ts` dev
+checkout cannot bounce the host's real `phantombot.service` — the daemon serving
+live conversations — when your branch saves config.
+
+The trap is the blast radius. `defaultServiceControl()` has ~15 callers,
+including `cli/update.ts`, `lib/serviceLifecycle.ts` and `channels/commands.ts`,
+and most of them only check `ok`. So on a host with the variable set, `/update`
+and `/restart` report success while restarting nothing. Every suppressed
+mutation therefore logs `platform: service change suppressed` with
+`reason: "PHANTOMBOT_SANDBOX"` and the op name — that warning is the only signal
+a caller who ignores `stderr` will ever see, so **do not remove it when adding
+a mutation to `ServiceControl`**: a new verb that suppresses silently
+reintroduces exactly this bug.
+
 ## Credentials
 
 Credentials live in the per-persona encrypted vault. The agent NEVER appends

@@ -32,6 +32,7 @@ import {
   launchdLogPaths,
   launchdLogsDir,
 } from "./launchd.ts";
+import { log } from "./logger.ts";
 import {
   defaultSyncHeartbeatInstances as syncSystemdHeartbeatInstances,
   defaultSystemdServiceControl,
@@ -133,18 +134,35 @@ export function isSandbox(
  * The suppressed calls report ok=true rather than an error, because a
  * suppressed restart is the intended outcome here, not a failure the user
  * needs to act on.
+ *
+ * Because ok=true is indistinguishable from a real restart to the ~15
+ * callers of `defaultServiceControl()` — `cli/update.ts` and
+ * `channels/commands.ts` among them — every suppression ALSO logs a
+ * warning. Without it, `/update` on a host that happens to have the var
+ * set reports success while never restarting anything, and the only
+ * explanation goes to a `stderr` field most call sites never read.
  */
 export function sandboxServiceControl(inner: ServiceControl): ServiceControl {
-  const suppressed = async () => ({
-    ok: true,
-    stderr: "sandbox: service change suppressed (PHANTOMBOT_SANDBOX)",
-  });
+  const suppressed = (op: string) => async () => {
+    log.warn("platform: service change suppressed", {
+      reason: "PHANTOMBOT_SANDBOX",
+      op,
+    });
+    return {
+      ok: true,
+      stderr: `sandbox: service change suppressed (PHANTOMBOT_SANDBOX, ${op})`,
+    };
+  };
   return {
     isActive: () => inner.isActive(),
-    start: suppressed,
-    stop: suppressed,
-    restart: suppressed,
+    start: suppressed("start"),
+    stop: suppressed("stop"),
+    restart: suppressed("restart"),
     async rerenderUnitIfStale() {
+      log.warn("platform: service change suppressed", {
+        reason: "PHANTOMBOT_SANDBOX",
+        op: "rerenderUnitIfStale",
+      });
       return { rerendered: false };
     },
   };

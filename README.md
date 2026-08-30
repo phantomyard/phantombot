@@ -572,6 +572,24 @@ in health checks or deploy hooks. These are the *external* controls (run from a
 terminal); the in-chat `/restart` and `/update` commands still bounce the running
 service from inside itself.
 
+**`PHANTOMBOT_SANDBOX` — a global kill-switch for all four verbs.** Set it to
+anything other than `""` or `0` and every service *mutation* in the process
+becomes a no-op: `start`, `stop`, `restart` and the unit-file re-render all
+return success without touching the host's service. Queries still tell the
+truth, so `phantombot doctor` and the TUI keep showing the real service state.
+
+It exists for **development checkouts**. Running `bun run src/index.ts` from a
+working tree gives you a second phantombot *process* but not a second
+*service* — so a config save in your branch would bounce the production daemon
+that is serving live conversations, killing whatever turn was in flight.
+
+Because it is read by `defaultServiceControl()`, it applies to *every* caller,
+not just the TUI: with the variable set, in-chat `/update` and `/restart` also
+stop restarting anything while still reporting success. Every suppressed
+mutation logs `platform: service change suppressed` at warn level, so
+`phantombot logs` tells you why nothing happened. **Never set it on a host
+running the real service** — the daemon will silently stop taking updates.
+
 ## Configuration
 
 Phantombot resolves configuration in this order:
