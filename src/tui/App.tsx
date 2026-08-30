@@ -41,6 +41,10 @@ import {
 } from "./screens/FileEditor.tsx";
 import { AskScreen, type AskRequest } from "./screens/Ask.tsx";
 import { ChooseScreen, type ChooseRequest } from "./screens/Choose.tsx";
+import {
+  SearchListScreen,
+  type SearchListRequest,
+} from "./screens/SearchList.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import type { EmbeddingConfigUpdate } from "../cli/embedding.ts";
 import { openChat, type ChatSession } from "./chatSession.ts";
@@ -179,6 +183,9 @@ export function App(props: AppProps): React.ReactElement {
   const [choose, setChoose] = useState<
     (ChooseRequest & { resolve: (value: string | undefined) => void }) | undefined
   >();
+  const [searchAsk, setSearchAsk] = useState<
+    (SearchListRequest & { resolve: (value: string | undefined) => void }) | undefined
+  >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
@@ -255,6 +262,15 @@ export function App(props: AppProps): React.ReactElement {
       setChoose({ ...input, resolve });
     });
     setChoose(undefined);
+    return value;
+  }, []);
+
+  /** Ask with the searchable list screen (long catalogues). Same contract. */
+  const askSearch = useCallback(async (input: SearchListRequest) => {
+    const value = await new Promise<string | undefined>((resolve) => {
+      setSearchAsk({ ...input, resolve });
+    });
+    setSearchAsk(undefined);
     return value;
   }, []);
 
@@ -430,79 +446,112 @@ export function App(props: AppProps): React.ReactElement {
   }, [personaName]);
 
   /**
-   * The harness chain, on screens.
+   * The Brain row, as the redesigned flow (`brainFlow.ts`).
    *
-   * `runHarness` is the SAME function `phantombot harness` runs — it writes the
-   * chain, Pi's routing, the provider key and the "use Pi's own config"
-   * tombstone, and none of that is worth a second implementation. Only the
-   * ASKING is swapped: every question becomes one of this app's own screens, so
-   * the flow keeps the frame and never hands the terminal over.
+   * The flow owns the ASKING (primary → fallback → Pi's provider/model slots,
+   * all on searchable screens); this callback owns the DEPS — every write goes
+   * through the same functions the CLI harness command uses, so the TUI and
+   * the CLI cannot write different shapes of the same files.
    */
   const changeBrain = useCallback(
     async (target: PersonaSnapshot) => {
       setPrompting(true);
       try {
-        // Imported ON DEMAND: pulling the whole `harness` subcommand graph in at
-        // module scope delayed the app's first render enough that the opening
-        // keystrokes were dropped — the first-run test caught it as a wizard
-        // whose name box stayed empty.
-        const { runHarness } = await import("../cli/harness.ts");
-        const firstLine = (text: string) =>
-          text.split("\n").find((l) => l.trim().length > 0) ?? "";
-        await runHarness({
-          persona: target.name,
-          prompts: {
-            // The Pi installer inherits stdin and paints its own onboarding:
-            // a hand-over mid-render, which is the wedge this port removes.
-            canRunInteractiveInstaller: false,
-            select: async (input) =>
-              (await askChoice({
-                title: input.message,
-                options: input.options.map((o) => ({
-                  value: o.value,
-                  label: o.label,
-                  hint: o.hint,
-                })),
-                initial: input.initialValue,
-              })) as never,
-            text: async (input) =>
-              await askValue({
-                title: input.message,
-                hint: input.placeholder,
-                initial: input.initialValue ?? input.defaultValue,
-                // "blank = keep current / none" is a real answer in this flow.
-                allowEmpty: true,
-              }),
-            password: async (input) =>
-              await askValue({
-                title: input.message,
-                hint: "stored in this phantom's vault, never displayed again",
-                masked: true,
-                allowEmpty: true,
-              }),
-            // The flow's own wording is the whole question — repeating it as a
-            // "consequence" said the same sentence twice, and a fixed detail
-            // line would be wrong for at least one of the questions asked here.
-            confirm: async (input) =>
-              await askConfirmValue({
-                title: input.message,
-                consequence: {
-                  summary: "",
-                  detail: "",
-                  longRunning: false,
-                  restarts: false,
-                },
-              }),
-            // Clack panels have nowhere to live on a framed screen, so a note
-            // becomes the notice line. The body's first line carries the fact;
-            // the rest is the CLI's prose.
-            note: (body, title) =>
-              setNotice(title ? `${title}: ${firstLine(body)}` : firstLine(body)),
-            intro: () => {},
-            outro: () => {},
-            cancel: () => setNotice("brain unchanged"),
+        // Imported ON DEMAND: pulling the harness graph in at module scope
+        // delayed the app's first render enough that the opening keystrokes
+        // were dropped — the first-run test caught it as a wizard whose name
+        // box stayed empty.
+        const { configureBrain } = await import("./brainFlow.ts");
+        const { loadConfig } = await import("../config.ts");
+        const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
+        const {
+          applyHarnessChain,
+          applyRouting,
+          clearPiRouting,
+          detectAvailability,
+          maybePromptRestart,
+          piInstallCommand,
+        } = await import("../cli/harness.ts");
+        const { resolveHarnessWriteTarget } = await import(
+          "../lib/harnessWriteTarget.ts"
+        );
+        const { harnessChainIds } = await import("../harnesses/buildChain.ts");
+        const { listPiModels } = await import("../lib/piModels.ts");
+        const {
+          getPersonaSecret,
+          setPersonaSecret,
+          unsetPersonaSecret,
+        } = await import("../lib/vaultSecrets.ts");
+        const { writePiApiKey } = await import("../lib/piAuthStore.ts");
+        const { defaultServiceControl } = await import("../lib/platform.ts");
+
+        const persona = target.name;
+        // Read the EFFECTIVE config: the picker pre-selects the chain and
+        // routing this persona actually runs with, not the host default's.
+        const config = await loadConfig(persona);
+        const chainIds = harnessChainIds(config, persona);
+        const availability = await detectAvailability(config);
+        const writeTarget = await resolveHarnessWriteTarget(config, persona);
+        const routing = config.harnesses.pi.routing ?? {};
+
+        const notice = await configureBrain(
+          {
+            choose: askChoice,
+            search: askSearch,
+            value: askValue,
+            note: (title, body) => setNotice(`${title}: ${body.split("\n")[0]}`),
           },
-        });
+          {
+            persona,
+            chain: chainIds,
+            availability,
+            routing: {
+              provider: routing.provider,
+              primaryModel: routing.primaryModel,
+              imageModel: routing.imageModel,
+              codingModel: routing.codingModel,
+            },
+            storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
+            targetPath: writeTarget.path,
+            personaScope: writeTarget.scope === "persona",
+            piBin: availability.pi,
+            installCommand: piInstallCommand().join(" "),
+            listModels: (extraEnv) =>
+              listPiModels(availability.pi!, undefined, extraEnv),
+            setSecret: (value) => setPersonaSecret(config, ENV_PI_API_KEY, value, persona),
+            unsetSecret: () => unsetPersonaSecret(config, ENV_PI_API_KEY, persona),
+            writeAuth: (provider, value) => writePiApiKey(provider, value),
+            applyChain: (chain) =>
+              applyHarnessChain(writeTarget.path, chain as never, persona, writeTarget.scope),
+            applyRouting: (choices) => applyRouting(writeTarget.path, choices),
+            clearRouting: async (opts) => {
+              await clearPiRouting(writeTarget.path, opts);
+            },
+          },
+        );
+        setNotice(notice);
+
+        // Same post-apply hook the CLI runs: offer the restart when the
+        // service is live, since a chain change only bites on the next spawn.
+        // The q shim only needs `note` (unit upgrades, the skip message);
+        // `confirm` is passed explicitly, mapped onto our own confirm screen.
+        await maybePromptRestart(
+          defaultServiceControl(),
+          async (message) =>
+            await askConfirmValue({
+              title: message,
+              consequence: {
+                summary: "",
+                detail: "",
+                longRunning: false,
+                restarts: true,
+              },
+            }),
+          {
+            note: (body: string, title?: string) =>
+              setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
+          } as never,
+        );
       } catch (e) {
         setNotice(`brain failed: ${(e as Error).message}`);
       } finally {
@@ -510,7 +559,7 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askValue, askConfirmValue],
+    [refresh, askChoice, askSearch, askValue, askConfirmValue],
   );
 
   /**
@@ -1150,6 +1199,19 @@ export function App(props: AppProps): React.ReactElement {
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
           <ChooseScreen request={choose} onAnswer={(v) => choose.resolve(v)} />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (searchAsk) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <SearchListScreen
+            request={searchAsk}
+            onAnswer={(v) => searchAsk.resolve(v)}
+          />
         </Box>
       </TerminalSizeContext.Provider>
     );

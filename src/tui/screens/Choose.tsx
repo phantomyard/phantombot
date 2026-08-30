@@ -30,13 +30,19 @@ export interface ChooseRequest {
   options: readonly ChooseOption[];
   /** Value the cursor starts on — the setting's CURRENT value, when there is one. */
   initial?: string;
+  /**
+   * A sentence under the title explaining what the choice MEANS — what the
+   * primary brain does, what a fallback is for. The flow's whole job is to
+   * make the consequence legible before the pick, not after.
+   */
+  description?: string;
 }
 
 export function ChooseScreen(props: {
   request: ChooseRequest;
   onAnswer: (value: string | undefined) => void;
 }): React.ReactElement {
-  const { title, options, initial } = props.request;
+  const { title, options, initial, description } = props.request;
   // Starting the cursor on the current value is what makes ↵ mean "leave it as
   // it is": a picker that always opens on row one turns every pass through a
   // long wizard into a chance to silently change a setting nobody asked about.
@@ -70,6 +76,11 @@ export function ChooseScreen(props: {
       <Box>
         <Text bold>{title}</Text>
       </Box>
+      {description ? (
+        <Box>
+          <Text color={theme.dim}>{description}</Text>
+        </Box>
+      ) : null}
       <Box flexDirection="column" marginTop={1}>
         {options.map((option, i) => (
           <Selectable
