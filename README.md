@@ -574,9 +574,10 @@ service from inside itself.
 
 **`PHANTOMBOT_SANDBOX` — a global kill-switch for all four verbs.** Set it to
 anything other than `""` or `0` and every service *mutation* in the process
-becomes a no-op: `start`, `stop`, `restart` and the unit-file re-render all
-return success without touching the host's service. Queries still tell the
-truth, so `phantombot doctor` and the TUI keep showing the real service state.
+becomes a no-op: `start`, `stop` and `restart` return success without touching
+the host's service, while the unit-file re-render writes nothing and reports
+`{ rerendered: false }`. Queries still tell the truth, so `phantombot doctor`
+and the TUI keep showing the real service state.
 
 It exists for **development checkouts**. Running `bun run src/index.ts` from a
 working tree gives you a second phantombot *process* but not a second
@@ -585,10 +586,14 @@ that is serving live conversations, killing whatever turn was in flight.
 
 Because it is read by `defaultServiceControl()`, it applies to *every* caller,
 not just the TUI: with the variable set, in-chat `/update` and `/restart` also
-stop restarting anything while still reporting success. Every suppressed
-mutation logs `platform: service change suppressed`, naming the op. That line
-goes to the **stderr of the process that has the variable set** — your terminal
-for a `bun run src/index.ts` checkout, and the `^l` log pane inside the TUI
+stop restarting anything while still reporting success. Every suppression is
+logged, naming the op: `start`, `stop` and `restart` log
+`platform: service change suppressed` at **warn**, and the re-render logs
+`platform: unit re-render skipped` at **info** — so a process running at
+`PHANTOMBOT_LOG_LEVEL=warn` keeps the three that report a false success and
+drops the one that does not. Those lines go to the **stderr of the process
+that has the variable set** — your terminal for a `bun run src/index.ts`
+checkout, and the `^l` log pane inside the TUI
 (which swaps the sink for its own ring buffer). It reaches `phantombot logs`
 only if the *daemon itself* was started with the variable set — which is the
 case you never want: **never set it on a host running the real service**, or
