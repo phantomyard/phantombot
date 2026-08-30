@@ -167,7 +167,12 @@ export function PersonaDetailScreen(props: {
     okLabel: string,
   ): { badge: string; badgeColor: string } => {
     if (status === undefined) return { badge: "…", badgeColor: theme.dim };
-    if (value === undefined) return { badge: "optional", badgeColor: theme.warn };
+    // /status prints "none" for a voice provider explicitly set to none —
+    // same "not set up" meaning as an omitted line, so same yellow badge.
+    if (value === undefined || value === "none")
+      return { badge: "optional", badgeColor: theme.warn };
+    if (value.includes("no key"))
+      return { badge: `${glyph.warn} no key`, badgeColor: theme.warn };
     if (value.includes("ERR"))
       return { badge: `${glyph.bad} error`, badgeColor: theme.bad };
     if (value.includes("WARN"))
@@ -178,7 +183,12 @@ export function PersonaDetailScreen(props: {
   const identityMarks = p.identity.files
     .map((f) => `${f.name} ${f.present ? glyph.ok : glyph.bad}`)
     .join("   ");
-  const identityMissing = p.identity.files.some((f) => !f.present);
+  // Only SOUL.md / IDENTITY.md are load-bearing (loader.ts: at least one must
+  // exist, else PersonaNotFoundError). AGENTS.md is an optional tools-hints
+  // file (first match wins vs tools.md) — its absence must not trip the badge.
+  const identityMissing = p.identity.files.some(
+    (f) => !f.present && (f.name === "SOUL.md" || f.name === "IDENTITY.md"),
+  );
 
   const chainLine = line("chain");
   const modelsLine = line("models");
@@ -268,19 +278,27 @@ export function PersonaDetailScreen(props: {
           icon="◎"
           label="Chat Channels"
           description={channelsDesc}
+          // Same source as the description (the /status lines), so the badge
+          // and the text can never disagree — p.channels is a different
+          // reader and testbot proved they drift (green badge over "none
+          // configured").
           badge={
             status === undefined
               ? "…"
-              : p.channels.length > 0
-                ? `${glyph.ok} configured`
-                : "optional"
+              : channelParts.some((s) => s.includes("ERR"))
+                ? `${glyph.bad} error`
+                : channelParts.length > 0
+                  ? `${glyph.ok} configured`
+                  : "optional"
           }
           badgeColor={
             status === undefined
               ? theme.dim
-              : p.channels.length > 0
-                ? theme.ok
-                : theme.warn
+              : channelParts.some((s) => s.includes("ERR"))
+                ? theme.bad
+                : channelParts.length > 0
+                  ? theme.ok
+                  : theme.warn
           }
           selected={row === "channels"}
           onPress={() => press("channels")}

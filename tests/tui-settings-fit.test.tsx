@@ -248,9 +248,10 @@ describe("settings screen in a short window", () => {
     expect(text).not.toContain("env > config.toml");
     expect(text).not.toContain("persona override");
 
-    // Identity has a missing file in the fixture: the badge must say so in
-    // the required state, not a green check.
-    expect(text).toContain("required");
+    // The fixture's identity is missing only AGENTS.md, which is an optional
+    // tools-hints file (loader.ts) — so the badge must NOT say required.
+    expect(text).toContain("configured");
+    expect(text).not.toContain("required");
 
     // Brain shows the chain and the per-harness models, as /status prints them.
     expect(text).toContain("models:");
