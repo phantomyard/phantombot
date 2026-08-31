@@ -17,10 +17,20 @@
  * root-owned file writes) — real installer territory. The TUI offers Boot only
  * where it is actually implemented, so the menu never lies.
  *
- * Credential doctrine (Andrew, 2026-08-31): the sudo / Windows password lives
- * in the DEFAULT persona's vault. If Default moves, the new default's vault
- * has no credential → the TUI re-prompts and re-stores; nothing is silently
- * reused across a default move.
+ * Credential doctrine:
+ *   - Linux: the sudo password is used IN MEMORY for the single
+ *     `enable-linger` call and NEVER persisted. Vault rows are exported into
+ *     every agent turn's environment at daemon start (loadVaultIntoEnv has no
+ *     allow-list, and filterAuthEnv only strips ANTHROPIC- and CLAUDE_CODE-
+ *     prefixed keys),
+ *     so a stored SUDO_PASSWORD would put a root-escalating credential within
+ *     reach of anything an agent shells out to. Nothing on Linux re-reads it —
+ *     linger is one-shot persistent state.
+ *   - Windows: the account password IS stored (WINDOWS_PASSWORD, default
+ *     persona's vault) — task re-registration genuinely re-reads it, and
+ *     cli/install.ts already stores it under the same key. If Default moves,
+ *     the new default's vault has no credential → the TUI re-prompts;
+ *     nothing is silently reused across a default move.
  */
 
 /** How a platform operation turned out. */
@@ -43,10 +53,15 @@ export interface SpawnRunner {
 const SUDO = "sudo";
 
 /**
- * Probe whether sudo is PASSWORDLESS for this user (`sudo -n true`). Many
- * Linux/Mac setups are (NOPASSWD wheel, CI images); when it is, Boot needs no
- * password at all and the prompt is skipped entirely (Andrew, 2026-08-31).
- * `sudo -n` fails fast with exit ≠ 0 when a password would be required.
+ * Probe whether sudo NEEDS NO PASSWORD right now (`sudo -n true`). Many
+ * Linux/Mac setups are (NOPASSWD wheel, CI images); when it is, Boot skips
+ * the password prompt entirely. `sudo -n` fails fast with exit ≠ 0 when a
+ * password would be required.
+ *
+ * Caveat: this CANNOT distinguish a true NOPASSWD rule from a cached sudo
+ * timestamp (15 min by default) — a user who ran sudo shortly before gets
+ * the prompt-free branch either way. Callers must not present the result as
+ * a claim about the host's sudoers policy.
  */
 export async function probeSudoPasswordless(
   runner: SpawnRunner,
@@ -119,12 +134,12 @@ export async function enableBootLinux(
 }
 
 /**
- * Vault keys for boot credentials, stored in the DEFAULT persona's vault:
- * if Default moves, the new default's vault has no record → the TUI re-prompts
- * (the doctrine Andrew set: never silently reuse across a default move).
- * WINDOWS_PASSWORD must match cli/install.ts's key of the same name.
+ * Vault key for the Windows boot credential, stored in the DEFAULT persona's
+ * vault: if Default moves, the new default's vault has no record → the TUI
+ * re-prompts (never silently reused across a default move). The Linux sudo
+ * password has NO vault key by design — see the credential doctrine at the
+ * top of this file. Must match cli/install.ts's key of the same name.
  */
-export const SUDO_PASSWORD_VAULT_KEY = "SUDO_PASSWORD";
 export const WINDOWS_PASSWORD_VAULT_KEY = "WINDOWS_PASSWORD";
 
 /** Read a boot credential from `persona`'s vault; null when absent/unreadable. */
@@ -148,7 +163,11 @@ export async function readBootCredential(
   }
 }
 
-/** Persist a boot credential into `persona`'s vault (encrypted at rest). */
+/**
+ * Persist a boot credential into `persona`'s vault (encrypted at rest).
+ * WINDOWS-ONLY: never call this with a sudo password — see the credential
+ * doctrine at the top of this file.
+ */
 export async function saveBootCredential(
   personaDir: string,
   key: string,

@@ -668,8 +668,10 @@ export function App(props: AppProps): React.ReactElement {
    * platform privileges, so its flow validates a credential (sudo password
    * on Linux, Windows account password) against the REAL mechanism before
    * anything is written — a failed Boot writes nothing and the old state
-   * stands. Credentials live in the persona's own vault (Boot is a
-   * default-phantom option, and the default owns them); if Default moves,
+   * stands. On Linux the password is used once in memory and never stored
+   * (vault rows are exported into every agent turn's environment); Windows
+   * stores its password in the default phantom's vault — Boot is a
+   * default-phantom option, and the default owns them. If Default moves,
    * the new default has no credential and the TUI re-prompts.
    *
    * macOS is deliberately absent from Boot: a boot start there needs a
@@ -684,12 +686,12 @@ export function App(props: AppProps): React.ReactElement {
         title: `Autostart for ${target.name}?`,
         description:
           "Login starts the daemon when you sign in. Boot starts it without " +
-          "a login (needs your password once; stored in this phantom's vault).",
+          "a login (needs your password once).",
         options: isDefault
           ? [
               { value: "off", label: "Off", hint: "not started with the daemon" },
               { value: "login", label: "Login", hint: "starts at login — no password needed" },
-              { value: "boot", label: "Boot", hint: "starts at boot without a login — no prompt when sudo is passwordless" },
+              { value: "boot", label: "Boot", hint: "starts at boot without a login — asks for your password once" },
             ]
           : [
               { value: "login", label: "On", hint: "starts at login with the daemon" },
@@ -721,22 +723,22 @@ export function App(props: AppProps): React.ReactElement {
           const boot = await import("../lib/autostartBoot.ts");
           const { config } = await loadConfigForPersona(target.name);
           const dir = personaDir(config, target.name);
-          const key =
-            platform === "windows"
-              ? boot.WINDOWS_PASSWORD_VAULT_KEY
-              : boot.SUDO_PASSWORD_VAULT_KEY;
-          let credential: string | null | undefined = await boot.readBootCredential(
-            dir,
-            key,
-          );
+          // Only Windows persists its boot credential (task re-registration
+          // re-reads it). The Linux sudo password is use-once in memory — a
+          // vault row would be exported into every agent turn's environment
+          // (loadVaultIntoEnv → filterAuthEnv passes it through).
+          const key = platform === "windows" ? boot.WINDOWS_PASSWORD_VAULT_KEY : null;
+          let credential: string | null | undefined =
+            key !== null ? await boot.readBootCredential(dir, key) : undefined;
           const askPassword = () =>
             askValue({
               title: platform === "windows"
                 ? "Windows account password"
                 : "sudo password",
-              description:
-                "Stored in this phantom’s vault (encrypted at rest) so Boot " +
-                  "can start the daemon without asking again.",
+              description: platform === "windows"
+                ? "Stored in this phantom’s vault (encrypted at rest) so task " +
+                  "re-registration can reuse it."
+                : "Used once to enable boot — never stored.",
               masked: true,
             });
           let outcome: { status: string; error?: string };
@@ -773,9 +775,11 @@ export function App(props: AppProps): React.ReactElement {
               persona: target.name,
               choice: "boot",
             });
+            // No passwordless claim: `sudo -n true` also passes off a cached
+            // timestamp, so the probe says nothing certain about sudoers.
             setNotice(
               r.ok
-                ? "autostart: boot (passwordless sudo) — starts without a login"
+                ? "autostart: boot — starts without a login"
                 : `boot set up, but the daemon update failed: ${r.error}`,
             );
             await refresh();
@@ -835,7 +839,7 @@ export function App(props: AppProps): React.ReactElement {
             return;
           }
           if (typeof credential !== "string") return; // unreachable, but keeps the type honest
-          await boot.saveBootCredential(dir, key, credential);
+          if (key !== null) await boot.saveBootCredential(dir, key, credential);
           const r = await (await import("./actions.ts")).applyAutostartChoice({
             config,
             persona: target.name,

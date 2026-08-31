@@ -437,11 +437,13 @@ export async function personaSnapshot(
     }
   }
 
-  // A brain of the persona's OWN — what the settings screen's Brain badge
-  // gates on. Same predicate the completeness gate uses (and the boot screen
-  // and doctor), so a phantom that chats can never show `required`: the persona
-  // file chain OR the host `[harnesses.personas.<name>]` record the Brain flow
-  // writes counts; bare host-chain inheritance does not.
+  // A brain of the persona's OWN — the chain the settings screen's Brain
+  // badge gates on. Same lookup the completeness gate uses (and the boot
+  // screen and doctor): the persona file chain OR the host
+  // `[harnesses.personas.<name>]` record the Brain flow writes counts; bare
+  // host-chain inheritance does not. NOTE the semantics: this means "a chain
+  // is recorded", NOT "a harness on it resolves" — PersonaDetail composes
+  // this with `resolvedHarness` for the ready badge.
   const localChain = await defaultLocalChain(config, name);
   const brainConfigured = localChain !== undefined;
 
