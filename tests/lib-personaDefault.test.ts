@@ -4,11 +4,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   adoptAsDefaultIfMissing,
+  adoptLegacyDefaultPersona,
   canonicalPersonaName,
   defaultPersonaDefect,
   defaultPersonaProvenance,
@@ -332,5 +333,27 @@ describe("defaultPersonaProvenance (#505)", () => {
       "utf8",
     );
     expect(await defaultPersonaProvenance(makeConfig(personasDir))).toBe("env");
+  });
+});
+
+describe("adoptLegacyDefaultPersona (legacy-install migration)", () => {
+  test("writes default_persona to config.toml and mutates the in-memory default", async () => {
+    await writeFile(
+      join(workdir, "config.toml"),
+      'update_channel = "preview"\nautostart_personas = ["lena"]\n\n[harnesses]\nchain = ["pi"]\n',
+      "utf8",
+    );
+    const config = makeConfig(personasDir);
+    expect(config.defaultPersona).toBe("phantom");
+
+    await adoptLegacyDefaultPersona(config, "lena");
+
+    expect(config.defaultPersona).toBe("lena");
+    const toml = await readFile(join(workdir, "config.toml"), "utf8");
+    expect(toml).toContain('default_persona = "lena"');
+    // Other keys survive the rewrite.
+    expect(toml).toContain('update_channel = "preview"');
+    expect(toml).toContain('[harnesses]');
+    expect(await defaultPersonaProvenance(config)).toBe("config");
   });
 });

@@ -43,13 +43,25 @@ import { log } from "../lib/logger.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { updateConfigToml, setIn } from "../lib/configWriter.ts";
 import {
+  adoptLegacyDefaultPersona,
+  configLayerDefaultPersona,
+  defaultPersonaProvenance,
+  healDefaultPersonaIfBroken,
   listPersonaDirs,
+  migrateLegacyAutostartModes,
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
+ *
+ * 0. Legacy migration first: a host with personas on disk but NO default
+ *    persona configured anywhere (env > state.json > config.toml all empty)
+ *    adopts the pre-#509 fallback choice (resolved default, else
+ *    `personas[0]`) as an explicit `default_persona` — exactly what the
+ *    pre-#509 silent fallback did — so an upgraded host opens where it always
+ *    did instead of in the wizard.
  *
  * 1. No personas, no default persona configured, or a default persona whose
  *    identity is missing — the gap the wizard itself exists to set up — → the
@@ -67,11 +79,65 @@ export async function resolveOpeningScreen(): Promise<{
   persona?: string;
   wizardStartAt?: WizardStep;
 }> {
-  const host = await loadConfig();
+  let host = await loadConfig();
   const { personas } = await hostSnapshot();
   if (personas.length === 0 || !host.defaultPersona)
     return { screen: "wizard" };
-  const target = personas.find((p) => p.name === host.defaultPersona);
+  // Legacy installs (see adoptLegacyDefaultPersona): before #509 the TUI fell
+  // back to `personas.find((p) => p.name === defaultPersona) ?? personas[0]` —
+  // with no default configured anywhere that resolves against the builtin
+  // "phantom", so a host that actually had a "phantom" persona opened THAT,
+  // not the alphabetically first. Reproduce the expression exactly, then make
+  // it explicit once, so an upgraded working host opens where it always did
+  // instead of in the wizard. Gated on provenance "builtin": an
+  // explicitly-configured or healed default — even a broken one — is never
+  // touched here.
+  if (
+    personas.length > 0 &&
+    (await defaultPersonaProvenance(host)) === "builtin"
+  ) {
+    // Best-effort: an unwritable config.toml must degrade to the
+    // pre-migration screen, never abort TUI launch on the hosts this
+    // migration exists to rescue.
+    try {
+      const legacyFallback =
+        personas.find((p) => p.name === host.defaultPersona) ?? personas[0]!;
+      await adoptLegacyDefaultPersona(host, legacyFallback.name);
+    } catch (err) {
+      log.warn(
+        "legacy install: default-persona adoption failed; continuing unmigrated",
+        { error: String(err) },
+      );
+    }
+  }
+  // Same legacy contract for autostart: a host with autostart_personas but
+  // no [autostart_modes] records is a pre-#509 install — backfill the mode
+  // records once. Best-effort for the same reason as the adoption above; a
+  // partial backfill is safe by construction (probes run before writes, and
+  // the records it manages to write are conservative).
+  try {
+    await migrateLegacyAutostartModes(host);
+  } catch (err) {
+    log.warn(
+      "legacy install: autostart_modes backfill failed; continuing without records",
+      { error: String(err) },
+    );
+  }
+  let target = personas.find((p) => p.name === host.defaultPersona);
+  if (!target) {
+    // Broken default — e.g. a stale state.json entry pointing at a persona
+    // that no longer exists. The heal path owns broken defaults: heal ONCE
+    // (preferring the operator-explicit config.toml choice), then proceed as
+    // if that default had always been set. Nothing to heal → wizard.
+    const healed = await healDefaultPersonaIfBroken(
+      host,
+      undefined,
+      await configLayerDefaultPersona(host),
+    );
+    if (!healed) return { screen: "wizard" };
+    host.defaultPersona = healed;
+    target = personas.find((p) => p.name === healed);
+  }
   if (!target) return { screen: "wizard" };
   const { config } = await loadConfigForPersona(target.name);
   const completeness = await personaCompleteness(config, target.name);
