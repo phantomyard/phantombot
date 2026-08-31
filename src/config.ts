@@ -678,6 +678,18 @@ export interface Config {
    */
   autostartPersonas?: string[];
   /**
+   * Per-persona autostart MODE (`[autostart_modes]` in the global config):
+   * "login" (user-level unit — the default when a persona has no record) or
+   * "boot" (survives logged-off: linger via sudo on Linux, LaunchDaemon on
+   * macOS, password-mode task on Windows). Membership in
+   * `autostartPersonas` decides WHETHER a persona starts; this record
+   * decides HOW. Host-only — a persona file must not be able to elect
+   * itself a boot start.
+   *
+   * Optional on the type so partial test fixtures need no update.
+   */
+  autostartModes?: Record<string, "login" | "boot">;
+  /**
    * The persona whose `<persona>/config.toml` layer was merged into this
    * object, when any. `loadConfig()` sets it to the default persona;
    * `loadConfigForPersona(name)` sets it to `name`. Undefined only in
@@ -1291,6 +1303,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
       "phantom",
 
     autostartPersonas: parseAutostartPersonas(globalToml),
+    autostartModes: parseAutostartModes(globalToml),
 
     personaLayer,
 
@@ -2316,6 +2329,30 @@ export function parseAutostartPersonas(
     if (name.length === 0 || seen.has(name)) continue;
     seen.add(name);
     out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Read `[autostart_modes]` from the global config — a table of persona name
+ * → "login" | "boot". Anything else resolves to no record (the caller then
+ * treats the persona as "login", the historical behaviour), so a malformed
+ * entry never blocks a daemon start. Host-only: stripped from persona layers
+ * by HOST_ONLY_KEYS, so a persona cannot grant itself a boot start.
+ */
+export function parseAutostartModes(
+  toml: Record<string, unknown>,
+): Record<string, "login" | "boot"> {
+  const raw = toml.autostart_modes;
+  if (raw === undefined || raw === null || typeof raw !== "object") return {};
+  const out: Record<string, "login" | "boot"> = {};
+  for (const [name, mode] of Object.entries(raw as Record<string, unknown>)) {
+    if (mode === "login" || mode === "boot") out[name] = mode;
+    else if (mode !== undefined) {
+      log.warn(
+        `config: autostart_modes.${name} must be "login" or "boot" — ignoring`,
+      );
+    }
   }
   return out;
 }

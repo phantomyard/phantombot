@@ -36,11 +36,11 @@ import { Frame } from "../components/Frame.tsx";
 import { useElapsedSeconds, useSpinnerFrame } from "../components/Spinner.tsx";
 import { badge, humanDuration, theme } from "../theme.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
+import { rawKeyFeed } from "../stdinTap.ts";
 import { frameChromeRows } from "../chrome.ts";
 import { transcriptLines, transcriptWindow } from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
-import { applyTextChunk } from "../textInput.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
 
@@ -176,8 +176,10 @@ function Activity(props: {
 
 export function ChatScreen(props: {
   session: ChatSession;
-  /** Title-bar status: brain, service state, channels. */
+  /** Title-bar status: release ring, autostart state. */
   status: string;
+  /** Loud-state override for the status text (red `autostart: off`). */
+  statusColor?: string;
   onSettings: () => void;
   onQuit: () => void;
 }): React.ReactElement {
@@ -196,7 +198,6 @@ export function ChatScreen(props: {
   const [busySince, setBusySince] = useState<number | undefined>();
   /** What the phantom is doing right now: a tool title, or "thinking". */
   const [activity, setActivity] = useState("thinking");
-  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   /**
    * Rows scrolled UP from the live bottom. 0 means "stuck to the bottom", and
    * new output keeps it there; anything else is the user reading back, and is
@@ -205,6 +206,14 @@ export function ChatScreen(props: {
   const [scroll, setScroll] = useState(0);
   /** Mirrors `scroll` so a burst of wheel events cannot lose one (see input). */
   const scrollRef = useRef(0);
+  /** ^k raw key inspector: what the terminal actually sent, latest last. */
+  const [showKeys, setShowKeys] = useState(false);
+  const [rawKeys, setRawKeys] = useState<string[]>([]);
+  useEffect(() => {
+    if (!showKeys) return;
+    setRawKeys(rawKeyFeed.recent());
+    return rawKeyFeed.subscribe(() => setRawKeys(rawKeyFeed.recent()));
+  }, [showKeys]);
   /**
    * How many transcript rows are on screen, for PgUp/PgDn.
    *
@@ -362,6 +371,13 @@ export function ChatScreen(props: {
       props.onSettings();
       return;
     }
+    // ^k toggles the raw key inspector — what the terminal actually sent for
+    // each chunk, so modifier problems ("ctrl+enter just submits") can be
+    // diagnosed from inside the app instead of by guesswork.
+    if (key.ctrl && char === "k") {
+      setShowKeys((v) => !v);
+      return;
+    }
     // Scrolling works WHILE A TURN IS RUNNING — reading back is exactly what
     // you do while waiting — so it sits above the `busy` gate.
     const page = Math.max(1, pageRef.current - 1);
@@ -378,6 +394,14 @@ export function ChatScreen(props: {
       if (completed !== inputRef.current) setInputValue(completed);
       return;
     }
+    // Shift/Ctrl/Alt+Enter inserts a newline instead of sending. Terminals
+    // that report modifiers (kitty protocol, CSI-u) get real multi-line
+    // input; a legacy terminal sends a bare \r for all of them and there is
+    // no way to tell them apart there — ctrl+J still works everywhere.
+    if (key.return && (key.shift || key.ctrl || key.meta)) {
+      setInputValue(`${inputRef.current}\n`);
+      return;
+    }
     if (key.return) {
       const text = inputRef.current.trim();
       if (!text) return;
@@ -386,50 +410,60 @@ export function ChatScreen(props: {
       const isCommand = commandName(text) !== undefined;
       if (busy && !isCommand) return;
       setInputValue("");
-      setHistoryIndex(null);
       if (isCommand) void runCommand(text);
       else void submit(text);
       return;
     }
-    // History recall is gated on `busy` — replacing the input under a running
-    // turn is confusing — but TYPING is not: `/stop` cannot be typed on a
-    // keyboard that stops accepting characters exactly when the turn you want
-    // to interrupt is the one blocking it.
-    if (key.upArrow || key.downArrow) {
-      if (busy) return;
-      const sent = messages.filter((m) => m.role === "user").map((m) => m.text);
-      if (sent.length === 0) return;
-      const at =
-        historyIndex === null
-          ? key.upArrow
-            ? sent.length - 1
-            : null
-          : Math.min(
-              sent.length - 1,
-              Math.max(0, historyIndex + (key.upArrow ? -1 : 1)),
-            );
-      setHistoryIndex(at);
-      setInputValue(at === null ? "" : (sent[at] ?? ""));
-      return;
-    }
+    // ↑↓ scroll the transcript one line at a time — there is no input
+    // history to walk, and like PgUp/PgDn this works WHILE a turn runs.
+    if (key.upArrow) return scrollBy(1);
+    if (key.downArrow) return scrollBy(-1);
     if (key.backspace || key.delete) {
       setInputValue(inputRef.current.slice(0, -1));
       return;
     }
     if (char && !key.ctrl && !key.meta) {
-      // A chunk can carry a newline INSIDE it: a paste, or a terminal that
-      // batched keystrokes. Shared with the wizard's name field, which had the
-      // same bug — see `textInput.ts`.
+      // A bare \n chunk (ctrl+J, some terminals' shift/alt+enter) is a
+      // newline in the box, never a submit.
+      if (char === "\n") {
+        setInputValue(`${inputRef.current}\n`);
+        return;
+      }
+      if (/\r|\n/.test(char)) {
+        // \r is normalised to \n: that is what the viewport wraps on.
+        const normalised = char.replace(/\r\n?/g, "\n");
+        // text + ONE trailing newline is a fast typist's batched Enter — the
+        // terminal delivered the typed text and Enter in a single read. That
+        // is a SUBMIT (the bug #509 exists for), not a paste. Interior
+        // newlines make it a paste, below.
+        const batched = /^(.+)\n$/.exec(normalised);
+        const body = batched?.[1];
+        if (body !== undefined && !body.includes("\n")) {
+          const text = `${inputRef.current}${body}`.trim();
+          const isCommand = commandName(text) !== undefined;
+          if (busy && !isCommand) {
+            // A turn in flight owns the harness; keep the text in the box
+            // exactly as the plain-Enter busy branch does.
+            setInputValue(`${inputRef.current}${body}`);
+            return;
+          }
+          if (!text) return;
+          setInputValue("");
+          if (isCommand) void runCommand(text);
+          else void submit(text);
+          return;
+        }
+        // Anything with INTERIOR newlines is a paste: in chat a paste is
+        // NEVER a submit — the whole block lands in the box so it can be
+        // reviewed and edited first. (The wizard's name field uses
+        // applyTextChunk's split-and-submit rule instead — see
+        // `textInput.ts`.)
+        setInputValue(inputRef.current + normalised);
+        return;
+      }
       // From the REF: two keystrokes can land between renders, and reading
       // `input` out of the closure loses the first of them.
-      const applied = applyTextChunk(inputRef.current, char);
-      setInputValue(applied.text);
-      if (applied.submit) {
-        setHistoryIndex(null);
-        const text = applied.submit;
-        if (commandName(text) !== undefined) void runCommand(text);
-        else if (!busy) void submit(text);
-      }
+      setInputValue(inputRef.current + char);
     }
   });
 
@@ -437,9 +471,12 @@ export function ChatScreen(props: {
   // The type-ahead is part of the chrome while it is up, so the transcript
   // gives back exactly the rows it takes.
   const hints = commandHints(input).slice(0, MAX_COMMAND_HINTS);
+  // Same for the key inspector: it borrows rows from the transcript, never
+  // overflows the frame — one header + one per recorded chunk.
+  const keyRows = showKeys ? rawKeys.length + 1 : 0;
   const rows = viewportRows(
     size,
-    CHAT_CHROME_ROWS + hints.length + frameChromeRows(),
+    CHAT_CHROME_ROWS + hints.length + keyRows + frameChromeRows(),
   );
   pageRef.current = rows;
   // ONE flat list of rows: what is measured is what is drawn. Clipping happens
@@ -467,11 +504,12 @@ export function ChatScreen(props: {
     <Frame
       title={[props.session.persona]}
       status={props.status}
+      statusColor={props.statusColor}
       footer={[
         { icon: badge.send, key: "↵", label: "Send" },
+        { icon: badge.send, key: "Alt+↵", label: "Newline" },
         { icon: badge.run, key: "/", label: "Commands" },
-        { icon: badge.history, key: "↑↓", label: "History" },
-        { icon: badge.scroll, key: "PgUp/PgDn", label: "Scroll" },
+        { icon: badge.scroll, key: "↑↓", label: "Scroll" },
         {
           icon: badge.settings,
           key: "^s",
@@ -519,14 +557,33 @@ export function ChatScreen(props: {
           ))}
         </Box>
       ) : null}
+      {showKeys ? (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color={theme.dim}>
+            {"KEY INSPECTOR — ^k to close, bytes the terminal sent (latest last):"}
+          </Text>
+          {rawKeys.length === 0 ? (
+            <Text color={theme.dim}>{"  (press any key)"}</Text>
+          ) : (
+            rawKeys.map((k, i) => (
+              <Text key={`${i}-${k}`} color={theme.accent}>{`  ${k}`}</Text>
+            ))
+          )}
+        </Box>
+      ) : null}
       <Box
         borderStyle="round"
         borderColor={busy ? theme.dim : theme.accent}
         paddingX={1}
       >
         <Text color={busy ? theme.dim : theme.accent}>{"› "}</Text>
-        <Text>{input}</Text>
-        <Text color={theme.accent}>{busy ? "" : "▌"}</Text>
+        {/* The caret is a NESTED span, not a sibling: as a sibling in a row
+            layout Yoga places it top-aligned next to a multi-line text block —
+            i.e. stranded on line 1 instead of after the last character. */}
+        <Text color={busy ? theme.dim : undefined}>
+          {input}
+          {!busy && <Text color={theme.accent}>{"▌"}</Text>}
+        </Text>
       </Box>
     </Frame>
   );

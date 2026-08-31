@@ -10,6 +10,8 @@ export interface PersonaTemplateInput {
   identity: string;
   tone: PersonaTone;
   expertise: readonly string[];
+  /** Optional. The principal's name — who this phantom works for and calls them. */
+  owner?: string;
   /** Optional, free-form. Each line becomes a bullet. */
   hardRules: string;
   /** Optional, free-form. */
@@ -180,6 +182,14 @@ export function generateIdentityMd(input: PersonaTemplateInput): string {
     sections.push(
       `## Areas of expertise\n\n` +
         input.expertise.map((e) => `- ${e}`).join("\n"),
+    );
+  }
+
+  if (input.owner && input.owner.trim().length > 0) {
+    sections.push(
+      `## Who you work for\n\n` +
+        `Your principal is **${input.owner.trim()}** — the person you serve ` +
+        `and take direction from.`,
     );
   }
 

@@ -30,6 +30,21 @@ export const ALT_SCREEN_ON = "\x1b[?1049h\x1b[H";
 /** Leave it again, restoring the shell exactly as it was. */
 export const ALT_SCREEN_OFF = "\x1b[?1049l";
 
+/**
+ * Kitty keyboard protocol, flag 1 (disambiguate escape codes).
+ *
+ * With it on, a supporting terminal reports Shift/Ctrl/Alt+Enter as distinct
+ * CSI-u sequences instead of a bare `\r`, which is what lets the chat box
+ * insert newlines. Ink 6 parses these natively but only enables the protocol
+ * itself for kitty/WezTerm/Ghostty (`ink.js` auto-mode heuristics), so the app
+ * pushes it explicitly at render and pops it whenever the terminal is handed
+ * to someone else (a clack prompt, `$EDITOR`) whose readline would choke on
+ * CSI-u bytes.
+ */
+export const KITTY_PUSH = "\x1b[>1u";
+/** Pop the kitty flags pushed by `KITTY_PUSH`. Extra pops are safely ignored. */
+export const KITTY_POP = "\x1b[<u";
+
 export interface TerminalSize {
   rows: number;
   columns: number;

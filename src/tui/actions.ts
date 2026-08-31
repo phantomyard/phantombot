@@ -41,6 +41,7 @@ import {
   type TomlObject,
 } from "../lib/configWriter.ts";
 import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import { archivePersona } from "../lib/personaArchive.ts";
 import { setPersonaSecret } from "../lib/vaultSecrets.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { loadState, saveState } from "../state.ts";
@@ -263,6 +264,50 @@ export function describeAutostartChange(
   };
 }
 
+/** The Autostart selector's values: "off" | "login" | "boot". */
+export type AutostartChoice = "off" | "login" | "boot";
+
+/**
+ * Apply an Autostart selector choice. Membership in `autostart_personas`
+ * decides WHETHER a persona starts; the per-persona `[autostart_modes]`
+ * record decides HOW:
+ *
+ *   - off   → out of the list, mode record removed.
+ *   - login → into the list, boot record removed (no record = login — the
+ *             historical behaviour, so existing agents inherit what they
+ *             have and nothing changes under them).
+ *   - boot  → into the list, mode record "boot". The caller runs the
+ *             platform privilege setup (linger / password task) FIRST via
+ *             lib/autostartBoot and only reaches here on success, so a
+ *             failed Boot writes nothing and the old state stands.
+ */
+export async function applyAutostartChoice(input: {
+  config: Config;
+  persona: string;
+  choice: AutostartChoice;
+  serviceControl?: ServiceControl;
+  /** Test seam for the heartbeat-instance sync (#486). */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
+}): Promise<{ ok: boolean; list: string[]; error?: string }> {
+  const on = input.choice !== "off";
+  const r = await applyAutostart({
+    config: input.config,
+    persona: input.persona,
+    on,
+    ...(input.serviceControl ? { serviceControl: input.serviceControl } : {}),
+    ...(input.syncHeartbeatInstances
+      ? { syncHeartbeatInstances: input.syncHeartbeatInstances }
+      : {}),
+  });
+  const { writeAutostartMode } = await import("../lib/personaDefault.ts");
+  await writeAutostartMode(
+    input.config,
+    input.persona,
+    input.choice === "boot" ? "boot" : undefined,
+  );
+  return r;
+}
+
 export async function applyAutostart(input: {
   config: Config;
   persona: string;
@@ -342,6 +387,101 @@ export async function applyUpdateChannel(input: {
     });
     input.config.updateChannel = input.channel;
     return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export function describePersonaRemoval(
+  persona: string,
+  autostarted: boolean,
+): Consequence {
+  return {
+    summary: `${persona}'s directory moves to personas-archive/ — nothing is hard-deleted`,
+    detail:
+      `The phantom goes quiet on this host: its persona directory is archived ` +
+      `(timestamped, restorable later via persona --import)` +
+      (autostarted ? `, its autostart entry is dropped,` : `,`) +
+      ` and the daemon restarts without it. Its channels and heartbeat timers stop with it.`,
+    longRunning: false,
+    restarts: true,
+  };
+}
+
+/**
+ * Remove a phantom from this host by ARCHIVING it.
+ *
+ * Mirrors `create-persona`'s overwrite behaviour: the persona directory is
+ * MOVED to personas-archive/<name>-<stamp>/ (see personaArchive.ts), never
+ * deleted — a persona embodies a memory DB and a vault, and losing either to
+ * a confirm-panel mis-tap must be recoverable. Restore is the existing
+ * `persona --import` archive list.
+ *
+ * Refusals, both mirrored from `applyDefaultPersona`: under
+ * `PHANTOMBOT_PERSONA` (a persona agent must not be able to delete its
+ * neighbours) and for the default persona (the phantom that owns /update and
+ * /restart cannot be removed out from under the host). The autostart entry
+ * is dropped BEFORE the directory moves, so a concurrent daemon rebuild
+ * never reads a boot list naming a directory that is no longer there.
+ */
+export async function applyRemovePersona(input: {
+  config: Config;
+  persona: string;
+  serviceControl?: ServiceControl;
+  /** Test seam for the heartbeat-instance sync (#486). */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
+}): Promise<{ ok: boolean; archive?: string; error?: string }> {
+  const agentPersona = process.env.PHANTOMBOT_PERSONA?.trim();
+  if (agentPersona) {
+    return {
+      ok: false,
+      error:
+        `refusing to remove persona '${input.persona}': running as ` +
+        `persona '${agentPersona}' (PHANTOMBOT_PERSONA).`,
+    };
+  }
+  if (input.persona === input.config.defaultPersona) {
+    return {
+      ok: false,
+      error:
+        `'${input.persona}' is the default persona — make another phantom ` +
+        `the default before removing it.`,
+    };
+  }
+  try {
+    const autostarted = (input.config.autostartPersonas ?? []).includes(
+      input.persona,
+    );
+    if (autostarted) {
+      const list = await writeAutostartPersonas(
+        input.config,
+        (input.config.autostartPersonas ?? []).filter(
+          (n) => n !== input.persona,
+        ),
+      );
+      // Retire the persona's heartbeat timer instance right away (#486),
+      // mirroring applyAutostart — best-effort, the heal reconciles.
+      try {
+        const sync = input.syncHeartbeatInstances ?? syncHeartbeatInstances;
+        await sync(
+          servedPersonasOf({
+            defaultPersona: input.config.defaultPersona,
+            autostartPersonas: list,
+          }),
+        );
+      } catch {
+        // The restart below still drops the persona; heal catches the rest.
+      }
+    }
+    const archived = await archivePersona(
+      input.config.personasDir,
+      input.persona,
+    );
+    const svc = input.serviceControl ?? defaultServiceControl();
+    const r = await svc.restart();
+    return r.ok
+      ? { ok: true, archive: archived.archiveName }
+      : { ok: false, error: r.stderr ?? "restart failed" };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }

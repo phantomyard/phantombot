@@ -31,6 +31,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: false,
   autostart: false,
   chain: ["claude"],
+  brainConfigured: true,
   channels: ["cli only"],
   identity: { files: [] },
   channelDetails: [],
@@ -167,14 +168,13 @@ async function openRow(down: number) {
   return app;
 }
 
-const AUTOSTART = 5; // identity, brain, channels, memory, voice, autostart
-const DEFAULT = 6;
+const DEFAULT = 1; // group order: autostart, default, release — default fires a Confirm
 
 describe("the confirmation is an app screen", () => {
   test("it keeps the frame's chrome and the app's own keys", async () => {
-    const app = await openRow(AUTOSTART);
+    const app = await openRow(DEFAULT);
     const frame = app.frame();
-    expect(frame).toContain("Start alice with the daemon?");
+    expect(frame).toContain("Make alice the default persona?");
     // The chrome is the point: a clack panel had none of this.
     expect(frame).toContain("phantombot");
     expect(frame).toContain("confirm");
@@ -183,11 +183,11 @@ describe("the confirmation is an app screen", () => {
   });
 
   test("esc answers no and returns to the screen that asked", async () => {
-    const app = await openRow(AUTOSTART);
-    expect(app.frame()).toContain("Start alice with the daemon?");
+    const app = await openRow(DEFAULT);
+    expect(app.frame()).toContain("Make alice the default persona?");
     await app.press("\x1b");
     const frame = app.frame();
-    expect(frame).not.toContain("Start alice with the daemon?");
+    expect(frame).not.toContain("Make alice the default persona?");
     // Back on alice's own settings, not a level further out.
     expect(frame).toContain("Identity");
     expect(frame).toContain("Brain");

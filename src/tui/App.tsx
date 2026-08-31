@@ -12,6 +12,8 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import {
@@ -21,14 +23,14 @@ import {
   type PersonaSnapshot,
 } from "./snapshot.ts";
 import {
-  applyAutostart,
   applyDefaultPersona,
   applyEmbedding,
   applyUpdateChannel,
   applyVoice,
-  describeAutostartChange,
   describeDefaultPersonaChange,
   describeEmbeddingChange,
+  describePersonaRemoval,
+  applyRemovePersona,
   describeUpdateChannelChange,
   describeVoiceChange,
   setSecret,
@@ -51,6 +53,11 @@ import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import { openChat, type ChatSession } from "./chatSession.ts";
 import { ChatScreen } from "./screens/Chat.tsx";
 import { DashboardScreen } from "./screens/Dashboard.tsx";
+import { NewPersonaScreen } from "./screens/NewPersona.tsx";
+import {
+  CreatePersonaScreen,
+  type CreatePersonaAnswers,
+} from "./screens/CreatePersona.tsx";
 import { PersonaDetailScreen } from "./screens/PersonaDetail.tsx";
 import { KeysScreen } from "./screens/Keys.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
@@ -61,7 +68,7 @@ import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
-import { loadConfigForPersona, type Config } from "../config.ts";
+import { loadConfig, loadConfigForPersona, type Config } from "../config.ts";
 import { runDoctor, type DoctorReport } from "../cli/doctor.ts";
 import type { WizardStep } from "../lib/personaComplete.ts";
 
@@ -73,6 +80,8 @@ type Screen =
   | "doctor"
   | "mcp"
   | "logs"
+  | "newPersona"
+  | "createPersona"
   | "wizard"
   | "editor";
 
@@ -80,11 +89,27 @@ export interface AppProps {
   host: HostSnapshot;
   /** Persona to open chat with. Undefined means "run the wizard first". */
   startPersona?: string;
+  /**
+   * Where `startPersona` lands: "chat" (default) or "configure" — the boot
+   * doctrine sends a default persona with no brain of its own straight to its
+   * Configure screen, where the red `required` Brain row is the nudge.
+   */
+  startScreen?: "chat" | "configure";
   /** Where the wizard resumes, when it is the opening screen. */
   wizardStartAt?: WizardStep;
   onCreatePersona: (
     answers: WizardAnswers,
   ) => Promise<void | { created: boolean }>;
+  /**
+   * The wizard's Brain steps (brainOnboarding.ts), run after the persona is
+   * created. Injectable for tests — the real implementation asks on screens
+   * and writes through the same config helpers the CLI uses. The result
+   * decides where the wizard lands: "chat" only when the brain was verified
+   * by a real turn; anything else lands in Configure.
+   */
+  onWizardBrain?: (
+    persona: string,
+  ) => Promise<{ landing: "chat" | "configure"; notice: string }>;
   /**
    * Seam for tests only; production always uses `openChat`. Injectable so the
    * session gate can be pinned by a test that FAILS when the gate regresses —
@@ -111,9 +136,16 @@ export function App(props: AppProps): React.ReactElement {
   // An INCOMPLETE persona arrives with both a name and a resume point, so the
   // wizard must win over chat here — otherwise `resolveOpeningScreen`'s resume
   // path is unreachable and a user whose harness is uninstalled lands in a chat
-  // box wired to a brain that does not exist.
+  // box wired to a brain that does not exist. A persona booting to Configure
+  // arrives as startPersona + startScreen="configure" (brain-only gap).
   const [screen, setScreen] = useState<Screen>(
-    props.wizardStartAt ? "wizard" : props.startPersona ? "chat" : "wizard",
+    props.wizardStartAt
+      ? "wizard"
+      : props.startPersona
+        ? props.startScreen === "configure"
+          ? "persona"
+          : "chat"
+        : "wizard",
   );
   // Navigation history. `esc` means "the screen you came from" on every
   // screen, and a screen is reachable by more than one route — logs from chat
@@ -230,6 +262,7 @@ export function App(props: AppProps): React.ReactElement {
       title: string;
       consequence: Consequence;
       danger?: boolean;
+      confirmName?: string;
     }) => {
       const yes = await new Promise<boolean>((resolve) => {
         setConfirm({ ...input, resolve });
@@ -245,6 +278,7 @@ export function App(props: AppProps): React.ReactElement {
       title: string;
       consequence: Consequence;
       danger?: boolean;
+      confirmName?: string;
       run: () => Promise<void>;
     }) => {
       const { run, ...question } = input;
@@ -377,6 +411,14 @@ export function App(props: AppProps): React.ReactElement {
     // While a clack prompt owns the terminal the app is not on screen. Acting
     // on a keystroke here would change something the user cannot see.
     if (prompting) return;
+    // ^q quits from anywhere — including while a question screen (ask,
+    // choose, confirm) owns the rest of the keyboard. A question never owns
+    // the decision to leave the app, and a footer that advertises no Quit
+    // must not mean there is no way out.
+    if (key.ctrl && char === "q") {
+      exit();
+      return;
+    }
     // The confirmation is a screen with its own keys. Without this the app's
     // global esc would answer the question AND pop a level of history behind
     // it, landing the user a screen further back than they asked for.
@@ -413,7 +455,7 @@ export function App(props: AppProps): React.ReactElement {
     // or a session that never opens because the harness is gone — is
     // unquittable except by killing the terminal.
     if (screen === "chat" && !session) {
-      if ((key.ctrl && (char === "q" || char === "c")) || key.escape) exit();
+      if ((key.ctrl && char === "c") || key.escape) exit();
     }
   });
 
@@ -454,32 +496,31 @@ export function App(props: AppProps): React.ReactElement {
   // The settings screen no longer runs the doctor — its telemetry block shows
   // the persona's /status reading only. The full Doctor screen (from the
   // phantoms list) still gathers its report via runTheDoctor on open.
-
   /**
-   * The Brain row, as the redesigned flow (`brainFlow.ts`).
-   *
-   * The flow owns the ASKING (primary → fallback → Pi's provider/model slots,
-   * all on searchable screens); this callback owns the DEPS — every write goes
-   * through the same functions the CLI harness command uses, so the TUI and
-   * the CLI cannot write different shapes of the same files.
+   * The wizard's Brain steps (`brainOnboarding.ts`), run right after the
+   * wizard creates the persona. Same dep discipline as `changeBrain`: the
+   * flow owns the ASKING, this owns the DEPS — every write goes through the
+   * same functions the CLI harness command uses, so the wizard, this flow
+   * and the CLI cannot write different shapes of the same files.
    */
-  const changeBrain = useCallback(
-    async (target: PersonaSnapshot) => {
+  const onboardBrain = useCallback(
+    async (
+      persona: string,
+    ): Promise<{ landing: "chat" | "configure"; notice: string }> => {
       setPrompting(true);
       try {
-        // Imported ON DEMAND: pulling the harness graph in at module scope
-        // delayed the app's first render enough that the opening keystrokes
-        // were dropped — the first-run test caught it as a wizard whose name
-        // box stayed empty.
-        const { configureBrain } = await import("./brainFlow.ts");
+        // On-demand imports, same reason as `changeBrain`: the harness graph
+        // must not delay the app's first render.
+        const { runBrainOnboarding } = await import("./brainOnboarding.ts");
         const { loadConfig } = await import("../config.ts");
         const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
         const {
           applyHarnessChain,
           applyRouting,
           clearPiRouting,
+          defaultInstallRunner,
           detectAvailability,
-          maybePromptRestart,
+          installPi,
           piInstallCommand,
         } = await import("../cli/harness.ts");
         const { resolveHarnessWriteTarget } = await import(
@@ -493,18 +534,13 @@ export function App(props: AppProps): React.ReactElement {
           unsetPersonaSecret,
         } = await import("../lib/vaultSecrets.ts");
         const { writePiApiKey } = await import("../lib/piAuthStore.ts");
-        const { defaultServiceControl } = await import("../lib/platform.ts");
 
-        const persona = target.name;
-        // Read the EFFECTIVE config: the picker pre-selects the chain and
-        // routing this persona actually runs with, not the host default's.
         const config = await loadConfig(persona);
-        const chainIds = harnessChainIds(config, persona);
         const availability = await detectAvailability(config);
         const writeTarget = await resolveHarnessWriteTarget(config, persona);
         const routing = config.harnesses.pi.routing ?? {};
 
-        const notice = await configureBrain(
+        return await runBrainOnboarding(
           {
             choose: askChoice,
             search: askSearch,
@@ -513,8 +549,23 @@ export function App(props: AppProps): React.ReactElement {
           },
           {
             persona,
-            chain: chainIds,
-            availability,
+            availability: () => detectAvailability(config),
+            installCommand: piInstallCommand().join(" "),
+            installPi: async () => {
+              // stdout/stdin inherit: the operator goes through Pi's own
+              // onboarding live. The q shim only needs `note` (failure).
+              const ok = await installPi(
+                defaultInstallRunner,
+                {
+                  note: (body: string, title?: string) =>
+                    setNotice(
+                      title ? `${title}: ${body.split("\n")[0]}` : body,
+                    ),
+                } as never,
+              );
+              return ok && Boolean((await detectAvailability(config)).pi);
+            },
+            chain: harnessChainIds(config, persona),
             routing: {
               provider: routing.provider,
               primaryModel: routing.primaryModel,
@@ -525,29 +576,68 @@ export function App(props: AppProps): React.ReactElement {
             targetPath: writeTarget.path,
             personaScope: writeTarget.scope === "persona",
             piBin: availability.pi,
-            installCommand: piInstallCommand().join(" "),
             listModels: (extraEnv) =>
               listPiModels(availability.pi!, undefined, extraEnv),
-            setSecret: (value) => setPersonaSecret(config, ENV_PI_API_KEY, value, persona),
-            unsetSecret: () => unsetPersonaSecret(config, ENV_PI_API_KEY, persona),
+            setSecret: (value) =>
+              setPersonaSecret(config, ENV_PI_API_KEY, value, persona),
+            unsetSecret: () =>
+              unsetPersonaSecret(config, ENV_PI_API_KEY, persona),
             writeAuth: (provider, value) => writePiApiKey(provider, value),
             applyChain: (chain) =>
-              applyHarnessChain(writeTarget.path, chain as never, persona, writeTarget.scope),
+              applyHarnessChain(
+                writeTarget.path,
+                chain as never,
+                persona,
+                writeTarget.scope,
+              ),
             applyRouting: (choices) => applyRouting(writeTarget.path, choices),
             clearRouting: async (opts) => {
               await clearPiRouting(writeTarget.path, opts);
             },
+            probe: async (id) => {
+              const { probeHarness } = await import("../lib/harnessProbe.ts");
+              return probeHarness({ config, id });
+            },
           },
         );
-        setNotice(notice);
+      } catch (e) {
+        return {
+          landing: "configure" as const,
+          notice: `brain setup failed: ${(e as Error).message}`,
+        };
+      } finally {
+        setPrompting(false);
+        await refresh();
+      }
+    },
+    [refresh, askChoice, askSearch, askValue],
+  );
 
-        // Same post-apply hook the CLI runs: offer the restart when the
-        // service is live, since a chain change only bites on the next spawn.
-        // A cancel that left the config untouched ("brain unchanged") must NOT
-        // offer one — the restart belongs to a change, not to a visit.
-        // The q shim only needs `note` (unit upgrades, the skip message);
-        // `confirm` is passed explicitly, mapped onto our own confirm screen.
-        if (notice !== "brain unchanged") await maybePromptRestart(
+  const wizardBrain = props.onWizardBrain ?? onboardBrain;
+
+  /**
+   * The Brain row. Runs the SAME flow the wizard's Brain steps use
+   * (`runBrainOnboarding`) — primary (with the Pi install offer) → Pi's model
+   * slots → fallback → Test now / Skip — so fixing a red `required` Brain in
+   * Configure is the identical experience to setting one up at first run.
+   * Delegating also means the writes cannot diverge between the two paths.
+   */
+  const changeBrain = useCallback(
+    async (target: PersonaSnapshot) => {
+      const result = await onboardBrain(target.name);
+      setNotice(result.notice);
+
+      // Writes are exactly the two applyChain endings — a verified chain and
+      // a saved-untested one. A cancel ("brain unchanged"), a Skip with no
+      // brain chosen, and a failed test (nothing saved) must NOT offer a
+      // restart: nothing changed to restart into.
+      const wroteChain =
+        result.notice.startsWith("brain verified") ||
+        result.notice.startsWith("brain saved");
+      if (wroteChain) {
+        const { maybePromptRestart } = await import("../cli/harness.ts");
+        const { defaultServiceControl } = await import("../lib/platform.ts");
+        await maybePromptRestart(
           defaultServiceControl(),
           async (message) =>
             await askConfirmValue({
@@ -564,14 +654,339 @@ export function App(props: AppProps): React.ReactElement {
               setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
           } as never,
         );
-      } catch (e) {
-        setNotice(`brain failed: ${(e as Error).message}`);
-      } finally {
-        setPrompting(false);
-        await refresh();
       }
+
+      // A verified brain earns chat, same as the wizard's landing.
+      if (result.landing === "chat") setScreen("chat");
     },
-    [refresh, askChoice, askSearch, askValue, askConfirmValue],
+    [onboardBrain, askConfirmValue],
+  );
+
+  /**
+   * The Autostart row — a selector, not a toggle. Default phantom:
+   * Off | Login | Boot. Siblings: On | Off (On is login-level). Boot needs
+   * platform privileges, so its flow validates a credential (sudo password
+   * on Linux, Windows account password) against the REAL mechanism before
+   * anything is written — a failed Boot writes nothing and the old state
+   * stands. On Linux the password is used once in memory and never stored
+   * (vault rows are exported into every agent turn's environment); Windows
+   * stores its password in the default phantom's vault — Boot is a
+   * default-phantom option, and the default owns them. If Default moves,
+   * the new default has no credential and the TUI re-prompts.
+   *
+   * macOS is deliberately absent from Boot: a boot start there needs a
+   * root-owned LaunchDaemon set — real installer territory — so the menu
+   * never offers what cannot be delivered.
+   */
+  const changeAutostart = useCallback(
+    async (target: PersonaSnapshot) => {
+      const current = target.autostart ? target.autostartMode : "off";
+      const isDefault = target.isDefault;
+      const pick = await askChoice({
+        title: `Autostart for ${target.name}?`,
+        description:
+          "Login starts the daemon when you sign in. Boot starts it without " +
+          "a login (needs your password once).",
+        options: isDefault
+          ? [
+              { value: "off", label: "Off", hint: "not started with the daemon" },
+              { value: "login", label: "Login", hint: "starts at login — no password needed" },
+              { value: "boot", label: "Boot", hint: "starts at boot without a login — asks for your password once" },
+            ]
+          : [
+              { value: "login", label: "On", hint: "starts at login with the daemon" },
+              { value: "off", label: "Off", hint: "not started with the daemon" },
+            ],
+        initial: isDefault ? current : target.autostart ? "login" : "off",
+      });
+      if (pick === undefined) return;
+      const choice: "off" | "login" | "boot" =
+        pick === "on" ? "login" : (pick as "off" | "login" | "boot");
+      if (choice === current) return; // ↵ on the current value is a no-op
+
+      // Boot: platform privilege setup first — nothing written until it
+      // succeeds. A failed Boot leaves the previous state untouched.
+      if (choice === "boot") {
+        const { currentPlatform } = await import("../lib/platform.ts");
+        const platform = currentPlatform();
+        if (platform === "darwin") {
+          setNotice(
+            "Boot start isn’t available on macOS yet (needs the LaunchDaemon " +
+              "installer) — choose Login for now.",
+          );
+          return;
+        }
+        setPrompting(true);
+        try {
+          const { loadConfigForPersona } = await import("../config.ts");
+          const { personaDir } = await import("../config.ts");
+          const boot = await import("../lib/autostartBoot.ts");
+          const { config } = await loadConfigForPersona(target.name);
+          const dir = personaDir(config, target.name);
+          const askPassword = () =>
+            askValue({
+              title: platform === "windows"
+                ? "Windows account password"
+                : "sudo password",
+              description: platform === "windows"
+                ? "Stored in this phantom’s vault (encrypted at rest) so task " +
+                  "re-registration can reuse it."
+                : "Used once to enable boot — never stored.",
+              masked: true,
+            });
+          let outcome: { status: string; error?: string };
+          const spawnRunner = boot.bunSpawnRunner();
+          if (platform === "linux") {
+            // ENABLE-ONLY LINGER DOCTRINE: linger is a one-way prerequisite —
+            // enabled here if missing (passwordless sudo first, validated
+            // re-prompt loop if a password is required), and NEVER disabled
+            // by phantombot anywhere. The boot start itself is the daemon
+            // unit enable, which needs no sudo at all.
+            const user = (await import("node:os")).userInfo().username;
+            if (!(await boot.probeLingerLinux(user))) {
+              if (await boot.probeSudoPasswordless(spawnRunner)) {
+                outcome = await boot.enableBootLinuxPasswordless(user, spawnRunner);
+              } else {
+                let credential: string | undefined;
+                for (;;) {
+                  credential = await askPassword();
+                  if (!credential) {
+                    setNotice("boot setup cancelled — nothing changed");
+                    return;
+                  }
+                  outcome = await boot.enableBootLinux(credential, user, spawnRunner);
+                  if (outcome.status === "ok") break;
+                  if (outcome.status === "invalid-credential") {
+                    setNotice(
+                      `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+                    );
+                    continue;
+                  }
+                  break;
+                }
+              }
+              if (!outcome || outcome.status !== "ok") {
+                setNotice(
+                  `boot setup failed: ${outcome?.error ?? "cancelled"} — nothing changed`,
+                );
+                return;
+              }
+            }
+            const u = await boot.enableDaemonUnit(spawnRunner);
+            if (u.status !== "ok") {
+              setNotice(`boot setup failed: ${u.error} — nothing changed`);
+              return;
+            }
+            const r = await (await import("./actions.ts")).applyAutostartChoice({
+              config,
+              persona: target.name,
+              choice: "boot",
+            });
+            setNotice(
+              r.ok
+                ? "autostart: boot — starts without a login"
+                : `boot set up, but the daemon update failed: ${r.error}`,
+            );
+            await refresh();
+            return;
+          }
+          // Windows: only Windows persists its boot credential (task
+          // re-registration re-reads it). The sudo password on Linux is
+          // use-once in memory — a vault row would be exported into every
+          // agent turn's environment.
+          const key = boot.WINDOWS_PASSWORD_VAULT_KEY;
+          let credential: string | null | undefined =
+            await boot.readBootCredential(dir, key);
+          const who = await new Promise<string>((resolve, reject) => {
+            const child = Bun.spawn(["whoami"], { stdout: "pipe", stderr: "pipe" });
+            void new Response(child.stdout).text().then(resolve, reject);
+            void child.exited.then((code) => {
+              if (code !== 0) reject(new Error("whoami failed"));
+            });
+          });
+          for (;;) {
+            if (!credential) {
+              credential = await askPassword();
+              if (!credential) {
+                setNotice("boot setup cancelled — nothing changed");
+                return;
+              }
+            }
+            let valid: boolean;
+            try {
+              const { defaultValidateWindowsCredential } = await import(
+                "../cli/install.ts"
+              );
+              valid = await defaultValidateWindowsCredential(who.trim(), credential);
+            } catch (e) {
+              // Unverifiable (no reachable account store) proceeds as
+              // requested — same doctrine as install.ts, only an explicit
+              // "invalid" downgrades.
+              valid = true;
+              setNotice(`could not verify the password (${(e as Error).message}); proceeding`);
+            }
+            outcome = valid
+              ? await boot.enableBootWindows(
+                  process.execPath,
+                  target.name,
+                  who.trim(),
+                  credential,
+                  { out: { write: () => {} }, err: { write: () => {} } },
+                )
+              : { status: "invalid-credential", error: "the password did not validate" };
+            if (outcome.status === "ok") break;
+            if (outcome.status === "invalid-credential") {
+              setNotice(
+                `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+              );
+              credential = undefined; // force the re-prompt
+              continue;
+            }
+            setNotice(`boot setup failed: ${outcome.error} — nothing changed`);
+            return;
+          }
+          if (typeof credential !== "string") return; // keeps the type honest
+          await boot.saveBootCredential(dir, key, credential);
+          const r = await (await import("./actions.ts")).applyAutostartChoice({
+            config,
+            persona: target.name,
+            choice: "boot",
+          });
+          setNotice(
+            r.ok
+              ? "autostart: boot — starts without a login"
+              : `boot set up, but the daemon update failed: ${r.error}`,
+          );
+          await refresh();
+          return;
+        } finally {
+          setPrompting(false);
+        }
+      }
+
+      // Off / Login: no credentials for the persona change itself — but a
+      // BOOT-level persona leaving needs platform teardown (Caveat 2).
+      // Linux/macOS hooks (linger / LaunchDaemon) are host-level, so they're
+      // torn down only when the LAST boot-level persona leaves; Windows
+      // tasks are per-persona and torn down / downgraded individually.
+      const { loadConfigForPersona } = await import("../config.ts");
+      const { config } = await loadConfigForPersona(target.name);
+      const boot = await import("../lib/autostartBoot.ts");
+      const { applyAutostartChoice } = await import("./actions.ts");
+
+      const wasBoot = target.autostart && target.autostartMode === "boot";
+      let teardownNote = "";
+      if (wasBoot) {
+        const platform = (await import("../lib/platform.ts")).currentPlatform();
+        const runner = boot.bunSpawnRunner();
+        const promptSudo = async (): Promise<string | undefined> =>
+          askValue({
+            title: "sudo password",
+            description: "Needed once to remove the boot start — never stored.",
+            masked: true,
+          });
+        if (platform === "windows") {
+          // Tasks are per-persona: Off deletes this persona's task set
+          // (ownership-checked), Login downgrades it to interactive so the
+          // heartbeat self-heal stops healing password-mode tasks back.
+          const t = choice === "off"
+            ? await boot.teardownBootWindows(target.name, {
+                out: { write: () => {} },
+                err: { write: () => {} },
+              })
+            : await boot.registerLoginTasksWindows(process.execPath, target.name, {
+                out: { write: () => {} },
+                err: { write: () => {} },
+              });
+          if (t.status !== "ok") {
+            setNotice(`boot teardown failed: ${t.error} — nothing changed`);
+            return;
+          }
+          teardownNote = choice === "off" ? " — boot tasks removed" : " — boot tasks moved to login";
+        } else {
+          // ENABLE-ONLY LINGER DOCTRINE (Andrew/Robbie, 2026-08-31): the
+          // boot start on Linux is the enabled daemon UNIT — phantombot
+          // stops booting by disabling its own unit (no sudo) and NEVER
+          // touches linger, which is one-way host state that may carry
+          // other systemd --user services. No ownership marker exists.
+          // The unit is disabled ONLY when a recorded boot persona leaves:
+          // the record is the proof phantombot (not the installer) chose
+          // boot, so the disable undoes OUR choice and never installer
+          // default state. Records-only: the outgoing persona's own record
+          // is stripped, and reading live unit state here would be
+          // circular (the unit is still enabled because of the choice we
+          // are undoing).
+          const postList = (config.autostartPersonas ?? []).filter(
+            (p) => p !== target.name,
+          );
+          const postModes = { ...(config.autostartModes ?? {}) };
+          delete postModes[target.name];
+          const unitNeeded = boot.bootHookStillNeeded(postList, postModes);
+          if (!unitNeeded) {
+            if (platform === "linux") {
+              const d = await boot.disableDaemonUnit(runner);
+              if (d.status !== "ok") {
+                setNotice(`boot teardown failed: ${d.error} — nothing changed`);
+                return;
+              }
+              // Login-level start: keep/land the marked hook line when any
+              // remaining on-list persona still needs a login start.
+              const hook = boot.loginHookNeeded(postList, postModes);
+              const h = await boot.writeLoginHook(hook);
+              if (h.status !== "ok") {
+                setNotice(`boot start disabled, but the login hook failed: ${h.error}`);
+              }
+              teardownNote = hook
+                ? " — boot start moved to login (~/.profile; GUI-only sessions may not fire it)"
+                : " — boot start removed";
+            } else {
+              // macOS: inherited LaunchDaemon teardown (ours-only labels).
+              // Boot is not selectable on macOS, so this is reachable only
+              // for a daemon an earlier install path created.
+              const passwordless = await boot.probeSudoPasswordless(runner);
+              let outcome: { status: string; error?: string };
+              for (;;) {
+                outcome = passwordless
+                  ? await boot.teardownBootMacPasswordless(runner)
+                  : await (async () => {
+                      const pw = await promptSudo();
+                      if (!pw) return { status: "cancelled" };
+                      return boot.teardownBootMac(pw, runner);
+                    })();
+                if (outcome.status === "ok") break;
+                if (outcome.status === "invalid-credential") {
+                  setNotice(
+                    `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+                  );
+                  continue;
+                }
+                const msg = outcome.status === "cancelled"
+                  ? "autostart change cancelled — boot start stays in place"
+                  : `boot teardown failed: ${outcome.error} — nothing changed`;
+                setNotice(msg);
+                return;
+              }
+              teardownNote = " — boot start removed";
+            }
+          }
+        }
+      }
+
+      const r = await applyAutostartChoice({
+        config,
+        persona: target.name,
+        choice,
+      });
+      setNotice(
+        r.ok
+          ? choice === "off"
+            ? `autostart: off — ${target.name} no longer starts with the daemon${teardownNote}`
+            : `autostart: login${teardownNote}`
+          : `failed: ${r.error}`,
+      );
+      await refresh();
+    },
+    [askChoice, askValue, askConfirmValue],
   );
 
   /**
@@ -981,6 +1396,196 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   /**
+   * Offer the service restart a persona-adding route needs. Shared by import
+   * and restore — the same post-apply hook the Brain/Voice/Channels flows run
+   * inline, factored out here because those flows predate the pattern's third
+   * copy.
+   */
+  const offerRestart = useCallback(async () => {
+    const { maybePromptRestart } = await import("../cli/harness.ts");
+    const { defaultServiceControl } = await import("../lib/platform.ts");
+    await maybePromptRestart(
+      defaultServiceControl(),
+      async (message) =>
+        await askConfirmValue({
+          title: message,
+          consequence: {
+            summary: "",
+            detail: "",
+            longRunning: false,
+            restarts: true,
+          },
+        }),
+      {
+        note: (body: string, title?: string) =>
+          setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
+      } as never,
+    );
+  }, [askConfirmValue]);
+
+  /**
+   * Import an OpenClaw- or phantombot-shaped directory, all on screens.
+   *
+   * The WRITE path is `runImportPersona` with an explicit source — the same
+   * machinery `phantombot persona --import` uses, including the OpenClaw
+   * telegram/voice sniff, default adoption and scaffold — so the TUI and the
+   * CLI cannot import differently shaped personas. Only the ASKING is ours:
+   * path, name, overwrite confirm, all on Ask/Confirm screens instead of clack.
+   */
+  const importPersonaFromDirectory = useCallback(async () => {
+    const source = await askValue({
+      title: "Import a persona from a directory",
+      hint: "path to an OpenClaw- or phantombot-shaped persona directory",
+    });
+    if (!source) return setNotice("import cancelled");
+    if (!existsSync(source))
+      return setNotice(`import failed: no such directory: ${source}`);
+
+    const { validPersonaName } = await import("../cli/persona-new.ts");
+    const suggested = basename(source);
+    const name = await askValue({
+      title: "Persona name",
+      hint: validPersonaName(suggested)
+        ? `blank keeps '${suggested}'`
+        : "lowercase letters, digits, '-' or '_'",
+      initial: validPersonaName(suggested) ? suggested : undefined,
+      allowEmpty: true,
+    });
+    if (name === undefined) return setNotice("import cancelled");
+    const target = name || (validPersonaName(suggested) ? suggested : "");
+    if (!target)
+      return setNotice("import failed: a valid persona name is required");
+
+    if (host.personas.some((p) => p.name === target)) {
+      const yes = await askConfirmValue({
+        title: `Persona '${target}' already exists — overwrite it?`,
+        danger: true,
+        consequence: {
+          summary: "the current directory is archived to personas-archive/ first",
+          detail: "",
+          longRunning: false,
+          restarts: false,
+        },
+      });
+      if (!yes) return setNotice("import cancelled");
+    }
+
+    setPrompting(true);
+    try {
+      const { runImportPersona } = await import("../cli/import-persona.ts");
+      const config = await loadConfig();
+      let output = "";
+      const code = await runImportPersona({
+        source,
+        as: target,
+        overwrite: true,
+        config,
+        out: { write: (chunk: string) => void (output += chunk) },
+        err: { write: (chunk: string) => void (output += chunk) },
+      });
+      if (code !== 0)
+        return setNotice(
+          output.trim().split("\n")[0] || `import of ${target} failed`,
+        );
+
+      await refresh();
+      setPersonaName(target);
+      navRef.current = [];
+      setScreen("persona");
+      setNotice(`imported ${target} — finish its settings below`);
+      await offerRestart();
+    } catch (e) {
+      setNotice(`import failed: ${(e as Error).message}`);
+    } finally {
+      setPrompting(false);
+    }
+  }, [host, askValue, askConfirmValue, refresh, offerRestart]);
+
+  /**
+   * Restore an archived persona from `personas-archive/`, all on screens.
+   * The WRITE path is `applyRestore` (the clack flow's own helper), so the
+   * archive-then-restore semantics — the existing dir archived first — are
+   * the ones the CLI already tests.
+   */
+  const restoreArchivedPersona = useCallback(async () => {
+    const { listArchives } = await import("../lib/personaArchive.ts");
+    let archives;
+    try {
+      archives = await listArchives(host.personasDir);
+    } catch (e) {
+      return setNotice(`restore failed: ${(e as Error).message}`);
+    }
+    if (archives.length === 0)
+      return setNotice("no archived personas to restore");
+
+    const picked = await askChoice({
+      title: "Restore an archived persona",
+      description:
+        "the archive is copied back under personas/ — nothing is removed from personas-archive/",
+      options: archives.map((a) => ({
+        value: a.archiveName,
+        label: a.name,
+        hint: a.dir,
+      })),
+    });
+    if (!picked) return setNotice("restore cancelled");
+    const chosen = archives.find((a) => a.archiveName === picked);
+    if (!chosen) return;
+
+    const { validPersonaName } = await import("../cli/persona-new.ts");
+    const name = await askValue({
+      title: "Persona name",
+      hint: `blank keeps '${chosen.name}'`,
+      initial: chosen.name,
+      allowEmpty: true,
+    });
+    if (name === undefined) return setNotice("restore cancelled");
+    const target = name || chosen.name;
+    if (!validPersonaName(target))
+      return setNotice(
+        "restore failed: use lowercase letters, digits, '-' or '_'",
+      );
+
+    if (host.personas.some((p) => p.name === target)) {
+      const yes = await askConfirmValue({
+        title: `Persona '${target}' already exists — overwrite it?`,
+        danger: true,
+        consequence: {
+          summary: "the current directory is archived to personas-archive/ first",
+          detail: "",
+          longRunning: false,
+          restarts: false,
+        },
+      });
+      if (!yes) return setNotice("restore cancelled");
+    }
+
+    setPrompting(true);
+    try {
+      const { applyRestore } = await import("../cli/import-persona.ts");
+      const { ensurePersonaScaffold } = await import(
+        "../lib/personaScaffold.ts"
+      );
+      const config = await loadConfig();
+      const r = await applyRestore(config, chosen, target);
+      await ensurePersonaScaffold(r.dir);
+
+      await refresh();
+      setPersonaName(target);
+      navRef.current = [];
+      setScreen("persona");
+      setNotice(
+        `restored ${target} from ${chosen.archiveName}${r.alsoArchived ? ` — previous ${target} archived` : ""}`,
+      );
+      await offerRestart();
+    } catch (e) {
+      setNotice(`restore failed: ${(e as Error).message}`);
+    } finally {
+      setPrompting(false);
+    }
+  }, [host, askChoice, askValue, askConfirmValue, refresh, offerRestart]);
+
+  /**
    * Pick one of the prompt files and edit it in the app's own editor.
    *
    * A missing file is offered too, and creating it by opening it is the
@@ -1012,14 +1617,11 @@ export function App(props: AppProps): React.ReactElement {
         <WizardScreen
           startAt={props.wizardStartAt}
           initial={{ name: props.startPersona ?? "" }}
-          defaultExists={host.personas.length > 0}
           existingNames={host.personas.map((p) => p.name)}
-          personasDir={host.personasDir}
           // Only when the wizard was reached from another screen; on first
           // run the stack is empty and `back` would fall through to chat,
           // which does not exist yet.
           onBack={navRef.current.length > 0 ? back : undefined}
-          onQuit={exit}
           onFinish={async (answers) => {
             try {
               const result = await props.onCreatePersona(answers);
@@ -1032,11 +1634,76 @@ export function App(props: AppProps): React.ReactElement {
               );
               // A finished wizard is not a place to go back to.
               navRef.current = [];
-              setScreen("chat");
+              // A freshly created persona continues straight into the Brain
+              // steps (brainOnboarding.ts): primary → Pi install/configure →
+              // fallback → test. Chat is earned by a VERIFIED brain — a real
+              // one-shot turn through the primary; every other exit (skip,
+              // failed test, cancel) lands in CONFIGURE, where the red
+              // `required` Brain row is the nudge. A resumed wizard (identity
+              // fix on an existing persona) skips the brain steps — its brain
+              // state is whatever it already was.
+              const brainResult =
+                result?.created !== false
+                  ? await wizardBrain(answers.name)
+                  : undefined;
+              // The brain steps' notice (what happened to the config)
+              // supersedes the creation line — but only when the flow has
+              // something to say.
+              if (brainResult?.notice) setNotice(brainResult.notice);
+              setScreen(brainResult?.landing === "chat" ? "chat" : "persona");
             } catch (e) {
               setNotice(`could not create ${answers.name}: ${(e as Error).message}`);
             }
           }}
+        />
+      );
+    }
+
+    if (screen === "newPersona") {
+      return (
+        <NewPersonaScreen
+          personasDir={host.personasDir}
+          onCreate={() => go("createPersona")}
+          onImport={() => void importPersonaFromDirectory()}
+          onRestore={() => void restoreArchivedPersona()}
+          onBack={back}
+        />
+      );
+    }
+
+    if (screen === "createPersona") {
+      return (
+        <CreatePersonaScreen
+          existingNames={host.personas.map((p) => p.name)}
+          onCreate={(answers: CreatePersonaAnswers) => {
+            void (async () => {
+              try {
+                await props.onCreatePersona({
+                  name: answers.name,
+                  identity: answers.identity,
+                  tone: answers.tone,
+                  owner: answers.owner,
+                  expertise: answers.expertise,
+                  makeDefault: false,
+                });
+                await refresh();
+                setPersonaName(answers.name);
+                setNotice(
+                  `created ${host.personasDir}/${answers.name} — finish setup in Configure`,
+                );
+                // Same rule as the wizard: a just-created persona is not a
+                // place to go back to. Land in Configure, where the rest of
+                // its setup (brain, channels, memory, voice) actually lives.
+                navRef.current = [];
+                setScreen("persona");
+              } catch (e) {
+                setNotice(
+                  `could not create ${answers.name}: ${(e as Error).message}`,
+                );
+              }
+            })();
+          }}
+          onBack={back}
         />
       );
     }
@@ -1090,7 +1757,34 @@ export function App(props: AppProps): React.ReactElement {
           // not status: they live on `^s`, and printing them here made the top
           // line read `claude · cli only` on a screen that is self-evidently a
           // chat with a phantom.
-          status={`channel: ${host.updateChannel}`}
+          status={(() => {
+            // Andrew, 2026-08-31: the autostart state lives on the chat top
+            // banner — it is the one fact that decides whether this phantom
+            // will be here when you reboot. An Off is LOUD (red): a default
+            // phantom with nothing starting it is exactly the surprise you
+            // only discover after a restart.
+            const chatPersona = host.personas.find(
+              (hp) => hp.name === session?.persona,
+            );
+            if (!chatPersona) return `channel: ${host.updateChannel}`;
+            const label = chatPersona.isDefault
+              ? chatPersona.autostart
+                ? (chatPersona.autostartMode ?? "login")
+                : "off"
+              : chatPersona.autostart
+                ? "on"
+                : "off";
+            return `channel: ${host.updateChannel} · autostart: ${label}`;
+          })()}
+          statusColor={
+            (() => {
+              const chatPersona = host.personas.find(
+                (hp) => hp.name === session?.persona,
+              );
+              if (!chatPersona?.isDefault) return undefined;
+              return chatPersona.autostart ? undefined : theme.bad;
+            })()
+          }
           // `^s` is chat's ONLY way out to configuration, and it lands on the
           // PHANTOM TABLE: "which phantom am I configuring" is the question
           // you have to answer before any of the per-phantom settings mean
@@ -1120,7 +1814,7 @@ export function App(props: AppProps): React.ReactElement {
             setPersonaName(name);
             go("persona");
           }}
-          onNew={() => go("wizard")}
+          onNew={() => go("newPersona")}
           onLogs={() => go("logs")}
           onDoctor={(name) => {
             setPersonaName(name);
@@ -1130,6 +1824,47 @@ export function App(props: AppProps): React.ReactElement {
             setDoctorStatus(undefined);
             go("doctor");
             void runTheDoctor(name);
+          }}
+          onRemove={(name) => {
+            // The default cannot be removed out from under the host: it owns
+            // /update and /restart, so removing it would strand the box.
+            // Saying WHY here beats a generic "failed" after the confirm.
+            if (host.defaultPersona === name) {
+              setNotice(
+                host.personas.length > 1
+                  ? `${name} is the default — make another phantom the default before removing it`
+                  : `${name} is the only phantom on this host and the default — nothing to hand the host to`,
+              );
+              return;
+            }
+            const row = host.personas.find((p) => p.name === name);
+            void askConfirm({
+              title: `Remove ${name} from this host?`,
+              danger: true,
+              // The loudest confirm there is: the exact name typed by hand.
+              confirmName: name,
+              consequence: describePersonaRemoval(name, row?.autostart ?? false),
+              run: async () => {
+                // HOST config — the autostart entry lives there, and the
+                // persona's own layer is about to stop existing.
+                const { host: hostConfig } = await loadConfigForPersona(name);
+                const r = await applyRemovePersona({
+                  config: hostConfig,
+                  persona: name,
+                });
+                setNotice(
+                  r.ok
+                    ? `removed ${name} — archived as ${r.archive}`
+                    : `failed: ${r.error}`,
+                );
+                // A phantom that no longer exists must not stay selected:
+                // esc → chat would otherwise open a ghost thread.
+                setPersonaName((current) =>
+                  current === name ? hostConfig.defaultPersona : current,
+                );
+                await refresh();
+              },
+            });
           }}
           onBack={back}
         />
@@ -1153,27 +1888,7 @@ export function App(props: AppProps): React.ReactElement {
           onEditIdentity={() => void editIdentity(persona)}
           onChangeBrain={() => void changeBrain(persona)}
           onChangeChannels={() => void changeChannels(persona)}
-          onToggleAutostart={() => {
-            const on = !(persona.autostart || persona.isDefault);
-            void askConfirm({
-              title: `${on ? "Start" : "Stop starting"} ${persona.name} with the daemon?`,
-              consequence: describeAutostartChange(persona.name, on),
-              run: async () => {
-                const { config } = await loadConfigForPersona(persona.name);
-                const r = await applyAutostart({
-                  config,
-                  persona: persona.name,
-                  on,
-                });
-                setNotice(
-                  r.ok
-                    ? `autostart: ${r.list.join(", ") || "none"}`
-                    : `failed: ${r.error}`,
-                );
-                await refresh();
-              },
-            });
-          }}
+          onChangeAutostart={() => void changeAutostart(persona)}
           releaseChannel={host.updateChannel}
           canSetDefault={host.personas.length > 1}
           canSetRelease={!process.env.PHANTOMBOT_PERSONA?.trim()}

@@ -15,7 +15,13 @@ import { render } from "ink";
 
 import { App } from "./App.tsx";
 import { installStdinTap } from "./stdinTap.ts";
-import { enterFullScreen, gateStdout, forceRepaint } from "./terminal.ts";
+import {
+  enterFullScreen,
+  gateStdout,
+  forceRepaint,
+  KITTY_POP,
+  KITTY_PUSH,
+} from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
@@ -43,31 +49,52 @@ import {
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 
 /**
- * Decide what the app opens on.
+ * Decide what the app opens on, in three tiers:
  *
- * - No personas at all → the wizard, from the start.
- * - A default persona that fails the completeness predicate → the wizard,
- *   RESUMED at the failing step with prior answers pre-filled.
- * - Otherwise → chat with the default persona.
+ * 1. No personas, no default persona configured, or a default persona whose
+ *    identity is missing — the gap the wizard itself exists to set up — → the
+ *    New Persona wizard. Resumed at the identity question when a persona
+ *    exists; from the start when none does.
+ * 2. A default persona with identity but no brain of its own → its Configure
+ *    screen. Not a wizard gap: a brain is chosen in Configure, and the red
+ *    `required` Brain row there is the nudge.
+ * 3. Identity + brain present → chat with the default persona.
  */
+export type OpeningScreen = "chat" | "configure" | "wizard";
+
 export async function resolveOpeningScreen(): Promise<{
+  screen: OpeningScreen;
   persona?: string;
   wizardStartAt?: WizardStep;
 }> {
   const host = await loadConfig();
   const { personas } = await hostSnapshot();
-  if (personas.length === 0) return {};
-  const target =
-    personas.find((p) => p.name === host.defaultPersona) ?? personas[0]!;
+  if (personas.length === 0 || !host.defaultPersona)
+    return { screen: "wizard" };
+  const target = personas.find((p) => p.name === host.defaultPersona);
+  if (!target) return { screen: "wizard" };
   const { config } = await loadConfigForPersona(target.name);
   const completeness = await personaCompleteness(config, target.name);
-  if (completeness.complete) return { persona: target.name };
-  return { persona: target.name, wizardStartAt: completeness.resumeAt };
+  const requirement = (id: (typeof completeness.requirements)[number]["id"]) =>
+    completeness.requirements.find((r) => r.id === id)!;
+  // Identity is the one wizard-fixable gap. A memory-DB failure is a repair
+  // case, not a setup flow (the wizard cannot fix it), so it falls through to
+  // the tiers below and surfaces as the not-ready badge.
+  if (!requirement("identity").ok) {
+    return {
+      screen: "wizard",
+      persona: target.name,
+      wizardStartAt: completeness.resumeAt,
+    };
+  }
+  if (!requirement("brain").ok) return { screen: "configure", persona: target.name };
+  return { screen: "chat", persona: target.name };
 }
 
 export async function startTui(): Promise<number> {
   const host = await hostSnapshot();
   const opening = await resolveOpeningScreen();
+  const startScreen = opening.screen === "configure" ? "configure" : undefined;
 
   // A terminal app owns the window. The alternate screen buffer is what makes
   // this look like `htop` rather than like output pasted under a shell prompt,
@@ -85,6 +112,7 @@ export async function startTui(): Promise<number> {
     <App
       host={host}
       startPersona={opening.persona}
+      startScreen={startScreen}
       wizardStartAt={opening.wizardStartAt}
       onCreatePersona={async (answers: WizardAnswers) => {
         return await createPhantomFromWizard(answers);
@@ -96,6 +124,12 @@ export async function startTui(): Promise<number> {
     stdin: installed.stdin,
     stdout: gate.stream,
     exitOnCtrlC: false,
+    // Shift/Ctrl/Alt+Enter as distinct keys in the chat box: Ink 6 parses the
+    // kitty keyboard protocol but only enables it for kitty/WezTerm/Ghostty,
+    // so we push flag 1 (disambiguate escape codes) ourselves. Terminals that
+    // don't support it ignore the sequence and stay legacy — ctrl+J remains
+    // the universal newline there. Popped around clack handovers below.
+    kittyKeyboard: { mode: "enabled", flags: ["disambiguateEscapeCodes"] },
     // Rewrite only the lines that changed. The default redraws the whole frame
     // on every render, which at a 12fps spinner plus one repaint per keystroke
     // is visible as flicker; with it on, a tick costs a few dozen bytes on one
@@ -121,6 +155,9 @@ export async function startTui(): Promise<number> {
     // owns the terminal we must not be reading the same bytes it is.
     installed.setForwarding(false);
     fullScreen.restore();
+    // Legacy bytes for the borrower: a clack readline or `$EDITOR` cannot
+    // parse CSI-u Enter, so the kitty flags come off while it owns stdin.
+    process.stdout.write(KITTY_POP);
     // Hand the stream over: snapshot the listeners the borrower will add, and
     // resume it so the borrower actually receives bytes. See `lendStdin`.
     const dropBorrowedListeners = lendStdin(process.stdin);
@@ -128,6 +165,9 @@ export async function startTui(): Promise<number> {
       return await fn();
     } finally {
       dropBorrowedListeners();
+      // Flags back on BEFORE anything reads stdin again — the pop must never
+      // outlive the handover, or Enter would arrive as a bare `\r` mid-frame.
+      process.stdout.write(KITTY_PUSH);
       fullScreen.enter();
       // Re-attaches the tap, restores raw mode, and RESUMES stdin — a readline
       // close or an inherited-stdin child leaves it paused, and a paused stdin
@@ -148,6 +188,10 @@ export async function startTui(): Promise<number> {
     restoreLogs();
     installed.teardown();
     fullScreen.restore();
+    // Belt for signal exits: Ink pops its own flags on unmount, but a SIGTERM
+    // path may not reach it — and a shell left in flag-1 mode gets CSI-u
+    // garbage on every Enter. Extra pops are ignored.
+    process.stdout.write(KITTY_POP);
   };
   installSignalExit(restore);
 
@@ -223,6 +267,10 @@ export async function createPhantomFromWizard(
     const code = await runPersonaNew({
       name: answers.name,
       harness: answers.brain,
+      identity: answers.identity,
+      tone: answers.tone,
+      owner: answers.owner,
+      expertise: answers.expertise,
       // Applied below for both new and resumed personas. Keeping this outside
       // the creation-only branch preserves the side effects on an incomplete
       // existing persona without asking `persona new` to overwrite it.
@@ -240,10 +288,16 @@ export async function createPhantomFromWizard(
     }
   }
 
-  const autostartPersonas = await writeAutostartPersonas(target, [
-    ...(target.autostartPersonas ?? []),
-    answers.name,
-  ]);
+  const autostartPersonas = await writeAutostartPersonas(
+    target,
+    // Autostart is OFF unless the host already uses it: a host with an empty
+    // `autostart_personas` (the “phantoms run when I open them” mode) does not
+    // silently conscript every new persona into the daemon fleet. Joining an
+    // existing autostart list is the detected case.
+    (target.autostartPersonas ?? []).length > 0
+      ? [...(target.autostartPersonas ?? []), answers.name]
+      : (target.autostartPersonas ?? []),
+  );
   try {
     await syncHeartbeatInstances(
       servedPersonasOf({
@@ -265,14 +319,19 @@ export async function createPhantomFromWizard(
   // This deliberately bypasses resolvePersonaWriteTarget(): a new persona has
   // no config file yet, so that helper would target the global config. Preserve
   // inherited fallbacks while moving the chosen brain to the head of the chain.
-  const chain = [
-    answers.brain,
-    ...(target.harnesses?.chain ?? []).filter((id) => id !== answers.brain),
-  ];
-  await updateConfigToml(
-    personaConfigPath(target.personasDir, answers.name),
-    (toml) => setIn(toml, ["harnesses", "chain"], chain),
-  );
+  // The three-question create flow (CreatePersona.tsx) picks no brain, so it
+  // writes nothing here — the persona inherits the host chain until the
+  // Configure screen's Brain flow records a choice.
+  if (answers.brain !== undefined) {
+    const chain = [
+      answers.brain,
+      ...(target.harnesses?.chain ?? []).filter((id) => id !== answers.brain),
+    ];
+    await updateConfigToml(
+      personaConfigPath(target.personasDir, answers.name),
+      (toml) => setIn(toml, ["harnesses", "chain"], chain),
+    );
+  }
   return { created };
 }
 

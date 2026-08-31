@@ -383,7 +383,7 @@ export type InstallRunner = (cmd: string[]) => Promise<{
   stderr: string;
 }>;
 
-const defaultInstallRunner: InstallRunner = async (cmd) => {
+export const defaultInstallRunner: InstallRunner = async (cmd) => {
   const [bin, ...rest] = cmd;
   const proc = Bun.spawn([bin!, ...rest], {
     stdin: "inherit",
@@ -395,7 +395,7 @@ const defaultInstallRunner: InstallRunner = async (cmd) => {
   return { exitCode, stderr };
 };
 
-async function installPi(
+export async function installPi(
   runner: InstallRunner = defaultInstallRunner,
   q: HarnessPrompts = clackPrompts,
 ): Promise<boolean> {

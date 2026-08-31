@@ -182,6 +182,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: true,
   autostart: true,
   chain: ["claude"],
+  brainConfigured: true,
   channels: ["cli only"],
   identity: { files: [] },
   channelDetails: [],

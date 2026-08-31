@@ -62,6 +62,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: true,
   autostart: true,
   chain: ["claude", "pi"],
+  brainConfigured: true,
   resolvedHarness: { id: "claude", path: "/usr/local/bin/claude" },
   channels: ["telegram"],
   voiceProvider: "azure_edge",
@@ -327,10 +328,11 @@ describe("settings screen in a short window", () => {
     expect(text).toContain("configured");
     expect(text).not.toContain("required");
 
-    // The informational group shows VALUES where badges sit: on|off, yes|no,
-    // stable|preview — dim, no glyph, no red/green.
+    // The informational group shows VALUES where badges sit: off|login|boot
+    // for a default phantom, on|off for siblings, yes|no, stable|preview —
+    // dim, no glyph, no red/green.
     const autostart = lines.find((l) => l.includes("Autostart"))!;
-    expect(autostart.trimEnd().endsWith("on")).toBe(true);
+    expect(autostart.trimEnd().endsWith("login")).toBe(true);
     const release = lines.find((l) => l.includes("Release Channel"))!;
     expect(release).toContain("stable");
   });

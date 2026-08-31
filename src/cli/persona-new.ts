@@ -37,6 +37,10 @@ export interface RunPersonaNewInput {
   /** One-line "who is this" for IDENTITY.md. */
   identity?: string;
   tone?: PersonaTone;
+  /** Optional. The principal's name — seeds IDENTITY.md's "Who you work for". */
+  owner?: string;
+  /** Optional. Areas of expertise — seeds IDENTITY.md's expertise section. */
+  expertise?: readonly string[];
   config?: Config;
   out?: WriteSink;
   err?: WriteSink;
@@ -74,7 +78,8 @@ export async function runPersonaNew(
     name,
     identity: input.identity ?? `a phantom called ${name}`,
     tone: input.tone ?? "professional",
-    expertise: [],
+    expertise: input.expertise ?? [],
+    owner: input.owner,
     hardRules: "",
     greeting: "",
     setDefault: input.makeDefault === true,

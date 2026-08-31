@@ -94,7 +94,9 @@ describe("footer badges", () => {
       const frame = stripAnsi(lastFrame(stdout.frames));
       const expected: Array<[string, string]> = [
         [badge.send, "↵"],
-        [badge.history, "↑↓"],
+        [badge.send, "Alt+↵"],
+        [badge.run, "/"],
+        [badge.scroll, "↑↓"],
         [badge.settings, "^s"],
         [badge.quit, "^q"],
       ];

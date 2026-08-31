@@ -8,10 +8,17 @@
  *
  * Three requirements, and deliberately no more:
  *
- *   1. **A resolvable brain.** At least one harness in the persona's chain has
- *      its binary on disk. Not "a chain is configured" — a chain naming a
- *      `codex` that was never installed produces a phantom that fails on its
- *      first turn, which is exactly the failure a first-run wizard exists to
+ *   1. **The persona's OWN brain.** A harness chain recorded FOR this
+ *      persona — its own config file, or a `[harnesses.personas.<name>]`
+ *      entry in the host file (the legacy default-persona shape the Brain
+ *      flow writes and the runtime honors, phantombot#441) — with at least
+ *      one binary on disk. Inheriting the bare host chain is NOT configuring
+ *      a brain: a phantom created without one must show as not-ready until
+ *      its operator records a choice (Configure → Brain) — "it would work
+ *      with the host's chain" is exactly the kind of implicit answer that
+ *      produces a phantom nobody ever deliberately set up. Not "a chain is configured" either — a chain naming a `codex`
+ *      that was never installed produces a phantom that fails on its first
+ *      turn, which is exactly the failure a first-run wizard exists to
  *      prevent.
  *   2. **An identity.** `identity.json` is the persona's nsec, and the vault
  *      key is DERIVED from it — without it there are no credentials, so there
@@ -35,6 +42,8 @@ import { join } from "node:path";
 
 import type { Config } from "../config.ts";
 import { personaDir } from "../config.ts";
+import { getIn, readConfigToml } from "../lib/configWriter.ts";
+import { personaConfigPath } from "../lib/personaConfig.ts";
 import { resolveHarnessAvailability } from "./harnessAvailability.ts";
 import { IDENTITY_FILE } from "./personaIdentity.ts";
 
@@ -46,10 +55,8 @@ import { IDENTITY_FILE } from "./personaIdentity.ts";
  */
 export const WIZARD_STEPS = [
   "name",
-  "brain",
-  "channel",
-  "memory",
-  "voice",
+  "identity",
+  "tone",
   "done",
 ] as const;
 
@@ -80,6 +87,12 @@ export interface PersonaCompleteness {
 export interface PersonaCompletenessDeps {
   /** Test seam for the harness binary probe. */
   resolveHarness?: typeof resolveHarnessAvailability;
+  /**
+   * Test seam: the persona's OWN harness chain, read from its config file.
+   * Defaults to the real reader; `undefined` means the persona has recorded
+   * no brain of its own.
+   */
+  localChain?: () => Promise<readonly string[] | undefined>;
   /** Test seam: does this path exist? */
   exists?: (path: string) => boolean;
   /**
@@ -88,6 +101,50 @@ export interface PersonaCompletenessDeps {
    * *reportable* state instead of an exception on the launch path.
    */
   memoryOpens?: (dbPath: string) => Promise<boolean>;
+}
+
+/**
+ * The harness chain recorded FOR this persona, in order of precedence —
+ * mirroring `harnessChainIds` so the gate and the runtime can never disagree
+ * about whether a brain exists:
+ *
+ *   1. the persona's OWN config file (`<persona>/config.toml`),
+ *   2. a persona-specific entry in the host file (`[harnesses.personas.<name>]`)
+ *      — the legacy default-persona shape the Brain flow writes while the
+ *      persona has no file of its own.
+ *
+ * The bare host chain (`[harnesses].chain`) is deliberately NOT consulted:
+ * inheriting it is not a recorded choice. A missing record is a phantom that
+ * has configured no brain yet, not an error.
+ *
+ * Exported so every consumer of "did this persona record a brain of its own?"
+ * (the completeness gate, the settings badge, the status block) reads ONE
+ * source of truth instead of drifting — the drift between this predicate and
+ * the snapshot's own-file reader is exactly what produced a red `required`
+ * badge on a phantom that was chatting.
+ */
+export async function defaultLocalChain(
+  config: Config,
+  persona: string,
+): Promise<readonly string[] | undefined> {
+  try {
+    const toml = await readConfigToml(
+      personaConfigPath(config.personasDir, persona),
+    );
+    const chain = getIn(toml, ["harnesses", "chain"]);
+    if (Array.isArray(chain) && chain.length > 0) {
+      return chain as readonly string[];
+    }
+  } catch {
+    // No persona file — fall through to the host personas table.
+  }
+  // `config` is the persona's EFFECTIVE config, so its personas table already
+  // carries the host file's `[harnesses.personas.<name>]` entry for THIS
+  // persona (and only this one is read — other personas' rows are theirs).
+  const recorded = config.harnesses.personas?.[persona]?.chain;
+  return Array.isArray(recorded) && recorded.length > 0
+    ? (recorded as readonly string[])
+    : undefined;
 }
 
 async function defaultMemoryOpens(dbPath: string): Promise<boolean> {
@@ -116,26 +173,32 @@ export async function personaCompleteness(
   const exists = deps.exists ?? existsSync;
   const resolveHarness = deps.resolveHarness ?? resolveHarnessAvailability;
   const memoryOpens = deps.memoryOpens ?? defaultMemoryOpens;
+  const localChain =
+    (await deps.localChain?.()) ?? (await defaultLocalChain(config, persona));
   const dir = personaDir(config, persona);
 
   const requirements: PersonaRequirement[] = [];
 
-  // 1. Brain. Walk the chain in order and stop at the first harness whose
-  //    binary actually resolves — that is the one a turn would use.
-  const chain = config.harnesses?.chain ?? [];
-  let brainDetail = "no harness chain configured";
+  // 1. Brain. The persona must have recorded its own chain, and at least one
+  //    harness on it must actually resolve — that is the one a turn would use.
+  const chain = localChain ?? [];
+  let brainDetail = "no brain configured — set one under Configure → Brain";
   let brainOk = false;
-  for (const id of chain) {
-    const availability = await resolveHarness(config, id);
-    if (availability?.resolved) {
-      brainOk = true;
-      brainDetail = `${id} → ${availability.resolved}`;
-      break;
+  if (localChain) {
+    for (const id of chain) {
+      const availability = await resolveHarness(config, id);
+      if (availability?.resolved) {
+        brainOk = true;
+        brainDetail = `${id} → ${availability.resolved}`;
+        break;
+      }
+      brainDetail = `${chain.join(" → ")}: none found on PATH`;
     }
-    brainDetail = `${chain.join(" → ")}: none found on PATH`;
   }
   requirements.push({
-    step: "brain",
+    // Not a wizard question anymore — a brain gap routes to Configure (tier
+    // 2 of the opening doctrine), so `step` only needs a legal value.
+    step: "done",
     id: "brain",
     ok: brainOk,
     detail: brainDetail,
@@ -146,7 +209,8 @@ export async function personaCompleteness(
   const identityPath = join(dir, IDENTITY_FILE);
   const identityOk = exists(identityPath);
   requirements.push({
-    step: "brain",
+    // The one gap the wizard itself fixes: resume at the identity question.
+    step: "identity",
     id: "identity",
     ok: identityOk,
     detail: identityOk ? identityPath : `missing ${identityPath}`,
@@ -155,7 +219,9 @@ export async function personaCompleteness(
   // 3. Memory database.
   const dbOk = await memoryOpens(config.memoryDbPath);
   requirements.push({
-    step: "memory",
+    // Also not a wizard question — a corrupt DB is a repair case, not a
+    // setup flow; it surfaces as the not-ready badge instead.
+    step: "done",
     id: "memory",
     ok: dbOk,
     detail: dbOk ? config.memoryDbPath : `cannot open ${config.memoryDbPath}`,

@@ -35,7 +35,7 @@ function fakeStdin() {
   return s;
 }
 
-function fakeStdout(rows = 44, columns = 100) {
+function fakeStdout(rows = 58, columns = 100) {
   const frames: string[] = [];
   const s = new EventEmitter() as EventEmitter & {
     columns: number;
@@ -56,6 +56,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: true,
   autostart: true,
   chain: ["claude", "pi"],
+  brainConfigured: true,
   resolvedHarness: { id: "claude", path: "/usr/local/bin/claude" },
   // Deliberately non-empty: the badge must ignore this and read /status.
   channels: ["telegram"],
@@ -103,8 +104,9 @@ afterEach(() => {
   mounted = [];
 });
 
-async function renderSettings(status: StatusRows) {
+async function renderSettings(status: StatusRows, downTo?: number) {
   const stdout = fakeStdout();
+  const stdin = fakeStdin();
   const instance = render(
     <PersonaDetailScreen
       persona={ALICE}
@@ -113,7 +115,7 @@ async function renderSettings(status: StatusRows) {
       onEditIdentity={noop}
       onChangeBrain={noop}
       onChangeChannels={noop}
-      onToggleAutostart={noop}
+      onChangeAutostart={noop}
       onMakeDefault={noop}
       releaseChannel="stable"
       onToggleRelease={noop}
@@ -122,7 +124,7 @@ async function renderSettings(status: StatusRows) {
       onBack={noop}
     />,
     {
-      stdin: fakeStdin() as never,
+      stdin: stdin as never,
       stdout: stdout as never,
       exitOnCtrlC: false,
       patchConsole: false,
@@ -131,7 +133,14 @@ async function renderSettings(status: StatusRows) {
   );
   mounted.push(() => instance.unmount());
   await new Promise((r) => setTimeout(r, 50));
-  return stdout.frames.map(stripAnsi).join("\n");
+  // Optional scroll: with the three-group layout the last rows sit below the
+  // fold of a 58-row window once a STATUS block has landed; arrow down to the
+  // row under test (the scroll window follows the cursor) and read that frame.
+  for (let i = 0; i < (downTo ?? 0); i++) {
+    stdin.write("\x1b[B");
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return stdout.frames.map(stripAnsi).at(-1)!;
 }
 
 const rowOf = (lines: string, label: string) =>
@@ -142,7 +151,7 @@ const rowOf = (lines: string, label: string) =>
 
 describe("settings badge semantics", () => {
   test("voice provider `none` is optional, not configured", async () => {
-    const text = await renderSettings([["voice", "none"]]);
+    const text = await renderSettings([["voice", "none"]], 7);
     const row = rowOf(text, "Voice");
     expect(row.endsWith("optional")).toBe(true);
     expect(row).not.toContain("✓");
@@ -155,7 +164,7 @@ describe("settings badge semantics", () => {
   });
 
   test("voice configured but keyless is a warning, not healthy", async () => {
-    const text = await renderSettings([["voice", "openai nova — no key"]]);
+    const text = await renderSettings([["voice", "openai nova — no key"]], 7);
     expect(rowOf(text, "Voice").endsWith("no key")).toBe(true);
     expect(rowOf(text, "Voice")).not.toContain("✓");
   });
@@ -209,7 +218,7 @@ describe("settings badge semantics", () => {
         onEditIdentity={noop}
         onChangeBrain={noop}
         onChangeChannels={noop}
-        onToggleAutostart={noop}
+        onChangeAutostart={noop}
         onMakeDefault={noop}
         releaseChannel="stable"
         onToggleRelease={noop}
