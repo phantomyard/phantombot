@@ -58,7 +58,9 @@ export function nameDescription(): React.ReactElement {
           {NAME_EXAMPLES}
         </Text>
       </ExampleBox>
-      <Text dimColor>lowercase letters, digits, "-" or "_"</Text>
+      {/* The format line lives in the AskScreen hint slot — which renders just
+          above the input and doubles as the validation-error line — so it
+          appears exactly once, next to where it matters. */}
     </>
   );
 }

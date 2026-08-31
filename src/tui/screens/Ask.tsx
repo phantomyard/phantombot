@@ -103,12 +103,7 @@ export function AskScreen(props: {
           : [{ icon: badge.back, key: "esc", label: "Back" }]),
       ]}
     >
-      {hint ? (
-        <Box>
-          <Text color={theme.dim}>{hint}</Text>
-        </Box>
-      ) : null}
-      <Box marginTop={1}>
+      <Box>
         <Text bold>{title}</Text>
       </Box>
       {description ? (
@@ -118,6 +113,15 @@ export function AskScreen(props: {
           ) : (
             description
           )}
+        </Box>
+      ) : null}
+      {/* Hint sits just above the input — the eye lands here when it matters
+          (validation errors, format rules), and the title stays first on
+          screen. Rendering it above the title put stray guidance at the very
+          top, which read as orphaned text. */}
+      {hint ? (
+        <Box marginBottom={1}>
+          <Text color={theme.dim}>{hint}</Text>
         </Box>
       ) : null}
       <Box>
