@@ -42,6 +42,35 @@ export interface StdinTap {
 }
 
 /**
+ * Raw key feed
+ *
+ * Debugging key handling means seeing what the TERMINAL actually sent — the
+ * inspector overlay in the chat screen reads these. Ring of the most recent
+ * chunks (a chunk may batch several escape sequences), JSON-escaped so control
+ * bytes are visible: `\r`, `\u001b[13;5u`, etc.
+ */
+
+const RAW_RING_MAX = 12;
+const rawRing: string[] = [];
+const rawSubscribers = new Set<() => void>();
+
+function recordRawChunk(chunk: string): void {
+  rawRing.push(JSON.stringify(chunk).slice(1, -1));
+  if (rawRing.length > RAW_RING_MAX) rawRing.shift();
+  for (const fn of rawSubscribers) fn();
+}
+
+export const rawKeyFeed = {
+  /** Most recent chunks, oldest first. */
+  recent: (): string[] => [...rawRing],
+  /** Subscribe to new chunks; returns an unsubscribe. */
+  subscribe: (fn: () => void): (() => void) => {
+    rawSubscribers.add(fn);
+    return () => rawSubscribers.delete(fn);
+  },
+};
+
+/**
  * Tap the real stdin and return the filtered stream for Ink to consume.
  *
  * With no TTY this is a no-op that hands the real stdin straight back, so a
@@ -67,7 +96,10 @@ export function installStdinTap(
   const onData = (data: Buffer | string) => {
     if (!forwarding) return;
     const chunk = typeof data === "string" ? data : data.toString("utf8");
-    if (chunk.length > 0) (filtered as unknown as PassThrough).write(chunk);
+    if (chunk.length > 0) {
+      recordRawChunk(chunk);
+      (filtered as unknown as PassThrough).write(chunk);
+    }
   };
   stdin.on("data", onData);
 

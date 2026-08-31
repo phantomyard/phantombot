@@ -15,7 +15,13 @@ import { render } from "ink";
 
 import { App } from "./App.tsx";
 import { installStdinTap } from "./stdinTap.ts";
-import { enterFullScreen, gateStdout, forceRepaint } from "./terminal.ts";
+import {
+  enterFullScreen,
+  gateStdout,
+  forceRepaint,
+  KITTY_POP,
+  KITTY_PUSH,
+} from "./terminal.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setPromptHost } from "./prompts.ts";
 import { lendStdin } from "./stdinHandover.ts";
@@ -96,6 +102,12 @@ export async function startTui(): Promise<number> {
     stdin: installed.stdin,
     stdout: gate.stream,
     exitOnCtrlC: false,
+    // Shift/Ctrl/Alt+Enter as distinct keys in the chat box: Ink 6 parses the
+    // kitty keyboard protocol but only enables it for kitty/WezTerm/Ghostty,
+    // so we push flag 1 (disambiguate escape codes) ourselves. Terminals that
+    // don't support it ignore the sequence and stay legacy — ctrl+J remains
+    // the universal newline there. Popped around clack handovers below.
+    kittyKeyboard: { mode: "enabled", flags: ["disambiguateEscapeCodes"] },
     // Rewrite only the lines that changed. The default redraws the whole frame
     // on every render, which at a 12fps spinner plus one repaint per keystroke
     // is visible as flicker; with it on, a tick costs a few dozen bytes on one
@@ -121,6 +133,9 @@ export async function startTui(): Promise<number> {
     // owns the terminal we must not be reading the same bytes it is.
     installed.setForwarding(false);
     fullScreen.restore();
+    // Legacy bytes for the borrower: a clack readline or `$EDITOR` cannot
+    // parse CSI-u Enter, so the kitty flags come off while it owns stdin.
+    process.stdout.write(KITTY_POP);
     // Hand the stream over: snapshot the listeners the borrower will add, and
     // resume it so the borrower actually receives bytes. See `lendStdin`.
     const dropBorrowedListeners = lendStdin(process.stdin);
@@ -128,6 +143,9 @@ export async function startTui(): Promise<number> {
       return await fn();
     } finally {
       dropBorrowedListeners();
+      // Flags back on BEFORE anything reads stdin again — the pop must never
+      // outlive the handover, or Enter would arrive as a bare `\r` mid-frame.
+      process.stdout.write(KITTY_PUSH);
       fullScreen.enter();
       // Re-attaches the tap, restores raw mode, and RESUMES stdin — a readline
       // close or an inherited-stdin child leaves it paused, and a paused stdin
@@ -148,6 +166,10 @@ export async function startTui(): Promise<number> {
     restoreLogs();
     installed.teardown();
     fullScreen.restore();
+    // Belt for signal exits: Ink pops its own flags on unmount, but a SIGTERM
+    // path may not reach it — and a shell left in flag-1 mode gets CSI-u
+    // garbage on every Enter. Extra pops are ignored.
+    process.stdout.write(KITTY_POP);
   };
   installSignalExit(restore);
 
