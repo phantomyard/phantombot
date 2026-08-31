@@ -41,7 +41,6 @@ import { frameChromeRows } from "../chrome.ts";
 import { transcriptLines, transcriptWindow } from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
-import { applyTextChunk } from "../textInput.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
 
@@ -428,18 +427,19 @@ export function ChatScreen(props: {
         setInputValue(`${inputRef.current}\n`);
         return;
       }
-      // A chunk can carry a newline INSIDE it: a paste, or a terminal that
-      // batched keystrokes. Shared with the wizard's name field, which had the
-      // same bug — see `textInput.ts`.
+      // A chunk can carry newlines INSIDE it — a bracketed paste, or a
+      // terminal that batched keystrokes. In chat a paste is NEVER a submit:
+      // the whole block lands in the box so it can be reviewed and edited
+      // first. (The wizard's name field uses applyTextChunk's split-and-
+      // submit rule instead — see `textInput.ts`.) \r is normalised to \n
+      // because that is what the viewport wraps on.
+      if (/\r|\n/.test(char)) {
+        setInputValue(inputRef.current + char.replace(/\r\n?/g, "\n"));
+        return;
+      }
       // From the REF: two keystrokes can land between renders, and reading
       // `input` out of the closure loses the first of them.
-      const applied = applyTextChunk(inputRef.current, char);
-      setInputValue(applied.text);
-      if (applied.submit) {
-        const text = applied.submit;
-        if (commandName(text) !== undefined) void runCommand(text);
-        else if (!busy) void submit(text);
-      }
+      setInputValue(inputRef.current + char);
     }
   });
 
