@@ -169,7 +169,7 @@ Three properties worth knowing when touching this code:
    half-finished. It is triggered by startup and by the heartbeat detecting a
    calendar-day rollover — there is no nightly timer. On systemd the sweep is
    launched as its own transient `--user` unit rather than as a detached child:
-   the rollover trigger runs inside `phantombot-heartbeat.service`, which is
+   the rollover trigger runs inside `phantombot-heartbeat@<persona>.service`, which is
    `Type=oneshot`, so its cgroup (and everything left in it) is torn down the
    moment the heartbeat exits. `detached`/`unref` leaves Node's event loop, not
    the cgroup. Per date it runs exactly

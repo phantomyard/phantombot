@@ -724,8 +724,9 @@ describe("runDoctor zombie-timer re-arm wiring", () => {
         },
       }),
     });
-    // The stale heartbeat (with a real last_fired) was passed down.
-    expect(receivedStale).toEqual(["phantombot-heartbeat.timer"]);
+    // The stale heartbeat (with a real last_fired) was passed down — as
+    // the DEFAULT persona's instance unit (#486).
+    expect(receivedStale).toEqual(["phantombot-heartbeat@phantom.timer"]);
     // Marker is still stale this run, so exit 1 (visibility) — the
     // re-arm fires a catch-up that refreshes the marker for next time.
     expect(code).toBe(1);
@@ -1261,5 +1262,225 @@ describe("runDoctor — memory database (#417)", () => {
       expect(report.service_logs.max_bytes).toBe(1000);
       expect(report.service_logs.over_cap).toEqual(["tick.out.log"]);
     });
+  });
+});
+
+describe("runDoctor per-persona maintenance coverage (#486)", () => {
+  test("renders the per-persona section, warns on a stale persona, exit stays 0", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: async () => [
+        {
+          persona: "phantom",
+          last_heartbeat: new Date().toISOString(),
+          heartbeat_age_minutes: 4,
+          heartbeat_stale: false,
+          nightly_backlog: 0,
+        },
+        {
+          persona: "kai",
+          heartbeat_stale: true,
+          nightly_backlog: 3,
+          nightly_oldest_pending: "2026-08-26",
+        },
+      ],
+    });
+    // Warn-only: a persona behind on maintenance never fails doctor.
+    expect(code).toBe(0);
+    expect(out.text).toContain("maintenance per persona:");
+    expect(out.text).toContain("phantom: ok");
+    expect(out.text).toContain("kai: WARN — heartbeat never fired");
+    expect(out.text).toContain("nightly 3 date(s) pending (oldest 2026-08-26)");
+    expect(out.text).toContain("phantombot-heartbeat@<persona>.timer");
+  });
+
+  test("a stale non-default persona drives a force-re-arm of ITS instance", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    let receivedStale: string[] | undefined;
+    await runDoctor({
+      config,
+      out: new CaptureStream(),
+      checkSystemd: async (staleTimers) => {
+        receivedStale = staleTimers;
+        return {
+          missing_unit_files: [],
+          drifted_unit_files: [],
+          inactive_timers: [],
+          repaired: true,
+        };
+      },
+      checkTimers: false,
+      checkMaintenance: async () => [
+        {
+          persona: "phantom",
+          last_heartbeat: new Date().toISOString(),
+          heartbeat_age_minutes: 4,
+          heartbeat_stale: false,
+          nightly_backlog: 0,
+        },
+        {
+          persona: "kai",
+          last_heartbeat: "2026-05-14T06:52:00.000Z",
+          heartbeat_age_minutes: 11_520,
+          heartbeat_stale: true,
+          nightly_backlog: 0,
+        },
+      ],
+    });
+    expect(receivedStale).toEqual(["phantombot-heartbeat@kai.timer"]);
+  });
+
+  test("checkMaintenance=false omits the section", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    expect(out.text).not.toContain("maintenance per persona:");
+  });
+
+  test("json mode emits the maintenance block", async () => {
+    await writeState({
+      last_run: new Date().toISOString(),
+      last_status: "ok",
+    });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      json: true,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: async () => [
+        {
+          persona: "kai",
+          heartbeat_stale: true,
+          nightly_backlog: 2,
+          nightly_oldest_pending: "2026-08-27",
+        },
+      ],
+    });
+    const report = JSON.parse(out.text);
+    expect(report.maintenance).toEqual([
+      {
+        persona: "kai",
+        heartbeat_stale: true,
+        nightly_backlog: 2,
+        nightly_oldest_pending: "2026-08-27",
+      },
+    ]);
+  });
+});
+
+describe("runDoctor — the host default persona (#505)", () => {
+  const SAVED_STATE = process.env.PHANTOMBOT_STATE;
+  beforeEach(() => {
+    // Hermetic: provenance reads state.json, and the real one must not leak in.
+    process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
+  });
+  afterEach(() => {
+    if (SAVED_STATE === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = SAVED_STATE;
+  });
+
+  test("names the resolved default, its provenance, and stays exit 0", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await writeFile(
+      join(workdir, "state.json"),
+      JSON.stringify({ default_persona: "phantom" }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    expect(code).toBe(0);
+    expect(out.text).toContain("default persona: ok — 'phantom' (from state.json)");
+    // The lever operators reach for first is the one that loses.
+    expect(out.text).toContain("state.json OUTRANKS config.toml");
+  });
+
+  test("an empty MCP registry next to a populated sibling WARNs, but never fails", async () => {
+    // The exact shape of a migrated-away default: the dir is still here, so
+    // every persona-scoped read succeeds against the wrong, empty persona.
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    await mkdir(join(workdir, "personas", "kai"), { recursive: true });
+    await writeFile(
+      join(workdir, "personas", "kai", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          mailspring: { transport: "http", url: "http://127.0.0.1:2587" },
+        },
+      }),
+      "utf8",
+    );
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config,
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    // Warn-only: plenty of hosts legitimately register no MCP servers.
+    expect(code).toBe(0);
+    expect(out.text).toContain("default persona: WARN");
+    expect(out.text).toContain("no MCP servers registered while kai has some");
+  });
+
+  test("a default whose dir is gone fails doctor", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    const code = await runDoctor({
+      config: { ...config, defaultPersona: "ghost" },
+      persona: "phantom",
+      out,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    expect(code).toBe(1);
+    expect(out.text).toContain("NOT usable: no persona dir on disk");
+  });
+
+  test("json mode carries the whole default-persona block", async () => {
+    await writeState({ last_run: new Date().toISOString(), last_status: "ok" });
+    const out = new CaptureStream();
+    await runDoctor({
+      config,
+      out,
+      json: true,
+      checkSystemd: false,
+      checkTimers: false,
+      checkMaintenance: false,
+    });
+    const report = JSON.parse(out.text);
+    expect(report.default_persona.resolved).toBe("phantom");
+    expect(report.default_persona.exists).toBe(true);
+    expect(report.default_persona.served).toBe(true);
+    expect(report.default_persona.defect).toBeNull();
+    expect(report.default_persona.provenance).toBe("builtin");
   });
 });

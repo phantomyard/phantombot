@@ -28,6 +28,17 @@
  * set that only ever grows would be safe by accident, and it also fills a
  * 40 GB VPS with copies of a 300 MB database.
  *
+ * A SNAPSHOT IS A HOST CONCERN, NOT A PERSONA ONE (issue #495). Several
+ * personas can share one `memory.sqlite`, and since the per-persona nightly
+ * instances landed they roll over within milliseconds of each other. The
+ * snapshot name is stamped to the SECOND, so two sweeps in the same second
+ * resolve to the SAME destination — and the second one deletes the file the
+ * first is still writing, which surfaces as `disk I/O error` on an otherwise
+ * healthy database. Snapshots are therefore serialised on a lock file beside
+ * the restore points, and a caller may pass `coalesceMs` to say "a snapshot
+ * this recent already covers me": the loser of the race reports `fresh` and
+ * takes nothing, instead of failing.
+ *
  * RESTORE NEVER OVERWRITES THE LIVE FILE IN PLACE. The current database is
  * moved aside to `<name>.pre-restore-<stamp>` first, so a restore from a
  * snapshot that turns out to be older than the operator thought is itself
@@ -40,12 +51,15 @@ import { existsSync } from "node:fs";
 import {
   copyFile,
   mkdir,
+  open as openFile,
+  readFile,
   readdir,
   rename,
   rm,
   stat,
   unlink,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -66,8 +80,102 @@ const SIDECARS = ["-wal", "-shm"] as const;
 
 const STAMP_RE = /\.(\d{8}T\d{6}Z)\.sqlite$/;
 
+/**
+ * How recent a restore point has to be for a `coalesceMs` caller to accept it
+ * instead of taking its own.
+ *
+ * Sized for the thing it exists to absorb: sibling nightly sweeps fire within
+ * milliseconds of a shared day rollover, so anything above a few seconds
+ * closes the race. Five minutes leaves room for a slow sweep without ever
+ * being long enough to swallow a genuine daily snapshot.
+ */
+export const SNAPSHOT_COALESCE_MS = 5 * 60_000;
+
+/** How long to wait for the lock before deciding a sibling has this covered. */
+const LOCK_WAIT_MS = 15_000;
+
+/**
+ * When a lock file is old enough to be treated as abandoned.
+ *
+ * A holder that died mid-`VACUUM INTO` leaves the file behind, and a lock that
+ * outlives its process would stop every future snapshot — the failure mode
+ * where the safety measure becomes the outage. Far longer than any real
+ * snapshot, far shorter than a day.
+ */
+const LOCK_STALE_MS = 10 * 60_000;
+
 export function backupDir(dbPath: string): string {
   return join(dirname(dbPath), "backups");
+}
+
+function lockPath(dbPath: string): string {
+  return join(backupDir(dbPath), ".snapshot.lock");
+}
+
+/**
+ * Serialise snapshots of one database across processes.
+ *
+ * `open(..., "wx")` is the atomic primitive: exactly one caller can create the
+ * file, so there is no window where two processes both believe they hold it.
+ * Returns a release function, or `null` if the lock stayed held for
+ * `waitMs` — the caller decides whether that means skip or proceed, because
+ * "someone else is snapshotting this exact database right now" is good news
+ * for the nightly and merely informational for an operator who typed the
+ * command.
+ *
+ * Exported for tests: the takeover case (a slow holder's lock cleared as
+ * stale, then re-taken by a sibling) cannot be provoked deterministically
+ * through `backupMemoryDb` alone.
+ */
+export async function acquireSnapshotLock(
+  dbPath: string,
+  waitMs: number,
+): Promise<(() => Promise<void>) | null> {
+  const path = lockPath(dbPath);
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const token = `${process.pid}:${randomUUID()}`;
+      const handle = await openFile(path, "wx");
+      await handle.writeFile(`${token} ${new Date().toISOString()}\n`);
+      await handle.close();
+      return async () => {
+        // Only remove the lock if it is still OURS. A holder whose snapshot
+        // ran past LOCK_STALE_MS has had its lock cleared and re-taken by a
+        // sibling; an unconditional `rm` here would delete the SIBLING's lock
+        // and let a third caller in while it was mid-`VACUUM INTO` — exactly
+        // the race this lock exists to close.
+        try {
+          const held = await readFile(path, "utf8");
+          if (!held.startsWith(`${token} `)) {
+            log.warn("dbBackup: snapshot lock was taken over; not releasing", {
+              path,
+            });
+            return;
+          }
+        } catch {
+          return; // Already gone — nothing to release.
+        }
+        await rm(path, { force: true });
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      // Abandoned by a dead holder? Clear it and try once more this pass.
+      try {
+        const age = Date.now() - (await stat(path)).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          log.warn("dbBackup: clearing a stale snapshot lock", { path, age });
+          await rm(path, { force: true });
+          continue;
+        }
+      } catch {
+        // The holder released it between our open and our stat — retry.
+        continue;
+      }
+      if (Date.now() >= deadline) return null;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
 }
 
 function stampNow(now: Date): string {
@@ -141,8 +249,11 @@ export async function listRestorePoints(
 }
 
 export interface BackupResult {
-  /** `taken` | `skipped` (source missing) | `refused` (source unhealthy). */
-  status: "taken" | "skipped" | "refused";
+  /**
+   * `taken` | `skipped` (source missing) | `refused` (source unhealthy) |
+   * `fresh` (a recent-enough restore point already covers this run — #495).
+   */
+  status: "taken" | "skipped" | "refused" | "fresh";
   path?: string;
   bytes?: number;
   /** Snapshots rotated out by this run. */
@@ -161,6 +272,15 @@ export async function backupMemoryDb(input: {
   dbPath: string;
   keep?: number;
   now?: Date;
+  /**
+   * Accept an existing restore point younger than this instead of taking one
+   * (#495). Callers that share a database with sibling processes — the
+   * nightly — pass it; an operator running `phantombot memory backup` does
+   * not, because an explicit request should always produce a snapshot.
+   */
+  coalesceMs?: number;
+  /** Override the lock wait. Tests use it; nothing else should need to. */
+  lockWaitMs?: number;
 }): Promise<BackupResult> {
   const now = input.now ?? new Date();
   const keep = input.keep ?? DEFAULT_KEEP;
@@ -182,29 +302,69 @@ export async function backupMemoryDb(input: {
 
   const dir = backupDir(input.dbPath);
   await mkdir(dir, { recursive: true });
-  const dest = snapshotPath(input.dbPath, now);
-  // A same-second re-run would otherwise fail the VACUUM INTO, which refuses
-  // an existing target. Overwriting is safe: the existing file was written by
-  // this same code path this same second.
-  if (existsSync(dest)) await rm(dest, { force: true });
 
-  const db = new Database(input.dbPath, { readonly: true, create: false });
+  // Everything from here to the release touches shared paths — the stamped
+  // destination and the rotation set — so it happens under the lock.
+  const release = await acquireSnapshotLock(
+    input.dbPath,
+    input.lockWaitMs ?? LOCK_WAIT_MS,
+  );
+  if (!release) {
+    // Another process has been snapshotting this database for longer than the
+    // wait. For a coalescing caller that is the answer it wanted; for an
+    // operator it is still the honest one, because barging in would delete the
+    // in-flight file out from under the holder.
+    log.info("dbBackup: another snapshot is in flight — skipping", {
+      db: input.dbPath,
+    });
+    return { status: "fresh", pruned: [], integrity };
+  }
+
   try {
-    db.query("VACUUM INTO ?").run(dest);
+    if (input.coalesceMs !== undefined) {
+      const [newest] = await listRestorePoints(input.dbPath);
+      const age = newest ? now.getTime() - newest.takenAt.getTime() : Infinity;
+      if (newest && age >= 0 && age < input.coalesceMs) {
+        log.info("dbBackup: recent restore point already covers this run", {
+          path: newest.path,
+          ageMs: age,
+        });
+        return {
+          status: "fresh",
+          path: newest.path,
+          bytes: newest.bytes,
+          pruned: [],
+          integrity,
+        };
+      }
+    }
+
+    const dest = snapshotPath(input.dbPath, now);
+    // A same-second re-run would otherwise fail the VACUUM INTO, which refuses
+    // an existing target. Overwriting is safe under the lock: no other process
+    // can be writing that file, so the only thing here is our own leftover.
+    if (existsSync(dest)) await rm(dest, { force: true });
+
+    const db = new Database(input.dbPath, { readonly: true, create: false });
+    try {
+      db.query("VACUUM INTO ?").run(dest);
+    } finally {
+      db.close();
+    }
+
+    const pruned: string[] = [];
+    const points = await listRestorePoints(input.dbPath);
+    for (const old of points.slice(keep)) {
+      await rm(old.path, { force: true });
+      pruned.push(old.path);
+    }
+
+    const bytes = (await stat(dest)).size;
+    log.info("dbBackup: snapshot taken", { path: dest, bytes, pruned: pruned.length });
+    return { status: "taken", path: dest, bytes, pruned, integrity };
   } finally {
-    db.close();
+    await release();
   }
-
-  const pruned: string[] = [];
-  const points = await listRestorePoints(input.dbPath);
-  for (const old of points.slice(keep)) {
-    await rm(old.path, { force: true });
-    pruned.push(old.path);
-  }
-
-  const bytes = (await stat(dest)).size;
-  log.info("dbBackup: snapshot taken", { path: dest, bytes, pruned: pruned.length });
-  return { status: "taken", path: dest, bytes, pruned, integrity };
 }
 
 export interface RestoreResult {

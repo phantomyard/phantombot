@@ -28,6 +28,7 @@ import {
 } from "../lib/harnessRunner.ts";
 import { log } from "../lib/logger.ts";
 import { spawnInNewSession } from "../lib/processGroup.ts";
+import { renderConversationPayload } from "./payload.ts";
 
 export interface CodexHarnessConfig {
   bin: string;
@@ -111,19 +112,8 @@ export class CodexHarness implements Harness {
 }
 
 export function renderStdinPayload(req: HarnessRequest): string {
-  const parts: string[] = [];
-  if (req.systemPrompt && req.systemPrompt.trim().length > 0) {
-    parts.push(req.systemPrompt.trim());
-  }
-  for (const turn of req.history) {
-    if (turn.role === "user") {
-      parts.push(turn.text);
-    } else {
-      parts.push(`<previous_response>\n${turn.text}\n</previous_response>`);
-    }
-  }
-  parts.push(req.userMessage);
-  return parts.join("\n\n");
+  const payload = renderConversationPayload(req);
+  return [req.systemPrompt.trim(), payload].filter(Boolean).join("\n\n");
 }
 
 export const PHANTOMBOT_INJECTED_CODEX_FLAGS = [

@@ -38,7 +38,7 @@ import {
   type LatestRelease,
   type UpdateChannel,
 } from "../lib/githubReleases.ts";
-import { loadConfig } from "../config.ts";
+import { loadConfig, servedPersonasOf } from "../config.ts";
 import {
   defaultServiceControl,
   restartCommand,
@@ -468,7 +468,17 @@ async function defaultHealUnits(
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return null;
   const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
-  return ensureSystemdUnitsCurrent({ binPath, systemctl });
+  // The heal arms one heartbeat instance per served persona (#486), so it
+  // needs the roster. A config that won't load must not fail the update —
+  // skip instance management; the next heartbeat/doctor heal completes it.
+  let personas: string[] | undefined;
+  try {
+    const config = await loadConfig();
+    personas = servedPersonasOf(config);
+  } catch {
+    personas = undefined;
+  }
+  return ensureSystemdUnitsCurrent({ binPath, systemctl, personas });
 }
 
 async function defaultConfirmInstall(

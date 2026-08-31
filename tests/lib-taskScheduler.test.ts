@@ -256,6 +256,10 @@ describe("companion task schedules", () => {
     expect(xml).toContain("<Interval>PT30M</Interval>");
     expect(xml).toContain("heartbeat.out.log");
     expect(xml).not.toContain("<RestartOnFailure>");
+    // #486: the per-persona-named task also RUNS per-persona — without the
+    // explicit flag the heartbeat CLI would resolve the default persona and
+    // silently sweep the wrong memory.
+    expect(xml).toContain(`heartbeat --persona ${PERSONA}`);
   });
 
   test("tick repeats every minute", () => {

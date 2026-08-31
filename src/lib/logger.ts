@@ -21,6 +21,7 @@
  */
 
 import { redactForLog } from "./redact.ts";
+import { writeLogLine } from "./logSink.ts";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -41,9 +42,13 @@ function emit(level: LogLevel, msg: string, fields?: Record<string, unknown>): v
     msg,
     ...(fields ?? {}),
   };
-  // ALL levels go to stderr. stdout is a protocol channel for two entrypoints
-  // (ACP stdio server + MCP proxy) — any stray write there corrupts the wire.
-  process.stderr.write(redactForLog(JSON.stringify(line)) + "\n");
+  // ALL levels go to stderr by default. stdout is a protocol channel for two
+  // entrypoints (ACP stdio server + MCP proxy) — any stray write there corrupts
+  // the wire. The destination is indirected through `logSink` so the
+  // full-screen TUI can capture lines into a pane instead of having them
+  // painted over its own frame; the default sink is `process.stderr` and every
+  // other entrypoint is unchanged.
+  writeLogLine(redactForLog(JSON.stringify(line)) + "\n");
 }
 
 export const log = {

@@ -33,7 +33,10 @@ import {
   type ArchivedPersona,
 } from "../lib/personaArchive.ts";
 import type { WriteSink } from "../lib/io.ts";
-import { adoptAsDefaultIfMissing } from "../lib/personaDefault.ts";
+import {
+  adoptAsDefaultIfMissing,
+  listPersonaDirs,
+} from "../lib/personaDefault.ts";
 import { ensurePersonaScaffold } from "../lib/personaScaffold.ts";
 import { loadState, saveState } from "../state.ts";
 
@@ -218,9 +221,19 @@ export async function runCreatePersona(input: RunInput = {}): Promise<number> {
     return 1;
   }
 
+  // Default to NO whenever a default persona already exists (issue #471).
+  // `default_persona` owns `/update` and `/restart`, so offering "yes" here
+  // means a user's SECOND phantom silently takes control of the box on a
+  // mis-tapped Enter. On a fresh install there is nothing to take over, so
+  // "yes" is both safe and what the user wants.
+  const defaultExists = listPersonaDirs(config).some(
+    (existing) => existing === config.defaultPersona,
+  );
   const setDefault = await p.confirm({
-    message: `Set '${name}' as the default persona?`,
-    initialValue: true,
+    message: defaultExists
+      ? `Set '${name}' as the default persona? (takes /update and /restart from '${config.defaultPersona}')`
+      : `Set '${name}' as the default persona?`,
+    initialValue: !defaultExists,
   });
   if (p.isCancel(setDefault)) {
     p.cancel("cancelled");

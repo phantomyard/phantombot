@@ -28,10 +28,13 @@
 
 import {
   defaultLaunchdServiceControl,
+  defaultSyncLaunchdHeartbeatInstances,
   launchdLogPaths,
   launchdLogsDir,
 } from "./launchd.ts";
+import { log } from "./logger.ts";
 import {
+  defaultSyncHeartbeatInstances as syncSystemdHeartbeatInstances,
   defaultSystemdServiceControl,
   type ServiceControl,
 } from "./systemd.ts";
@@ -56,6 +59,27 @@ export function currentPlatform(): Platform {
 }
 
 /**
+ * Platform-dispatching heartbeat-instance sync (#486/#491): reconcile the
+ * service manager's per-persona maintenance units with the served-persona
+ * roster after `autostart_personas` changes. Linux → systemd timer
+ * instances, macOS → launchd per-persona plists, elsewhere → null (Windows
+ * re-registers its per-persona tasks via the heartbeat heal). Both backends
+ * return null on dev boxes, so callers can stay silent there.
+ */
+export function syncHeartbeatInstances(
+  personas: readonly string[],
+): Promise<unknown> {
+  switch (currentPlatform()) {
+    case "linux":
+      return syncSystemdHeartbeatInstances(personas);
+    case "darwin":
+      return defaultSyncLaunchdHeartbeatInstances(personas);
+    default:
+      return Promise.resolve(null);
+  }
+}
+
+/**
  * ServiceControl wired to the appropriate backend for the host.
  *
  * On unsupported platforms (anything other than linux/darwin) we return
@@ -64,7 +88,14 @@ export function currentPlatform(): Platform {
  * so the only way to hit this branch is `bun src/index.ts` on Windows
  * or BSD, where the user is on their own.
  */
-export function defaultServiceControl(): ServiceControl {
+export function defaultServiceControl(
+  env: Record<string, string | undefined> = process.env,
+): ServiceControl {
+  const backend = hostServiceControl();
+  return isSandbox(env) ? sandboxServiceControl(backend) : backend;
+}
+
+function hostServiceControl(): ServiceControl {
   switch (currentPlatform()) {
     case "linux":
       return defaultSystemdServiceControl();
@@ -75,6 +106,77 @@ export function defaultServiceControl(): ServiceControl {
     default:
       return noopServiceControl();
   }
+}
+
+/** Truthy iff PHANTOMBOT_SANDBOX is set to something other than "" / "0". */
+export function isSandbox(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env.PHANTOMBOT_SANDBOX?.trim();
+  return raw !== undefined && raw !== "" && raw !== "0";
+}
+
+/**
+ * Read-through, write-suppressed ServiceControl for a DEVELOPMENT CHECKOUT.
+ *
+ * Running `bun run src/index.ts` from a working tree gives you a second
+ * phantombot process, but NOT a second service: every `restart()` in that
+ * process still names the host's one `phantombot.service` — the daemon
+ * serving the user's live conversations. So saving voice/autostart/default
+ * config while dogfooding a branch bounces production, killing whatever
+ * turn was in flight. (Observed three times on 2026-08-28/29.)
+ *
+ * With PHANTOMBOT_SANDBOX set, queries still tell the truth — `isActive()`
+ * delegates, so the TUI shows the real service state — while every
+ * MUTATION becomes a no-op that reports success. `rerenderUnitIfStale()`
+ * is suppressed too: it writes the real unit file on disk.
+ *
+ * The suppressed calls report ok=true rather than an error, because a
+ * suppressed restart is the intended outcome here, not a failure the user
+ * needs to act on.
+ *
+ * Because ok=true is indistinguishable from a real restart to the ~15
+ * callers of `defaultServiceControl()` — `cli/update.ts` and
+ * `channels/commands.ts` among them — every suppression ALSO logs a
+ * warning. Without it, `/update` on a host that happens to have the var
+ * set reports success while never restarting anything, and the only
+ * explanation goes to a `stderr` field most call sites never read.
+ * `rerenderUnitIfStale()` logs at info instead: it returns
+ * {rerendered:false}, which is honest rather than a false success, and is
+ * what the real backend returns in a dev checkout anyway.
+ */
+export function sandboxServiceControl(inner: ServiceControl): ServiceControl {
+  const suppressed = (op: string) => async () => {
+    log.warn("platform: service change suppressed", {
+      reason: "PHANTOMBOT_SANDBOX",
+      op,
+    });
+    return {
+      ok: true,
+      stderr: `sandbox: service change suppressed (PHANTOMBOT_SANDBOX, ${op})`,
+    };
+  };
+  return {
+    isActive: () => inner.isActive(),
+    start: suppressed("start"),
+    stop: suppressed("stop"),
+    restart: suppressed("restart"),
+    // Logged, but NOT at warn — unlike the three verbs above, this one has
+    // no deceptive success to warn about. It answers {rerendered:false},
+    // which is exactly what the real POSIX backend answers in the sandbox's
+    // own headline case: `defaultRerenderUnitIfStale` bails on
+    // `isPhantombotBinary(process.execPath)`, false under `bun run`. Warning
+    // there would fire on a call that was never going to write anything, and
+    // a warn line that cries wolf in the common case is one contributors
+    // learn to ignore — including the three that do matter.
+    async rerenderUnitIfStale() {
+      log.info("platform: unit re-render skipped", {
+        reason: "PHANTOMBOT_SANDBOX",
+        op: "rerenderUnitIfStale",
+      });
+      return { rerendered: false };
+    },
+  };
 }
 
 export interface SelfRestartOpts {

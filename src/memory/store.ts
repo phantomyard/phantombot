@@ -262,6 +262,17 @@ export interface MemoryStore {
     conversation: string,
     n: number,
   ): Promise<Array<{ role: Role; text: string }>>;
+  /**
+   * The same window as `recentTurns`, but as full rows — id, `createdAt`,
+   * provenance. For a UI that has to SHOW a replayed turn (the TUI transcript
+   * renders the time each one happened); prompt builders want the narrow shape
+   * above and should keep using it.
+   */
+  recentTurnsForConversationDisplay(
+    persona: string,
+    conversation: string,
+    n: number,
+  ): Promise<Turn[]>;
   /** Most recent N turns across all conversations for one persona, full rows, oldest first. */
   recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]>;
   /**
@@ -652,6 +663,7 @@ class SqliteMemoryStore implements MemoryStore {
   dbPath?: string;
   private appendStmt;
   private recentStmt;
+  private recentConversationDisplayStmt;
   private recentPrefixStmt;
   private recentDisplayStmt;
   private turnsAfterIdStmt;
@@ -807,6 +819,21 @@ class SqliteMemoryStore implements MemoryStore {
     this.recentStmt = db.prepare(
       `SELECT role, text FROM (
          SELECT id, role, text, created_at
+         FROM turns
+         WHERE persona = ? AND conversation = ?
+           AND id > COALESCE((SELECT reset_turn_id FROM conversation_reset
+                              WHERE persona = ? AND conversation = ?), 0)
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?
+       ) ORDER BY created_at ASC, id ASC`,
+    );
+    // The same window as recentStmt, full rows. Kept beside it deliberately:
+    // if the /reset watermark logic above ever changes, both selects have to
+    // change together or the TUI would show turns the prompt no longer replays.
+    this.recentConversationDisplayStmt = db.prepare(
+      `SELECT * FROM (
+         SELECT id, persona, conversation, role, text, created_at,
+                embeddable, source, origin
          FROM turns
          WHERE persona = ? AND conversation = ?
            AND id > COALESCE((SELECT reset_turn_id FROM conversation_reset
@@ -1275,6 +1302,21 @@ class SqliteMemoryStore implements MemoryStore {
       role: Role;
       text: string;
     }>;
+  }
+
+  async recentTurnsForConversationDisplay(
+    persona: string,
+    conversation: string,
+    n: number,
+  ): Promise<Turn[]> {
+    const rows = this.recentConversationDisplayStmt.all(
+      persona,
+      conversation,
+      persona,
+      conversation,
+      n,
+    ) as RawDisplayRow[];
+    return mapDisplayRows(rows);
   }
 
   async recentTurnsForConversationPrefix(

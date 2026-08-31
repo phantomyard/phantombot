@@ -12,7 +12,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -414,6 +421,19 @@ describe("ACP server — a new thread does not inherit the old thread's orders",
 });
 
 describe("ACP server — session/prompt", () => {
+  test("canonicalizes the default when its wrong-cased path resolves", async () => {
+    const canonicalDir = join(workdir, "personas", "Phantom");
+    await rename(join(workdir, "personas", "phantom"), canonicalDir);
+    await symlink(canonicalDir, join(workdir, "personas", "phantom"), "dir");
+    const err = new CapturingErr();
+    const harness = new ScriptedHarness("h", () => []);
+    const { code } = await driveServer({ messages: [], harness, err });
+
+    expect(code).toBe(0);
+    expect(config.defaultPersona).toBe("Phantom");
+    expect(err.buf).toContain("case mismatch against persona dir");
+  });
+
   test("streams ordered agent_message_chunks then resolves end_turn", async () => {
     const cwd = "/home/dev/proj";
 

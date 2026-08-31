@@ -56,6 +56,8 @@ let workdir: string;
 let unitPath: string;
 let hbServicePath: string;
 let hbTimerPath: string;
+let legacyHbServicePath: string;
+let legacyHbTimerPath: string;
 let ngServicePath: string;
 let ngTimerPath: string;
 let tickServicePath: string;
@@ -70,6 +72,8 @@ function tmpInstallPaths() {
   return {
     heartbeatServicePath: hbServicePath,
     heartbeatTimerPath: hbTimerPath,
+    legacyHeartbeatServicePath: legacyHbServicePath,
+    legacyHeartbeatTimerPath: legacyHbTimerPath,
     nightlyServicePath: ngServicePath,
     nightlyTimerPath: ngTimerPath,
     tickServicePath: tickServicePath,
@@ -80,8 +84,12 @@ function tmpInstallPaths() {
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-systemd-"));
   unitPath = join(workdir, "phantombot.service");
-  hbServicePath = join(workdir, "phantombot-heartbeat.service");
-  hbTimerPath = join(workdir, "phantombot-heartbeat.timer");
+  // #486: the heartbeat units are systemd TEMPLATES — one
+  // `phantombot-heartbeat@<persona>.timer` instance per served persona.
+  hbServicePath = join(workdir, "phantombot-heartbeat@.service");
+  hbTimerPath = join(workdir, "phantombot-heartbeat@.timer");
+  legacyHbServicePath = join(workdir, "phantombot-heartbeat.service");
+  legacyHbTimerPath = join(workdir, "phantombot-heartbeat.timer");
   ngServicePath = join(workdir, "phantombot-nightly.service");
   ngTimerPath = join(workdir, "phantombot-nightly.timer");
   tickServicePath = join(workdir, "phantombot-tick.service");
@@ -275,18 +283,79 @@ describe("installPhantombotUnit", () => {
     const unit = await readFile(unitPath, "utf8");
     expect(unit).toContain("ExecStart=/usr/local/bin/phantombot run");
 
+    // No personas passed (pre-init box): no heartbeat instances are armed —
+    // the startup doctor / first heartbeat heal provisions them later.
     expect(sys.calls).toEqual([
       ["--user", "daemon-reload"],
       ["--user", "enable", "phantombot.service"],
       ["--user", "start", "phantombot.service"],
-      ["--user", "enable", "phantombot-heartbeat.timer"],
-      ["--user", "start", "phantombot-heartbeat.timer"],
       ["--user", "enable", "phantombot-tick.timer"],
       ["--user", "start", "phantombot-tick.timer"],
     ]);
     expect(out.text).toContain("wrote phantombot.service");
     expect(out.text).toContain("wrote phantombot-tick.timer");
     expect(out.text).toContain("enabled and started");
+  });
+
+  test("arms one heartbeat timer instance per served persona (#486)", async () => {
+    const sys = new FakeSystemctl();
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const result = await installPhantombotUnit({
+      binPath: "/usr/local/bin/phantombot",
+      unitPath,
+      personas: ["lena", "kai"],
+      ...tmpInstallPaths(),
+      systemctl: sys,
+      out,
+      err,
+    });
+    expect(result.installed).toBe(true);
+    expect(sys.calls).toEqual([
+      ["--user", "daemon-reload"],
+      ["--user", "enable", "phantombot.service"],
+      ["--user", "start", "phantombot.service"],
+      ["--user", "enable", "phantombot-heartbeat@lena.timer"],
+      ["--user", "start", "phantombot-heartbeat@lena.timer"],
+      ["--user", "enable", "phantombot-heartbeat@kai.timer"],
+      ["--user", "start", "phantombot-heartbeat@kai.timer"],
+      ["--user", "enable", "phantombot-tick.timer"],
+      ["--user", "start", "phantombot-tick.timer"],
+    ]);
+  });
+
+  test("retires the legacy heartbeat unit only after the default instance is armed", async () => {
+    // Upgrade over a pre-#486 layout: the plain heartbeat units are on
+    // disk. Install arms the default persona's instance, then removes
+    // them — never the other way around.
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    const sys = new FakeSystemctl();
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const result = await installPhantombotUnit({
+      binPath: "/usr/local/bin/phantombot",
+      unitPath,
+      personas: ["lena"],
+      ...tmpInstallPaths(),
+      systemctl: sys,
+      out,
+      err,
+    });
+    expect(result.installed).toBe(true);
+    expect(existsSync(legacyHbServicePath)).toBe(false);
+    expect(existsSync(legacyHbTimerPath)).toBe(false);
+    expect(out.text).toContain("removed retired unit: phantombot-heartbeat.timer");
+    // The legacy timer was stopped BEFORE its file was removed, and the
+    // instance was armed BEFORE either happened.
+    const startIdx = sys.calls.findIndex(
+      (c) => c[1] === "start" && c[2] === "phantombot-heartbeat@lena.timer",
+    );
+    const stopIdx = sys.calls.findIndex(
+      (c) => c[1] === "stop" && c[2] === "phantombot-heartbeat.timer",
+    );
+    expect(startIdx).toBeGreaterThanOrEqual(0);
+    expect(stopIdx).toBeGreaterThan(startIdx);
   });
 
   test("aborts on systemctl failure", async () => {
@@ -320,6 +389,8 @@ describe("ensureSystemdUnitsCurrent", () => {
       unitPath,
       heartbeatServicePath: hbServicePath,
       heartbeatTimerPath: hbTimerPath,
+      legacyHeartbeatServicePath: legacyHbServicePath,
+      legacyHeartbeatTimerPath: legacyHbTimerPath,
       nightlyServicePath: ngServicePath,
       nightlyTimerPath: ngTimerPath,
       tickServicePath,
@@ -365,11 +436,10 @@ describe("ensureSystemdUnitsCurrent", () => {
     expect(r.rewrote).toEqual([]);
     expect(r.backups).toEqual([]);
     expect(r.repairedTimers).toEqual([]);
-    // No daemon-reload, no enable, no start — only the 4 inspect calls
-    // (is-enabled + is-active for each of the 2 timers).
+    // No daemon-reload, no enable, no start — only the 2 inspect calls
+    // for the tick timer (the heartbeat TEMPLATE is never armed itself;
+    // without `personas` no instances are managed).
     expect(sys.calls).toEqual([
-      ["--user", "is-enabled", "phantombot-heartbeat.timer"],
-      ["--user", "is-active", "phantombot-heartbeat.timer"],
       ["--user", "is-enabled", "phantombot-tick.timer"],
       ["--user", "is-active", "phantombot-tick.timer"],
     ]);
@@ -378,16 +448,13 @@ describe("ensureSystemdUnitsCurrent", () => {
   test("rewrites every missing unit file, runs daemon-reload once, enables timers", async () => {
     const sys = new FakeSystemctl();
     // Workdir is empty; every target file is missing. After running:
-    // daemon-reload + for each of 3 timers we'll see is-enabled
-    // returning "disabled" (exit 1) + enable --now.
+    // daemon-reload + for the tick timer we'll see is-enabled
+    // returning "disabled" (exit 1) + enable --now. The heartbeat
+    // TEMPLATE is written but never armed itself (#486).
     sys.responses = [
       // daemon-reload after rewrite
       { exitCode: 0, stdout: "", stderr: "" },
-      // heartbeat: is-enabled, is-active, enable --now
-      { exitCode: 1, stdout: "disabled\n", stderr: "" },
-      { exitCode: 3, stdout: "inactive\n", stderr: "" },
-      { exitCode: 0, stdout: "", stderr: "" },
-      // tick
+      // tick: is-enabled, is-active, enable --now
       { exitCode: 1, stdout: "disabled\n", stderr: "" },
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
@@ -399,18 +466,15 @@ describe("ensureSystemdUnitsCurrent", () => {
     });
     expect(r.rewrote.sort()).toEqual(
       [
-        "phantombot-heartbeat.service",
-        "phantombot-heartbeat.timer",
+        "phantombot-heartbeat@.service",
+        "phantombot-heartbeat@.timer",
         "phantombot-tick.service",
         "phantombot-tick.timer",
         "phantombot.service",
       ].sort(),
     );
     expect(r.backups).toEqual([]); // nothing pre-existing to back up
-    expect(r.repairedTimers).toEqual([
-      "phantombot-heartbeat.timer",
-      "phantombot-tick.timer",
-    ]);
+    expect(r.repairedTimers).toEqual(["phantombot-tick.timer"]);
     // Verify each canonical body landed on disk.
     expect(await readFile(unitPath, "utf8")).toContain(
       "ExecStart=/usr/local/bin/phantombot run",
@@ -452,7 +516,7 @@ describe("ensureSystemdUnitsCurrent", () => {
   });
 
   test("re-arms a timer whose is-active reports inactive", async () => {
-    // All unit files in place and current, but the heartbeat timer
+    // All unit files in place and current, but the tick timer
     // claims active=no — simulates a rotted timers.target.wants/ symlink.
     const bin = "/usr/local/bin/phantombot";
     await ensureSystemdUnitsCurrent({
@@ -462,13 +526,10 @@ describe("ensureSystemdUnitsCurrent", () => {
     });
     const sys = new FakeSystemctl();
     sys.responses = [
-      // heartbeat: enabled but inactive → enable --now
+      // tick: enabled but inactive → enable --now
       isEnabledActive(),
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" },
-      // tick OK
-      isEnabledActive(),
-      isActiveActive(),
     ];
     const r = await ensureSystemdUnitsCurrent({
       binPath: bin,
@@ -476,14 +537,14 @@ describe("ensureSystemdUnitsCurrent", () => {
       systemctl: sys,
     });
     expect(r.rewrote).toEqual([]);
-    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-tick.timer"]);
     // Verify the repair call was enable --now (not just start), which
     // both arms the symlink and starts the timer in one shot.
     expect(sys.calls).toContainEqual([
       "--user",
       "enable",
       "--now",
-      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
   });
 
@@ -502,27 +563,24 @@ describe("ensureSystemdUnitsCurrent", () => {
     });
     const sys = new FakeSystemctl();
     sys.responses = [
-      // heartbeat: enabled + active, but in the force set → restart
+      // tick: enabled + active, but in the force set → restart
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" }, // restart
-      // tick OK, not in the force set → left alone
-      isEnabledActive(),
-      isActiveActive(),
     ];
     const r = await ensureSystemdUnitsCurrent({
       binPath: bin,
       ...paths(),
       systemctl: sys,
-      forceRearmTimers: ["phantombot-heartbeat.timer"],
+      forceRearmTimers: ["phantombot-tick.timer"],
     });
     expect(r.rewrote).toEqual([]);
-    // Only the listed zombie is touched; the other healthy timers aren't.
-    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    // Only the listed zombie is touched.
+    expect(r.repairedTimers).toEqual(["phantombot-tick.timer"]);
     expect(sys.calls).toContainEqual([
       "--user",
       "restart",
-      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
     // It must NOT have used enable --now, which can't recover an
     // already-active timer.
@@ -530,7 +588,7 @@ describe("ensureSystemdUnitsCurrent", () => {
       "--user",
       "enable",
       "--now",
-      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
   });
 
@@ -548,34 +606,26 @@ describe("ensureSystemdUnitsCurrent", () => {
       ...paths(),
       systemctl: new FakeSystemctl(),
     });
-    // Now corrupt only the heartbeat *timer* so its content drifts.
-    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    // Now corrupt only the tick *timer* so its content drifts.
+    await writeFile(tickTimerPath, "OnUnitActiveSec=30min\n", "utf8");
     const sys = new FakeSystemctl();
     sys.responses = [
       { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload (content changed)
-      // heartbeat: enabled + active, but its content was just rewritten → restart
+      // tick: enabled + active, but its content was just rewritten → restart
       isEnabledActive(),
       isActiveActive(),
       { exitCode: 0, stdout: "", stderr: "" }, // restart
-      // tick: unchanged, enabled + active → left alone
-      isEnabledActive(),
-      isActiveActive(),
     ];
     const r = await ensureSystemdUnitsCurrent({
       binPath: bin,
       ...paths(),
       systemctl: sys,
     });
-    expect(r.rewrote).toEqual(["phantombot-heartbeat.timer"]);
-    expect(r.backups).toEqual([`${hbTimerPath}.bak`]);
-    // The rewritten timer was restarted; the untouched ones were not.
-    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(r.rewrote).toEqual(["phantombot-tick.timer"]);
+    expect(r.backups).toEqual([`${tickTimerPath}.bak`]);
+    // The rewritten timer was restarted.
+    expect(r.repairedTimers).toEqual(["phantombot-tick.timer"]);
     expect(sys.calls).toContainEqual([
-      "--user",
-      "restart",
-      "phantombot-heartbeat.timer",
-    ]);
-    expect(sys.calls).not.toContainEqual([
       "--user",
       "restart",
       "phantombot-tick.timer",
@@ -594,31 +644,28 @@ describe("ensureSystemdUnitsCurrent", () => {
     });
     const sys = new FakeSystemctl();
     sys.responses = [
-      // heartbeat: enabled but inactive → enable --now (force set is moot)
+      // tick: enabled but inactive → enable --now (force set is moot)
       isEnabledActive(),
       { exitCode: 3, stdout: "inactive\n", stderr: "" },
       { exitCode: 0, stdout: "", stderr: "" }, // enable --now
-      // tick OK
-      isEnabledActive(),
-      isActiveActive(),
     ];
     const r = await ensureSystemdUnitsCurrent({
       binPath: bin,
       ...paths(),
       systemctl: sys,
-      forceRearmTimers: ["phantombot-heartbeat.timer"],
+      forceRearmTimers: ["phantombot-tick.timer"],
     });
-    expect(r.repairedTimers).toEqual(["phantombot-heartbeat.timer"]);
+    expect(r.repairedTimers).toEqual(["phantombot-tick.timer"]);
     expect(sys.calls).toContainEqual([
       "--user",
       "enable",
       "--now",
-      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
     expect(sys.calls).not.toContainEqual([
       "--user",
       "restart",
-      "phantombot-heartbeat.timer",
+      "phantombot-tick.timer",
     ]);
   });
 
@@ -626,11 +673,20 @@ describe("ensureSystemdUnitsCurrent", () => {
     const targets = phantombotUnitTargets("/usr/local/bin/phantombot");
     expect(targets.map((t) => t.unit)).toEqual([
       "phantombot.service",
-      "phantombot-heartbeat.service",
-      "phantombot-heartbeat.timer",
+      "phantombot-heartbeat@.service",
+      "phantombot-heartbeat@.timer",
       "phantombot-tick.service",
       "phantombot-tick.timer",
     ]);
+  });
+
+  test("the heartbeat service template sweeps its instance persona (#486)", () => {
+    const targets = phantombotUnitTargets("/usr/local/bin/phantombot");
+    const hb = targets.find((t) => t.unit === "phantombot-heartbeat@.service");
+    if (!hb) throw new Error("heartbeat service template missing");
+    expect(hb.content).toContain(
+      'ExecStart=/usr/local/bin/phantombot heartbeat --persona "%i"',
+    );
   });
 
   test("tears down a nightly timer left behind by an older install", async () => {
@@ -683,6 +739,298 @@ describe("ensureSystemdUnitsCurrent", () => {
       sys.calls.filter((c) => c.some((a) => a.includes("nightly"))),
     ).toEqual([]);
   });
+
+  test("arms one heartbeat instance per served persona (#486)", async () => {
+    const bin = "/usr/local/bin/phantombot";
+    // All unit files current; instances not yet enabled.
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      // tick: healthy
+      isEnabledActive(),
+      isActiveActive(),
+      // lena instance: not enabled → enable --now
+      { exitCode: 1, stdout: "disabled\n", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+      // kai instance: not enabled → enable --now
+      { exitCode: 1, stdout: "disabled\n", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
+      // list-unit-files: no stray instances
+      { exitCode: 0, stdout: "", stderr: "" },
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena", "kai"],
+    });
+    expect(r.repairedTimers).toEqual([
+      "phantombot-heartbeat@lena.timer",
+      "phantombot-heartbeat@kai.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "enable",
+      "--now",
+      "phantombot-heartbeat@lena.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "enable",
+      "--now",
+      "phantombot-heartbeat@kai.timer",
+    ]);
+  });
+
+  test("disables the heartbeat instance of a persona no longer served", async () => {
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      // tick: healthy
+      isEnabledActive(),
+      isActiveActive(),
+      // lena instance: enabled + active → left alone
+      isEnabledActive(),
+      isActiveActive(),
+      // list-unit-files: jake still enabled from before his removal
+      {
+        exitCode: 0,
+        stdout:
+          "phantombot-heartbeat@lena.timer enabled\n" +
+          "phantombot-heartbeat@jake.timer enabled\n",
+        stderr: "",
+      },
+      // disable --now jake
+      { exitCode: 0, stdout: "", stderr: "" },
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena"],
+    });
+    expect(r.disabledInstances).toEqual(["phantombot-heartbeat@jake.timer"]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "disable",
+      "--now",
+      "phantombot-heartbeat@jake.timer",
+    ]);
+    // Lena's instance is NOT touched beyond the inspect calls.
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "disable",
+      "--now",
+      "phantombot-heartbeat@lena.timer",
+    ]);
+  });
+
+  test("retires the legacy heartbeat unit only once the default instance is active", async () => {
+    // The migration ordering rule: a host whose default persona's instance
+    // can't be armed keeps its legacy heartbeat — never left heartbeat-less.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+
+    // Case 1: default instance arms fine → legacy retired.
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      isEnabledActive(), // tick
+      isActiveActive(),
+      isEnabledActive(), // lena instance
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files: no strays
+      { exitCode: 0, stdout: "", stderr: "" }, // stop legacy timer
+      { exitCode: 0, stdout: "", stderr: "" }, // disable legacy timer
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+    ];
+    const ok = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena", "kai"],
+    });
+    expect(ok.removedRetired.sort()).toEqual([
+      "phantombot-heartbeat.service",
+      "phantombot-heartbeat.timer",
+    ]);
+    expect(existsSync(legacyHbServicePath)).toBe(false);
+    expect(existsSync(legacyHbTimerPath)).toBe(false);
+
+    // Case 2: default instance will NOT arm → legacy stays.
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    const sys2 = new FakeSystemctl();
+    sys2.responses = [
+      isEnabledActive(), // tick
+      isActiveActive(),
+      { exitCode: 1, stdout: "disabled\n", stderr: "" }, // lena: not enabled
+      { exitCode: 3, stdout: "inactive\n", stderr: "" }, // not active
+      { exitCode: 1, stdout: "", stderr: "bus gone" }, // enable --now FAILS
+      // kai instance: enabled + active (irrelevant — only the default gates)
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const failed = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys2,
+      personas: ["lena", "kai"],
+    });
+    expect(failed.removedRetired).toEqual([]);
+    expect(existsSync(legacyHbServicePath)).toBe(true);
+    expect(existsSync(legacyHbTimerPath)).toBe(true);
+  });
+
+  test("restarts every instance when the heartbeat timer template was rewritten", async () => {
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    // Corrupt the TEMPLATE timer so it drifts.
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(), // tick: unchanged → left alone
+      isActiveActive(),
+      // lena: enabled + active, template rewrote → restart + active re-probe
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      isActiveActive(),
+      // kai: enabled + active, template rewrote → restart + active re-probe
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena", "kai"],
+    });
+    expect(r.rewrote).toEqual(["phantombot-heartbeat@.timer"]);
+    expect(r.repairedTimers).toEqual([
+      "phantombot-heartbeat@lena.timer",
+      "phantombot-heartbeat@kai.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-heartbeat@lena.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "restart",
+      "phantombot-heartbeat@kai.timer",
+    ]);
+  });
+
+  test("a failed instance restart keeps the legacy heartbeat unit", async () => {
+    // Migration ordering, restart path: the default persona's instance was
+    // enabled+active, the template rewrite triggers a restart, and that
+    // restart FAILS (or leaves the unit dead). The pre-restart probe said
+    // active, but the replacement is now unverifiable — the legacy unit
+    // must stay, or the host goes heartbeat-less.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    // Corrupt the TEMPLATE timer so the heal rewrites it and restarts the
+    // instances.
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(), // tick: unchanged → left alone
+      isActiveActive(),
+      // lena: enabled + active, template rewrote → restart FAILS
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 1, stdout: "", stderr: "Job for phantombot-heartbeat@lena.timer failed" },
+      // kai: enabled + active, restart ok + active re-probe
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena", "kai"],
+    });
+    expect(r.rewrote).toEqual(["phantombot-heartbeat@.timer"]);
+    // Only kai's verified restart counts as repaired.
+    expect(r.repairedTimers).toEqual(["phantombot-heartbeat@kai.timer"]);
+    // The legacy unit and its files survive — retried on the next heal.
+    expect(r.removedRetired).toEqual([]);
+    expect(existsSync(legacyHbServicePath)).toBe(true);
+    expect(existsSync(legacyHbTimerPath)).toBe(true);
+  });
+
+  test("a restart that exits 0 but leaves the instance inactive keeps the legacy unit", async () => {
+    // Same guarantee via the re-probe: restart claims success but the unit
+    // did not come back active — `ready` must drop to false.
+    const bin = "/usr/local/bin/phantombot";
+    await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: new FakeSystemctl(),
+    });
+    await writeFile(legacyHbServicePath, "[Service]\nExecStart=old\n", "utf8");
+    await writeFile(legacyHbTimerPath, "[Timer]\nOnCalendar=*:0/30\n", "utf8");
+    await writeFile(hbTimerPath, "OnUnitActiveSec=30min\n", "utf8");
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // daemon-reload
+      isEnabledActive(), // tick
+      isActiveActive(),
+      // lena: enabled + active → restart ok, but re-probe says inactive
+      isEnabledActive(),
+      isActiveActive(),
+      { exitCode: 0, stdout: "", stderr: "" },
+      { exitCode: 3, stdout: "inactive\n", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" }, // list-unit-files
+    ];
+    const r = await ensureSystemdUnitsCurrent({
+      binPath: bin,
+      ...paths(),
+      systemctl: sys,
+      personas: ["lena"],
+    });
+    expect(r.repairedTimers).toEqual([]);
+    expect(r.removedRetired).toEqual([]);
+    expect(existsSync(legacyHbServicePath)).toBe(true);
+    expect(existsSync(legacyHbTimerPath)).toBe(true);
+  });
 });
 
 describe("driftedUnitNames", () => {
@@ -699,13 +1047,13 @@ describe("driftedUnitNames", () => {
     const targets = phantombotUnitTargets(bin);
     const byPath = new Map(targets.map((t) => [t.path, t.content]));
     const heartbeat = targets.find(
-      (t) => t.unit === "phantombot-heartbeat.timer",
+      (t) => t.unit === "phantombot-heartbeat@.timer",
     );
     if (!heartbeat) throw new Error("heartbeat timer target missing");
     // Simulate the pre-OnCalendar body left behind by an in-place update.
     byPath.set(heartbeat.path, "OnUnitActiveSec=30min\n");
     const drifted = driftedUnitNames(targets, (p) => byPath.get(p));
-    expect(drifted).toEqual(["phantombot-heartbeat.timer"]);
+    expect(drifted).toEqual(["phantombot-heartbeat@.timer"]);
   });
 
   test("a missing file (reader returns undefined) is not counted as drift", () => {
@@ -939,17 +1287,62 @@ describe("uninstallPhantombotUnit", () => {
     });
     expect(result.removed).toBe(true);
     expect(sys.calls).toEqual([
+      // Enabled heartbeat instances are enumerated first (#486) — none
+      // here (empty stdout from the fake).
+      [
+        "--user",
+        "list-unit-files",
+        "--no-legend",
+        "--no-pager",
+        "phantombot-heartbeat@*.timer",
+      ],
       ["--user", "stop", "phantombot-tick.timer"],
       ["--user", "disable", "phantombot-tick.timer"],
       ["--user", "stop", "phantombot-nightly.timer"],
       ["--user", "disable", "phantombot-nightly.timer"],
+      // The retired pre-#486 single-persona heartbeat units.
       ["--user", "stop", "phantombot-heartbeat.timer"],
       ["--user", "disable", "phantombot-heartbeat.timer"],
+      ["--user", "stop", "phantombot-heartbeat.service"],
+      ["--user", "disable", "phantombot-heartbeat.service"],
       ["--user", "stop", "phantombot.service"],
       ["--user", "disable", "phantombot.service"],
       ["--user", "daemon-reload"],
     ]);
     await expect(readFile(unitPath, "utf8")).rejects.toThrow();
+  });
+
+  test("stops and disables every enabled heartbeat instance", async () => {
+    const sys = new FakeSystemctl();
+    sys.responses = [
+      {
+        exitCode: 0,
+        stdout:
+          "phantombot-heartbeat@lena.timer enabled\n" +
+          "phantombot-heartbeat@kai.timer enabled\n" +
+          "phantombot-heartbeat@.timer static\n",
+        stderr: "",
+      },
+    ];
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    await uninstallPhantombotUnit({ unitPath, systemctl: sys, out, err });
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "stop",
+      "phantombot-heartbeat@lena.timer",
+    ]);
+    expect(sys.calls).toContainEqual([
+      "--user",
+      "disable",
+      "phantombot-heartbeat@kai.timer",
+    ]);
+    // The template itself is never stopped/disabled.
+    expect(sys.calls).not.toContainEqual([
+      "--user",
+      "stop",
+      "phantombot-heartbeat@.timer",
+    ]);
   });
 
   test("does not fail when there's no unit file to remove", async () => {

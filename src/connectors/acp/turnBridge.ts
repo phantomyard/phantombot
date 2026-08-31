@@ -27,6 +27,7 @@
 import { homedir } from "node:os";
 
 import type { Harness, HarnessChunk } from "../../harnesses/types.ts";
+import type { PromptCacheSettings } from "../../config.ts";
 import type { ToolCallDetail } from "../../harnesses/toolNote.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn, type TurnInput } from "../../orchestrator/turn.ts";
@@ -50,6 +51,7 @@ export interface BridgeTurnInput {
   memory: MemoryStore;
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
+  promptCache?: PromptCacheSettings;
   /** @-mentioned reference data, kept separate from the instruction. */
   systemPromptSuffix?: string;
   /** Cancellation signal (session/cancel fires this). */
@@ -104,6 +106,7 @@ export async function runBridgeTurn(
     memory: input.memory,
     idleTimeoutMs: input.idleTimeoutMs,
     hardTimeoutMs: input.hardTimeoutMs,
+    promptCache: input.promptCache,
     systemPromptSuffix: input.systemPromptSuffix,
     // Stream-first surface (Zed renders deltas live) → narrate before tools.
     toolNarration: true,

@@ -8,12 +8,16 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { setLogSink } from "../src/lib/logSink.ts";
 import {
+  syncHeartbeatInstances,
   currentPlatform,
   defaultServiceControl,
+  isSandbox,
   logsCommand,
   logsSpec,
   restartCommand,
+  sandboxServiceControl,
   selfRestart,
   startCommand,
   statusCommand,
@@ -249,5 +253,146 @@ describe("selfRestart", () => {
     // ...but the failure is surfaced for logging.
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("keep-alive");
+  });
+});
+
+describe("sandbox service suppression", () => {
+  /**
+   * A tracking backend: records every mutation so a test can assert the
+   * wrapper never reached it, and reports a KNOWN isActive value so we can
+   * tell "delegated" apart from "hardcoded false".
+   */
+  function trackingBackend(active: boolean) {
+    const calls: string[] = [];
+    const control: ServiceControl = {
+      async isActive() {
+        calls.push("isActive");
+        return active;
+      },
+      async start() {
+        calls.push("start");
+        return { ok: true };
+      },
+      async stop() {
+        calls.push("stop");
+        return { ok: true };
+      },
+      async restart() {
+        calls.push("restart");
+        return { ok: true };
+      },
+      async rerenderUnitIfStale() {
+        calls.push("rerenderUnitIfStale");
+        return { rerendered: true };
+      },
+    };
+    return { calls, control };
+  }
+
+  test("isSandbox reads PHANTOMBOT_SANDBOX, ignoring empty and 0", () => {
+    expect(isSandbox({})).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "" })).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "0" })).toBe(false);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "1" })).toBe(true);
+    expect(isSandbox({ PHANTOMBOT_SANDBOX: "yes" })).toBe(true);
+  });
+
+  test("mutations never reach the backend, and report success", async () => {
+    const { calls, control } = trackingBackend(true);
+    const sandboxed = sandboxServiceControl(control);
+
+    expect(await sandboxed.restart()).toMatchObject({ ok: true });
+    expect(await sandboxed.start()).toMatchObject({ ok: true });
+    expect(await sandboxed.stop()).toMatchObject({ ok: true });
+    expect(await sandboxed.rerenderUnitIfStale()).toEqual({
+      rerendered: false,
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  test("every suppressed mutation logs, naming the op", async () => {
+    // The whole hazard of this wrapper is that it reports ok=true, which is
+    // indistinguishable from a real restart to the ~15 callers of
+    // defaultServiceControl() that only check `ok`. The warn line is the only
+    // signal those callers leave behind, so pin it: a future verb added to
+    // ServiceControl that suppresses SILENTLY reintroduces #484.
+    const captured: string[] = [];
+    const restore = setLogSink((line) => captured.push(line));
+    try {
+      const { control } = trackingBackend(true);
+      const sandboxed = sandboxServiceControl(control);
+      await sandboxed.start();
+      await sandboxed.stop();
+      await sandboxed.restart();
+      await sandboxed.rerenderUnitIfStale();
+      // A query is not a mutation — it must stay silent.
+      await sandboxed.isActive();
+    } finally {
+      restore();
+    }
+
+    const lines = captured.map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line.reason).toBe("PHANTOMBOT_SANDBOX");
+    }
+    expect(lines.map((l) => l.op)).toEqual([
+      "start",
+      "stop",
+      "restart",
+      "rerenderUnitIfStale",
+    ]);
+
+    // The three verbs that report ok=true are the deceptive ones, so they
+    // warn. rerenderUnitIfStale returns {rerendered:false} — the same answer
+    // the real backend gives under `bun run` — so it only informs; warning on
+    // a call that would not have written anything trains readers to ignore
+    // the line.
+    expect(lines.slice(0, 3).map((l) => [l.level, l.msg])).toEqual([
+      ["warn", "platform: service change suppressed"],
+      ["warn", "platform: service change suppressed"],
+      ["warn", "platform: service change suppressed"],
+    ]);
+    expect(lines[3].level).toBe("info");
+    expect(lines[3].msg).toBe("platform: unit re-render skipped");
+  });
+
+  test("isActive still delegates, so status is the truth", async () => {
+    const { calls, control } = trackingBackend(true);
+    expect(await sandboxServiceControl(control).isActive()).toBe(true);
+    expect(calls).toEqual(["isActive"]);
+
+    const off = trackingBackend(false);
+    expect(await sandboxServiceControl(off.control).isActive()).toBe(false);
+  });
+
+  test("defaultServiceControl wraps only when the env var is set", async () => {
+    // Unset: the real backend. We can't restart the host service in a test,
+    // so assert on identity of behaviour we CAN see — the sandbox wrapper's
+    // rerenderUnitIfStale always answers {rerendered:false} without touching
+    // disk, whereas the sandbox flag is what selects it.
+    const sandboxed = defaultServiceControl({ PHANTOMBOT_SANDBOX: "1" });
+    expect(await sandboxed.rerenderUnitIfStale()).toEqual({
+      rerendered: false,
+    });
+    expect(await sandboxed.restart()).toMatchObject({ ok: true });
+
+    const plain = defaultServiceControl({});
+    // The unwrapped control is the platform backend; on an unsupported
+    // platform it refuses, on linux/darwin/windows it is a real object.
+    expect(typeof plain.restart).toBe("function");
+    expect(plain).not.toBe(sandboxed);
+  });
+});
+
+describe("syncHeartbeatInstances dispatcher (#486/#491)", () => {
+  test("delegates to the host backend and stays null on a dev box", async () => {
+    // On the Linux test host this routes to the systemd sync, whose own
+    // gates (installed-binary check, user bus) return null — the contract
+    // callers rely on to stay silent on dev machines. The darwin branch is
+    // gated identically inside defaultSyncLaunchdHeartbeatInstances.
+    const result = await syncHeartbeatInstances(["lena"]);
+    expect(result).toBeNull();
   });
 });

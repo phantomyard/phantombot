@@ -53,6 +53,28 @@ export interface RunEmbedJobInput {
   /** If true, re-embed every chunk regardless of sha match. */
   force?: boolean;
   space?: EmbeddingSpace;
+  /**
+   * Called after each chunk is embedded, skipped or failed.
+   *
+   * Exists so a caller can render an HONEST progress bar. `total` is the number
+   * of chunks discovered SO FAR, not a final figure — files are chunked lazily
+   * as the walk proceeds, so it grows during the run. A UI must treat it as a
+   * lower bound (render "8,431 / 12,904" and let the denominator move) rather
+   * than compute a percentage it then has to walk backwards.
+   *
+   * Never throws into the job: a reporting callback that fails must not abort
+   * an embedding run that is otherwise fine.
+   */
+  onProgress?: (progress: EmbedProgress) => void;
+}
+
+export interface EmbedProgress {
+  /** Chunks processed (embedded + skipped + failed). */
+  done: number;
+  /** Chunks discovered so far. Grows as the file walk proceeds. */
+  total: number;
+  /** The note currently being embedded, persona-relative. */
+  path: string;
 }
 
 export async function runEmbedJob(
@@ -75,6 +97,19 @@ export async function runEmbedJob(
   // populated by refreshStale before we get here).
   const files = input.index.allNotePaths().map((path) => ({ path }));
   const space = input.space ?? input.embedder.space;
+  const report = (path: string) => {
+    if (!input.onProgress) return;
+    try {
+      input.onProgress({
+        done:
+          result.embeddedChunks + result.skippedChunks + result.failedChunks,
+        total: result.totalChunks,
+        path,
+      });
+    } catch {
+      // A progress sink is a nicety; it never fails the job.
+    }
+  };
 
   for (const { path } of files) {
     result.totalFiles++;
@@ -102,6 +137,7 @@ export async function runEmbedJob(
         if (recorded === sha) {
           result.skippedChunks++;
           result.skipped++;
+          report(path);
           continue;
         }
       }
@@ -110,11 +146,13 @@ export async function runEmbedJob(
         result.failedChunks++;
         result.failed++;
         result.errors.push({ path, chunkIdx: i, error: r.error });
+        report(path);
         continue;
       }
       input.index.upsertEmbedding(path, i, r.values, sha, space);
       result.embeddedChunks++;
       result.embedded++;
+      report(path);
     }
   }
 
@@ -133,6 +171,8 @@ export async function runTurnEmbedJob(input: {
   index: MemoryIndex;
   embedder: Embedder;
   space?: EmbeddingSpace;
+  /** Same contract as `RunEmbedJobInput.onProgress`, counted in turns. */
+  onProgress?: (progress: EmbedProgress) => void;
 }): Promise<TurnEmbedJobResult> {
   const result: TurnEmbedJobResult = {
     totalTurns: 0,
@@ -156,6 +196,17 @@ export async function runTurnEmbedJob(input: {
       space,
     );
     result.embedded++;
+    if (input.onProgress) {
+      try {
+        input.onProgress({
+          done: result.embedded + result.failed,
+          total: result.totalTurns,
+          path: row.path,
+        });
+      } catch {
+        // As above: never fail a run because the UI could not be told.
+      }
+    }
   }
   return result;
 }

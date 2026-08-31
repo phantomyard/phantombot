@@ -26,7 +26,7 @@ class FakeHarness implements Harness {
   invocations = 0;
   constructor(
     public readonly id: string,
-    private readonly script: HarnessChunk[],
+    public script: HarnessChunk[],
     public readonly maxPayloadBytes?: number,
   ) {}
   async available(): Promise<boolean> {
@@ -232,6 +232,57 @@ describe("runWithFallback — empty done falls through", () => {
     expect(empty.invocations).toBe(1);
     expect(chunks.map((c) => c.type)).toEqual(["done"]);
     expect(chunks[0]).toMatchObject({ type: "done", finalText: "" });
+  });
+
+  test("empty done does NOT put the harness into cooldown (#499)", async () => {
+    // An empty `done` means the process ran cleanly — a model-output
+    // flake, not a harness-health failure. Cooling it would bench the
+    // one healthy fallback behind a dead primary on the next turn.
+    const cooldown = new CooldownStore(() => 0.5);
+    const empty = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    const filler = new FakeHarness("claude", [
+      { type: "text", text: "real reply" },
+      { type: "done", finalText: "real reply" },
+    ]);
+    await collect(runWithFallback([empty, filler], newRequest(), { cooldown }));
+    expect(empty.invocations).toBe(1);
+    expect(filler.invocations).toBe(1);
+    expect(cooldown.isCooledDown("pi").cooled).toBe(false);
+    expect(cooldown.isCooledDown("pi").consecutiveFailures).toBe(0);
+  });
+
+  test("a harness that emitted an empty reply last turn is tried again next turn (#499)", async () => {
+    // Regression for the kw-phantombot 2026-08-29 incident: one empty
+    // reply from pi (the only healthy harness, primary dead on usage
+    // limit) cooled it, so the NEXT turn skipped pi, hit the dead
+    // primary, and served recovery text. Here: turn 1 pi flakes empty
+    // and claude covers; turn 2 pi must be tried again — and this time
+    // it answers.
+    const cooldown = new CooldownStore(() => 0.5);
+    const flaky = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    const cover = new FakeHarness("claude", [
+      { type: "text", text: "cover" },
+      { type: "done", finalText: "cover" },
+    ]);
+    await collect(runWithFallback([flaky, cover], newRequest(), { cooldown }));
+    expect(flaky.invocations).toBe(1);
+    expect(cover.invocations).toBe(1);
+
+    // Turn 2: pi is healthy again (no cooldown from the empty), so it
+    // is invoked first and its real answer is served.
+    flaky.script = [
+      { type: "text", text: "real reply" },
+      { type: "done", finalText: "real reply" },
+    ];
+    const chunks = await collect(
+      runWithFallback([flaky, cover], newRequest(), { cooldown }),
+    );
+    expect(flaky.invocations).toBe(2);
+    expect(cover.invocations).toBe(1); // never reached
+    const last = chunks[chunks.length - 1];
+    expect(last && last.type === "done" ? last.finalText : "").toBe(
+      "real reply",
+    );
   });
 });
 
@@ -521,6 +572,68 @@ describe("health alerting", () => {
     expect(chunks.at(-1)?.type).toBe("error");
     expect(sent.length).toBe(1);
     expect(sent[0]).toContain("rate limited 429");
+  });
+
+  test("a single-harness chain going empty every turn alerts (#501)", async () => {
+    // The kw-phantombot 2026-08-29 shape: pi is the ONLY harness, its
+    // per-user model catalogue is empty, so every turn comes back with no
+    // text. Before #501 the empty done on the last harness was reported to
+    // the alerter as a success, which closed the incident every turn — the
+    // consecutive-empty counter never reached the threshold and the owner
+    // saw "(no reply)" forever with no signal anywhere.
+    const { alerter, sent } = recordingAlerter();
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES; i++) {
+      const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+      const chunks = await collect(
+        runWithFallback([only], newRequest(), {
+          cooldown: new CooldownStore(),
+          alerter,
+        }),
+      );
+      // The reply path is untouched: the empty done still reaches the
+      // channel so the user gets "(no reply)" rather than silence.
+      expect(chunks).toEqual([{ type: "done", finalText: "" }]);
+    }
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("empty reply");
+    expect(sent[0]).toContain("\u00d73");
+    // Nothing covered the turn, so the alert must not claim a fallback did.
+    expect(sent[0]).toContain("no fallback left");
+    expect(sent[0]).not.toContain("serving");
+  });
+
+  test("one empty reply on a single-harness chain stays quiet (#499)", async () => {
+    // The flake case #499 protects: below the threshold, and a real reply
+    // afterwards closes the incident so the run starts over.
+    const { alerter, sent } = recordingAlerter();
+    const cooldown = new CooldownStore();
+    const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+    expect(sent).toEqual([]);
+
+    only.script = [{ type: "done", finalText: "back" }];
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+
+    // Two more empties would be 3 in total but only 2 consecutive.
+    only.script = [{ type: "done", finalText: "" }];
+    for (let i = 0; i < DEGRADE_AFTER_FAILURES - 1; i++) {
+      await collect(
+        runWithFallback([only], newRequest(), { cooldown, alerter }),
+      );
+    }
+    expect(sent).toEqual([]);
+  });
+
+  test("an empty reply from the last harness does not cool it (#499/#501)", async () => {
+    // Counting the empty for the ALERTER must not leak into the scheduler:
+    // the harness is still the only one we have, so it must be tried first
+    // again next turn rather than benched behind a backoff.
+    const cooldown = new CooldownStore(() => 0.5);
+    const { alerter } = recordingAlerter();
+    const only = new FakeHarness("pi", [{ type: "done", finalText: "" }]);
+    await collect(runWithFallback([only], newRequest(), { cooldown, alerter }));
+    expect(cooldown.isCooledDown("pi").cooled).toBe(false);
+    expect(cooldown.isCooledDown("pi").consecutiveFailures).toBe(0);
   });
 
   test("a terminal (non-recoverable) error does not alert", async () => {

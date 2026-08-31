@@ -21,7 +21,7 @@
  * dispatcher only exposes the consolidated entry point.
  */
 
-import { defineCommand } from "citty";
+import { defineCommand, runCommand, showUsage } from "citty";
 import { existsSync, readdirSync } from "node:fs";
 import * as p from "@clack/prompts";
 
@@ -29,12 +29,18 @@ import {
   type Config,
   loadConfig,
   personaDir,
+  servedPersonasOf,
 } from "../config.ts";
 import type { WriteSink } from "../lib/io.ts";
-import { updateConfigToml, type TomlObject } from "../lib/configWriter.ts";
+import { writeAutostartPersonas } from "../lib/personaDefault.ts";
+import personaNewCmd from "./persona-new.ts";
 import { log } from "../lib/logger.ts";
 import { listArchives } from "../lib/personaArchive.ts";
-import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
+import {
+  defaultServiceControl,
+  type ServiceControl,
+  syncHeartbeatInstances,
+} from "../lib/platform.ts";
 import { loadState, saveState } from "../state.ts";
 import { runCreatePersona } from "./create-persona.ts";
 import { runImportPersona } from "./import-persona.ts";
@@ -384,6 +390,12 @@ export interface RunAutostartPickerInput {
     selected: string[];
     defaultPersona: string;
   }) => Promise<string[] | null>;
+  /**
+   * Test seam for the heartbeat-instance sync after the autostart set
+   * changes (#486). Production leaves this undefined and the real sync
+   * runs (it self-gates to the installed binary on Linux).
+   */
+  syncHeartbeatInstances?: (personas: string[]) => Promise<unknown>;
 }
 
 /**
@@ -432,21 +444,27 @@ export async function runAutostartPicker(
     return 0;
   }
 
-  // Preserve the on-disk order of the existing list, then append what's new,
-  // so an unrelated reorder never shows up as a diff in the config file.
-  const chosen = [
-    ...current.filter((n) => picked.includes(n)),
-    ...picked.filter((n) => !current.includes(n)),
-  ];
+  // Ordering (preserve what is on disk, append what is new) lives in the
+  // writer, so the TUI and this picker cannot drift apart on it.
+  const chosen = await writeAutostartPersonas(config, picked);
 
-  await updateConfigToml(config.configPath, (toml: TomlObject) => {
-    if (chosen.length === 0) {
-      delete toml.autostart_personas;
-    } else {
-      toml.autostart_personas = chosen;
-    }
-  });
-  config.autostartPersonas = chosen;
+  // Provision the heartbeat timer instance for newly-served personas (and
+  // retire removed ones) right away (#486). Best-effort: the next
+  // heartbeat heal reconciles the same state if this fails.
+  const sync =
+    input.syncHeartbeatInstances ?? syncHeartbeatInstances;
+  try {
+    await sync(
+      servedPersonasOf({
+        defaultPersona: config.defaultPersona,
+        autostartPersonas: chosen,
+      }),
+    );
+  } catch (e) {
+    input.err.write(
+      `warning: could not sync heartbeat timer instances: ${(e as Error).message}\n`,
+    );
+  }
 
   input.out.write(
     chosen.length === 0
@@ -485,6 +503,13 @@ export function listExistingPersonas(config: Config): string[] {
 }
 
 export default defineCommand({
+  // NOTE: `new` is deliberately NOT registered in citty's `subCommands`.
+  // citty treats the first positional under a command that HAS subCommands as
+  // a subcommand name and throws `Unknown command` when it doesn't match — so
+  // registering it there silently killed `phantombot persona <name>`, the
+  // documented default-persona switch (shipped broken in v1.1.316). Dispatch
+  // it by hand instead, which keeps `persona <name>` on citty's positional
+  // path and honours #471's hard non-goal: the CLI does not change.
   meta: {
     name: "persona",
     description:
@@ -520,7 +545,16 @@ export default defineCommand({
       default: false,
     },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
+    if (rawArgs[0] === "new") {
+      const rest = rawArgs.slice(1);
+      if (rest.includes("--help") || rest.includes("-h")) {
+        await showUsage(personaNewCmd);
+        return;
+      }
+      await runCommand(personaNewCmd, { rawArgs: rest });
+      return;
+    }
     process.exitCode = await runPersona({
       name: args.name ? String(args.name) : undefined,
       import: args.import ? String(args.import) : undefined,

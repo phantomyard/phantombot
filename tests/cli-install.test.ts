@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmrf } from "./fixtures/rmrf.ts";
@@ -93,6 +93,8 @@ let unitPath: string;
 let installPaths: {
   heartbeatServicePath: string;
   heartbeatTimerPath: string;
+  legacyHeartbeatServicePath: string;
+  legacyHeartbeatTimerPath: string;
   nightlyServicePath: string;
   nightlyTimerPath: string;
   tickServicePath: string;
@@ -103,10 +105,14 @@ beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-install-"));
   unitPath = join(workdir, "phantombot.service");
   // Without these, runInstall would write companion units into the real
-  // ~/.config/systemd/user/ on the test runner — see #44.
+  // ~/.config/systemd/user/ on the test runner — see #44. The retired
+  // pre-#486 heartbeat paths are overridden for the same reason: an
+  // upgrade-migration test would otherwise DELETE the real files.
   installPaths = {
-    heartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
-    heartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
+    heartbeatServicePath: join(workdir, "phantombot-heartbeat@.service"),
+    heartbeatTimerPath: join(workdir, "phantombot-heartbeat@.timer"),
+    legacyHeartbeatServicePath: join(workdir, "phantombot-heartbeat.service"),
+    legacyHeartbeatTimerPath: join(workdir, "phantombot-heartbeat.timer"),
     nightlyServicePath: join(workdir, "phantombot-nightly.service"),
     nightlyTimerPath: join(workdir, "phantombot-nightly.timer"),
     tickServicePath: join(workdir, "phantombot-tick.service"),
@@ -184,6 +190,8 @@ describe("runInstall (linux/systemd)", () => {
       err,
       ensureSystemdEnv: sysEnvAutoSet,
       platform: "linux",
+      // Hermetic: never let a test derive personas from the real config.
+      personas: [],
     });
     expect(code).toBe(0);
     expect(out.text).toContain(
@@ -199,6 +207,8 @@ describe("runInstall (linux/systemd)", () => {
       binPath: "/usr/local/bin/phantombot",
       unitPath,
       ...installPaths,
+      // Hermetic: never let a test derive personas from the real config.
+      personas: ["testbot", "helper"],
       systemctl: sys,
       out,
       err,
@@ -210,8 +220,11 @@ describe("runInstall (linux/systemd)", () => {
       "--user daemon-reload",
       "--user enable phantombot.service",
       "--user start phantombot.service",
-      "--user enable phantombot-heartbeat.timer",
-      "--user start phantombot-heartbeat.timer",
+      // One heartbeat timer instance per served persona (#486).
+      "--user enable phantombot-heartbeat@testbot.timer",
+      "--user start phantombot-heartbeat@testbot.timer",
+      "--user enable phantombot-heartbeat@helper.timer",
+      "--user start phantombot-heartbeat@helper.timer",
       "--user enable phantombot-tick.timer",
       "--user start phantombot-tick.timer",
     ]);
@@ -232,6 +245,8 @@ describe("runInstall (darwin/launchd)", () => {
     const lc = new FakeLaunchctl();
     const code = await runInstall({
       binPath: "/Users/andrew/.local/bin/phantombot",
+      // Hermetic: never let a test derive personas from the real config.
+      personas: ["testbot", "helper"],
       plistPath: join(workdir, "dev.phantombot.phantombot.plist"),
       heartbeatPlistPath: join(workdir, "dev.phantombot.heartbeat.plist"),
       nightlyPlistPath: join(workdir, "dev.phantombot.nightly.plist"),
@@ -243,14 +258,17 @@ describe("runInstall (darwin/launchd)", () => {
       platform: "darwin",
     });
     expect(code).toBe(0);
-    // bootouts of nothing × 3, then bootstrap each plist × 3 (the retired
-    // nightly agent is neither written nor bootstrapped). We check the verb
-    // sequence rather than full strings so the test stays readable.
+    // bootouts of nothing × 4 (main + one heartbeat plist per persona +
+    // tick), then bootstrap each × 4 (the retired nightly agent is neither
+    // written nor bootstrapped). We check the verb sequence rather than
+    // full strings so the test stays readable.
     const verbs = lc.calls.map((c) => c[0]);
     expect(verbs).toEqual([
       "bootout",
       "bootout",
       "bootout",
+      "bootout",
+      "bootstrap",
       "bootstrap",
       "bootstrap",
       "bootstrap",
@@ -259,6 +277,13 @@ describe("runInstall (darwin/launchd)", () => {
     for (const c of lc.calls.filter((c) => c[0] === "bootstrap")) {
       expect(c[1]).toBe("gui/501");
     }
+    // Per-persona heartbeat plists carry --persona args (#491).
+    const helperBody = await readFile(
+      join(workdir, "dev.phantombot.heartbeat.helper.plist"),
+      "utf8",
+    );
+    expect(helperBody).toContain("--persona");
+    expect(helperBody).toContain("<string>helper</string>");
   });
 
   test("doesn't fall through to systemctl on darwin (the bug Andrew hit on his Mac)", async () => {
@@ -459,12 +484,17 @@ describe("runUninstall (linux/systemd)", () => {
     });
     expect(code).toBe(0);
     expect(sys.calls.map((a) => a.join(" "))).toEqual([
+      // Heartbeat instances are enumerated first (#486); none enabled here.
+      "--user list-unit-files --no-legend --no-pager phantombot-heartbeat@*.timer",
       "--user stop phantombot-tick.timer",
       "--user disable phantombot-tick.timer",
       "--user stop phantombot-nightly.timer",
       "--user disable phantombot-nightly.timer",
+      // The retired pre-#486 heartbeat units.
       "--user stop phantombot-heartbeat.timer",
       "--user disable phantombot-heartbeat.timer",
+      "--user stop phantombot-heartbeat.service",
+      "--user disable phantombot-heartbeat.service",
       "--user stop phantombot.service",
       "--user disable phantombot.service",
       "--user daemon-reload",

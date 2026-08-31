@@ -151,6 +151,7 @@ export async function runNightlyTurn(opts: {
   agentDir: string;
   harnesses: Harness[];
   memory: Awaited<ReturnType<typeof openMemoryStore>>;
+  promptCache?: Config["promptCache"];
 }): Promise<TurnResult> {
   const startedAt = Date.now();
   let finalReply = "";
@@ -174,6 +175,7 @@ export async function runNightlyTurn(opts: {
       memory: opts.memory,
       idleTimeoutMs: STAGE_IDLE_TIMEOUT_MS,
       hardTimeoutMs: STAGE_HARD_TIMEOUT_MS,
+      promptCache: opts.promptCache,
       systemPromptSuffix: NIGHTLY_SUFFIX,
       // Machine-driven, not a chat surface: the "user" message is one the
       // nightly wrote itself. Without this, new nightly rows would land
@@ -453,6 +455,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
               agentDir: dir,
               harnesses,
               memory: memory!,
+              promptCache: config.promptCache,
             });
 
       const stagesDone: NightlyStage[] = [];
@@ -578,6 +581,7 @@ export async function runNightly(input: RunNightlyInput = {}): Promise<number> {
                 agentDir: dir,
                 harnesses,
                 memory: memory!,
+                promptCache: config.promptCache,
               }),
         reconcileIndex: async () => {
           if (input.refreshIndex) {

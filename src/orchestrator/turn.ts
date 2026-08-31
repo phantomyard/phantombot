@@ -46,18 +46,26 @@ import {
   workspaceLockNotice,
 } from "../lib/workspaceLock.ts";
 import {
+  buildStableSystemPrompt,
   buildSystemPrompt,
   CONFIRM_BEFORE_LONG_JOBS_INSTRUCTION,
   PRE_TOOL_NARRATION_INSTRUCTION,
 } from "../persona/builder.ts";
+import { buildTurnContext } from "../persona/turnContext.ts";
 import { loadPersona } from "../persona/loader.ts";
 import { buildDailyRecall } from "../lib/dailyRecall.ts";
 import { isNightlyConversation } from "../lib/nightly.ts";
 import type { Harness, HarnessChunk } from "../harnesses/types.ts";
 import type { ToolCallDetail } from "../harnesses/toolNote.ts";
 import type { MemoryStore, TurnOrigin } from "../memory/store.ts";
-import type { FactSource } from "../config.ts";
+import { DEFAULT_PROMPT_CACHE, type FactSource, type PromptCacheSettings } from "../config.ts";
 import type { ScreenVerdict } from "./screen.ts";
+import {
+  promptCacheEpochs,
+  promptCacheSecurityFingerprint,
+  reportPromptCacheError,
+  type PromptCacheEpochPlan,
+} from "./promptCache.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 30;
 
@@ -106,6 +114,8 @@ export interface TurnInput {
   startupTimeoutMs?: number;
   /** Number of prior turns to load. Default 30. */
   historyLimit?: number;
+  /** One opt-in setting for cache-friendly serialization and bounded epochs. */
+  promptCache?: PromptCacheSettings;
   /** Skip loading prior turns AND skip persisting this one. Default false. */
   noHistory?: boolean;
   /** Extra text appended to the system prompt. Used by nightly to inject distillation directives. */
@@ -349,6 +359,13 @@ async function* runTurnBody(
 ): AsyncGenerator<HarnessChunk> {
   const origin: TurnOrigin = input.origin ?? "channel";
   const startedAt = new Date();
+  // Persona entry is lifecycle bookkeeping, not cache preparation. It must
+  // run for cache-disabled and no-history turns so A -> B -> A cannot revive
+  // A's disposable epoch after B was served without a cache plan.
+  const personaChanged = promptCacheEpochs.observePersona(
+    input.persona,
+    input.conversation,
+  );
   const persona = await loadPersona(input.agentDir);
 
   const history = input.noHistory
@@ -371,14 +388,38 @@ async function* runTurnBody(
   // authenticated principal is the gate). The screen contracts not to throw;
   // the catch is belt-and-suspenders and fails OPEN so a judge outage degrades
   // to "unscreened", never "app down".
+  const screening: "screened" | "unscreened" | "trusted" =
+    input.trusted === true ? "trusted" : "unscreened";
+  let effectiveScreening: "screened" | "unscreened" | "trusted" = screening;
   if (input.trusted !== true && input.screen) {
     let verdict: ScreenVerdict | undefined;
     try {
       verdict = await input.screen(input.userMessage, input.signal);
+      if (verdict?.action === "pass") effectiveScreening = "screened";
     } catch {
       verdict = undefined;
     }
     if (verdict?.action === "hold") {
+      // A held untrusted request never reaches prompt-cache preparation, so
+      // invalidate the prior disposable epoch at the actual hold boundary.
+      // This must remain best-effort: cache bookkeeping cannot weaken or turn
+      // a correctly held request into a failed turn.
+      try {
+        promptCacheEpochs.invalidate(
+          {
+            settings: input.promptCache ?? DEFAULT_PROMPT_CACHE,
+            persona: input.persona,
+            conversation: input.conversation,
+          },
+          "threat_hold",
+        );
+      } catch {
+        reportPromptCacheError(
+          input.persona,
+          input.conversation,
+          "discard",
+        );
+      }
       // NOTE: the screener already did the grounding write — it wrote the
       // held episode (quarantined payload) into the PRINCIPAL'S
       // telegram conversation, which is the correct scope (that's where the
@@ -453,18 +494,32 @@ async function* runTurnBody(
     }
   }
 
-  const baseSystemPrompt = buildSystemPrompt(
-    persona,
-    {
-      channel: "cli",
-      conversationId: input.conversation,
-      timestamp: new Date(),
-      trusted: input.trusted === true,
-    },
-    retrievedMemory,
-    durableFacts,
-    dailyRecall,
-  );
+  const channelCtx = {
+    channel: "cli",
+    conversationId: input.conversation,
+    timestamp: new Date(),
+    trusted: input.trusted === true,
+  };
+  const cacheFriendly = input.promptCache?.enabled === true;
+  let baseSystemPrompt: string;
+  let turnContext: string | undefined;
+  if (cacheFriendly) {
+    baseSystemPrompt = buildStableSystemPrompt(persona, channelCtx);
+    turnContext = buildTurnContext({
+      durableFacts,
+      retrievedMemory,
+      dailyRecall,
+      channel: channelCtx,
+    });
+  } else {
+    baseSystemPrompt = buildSystemPrompt(
+      persona,
+      channelCtx,
+      retrievedMemory,
+      durableFacts,
+      dailyRecall,
+    );
+  }
   // Channel-layer overlays in append order:
   //   1. systemPromptSuffix — caller-provided (e.g. Telegram's
   //      reply-style + voice-brevity rules; nightly's distillation
@@ -473,13 +528,13 @@ async function* runTurnBody(
   //      plan-then-confirm + 50-word-answer rule, on every interactive
   //      turn whose question a human will actually see.
   //   2. siblingNotice — #391. Sits between the caller's suffix and the
-  //      narration rule: it is a constraint on WHAT the turn may do, so it
-  //      outranks the formatting directive, but it must not displace the
+  //      narration rule: it is a constraint on WHAT the turn may do and stays
+  //      in this deterministic overlay order without displacing the
   //      channel's own framing. Absent (and free) whenever nothing else is
   //      running, which is the overwhelming majority of turns.
-  //   3. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration,
-  //      added LAST so its directive sits closest to the user message
-  //      and is the most prominent format-of-reply rule the model sees.
+  //   3. PRE_TOOL_NARRATION_INSTRUCTION — opt-in via toolNarration, added LAST
+  //      to preserve the deterministic existing overlay order. Placement is a
+  //      formatting/layout choice and carries no trust or security meaning.
   const overlays: string[] = [];
   if (input.systemPromptSuffix) overlays.push(input.systemPromptSuffix);
 
@@ -567,10 +622,59 @@ async function* runTurnBody(
     });
   }
   if (input.toolNarration) overlays.push(PRE_TOOL_NARRATION_INSTRUCTION);
-  const systemPrompt =
+  let systemPrompt =
     overlays.length > 0
       ? baseSystemPrompt + "\n\n" + overlays.join("\n\n")
       : baseSystemPrompt;
+
+  const promptCacheInput = {
+    settings: input.promptCache ?? DEFAULT_PROMPT_CACHE,
+    persona: input.persona,
+    conversation: input.conversation,
+    systemPrompt,
+    history,
+    historyLimit: input.historyLimit ?? DEFAULT_HISTORY_LIMIT,
+    turnContext,
+    userMessage: input.userMessage,
+    trusted: input.trusted === true,
+    securityFingerprint: promptCacheSecurityFingerprint({
+      trusted: input.trusted === true,
+      screening: effectiveScreening,
+      mcpMode: input.mcpMode ?? "default",
+      tools: input.toolsMode?.allow,
+    }),
+  };
+  let epochPlan: PromptCacheEpochPlan | undefined;
+  if (cacheFriendly) {
+    try {
+      epochPlan = input.noHistory
+        ? (promptCacheEpochs.bypass(promptCacheInput, "no_history"), undefined)
+        : promptCacheEpochs.prepare(promptCacheInput, personaChanged);
+    } catch {
+      try {
+        promptCacheEpochs.discard(input.persona, input.conversation);
+      } catch {
+        reportPromptCacheError(input.persona, input.conversation, "discard");
+      }
+      reportPromptCacheError(input.persona, input.conversation, "prepare");
+
+      // A cache failure must make this request indistinguishable from the
+      // feature-off path. Rebuild the ordinary prompt, including the same
+      // volatile context that the cache-friendly layout had separated out.
+      baseSystemPrompt = buildSystemPrompt(
+        persona,
+        channelCtx,
+        retrievedMemory,
+        durableFacts,
+        dailyRecall,
+      );
+      turnContext = undefined;
+      systemPrompt =
+        overlays.length > 0
+          ? baseSystemPrompt + "\n\n" + overlays.join("\n\n")
+          : baseSystemPrompt;
+    }
+  }
 
   let finalText = "";
   let succeeded = false;
@@ -629,8 +733,12 @@ async function* runTurnBody(
       input.harnesses,
       {
         systemPrompt,
+        ...(turnContext ? { turnContext } : {}),
         userMessage: input.userMessage,
-        history,
+        history: [...(epochPlan?.baseHistory ?? history)],
+        ...(epochPlan?.epochTurns.length
+          ? { epochTurns: [...epochPlan.epochTurns] }
+          : {}),
         persona: input.persona,
         conversation: input.conversation,
         // #405: lets `phantombot workspace lock/unlock` attribute a claim to the
@@ -754,6 +862,27 @@ async function* runTurnBody(
         .catch(() => {
           // Out-of-band extraction must never surface to the user.
         });
+    }
+  }
+
+  if (epochPlan) {
+    try {
+      if (succeeded && !input.noHistory) {
+        promptCacheEpochs.complete(epochPlan, finalText);
+      } else {
+        promptCacheEpochs.fail(epochPlan);
+      }
+    } catch {
+      try {
+        promptCacheEpochs.discard(input.persona, input.conversation);
+      } catch {
+        reportPromptCacheError(input.persona, input.conversation, "discard");
+      }
+      reportPromptCacheError(
+        input.persona,
+        input.conversation,
+        succeeded && !input.noHistory ? "complete" : "fail",
+      );
     }
   }
 }

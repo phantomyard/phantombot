@@ -242,6 +242,7 @@ export interface RunReactionTurnInput {
   idleTimeoutMs: number;
   hardTimeoutMs?: number;
   startupTimeoutMs?: number;
+  promptCache?: import("../../config.ts").PromptCacheSettings;
   /**
    * Trust provenance — true only when the reactor is an allow-listed principal.
    * A reaction from the principal is trusted (so the capture can write memory);
@@ -294,6 +295,7 @@ export async function runReactionTurn(
       idleTimeoutMs: input.idleTimeoutMs,
       hardTimeoutMs: input.hardTimeoutMs,
       startupTimeoutMs: input.startupTimeoutMs,
+      promptCache: input.promptCache,
       signal: input.signal,
       trusted: input.trusted,
       // Wake-but-SILENT: the principal gave ambient feedback, not a request

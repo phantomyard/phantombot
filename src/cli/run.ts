@@ -40,6 +40,7 @@ import {
   DEFAULT_P2P,
   loadConfig,
   personaDir,
+  servedPersonasOf,
   type TelegramAccount,
   withHostHarnessBins,
 } from "../config.ts";
@@ -390,23 +391,24 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   let defaultPersona = config.defaultPersona;
   if (hasDefault) {
     const agentDir = personaDir(config, defaultPersona);
-    if (!existsSync(agentDir)) {
-      const healed = await healDefaultPersonaIfBroken(config, err);
-      if (healed) {
-        defaultPersona = healed;
-        config.defaultPersona = healed;
-      } else if (!hasPhantomchat) {
-        err.write(
-          `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
-            "Create one with `phantombot persona`.\n",
-        );
-        return 2;
-      }
-      // else: Telegram's default persona is broken, but PhantomChat is a
-      // runnable channel — fall through. planListeners skips the missing default
-      // and we continue PhantomChat-only (warned below). The service must never
-      // fail to start just because one channel is misconfigured.
+    // Do not guard this with existsSync(agentDir): on a case-insensitive
+    // filesystem a wrong-cased key exists as a path but is still a different
+    // memory/vault namespace. The healer also no-ops cheaply for a healthy key.
+    const healed = await healDefaultPersonaIfBroken(config, err);
+    if (healed) {
+      defaultPersona = healed;
+      config.defaultPersona = healed;
+    } else if (!hasPhantomchat) {
+      err.write(
+        `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
+          "Create one with `phantombot persona`.\n",
+      );
+      return 2;
     }
+    // else: Telegram's default persona is broken, but PhantomChat is a
+    // runnable channel — fall through. planListeners skips the missing default
+    // and we continue PhantomChat-only (warned below). The service must never
+    // fail to start just because one channel is misconfigured.
   }
 
   // The default persona may have been HEALED to a different name just above,
@@ -795,7 +797,15 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   // Detached, so a long backlog sweep outlives neither this promise nor the
   // daemon's own lifecycle concerns, and a crash there can never take the
   // channel loop with it.
-  spawnStartupNightly(alertPersona);
+  //
+  // One sweep per SERVED persona (#486) — the startup trigger used to fire
+  // only for the default persona, so a non-default persona whose heartbeat
+  // never ran got no nightly at all. Skips personas with no directory (a
+  // stale autostart entry) — their sweeps would only log an error.
+  for (const p of servedPersonasOf(config)) {
+    if (p !== alertPersona && !existsSync(personaDir(config, p))) continue;
+    spawnStartupNightly(p);
+  }
 
   // Self-provision the managed Pi capability-routing extension: when a routable
   // capability (image and/or coding model) is configured, stamp the embedded

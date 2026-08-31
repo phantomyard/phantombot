@@ -64,6 +64,7 @@ Supported harnesses:
 - [Why Phantombot Exists](#why-phantombot-exists)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [The terminal app](#the-terminal-app)
 - [Windows](#windows)
 - [Configuration](#configuration)
 - [Command Reference](#command-reference)
@@ -170,6 +171,15 @@ phantombot builds the persona prompt, loads relevant memory, sends the turn to
 the harness, and relays the final answer to Telegram. The harness performs the
 SSH, file edits, searches, and command execution through its native tool loop.
 
+PhantomBot remains the owner of conversation history and durable memory. An
+opt-in prompt-cache setting keeps persona instructions and security policy in
+the stable system prompt, places each turn's retrieved context, durable facts,
+daily recall, and channel metadata after canonical history, and retains a
+bounded append-only chain of completed turns for exact-prefix reuse. Cache
+state is disposable acceleration; losing it never loses memory. The feature is
+disabled by default, and its benefit depends on the selected backend supporting
+exact prompt-prefix caching.
+
 ## Install
 
 ```bash
@@ -259,6 +269,120 @@ running after logout:
 ```bash
 sudo loginctl enable-linger "$USER"
 ```
+
+## The terminal app
+
+`phantombot` with no arguments, in a terminal, opens **a conversation with your
+default phantom** — full screen, cursor in the box. Not a menu, not usage text.
+
+```
+phantombot
+```
+
+Settings live one keypress away:
+
+| Key | What it does |
+|---|---|
+| `^s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
+| `esc` | Back to the conversation, mid-thread, nothing lost |
+| `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
+| `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
+| `^l` | Show captured log lines |
+| `^c` | Interrupt the turn (it does **not** quit) |
+| `^q` | Quit |
+| `/` | Open the command list; `Tab` completes what you have typed |
+
+It takes the whole window — the app runs on the alternate screen buffer, like
+`less` or `htop`, and leaves your shell and its scrollback exactly as it found
+them on exit. While it runs, log output is **captured rather than printed**:
+`^l` shows it. Otherwise those lines would land on top of the frame, which is
+where they used to go.
+
+While a turn is in flight the status line under the transcript animates: a
+spinner, the step the phantom is on right now (`gh release view`, `thinking`,
+`writing the reply`), and a seconds counter. A long answer and a hung process
+should never look the same.
+
+A conversation here is a real turn: same harness chain, same memory, same tools
+and the same journal as a message from any channel. The scrollback IS the
+conversation store, so closing the app and reopening it tomorrow continues the
+same thread.
+
+**Slash commands work here, and they are phantombot's — not the model's.**
+`/status`, `/stop`, `/reset`, `/harness`, `/model`, `/coder`, `/chattiness`,
+`/update`, `/restart` and `/help` are the same commands Telegram and
+phantomchat expose, handled by the same code. Type `/` and the list appears
+under the input box; `Tab` completes it.
+
+They are dispatched **ahead of the harness**, so they answer while a turn is
+running — which is the only moment `/stop` is any use — and typing is never
+blocked by a turn in flight. `/update` and `/restart` act on the whole host, so
+they are accepted only from the default phantom and refused, with the reason,
+anywhere else. A command that is not one of ours (`/wat`) is answered here
+rather than improvised by the model, while a line that only *looks* like one
+(`/usr/bin/env is on PATH?`, `/etc/hosts`) goes to the phantom untouched.
+
+**Replies are rendered, not dumped.** Headings, **bold**, *italic*, `inline
+code`, bullet and numbered lists, block quotes, fenced code blocks and pipe
+tables all come out as the terminal's own formatting instead of raw markup.
+Tables are fitted to the window — the widest columns shrink first and cells
+truncate with an ellipsis — and code blocks are truncated rather than re-wrapped,
+because a re-flowed command line looks copy-pasteable and is not. Everything
+re-renders at the new width when you resize.
+
+**If the default phantom is not configured yet**, the same command opens the
+setup wizard instead — and resumes at the first unanswered step rather than
+starting from the beginning. "Configured" means a resolvable harness, an
+`identity.json` and a memory database that opens. Channels are deliberately not
+part of it: a phantom you only talk to from the terminal is a finished phantom.
+
+For a new phantom, the final wizard page is a review: it writes nothing until
+you confirm, then reports the persona directory plus `identity.json` and
+`config.toml`. Invalid or duplicate directory names are rejected inline.
+
+Per-phantom settings label each effective value as a **persona override**,
+**inherited from global config**, or a **built-in default**. Removing a persona
+key means “inherit”; explicit empty/tombstone values remain persona overrides.
+
+**Questions are asked in line mode.** The screens you read are rendered by Ink;
+the questions that change something — a value to type, a choice to make, a
+confirmation to give — are the same [`@clack`](https://github.com/bombshell-dev/clack)
+prompts every `phantombot` subcommand uses. The app steps out of the way while
+you answer and repaints when you are done, so a setting looks and behaves the
+same whether you reached it from the settings screen or from the command line.
+
+Long screens **window their content** rather than squeezing it: a settings
+screen that does not fit says `▼ 4 more below` and scrolls with the cursor. The
+frame is never allowed to deform.
+
+**Mouse is supported** — click a row to select it, click a footer action to run
+it, scroll a list with the wheel. It is always optional: every clickable target
+also has a key on the footer, and exiting restores your terminal exactly.
+
+### When it does NOT open
+
+The app is gated on there being a human present — both stdin and stdout must be
+terminals. Everything else behaves exactly as it did before:
+
+| Invocation | Behaviour |
+|---|---|
+| `phantombot` in a terminal | The app (chat, or the wizard) |
+| `phantombot` piped, redirected, in CI or from cron | Today's usage text; touches no disk |
+| `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
+| `phantombot --help` / `--version` / any subcommand | Unchanged |
+
+**Every existing command keeps its exact behaviour, flags and output.** The app
+is a new surface over the same operations, so scripts, runbooks and systemd
+units are unaffected.
+
+### Changing a setting performs its consequence
+
+A settings screen that only writes config is a trap. Changing the embedding
+provider, model or dimensions changes the vector-space fingerprint, which makes
+every stored vector invisible to search — recall silently drops back to lexical
+with nothing looking broken. So the app states the consequence before you
+commit to it, then **runs it for you** with a progress bar. There is never a
+follow-up command to remember.
 
 ## Windows
 
@@ -457,6 +581,33 @@ in health checks or deploy hooks. These are the *external* controls (run from a
 terminal); the in-chat `/restart` and `/update` commands still bounce the running
 service from inside itself.
 
+**`PHANTOMBOT_SANDBOX` — a global kill-switch for all four verbs.** Set it to
+anything other than `""` or `0` and every service *mutation* in the process
+becomes a no-op: `start`, `stop` and `restart` return success without touching
+the host's service, while the unit-file re-render writes nothing and reports
+`{ rerendered: false }`. Queries still tell the truth, so `phantombot doctor`
+and the TUI keep showing the real service state.
+
+It exists for **development checkouts**. Running `bun run src/index.ts` from a
+working tree gives you a second phantombot *process* but not a second
+*service* — so a config save in your branch would bounce the production daemon
+that is serving live conversations, killing whatever turn was in flight.
+
+Because it is read by `defaultServiceControl()`, it applies to *every* caller,
+not just the TUI: with the variable set, in-chat `/update` and `/restart` also
+stop restarting anything while still reporting success. Every suppression is
+logged, naming the op: `start`, `stop` and `restart` log
+`platform: service change suppressed` at **warn**, and the re-render logs
+`platform: unit re-render skipped` at **info** — so a process running at
+`PHANTOMBOT_LOG_LEVEL=warn` keeps the three that report a false success and
+drops the one that does not. Those lines go to the **stderr of the process
+that has the variable set** — your terminal for a `bun run src/index.ts`
+checkout, and the `^l` log pane inside the TUI
+(which swaps the sink for its own ring buffer). It reaches `phantombot logs`
+only if the *daemon itself* was started with the variable set — which is the
+case you never want: **never set it on a host running the real service**, or
+the daemon will silently stop taking updates.
+
 ## Configuration
 
 Phantombot resolves configuration in this order:
@@ -474,6 +625,82 @@ always has.
 Some keys describe the *machine* and are only ever read from the global file:
 `default_persona`, `autostart_personas`, `update_channel`, `personas_dir` and
 `memory_db`. A persona cannot elect itself default or move the personas root.
+
+### Prompt-cache optimization
+
+The optimization is one opt-in feature and is disabled by default:
+
+```toml
+[prompt_cache]
+enabled = false
+max_epoch_bytes = 80000
+```
+
+Use this primarily for self-hosted/local inference, such as llama.cpp or vLLM,
+where the operator controls the prefix/KV cache. Hosted-provider users should
+generally leave it disabled: hosted APIs manage caching differently, and an
+epoch can lengthen billed input while PhantomBot cannot control provider-side
+cache behavior.
+
+When enabled, PhantomBot keeps persona, policy, security, and instruction-bearing
+overlay material in the stable system prompt, then places the current
+PhantomBot-provided context and user message after canonical history. This
+ordering is only a cache/prefix-reuse optimization; prompt position does not
+grant trust or authority. Completed turns are appended to a small, in-process
+cache epoch so payload N is an exact textual prefix of payload N+1.
+The epoch is rebuilt from the canonical memory database when its byte budget is
+reached or its identity is no longer valid. That rebase causes one cold turn;
+it does not discard or rewrite durable memory.
+
+Epoch bookkeeping is disposable optimization state, not part of turn
+correctness. If no epoch state exists, PhantomBot starts a fresh cold epoch
+from canonical history. Invalid, corrupt, or inconsistent state is discarded;
+preparation failures fall back to the normal feature-off prompt path for that
+request. A failure while preparing, completing, or discarding cache bookkeeping
+is contained: a valid model response remains a successful user turn. Cache-error
+telemetry contains safe metadata only and never prompt content.
+
+Security authority comes from explicit trust state, threat screening,
+security/system policy, and epoch invalidation; prompt position is not a
+security mechanism. Retrieved memories, durable facts, daily recall, and
+historical snapshots are data/context, not a new instruction channel.
+Security boundaries are explicit cache boundaries too. Trusted/untrusted
+transitions rebase from canonical history even if prompt text would otherwise
+look unchanged. Persona entry is observed before screening and cache
+eligibility, including cache-disabled and no-history turns, so changing persona
+within a conversation discards the prior persona state and A → B → A cannot
+revive it. A held untrusted request discards the warm epoch before the hold
+returns. For untrusted turns, only a returned screen `pass` is fingerprinted as
+screened; a missing or throwing screener remains fail-open but is fingerprinted
+as unscreened, so recovery also crosses a cold boundary. Effective tool-surface
+changes also rebase. Channel authentication, allowlists, harness/MCP
+configuration, and other security settings use the existing restart-required
+configuration lifecycle; a process restart clears all in-process epoch state.
+Persona/policy prompt edits remain additionally covered by the full system
+fingerprint. These are security lifecycle rules, not claims about prompt
+position or authority.
+
+The epoch contains no backend handles, slot identifiers, sessions, or persisted
+conversation data. It disappears on process restart, persona/conversation
+changes, prompt-policy changes, history edits, and failed serialization checks.
+`max_epoch_bytes` measures PhantomBot-rendered UTF-8 bytes, not exact model
+tokens. Harness, chat-template, and tool tokens may exist outside this
+measurement, so it is an optimization bound rather than a backend context
+guarantee. Operators should choose it conservatively for their model/harness;
+the shipped `80000` value will be tuned from benchmark evidence later. There is
+no fixed speedup guarantee: backends that do not reuse exact prefixes receive
+the same correct conversation semantics, with only the opt-in serialization
+behavior.
+
+The serialized-prefix property is distinct from backend KV reuse. Pi, Claude,
+and Codex are stateless CLI harnesses, so the immediately previous generated
+assistant response is not guaranteed to be reusable in the model input on the
+very next request when the chat-template role boundary differs. The historical
+context and user message remain identical, and the wrapped assistant response
+becomes part of the reusable serialized prefix on a later request.
+
+Environment overrides are `PHANTOMBOT_PROMPT_CACHE_ENABLED` and
+`PHANTOMBOT_PROMPT_CACHE_MAX_EPOCH_BYTES`.
 
 The first time a newer phantombot starts, it **copies** the persona-scoped keys
 out of the global file into each persona's own file. It never deletes anything:
@@ -613,7 +840,10 @@ Setup and channels:
 | Command | Purpose |
 |---|---|
 | `phantombot init` | Run the unified setup wizard |
+| `phantombot` (in a terminal) | Open the full-screen app: chat with the default phantom, or the setup wizard |
+| `phantombot --no-tui` | The same conversation as a plain line-mode REPL |
 | `phantombot persona [<name>] [--yes]` | Create, import, list, or explicitly switch the default persona |
+| `phantombot persona new <name> [--autostart] [--default]` | Create a persona non-interactively. Never becomes the default unless `--default` is passed |
 | `phantombot persona --import <dir> [--as <name>] [--no-telegram]` | Import a persona directory |
 | `phantombot backfill-identity` | Add missing split identity files without overwriting existing content |
 | `phantombot harness [--persona <name>]` | Configure a host or persona harness chain, models, and Pi routing |
@@ -781,6 +1011,19 @@ anything it does not mention falling back to the host file — never to a
 built-in default. Env vars still win over both. `default_persona`,
 `autostart_personas`, `update_channel`, `personas_dir` and `memory_db` describe
 the machine, so they are ignored inside a persona file.
+
+**Who am I when I omit `--persona`?** `phantombot doctor` answers it on its
+first line: the resolved default persona, WHERE it came from, whether it is
+usable and how many MCP servers it has. Provenance matters because the layer
+operators reach for first is the one that loses — resolution is
+`PHANTOMBOT_DEFAULT_PERSONA` env > `state.json` > `config.toml` > the built-in
+`phantom`, so editing `default_persona` in `config.toml` on a host that has ever
+created or switched a persona changes nothing at all. Doctor fails (exit 1) when
+the default has no persona directory, or when its `mcp.json` will not parse. It
+WARNS, without failing, when the default has no MCP servers while another
+persona on the box does — the signature of a default left pointing at a persona
+that has been migrated away, where every persona-scoped read still succeeds
+against the wrong, empty persona.
 
 **Lifecycle commands belong to the default persona.** `/update` and `/restart`
 swap the binary and bounce the service for *everyone* in the process, so they
@@ -1497,6 +1740,10 @@ Task behavior:
 - LLM-backed tasks spawn the configured harness.
 - Command-backed tasks run a local shell command directly.
 - Command tasks receive a minimal environment plus only named `--secret` vars.
+- That environment always includes `PHANTOMBOT_PERSONA`, set to the persona
+  that OWNS the task. A command that shells back into `phantombot` (`ask`,
+  `notify`, `mcp call`, `memory ...`) therefore acts as its own persona rather
+  than falling through to the host default.
 - Task stdout, stderr, exit status, and next run are recorded.
 - Tasks run silently by default.
 - Missed runs are skipped rather than replayed in a burst.
@@ -2456,7 +2703,14 @@ Installed user units:
 |---|---|---|
 | `phantombot.service` | Always on | Multi-persona Telegram + PhantomChat runtime and P2P nodes |
 | `phantombot-tick.timer` | Every minute | Scheduled task runner |
-| `phantombot-heartbeat.timer` | Every 30 minutes | Mechanical maintenance + fires the nightly sweep on day rollover |
+| `phantombot-heartbeat@<persona>.timer` | Every 30 minutes | Per-persona mechanical maintenance + fires that persona's nightly sweep on day rollover (one instance per served persona; the legacy single `phantombot-heartbeat.timer` is retired automatically) |
+
+The macOS equivalents are per-user LaunchAgents: `dev.phantombot.phantombot`
+(always on), `dev.phantombot.tick`, and one
+`dev.phantombot.heartbeat.<persona>` plist per served persona — the legacy
+single `dev.phantombot.heartbeat` plist is retired automatically once the
+default persona's replacement is loaded. On Windows the per-persona
+`heartbeat-<persona>` tasks play the same role.
 
 Update commands:
 

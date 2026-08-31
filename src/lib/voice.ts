@@ -65,6 +65,18 @@ export interface VoiceConfig {
   sttTimeoutMs?: number;
 }
 
+/**
+ * Can this provider TRANSCRIBE? Mirrors the dispatch in `lib/audio.ts`, which
+ * supports exactly `elevenlabs` (scribe) and `openai` (whisper-1) and answers
+ * "STT not supported" for everything else. `[voice] provider` is ONE key
+ * driving TWO capabilities, so `azure_edge` — the only provider needing no
+ * credential — yields a phantom that speaks but silently rejects every voice
+ * note. If a new STT backend is added there, this list moves with it.
+ */
+export function providerHearsVoice(provider: VoiceProvider): boolean {
+  return provider === "openai" || provider === "elevenlabs";
+}
+
 export const ENV_KEY_FOR_PROVIDER: Record<
   Exclude<VoiceProvider, "azure_edge" | "none">,
   string

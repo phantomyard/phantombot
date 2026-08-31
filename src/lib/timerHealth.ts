@@ -10,10 +10,12 @@
  * We write one cheap, atomic marker file per timer in XDG_STATE_HOME.
  * No JSON parsing on read — we just stat() the mtime — but the file
  * also contains the ISO timestamp + a "runs=" counter for forensic
- * tail -F use. Marker files are TIMER-scoped (not persona-scoped) on
- * purpose: heartbeat may eventually run multi-persona, and tick has
- * no persona at all. We're tracking the timer's heartbeat, not any
- * one persona's memory.
+ * tail -F use. Heartbeat markers are PERSONA-scoped
+ * (`heartbeat.<persona>.last-fired`) because each persona has its own
+ * `phantombot-heartbeat@<persona>.timer` instance (#486) and its own
+ * day-rollover nightly trigger — one shared marker would let the
+ * first-firing persona consume the rollover for everyone. Tick has no
+ * persona at all, so its marker stays timer-scoped.
  *
  * Staleness thresholds are passed in by callers (doctor picks them)
  * rather than hard-coded here, because the heartbeat-firing-every-30m
@@ -27,8 +29,18 @@ import { dirname, join } from "node:path";
 import { xdgStateHome } from "../config.ts";
 import { log } from "./logger.ts";
 
-export function heartbeatMarkerPath(): string {
-  return join(xdgStateHome(), "phantombot", "heartbeat.last-fired");
+/**
+ * Path of the heartbeat fire marker. With a persona, the per-persona
+ * marker written by that persona's heartbeat instance; without one, the
+ * legacy timer-scoped marker — kept solely so installs from before the
+ * per-persona instances (#486) still report the default persona's last
+ * fire instead of going falsely stale at upgrade.
+ */
+export function heartbeatMarkerPath(persona?: string): string {
+  const file = persona
+    ? `heartbeat.${persona}.last-fired`
+    : "heartbeat.last-fired";
+  return join(xdgStateHome(), "phantombot", file);
 }
 
 export function tickMarkerPath(): string {
@@ -97,8 +109,8 @@ async function recordFired(path: string): Promise<void> {
   }
 }
 
-export function recordHeartbeatFired(): Promise<void> {
-  return recordFired(heartbeatMarkerPath());
+export function recordHeartbeatFired(persona?: string): Promise<void> {
+  return recordFired(heartbeatMarkerPath(persona));
 }
 
 export function recordTickFired(): Promise<void> {
@@ -146,8 +158,31 @@ function loadLastFired(path: string, now: Date): TimerLastFired {
   }
 }
 
-export function loadHeartbeatLastFired(now: Date = new Date()): TimerLastFired {
-  return loadLastFired(heartbeatMarkerPath(), now);
+export function loadHeartbeatLastFired(
+  now: Date = new Date(),
+  persona?: string,
+): TimerLastFired {
+  return loadLastFired(heartbeatMarkerPath(persona), now);
+}
+
+/**
+ * Last-fire info for one persona's heartbeat instance. The default
+ * persona falls back to the legacy timer-scoped marker when its
+ * per-persona file doesn't exist yet — that marker tracked exactly its
+ * fires on pre-#486 installs. A NON-default persona gets no fallback:
+ * the legacy marker says nothing about when (or whether) its instance
+ * ever fired, and borrowing it would report a never-maintained persona
+ * as healthy.
+ */
+export function loadPersonaHeartbeatLastFired(
+  persona: string,
+  opts: { isDefault?: boolean; now?: Date } = {},
+): TimerLastFired {
+  const now = opts.now ?? new Date();
+  const own = loadLastFired(heartbeatMarkerPath(persona), now);
+  if (own.iso !== undefined) return own;
+  if (opts.isDefault) return loadLastFired(heartbeatMarkerPath(), now);
+  return own;
 }
 
 export function loadTickLastFired(now: Date = new Date()): TimerLastFired {

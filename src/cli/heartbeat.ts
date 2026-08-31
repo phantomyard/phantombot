@@ -20,6 +20,7 @@ import {
   personaDir,
   loadConfigForPersona,
   resolvePersona,
+  servedPersonasOf,
 } from "../config.ts";
 import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
@@ -50,7 +51,12 @@ import {
   ensureTasksCurrent,
 } from "../lib/taskScheduler.ts";
 import {
-  loadHeartbeatLastFired,
+  BunLaunchctlRunner,
+  ensureLaunchdHeartbeatInstances,
+  guiDomain,
+} from "../lib/launchd.ts";
+import {
+  loadPersonaHeartbeatLastFired,
   recordHeartbeatFired,
 } from "../lib/timerHealth.ts";
 import { VERSION } from "../version.ts";
@@ -225,7 +231,7 @@ export async function runHeartbeatCli(
       if (input.healSystemd) {
         await input.healSystemd();
       } else {
-        await defaultHealService(persona);
+        await defaultHealService(config, persona);
       }
     } catch (e) {
       log.warn("heartbeat: service self-heal threw unexpectedly", {
@@ -279,7 +285,12 @@ export async function runHeartbeatCli(
   let rolloverLine = "";
   if (input.triggerNightly !== false) {
     try {
-      const prev = loadHeartbeatLastFired(new Date()).iso;
+      // PER-PERSONA marker (#486): every persona's heartbeat instance tracks
+      // its own last fire, so one persona firing first after midnight can't
+      // consume the rollover and starve the others of their nightly sweep.
+      const prev = loadPersonaHeartbeatLastFired(persona, {
+        isDefault: persona === config.defaultPersona,
+      }).iso;
       if (dayRolledOver(prev)) {
         (input.triggerNightly ?? spawnNightlySweep)(persona, "rollover");
         rolloverLine = ", day rolled over → nightly sweep";
@@ -296,8 +307,10 @@ export async function runHeartbeatCli(
   }
 
   // Record the fire AFTER the primary work succeeded. Doctor uses
-  // this marker's mtime to flag a dead heartbeat timer.
-  await recordHeartbeatFired();
+  // this marker's mtime to flag a dead heartbeat timer. Per-persona
+  // (#486): each instance's marker backs doctor's per-persona
+  // maintenance report.
+  await recordHeartbeatFired(persona);
 
   const updateLine =
     r.updateCheck?.status === "notified"
@@ -353,33 +366,88 @@ async function defaultEmbedNotes(
  * Silent on healthy boxes; logs a notice only on repair. A no-op on any
  * platform without a backend.
  */
-async function defaultHealService(persona?: string): Promise<void> {
+async function defaultHealService(
+  config: Config,
+  persona?: string,
+): Promise<void> {
   switch (currentPlatform()) {
     case "linux":
-      return defaultHealSystemd();
+      return defaultHealSystemd(config);
+    case "darwin":
+      return defaultHealLaunchd(config);
     case "windows":
       return defaultHealTaskScheduler(persona);
     default:
-      return; // macOS (launchd self-heals via KeepAlive) and unsupported hosts
+      return; // unsupported hosts
+  }
+}
+
+/**
+ * macOS analogue of `defaultHealSystemd` (#491): reconcile one per-persona
+ * heartbeat plist per served persona, bootout plists of personas no longer
+ * served, and retire the legacy single-persona heartbeat once its
+ * replacement is loaded. Idempotent; silent when nothing drifted.
+ */
+async function defaultHealLaunchd(config: Config): Promise<void> {
+  const binPath = process.execPath;
+  if (!isPhantombotBinary(binPath)) return;
+  let domain: string;
+  try {
+    domain = guiDomain();
+  } catch {
+    return;
+  }
+  const r = await ensureLaunchdHeartbeatInstances({
+    binPath,
+    personas: servedPersonasOf(config),
+    domain,
+    launchctl: new BunLaunchctlRunner(),
+  });
+  if (
+    r.rewrote.length > 0 ||
+    r.bootstrapped.length > 0 ||
+    r.removed.length > 0 ||
+    r.retiredLegacy ||
+    r.reloadFailed.length > 0 ||
+    r.removeFailed.length > 0
+  ) {
+    log.info("heartbeat: healed launchd heartbeat plists", {
+      rewrote: r.rewrote,
+      bootstrapped: r.bootstrapped,
+      removed: r.removed,
+      retiredLegacy: r.retiredLegacy,
+      reloadFailed: r.reloadFailed,
+      removeFailed: r.removeFailed,
+    });
   }
 }
 
 /**
  * Idempotently ensure all phantombot systemd units are present and timers are
- * armed. Skips on Linux hosts where the user-systemd bus isn't reachable (e.g.
- * SSH without lingering).
+ * armed — including one heartbeat instance per served persona (#486). Skips on
+ * Linux hosts where the user-systemd bus isn't reachable (e.g. SSH without
+ * lingering).
  */
-async function defaultHealSystemd(): Promise<void> {
+async function defaultHealSystemd(config: Config): Promise<void> {
   const binPath = process.execPath;
   if (!isPhantombotBinary(binPath)) return;
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return;
   const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
-  const r = await ensureSystemdUnitsCurrent({ binPath, systemctl });
-  if (r.rewrote.length > 0 || r.repairedTimers.length > 0) {
+  const r = await ensureSystemdUnitsCurrent({
+    binPath,
+    systemctl,
+    personas: servedPersonasOf(config),
+  });
+  if (
+    r.rewrote.length > 0 ||
+    r.repairedTimers.length > 0 ||
+    r.disabledInstances.length > 0
+  ) {
     log.info("heartbeat: healed systemd units", {
       rewrote: r.rewrote,
       repairedTimers: r.repairedTimers,
+      disabledInstances: r.disabledInstances,
     });
   }
 }

@@ -26,6 +26,7 @@ import {
   loadConfigForPersona,
   personaDir,
   resolvePersona,
+  servedPersonasOf,
 } from "../config.ts";
 import {
   checkConfiguredHarnesses,
@@ -64,6 +65,12 @@ import {
   reconcileEditorConnectors,
   type EditorConnectorResult,
 } from "../connectors/acp/autoInstall.ts";
+import {
+  defaultPersonaDefect,
+  defaultPersonaProvenance,
+  listPersonaDirs,
+} from "../lib/personaDefault.ts";
+import { loadRegistry } from "../mcp/registry.ts";
 import { saveHarnessBins } from "../state.ts";
 import {
   BunSystemctlRunner,
@@ -72,7 +79,7 @@ import {
   driftedUnitNames,
   ensureSystemdUnitsCurrent,
   ensureUserSystemdEnv,
-  HEARTBEAT_TIMER_NAME,
+  heartbeatInstanceTimer,
   heartbeatServicePath,
   heartbeatTimerPath,
   phantombotUnitTargets,
@@ -84,7 +91,7 @@ import {
 } from "../lib/systemd.ts";
 import {
   HEARTBEAT_STALE_MINUTES,
-  loadHeartbeatLastFired,
+  loadPersonaHeartbeatLastFired,
   loadTickLastFired,
   TICK_STALE_MINUTES,
   type TimerLastFired,
@@ -246,6 +253,54 @@ export interface DoctorReport {
     };
   };
   /**
+   * Per-persona maintenance coverage (#486): for every persona this host
+   * serves (default ∪ autostart), when its heartbeat instance last fired
+   * (stale = never, or older than the heartbeat threshold) and how far
+   * its nightly ledger is behind. WARN-ONLY — never feeds the exit code;
+   * a persona that is behind is something to surface, not a failure.
+   */
+  maintenance?: Array<{
+    persona: string;
+    last_heartbeat?: string;
+    heartbeat_age_minutes?: number;
+    heartbeat_stale: boolean;
+    nightly_backlog: number;
+    nightly_oldest_pending?: string;
+    nightly_last_run?: string;
+  }>;
+  /**
+   * The HOST DEFAULT persona (#505): who am I when a command omits
+   * `--persona`, and is that persona actually usable?
+   *
+   * There was no way to answer that, and the failure is silent by
+   * construction: a stale default resolves to a real directory, so every
+   * persona-scoped read (vault, memory, MCP registry) succeeds against the
+   * WRONG, empty persona instead of failing. One line here turns an
+   * afternoon of debugging into a glance.
+   *
+   * `served` is `default ∪ autostart_personas` — the default is in it by
+   * definition, so a false here means the config is self-contradictory.
+   * `mcp_servers` counts entries in the resolved persona's `mcp.json`;
+   * `mcp_error` is set when the registry exists but does not load. An empty
+   * registry while ANOTHER persona has one is the exact shape of a
+   * migrated-away default, so it warns — but warn-only, because a
+   * legitimately MCP-free host must not fail its health check.
+   */
+  default_persona: {
+    resolved: string;
+    provenance: "env" | "state" | "config" | "builtin";
+    exists: boolean;
+    served: boolean;
+    /** null when usable; otherwise why it is not (missing identity, ...). */
+    defect: string | null;
+    mcp_servers: number;
+    mcp_error?: string;
+    /** Other personas on this host that DO have MCP servers registered. */
+    mcp_elsewhere: string[];
+    healthy: boolean;
+    detail: string;
+  };
+  /**
    * Configured harness binaries resolved from the service/runtime PATH.
    * Catches installs that work in an interactive shell but fail under the
    * daemon environment.
@@ -325,6 +380,21 @@ export interface RunDoctorInput {
   checkTimers?:
     | false
     | (() => Promise<DoctorReport["timers"] | undefined>);
+  /**
+   * Test seam for the per-persona maintenance check (#486). Pass `false`
+   * to skip, a function to substitute a fake report. In production this
+   * is undefined and doctor reads the real per-persona markers + nightly
+   * ledgers.
+   */
+  checkMaintenance?:
+    | false
+    | (() => Promise<DoctorReport["maintenance"] | undefined>);
+  /**
+   * Test seam for the default-persona check (#505). Pass a function to
+   * substitute a fake report. In production this is undefined and doctor
+   * reads state.json, the persona dirs and each persona's mcp.json.
+   */
+  checkDefaultPersona?: () => Promise<DoctorReport["default_persona"]>;
   /**
    * Test seam for harness binary availability. Pass false to skip. In
    * production, doctor checks the installed service PATH when running as the
@@ -580,9 +650,27 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (input.checkTimers) {
       timersReport = await input.checkTimers();
     } else {
-      timersReport = computeTimersReport();
+      timersReport = computeTimersReport(host.defaultPersona);
     }
   }
+
+  // Per-persona maintenance coverage (#486) — computed BEFORE the systemd
+  // check so a persona whose heartbeat instance stopped firing can drive a
+  // forced re-arm of that instance (the same zombie-timer repair the
+  // default persona's marker gets below).
+  let maintenanceReport: DoctorReport["maintenance"] | undefined;
+  if (input.checkMaintenance !== false) {
+    if (input.checkMaintenance) {
+      maintenanceReport = await input.checkMaintenance();
+    } else {
+      maintenanceReport = await defaultCheckMaintenance(host, input.nightlyHealth);
+    }
+  }
+
+  // Host default-persona health (#505) — who am I when `--persona` is omitted?
+  const defaultPersonaReport = input.checkDefaultPersona
+    ? await input.checkDefaultPersona()
+    : await defaultCheckDefaultPersona(host);
 
   // Map any "fired before, then went stale" marker to its timer unit.
   // These are the `active (elapsed)` zombies that is-active can't see —
@@ -597,13 +685,24 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       timersReport.heartbeat.stale &&
       timersReport.heartbeat.last_fired !== undefined
     ) {
-      staleTimerUnits.push(HEARTBEAT_TIMER_NAME);
+      staleTimerUnits.push(heartbeatInstanceTimer(host.defaultPersona));
     }
     if (
       timersReport.tick.stale &&
       timersReport.tick.last_fired !== undefined
     ) {
       staleTimerUnits.push(TICK_TIMER_NAME);
+    }
+  }
+  // Non-default personas' stale instances too (the timers section only
+  // tracks the default persona's heartbeat + tick).
+  for (const m of maintenanceReport ?? []) {
+    if (
+      m.persona !== host.defaultPersona &&
+      m.heartbeat_stale &&
+      m.last_heartbeat !== undefined
+    ) {
+      staleTimerUnits.push(heartbeatInstanceTimer(m.persona));
     }
   }
 
@@ -616,7 +715,11 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     if (input.checkSystemd) {
       systemdReport = await input.checkSystemd(staleTimerUnits);
     } else if (currentPlatform() === "linux") {
-      systemdReport = await defaultCheckSystemd(repair, staleTimerUnits);
+      systemdReport = await defaultCheckSystemd(
+        repair,
+        staleTimerUnits,
+        servedPersonasOf(host),
+      );
     }
   }
 
@@ -778,8 +881,10 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
       channel: updateChannel,
       version: VERSION,
     },
+    default_persona: defaultPersonaReport,
     ...(systemdReport ? { systemd: systemdReport } : {}),
     ...(timersReport ? { timers: timersReport } : {}),
+    ...(maintenanceReport ? { maintenance: maintenanceReport } : {}),
     ...(harnessReport ? { harnesses: harnessReport } : {}),
     ...(piExtensionReport ? { piExtension: piExtensionReport } : {}),
     ...(editorConnectors ? { editorConnectors } : {}),
@@ -823,10 +928,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // about the data. No restore point at all is NOT a failure on its own — a
   // box installed this afternoon has none yet, and crying WARN there would
   // teach an operator to ignore the line that matters.
+  // A default persona that is not usable (missing dir, missing identity,
+  // unopenable memory) is a genuine failure: every command that omits
+  // --persona is aimed at it. An EMPTY-but-loadable MCP registry is not —
+  // that is a warning, because plenty of hosts register no MCP servers at all.
+  const defaultPersonaBroken =
+    defaultPersonaReport.defect !== null ||
+    defaultPersonaReport.mcp_error !== undefined;
+
   const memoryDbBroken = dbPresent && !dbHealth.ok;
   const telegramBroken = !telegramReport.healthy;
   const exitCode =
     memoryDbBroken
+      ? 1
+      : defaultPersonaBroken
       ? 1
       : health.status === "error"
       ? 1
@@ -852,6 +967,20 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   // Human summary.
   const tick = (ok: boolean) => (ok ? "ok" : "WARN");
   out.write(`phantombot doctor — persona '${persona}'\n`);
+  {
+    const d = defaultPersonaReport;
+    out.write(
+      `  default persona: ${tick(d.healthy)} — '${d.resolved}' ` +
+        `(from ${provenanceLabel(d.provenance)})\n`,
+    );
+    out.write(`    ${d.detail}\n`);
+    if (d.provenance === "state") {
+      out.write(
+        "    note: state.json OUTRANKS config.toml's default_persona — " +
+          "editing the TOML key will not change this\n",
+      );
+    }
+  }
   out.write(
     `  telegram: ${tick(telegramReport.healthy)} — ` +
       `${telegramReport.listeners} listener(s) across ` +
@@ -1015,6 +1144,30 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
     renderTimer("tick", timersReport.tick);
   }
 
+  // Per-persona maintenance coverage (#486) — warn-only, never exit-code.
+  if (maintenanceReport && maintenanceReport.length > 0) {
+    out.write("  maintenance per persona:\n");
+    for (const m of maintenanceReport) {
+      const hbOk = !m.heartbeat_stale;
+      const hb =
+        m.last_heartbeat === undefined
+          ? "heartbeat never fired"
+          : `heartbeat ${m.heartbeat_age_minutes}m ago${hbOk ? "" : " — STALE"}`;
+      const nightly =
+        m.nightly_backlog > 0
+          ? `nightly ${m.nightly_backlog} date(s) pending (oldest ${m.nightly_oldest_pending})`
+          : "nightly ledger current";
+      out.write(`    ${m.persona}: ${tick(hbOk && m.nightly_backlog === 0)} — ${hb}; ${nightly}\n`);
+    }
+    const stale = maintenanceReport.filter((m) => m.heartbeat_stale);
+    if (stale.length > 0) {
+      out.write(
+        `  → ${stale.map((m) => m.persona).join(", ")}: heartbeat maintenance is behind — ` +
+          "check `systemctl --user status phantombot-heartbeat@<persona>.timer`\n",
+      );
+    }
+  }
+
   if (harnessReport) {
     const missing = missingHarnesses(harnessReport.checks);
     out.write(`  harnesses: ${tick(missing.length === 0)} — `);
@@ -1132,6 +1285,91 @@ export async function runDoctor(input: RunDoctorInput = {}): Promise<number> {
   return exitCode;
 }
 
+/** Human label for where the default persona came from. */
+function provenanceLabel(p: DoctorReport["default_persona"]["provenance"]): string {
+  switch (p) {
+    case "env":
+      return "PHANTOMBOT_DEFAULT_PERSONA env";
+    case "state":
+      return "state.json";
+    case "config":
+      return "config.toml";
+    case "builtin":
+      return "built-in fallback";
+  }
+}
+
+/**
+ * Production wiring for the default-persona check (#505).
+ *
+ * Everything here is cheap and read-only: state.json for provenance, the
+ * shared `defaultPersonaDefect` predicate for usability (the same one heal
+ * keys on, so doctor and heal can never disagree), and one `mcp.json` read
+ * per persona on disk. `loadRegistry` returns an empty registry when the file
+ * is absent and THROWS when it is present but malformed, so an unparseable
+ * registry is reported as an error rather than laundered into "0 servers".
+ */
+async function defaultCheckDefaultPersona(
+  host: Config,
+): Promise<DoctorReport["default_persona"]> {
+  const resolved = host.defaultPersona;
+  const provenance = await defaultPersonaProvenance(host);
+  const exists = existsSync(personaDir(host, resolved));
+  const served = servedPersonasOf(host).includes(resolved);
+  const defect = defaultPersonaDefect(host, resolved);
+
+  let mcpServers = 0;
+  let mcpError: string | undefined;
+  if (exists) {
+    try {
+      const registry = await loadRegistry(personaDir(host, resolved));
+      mcpServers = Object.keys(registry.mcpServers).length;
+    } catch (e) {
+      mcpError = (e as Error).message;
+    }
+  }
+
+  // Which OTHER personas have MCP servers? An empty default next to a
+  // populated sibling is the signature of a stale/migrated default — the
+  // exact state that silently sent a poller's `mcp call` into the void.
+  const mcpElsewhere: string[] = [];
+  for (const name of listPersonaDirs(host)) {
+    if (name === resolved) continue;
+    try {
+      const registry = await loadRegistry(personaDir(host, name));
+      if (Object.keys(registry.mcpServers).length > 0) mcpElsewhere.push(name);
+    } catch {
+      // A sibling's broken registry is not this check's business.
+    }
+  }
+
+  const detail = defect
+    ? `NOT usable: ${defect}`
+    : mcpError
+      ? `mcp.json does not load: ${mcpError}`
+      : mcpServers === 0 && mcpElsewhere.length > 0
+        ? `usable, but no MCP servers registered while ${mcpElsewhere.join(", ")} ` +
+          `has some — commands run without --persona will not see them`
+        : `usable; ${mcpServers} MCP server(s); ${served ? "served" : "NOT in the served set"}`;
+
+  return {
+    resolved,
+    provenance,
+    exists,
+    served,
+    defect,
+    mcp_servers: mcpServers,
+    ...(mcpError ? { mcp_error: mcpError } : {}),
+    mcp_elsewhere: mcpElsewhere,
+    healthy:
+      defect === null &&
+      mcpError === undefined &&
+      served &&
+      !(mcpServers === 0 && mcpElsewhere.length > 0),
+    detail,
+  };
+}
+
 async function computeHarnessReport(
   config: Config,
 ): Promise<DoctorReport["harnesses"] | undefined> {
@@ -1160,6 +1398,7 @@ async function computeHarnessReport(
 async function defaultCheckSystemd(
   repair: boolean,
   staleTimers: string[] = [],
+  personas: readonly string[] = [],
 ): Promise<DoctorReport["systemd"] | undefined> {
   const sysEnv = ensureUserSystemdEnv();
   if (!sysEnv.ready) return undefined;
@@ -1188,7 +1427,7 @@ async function defaultCheckSystemd(
   const drifted = driftedUnitNames(phantombotUnitTargets(binPath), (p) =>
     existsSync(p) ? readFileSync(p, "utf8") : undefined,
   );
-  const inactive = await listInactiveTimers(systemctl);
+  const inactive = await listInactiveTimers(systemctl, personas);
   let repaired = false;
   if (
     repair &&
@@ -1201,12 +1440,14 @@ async function defaultCheckSystemd(
       const heal = await ensureSystemdUnitsCurrent({
         binPath,
         systemctl,
+        personas,
         forceRearmTimers: staleTimers,
       });
       repaired =
         heal.rewrote.length > 0 ||
         heal.repairedTimers.length > 0 ||
-        heal.removedRetired.length > 0;
+        heal.removedRetired.length > 0 ||
+        heal.disabledInstances.length > 0;
     } catch (e) {
       log.warn("doctor: systemd heal failed", {
         error: (e as Error).message,
@@ -1232,15 +1473,75 @@ async function defaultCheckSystemd(
  * same gate `defaultCheckSystemd` uses so the check stays inert in
  * dev contexts and tests don't need to clean up marker files.
  */
-function computeTimersReport(): DoctorReport["timers"] | undefined {
+function computeTimersReport(
+  defaultPersona: string,
+): DoctorReport["timers"] | undefined {
   if (!isPhantombotBinary()) return undefined;
   const now = new Date();
-  const heartbeat = loadHeartbeatLastFired(now);
+  // The heartbeat section tracks the DEFAULT persona's instance marker
+  // (with the pre-#486 timer-scoped marker as upgrade fallback); other
+  // personas are covered per-persona in the maintenance section.
+  const heartbeat = loadPersonaHeartbeatLastFired(defaultPersona, {
+    isDefault: true,
+    now,
+  });
   const tickFired = loadTickLastFired(now);
   return {
     heartbeat: timerSection(heartbeat, HEARTBEAT_STALE_MINUTES),
     tick: timerSection(tickFired, TICK_STALE_MINUTES),
   };
+}
+
+/**
+ * Per-persona maintenance coverage (#486). For every persona this host
+ * serves: its heartbeat instance's last-fire marker, and its nightly
+ * ledger backlog. Pure reads (marker files + persona dirs) — the systemd
+ * half of coverage (is the instance enabled?) lives in
+ * `defaultCheckSystemd`. Gated on the real phantombot binary like the
+ * other service-manager checks, so dev/test runs stay silent.
+ */
+async function defaultCheckMaintenance(
+  host: Config,
+  nightlyHealthFn: typeof nightlyHealth = nightlyHealth,
+): Promise<DoctorReport["maintenance"]> {
+  if (!isPhantombotBinary()) return undefined;
+  const now = new Date();
+  const entries: NonNullable<DoctorReport["maintenance"]> = [];
+  for (const persona of servedPersonasOf(host)) {
+    const dir = personaDir(host, persona);
+    if (!existsSync(dir)) continue;
+    const marker = loadPersonaHeartbeatLastFired(persona, {
+      isDefault: persona === host.defaultPersona,
+      now,
+    });
+    const heartbeatStale =
+      marker.ageMinutes === undefined ||
+      marker.ageMinutes > HEARTBEAT_STALE_MINUTES;
+    let health: NightlyHealth | undefined;
+    try {
+      const state = await loadNightlyState(dir);
+      health = await nightlyHealthFn(dir, { state });
+    } catch (e) {
+      log.warn("doctor: maintenance nightly-health read failed", {
+        persona,
+        error: (e as Error).message,
+      });
+    }
+    entries.push({
+      persona,
+      ...(marker.iso !== undefined ? { last_heartbeat: marker.iso } : {}),
+      ...(marker.ageMinutes !== undefined
+        ? { heartbeat_age_minutes: marker.ageMinutes }
+        : {}),
+      heartbeat_stale: heartbeatStale,
+      nightly_backlog: health?.backlog ?? 0,
+      ...(health?.oldest_pending
+        ? { nightly_oldest_pending: health.oldest_pending }
+        : {}),
+      ...(health?.last_run ? { nightly_last_run: health.last_run } : {}),
+    });
+  }
+  return entries;
 }
 
 function timerSection(
@@ -1259,12 +1560,19 @@ function timerSection(
 
 async function listInactiveTimers(
   systemctl: SystemctlRunner,
+  personas: readonly string[] = [],
 ): Promise<string[]> {
   const out: string[] = [];
-  // Two timers, not three: the nightly timer is retired (the sweep runs on
-  // startup and on the heartbeat's day-rollover check), so an absent one is
-  // correct rather than a fault to repair.
-  for (const t of [HEARTBEAT_TIMER_NAME, TICK_TIMER_NAME]) {
+  // Tick + one heartbeat instance per served persona (#486). The nightly
+  // timer is retired (the sweep runs on startup and on the heartbeat's
+  // day-rollover check), so an absent one is correct rather than a fault
+  // to repair. A persona whose instance is missing or disabled reads as
+  // "not active" here, which routes it into the same repair path.
+  const units = [
+    TICK_TIMER_NAME,
+    ...personas.map((p) => heartbeatInstanceTimer(p)),
+  ];
+  for (const t of units) {
     const r = await systemctl.run(["--user", "is-active", t]);
     if (r.exitCode !== 0 || r.stdout.trim() !== "active") {
       out.push(t);

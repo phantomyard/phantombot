@@ -173,6 +173,7 @@ export async function runAsk(input: RunAskInput): Promise<number> {
       memory,
       idleTimeoutMs: config.harnessIdleTimeoutMs,
       hardTimeoutMs: config.harnessHardTimeoutMs,
+      promptCache: config.promptCache,
       noHistory: !input.history,
       // Instinct layer: auto-retrieve relevant memory/kb, but only for
       // conversational asks (history on). One-shot, no-history asks are

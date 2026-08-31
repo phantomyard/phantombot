@@ -15,6 +15,7 @@ import {
   DEFAULT_DURABLE_FACTS,
   DEFAULT_GEMINI_MAX_CHUNK_CHARS,
   DEFAULT_OPENAI_COMPATIBLE_MAX_CHUNK_CHARS,
+  DEFAULT_PROMPT_CACHE,
   DEFAULT_GRAPH_EXPANSION,
   DEFAULT_RETRIEVAL,
   DEFAULT_RETRIEVAL_DECAY,
@@ -103,6 +104,8 @@ const ENV_KEYS = [
   "PHANTOMBOT_TELEGRAM_BUBBLE_DELAY_MS",
   "PHANTOMBOT_TELEGRAM_VOICE_MAX_SENTENCES",
   "PHANTOMBOT_CHATTINESS",
+  "PHANTOMBOT_PROMPT_CACHE_ENABLED",
+  "PHANTOMBOT_PROMPT_CACHE_MAX_EPOCH_BYTES",
   "PHANTOMBOT_UPDATE_CHANNEL",
   "PHANTOMBOT_P2P_ENABLED",
   "PHANTOMBOT_P2P_PORT",
@@ -159,6 +162,7 @@ describe("loadConfig — defaults (no file)", () => {
     // Fresh / not-yet-configured install (no config.toml on disk) NARRATES —
     // the standing default that keeps the agent anchored on long runs.
     expect(c.chattiness).toBe(true);
+    expect(c.promptCache).toEqual(DEFAULT_PROMPT_CACHE);
   });
 
   test("durable-facts defaults are pinned (drift guard)", async () => {
@@ -247,6 +251,34 @@ describe("loadConfig — chattiness default", () => {
     process.env.PHANTOMBOT_CHATTINESS = "off";
     const c = await loadConfig();
     expect(c.chattiness).toBe(false);
+  });
+});
+
+describe("loadConfig — prompt-cache settings", () => {
+  async function writeConfig(body: string): Promise<void> {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "config.toml"), body, "utf8");
+  }
+
+  test("is disabled by default", async () => {
+    const c = await loadConfig();
+    expect(c.promptCache).toEqual(DEFAULT_PROMPT_CACHE);
+    expect(DEFAULT_PROMPT_CACHE.maxEpochBytes).toBe(80_000);
+  });
+
+  test("reads one TOML switch and epoch ceiling", async () => {
+    await writeConfig(`[prompt_cache]\nenabled = true\nmax_epoch_bytes = 64000\n`);
+    const c = await loadConfig();
+    expect(c.promptCache).toEqual({ enabled: true, maxEpochBytes: 64000 });
+  });
+
+  test("environment values override the same prompt-cache table", async () => {
+    await writeConfig(`[prompt_cache]\nenabled = false\nmax_epoch_bytes = 64000\n`);
+    process.env.PHANTOMBOT_PROMPT_CACHE_ENABLED = "true";
+    process.env.PHANTOMBOT_PROMPT_CACHE_MAX_EPOCH_BYTES = "72000";
+    const c = await loadConfig();
+    expect(c.promptCache).toEqual({ enabled: true, maxEpochBytes: 72000 });
   });
 });
 

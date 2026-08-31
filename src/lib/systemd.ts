@@ -13,8 +13,28 @@ import { isPhantombotBinary } from "./binaryIdentity.ts";
 import type { WriteSink } from "./io.ts";
 
 export const PHANTOMBOT_UNIT_NAME = "phantombot.service";
-export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
-export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
+/**
+ * Heartbeat units are systemd TEMPLATES (#486): one
+ * `phantombot-heartbeat@<persona>.timer` instance per served persona
+ * (default_persona ∪ autostart_personas), so every persona on a
+ * multi-persona rig gets its own 30-minute maintenance pass — drawer
+ * promotion, index refresh, turn-flush, day-rollover nightly trigger —
+ * instead of only the default persona being swept.
+ */
+export const HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat@.service";
+export const HEARTBEAT_TIMER_NAME = "phantombot-heartbeat@.timer";
+/** Pre-#486 single-persona heartbeat units — retired by the heal path once
+ * the default persona's instance is verified active. */
+export const LEGACY_HEARTBEAT_SERVICE_NAME = "phantombot-heartbeat.service";
+export const LEGACY_HEARTBEAT_TIMER_NAME = "phantombot-heartbeat.timer";
+/** Name of the heartbeat timer instance serving one persona. */
+export function heartbeatInstanceTimer(persona: string): string {
+  return `phantombot-heartbeat@${persona}.timer`;
+}
+/** Name of the heartbeat service instance serving one persona. */
+export function heartbeatInstanceService(persona: string): string {
+  return `phantombot-heartbeat@${persona}.service`;
+}
 /**
  * RETIRED units. The nightly no longer runs on a clock — it is triggered by
  * startup and by the heartbeat noticing the calendar day rolled over (see
@@ -62,6 +82,28 @@ export function heartbeatServicePath(): string {
 
 export function heartbeatTimerPath(): string {
   return join(homedir(), ".config", "systemd", "user", HEARTBEAT_TIMER_NAME);
+}
+
+/** Path of the retired pre-#486 heartbeat service (kept for cleanup only). */
+export function legacyHeartbeatServicePath(): string {
+  return join(
+    homedir(),
+    ".config",
+    "systemd",
+    "user",
+    LEGACY_HEARTBEAT_SERVICE_NAME,
+  );
+}
+
+/** Path of the retired pre-#486 heartbeat timer (kept for cleanup only). */
+export function legacyHeartbeatTimerPath(): string {
+  return join(
+    homedir(),
+    ".config",
+    "systemd",
+    "user",
+    LEGACY_HEARTBEAT_TIMER_NAME,
+  );
 }
 
 /** Path of the retired nightly service (kept for cleanup only). */
@@ -143,11 +185,17 @@ function quoteArg(s: string): string {
   return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
-/** Generate the heartbeat oneshot service body. */
+/**
+ * Generate the heartbeat oneshot service TEMPLATE body (#486). The `%i`
+ * instance specifier becomes the persona name, so one template serves
+ * every `phantombot-heartbeat@<persona>.timer` instance on the host.
+ */
 export function generateHeartbeatService(binPath: string): string {
-  const exec = [binPath, "heartbeat"].map(quoteArg).join(" ");
+  const exec = [binPath, "heartbeat", "--persona", "%i"]
+    .map(quoteArg)
+    .join(" ");
   return `[Unit]
-Description=Phantombot heartbeat — mechanical 30-minute maintenance pass
+Description=Phantombot heartbeat — mechanical 30-minute maintenance pass (%i)
 
 [Service]
 Type=oneshot
@@ -170,7 +218,7 @@ StandardError=journal
  */
 export function generateHeartbeatTimer(): string {
   return `[Unit]
-Description=Phantombot heartbeat timer (every 30 min)
+Description=Phantombot heartbeat timer (every 30 min, %i)
 
 [Timer]
 OnCalendar=*:0/30
@@ -668,6 +716,26 @@ export interface EnsureUnitsCurrentOptions extends PhantombotUnitPathOverrides {
   binPath: string;
   systemctl: SystemctlRunner;
   /**
+   * Personas this host serves — `{default_persona} ∪ autostart_personas`,
+   * DEFAULT PERSONA FIRST (the legacy heartbeat unit is only retired once
+   * the default's instance is verified active, so a failed migration never
+   * leaves a host with no heartbeat at all). Each persona gets an enabled
+   * `phantombot-heartbeat@<persona>.timer` instance; enabled instances
+   * naming a persona NOT in this list are disabled (a persona removed from
+   * autostart loses its maintenance with it). When omitted, instance
+   * management is skipped entirely — the template files are still
+   * reconciled, but no instances are armed or retired (callers without a
+   * config in scope use this; the next heartbeat/doctor heal completes the
+   * migration).
+   */
+  personas?: readonly string[];
+  /**
+   * Where the RETIRED pre-#486 heartbeat units live. Only consulted so the
+   * migration can delete them out of a tmpdir under test.
+   */
+  legacyHeartbeatServicePath?: string;
+  legacyHeartbeatTimerPath?: string;
+  /**
    * Timer unit names (e.g. "phantombot-heartbeat.timer") that must be
    * re-armed even when systemd reports them enabled AND active.
    *
@@ -694,6 +762,9 @@ export interface EnsureUnitsCurrentResult {
   repairedTimers: string[];
   /** Retired unit files removed from disk (upgrade cleanup). Usually empty. */
   removedRetired: string[];
+  /** Heartbeat timer instances disabled because their persona is no longer
+   * served (empty when `personas` was not passed). */
+  disabledInstances: string[];
 }
 
 /**
@@ -709,6 +780,7 @@ export interface EnsureUnitsCurrentResult {
 export async function removeRetiredUnits(
   systemctl: SystemctlRunner,
   paths: readonly string[] = [nightlyTimerPath(), nightlyServicePath()],
+  timersToStop: readonly string[] = RETIRED_TIMER_NAMES,
 ): Promise<string[]> {
   const present = paths.filter((p) => existsSync(p));
   // Nothing on disk → nothing systemd can run, so skip the IPC entirely. This
@@ -716,7 +788,7 @@ export async function removeRetiredUnits(
   // because the heal path runs on every heartbeat.
   if (present.length === 0) return [];
 
-  for (const unit of RETIRED_TIMER_NAMES) {
+  for (const unit of timersToStop) {
     await systemctl.run(["--user", "stop", unit]);
     await systemctl.run(["--user", "disable", unit]);
   }
@@ -779,10 +851,14 @@ export async function ensureSystemdUnitsCurrent(
   // armed. Anything else means the timer isn't actually running and we
   // need to enable --now to repair it. Cheap to recheck — systemctl is
   // local IPC and these calls take ~ms.
+  //
+  // The heartbeat TEMPLATE timer (`phantombot-heartbeat@.timer`) is
+  // skipped here — a template can never be enabled itself; its instances
+  // are reconciled per persona below.
   const forceRearm = new Set(opts.forceRearmTimers ?? []);
   const repairedTimers: string[] = [];
   for (const t of targets) {
-    if (!t.isTimer) continue;
+    if (!t.isTimer || t.unit.includes("@")) continue;
     const enabled = await opts.systemctl.run([
       "--user",
       "is-enabled",
@@ -814,12 +890,141 @@ export async function ensureSystemdUnitsCurrent(
     repairedTimers.push(t.unit);
   }
 
-  return { rewrote, backups, repairedTimers, removedRetired };
+  // Per-persona heartbeat instances (#486). One enabled
+  // `phantombot-heartbeat@<persona>.timer` per served persona; instances
+  // for personas no longer served are disabled; and the retired
+  // single-persona heartbeat unit is removed only AFTER the default
+  // persona's instance is verified armed — a migration that can't arm the
+  // replacement keeps the legacy unit rather than leaving the host with
+  // no heartbeat at all (it is retried on the next heal pass).
+  let disabledInstances: string[] = [];
+  if (opts.personas) {
+    const templateRewrote = rewroteTimerUnits.has(HEARTBEAT_TIMER_NAME);
+    let defaultInstanceReady = false;
+    for (let i = 0; i < opts.personas.length; i++) {
+      const unit = heartbeatInstanceTimer(opts.personas[i]!);
+      const enabled = await opts.systemctl.run(["--user", "is-enabled", unit]);
+      const active = await opts.systemctl.run(["--user", "is-active", unit]);
+      const isEnabled =
+        enabled.exitCode === 0 && enabled.stdout.trim() === "enabled";
+      const isActive =
+        active.exitCode === 0 && active.stdout.trim() === "active";
+      let ready = isEnabled && isActive;
+      if (ready) {
+        if (forceRearm.has(unit) || templateRewrote) {
+          // A failed restart can leave the instance stopped; only keep
+          // `ready` when the unit is verifiably active afterwards, so the
+          // legacy retirement below never fires on a dead replacement.
+          const r = await opts.systemctl.run(["--user", "restart", unit]);
+          if (r.exitCode === 0) {
+            const re = await opts.systemctl.run(["--user", "is-active", unit]);
+            ready = re.exitCode === 0 && re.stdout.trim() === "active";
+          } else {
+            ready = false;
+          }
+          if (ready) repairedTimers.push(unit);
+        }
+      } else {
+        const r = await opts.systemctl.run(["--user", "enable", "--now", unit]);
+        if (r.exitCode === 0) {
+          repairedTimers.push(unit);
+          ready = true;
+        }
+      }
+      if (i === 0) defaultInstanceReady = ready;
+    }
+
+    disabledInstances = await disableUnservedHeartbeatInstances(
+      opts.systemctl,
+      opts.personas,
+    );
+
+    if (defaultInstanceReady) {
+      const removedLegacy = await removeRetiredUnits(
+        opts.systemctl,
+        [
+          opts.legacyHeartbeatTimerPath ?? legacyHeartbeatTimerPath(),
+          opts.legacyHeartbeatServicePath ?? legacyHeartbeatServicePath(),
+        ],
+        [LEGACY_HEARTBEAT_TIMER_NAME],
+      );
+      if (removedLegacy.length > 0) {
+        removedRetired.push(...removedLegacy);
+        await opts.systemctl.run(["--user", "daemon-reload"]);
+      }
+    }
+  }
+
+  return { rewrote, backups, repairedTimers, removedRetired, disabledInstances };
+}
+
+/**
+ * Persona names with an ENABLED `phantombot-heartbeat@<persona>.timer`
+ * instance, parsed from `systemctl --user list-unit-files`. The template
+ * itself (`@.timer`, empty instance name) is never returned. Pure IPC +
+ * parse — no files touched — so it works for both the heal path and
+ * persona-lifecycle callers.
+ */
+export async function listEnabledHeartbeatInstances(
+  systemctl: SystemctlRunner,
+): Promise<string[]> {
+  const r = await systemctl.run([
+    "--user",
+    "list-unit-files",
+    "--no-legend",
+    "--no-pager",
+    "phantombot-heartbeat@*.timer",
+  ]);
+  if (r.exitCode !== 0) return [];
+  const personas: string[] = [];
+  for (const line of r.stdout.split("\n")) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 2) continue;
+    const [unit, state] = cols;
+    if (!unit!.startsWith("phantombot-heartbeat@") || !unit!.endsWith(".timer")) {
+      continue;
+    }
+    if (state !== "enabled" && state !== "enabled-runtime") continue;
+    const persona = unit!.slice(
+      "phantombot-heartbeat@".length,
+      -".timer".length,
+    );
+    if (persona.length > 0) personas.push(persona);
+  }
+  return personas;
+}
+
+/**
+ * Disable (and stop) every enabled heartbeat instance whose persona is NOT
+ * in `served` — the "removed from autostart loses its maintenance" half of
+ * instance reconciliation. Returns the disabled unit names.
+ */
+export async function disableUnservedHeartbeatInstances(
+  systemctl: SystemctlRunner,
+  served: readonly string[],
+): Promise<string[]> {
+  const servedSet = new Set(served);
+  const enabled = await listEnabledHeartbeatInstances(systemctl);
+  const disabled: string[] = [];
+  for (const persona of enabled) {
+    if (servedSet.has(persona)) continue;
+    const unit = heartbeatInstanceTimer(persona);
+    const r = await systemctl.run(["--user", "disable", "--now", unit]);
+    if (r.exitCode === 0) disabled.push(unit);
+  }
+  return disabled;
 }
 
 export interface InstallOptions {
   binPath: string;
   unitPath: string;
+  /**
+   * Personas to arm heartbeat instances for (#486) — default persona
+   * FIRST, same contract as `ensureSystemdUnitsCurrent`. When omitted (no
+   * config on a pre-init box), no instances are armed; the startup doctor
+   * / first heartbeat heal provisions them once a config exists.
+   */
+  personas?: readonly string[];
   /**
    * Optional path overrides for the heartbeat/nightly companion units.
    * Default to the per-user XDG locations (~/.config/systemd/user/...).
@@ -829,6 +1034,8 @@ export interface InstallOptions {
    */
   heartbeatServicePath?: string;
   heartbeatTimerPath?: string;
+  legacyHeartbeatServicePath?: string;
+  legacyHeartbeatTimerPath?: string;
   nightlyServicePath?: string;
   nightlyTimerPath?: string;
   tickServicePath?: string;
@@ -860,15 +1067,25 @@ export async function installPhantombotUnit(
     opts.out.write(`removed retired unit: ${name}\n`);
   }
 
-  for (const args of [
+  const enableSteps: string[][] = [
     ["--user", "daemon-reload"],
     ["--user", "enable", PHANTOMBOT_UNIT_NAME],
     ["--user", "start", PHANTOMBOT_UNIT_NAME],
-    ["--user", "enable", HEARTBEAT_TIMER_NAME],
-    ["--user", "start", HEARTBEAT_TIMER_NAME],
+  ];
+  // One heartbeat timer instance per served persona (#486).
+  for (const persona of opts.personas ?? []) {
+    enableSteps.push(
+      ["--user", "enable", heartbeatInstanceTimer(persona)],
+      ["--user", "start", heartbeatInstanceTimer(persona)],
+    );
+  }
+  enableSteps.push(
     ["--user", "enable", TICK_TIMER_NAME],
     ["--user", "start", TICK_TIMER_NAME],
-  ]) {
+  );
+  let defaultInstanceReady = opts.personas === undefined;
+  for (let i = 0; i < enableSteps.length; i++) {
+    const args = enableSteps[i]!;
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
       opts.err.write(
@@ -876,9 +1093,35 @@ export async function installPhantombotUnit(
       );
       return { installed: false };
     }
+    if (
+      opts.personas !== undefined &&
+      opts.personas.length > 0 &&
+      args[1] === "start" &&
+      args[2] === heartbeatInstanceTimer(opts.personas[0]!)
+    ) {
+      defaultInstanceReady = true;
+    }
+  }
+
+  // Only retire the pre-#486 single-persona heartbeat unit once its
+  // replacement (the default persona's instance) is armed — same migration
+  // rule as the heal path, so a failed install never strands a host
+  // heartbeat-less.
+  if (defaultInstanceReady) {
+    const removedLegacy = await removeRetiredUnits(
+      opts.systemctl,
+      [
+        opts.legacyHeartbeatTimerPath ?? legacyHeartbeatTimerPath(),
+        opts.legacyHeartbeatServicePath ?? legacyHeartbeatServicePath(),
+      ],
+      [LEGACY_HEARTBEAT_TIMER_NAME],
+    );
+    for (const name of removedLegacy) {
+      opts.out.write(`removed retired unit: ${name}\n`);
+    }
   }
   opts.out.write(
-    "enabled and started phantombot.service + heartbeat.timer + tick.timer\n",
+    `enabled and started phantombot.service + ${opts.personas?.length ?? 0} heartbeat instance(s) + tick.timer\n`,
   );
   return { installed: true };
 }
@@ -894,16 +1137,30 @@ export async function uninstallPhantombotUnit(
   opts: UninstallOptions,
 ): Promise<{ removed: boolean }> {
   // stop + disable are best-effort: a half-installed unit is fine to remove.
-  for (const args of [
+  const stopSteps: string[][] = [
     ["--user", "stop", TICK_TIMER_NAME],
     ["--user", "disable", TICK_TIMER_NAME],
     ["--user", "stop", NIGHTLY_TIMER_NAME],
     ["--user", "disable", NIGHTLY_TIMER_NAME],
-    ["--user", "stop", HEARTBEAT_TIMER_NAME],
-    ["--user", "disable", HEARTBEAT_TIMER_NAME],
+    // The retired pre-#486 single-persona heartbeat units, in case an
+    // uninstall runs on a host that never got the migration heal.
+    ["--user", "stop", LEGACY_HEARTBEAT_TIMER_NAME],
+    ["--user", "disable", LEGACY_HEARTBEAT_TIMER_NAME],
+    ["--user", "stop", LEGACY_HEARTBEAT_SERVICE_NAME],
+    ["--user", "disable", LEGACY_HEARTBEAT_SERVICE_NAME],
+  ];
+  // Every per-persona heartbeat instance (#486).
+  for (const persona of await listEnabledHeartbeatInstances(opts.systemctl)) {
+    stopSteps.push(
+      ["--user", "stop", heartbeatInstanceTimer(persona)],
+      ["--user", "disable", heartbeatInstanceTimer(persona)],
+    );
+  }
+  stopSteps.push(
     ["--user", "stop", PHANTOMBOT_UNIT_NAME],
     ["--user", "disable", PHANTOMBOT_UNIT_NAME],
-  ]) {
+  );
+  for (const args of stopSteps) {
     const r = await opts.systemctl.run(args);
     if (r.exitCode !== 0) {
       opts.out.write(
@@ -924,6 +1181,8 @@ export async function uninstallPhantombotUnit(
   for (const path of [
     heartbeatServicePath(),
     heartbeatTimerPath(),
+    legacyHeartbeatServicePath(),
+    legacyHeartbeatTimerPath(),
     nightlyServicePath(),
     nightlyTimerPath(),
     tickServicePath(),
@@ -1017,4 +1276,47 @@ export function ensureUserSystemdEnv(
     env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${runtimeDir}/bus`;
   }
   return { ready: true, autoSet: true, runtimeDir };
+}
+
+/**
+ * Provision/tear down heartbeat timer instances to match the served
+ * persona set — the persona-lifecycle caller of the #486 machinery.
+ * Invoked after `autostart_personas` changes (persona picker,
+ * `persona new`, the TUI autostart action) so a newly-served persona's
+ * first maintenance pass is at most 30 minutes away instead of waiting
+ * for the next heal, and a removed persona's instance dies with it.
+ *
+ * Light by design: only instance enable/disable, no unit-file rendering
+ * (the templates are install's/heal's job — if they're absent the enable
+ * fails and the caller warns). Returns null when instance management
+ * isn't possible here (no user-systemd bus), so callers can stay silent
+ * on dev boxes and headless sessions.
+ */
+export async function defaultSyncHeartbeatInstances(
+  personas: readonly string[],
+): Promise<{ armed: string[]; disabled: string[] } | null> {
+  // Real installed service only: unit management from a dev `bun` run or a
+  // test would arm timers on the developer's actual host. The periodic
+  // heal (which runs from the compiled binary's own heartbeat) reconciles
+  // the same state, so skipping here never strands anyone.
+  if (process.platform !== "linux") return null;
+  if (!isPhantombotBinary()) return null;
+  const sysEnv = ensureUserSystemdEnv();
+  if (!sysEnv.ready) return null;
+  const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
+  const armed: string[] = [];
+  for (const persona of personas) {
+    const unit = heartbeatInstanceTimer(persona);
+    const enabled = await systemctl.run(["--user", "is-enabled", unit]);
+    if (enabled.exitCode === 0 && enabled.stdout.trim() === "enabled") continue;
+    const r = await systemctl.run(["--user", "enable", "--now", unit]);
+    if (r.exitCode === 0) armed.push(unit);
+    else {
+      throw new Error(
+        `systemctl enable --now ${unit} failed: ${r.stderr.trim() || `exit ${r.exitCode}`}`,
+      );
+    }
+  }
+  const disabled = await disableUnservedHeartbeatInstances(systemctl, personas);
+  return { armed, disabled };
 }

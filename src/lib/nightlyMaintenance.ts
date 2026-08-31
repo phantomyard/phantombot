@@ -29,6 +29,7 @@ import type { WriteSink } from "./io.ts";
 import { log } from "./logger.ts";
 import {
   backupMemoryDb,
+  SNAPSHOT_COALESCE_MS,
   type BackupResult,
 } from "../memory/dbBackup.ts";
 import { openDrawerStore } from "../memory/drawerSync.ts";
@@ -66,6 +67,8 @@ export async function runMemoryMaintenance(input: {
   personaDir?: string;
   keep?: number;
   now?: Date;
+  /** Snapshot coalescing window (#495). Defaults to `SNAPSHOT_COALESCE_MS`. */
+  coalesceMs?: number;
   out?: WriteSink;
 }): Promise<MaintenanceResult> {
   const now = input.now ?? new Date();
@@ -149,6 +152,12 @@ export async function runMemoryMaintenance(input: {
       dbPath: input.dbPath,
       keep: input.keep,
       now,
+      // The database is shared by every persona on the host, and since the
+      // per-persona nightly instances (#490) the siblings roll over together.
+      // One restore point per rollover is the whole point of a restore point,
+      // so a sweep that finds a fresh one — or finds a sibling mid-snapshot —
+      // stands down instead of racing it (#495).
+      coalesceMs: input.coalesceMs ?? SNAPSHOT_COALESCE_MS,
     });
     result.backup = backup;
     if (backup.status === "taken") {
@@ -159,6 +168,22 @@ export async function runMemoryMaintenance(input: {
             ? `, ${backup.pruned.length} older point(s) rotated out`
             : "") +
           `\n`,
+      );
+    } else if (backup.status === "fresh") {
+      // Not an error and deliberately not in `errors`: a sibling sweep took
+      // the snapshot seconds ago, so this host IS backed up. Writing it to the
+      // ledger would leave `doctor` permanently red on a healthy box, which is
+      // how operators learn to stop reading doctor at all.
+      // Two different shapes share `fresh`: a sibling's restore point already
+      // covers this rollover (we have a path), or the lock stayed held and
+      // nothing was taken at all. Say which — an operator reading the ledger
+      // should not have to guess whether a snapshot exists.
+      write(
+        backup.path
+          ? `nightly: memory snapshot skipped — a restore point from this ` +
+              `rollover already exists (${backup.path})\n`
+          : `nightly: memory snapshot skipped — another snapshot is in ` +
+              `flight, nothing taken this run\n`,
       );
     } else if (backup.status === "refused") {
       // Loud on purpose: an unhealthy memory database is the one condition
