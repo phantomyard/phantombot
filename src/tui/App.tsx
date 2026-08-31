@@ -723,13 +723,6 @@ export function App(props: AppProps): React.ReactElement {
           const boot = await import("../lib/autostartBoot.ts");
           const { config } = await loadConfigForPersona(target.name);
           const dir = personaDir(config, target.name);
-          // Only Windows persists its boot credential (task re-registration
-          // re-reads it). The Linux sudo password is use-once in memory — a
-          // vault row would be exported into every agent turn's environment
-          // (loadVaultIntoEnv → filterAuthEnv passes it through).
-          const key = platform === "windows" ? boot.WINDOWS_PASSWORD_VAULT_KEY : null;
-          let credential: string | null | undefined =
-            key !== null ? await boot.readBootCredential(dir, key) : undefined;
           const askPassword = () =>
             askValue({
               title: platform === "windows"
@@ -743,29 +736,52 @@ export function App(props: AppProps): React.ReactElement {
             });
           let outcome: { status: string; error?: string };
           const spawnRunner = boot.bunSpawnRunner();
-          if (platform !== "windows" && (await boot.probeSudoPasswordless(spawnRunner))) {
-            // Passwordless sudo: Boot needs no password — skip the prompt
-            // and the vault write entirely (nothing secret involved).
+          if (platform === "linux") {
+            // ENABLE-ONLY LINGER DOCTRINE: linger is a one-way prerequisite —
+            // enabled here if missing (passwordless sudo first, validated
+            // re-prompt loop if a password is required), and NEVER disabled
+            // by phantombot anywhere. The boot start itself is the daemon
+            // unit enable, which needs no sudo at all.
             const user = (await import("node:os")).userInfo().username;
-            outcome = await boot.enableBootLinuxPasswordless(user, spawnRunner);
-            if (outcome.status !== "ok") {
-              setNotice(`boot setup failed: ${outcome.error} — nothing changed`);
-              return;
+            if (!(await boot.probeLingerLinux(user))) {
+              if (await boot.probeSudoPasswordless(spawnRunner)) {
+                outcome = await boot.enableBootLinuxPasswordless(user, spawnRunner);
+              } else {
+                let credential: string | undefined;
+                for (;;) {
+                  credential = await askPassword();
+                  if (!credential) {
+                    setNotice("boot setup cancelled — nothing changed");
+                    return;
+                  }
+                  outcome = await boot.enableBootLinux(credential, user, spawnRunner);
+                  if (outcome.status === "ok") break;
+                  if (outcome.status === "invalid-credential") {
+                    setNotice(
+                      `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+                    );
+                    continue;
+                  }
+                  break;
+                }
+              }
+              if (!outcome || outcome.status !== "ok") {
+                setNotice(
+                  `boot setup failed: ${outcome?.error ?? "cancelled"} — nothing changed`,
+                );
+                return;
+              }
             }
-            if (platform === "linux") {
-              // Record that phantombot created this linger flag — the
-              // ownership marker the teardown (and the boot-state probe)
-              // consult before ever disabling linger.
-              const { writeBootHook } = await import("../lib/personaDefault.ts");
-              await writeBootHook(config, "linger", true);
+            const u = await boot.enableDaemonUnit(spawnRunner);
+            if (u.status !== "ok") {
+              setNotice(`boot setup failed: ${u.error} — nothing changed`);
+              return;
             }
             const r = await (await import("./actions.ts")).applyAutostartChoice({
               config,
               persona: target.name,
               choice: "boot",
             });
-            // No passwordless claim: `sudo -n true` also passes off a cached
-            // timestamp, so the probe says nothing certain about sudoers.
             setNotice(
               r.ok
                 ? "autostart: boot — starts without a login"
@@ -774,6 +790,20 @@ export function App(props: AppProps): React.ReactElement {
             await refresh();
             return;
           }
+          // Windows: only Windows persists its boot credential (task
+          // re-registration re-reads it). The sudo password on Linux is
+          // use-once in memory — a vault row would be exported into every
+          // agent turn's environment.
+          const key = boot.WINDOWS_PASSWORD_VAULT_KEY;
+          let credential: string | null | undefined =
+            await boot.readBootCredential(dir, key);
+          const who = await new Promise<string>((resolve, reject) => {
+            const child = Bun.spawn(["whoami"], { stdout: "pipe", stderr: "pipe" });
+            void new Response(child.stdout).text().then(resolve, reject);
+            void child.exited.then((code) => {
+              if (code !== 0) reject(new Error("whoami failed"));
+            });
+          });
           for (;;) {
             if (!credential) {
               credential = await askPassword();
@@ -782,40 +812,28 @@ export function App(props: AppProps): React.ReactElement {
                 return;
               }
             }
-            if (platform === "windows") {
+            let valid: boolean;
+            try {
               const { defaultValidateWindowsCredential } = await import(
                 "../cli/install.ts"
               );
-              const who = await new Promise<string>((resolve, reject) => {
-                const child = Bun.spawn(["whoami"], { stdout: "pipe", stderr: "pipe" });
-                void new Response(child.stdout).text().then(resolve, reject);
-                void child.exited.then((code) => {
-                  if (code !== 0) reject(new Error("whoami failed"));
-                });
-              });
-              let valid: boolean;
-              try {
-                valid = await defaultValidateWindowsCredential(who.trim(), credential);
-              } catch (e) {
-                // Unverifiable (no reachable account store) proceeds as
-                // requested — same doctrine as install.ts, only an explicit
-                // "invalid" downgrades.
-                valid = true;
-                setNotice(`could not verify the password (${(e as Error).message}); proceeding`);
-              }
-              outcome = valid
-                ? await boot.enableBootWindows(
-                    process.execPath,
-                    target.name,
-                    who.trim(),
-                    credential,
-                    { out: { write: () => {} }, err: { write: () => {} } },
-                  )
-                : { status: "invalid-credential", error: "the password did not validate" };
-            } else {
-              const user = (await import("node:os")).userInfo().username;
-              outcome = await boot.enableBootLinux(credential, user, spawnRunner);
+              valid = await defaultValidateWindowsCredential(who.trim(), credential);
+            } catch (e) {
+              // Unverifiable (no reachable account store) proceeds as
+              // requested — same doctrine as install.ts, only an explicit
+              // "invalid" downgrades.
+              valid = true;
+              setNotice(`could not verify the password (${(e as Error).message}); proceeding`);
             }
+            outcome = valid
+              ? await boot.enableBootWindows(
+                  process.execPath,
+                  target.name,
+                  who.trim(),
+                  credential,
+                  { out: { write: () => {} }, err: { write: () => {} } },
+                )
+              : { status: "invalid-credential", error: "the password did not validate" };
             if (outcome.status === "ok") break;
             if (outcome.status === "invalid-credential") {
               setNotice(
@@ -827,14 +845,8 @@ export function App(props: AppProps): React.ReactElement {
             setNotice(`boot setup failed: ${outcome.error} — nothing changed`);
             return;
           }
-          if (typeof credential !== "string") return; // unreachable, but keeps the type honest
-          if (platform === "linux") {
-            // Ownership marker for the linger flag we just created — see
-            // the passwordless branch above.
-            const { writeBootHook } = await import("../lib/personaDefault.ts");
-            await writeBootHook(config, "linger", true);
-          }
-          if (key !== null) await boot.saveBootCredential(dir, key, credential);
+          if (typeof credential !== "string") return; // keeps the type honest
+          await boot.saveBootCredential(dir, key, credential);
           const r = await (await import("./actions.ts")).applyAutostartChoice({
             config,
             persona: target.name,
@@ -892,92 +904,66 @@ export function App(props: AppProps): React.ReactElement {
           }
           teardownNote = choice === "off" ? " — boot tasks removed" : " — boot tasks moved to login";
         } else {
-          // Host-level hook: tear down only when NO remaining persona is
-          // boot-level (recorded, or probed — a stale `login` record never
-          // masks real boot state). The target's own record is stripped:
-          // post-change it is login/off, never boot, and its stale boot
-          // record must not mask teardown.
+          // ENABLE-ONLY LINGER DOCTRINE (Andrew/Robbie, 2026-08-31): the
+          // boot start on Linux is the enabled daemon UNIT — phantombot
+          // stops booting by disabling its own unit (no sudo) and NEVER
+          // touches linger, which is one-way host state that may carry
+          // other systemd --user services. No ownership marker exists.
+          // The unit is torn down only when NO remaining persona is
+          // boot-level (records-only: the outgoing persona's own record is
+          // stripped, and reading live unit state here would be circular).
           const postList = (config.autostartPersonas ?? []).filter(
             (p) => p !== target.name,
           );
           const postModes = { ...(config.autostartModes ?? {}) };
           delete postModes[target.name];
-          // Linux: linger is also a `phantombot init` PREREQUISITE (the
-          // user-systemd bus is unreachable without it) and may carry other
-          // systemd --user services on this host — only disable it when
-          // phantombot created it ([boot_hooks] marker, written by the
-          // Boot enable path above).
-          const lingerOwned = config.bootHooks?.linger === true;
-          const needed = await boot.bootHookStillNeeded(
-            postList,
-            postModes,
-            (p) => boot.probeBootState(p, { lingerOwned }),
-          );
-          let lingerLeftInPlace = false;
-          if (!needed && platform === "linux" && !lingerOwned) {
-            // Recorded boot but phantombot does not own the linger flag:
-            // refuse by default, offer an explicit, named confirmation.
-            const ok = await askConfirmValue({
-              title: "Remove the system linger flag?",
-              consequence: {
-                summary: "disables linger for this user",
-                detail:
-                  "phantombot did not create this linger flag (it may come " +
-                  "from setup or an admin). Disabling it stops ALL " +
-                  "systemd --user services for this account at next boot, " +
-                  "including any that are not phantombot's.",
-                longRunning: false,
-                restarts: false,
-              },
-              danger: true,
-            });
-            if (!ok) {
-              lingerLeftInPlace = true;
-              teardownNote = " — linger left in place (not created by phantombot)";
-            }
-          }
-          if (!needed && !lingerLeftInPlace) {
-            const user = (await import("node:os")).userInfo().username;
-            const passwordless = platform === "linux"
-              ? await boot.probeSudoPasswordless(runner)
-              : false;
-            let outcome: { status: string; error?: string };
-            for (;;) {
-              outcome = platform === "linux"
-                ? passwordless
-                  ? await boot.disableBootLinuxPasswordless(user, runner)
-                  : await (async () => {
-                      const pw = await promptSudo();
-                      if (!pw) return { status: "cancelled" };
-                      return boot.disableBootLinux(pw, user, runner);
-                    })()
-                : passwordless
+          const unitNeeded = boot.bootHookStillNeeded(postList, postModes);
+          if (!unitNeeded) {
+            if (platform === "linux") {
+              const d = await boot.disableDaemonUnit(runner);
+              if (d.status !== "ok") {
+                setNotice(`boot teardown failed: ${d.error} — nothing changed`);
+                return;
+              }
+              // Login-level start: keep/land the marked hook line when any
+              // remaining on-list persona still needs a login start.
+              const hook = boot.loginHookNeeded(postList, postModes);
+              const h = await boot.writeLoginHook(hook);
+              if (h.status !== "ok") {
+                setNotice(`boot start disabled, but the login hook failed: ${h.error}`);
+              }
+              teardownNote = hook
+                ? " — boot start moved to login"
+                : " — boot start removed";
+            } else {
+              // macOS: inherited LaunchDaemon teardown (ours-only labels).
+              // Boot is not selectable on macOS, so this is reachable only
+              // for a daemon an earlier install path created.
+              const passwordless = await boot.probeSudoPasswordless(runner);
+              let outcome: { status: string; error?: string };
+              for (;;) {
+                outcome = passwordless
                   ? await boot.teardownBootMacPasswordless(runner)
                   : await (async () => {
                       const pw = await promptSudo();
                       if (!pw) return { status: "cancelled" };
                       return boot.teardownBootMac(pw, runner);
                     })();
-              if (outcome.status === "ok") break;
-              if (outcome.status === "invalid-credential") {
-                setNotice(
-                  `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
-                );
-                continue;
+                if (outcome.status === "ok") break;
+                if (outcome.status === "invalid-credential") {
+                  setNotice(
+                    `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+                  );
+                  continue;
+                }
+                const msg = outcome.status === "cancelled"
+                  ? "autostart change cancelled — boot start stays in place"
+                  : `boot teardown failed: ${outcome.error} — nothing changed`;
+                setNotice(msg);
+                return;
               }
-              const msg = outcome.status === "cancelled"
-                ? "autostart change cancelled — boot start stays in place"
-                : `boot teardown failed: ${outcome.error} — nothing changed`;
-              setNotice(msg);
-              return;
+              teardownNote = " — boot start removed";
             }
-            if (platform === "linux") {
-              // Linger is gone — clear the ownership marker so a future
-              // enable re-records it and the probe reports Login.
-              const { writeBootHook } = await import("../lib/personaDefault.ts");
-              await writeBootHook(config, "linger", undefined);
-            }
-            teardownNote = " — boot start removed";
           }
         }
       }

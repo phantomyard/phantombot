@@ -690,19 +690,6 @@ export interface Config {
    */
   autostartModes?: Record<string, "login" | "boot">;
   /**
-   * Host-level boot hooks phantombot itself created (`[boot_hooks]` in the
-   * global config): `linger = true` means THIS install ran
-   * `loginctl enable-linger` for boot autostart, so it may disable it when
-   * the last boot persona leaves. Linger is also a plain `phantombot init`
-   * prerequisite and can be set by an admin — an inherited flag with no
-   * marker here is displayed via probe but NEVER torn down: it may carry
-   * other systemd --user services on the host that did not consent.
-   * Host-only — a persona file must not disown a host hook.
-   *
-   * Optional on the type so partial test fixtures need no update.
-   */
-  bootHooks?: { linger?: boolean };
-  /**
    * The persona whose `<persona>/config.toml` layer was merged into this
    * object, when any. `loadConfig()` sets it to the default persona;
    * `loadConfigForPersona(name)` sets it to `name`. Undefined only in
@@ -1317,7 +1304,6 @@ export async function loadConfig(persona?: string): Promise<Config> {
 
     autostartPersonas: parseAutostartPersonas(globalToml),
     autostartModes: parseAutostartModes(globalToml),
-    bootHooks: parseBootHooks(globalToml),
 
     personaLayer,
 
@@ -2369,22 +2355,6 @@ export function parseAutostartModes(
     }
   }
   return out;
-}
-
-/**
- * Read `[boot_hooks]` from the global config — the ownership marker for
- * host-level boot state phantombot created (currently only `linger`). A
- * missing table or a non-boolean entry means "not ours" (the teardown then
- * refuses), so a malformed entry can never widen what phantombot removes.
- * Host-only: stripped from persona layers by HOST_ONLY_KEYS.
- */
-export function parseBootHooks(
-  toml: Record<string, unknown>,
-): { linger?: boolean } {
-  const raw = toml.boot_hooks;
-  if (raw === undefined || raw === null || typeof raw !== "object") return {};
-  const linger = (raw as Record<string, unknown>).linger;
-  return typeof linger === "boolean" ? { linger } : {};
 }
 
 /** Resolve the on-disk directory for a named persona. */

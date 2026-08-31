@@ -5,9 +5,15 @@
  * platform privileges, so it lives behind this module with every subprocess
  * and secret read injected for tests.
  *
- *   - Linux   → `sudo loginctl enable-linger <user>` — the user manager
- *               (systemd --user) then starts at boot and brings the units up.
- *               Runs as the USER, never root; sudo only touches linger.
+ *   - Linux   → enable-only linger doctrine (Andrew/Robbie, 2026-08-31):
+ *               Boot = linger ON (a one-way prerequisite — enabled if
+ *               missing, NEVER disabled by phantombot) + the daemon unit
+ *               enabled (`systemctl --user enable phantombot.service` — no
+ *               sudo). Login = unit disabled + a marked, idempotent start
+ *               line in ~/.profile. Off = unit disabled + line removed.
+ *               The unit, not linger, is what phantombot stops booting.
+ *               Runs as the USER, never root; sudo only ever touches
+ *               enable-linger.
  *   - Windows → re-register the persona's task set in password mode via the
  *               same `installPhantombotTasks` machinery `phantombot install`
  *               uses, with the credential validated first.
@@ -34,8 +40,13 @@
  */
 
 /**
- * Where boot-level state lives per platform (test seams override the dirs):
- *   - Linux   → /var/lib/systemd/linger/<user>   (host-level; one flag)
+ * Where boot-level state lives per platform (test seams override):
+ *   - Linux   → the daemon unit's enabled state (`systemctl --user
+ *               is-enabled phantombot.service`). Linger is deliberately NOT
+ *               read for display: it is a host prerequisite (also set by
+ *               `phantombot init`, possibly carrying other services), not
+ *               an autostart feature, and under the enable-only doctrine it
+ *               is never torn down — so it cannot be boot state we own.
  *   - macOS   → /Library/LaunchDaemons/dev.phantombot.*.plist
  *               (host-level; our tooling doesn't create these YET, but the
  *               probe detects a daemon set up by any earlier install path)
@@ -45,17 +56,8 @@
 export interface BootStatePaths {
   lingerDir?: string;
   daemonDir?: string;
-  /**
-   * Linux only — does phantombot OWN the linger flag (the `[boot_hooks]`
-   * marker written when the TUI ran enable-linger)? Linger is also a plain
-   * `phantombot init` prerequisite and can be set by an admin; an unowned
-   * flag is a host prerequisite, NOT a boot-autostart feature, so it must
-   * not display as Boot (that would arm a teardown the ownership check
-   * would only refuse). `false`/absent → linger present still means not
-   * boot. Callers read the marker from the same host config as the
-   * teardown, so display and teardown share one source of truth.
-   */
-  lingerOwned?: boolean;
+  /** Test seam — override the Linux unit-enabled probe. */
+  unitEnabledReader?: () => Promise<boolean>;
   /** Test seam — override the platform branch (default: real host). */
   platform?: "linux" | "darwin" | "windows" | "unsupported";
   /** Test seam — override the Windows logon-marker reader. */
@@ -65,18 +67,16 @@ export interface BootStatePaths {
 /**
  * Read-only boot-state probe — does the platform ACTUALLY start this
  * persona (or, on Linux/macOS, the host) without a login? No sudo, no
- * elevation, no subprocess on Linux/macOS (pure fs checks); on Windows it
- * reads the persona's persisted logon marker. This is what lets the
- * Autostart selector DISPLAY a pre-existing boot setup (linger enabled by
- * `phantombot init`, a password-mode task from `phantombot install`) as
- * Boot instead of silently mislabelling it Login.
+ * elevation anywhere; on Linux it runs `systemctl --user is-enabled`, on
+ * macOS it is a pure fs check, on Windows it reads the persona's persisted
+ * logon marker. This is what lets the Autostart selector DISPLAY a
+ * pre-existing boot setup (an enabled daemon unit, a password-mode task
+ * from `phantombot install`) as Boot instead of silently mislabelling it
+ * Login.
  *
- * LINUX CAVEAT: linger is a phantombot PREREQUISITE (`phantombot init`
- * enables it so the user-systemd bus is reachable) and is per-USER host
- * state with no provenance — other systemd --user services may depend on
- * it. So on Linux the probe only reports Boot when phantombot owns the
- * flag (`lingerOwned`, from the `[boot_hooks]` marker): an inherited flag
- * is never mislabelled into arming a teardown.
+ * ENABLE-ONLY NOTE: the Linux probe reads UNIT state, never linger — the
+ * unit is the thing phantombot enables/disables, so display and teardown
+ * share one source of truth. Linger is display-invisible by design.
  */
 export async function probeBootState(
   persona: string,
@@ -87,11 +87,11 @@ export async function probeBootState(
   const platform = opts?.platform ?? currentPlatform();
   try {
     if (platform === "linux") {
-      if (opts?.lingerOwned !== true) return false; // not ours → not a boot-autostart feature
-      const user = (await import("node:os")).userInfo().username;
-      return existsSync(
-        joinPath(opts?.lingerDir ?? "/var/lib/systemd/linger", user),
-      );
+      // Boot = the daemon unit is enabled. Pure unit-level doctrine: one
+      // subprocess, no sudo, no linger read.
+      if (opts?.unitEnabledReader) return await opts.unitEnabledReader();
+      const runner = bunSpawnRunner();
+      return (await runner.run(["systemctl", "--user", "is-enabled", SYSTEMD_UNIT])).exit === 0;
     }
     if (platform === "darwin") {
       const dir = opts?.daemonDir ?? "/Library/LaunchDaemons";
@@ -119,6 +119,142 @@ function joinPath(dir: string, name: string): string {
   return dir.endsWith("/") || dir.endsWith("\\")
     ? `${dir}${name}`
     : `${dir}/${name}`;
+}
+
+/** The daemon unit the enable-only doctrine toggles. */
+export const SYSTEMD_UNIT = "phantombot.service";
+
+/**
+ * Is linger ON for this user? Read-only fs check — linger is a one-way
+ * prerequisite under the enable-only doctrine: phantombot enables it when
+ * a Boot start needs it and NEVER disables it (it is host state that may
+ * carry other systemd --user services).
+ */
+export async function probeLingerLinux(
+  user?: string,
+  lingerDir?: string,
+): Promise<boolean> {
+  const { existsSync } = await import("node:fs");
+  const name = user ?? (await import("node:os")).userInfo().username;
+  return existsSync(joinPath(lingerDir ?? "/var/lib/systemd/linger", name));
+}
+
+/**
+ * Is the daemon unit currently enabled? Read-only probe (exit 0 = enabled).
+ */
+export async function probeDaemonUnitEnabled(
+  runner: SpawnRunner,
+): Promise<boolean> {
+  const r = await runner.run(["systemctl", "--user", "is-enabled", SYSTEMD_UNIT]);
+  return r.exit === 0;
+}
+
+/**
+ * Enable the daemon unit — THE boot start on Linux. No sudo, no linger
+ * touch: with linger on (a prerequisite this module enables when missing)
+ * the user manager starts the unit at boot.
+ */
+export async function enableDaemonUnit(
+  runner: SpawnRunner,
+): Promise<BootSetupOutcome> {
+  const r = await runner.run(["systemctl", "--user", "enable", SYSTEMD_UNIT]);
+  if (r.exit === 0) return { status: "ok" };
+  return {
+    status: "failed",
+    error: (r.stderr || r.stdout).trim() || `systemctl --user enable exited ${r.exit}`,
+  };
+}
+
+/**
+ * Disable the daemon unit — the Boot teardown under the enable-only
+ * doctrine: phantombot stops booting by disabling ITS OWN unit, never by
+ * touching host linger. No sudo. Does not stop a running daemon (that is
+ * the daemon lifecycle, not autostart).
+ */
+export async function disableDaemonUnit(
+  runner: SpawnRunner,
+): Promise<BootSetupOutcome> {
+  const r = await runner.run(["systemctl", "--user", "disable", SYSTEMD_UNIT]);
+  if (r.exit === 0) return { status: "ok" };
+  return {
+    status: "failed",
+    error: (r.stderr || r.stdout).trim() || `systemctl --user disable exited ${r.exit}`,
+  };
+}
+
+/** The marked login-start block we own inside the hook file. */
+export const LOGIN_HOOK_MARKER = "# phantombot login-start (managed — do not edit)";
+/**
+ * The login hook phantombot manages. ~/.profile is sourced by login bash
+ * shells (console and most SSH logins); GUI-session coverage varies by
+ * distro, which is an accepted v1 caveat — the unit-level Boot path is the
+ * primary doctrine and Login via hook is the fallback.
+ */
+export const LOGIN_HOOK_PATH = ".profile";
+
+function loginHookPath(home?: string): string {
+  return joinPath(home ?? ("HOME" in process.env ? process.env.HOME! : ""), LOGIN_HOOK_PATH);
+}
+
+/** Does the hook file currently carry our marked start line? */
+export async function probeLoginHook(home?: string): Promise<boolean> {
+  const { readFileSync, existsSync } = await import("node:fs");
+  const p = loginHookPath(home);
+  if (!existsSync(p)) return false;
+  try {
+    return readFileSync(p, "utf8").includes(LOGIN_HOOK_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Add or remove OUR marked login-start block in the hook file — idempotent,
+ * and it only ever touches lines between our marker comments; anything the
+ * user (or another tool) wrote is untouched. `present=false` removes the
+ * block; a file left empty by that is left as an empty file, not deleted.
+ */
+export async function writeLoginHook(
+  present: boolean,
+  home?: string,
+): Promise<BootSetupOutcome> {
+  const { readFileSync, writeFileSync, existsSync } = await import("node:fs");
+  const p = loginHookPath(home);
+  const block = present
+    ? `${LOGIN_HOOK_MARKER}\nsystemctl --user start ${SYSTEMD_UNIT} >/dev/null 2>&1 || true\n# <<< phantombot login-start <<<\n`
+    : null;
+  let body = "";
+  if (existsSync(p)) {
+    try {
+      body = readFileSync(p, "utf8");
+    } catch (e) {
+      return { status: "failed", error: `reading ${LOGIN_HOOK_PATH}: ${(e as Error).message}` };
+    }
+  }
+  // Strip any existing block (marker line, start line, closing marker) so a
+  // re-write never duplicates. Only OUR marker-delimited lines are removed.
+  const lines = body.split("\n");
+  const kept: string[] = [];
+  let inBlock = false;
+  for (const line of lines) {
+    if (line === LOGIN_HOOK_MARKER) {
+      inBlock = true;
+      continue;
+    }
+    if (inBlock) {
+      if (line === "# <<< phantombot login-start <<<") inBlock = false;
+      continue;
+    }
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
+  const next = block ? [...kept, block].join("\n") : kept.length > 0 ? `${kept.join("\n")}\n` : "";
+  try {
+    writeFileSync(p, next);
+    return { status: "ok" };
+  } catch (e) {
+    return { status: "failed", error: `writing ${LOGIN_HOOK_PATH}: ${(e as Error).message}` };
+  }
 }
 
 /** How a platform operation turned out. */
@@ -218,47 +354,6 @@ export async function validateSudoPassword(
       ? "invalid-credential"
       : "failed",
     error: err || `sudo exited ${r.exit}`,
-  };
-}
-
-/**
- * Linux: disable linger (the Boot teardown). Passwordless path — same
- * fail-closed doctrine as enable: any non-zero exit is "failed".
- */
-export async function disableBootLinuxPasswordless(
-  user: string,
-  runner: SpawnRunner,
-): Promise<BootSetupOutcome> {
-  const r = await runner.run([SUDO, "-n", "loginctl", "disable-linger", user]);
-  if (r.exit === 0) return { status: "ok" };
-  return {
-    status: "failed",
-    error: (r.stderr || r.stdout).trim() || `loginctl disable-linger exited ${r.exit}`,
-  };
-}
-
-/**
- * Linux: disable linger with a validated password. Validates FIRST (-k, no
- * timestamp cached) so a wrong password never half-applies a teardown.
- */
-export async function disableBootLinux(
-  password: string,
-  user: string,
-  runner: SpawnRunner,
-): Promise<BootSetupOutcome> {
-  const v = await validateSudoPassword(password, runner);
-  if (v.status !== "ok") return v;
-  const r = await runner.run(
-    [SUDO, "-S", "-k", "loginctl", "disable-linger", user],
-    { input: `${password}\n` },
-  );
-  if (r.exit === 0) return { status: "ok" };
-  const err = (r.stderr || r.stdout).trim();
-  return {
-    status: err.toLowerCase().includes("incorrect password")
-      ? "invalid-credential"
-      : "failed",
-    error: err || `loginctl disable-linger exited ${r.exit}`,
   };
 }
 
@@ -420,30 +515,42 @@ export async function teardownBootWindows(
 }
 
 /**
- * After a Boot persona leaves (Off/Login), does ANY remaining autostart
- * persona still need the host-level boot hook (linger / LaunchDaemon)?
- * A member needs it when its EFFECTIVE mode is boot: recorded, or — for
- * records that predate or disagree with reality (a stale `login` entry on
- * a host where the persona's plist actually exists from an earlier
- * install path) — probed. Windows tasks are per-persona and torn down
- * individually, so the caller only consults this for Linux/macOS.
+ * After a Boot persona leaves (Off/Login), does any REMAINING persona still
+ * need the boot-level host start (the enabled daemon unit on Linux, the
+ * LaunchDaemon on macOS)? Records-only by design: the enable-only doctrine
+ * WRITES a `boot` record whenever Boot is selected, so a boot persona always
+ * has a record; reading live unit state here would be circular (the unit is
+ * still enabled because the OUTGOING persona enabled it). Windows tasks are
+ * per-persona and torn down individually, so the caller only consults this
+ * for Linux/macOS.
  */
-export async function bootHookStillNeeded(
+export function bootHookStillNeeded(
   list: string[],
   recorded: Record<string, "login" | "boot"> | undefined,
-  probe: (persona: string) => Promise<boolean>,
-): Promise<boolean> {
-  for (const persona of list) {
-    if (recorded?.[persona] === "boot") return true;
-    if (await probe(persona)) return true; // login/undefined records: trust the PROBE over the record
-  }
-  return false;
+): boolean {
+  return list.some((p) => recorded?.[p] === "boot");
 }
 
 /**
- * Linux: enable linger for `user`. Runs as the user, never root — sudo is
- * only the privilege bridge for `loginctl enable-linger`, the exact scope
- * Andrew set ("it should boot as the user, never as root").
+ * After the change, do any remaining on-list personas need the LOGIN-level
+ * start (the marked ~/.profile line on Linux)? Under the enable-only
+ * doctrine every on-list persona that is not boot is login: when this is
+ * true the hook line stays/lands, when false it is removed.
+ */
+export function loginHookNeeded(
+  list: string[],
+  recorded: Record<string, "login" | "boot"> | undefined,
+): boolean {
+  return list.some((p) => (recorded?.[p] ?? "login") === "login");
+}
+
+/**
+ * Linux: enable linger for `user` — a ONE-WAY prerequisite for boot starts
+ * under the enable-only doctrine: phantombot enables it when a Boot start
+ * needs it and NEVER disables it (it is host state that may carry other
+ * systemd --user services). Runs as the user, never root — sudo is only the
+ * privilege bridge for `loginctl enable-linger`, the exact scope Andrew set
+ * ("it should boot as the user, never as root").
  */
 export async function enableBootLinux(
   password: string,

@@ -89,7 +89,6 @@ export const HOST_ONLY_KEYS: readonly string[] = [
   "default_persona",
   "autostart_personas",
   "autostart_modes",
-  "boot_hooks",
   "update_channel",
   "personas_dir",
   "memory_db",
