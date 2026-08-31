@@ -158,6 +158,9 @@ export async function adoptAsDefaultIfMissing(
 export async function healDefaultPersonaIfBroken(
   config: Config,
   out?: WriteSink,
+  /** Operator-explicit fallback (e.g. the config.toml-layer default) — tried
+   *  after a case-variant of the broken name and before alphabetical order. */
+  preferred?: string,
 ): Promise<string | null> {
   const canonical = canonicalPersonaName(config, config.defaultPersona);
   const defect =
@@ -188,6 +191,10 @@ export async function healDefaultPersonaIfBroken(
   // state.json and leave the host unbootable (#506 review).
   let healed =
     caseMatch !== undefined && usable(caseMatch) ? caseMatch : undefined;
+  healed ??=
+    preferred !== undefined && preferred !== config.defaultPersona && usable(preferred)
+      ? preferred
+      : undefined;
   healed ??= others.find(usable);
   healed ??= caseMatch;
   healed ??= others[0] ?? existing[0]!;
@@ -222,22 +229,127 @@ export type DefaultPersonaSource = "env" | "state" | "config" | "builtin";
  * `config.toml` first and it is the layer that LOSES, so the provenance line is
  * the difference between a one-line fix and an afternoon.
  */
+/**
+ * The raw `config.toml`-layer `default_persona`, if the operator set one —
+ * regardless of what env/state layers resolved on top of it. The layer that
+ * LOSES resolution is often the layer the operator actually edited.
+ */
+export async function configLayerDefaultPersona(
+  config: Config,
+): Promise<string | undefined> {
+  try {
+    const toml = parseToml(await readFile(config.configPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    return typeof toml.default_persona === "string"
+      ? toml.default_persona
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function defaultPersonaProvenance(
   config: Config,
 ): Promise<DefaultPersonaSource> {
   if (process.env.PHANTOMBOT_DEFAULT_PERSONA?.trim()) return "env";
   const state = await loadState();
   if (state.default_persona) return "state";
-  try {
-    const toml = parseToml(await readFile(config.configPath, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    if (typeof toml.default_persona === "string") return "config";
-  } catch {
-    // Missing or unparseable config.toml: nothing came from that layer.
-  }
+  if (await configLayerDefaultPersona(config)) return "config";
   return "builtin";
+}
+
+/**
+ * Legacy-install migration: adopt the given persona as `default_persona` when
+ * NOTHING configured a default anywhere (env > state.json > config.toml all
+ * empty, i.e. provenance "builtin").
+ *
+ * Pre-#509 the TUI silently fell back to `personas[0]`'s chat, so every
+ * legacy install without an explicit default landed in that persona. The
+ * three-tier opening doctrine turned that silent fallback into the wizard,
+ * which would shove a working, configured host into the create flow on first
+ * launch after upgrade. This restores the pre-upgrade behaviour by making it
+ * EXPLICIT: the fallback persona the old TUI would have picked is written to
+ * config.toml (the operator-visible layer) once, and from then on the host is
+ * an ordinary configured install.
+ *
+ * The caller gates on provenance — an explicitly-configured (or healed)
+ * default, even a broken one, is never overwritten here; the heal path owns
+ * broken defaults.
+ *
+ * Mutates `config.defaultPersona` to match, so an in-memory caller does not
+ * have to reload to resolve the opening screen.
+ */
+export async function adoptLegacyDefaultPersona(
+  config: Config,
+  persona: string,
+): Promise<void> {
+  await updateConfigToml(config.configPath, (toml: TomlObject) => {
+    toml.default_persona = persona;
+  });
+  config.defaultPersona = persona;
+  log.warn("legacy install: adopted default_persona", {
+    persona,
+    reason:
+      "no default_persona configured anywhere (pre-upgrade fallback made explicit)",
+  });
+}
+
+/**
+ * Legacy-install migration: backfill `[autostart_modes]` from real host state
+ * when the host has `autostart_personas` but NO mode records at all — the
+ * exact signature of a pre-#509 install, where list membership meant "boot
+ * via linger/LaunchDaemon/boot task".
+ *
+ * Without this, the #509 records-only display shows every legacy Linux boot
+ * persona as Login (the Linux probe deliberately returns false — an enabled
+ * unit is the installer's default, not a Boot choice), so an operator opening
+ * the TUI sees their boot setup misreported and a teardown armed against the
+ * wrong state on the next change.
+ *
+ * One-time by construction: the gate is "no records exist", and this write
+ * CREATES records — from then on the table is the sole source of truth and
+ * this migration is a no-op. Nothing here disables anything: boot stays boot,
+ * login stays login; the migration only makes existing reality VISIBLE.
+ *
+ * Signal per platform: Linux — linger on (pre-#509 boot ran through linger;
+ * linger off cannot boot, so login is the only truthful record). macOS/Windows
+ * — the same ours-only probes the display uses (plists / per-persona markers).
+ */
+export async function migrateLegacyAutostartModes(
+  config: Config,
+  opts?: {
+    /** Test seam: overrides the Linux linger probe. */
+    lingerProbe?: () => Promise<boolean>;
+    /** Test seam: overrides the per-platform boot probe. */
+    bootProbe?: (name: string) => Promise<boolean>;
+  },
+): Promise<void> {
+  if (!config.autostartPersonas?.length) return;
+  if (config.autostartModes && Object.keys(config.autostartModes).length > 0)
+    return;
+  const { currentPlatform } = await import("./platform.ts");
+  const platform = currentPlatform();
+  const bootProbe = (name: string): Promise<boolean> => {
+    if (opts?.bootProbe) return opts.bootProbe(name);
+    if (platform === "linux" && opts?.lingerProbe) return opts.lingerProbe();
+    return import("./autostartBoot.ts").then(async (m) =>
+      platform === "linux"
+        ? m.probeLingerLinux()
+        : m.probeBootState(name, {}),
+    );
+  };
+  const recorded: Record<string, "login" | "boot"> = {};
+  for (const name of config.autostartPersonas) {
+    const mode = (await bootProbe(name)) ? "boot" : "login";
+    await writeAutostartMode(config, name, mode);
+    recorded[name] = mode;
+  }
+  log.warn("legacy install: backfilled [autostart_modes] from host state", {
+    ...recorded,
+    reason: "pre-#509 autostart_personas had no mode records; made real boot state visible",
+  });
 }
 
 /** List persona subdirectory names. Returns [] if the dir doesn't exist. */

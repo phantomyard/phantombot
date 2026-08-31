@@ -43,13 +43,24 @@ import { log } from "../lib/logger.ts";
 import { personaConfigPath } from "../lib/personaConfig.ts";
 import { updateConfigToml, setIn } from "../lib/configWriter.ts";
 import {
+  adoptLegacyDefaultPersona,
+  configLayerDefaultPersona,
+  defaultPersonaProvenance,
+  healDefaultPersonaIfBroken,
   listPersonaDirs,
+  migrateLegacyAutostartModes,
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
 
 /**
  * Decide what the app opens on, in three tiers:
+ *
+ * 0. Legacy migration first: a host with personas on disk but NO default
+ *    persona configured anywhere (env > state.json > config.toml all empty)
+ *    adopts `personas[0]` as an explicit `default_persona` — exactly what the
+ *    pre-#509 silent fallback did — so an upgraded host opens where it always
+ *    did instead of in the wizard.
  *
  * 1. No personas, no default persona configured, or a default persona whose
  *    identity is missing — the gap the wizard itself exists to set up — → the
@@ -67,11 +78,42 @@ export async function resolveOpeningScreen(): Promise<{
   persona?: string;
   wizardStartAt?: WizardStep;
 }> {
-  const host = await loadConfig();
+  let host = await loadConfig();
   const { personas } = await hostSnapshot();
   if (personas.length === 0 || !host.defaultPersona)
     return { screen: "wizard" };
-  const target = personas.find((p) => p.name === host.defaultPersona);
+  // Legacy installs (see adoptLegacyDefaultPersona): before #509 the TUI fell
+  // back to personas[0]'s chat when no default was configured anywhere.
+  // Make that fallback explicit once, so an upgraded working host opens
+  // exactly where it always did instead of in the wizard. Gated on
+  // provenance "builtin": an explicitly-configured or healed default — even
+  // a broken one — is never touched here.
+  if (
+    personas.length > 0 &&
+    (await defaultPersonaProvenance(host)) === "builtin"
+  ) {
+    await adoptLegacyDefaultPersona(host, personas[0]!.name);
+  }
+  // Same legacy contract for autostart: a host with autostart_personas but
+  // no [autostart_modes] records is a pre-#509 install — backfill the mode
+  // records from real host state once, so the records-only display shows
+  // Boot where boot is real instead of misreporting it as Login.
+  await migrateLegacyAutostartModes(host);
+  let target = personas.find((p) => p.name === host.defaultPersona);
+  if (!target) {
+    // Broken default — e.g. a stale state.json entry pointing at a persona
+    // that no longer exists. The heal path owns broken defaults: heal ONCE
+    // (preferring the operator-explicit config.toml choice), then proceed as
+    // if that default had always been set. Nothing to heal → wizard.
+    const healed = await healDefaultPersonaIfBroken(
+      host,
+      undefined,
+      await configLayerDefaultPersona(host),
+    );
+    if (!healed) return { screen: "wizard" };
+    host.defaultPersona = healed;
+    target = personas.find((p) => p.name === healed);
+  }
   if (!target) return { screen: "wizard" };
   const { config } = await loadConfigForPersona(target.name);
   const completeness = await personaCompleteness(config, target.name);
