@@ -94,6 +94,23 @@ async function mount(session: ChatSession) {
   return { stdin, stdout, instance };
 }
 
+/** A turn that stays in flight AND records what was submitted. */
+function recordingSession(sent: string[]): ChatSession {
+  return {
+    persona: "alice",
+    conversation: "cli:tui:alice",
+    history: [],
+    async *send(text: string) {
+      sent.push(text);
+      await new Promise(() => {});
+    },
+    async command() {
+      return null;
+    },
+    async close() {},
+  };
+}
+
 const spinnerIn = (frame: string) =>
   SPINNER_FRAMES.filter((f) => frame.includes(f));
 
@@ -111,6 +128,26 @@ describe("chat input", () => {
       const frame = lastFrame(stdout.frames);
       expect(frame).toContain("hello there");
       expect(spinnerIn(frame).length).toBeGreaterThan(0);
+    } finally {
+      instance.unmount();
+    }
+  });
+  test("a chunk that arrives while busy keeps its text in the box", async () => {
+    // Ink coalesces back-to-back stdin writes into one chunk, so a fast
+    // typist's second message can arrive as `hello\r` while the first turn
+    // is still in flight. The submit must be swallowed — but the TEXT was
+    // never typed one keystroke at a time, so dropping the chunk loses it
+    // (review of 19ff85a: the box stayed empty and "hello" was gone).
+    const sent: string[] = [];
+    const { stdin, stdout, instance } = await mount(recordingSession(sent));
+    try {
+      stdin.write("first\r"); // starts a turn; screen goes busy
+      await sleep(150);
+      stdin.write("hello\r"); // coalesced chunk, arrives while busy
+      await sleep(150);
+      const frame = lastFrame(stdout.frames);
+      expect(sent).toEqual(["first"]); // correctly not submitted
+      expect(frame).toContain("hello"); // and not lost, either
     } finally {
       instance.unmount();
     }

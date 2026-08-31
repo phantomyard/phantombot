@@ -448,8 +448,11 @@ export function ChatScreen(props: {
           if (!text) return;
           const isCommand = commandName(text) !== undefined;
           if (busy && !isCommand) {
-            // Keep the un-submitted text in the box so it isn't lost;
-            // commands still dispatch while a turn is in flight.
+            // A turn is in flight, so the text is not submitted — but the
+            // chunk arrived as one read, meaning these characters never
+            // landed one at a time. Append them to the box or they are
+            // gone. Commands still dispatch while a turn is in flight.
+            setInputValue(inputRef.current + body);
             return;
           }
           setInputValue("");
