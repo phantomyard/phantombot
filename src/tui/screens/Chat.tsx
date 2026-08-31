@@ -434,6 +434,29 @@ export function ChatScreen(props: {
       // submit rule instead — see `textInput.ts`.) \r is normalised to \n
       // because that is what the viewport wraps on.
       if (/\r|\n/.test(char)) {
+        // A chunk that is plain text plus ONE trailing newline is a fast
+        // typist (or a laggy ssh/tmux link) whose keystrokes and Enter
+        // arrived in the same read — swallowing that Enter loses every
+        // message typed faster than the event loop. A chunk with INTERIOR
+        // newlines is a paste, and lands whole without submitting (Ink 6
+        // has no bracketed-paste support, so position is the only
+        // discriminator available). \r is normalised to \n because that is
+        // what the viewport wraps on.
+        const body = char.replace(/\r\n?$|\n$/, "");
+        if (!/[\r\n]/.test(body)) {
+          const text = (inputRef.current + body).trim();
+          if (!text) return;
+          const isCommand = commandName(text) !== undefined;
+          if (busy && !isCommand) {
+            // Keep the un-submitted text in the box so it isn't lost;
+            // commands still dispatch while a turn is in flight.
+            return;
+          }
+          setInputValue("");
+          if (isCommand) void runCommand(text);
+          else void submit(text);
+          return;
+        }
         setInputValue(inputRef.current + char.replace(/\r\n?/g, "\n"));
         return;
       }
