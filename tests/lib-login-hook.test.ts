@@ -82,6 +82,40 @@ describe("writeLoginHook", () => {
     expect(body).toContain("fan club");
     expect(body).toContain("alias pb");
   });
+
+  test("UNTERMINATED block (missing closing marker) → fail closed, file untouched (review blocker)", async () => {
+    // Robbie's repro: a hand-edited or truncated .profile with our opening
+    // marker but no closing marker must NOT swallow the user's lines after
+    // it. The write is refused and the file left byte-identical.
+    const mangled = [
+      "export PATH=/a:$PATH",
+      LOGIN_HOOK_MARKER,
+      "systemctl --user start phantombot.service >/dev/null 2>&1 || true",
+      "export SECRET_THING=1",
+      "source ~/.work-env",
+      "",
+    ].join("\n");
+    await writeFile(hookPath(), mangled);
+    const rAdd = await writeLoginHook(true, home);
+    expect(rAdd.status).toBe("failed");
+    const rRm = await writeLoginHook(false, home);
+    expect(rRm.status).toBe("failed");
+    expect(await readFile(hookPath(), "utf8")).toBe(mangled); // byte-identical
+    expect(rRm.status === "failed" && rRm.error.includes("unterminated")).toBe(true);
+  });
+
+  test("HOME-unset (empty home arg) → failed, nothing written", async () => {
+    const r = await writeLoginHook(true, "");
+    expect(r.status === "failed" && r.error.includes("HOME")).toBe(true);
+  });
+
+  test("restrictive file mode is preserved on rewrite", async () => {
+    await writeFile(hookPath(), "export EDITOR=vim\n");
+    await Bun.$`chmod 600 ${hookPath()}`.quiet();
+    await writeLoginHook(true, home);
+    const st = await Bun.$`stat -c %a ${hookPath()}`.text();
+    expect(st.trim()).toBe("600");
+  });
 });
 
 describe("probeLoginHook", () => {

@@ -909,9 +909,13 @@ export function App(props: AppProps): React.ReactElement {
           // stops booting by disabling its own unit (no sudo) and NEVER
           // touches linger, which is one-way host state that may carry
           // other systemd --user services. No ownership marker exists.
-          // The unit is torn down only when NO remaining persona is
-          // boot-level (records-only: the outgoing persona's own record is
-          // stripped, and reading live unit state here would be circular).
+          // The unit is disabled ONLY when a recorded boot persona leaves:
+          // the record is the proof phantombot (not the installer) chose
+          // boot, so the disable undoes OUR choice and never installer
+          // default state. Records-only: the outgoing persona's own record
+          // is stripped, and reading live unit state here would be
+          // circular (the unit is still enabled because of the choice we
+          // are undoing).
           const postList = (config.autostartPersonas ?? []).filter(
             (p) => p !== target.name,
           );
@@ -933,7 +937,7 @@ export function App(props: AppProps): React.ReactElement {
                 setNotice(`boot start disabled, but the login hook failed: ${h.error}`);
               }
               teardownNote = hook
-                ? " — boot start moved to login"
+                ? " — boot start moved to login (~/.profile; GUI-only sessions may not fire it)"
                 : " — boot start removed";
             } else {
               // macOS: inherited LaunchDaemon teardown (ours-only labels).

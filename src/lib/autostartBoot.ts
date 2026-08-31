@@ -57,7 +57,6 @@ export interface BootStatePaths {
   lingerDir?: string;
   daemonDir?: string;
   /** Test seam — override the Linux unit-enabled probe. */
-  unitEnabledReader?: () => Promise<boolean>;
   /** Test seam — override the platform branch (default: real host). */
   platform?: "linux" | "darwin" | "windows" | "unsupported";
   /** Test seam — override the Windows logon-marker reader. */
@@ -74,9 +73,15 @@ export interface BootStatePaths {
  * from `phantombot install`) as Boot instead of silently mislabelling it
  * Login.
  *
- * ENABLE-ONLY NOTE: the Linux probe reads UNIT state, never linger — the
- * unit is the thing phantombot enables/disables, so display and teardown
- * share one source of truth. Linger is display-invisible by design.
+ * ENABLE-ONLY NOTE: on Linux there is NOTHING to probe. The daemon unit is
+ * enabled unconditionally by the installer (phantombot install), so an
+ * enabled unit is the always-run default state, not a Boot choice — deriving
+ * display or teardown ownership from `is-enabled` mislabels every standard
+ * install as Boot and arms teardown against state phantombot did not choose
+ * (review blocker, 2026-08-31). On Linux, boot is RECORD-expressed only: a
+ * `boot` record is written when Boot is selected and is the sole source for
+ * display and for teardown. Linger is likewise display-invisible (one-way
+ * prerequisite, never boot state we own).
  */
 export async function probeBootState(
   persona: string,
@@ -87,11 +92,10 @@ export async function probeBootState(
   const platform = opts?.platform ?? currentPlatform();
   try {
     if (platform === "linux") {
-      // Boot = the daemon unit is enabled. Pure unit-level doctrine: one
-      // subprocess, no sudo, no linger read.
-      if (opts?.unitEnabledReader) return await opts.unitEnabledReader();
-      const runner = bunSpawnRunner();
-      return (await runner.run(["systemctl", "--user", "is-enabled", SYSTEMD_UNIT])).exit === 0;
+      // Records-only: an enabled unit is the installer's unconditional
+      // default, so no live probe can discriminate a Boot choice. Unrecorded
+      // personas display Login; only a recorded mode=boot shows Boot.
+      return false;
     }
     if (platform === "darwin") {
       const dir = opts?.daemonDir ?? "/Library/LaunchDaemons";
@@ -192,15 +196,22 @@ export const LOGIN_HOOK_MARKER = "# phantombot login-start (managed — do not e
  */
 export const LOGIN_HOOK_PATH = ".profile";
 
-function loginHookPath(home?: string): string {
-  return joinPath(home ?? ("HOME" in process.env ? process.env.HOME! : ""), LOGIN_HOOK_PATH);
+/**
+ * Resolve the login hook path. Returns null when HOME is unset — a relative
+ * `.profile` written into the process cwd would be a silent mis-write, so we
+ * fail instead.
+ */
+function loginHookPath(home?: string): string | null {
+  const dir = home ?? ("HOME" in process.env ? process.env.HOME! : "");
+  if (!dir) return null;
+  return joinPath(dir, LOGIN_HOOK_PATH);
 }
 
 /** Does the hook file currently carry our marked start line? */
 export async function probeLoginHook(home?: string): Promise<boolean> {
   const { readFileSync, existsSync } = await import("node:fs");
   const p = loginHookPath(home);
-  if (!existsSync(p)) return false;
+  if (!p || !existsSync(p)) return false;
   try {
     return readFileSync(p, "utf8").includes(LOGIN_HOOK_MARKER);
   } catch {
@@ -218,15 +229,22 @@ export async function writeLoginHook(
   present: boolean,
   home?: string,
 ): Promise<BootSetupOutcome> {
-  const { readFileSync, writeFileSync, existsSync } = await import("node:fs");
+  const { readFileSync, writeFileSync, existsSync, statSync } = await import("node:fs");
   const p = loginHookPath(home);
+  if (!p) {
+    return { status: "failed", error: "HOME is not set — cannot locate the login hook file" };
+  }
   const block = present
     ? `${LOGIN_HOOK_MARKER}\nsystemctl --user start ${SYSTEMD_UNIT} >/dev/null 2>&1 || true\n# <<< phantombot login-start <<<\n`
     : null;
   let body = "";
+  let mode: number | undefined;
   if (existsSync(p)) {
     try {
       body = readFileSync(p, "utf8");
+      // Preserve the file's permissions — writeFileSync would otherwise apply
+      // the umask default and silently widen a restrictive .profile.
+      mode = statSync(p).mode & 0o777;
     } catch (e) {
       return { status: "failed", error: `reading ${LOGIN_HOOK_PATH}: ${(e as Error).message}` };
     }
@@ -247,10 +265,19 @@ export async function writeLoginHook(
     }
     kept.push(line);
   }
+  // FAIL CLOSED: a marker with no closing marker means the file was
+  // hand-edited or truncated mid-block. Skipping to EOF would discard every
+  // user line after the marker, so we refuse to write and report it.
+  if (inBlock) {
+    return {
+      status: "failed",
+      error: `${LOGIN_HOOK_PATH} has an unterminated phantombot block (missing "${"# <<< phantombot login-start <<<"}") — fix or remove it by hand; nothing was changed`,
+    };
+  }
   while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
   const next = block ? [...kept, block].join("\n") : kept.length > 0 ? `${kept.join("\n")}\n` : "";
   try {
-    writeFileSync(p, next);
+    writeFileSync(p, next, mode !== undefined ? { mode } : undefined);
     return { status: "ok" };
   } catch (e) {
     return { status: "failed", error: `writing ${LOGIN_HOOK_PATH}: ${(e as Error).message}` };

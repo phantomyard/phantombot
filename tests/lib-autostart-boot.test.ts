@@ -111,29 +111,12 @@ import { join } from "node:path";
 import { probeBootState, bootHookStillNeeded, loginHookNeeded } from "../src/lib/autostartBoot.ts";
 
 describe("probeBootState", () => {
-  test("linux: enabled daemon unit → boot (unit-level doctrine)", async () => {
-    expect(
-      await probeBootState("any", { platform: "linux", unitEnabledReader: async () => true }),
-    ).toBe(true);
-  });
-
-  test("linux: disabled unit → not boot, regardless of linger", async () => {
-    // Linger is NEVER read for display — it is a one-way prerequisite that
-    // may carry other services, not an autostart feature we own.
-    expect(
-      await probeBootState("any", { platform: "linux", unitEnabledReader: async () => false }),
-    ).toBe(false);
-  });
-
-  test("linux: probe failing → false (fail closed to Login)", async () => {
-    expect(
-      await probeBootState("any", {
-        platform: "linux",
-        unitEnabledReader: async () => {
-          throw new Error("systemctl missing");
-        },
-      }),
-    ).toBe(false);
+  test("linux: ALWAYS false — records-only doctrine (review blocker 2026-08-31)", async () => {
+    // The daemon unit is enabled unconditionally by the installer, so an
+    // enabled unit is the default state, NOT a Boot choice. No live probe
+    // can discriminate — display and teardown derive from [autostart_modes]
+    // records only. Linger is likewise never read (one-way prerequisite).
+    expect(await probeBootState("any", { platform: "linux" })).toBe(false);
   });
 
   test("darwin: our LaunchDaemon plist → boot; foreign plists ignored", async () => {

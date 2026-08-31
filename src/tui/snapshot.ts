@@ -478,12 +478,13 @@ export async function personaSnapshot(
     : undefined;
 
   // Autostart mode display (Caveat-1 fix): the recorded [autostart_modes]
-  // value is the source of truth, but an INHERITED boot setup (an enabled
-  // daemon unit from an earlier install, a password-mode task) predates the
-  // record — for a persona on the list with no record, probe the platform's
-  // actual boot state rather than mislabelling it Login. Linux probes read
-  // UNIT state only (enable-only linger doctrine: linger is a display-
-  // invisible prerequisite, never boot state we own). No sudo, no elevation.
+  // value is the source of truth. An INHERITED boot setup predating the
+  // record is probed only where phantombot OWNS the state: macOS plists
+  // (ours-only labels) and Windows per-persona markers. On Linux there is
+  // deliberately NO probe — the daemon unit is enabled unconditionally by
+  // the installer, so an enabled unit is the default state, not a Boot
+  // choice (review blocker 2026-08-31); unrecorded Linux personas display
+  // Login, and only a recorded mode=boot shows Boot. No sudo, no elevation.
   const onList = (host.autostartPersonas ?? []).includes(name);
   let autostartMode = host.autostartModes?.[name];
   if (autostartMode === undefined && onList) {
