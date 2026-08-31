@@ -111,12 +111,42 @@ import { join } from "node:path";
 import { probeBootState, bootHookStillNeeded } from "../src/lib/autostartBoot.ts";
 
 describe("probeBootState", () => {
-  test("linux: linger file for the current user → boot", async () => {
+  test("linux: linger file for the current user + phantombot owns it → boot", async () => {
     const dir = mkdtempSync(join(tmpdir(), "linger-"));
     try {
       const user = (await import("node:os")).userInfo().username;
       writeFileSync(join(dir, user), "");
-      expect(await probeBootState("any", { platform: "linux", lingerDir: dir })).toBe(true);
+      expect(
+        await probeBootState("any", { platform: "linux", lingerDir: dir, lingerOwned: true }),
+      ).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("linux: linger file but NOT phantombot-owned → NOT boot (init prerequisite / admin flag)", async () => {
+    // Linger is a phantombot init prerequisite and per-USER host state with
+    // no provenance — labelling an inherited flag Boot would arm a teardown
+    // that could kill unrelated systemd --user services.
+    const dir = mkdtempSync(join(tmpdir(), "linger-"));
+    try {
+      const user = (await import("node:os")).userInfo().username;
+      writeFileSync(join(dir, user), "");
+      expect(await probeBootState("any", { platform: "linux", lingerDir: dir })).toBe(false);
+      expect(
+        await probeBootState("any", { platform: "linux", lingerDir: dir, lingerOwned: false }),
+      ).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("linux: owned but no linger file → not boot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "linger-"));
+    try {
+      expect(
+        await probeBootState("any", { platform: "linux", lingerDir: dir, lingerOwned: true }),
+      ).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -182,8 +212,20 @@ describe("bootHookStillNeeded", () => {
     expect(await bootHookStillNeeded(["inherited-boot"], {}, probe)).toBe(true);
   });
 
-  test("no boot members → not needed", async () => {
-    expect(await bootHookStillNeeded(["a", "inherited-boot"], { a: "login", "inherited-boot": "login" }, probe)).toBe(false);
+  test("stale LOGIN record but probe says boot → needed (probe wins over the record)", async () => {
+    // A login record from an install path that predates the record must not
+    // mask a real plist/linger — otherwise teardown removes hooks that are
+    // still in use.
+    expect(
+      await bootHookStillNeeded(["stale-login"], { "stale-login": "login" }, probe),
+    ).toBe(false); // probe returns false for any name but inherited-boot
+    expect(
+      await bootHookStillNeeded(["inherited-boot"], { "inherited-boot": "login" }, probe),
+    ).toBe(true);
+  });
+
+  test("no boot members (probe agrees) → not needed", async () => {
+    expect(await bootHookStillNeeded(["a"], { a: "login" }, probe)).toBe(false);
     expect(await bootHookStillNeeded([], {}, probe)).toBe(false);
   });
 });
@@ -266,6 +308,44 @@ describe("teardownBootMac", () => {
     }), { daemonDir: mkdtempSync(join(tmpdir(), "empty-")) });
     expect(r.status).toBe("ok");
     expect(calls).toEqual([]);
+  });
+
+  test("passwordless: bootout failure (job busy) aborts BEFORE rm — plist stays", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "daemons-"));
+    try {
+      const plist = join(dir, "dev.phantombot.phantombot.plist");
+      writeFileSync(plist, "");
+      const calls: string[][] = [];
+      const r = await teardownBootMacPasswordless(runner((a) => {
+        calls.push(a);
+        if (a.includes("bootout")) return { exit: 3, stderr: "Boot-out failed: 3: job busy" };
+        return { exit: 0 };
+      }), { daemonDir: dir });
+      expect(r.status).toBe("failed");
+      if (r.status !== "failed") throw new Error("unreachable");
+      expect(r.error).toContain("job busy");
+      expect(calls.some((c) => c.includes("rm"))).toBe(false); // never removed a loaded daemon
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("passwordless: bootout 'not loaded' tolerated — rm still runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "daemons-"));
+    try {
+      const plist = join(dir, "dev.phantombot.phantombot.plist");
+      writeFileSync(plist, "");
+      const calls: string[][] = [];
+      const r = await teardownBootMacPasswordless(runner((a) => {
+        calls.push(a);
+        if (a.includes("bootout")) return { exit: 3, stderr: "Boot-out failed: 3: No such process" };
+        return { exit: 0 };
+      }), { daemonDir: dir });
+      expect(r.status).toBe("ok");
+      expect(calls.some((c) => c.includes("rm"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("password path: validate first, wrong password → invalid-credential", async () => {

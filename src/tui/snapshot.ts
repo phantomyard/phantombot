@@ -478,17 +478,24 @@ export async function personaSnapshot(
     : undefined;
 
   // Autostart mode display (Caveat-1 fix): the recorded [autostart_modes]
-  // value is the source of truth, but an INHERITED boot setup (linger
-  // enabled by `phantombot init`, a password-mode task from an old install)
-  // predates the record — for a persona on the list with no record, probe
-  // the platform's actual boot state rather than mislabelling it Login.
+  // value is the source of truth, but an INHERITED boot setup (a
+  // password-mode task from an old install) predates the record — for a
+  // persona on the list with no record, probe the platform's actual boot
+  // state rather than mislabelling it Login. Linux probes only report Boot
+  // for linger phantombot OWNS ([boot_hooks] marker): linger is also an
+  // init prerequisite with no per-persona provenance, and labelling an
+  // inherited flag Boot would arm a teardown that must refuse it.
   // Pure fs/JSON reads; no sudo, no elevation, no subprocess on Linux/macOS.
   const onList = (host.autostartPersonas ?? []).includes(name);
   let autostartMode = host.autostartModes?.[name];
   if (autostartMode === undefined && onList) {
+    const lingerOwned = host.bootHooks?.linger === true;
     const probe =
       probeBoot ??
-      ((p: string) => import("../lib/autostartBoot.ts").then((m) => m.probeBootState(p)));
+      ((p: string) =>
+        import("../lib/autostartBoot.ts").then((m) =>
+          m.probeBootState(p, { lingerOwned }),
+        ));
     autostartMode = (await probe(name)) ? "boot" : "login";
   }
 

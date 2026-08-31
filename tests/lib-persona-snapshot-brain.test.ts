@@ -96,7 +96,7 @@ alice = "login"
     expect(snap.autostartMode).toBe("login");
   });
 
-  test("no record + probed boot state (inherited linger) → boot", async () => {
+  test("no record + probed boot state (inherited macOS daemon) → boot", async () => {
     setup(`
 default_persona = "alice"
 autostart_personas = ["alice", "bob"]

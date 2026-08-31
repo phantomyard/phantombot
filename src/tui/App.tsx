@@ -752,6 +752,13 @@ export function App(props: AppProps): React.ReactElement {
               setNotice(`boot setup failed: ${outcome.error} — nothing changed`);
               return;
             }
+            if (platform === "linux") {
+              // Record that phantombot created this linger flag — the
+              // ownership marker the teardown (and the boot-state probe)
+              // consult before ever disabling linger.
+              const { writeBootHook } = await import("../lib/personaDefault.ts");
+              await writeBootHook(config, "linger", true);
+            }
             const r = await (await import("./actions.ts")).applyAutostartChoice({
               config,
               persona: target.name,
@@ -821,6 +828,12 @@ export function App(props: AppProps): React.ReactElement {
             return;
           }
           if (typeof credential !== "string") return; // unreachable, but keeps the type honest
+          if (platform === "linux") {
+            // Ownership marker for the linger flag we just created — see
+            // the passwordless branch above.
+            const { writeBootHook } = await import("../lib/personaDefault.ts");
+            await writeBootHook(config, "linger", true);
+          }
           if (key !== null) await boot.saveBootCredential(dir, key, credential);
           const r = await (await import("./actions.ts")).applyAutostartChoice({
             config,
@@ -880,20 +893,50 @@ export function App(props: AppProps): React.ReactElement {
           teardownNote = choice === "off" ? " — boot tasks removed" : " — boot tasks moved to login";
         } else {
           // Host-level hook: tear down only when NO remaining persona is
-          // boot-level (recorded, or — for inherited setups — probed). The
-          // target's own record is stripped: post-change it is login/off,
-          // never boot, and its stale boot record must not mask teardown.
+          // boot-level (recorded, or probed — a stale `login` record never
+          // masks real boot state). The target's own record is stripped:
+          // post-change it is login/off, never boot, and its stale boot
+          // record must not mask teardown.
           const postList = (config.autostartPersonas ?? []).filter(
             (p) => p !== target.name,
           );
           const postModes = { ...(config.autostartModes ?? {}) };
           delete postModes[target.name];
+          // Linux: linger is also a `phantombot init` PREREQUISITE (the
+          // user-systemd bus is unreachable without it) and may carry other
+          // systemd --user services on this host — only disable it when
+          // phantombot created it ([boot_hooks] marker, written by the
+          // Boot enable path above).
+          const lingerOwned = config.bootHooks?.linger === true;
           const needed = await boot.bootHookStillNeeded(
             postList,
             postModes,
-            (p) => boot.probeBootState(p),
+            (p) => boot.probeBootState(p, { lingerOwned }),
           );
-          if (!needed) {
+          let lingerLeftInPlace = false;
+          if (!needed && platform === "linux" && !lingerOwned) {
+            // Recorded boot but phantombot does not own the linger flag:
+            // refuse by default, offer an explicit, named confirmation.
+            const ok = await askConfirmValue({
+              title: "Remove the system linger flag?",
+              consequence: {
+                summary: "disables linger for this user",
+                detail:
+                  "phantombot did not create this linger flag (it may come " +
+                  "from setup or an admin). Disabling it stops ALL " +
+                  "systemd --user services for this account at next boot, " +
+                  "including any that are not phantombot's.",
+                longRunning: false,
+                restarts: false,
+              },
+              danger: true,
+            });
+            if (!ok) {
+              lingerLeftInPlace = true;
+              teardownNote = " — linger left in place (not created by phantombot)";
+            }
+          }
+          if (!needed && !lingerLeftInPlace) {
             const user = (await import("node:os")).userInfo().username;
             const passwordless = platform === "linux"
               ? await boot.probeSudoPasswordless(runner)
@@ -928,6 +971,12 @@ export function App(props: AppProps): React.ReactElement {
               setNotice(msg);
               return;
             }
+            if (platform === "linux") {
+              // Linger is gone — clear the ownership marker so a future
+              // enable re-records it and the probe reports Login.
+              const { writeBootHook } = await import("../lib/personaDefault.ts");
+              await writeBootHook(config, "linger", undefined);
+            }
             teardownNote = " — boot start removed";
           }
         }
@@ -947,7 +996,7 @@ export function App(props: AppProps): React.ReactElement {
       );
       await refresh();
     },
-    [askChoice, askValue],
+    [askChoice, askValue, askConfirmValue],
   );
 
   /**

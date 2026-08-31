@@ -45,6 +45,17 @@
 export interface BootStatePaths {
   lingerDir?: string;
   daemonDir?: string;
+  /**
+   * Linux only — does phantombot OWN the linger flag (the `[boot_hooks]`
+   * marker written when the TUI ran enable-linger)? Linger is also a plain
+   * `phantombot init` prerequisite and can be set by an admin; an unowned
+   * flag is a host prerequisite, NOT a boot-autostart feature, so it must
+   * not display as Boot (that would arm a teardown the ownership check
+   * would only refuse). `false`/absent → linger present still means not
+   * boot. Callers read the marker from the same host config as the
+   * teardown, so display and teardown share one source of truth.
+   */
+  lingerOwned?: boolean;
   /** Test seam — override the platform branch (default: real host). */
   platform?: "linux" | "darwin" | "windows" | "unsupported";
   /** Test seam — override the Windows logon-marker reader. */
@@ -59,6 +70,13 @@ export interface BootStatePaths {
  * Autostart selector DISPLAY a pre-existing boot setup (linger enabled by
  * `phantombot init`, a password-mode task from `phantombot install`) as
  * Boot instead of silently mislabelling it Login.
+ *
+ * LINUX CAVEAT: linger is a phantombot PREREQUISITE (`phantombot init`
+ * enables it so the user-systemd bus is reachable) and is per-USER host
+ * state with no provenance — other systemd --user services may depend on
+ * it. So on Linux the probe only reports Boot when phantombot owns the
+ * flag (`lingerOwned`, from the `[boot_hooks]` marker): an inherited flag
+ * is never mislabelled into arming a teardown.
  */
 export async function probeBootState(
   persona: string,
@@ -69,6 +87,7 @@ export async function probeBootState(
   const platform = opts?.platform ?? currentPlatform();
   try {
     if (platform === "linux") {
+      if (opts?.lingerOwned !== true) return false; // not ours → not a boot-autostart feature
       const user = (await import("node:os")).userInfo().username;
       return existsSync(
         joinPath(opts?.lingerDir ?? "/var/lib/systemd/linger", user),
@@ -265,7 +284,19 @@ export async function teardownBootMacPasswordless(
   const plists = await macDaemonPlists(opts?.daemonDir);
   if (plists.length === 0) return { status: "ok" }; // nothing of ours to tear down
   for (const plist of plists) {
-    await runner.run([SUDO, "-n", "launchctl", "bootout", "system", plist]);
+    const b = await runner.run([SUDO, "-n", "launchctl", "bootout", "system", plist]);
+    const bErr = (b.stderr || b.stdout).trim();
+    // Only the "not loaded" failure is tolerable — the daemon is already
+    // down, which is the state teardown is driving toward. Any other
+    // bootout failure (job busy, wrong domain) must ABORT before the rm:
+    // removing the plist of a still-loaded daemon leaves it running and
+    // unmanageable until reboot, and invisible to a later probe.
+    if (b.exit !== 0 && !/not loaded|no such process/i.test(bErr)) {
+      return {
+        status: "failed",
+        error: bErr || `bootout ${plist} exited ${b.exit} — plist left in place`,
+      };
+    }
     const r = await runner.run([SUDO, "-n", "rm", "-f", plist]);
     if (r.exit !== 0) {
       return {
@@ -291,9 +322,20 @@ export async function teardownBootMac(
   const plists = await macDaemonPlists(opts?.daemonDir);
   if (plists.length === 0) return { status: "ok" };
   for (const plist of plists) {
-    await runner.run([SUDO, "-S", "-k", "launchctl", "bootout", "system", plist], {
+    const b = await runner.run([SUDO, "-S", "-k", "launchctl", "bootout", "system", plist], {
       input: `${password}\n`,
     });
+    const bErr = (b.stderr || b.stdout).trim();
+    // Same abort-before-rm doctrine as the passwordless path — and a wrong
+    // password surfaces here as invalid-credential, not "failed".
+    if (b.exit !== 0 && !/not loaded|no such process/i.test(bErr)) {
+      return {
+        status: bErr.toLowerCase().includes("incorrect password")
+          ? "invalid-credential"
+          : "failed",
+        error: bErr || `bootout ${plist} exited ${b.exit} — plist left in place`,
+      };
+    }
     const r = await runner.run([SUDO, "-S", "-k", "rm", "-f", plist], {
       input: `${password}\n`,
     });
@@ -381,9 +423,10 @@ export async function teardownBootWindows(
  * After a Boot persona leaves (Off/Login), does ANY remaining autostart
  * persona still need the host-level boot hook (linger / LaunchDaemon)?
  * A member needs it when its EFFECTIVE mode is boot: recorded, or — for
- * inherited setups with no record — probed. Windows tasks are per-persona
- * and torn down individually, so the caller only consults this for
- * Linux/macOS.
+ * records that predate or disagree with reality (a stale `login` entry on
+ * a host where the persona's plist actually exists from an earlier
+ * install path) — probed. Windows tasks are per-persona and torn down
+ * individually, so the caller only consults this for Linux/macOS.
  */
 export async function bootHookStillNeeded(
   list: string[],
@@ -392,7 +435,7 @@ export async function bootHookStillNeeded(
 ): Promise<boolean> {
   for (const persona of list) {
     if (recorded?.[persona] === "boot") return true;
-    if (recorded?.[persona] === undefined && (await probe(persona))) return true;
+    if (await probe(persona)) return true; // login/undefined records: trust the PROBE over the record
   }
   return false;
 }
