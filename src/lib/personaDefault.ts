@@ -79,6 +79,21 @@ export function defaultPersonaDefect(
   return null;
 }
 
+/** Resolve a persona key to the exact directory spelling on disk. */
+export function canonicalPersonaName(
+  config: Config,
+  name: string,
+): string | null {
+  const existing = listPersonaDirs(config);
+  if (existing.includes(name)) return name;
+  const matches = existing.filter(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  // Case-sensitive filesystems can contain ambiguous names. Never guess which
+  // memory namespace the operator intended.
+  return matches.length === 1 ? matches[0]! : null;
+}
+
 /**
  * If the current `default_persona` points at a directory that doesn't
  * exist on disk, set `default_persona` to `name` (and write state.json).
@@ -91,10 +106,27 @@ export async function adoptAsDefaultIfMissing(
   name: string,
   out?: WriteSink,
 ): Promise<boolean> {
-  if (defaultPersonaDefect(config, config.defaultPersona) === null) return false;
-  const state = await loadState();
-  state.default_persona = name;
-  await saveState(state);
+  const canonical = canonicalPersonaName(config, config.defaultPersona);
+  if (
+    canonical === config.defaultPersona &&
+    defaultPersonaDefect(config, canonical) === null
+  ) {
+    return false;
+  }
+  if (canonical !== null && defaultPersonaDefect(config, canonical) === null) {
+    await writeDefaultPersona(canonical);
+    log.warn("persona default case-normalized", {
+      from: config.defaultPersona,
+      to: canonical,
+      reason: "case mismatch against persona dir",
+    });
+    out?.write(
+      `\nnormalized default_persona: '${config.defaultPersona}' → '${canonical}' ` +
+        `(the persona dir on disk is spelled '${canonical}')\n`,
+    );
+    return false;
+  }
+  await writeDefaultPersona(name);
   out?.write(
     `\nadopted '${name}' as default_persona (previous default '${config.defaultPersona}': ` +
       `${defaultPersonaDefect(config, config.defaultPersona)})\n`,
@@ -127,8 +159,14 @@ export async function healDefaultPersonaIfBroken(
   config: Config,
   out?: WriteSink,
 ): Promise<string | null> {
-  const defect = defaultPersonaDefect(config, config.defaultPersona);
-  if (defect === null) return config.defaultPersona;
+  const canonical = canonicalPersonaName(config, config.defaultPersona);
+  const defect =
+    canonical === null
+      ? defaultPersonaDefect(config, config.defaultPersona)
+      : defaultPersonaDefect(config, canonical);
+  if (canonical === config.defaultPersona && defect === null) {
+    return config.defaultPersona;
+  }
 
   const existing = listPersonaDirs(config);
   if (existing.length === 0) return null;
@@ -141,11 +179,15 @@ export async function healDefaultPersonaIfBroken(
   const brokenName = config.defaultPersona.toLowerCase();
   const others = existing.filter((n) => n !== config.defaultPersona);
   const usable = (n: string) => defaultPersonaDefect(config, n) === null;
-  const caseMatch = others.find((n) => n.toLowerCase() === brokenName);
+  const caseMatch =
+    canonical !== null && canonical !== config.defaultPersona
+      ? canonical
+      : others.find((n) => n.toLowerCase() === brokenName);
   // The case-only match only wins if it is itself usable: preferring a husk
   // named `Kai` over a working `real` would write the broken name to
   // state.json and leave the host unbootable (#506 review).
-  let healed = caseMatch !== undefined && usable(caseMatch) ? caseMatch : undefined;
+  let healed =
+    caseMatch !== undefined && usable(caseMatch) ? caseMatch : undefined;
   healed ??= others.find(usable);
   healed ??= caseMatch;
   healed ??= others[0] ?? existing[0]!;
@@ -157,11 +199,14 @@ export async function healDefaultPersonaIfBroken(
   log.warn("persona healed", {
     from: config.defaultPersona,
     to: healed,
-    reason: defect,
+    reason:
+      canonical !== null && defect === null
+        ? "case mismatch against persona dir"
+        : defect,
   });
   out?.write(
     `healed default_persona: '${config.defaultPersona}' \u2192 '${healed}' ` +
-      `(previous default: ${defect})\n`,
+      `(${canonical !== null && defect === null ? "case mismatch against persona dir" : `previous default: ${defect}`})\n`,
   );
   return healed;
 }
@@ -210,6 +255,12 @@ export function listPersonaDirs(config: Config): string[] {
     });
     return [];
   }
+}
+
+async function writeDefaultPersona(name: string): Promise<void> {
+  const state = await loadState();
+  state.default_persona = name;
+  await saveState(state);
 }
 
 /**

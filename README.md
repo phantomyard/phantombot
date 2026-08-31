@@ -972,6 +972,17 @@ before the key existed: every configured identity starts. Once the key is
 present — even as an empty list — it is the whole truth, and a persona outside
 it is skipped with a warning naming the fix.
 
+A persona name is CASE-SENSITIVE everywhere it is used as a key — persona
+directory, memory rows, vault, tasks — even though macOS and Windows
+filesystems are not. `default_persona = "robbie"` against a directory named
+`Robbie` therefore used to look healthy while addressing a different memory
+namespace, so drawers and the journal read empty. Startup now repairs the
+casing to whatever the directory is actually spelled and logs the correction
+(`healed default_persona: 'robbie' → 'Robbie' (case mismatch against persona
+dir)`); if you see that line once, nothing else is wrong. Two directories that
+differ only by case (possible on a case-sensitive filesystem) are ambiguous and
+are left alone.
+
 Each persona keeps its own settings in `<personas-root>/<persona>/config.toml`:
 
 ```toml

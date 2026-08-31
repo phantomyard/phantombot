@@ -5,7 +5,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -147,6 +155,33 @@ describe("runRun — early exits", () => {
     expect(code).toBe(2);
     expect(err.text).not.toContain("no other personas exist");
     expect(err.text).toContain("phantombot harness");
+  });
+
+  test("canonicalizes a default even when its wrong-cased path resolves", async () => {
+    const canonicalDir = join(workdir, "personas", "Phantom");
+    await rename(join(workdir, "personas", "phantom"), canonicalDir);
+    // Reproduce a case-insensitive filesystem on Linux: the configured path
+    // resolves, while the directory listing still supplies canonical spelling.
+    await symlink(canonicalDir, join(workdir, "personas", "phantom"), "dir");
+    const err = new CaptureStream();
+    const caseConfig = {
+      ...config,
+      harnesses: { ...config.harnesses, chain: [] },
+      channels: {
+        telegram: { token: "abc", pollTimeoutS: 30, allowedUserIds: [] },
+      },
+    };
+
+    const code = await runRun({
+      config: caseConfig,
+      lockPath: join(workdir, "run.lock"),
+      out: new CaptureStream(),
+      err,
+    });
+
+    expect(code).toBe(2);
+    expect(caseConfig.defaultPersona).toBe("Phantom");
+    expect(err.text).toContain("case mismatch against persona dir");
   });
 
   test("returns 2 when harness chain is empty", async () => {

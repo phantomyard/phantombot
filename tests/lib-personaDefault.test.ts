@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   adoptAsDefaultIfMissing,
+  canonicalPersonaName,
   defaultPersonaDefect,
   defaultPersonaProvenance,
   healDefaultPersonaIfBroken,
@@ -133,6 +134,42 @@ describe("adoptAsDefaultIfMissing", () => {
 
     const state = await loadState();
     expect(state.default_persona).toBe("kai");
+  });
+
+  test("repairs casing without adopting the newly created persona", async () => {
+    await makePersona("Ghostfixture");
+    await makePersona("kai");
+    const out = new CaptureStream();
+    const changed = await adoptAsDefaultIfMissing(
+      makeConfig(personasDir, "ghostfixture"),
+      "kai",
+      out,
+    );
+    expect(changed).toBe(false);
+    expect(out.text).toContain("normalized default_persona");
+    expect((await loadState()).default_persona).toBe("Ghostfixture");
+  });
+});
+
+describe("canonicalPersonaName (#475)", () => {
+  test("returns exact and unique case-insensitive matches", async () => {
+    await makePersona("Ghostfixture");
+    const config = makeConfig(personasDir);
+    expect(canonicalPersonaName(config, "Ghostfixture")).toBe("Ghostfixture");
+    expect(canonicalPersonaName(config, "ghostfixture")).toBe("Ghostfixture");
+  });
+
+  test("returns null for missing and ambiguous names", async () => {
+    await makePersona("Kai");
+    await makePersona("KAI");
+    const config = makeConfig(personasDir);
+    expect(canonicalPersonaName(config, "missing")).toBeNull();
+    expect(canonicalPersonaName(config, "kai")).toBeNull();
+  });
+
+  test("ignores plain files", async () => {
+    await writeFile(join(personasDir, "kai"), "not a persona");
+    expect(canonicalPersonaName(makeConfig(personasDir), "kai")).toBeNull();
   });
 });
 

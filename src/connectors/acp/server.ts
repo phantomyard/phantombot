@@ -16,7 +16,6 @@
  */
 
 import { createInterface } from "node:readline";
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -24,7 +23,10 @@ import type { Readable, Writable } from "node:stream";
 
 import type { ActiveTurnHandle } from "../../channels/commands.ts";
 import { type Config, loadConfig, personaDir } from "../../config.ts";
-import { healDefaultPersonaIfBroken } from "../../lib/personaDefault.ts";
+import {
+  canonicalPersonaName,
+  healDefaultPersonaIfBroken,
+} from "../../lib/personaDefault.ts";
 import { buildHarnessChain } from "../../harnesses/buildChain.ts";
 import { harnessBin, resolveHarnessBinsForConfig } from "../../lib/harnessAvailability.ts";
 import type { Harness } from "../../harnesses/types.ts";
@@ -106,11 +108,17 @@ export async function runAcpServer(
   // genuinely zero personas to fall back to.
   let persona = options.persona ?? config.defaultPersona;
   let agentDir = personaDir(config, persona);
-  if (!existsSync(agentDir)) {
-    if (options.persona !== undefined) {
+  if (options.persona !== undefined) {
+    const canonical = canonicalPersonaName(config, persona);
+    if (canonical === null) {
       logErr.write(`phantombot acp: persona '${persona}' not found at ${agentDir}\n`);
       return 2;
     }
+    persona = canonical;
+    agentDir = personaDir(config, persona);
+  } else {
+    // Always enter the healer: existsSync cannot distinguish wrong casing on
+    // macOS/Windows, but persona names remain case-sensitive storage keys.
     const healed = await healDefaultPersonaIfBroken(config, logErr);
     if (!healed) {
       logErr.write(

@@ -564,3 +564,5 @@ not full backend KV reuse: stateless Pi/Claude/Codex chat-template role
 transitions mean the immediately previous generated assistant response is not
 guaranteed reusable on the following request, though it becomes part of the
 stable serialized prefix on a later request.
+
+40. **Persona names are case-sensitive keys even where paths are not (PR #475).** Resolve a configured default through `canonicalPersonaName`, using the exact spelling from the persona-directory listing before it reaches memory, vault, journal, or task namespaces. A unique case-only match is repaired and persisted; multiple case-insensitive matches are ambiguous and must never be guessed. Canonicalisation composes with `defaultPersonaDefect`: a case-matched husk is still defective and must not outrank a usable persona.

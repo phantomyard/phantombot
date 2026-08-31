@@ -391,23 +391,24 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   let defaultPersona = config.defaultPersona;
   if (hasDefault) {
     const agentDir = personaDir(config, defaultPersona);
-    if (!existsSync(agentDir)) {
-      const healed = await healDefaultPersonaIfBroken(config, err);
-      if (healed) {
-        defaultPersona = healed;
-        config.defaultPersona = healed;
-      } else if (!hasPhantomchat) {
-        err.write(
-          `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
-            "Create one with `phantombot persona`.\n",
-        );
-        return 2;
-      }
-      // else: Telegram's default persona is broken, but PhantomChat is a
-      // runnable channel — fall through. planListeners skips the missing default
-      // and we continue PhantomChat-only (warned below). The service must never
-      // fail to start just because one channel is misconfigured.
+    // Do not guard this with existsSync(agentDir): on a case-insensitive
+    // filesystem a wrong-cased key exists as a path but is still a different
+    // memory/vault namespace. The healer also no-ops cheaply for a healthy key.
+    const healed = await healDefaultPersonaIfBroken(config, err);
+    if (healed) {
+      defaultPersona = healed;
+      config.defaultPersona = healed;
+    } else if (!hasPhantomchat) {
+      err.write(
+        `default persona '${defaultPersona}' not found at ${agentDir} and no other personas exist.\n` +
+          "Create one with `phantombot persona`.\n",
+      );
+      return 2;
     }
+    // else: Telegram's default persona is broken, but PhantomChat is a
+    // runnable channel — fall through. planListeners skips the missing default
+    // and we continue PhantomChat-only (warned below). The service must never
+    // fail to start just because one channel is misconfigured.
   }
 
   // The default persona may have been HEALED to a different name just above,
