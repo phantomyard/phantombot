@@ -58,7 +58,8 @@ import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
  *
  * 0. Legacy migration first: a host with personas on disk but NO default
  *    persona configured anywhere (env > state.json > config.toml all empty)
- *    adopts `personas[0]` as an explicit `default_persona` — exactly what the
+ *    adopts the pre-#509 fallback choice (resolved default, else
+ *    `personas[0]`) as an explicit `default_persona` — exactly what the
  *    pre-#509 silent fallback did — so an upgraded host opens where it always
  *    did instead of in the wizard.
  *
@@ -83,22 +84,45 @@ export async function resolveOpeningScreen(): Promise<{
   if (personas.length === 0 || !host.defaultPersona)
     return { screen: "wizard" };
   // Legacy installs (see adoptLegacyDefaultPersona): before #509 the TUI fell
-  // back to personas[0]'s chat when no default was configured anywhere.
-  // Make that fallback explicit once, so an upgraded working host opens
-  // exactly where it always did instead of in the wizard. Gated on
-  // provenance "builtin": an explicitly-configured or healed default — even
-  // a broken one — is never touched here.
+  // back to `personas.find((p) => p.name === defaultPersona) ?? personas[0]` —
+  // with no default configured anywhere that resolves against the builtin
+  // "phantom", so a host that actually had a "phantom" persona opened THAT,
+  // not the alphabetically first. Reproduce the expression exactly, then make
+  // it explicit once, so an upgraded working host opens where it always did
+  // instead of in the wizard. Gated on provenance "builtin": an
+  // explicitly-configured or healed default — even a broken one — is never
+  // touched here.
   if (
     personas.length > 0 &&
     (await defaultPersonaProvenance(host)) === "builtin"
   ) {
-    await adoptLegacyDefaultPersona(host, personas[0]!.name);
+    // Best-effort: an unwritable config.toml must degrade to the
+    // pre-migration screen, never abort TUI launch on the hosts this
+    // migration exists to rescue.
+    try {
+      const legacyFallback =
+        personas.find((p) => p.name === host.defaultPersona) ?? personas[0]!;
+      await adoptLegacyDefaultPersona(host, legacyFallback.name);
+    } catch (err) {
+      log.warn(
+        "legacy install: default-persona adoption failed; continuing unmigrated",
+        { error: String(err) },
+      );
+    }
   }
   // Same legacy contract for autostart: a host with autostart_personas but
   // no [autostart_modes] records is a pre-#509 install — backfill the mode
-  // records from real host state once, so the records-only display shows
-  // Boot where boot is real instead of misreporting it as Login.
-  await migrateLegacyAutostartModes(host);
+  // records once. Best-effort for the same reason as the adoption above; a
+  // partial backfill is safe by construction (probes run before writes, and
+  // the records it manages to write are conservative).
+  try {
+    await migrateLegacyAutostartModes(host);
+  } catch (err) {
+    log.warn(
+      "legacy install: autostart_modes backfill failed; continuing without records",
+      { error: String(err) },
+    );
+  }
   let target = personas.find((p) => p.name === host.defaultPersona);
   if (!target) {
     // Broken default — e.g. a stale state.json entry pointing at a persona

@@ -297,31 +297,34 @@ export async function adoptLegacyDefaultPersona(
 }
 
 /**
- * Legacy-install migration: backfill `[autostart_modes]` from real host state
- * when the host has `autostart_personas` but NO mode records at all — the
- * exact signature of a pre-#509 install, where list membership meant "boot
- * via linger/LaunchDaemon/boot task".
- *
- * Without this, the #509 records-only display shows every legacy Linux boot
- * persona as Login (the Linux probe deliberately returns false — an enabled
- * unit is the installer's default, not a Boot choice), so an operator opening
- * the TUI sees their boot setup misreported and a teardown armed against the
- * wrong state on the next change.
+ * Legacy-install migration: backfill `[autostart_modes]` when the host has
+ * `autostart_personas` but NO mode records at all — the exact signature of a
+ * pre-#509 install, where list membership meant "boot via linger/LaunchDaemon/
+ * boot task".
  *
  * One-time by construction: the gate is "no records exist", and this write
  * CREATES records — from then on the table is the sole source of truth and
  * this migration is a no-op. Nothing here disables anything: boot stays boot,
- * login stays login; the migration only makes existing reality VISIBLE.
+ * login stays login.
  *
- * Signal per platform: Linux — linger on (pre-#509 boot ran through linger;
- * linger off cannot boot, so login is the only truthful record). macOS/Windows
- * — the same ours-only probes the display uses (plists / per-persona markers).
+ * Signal per platform: Linux — ALWAYS `login`. A pre-#509 host cannot be
+ * distinguished from a standard installer host: linger is an ordinary
+ * systemd --user prerequisite enabled unconditionally by the installer
+ * (cli/init.ts), so a linger probe is the same provenance-free bit #509
+ * rejected — a `boot` record written from it would arm teardown against
+ * installer default state. Failing toward `login` (display) and doing
+ * nothing (teardown) beats a record that lies; an operator who really
+ * boots sets Boot once in the TUI. macOS/Windows — the same ours-only
+ * probes the display uses (dev.phantombot.* plists / per-persona markers);
+ * those DO carry provenance, so they may still produce `boot`.
+ *
+ * All probes run BEFORE any write: a throw can then only happen in the
+ * write loop, and a partial write leaves earlier personas with valid
+ * (conservative) records rather than an inconsistent mix.
  */
 export async function migrateLegacyAutostartModes(
   config: Config,
   opts?: {
-    /** Test seam: overrides the Linux linger probe. */
-    lingerProbe?: () => Promise<boolean>;
     /** Test seam: overrides the per-platform boot probe. */
     bootProbe?: (name: string) => Promise<boolean>;
   },
@@ -333,22 +336,24 @@ export async function migrateLegacyAutostartModes(
   const platform = currentPlatform();
   const bootProbe = (name: string): Promise<boolean> => {
     if (opts?.bootProbe) return opts.bootProbe(name);
-    if (platform === "linux" && opts?.lingerProbe) return opts.lingerProbe();
-    return import("./autostartBoot.ts").then(async (m) =>
-      platform === "linux"
-        ? m.probeLingerLinux()
-        : m.probeBootState(name, {}),
-    );
+    return import("./autostartBoot.ts").then((m) => m.probeBootState(name, {}));
   };
-  const recorded: Record<string, "login" | "boot"> = {};
+  // Probe everything first — probing never writes, so a probe failure here
+  // leaves the config untouched and the migration can simply be retried.
+  const modes: Record<string, "login" | "boot"> = {};
   for (const name of config.autostartPersonas) {
-    const mode = (await bootProbe(name)) ? "boot" : "login";
+    modes[name] =
+      platform === "linux" ? "login" : (await bootProbe(name)) ? "boot" : "login";
+  }
+  const recorded: Record<string, "login" | "boot"> = {};
+  for (const [name, mode] of Object.entries(modes)) {
     await writeAutostartMode(config, name, mode);
     recorded[name] = mode;
   }
-  log.warn("legacy install: backfilled [autostart_modes] from host state", {
+  log.warn("legacy install: backfilled [autostart_modes]", {
     ...recorded,
-    reason: "pre-#509 autostart_personas had no mode records; made real boot state visible",
+    reason:
+      "pre-#509 autostart_personas had no mode records; linux is always login (linger is an installer default, not a Boot choice), mac/win from ours-only probes",
   });
 }
 

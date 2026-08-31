@@ -9,7 +9,8 @@
  *
  * The migration makes the old fallback explicit ONCE: personas on disk +
  * provenance "builtin" (env > state.json > config.toml all silent) →
- * `default_persona = personas[0]` written to config.toml, and the resolver
+ * `default_persona` = the pre-#509 fallback choice (resolved default, else
+ * personas[0]) written to config.toml, and the resolver
  * proceeds exactly as if the operator had configured it.
  *
  * Pinned guarantees:
@@ -125,6 +126,25 @@ describe("resolveOpeningScreen — legacy default migration", () => {
     expect(await readFile(configPath, "utf8")).not.toContain("default_persona");
   });
 
+  test("adoption matches the pre-#509 fallback exactly: a 'phantom' persona wins over personas[0]", async () => {
+    // The unconfigured defaultPersona resolves to the builtin "phantom"
+    // (config.ts), and the old fallback was
+    // `personas.find((p) => p.name === defaultPersona) ?? personas[0]` — so a
+    // host with both personas opened "phantom", not the alphabetically first.
+    await makePersona("alpha");
+    await makePersona("phantom");
+    await writeFile(configPath, "", "utf8");
+
+    const opening = await resolveOpeningScreen();
+
+    expect(opening.screen === "chat" || opening.screen === "configure").toBe(
+      true,
+    );
+    expect(opening.persona).toBe("phantom");
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain('default_persona = "phantom"');
+  });
+
   test("migration is one-shot: second run changes nothing", async () => {
     await makePersona("lena");
     await writeFile(configPath, "", "utf8");
@@ -145,7 +165,7 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
   } = require("../src/lib/personaDefault.ts") as typeof import("../src/lib/personaDefault.ts");
   const { loadConfig } = require("../src/config.ts") as typeof import("../src/config.ts");
 
-  test("legacy signature (autostart_personas, no records) → backfilled per probe", async () => {
+  test("legacy signature (autostart_personas, no records) → backfilled per platform", async () => {
     await writeFile(
       configPath,
       'autostart_personas = ["lena", "kai"]\n',
@@ -153,15 +173,48 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     );
     const config = await loadConfig();
 
+    const { currentPlatform } = await import("../src/lib/platform.ts");
     await migrateLegacyAutostartModes(config, {
+      // Must never be consulted on Linux (see the Linux pin below).
       bootProbe: async (name: string) => name === "lena",
     });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[autostart_modes]");
-    expect(toml).toContain('lena = "boot"');
-    expect(toml).toContain('kai = "login"');
-    expect(config.autostartModes).toEqual({ lena: "boot", kai: "login" });
+    if (currentPlatform() === "linux") {
+      // Linux never probes: linger is an installer default, not a Boot
+      // choice, so the record is ALWAYS login.
+      expect(toml).toContain('lena = "login"');
+      expect(toml).toContain('kai = "login"');
+      expect(config.autostartModes).toEqual({ lena: "login", kai: "login" });
+    } else {
+      expect(toml).toContain('lena = "boot"');
+      expect(toml).toContain('kai = "login"');
+      expect(config.autostartModes).toEqual({ lena: "boot", kai: "login" });
+    }
+  });
+
+  test("linux: record is login unconditionally — no probe is ever consulted", async () => {
+    const { currentPlatform } = await import("../src/lib/platform.ts");
+    if (currentPlatform() !== "linux") return; // pinned by the linux CI job
+    await writeFile(
+      configPath,
+      // Host with linger on and the unit enabled — the standard-installer
+      // state that must NOT produce a boot record (teardown authority).
+      'autostart_personas = ["lena"]\n',
+      "utf8",
+    );
+    const config = await loadConfig();
+
+    await migrateLegacyAutostartModes(config, {
+      bootProbe: async () => {
+        throw new Error("linux backfill must never probe boot state");
+      },
+    });
+
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain('lena = "login"');
+    expect(toml).not.toContain('lena = "boot"');
   });
 
   test("any existing records → no-op (never overwrites an operator choice)", async () => {
@@ -203,8 +256,9 @@ describe("resolveOpeningScreen — legacy autostart backfill", () => {
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("default_persona");
     expect(toml).toContain("[autostart_modes]");
-    // The exact mode is host-dependent by design (real boot state); both
-    // outcomes must produce a valid record, never leave the table missing.
+    // Linux always records login (conservative, never arms teardown);
+    // mac/win record from ours-only probes. Either way a valid record,
+    // never a missing table.
     expect(toml).toMatch(/lena = "(boot|login)"/);
   });
 });
