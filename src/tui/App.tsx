@@ -742,25 +742,7 @@ export function App(props: AppProps): React.ReactElement {
               masked: true,
             });
           let outcome: { status: string; error?: string };
-          const spawnRunner = {
-            run: (argv: string[], opts?: { input?: string }) =>
-              new Promise<{ exit: number; stdout: string; stderr: string }>((resolve) => {
-                const child = Bun.spawn(argv, {
-                  stdin: opts?.input !== undefined ? "pipe" : "ignore",
-                  stdout: "pipe",
-                  stderr: "pipe",
-                });
-                if (opts?.input !== undefined && child.stdin) {
-                  child.stdin.write(opts.input);
-                  child.stdin.end();
-                }
-                void Promise.all([
-                  new Response(child.stdout).text(),
-                  new Response(child.stderr).text(),
-                  child.exited,
-                ]).then(([stdout, stderr, exit]) => resolve({ exit, stdout, stderr }));
-              }),
-          };
+          const spawnRunner = boot.bunSpawnRunner();
           if (platform !== "windows" && (await boot.probeSudoPasswordless(spawnRunner))) {
             // Passwordless sudo: Boot needs no password — skip the prompt
             // and the vault write entirely (nothing secret involved).
@@ -857,10 +839,100 @@ export function App(props: AppProps): React.ReactElement {
         }
       }
 
-      // Off / Login: no credentials, no privilege setup.
+      // Off / Login: no credentials for the persona change itself — but a
+      // BOOT-level persona leaving needs platform teardown (Caveat 2).
+      // Linux/macOS hooks (linger / LaunchDaemon) are host-level, so they're
+      // torn down only when the LAST boot-level persona leaves; Windows
+      // tasks are per-persona and torn down / downgraded individually.
       const { loadConfigForPersona } = await import("../config.ts");
       const { config } = await loadConfigForPersona(target.name);
+      const boot = await import("../lib/autostartBoot.ts");
       const { applyAutostartChoice } = await import("./actions.ts");
+
+      const wasBoot = target.autostart && target.autostartMode === "boot";
+      let teardownNote = "";
+      if (wasBoot) {
+        const platform = (await import("../lib/platform.ts")).currentPlatform();
+        const runner = boot.bunSpawnRunner();
+        const promptSudo = async (): Promise<string | undefined> =>
+          askValue({
+            title: "sudo password",
+            description: "Needed once to remove the boot start — never stored.",
+            masked: true,
+          });
+        if (platform === "windows") {
+          // Tasks are per-persona: Off deletes this persona's task set
+          // (ownership-checked), Login downgrades it to interactive so the
+          // heartbeat self-heal stops healing password-mode tasks back.
+          const t = choice === "off"
+            ? await boot.teardownBootWindows(target.name, {
+                out: { write: () => {} },
+                err: { write: () => {} },
+              })
+            : await boot.registerLoginTasksWindows(process.execPath, target.name, {
+                out: { write: () => {} },
+                err: { write: () => {} },
+              });
+          if (t.status !== "ok") {
+            setNotice(`boot teardown failed: ${t.error} — nothing changed`);
+            return;
+          }
+          teardownNote = choice === "off" ? " — boot tasks removed" : " — boot tasks moved to login";
+        } else {
+          // Host-level hook: tear down only when NO remaining persona is
+          // boot-level (recorded, or — for inherited setups — probed). The
+          // target's own record is stripped: post-change it is login/off,
+          // never boot, and its stale boot record must not mask teardown.
+          const postList = (config.autostartPersonas ?? []).filter(
+            (p) => p !== target.name,
+          );
+          const postModes = { ...(config.autostartModes ?? {}) };
+          delete postModes[target.name];
+          const needed = await boot.bootHookStillNeeded(
+            postList,
+            postModes,
+            (p) => boot.probeBootState(p),
+          );
+          if (!needed) {
+            const user = (await import("node:os")).userInfo().username;
+            const passwordless = platform === "linux"
+              ? await boot.probeSudoPasswordless(runner)
+              : false;
+            let outcome: { status: string; error?: string };
+            for (;;) {
+              outcome = platform === "linux"
+                ? passwordless
+                  ? await boot.disableBootLinuxPasswordless(user, runner)
+                  : await (async () => {
+                      const pw = await promptSudo();
+                      if (!pw) return { status: "cancelled" };
+                      return boot.disableBootLinux(pw, user, runner);
+                    })()
+                : passwordless
+                  ? await boot.teardownBootMacPasswordless(runner)
+                  : await (async () => {
+                      const pw = await promptSudo();
+                      if (!pw) return { status: "cancelled" };
+                      return boot.teardownBootMac(pw, runner);
+                    })();
+              if (outcome.status === "ok") break;
+              if (outcome.status === "invalid-credential") {
+                setNotice(
+                  `${outcome.error ?? "the password was rejected"} — try again, or esc to cancel`,
+                );
+                continue;
+              }
+              const msg = outcome.status === "cancelled"
+                ? "autostart change cancelled — boot start stays in place"
+                : `boot teardown failed: ${outcome.error} — nothing changed`;
+              setNotice(msg);
+              return;
+            }
+            teardownNote = " — boot start removed";
+          }
+        }
+      }
+
       const r = await applyAutostartChoice({
         config,
         persona: target.name,
@@ -869,8 +941,8 @@ export function App(props: AppProps): React.ReactElement {
       setNotice(
         r.ok
           ? choice === "off"
-            ? `autostart: off — ${target.name} no longer starts with the daemon`
-            : "autostart: login"
+            ? `autostart: off — ${target.name} no longer starts with the daemon${teardownNote}`
+            : `autostart: login${teardownNote}`
           : `failed: ${r.error}`,
       );
       await refresh();

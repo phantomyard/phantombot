@@ -33,6 +33,75 @@
  *     nothing is silently reused across a default move.
  */
 
+/**
+ * Where boot-level state lives per platform (test seams override the dirs):
+ *   - Linux   → /var/lib/systemd/linger/<user>   (host-level; one flag)
+ *   - macOS   → /Library/LaunchDaemons/dev.phantombot.*.plist
+ *               (host-level; our tooling doesn't create these YET, but the
+ *               probe detects a daemon set up by any earlier install path)
+ *   - Windows → per-persona logon marker (windows-logon-<persona>.json):
+ *               mode "password" IS boot level — the task runs logged-off.
+ */
+export interface BootStatePaths {
+  lingerDir?: string;
+  daemonDir?: string;
+  /** Test seam — override the platform branch (default: real host). */
+  platform?: "linux" | "darwin" | "windows" | "unsupported";
+  /** Test seam — override the Windows logon-marker reader. */
+  logonReader?: (persona: string) => Promise<{ mode: string }>;
+}
+
+/**
+ * Read-only boot-state probe — does the platform ACTUALLY start this
+ * persona (or, on Linux/macOS, the host) without a login? No sudo, no
+ * elevation, no subprocess on Linux/macOS (pure fs checks); on Windows it
+ * reads the persona's persisted logon marker. This is what lets the
+ * Autostart selector DISPLAY a pre-existing boot setup (linger enabled by
+ * `phantombot init`, a password-mode task from `phantombot install`) as
+ * Boot instead of silently mislabelling it Login.
+ */
+export async function probeBootState(
+  persona: string,
+  opts?: BootStatePaths,
+): Promise<boolean> {
+  const { existsSync, readdirSync } = await import("node:fs");
+  const { currentPlatform } = await import("./platform.ts");
+  const platform = opts?.platform ?? currentPlatform();
+  try {
+    if (platform === "linux") {
+      const user = (await import("node:os")).userInfo().username;
+      return existsSync(
+        joinPath(opts?.lingerDir ?? "/var/lib/systemd/linger", user),
+      );
+    }
+    if (platform === "darwin") {
+      const dir = opts?.daemonDir ?? "/Library/LaunchDaemons";
+      if (!existsSync(dir)) return false;
+      return readdirSync(dir).some((f) => f.startsWith("dev.phantombot.") && f.endsWith(".plist"));
+    }
+    if (platform === "windows") {
+      // The per-persona marker is the same source the heartbeat self-heal
+      // reads — mode "password" means the task set runs logged-off (boot).
+      const logon = opts?.logonReader
+        ? await opts.logonReader(persona)
+        : await (async () => {
+            const { readTaskLogon } = await import("./taskScheduler.ts");
+            return readTaskLogon(persona);
+          })();
+      return logon.mode === "password";
+    }
+    return false;
+  } catch {
+    return false; // unreadable state is not boot state — fail closed to Login
+  }
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir.endsWith("/") || dir.endsWith("\\")
+    ? `${dir}${name}`
+    : `${dir}/${name}`;
+}
+
 /** How a platform operation turned out. */
 export type BootSetupOutcome =
   | { status: "ok" }
@@ -51,6 +120,33 @@ export interface SpawnRunner {
 }
 
 const SUDO = "sudo";
+
+/**
+ * The real subprocess runner (Bun.spawn) as a SpawnRunner. Lives here so
+ * every sudo/task touchpoint in the TUI shares one implementation and the
+ * tests inject a fake instead.
+ */
+export function bunSpawnRunner(): SpawnRunner {
+  return {
+    run: (argv, opts) =>
+      new Promise((resolve) => {
+        const child = Bun.spawn(argv, {
+          stdin: opts?.input !== undefined ? "pipe" : "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (opts?.input !== undefined && child.stdin) {
+          child.stdin.write(opts.input);
+          child.stdin.end();
+        }
+        void Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]).then(([stdout, stderr, exit]) => resolve({ exit, stdout, stderr }));
+      }),
+  };
+}
 
 /**
  * Probe whether sudo NEEDS NO PASSWORD right now (`sudo -n true`). Many
@@ -104,6 +200,201 @@ export async function validateSudoPassword(
       : "failed",
     error: err || `sudo exited ${r.exit}`,
   };
+}
+
+/**
+ * Linux: disable linger (the Boot teardown). Passwordless path — same
+ * fail-closed doctrine as enable: any non-zero exit is "failed".
+ */
+export async function disableBootLinuxPasswordless(
+  user: string,
+  runner: SpawnRunner,
+): Promise<BootSetupOutcome> {
+  const r = await runner.run([SUDO, "-n", "loginctl", "disable-linger", user]);
+  if (r.exit === 0) return { status: "ok" };
+  return {
+    status: "failed",
+    error: (r.stderr || r.stdout).trim() || `loginctl disable-linger exited ${r.exit}`,
+  };
+}
+
+/**
+ * Linux: disable linger with a validated password. Validates FIRST (-k, no
+ * timestamp cached) so a wrong password never half-applies a teardown.
+ */
+export async function disableBootLinux(
+  password: string,
+  user: string,
+  runner: SpawnRunner,
+): Promise<BootSetupOutcome> {
+  const v = await validateSudoPassword(password, runner);
+  if (v.status !== "ok") return v;
+  const r = await runner.run(
+    [SUDO, "-S", "-k", "loginctl", "disable-linger", user],
+    { input: `${password}\n` },
+  );
+  if (r.exit === 0) return { status: "ok" };
+  const err = (r.stderr || r.stdout).trim();
+  return {
+    status: err.toLowerCase().includes("incorrect password")
+      ? "invalid-credential"
+      : "failed",
+    error: err || `loginctl disable-linger exited ${r.exit}`,
+  };
+}
+
+/** Our daemon plists in /Library/LaunchDaemons (macOS boot state). */
+async function macDaemonPlists(daemonDir?: string): Promise<string[]> {
+  const { existsSync, readdirSync } = await import("node:fs");
+  const dir = daemonDir ?? "/Library/LaunchDaemons";
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.startsWith("dev.phantombot.") && f.endsWith(".plist"))
+    .map((f) => joinPath(dir, f));
+}
+
+/**
+ * macOS: bootout + remove our /Library/LaunchDaemons plists. Passwordless
+ * path. Only touches plists whose name starts with our label prefix — a
+ * foreign daemon is never unloaded.
+ */
+export async function teardownBootMacPasswordless(
+  runner: SpawnRunner,
+  opts?: BootStatePaths,
+): Promise<BootSetupOutcome> {
+  const plists = await macDaemonPlists(opts?.daemonDir);
+  if (plists.length === 0) return { status: "ok" }; // nothing of ours to tear down
+  for (const plist of plists) {
+    await runner.run([SUDO, "-n", "launchctl", "bootout", "system", plist]);
+    const r = await runner.run([SUDO, "-n", "rm", "-f", plist]);
+    if (r.exit !== 0) {
+      return {
+        status: "failed",
+        error: (r.stderr || r.stdout).trim() || `removing ${plist} exited ${r.exit}`,
+      };
+    }
+  }
+  return { status: "ok" };
+}
+
+/**
+ * macOS: teardown with a validated password — validate first (-k), then run
+ * the bootout+remove sequence with -S -k per command.
+ */
+export async function teardownBootMac(
+  password: string,
+  runner: SpawnRunner,
+  opts?: BootStatePaths,
+): Promise<BootSetupOutcome> {
+  const v = await validateSudoPassword(password, runner);
+  if (v.status !== "ok") return v;
+  const plists = await macDaemonPlists(opts?.daemonDir);
+  if (plists.length === 0) return { status: "ok" };
+  for (const plist of plists) {
+    await runner.run([SUDO, "-S", "-k", "launchctl", "bootout", "system", plist], {
+      input: `${password}\n`,
+    });
+    const r = await runner.run([SUDO, "-S", "-k", "rm", "-f", plist], {
+      input: `${password}\n`,
+    });
+    if (r.exit !== 0) {
+      const err = (r.stderr || r.stdout).trim();
+      return {
+        status: err.toLowerCase().includes("incorrect password")
+          ? "invalid-credential"
+          : "failed",
+        error: err || `removing ${plist} exited ${r.exit}`,
+      };
+    }
+  }
+  return { status: "ok" };
+}
+
+/**
+ * Windows: re-register `persona`'s task set in INTERACTIVE (login) mode —
+ * the downgrade half of a Boot → Login change. Reuses the exact install
+ * machinery so the marker, launcher and task XML all stay consistent (the
+ * heartbeat self-heal would otherwise keep healing password-mode tasks).
+ * No credential needed.
+ */
+export async function registerLoginTasksWindows(
+  binPath: string,
+  persona: string,
+  params: WindowsBootParams,
+): Promise<BootSetupOutcome> {
+  try {
+    const { installPhantombotTasks, BunSchtasksRunner } = await import("./taskScheduler.ts");
+    const result = await installPhantombotTasks({
+      binPath,
+      persona,
+      logon: { mode: "interactive" as const },
+      out: params.out,
+      err: params.err,
+      ...(params.xmlDir ? { xmlDir: params.xmlDir } : {}),
+      ...(params.sid ? { sid: params.sid } : {}),
+      ...(params.accountName ? { accountName: params.accountName } : {}),
+      schtasks: (params.schtasks as never) ?? new BunSchtasksRunner(),
+    });
+    return result.installed
+      ? { status: "ok" }
+      : { status: "failed", error: "task registration did not complete" };
+  } catch (e) {
+    return { status: "failed", error: (e as Error).message };
+  }
+}
+
+export interface WindowsTeardownParams {
+  schtasks?: unknown;
+  sid?: string;
+  accountName?: string;
+  out: { write(s: string): void };
+  err: { write(s: string): void };
+}
+
+/**
+ * Windows: delete `persona`'s task set (password-mode = boot level). Uses
+ * the same ownership-checked uninstall `phantombot uninstall` uses — a task
+ * owned by another Windows account is never touched.
+ */
+export async function teardownBootWindows(
+  persona: string,
+  params: WindowsTeardownParams,
+): Promise<BootSetupOutcome> {
+  try {
+    const mod = await import("./taskScheduler.ts");
+    await mod.uninstallPhantombotTasks({
+      persona,
+      ...(params.sid ? { sid: params.sid } : {}),
+      ...(params.accountName ? { accountName: params.accountName } : {}),
+      schtasks:
+        (params.schtasks as never) ?? new mod.BunSchtasksRunner(),
+      out: params.out,
+      err: params.err,
+    });
+    return { status: "ok" };
+  } catch (e) {
+    return { status: "failed", error: (e as Error).message };
+  }
+}
+
+/**
+ * After a Boot persona leaves (Off/Login), does ANY remaining autostart
+ * persona still need the host-level boot hook (linger / LaunchDaemon)?
+ * A member needs it when its EFFECTIVE mode is boot: recorded, or — for
+ * inherited setups with no record — probed. Windows tasks are per-persona
+ * and torn down individually, so the caller only consults this for
+ * Linux/macOS.
+ */
+export async function bootHookStillNeeded(
+  list: string[],
+  recorded: Record<string, "login" | "boot"> | undefined,
+  probe: (persona: string) => Promise<boolean>,
+): Promise<boolean> {
+  for (const persona of list) {
+    if (recorded?.[persona] === "boot") return true;
+    if (recorded?.[persona] === undefined && (await probe(persona))) return true;
+  }
+  return false;
 }
 
 /**
@@ -186,6 +477,9 @@ export interface WindowsBootParams {
   /** Override the transient XML import dir (tests keep writes in a tmpdir). */
   xmlDir?: string;
   schtasks?: unknown;
+  /** Test seams — task-principal identity (Windows resolves these live). */
+  sid?: string;
+  accountName?: string;
   out: { write(s: string): void };
   err: { write(s: string): void };
 }
@@ -216,6 +510,8 @@ export async function enableBootWindows(
       out: params.out,
       err: params.err,
       ...(params.xmlDir ? { xmlDir: params.xmlDir } : {}),
+      ...(params.sid ? { sid: params.sid } : {}),
+      ...(params.accountName ? { accountName: params.accountName } : {}),
     };
     const result = await installPhantombotTasks({
       ...opts,

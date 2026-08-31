@@ -413,6 +413,8 @@ export async function personaSnapshot(
   config: Config,
   host: Config,
   name: string,
+  /** Test seam for the boot-state probe (Caveat-1 display fix). */
+  probeBoot?: (persona: string) => Promise<boolean>,
 ): Promise<PersonaSnapshot> {
   const dir = personaDir(config, name);
   // The chain the RUNTIME would use — the single source of truth in
@@ -475,12 +477,27 @@ export async function personaSnapshot(
       }
     : undefined;
 
+  // Autostart mode display (Caveat-1 fix): the recorded [autostart_modes]
+  // value is the source of truth, but an INHERITED boot setup (linger
+  // enabled by `phantombot init`, a password-mode task from an old install)
+  // predates the record — for a persona on the list with no record, probe
+  // the platform's actual boot state rather than mislabelling it Login.
+  // Pure fs/JSON reads; no sudo, no elevation, no subprocess on Linux/macOS.
+  const onList = (host.autostartPersonas ?? []).includes(name);
+  let autostartMode = host.autostartModes?.[name];
+  if (autostartMode === undefined && onList) {
+    const probe =
+      probeBoot ??
+      ((p: string) => import("../lib/autostartBoot.ts").then((m) => m.probeBootState(p)));
+    autostartMode = (await probe(name)) ? "boot" : "login";
+  }
+
   return {
     name,
     dir,
     isDefault: host.defaultPersona === name,
-    autostart: (host.autostartPersonas ?? []).includes(name),
-    autostartMode: host.autostartModes?.[name] ?? "login",
+    autostart: onList,
+    autostartMode: autostartMode ?? "login",
     chain,
     brainConfigured,
     resolvedHarness,

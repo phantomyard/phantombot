@@ -80,3 +80,55 @@ describe("personaSnapshot brain badge source of truth", () => {
     expect(snap.completeness.complete).toBe(false);
   });
 });
+
+describe("personaSnapshot autostart mode resolution (Caveat-1)", () => {
+  test("recorded [autostart_modes] wins over the probe", async () => {
+    const personasDir = setup(`
+default_persona = "alice"
+autostart_personas = ["alice", "bob"]
+[autostart_modes]
+alice = "login"
+`);
+    void personasDir;
+    const { config, host } = await loadConfigForPersona("alice");
+    const snap = await personaSnapshot(config, host, "alice", async () => true);
+    expect(snap.autostart).toBe(true);
+    expect(snap.autostartMode).toBe("login");
+  });
+
+  test("no record + probed boot state (inherited linger) → boot", async () => {
+    setup(`
+default_persona = "alice"
+autostart_personas = ["alice", "bob"]
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    const snap = await personaSnapshot(config, host, "alice", async () => true);
+    expect(snap.autostartMode).toBe("boot");
+  });
+
+  test("no record + probe says not boot → login", async () => {
+    setup(`
+default_persona = "alice"
+autostart_personas = ["alice"]
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    const snap = await personaSnapshot(config, host, "alice", async () => false);
+    expect(snap.autostartMode).toBe("login");
+  });
+
+  test("not on the list → off, probe never consulted", async () => {
+    setup(`
+default_persona = "alice"
+autostart_personas = ["bob"]
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    let probed = 0;
+    const snap = await personaSnapshot(config, host, "alice", async () => {
+      probed++;
+      return true;
+    });
+    expect(snap.autostart).toBe(false);
+    expect(snap.autostartMode).toBe("login");
+    expect(probed).toBe(0);
+  });
+});
