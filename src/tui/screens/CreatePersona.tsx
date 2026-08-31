@@ -1,21 +1,17 @@
 /**
- * Screen 1 — first run, the installer wizard.
+ * The New Persona create flow — three questions, nothing else.
  *
- * Three questions, identical to the New Persona → Create flow
- * (CreatePersona.tsx): name → one-line identity → tone. Nothing operational is
- * asked here — the persona writes no brain/channel/memory/voice overrides, so
- * it inherits the host chain and lands straight in its CONFIGURE screen, where
- * the red `required` Brain row walks the user through the rest. The old
- * six-step installer (brain/channel/memory/voice) was cut: those are Configure
- * questions, and a first-run user got an interrogation instead of a persona.
+ * The six-step installer wizard (Wizard.tsx) exists for FIRST RUN, where the
+ * daemon needs a working brain before it can serve anyone. Adding a phantom
+ * later needs none of that ceremony: identity is authored in three answers,
+ * and everything operational — brain, channels, memory, voice — lives in the
+ * Configure screen the flow lands on. A persona created here writes no local
+ * harness overrides, so it simply inherits the host chain until Configure
+ * says otherwise.
  *
- * It opens when no personas exist, and RESUMES at the identity question when
- * an existing default persona is missing its identity (the one gap the wizard
- * itself can fix — see `resolveOpeningScreen`). It ends by opening CONFIGURE
- * for the phantom it just built.
+ *   name → one-line identity → tone → skills → your name
  *
- * `^q` quits via the app-global handler; on genuine first run the wizard IS
- * the app, and from the table esc backs out one question at a time.
+ * `esc` backs out one question at a time; esc on the name leaves the flow.
  */
 
 import React, { useState } from "react";
@@ -35,54 +31,50 @@ import {
 import { AskScreen, type AskRequest } from "./Ask.tsx";
 import { ChooseScreen, type ChooseRequest } from "./Choose.tsx";
 import { MultiChooseScreen, type MultiChooseRequest } from "./MultiChoose.tsx";
-import { DEFAULT_IDENTITY, TONE_CHOICES } from "./CreatePersona.tsx";
-import type { WizardStep } from "../../lib/personaComplete.ts";
 
-export interface WizardAnswers {
+export interface CreatePersonaAnswers {
   name: string;
-  /**
-   * The installer asks only name/identity/tone; brain/channel/memory/voice
-   * stay undefined so the persona inherits the host chain and Configure
-   * finishes the setup (the same shape the three-question create flow sends).
-   */
-  brain?: string;
-  channel?: string;
-  memory?: string;
-  voice?: string;
-  /** One-line "who is this" for IDENTITY.md. */
   identity: string;
-  /** Default tone. */
   tone: PersonaTone;
   /** What the phantom calls its principal — undefined when skipped. */
   owner?: string;
   /** Expertise rows picked from the multi-select; empty when skipped. */
   expertise?: string[];
-  /** False from this screen; `applyPersona` adopts the first phantom as default. */
-  makeDefault: boolean;
 }
 
-export function WizardScreen(props: {
-  /** Resume point. "name" for a brand new install; "identity" for a resume. */
-  startAt?: WizardStep;
-  /** Pre-filled answers — carries the persona name on a resume. */
-  initial?: Partial<WizardAnswers>;
-  /** Existing directory names, used for inline validation before any write. */
-  existingNames?: readonly string[];
-  /**
-   * Where esc goes from the FIRST step. Absent on genuine first run, where
-   * there is no screen behind the wizard to return to.
-   */
-  onBack?: () => void;
-  onFinish: (answers: WizardAnswers) => void;
+/**
+ * The five tones `personaTemplate.ts` actually understands. The hints are
+ * compressed from TONE_GUIDANCE there — one phrase per row, not the full
+ * guidance text, so the picker stays scannable.
+ */
+export const TONE_CHOICES = [
+  { value: "blunt", label: "Blunt", hint: "concise, direct, no fluff" },
+  { value: "professional", label: "Professional", hint: "measured and polished" },
+  { value: "casual", label: "Casual", hint: "friendly, conversational" },
+  { value: "warm", label: "Warm", hint: "supportive, empathetic" },
+  { value: "playful", label: "Playful", hint: "witty, light" },
+] as const;
+
+type Step = "name" | "identity" | "tone" | "skills" | "owner";
+
+/**
+ * The generic identity pre-filled into the identity question — deliberately
+ * plain, deliberately editable: a user who just wants a working phantom
+ * accepts it as-is, a user with an opinion overwrites it. Shared with the
+ * first-run wizard, which asks the same three questions.
+ */
+export const DEFAULT_IDENTITY = "a helpful, no-nonsense assistant";
+
+export function CreatePersonaScreen(props: {
+  existingNames: readonly string[];
+  onCreate: (answers: CreatePersonaAnswers) => void;
+  onBack: () => void;
 }): React.ReactElement {
-  const resumed = props.startAt === "identity";
-  const [step, setStep] = useState<
-    "name" | "identity" | "tone" | "skills" | "owner"
-  >(resumed ? "identity" : "name");
-  const [name, setName] = useState(props.initial?.name ?? "");
+  const [step, setStep] = useState<Step>("name");
+  const [name, setName] = useState("");
   const [identity, setIdentity] = useState("");
-  const [tone, setTone] = useState<PersonaTone>("professional");
   const [owner, setOwner] = useState("");
+  const [tone, setTone] = useState<PersonaTone>("professional");
   const [expertise, setExpertise] = useState<string[]>([]);
   // Remounts the name AskScreen after a rejected answer, so the user edits
   // what they typed instead of staring at a box that silently ate it.
@@ -100,28 +92,19 @@ export function WizardScreen(props: {
       <AskScreen
         key={attempt}
         request={request}
-        // Genuine first run has no screen behind the name question.
-        noBack={!props.onBack}
         onAnswer={(value) => {
-          if (value === undefined) {
-            if (props.onBack) props.onBack();
-            return;
-          }
-          const trimmed = value.trim();
-          if (!validPersonaName(trimmed)) {
+          if (value === undefined) return props.onBack();
+          if (!validPersonaName(value)) {
             setError(
               "invalid name — lowercase letters, digits, '-' or '_', starting with a letter or digit",
             );
             return setAttempt((n) => n + 1);
           }
-          if (
-            trimmed !== props.initial?.name?.trim() &&
-            props.existingNames?.includes(trimmed)
-          ) {
-            setError(`'${trimmed}' already exists — pick another name`);
+          if (props.existingNames.includes(value)) {
+            setError(`'${value}' already exists — pick another name`);
             return setAttempt((n) => n + 1);
           }
-          setName(trimmed);
+          setName(value);
           setError(undefined);
           setStep("identity");
         }}
@@ -133,23 +116,14 @@ export function WizardScreen(props: {
     const request: AskRequest = {
       title: "One-line identity",
       description: identityDescription(name),
-      hint: `You are ${name || "…"}, ___`,
+      hint: `You are ${name}, ___`,
       initial: identity || DEFAULT_IDENTITY,
     };
     return (
       <AskScreen
         request={request}
-        // A resume has no name question behind it — the persona already
-        // exists, and renaming it here would create a different phantom.
-        noBack={resumed}
         onAnswer={(value) => {
-          if (value === undefined) {
-            // A resume has no name question behind it — the persona already
-            // exists, and renaming it here would create a different phantom.
-            if (resumed || !name) return;
-            setStep("name");
-            return;
-          }
+          if (value === undefined) return setStep("name");
           setIdentity(value);
           setStep("tone");
         }}
@@ -207,13 +181,12 @@ export function WizardScreen(props: {
       onAnswer={(value) => {
         if (value === undefined) return setStep("skills");
         setOwner(value);
-        props.onFinish({
+        props.onCreate({
           name,
           identity,
-          tone,
+          tone: tone as PersonaTone,
           owner: value || undefined,
           expertise,
-          makeDefault: false,
         });
       }}
     />

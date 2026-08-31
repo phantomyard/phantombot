@@ -49,6 +49,7 @@ function harness(over: {
   choose?: Array<string | undefined>;
   search?: Array<string | undefined>;
   value?: Array<string | undefined>;
+  probeProviderKey?: BrainDeps["probeProviderKey"];
 }): Harness {
   const applied = {
     chains: [] as string[][],
@@ -89,6 +90,7 @@ function harness(over: {
     piBin: over.availability?.pi ?? "/usr/bin/pi",
     installCommand: "curl -fsSL https://pi.sh | bash",
     listModels: async () => models,
+    probeProviderKey: over.probeProviderKey ?? (async () => ({ status: "verified", detail: "" })),
     setSecret: async (value) => {
       applied.secrets.push(value);
       return { ok: true, persona: "robbie" };
@@ -194,6 +196,57 @@ describe("the brain flow", () => {
     await configureBrain(h.q, h.deps);
     expect(h.applied.secrets).toEqual(["sk-new"]);
     expect(h.applied.routings[0]).toMatchObject({ provider: "openrouter" });
+  });
+
+  test("a key the provider rejects is re-asked and saved only once valid", async () => {
+    let calls = 0;
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-bad", "sk-good"],
+      probeProviderKey: async () =>
+        ++calls === 1
+          ? { status: "invalid", detail: "rejected (HTTP 401)" }
+          : { status: "verified", detail: "ok" },
+    });
+    await configureBrain(h.q, h.deps);
+    // The rejected key never reached the vault — only the accepted one did.
+    expect(h.applied.secrets).toEqual(["sk-good"]);
+    expect(calls).toBe(2);
+  });
+
+  test("an unverifiable key warns but does not block the flow", async () => {
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["zai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-mystery"],
+      probeProviderKey: async () => ({
+        status: "unverified",
+        detail: "no known check for provider 'zai'",
+      }),
+    });
+    await configureBrain(h.q, h.deps);
+    expect(h.applied.secrets).toEqual(["sk-mystery"]);
+    expect(h.applied.routings[0]).toMatchObject({ provider: "zai" });
+  });
+
+  test("a kept (stored) key is validated too, before any write", async () => {
+    let probed: string | undefined;
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openai", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""], // blank = keep stored
+      routing: { provider: "openai" },
+      storedKey: "sk-stored",
+      probeProviderKey: async (_p, key) => {
+        probed = key;
+        return { status: "verified", detail: "" };
+      },
+    });
+    await configureBrain(h.q, h.deps);
+    expect(probed).toBe("sk-stored");
+    expect(h.applied.secrets).toEqual([]); // keep = no new write
+    expect(h.applied.routings[0]).toMatchObject({ provider: "openai" });
   });
 
   test("a vision-capable primary skips the vision slot", async () => {

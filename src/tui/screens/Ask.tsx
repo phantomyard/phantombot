@@ -18,7 +18,9 @@
  */
 
 import React, { useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+
+import { useStableInput } from "../useStableInput.ts";
+import { Box, Text } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { badge, theme } from "../theme.ts";
@@ -26,6 +28,12 @@ import { applyTextChunk } from "../textInput.ts";
 
 export interface AskRequest {
   title: string;
+  /**
+   * Guidance block under the title — why the question matters, examples.
+   * A plain string renders dim (the legacy look); a ReactNode renders as-is
+   * so flows can compose styled prose and example boxes.
+   */
+  description?: string | React.ReactNode;
   hint?: string;
   masked?: boolean;
   initial?: string;
@@ -43,8 +51,15 @@ export interface AskRequest {
 export function AskScreen(props: {
   request: AskRequest;
   onAnswer: (value: string | undefined) => void;
+  /**
+   * Drop the `esc Back` footer entry — for flows whose first step has no
+   * screen behind it (genuine first run, wizard resume). `esc` still
+   * resolves undefined; the caller just ignores it, and a footer key that
+   * does nothing is worse than no key at all.
+   */
+  noBack?: boolean;
 }): React.ReactElement {
-  const { title, hint, masked, initial, allowEmpty } = props.request;
+  const { title, description, hint, masked, initial, allowEmpty } = props.request;
   const [value, setValue] = useState(initial ?? "");
   // Written synchronously on every keystroke: several chunks can arrive before
   // React re-renders, and a closure-read `value` is one render stale — the
@@ -60,7 +75,7 @@ export function AskScreen(props: {
     props.onAnswer(trimmed);
   };
 
-  useInput((char, key) => {
+  useStableInput((char, key) => {
     if (key.escape) return props.onAnswer(undefined);
     if (key.return) return submit(ref.current);
     if (key.backspace || key.delete) {
@@ -83,7 +98,9 @@ export function AskScreen(props: {
       title={["configure", masked ? "secret" : "value"]}
       footer={[
         { icon: badge.save, key: "↵", label: "Save" },
-        { icon: badge.back, key: "esc", label: "Back" },
+        ...(props.noBack
+          ? []
+          : [{ icon: badge.back, key: "esc", label: "Back" }]),
       ]}
     >
       {hint ? (
@@ -94,6 +111,15 @@ export function AskScreen(props: {
       <Box marginTop={1}>
         <Text bold>{title}</Text>
       </Box>
+      {description ? (
+        <Box marginBottom={1} flexDirection="column">
+          {typeof description === "string" ? (
+            <Text color={theme.dim}>{description}</Text>
+          ) : (
+            description
+          )}
+        </Box>
+      ) : null}
       <Box>
         <Text color={theme.accent}>{"› "}</Text>
         <Text>{shown}</Text>

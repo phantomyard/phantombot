@@ -1,5 +1,5 @@
 /**
- * The new-phantom wizard must speak the same language as every other screen
+ * The new-phantom flow must speak the same language as every other screen
  * (issue #471 follow-up).
  *
  * Reported from a screenshot of `settings ▸ New`: the wizard was the one
@@ -13,6 +13,12 @@
  *   3. There was no `Back` at all on the first step, so a wizard opened with
  *      `n New` from the table was a one-way door: esc did nothing, and the
  *      only way out was quitting the whole app.
+ *
+ * Since the three-question create flow landed, `n New` from the table opens
+ * the New Persona MENU (create / import / restore), not the six-step wizard —
+ * the wizard itself is now first-run-only. So the in-app language assertions
+ * walk the menu ▸ create route, and the wizard's own dialect is asserted on
+ * the first-run mount, where it is still the opening screen.
  *
  * These assert the SCREEN after real keystrokes, not that a prop was passed:
  * the first-step esc bug was a missing handler, which no prop assertion sees.
@@ -85,6 +91,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: true,
   autostart: true,
   chain: ["claude"],
+  brainConfigured: true,
   resolvedHarness: { id: "claude", path: "/usr/local/bin/claude" },
   channels: ["cli"],
   voiceProvider: "none",
@@ -162,6 +169,7 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
     <App
       host={HOST}
       onCreatePersona={async () => {}}
+      onWizardBrain={async () => ({ landing: "configure", notice: "" })}
       openSession={async ({ persona }) => fakeSession(persona)}
       {...props}
     />,
@@ -209,44 +217,44 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
 }
 
 /**
- * `^s` then `n` — the route a user walks to reach the wizard from chat.
+ * `^s`, `n`, Enter — the route a user walks to reach the create flow from
+ * chat: settings ▸ New Persona menu ▸ Create a new persona.
  *
  * Each key is RESENT until the screen changes. Ink mounts its input handler a
  * tick after the frame it belongs to is painted, so a single keystroke sent
  * the moment the chat footer appears is sometimes written to a stdin nobody
  * is reading yet — a flake that looks exactly like a broken key binding.
  */
-async function openWizard() {
+async function openNewPersona() {
   const app = mount({ startPersona: "alice" });
   await app.waitFor((f) => f.includes("Send"));
   await app.pressUntil("\x13", (f) => f.includes("PHANTOMS")); // ^s
-  await app.pressUntil("n", (f) => f.includes("What should it be called?"));
+  await app.pressUntil("n", (f) => f.includes("What do you want to do?"));
+  await app.pressUntil("\r", (f) => f.includes("Persona name"));
   return app;
 }
 
-describe("the wizard speaks the app's menu language", () => {
+describe("the new-persona flow speaks the app's menu language", () => {
   test("the version appears once, in the header bar", async () => {
-    const app = await openWizard();
+    const app = await openNewPersona();
     const frame = app.lastFrame();
     // The bar prints it; the status must not print it again. Counted rather
     // than `not.toContain`, because the header's own copy is correct.
     const occurrences = frame.split(VERSION).length - 1;
     expect(occurrences).toBe(1);
-    // And the crumb, not a status, says which screen this is.
-    expect(frame).toContain("\u25b8 new");
   });
 
-  test("opened from settings, the wizard offers no Quit at all", async () => {
-    const app = await openWizard();
+  test("opened from settings, the flow offers no Quit at all", async () => {
+    const app = await openNewPersona();
     const frame = app.lastFrame();
-    // Leaving a wizard that lives inside the app means going back a screen,
+    // Leaving a flow that lives inside the app means going back a screen,
     // not killing the process. Neither spelling of quit is advertised.
     expect(frame).not.toContain("Quit");
     expect(frame).toContain("esc Back");
   });
 
-  test("^q still quits from the wizard, unadvertised", async () => {
-    const app = await openWizard();
+  test("^q still quits from the flow, unadvertised", async () => {
+    const app = await openNewPersona();
     let exited = false;
     void app.instance.waitUntilExit().then(() => void (exited = true));
     await app.press("\x11"); // ^q
@@ -254,22 +262,22 @@ describe("the wizard speaks the app's menu language", () => {
     expect(exited).toBe(true);
   });
 
-  test("esc on the first step returns to the screen it was opened from", async () => {
-    const app = await openWizard();
+  test("esc on the first question returns to the screen it was opened from", async () => {
+    const app = await openNewPersona();
     expect(app.lastFrame()).toContain("esc Back");
     await app.press("\x1b");
-    await app.waitFor((f) => f.includes("PHANTOMS"));
-    // And not merely "left the wizard": the name question is gone.
-    expect(app.lastFrame()).not.toContain("What should it be called?");
+    await app.waitFor((f) => f.includes("What do you want to do?"));
+    // And not merely "left the flow": the name question is gone.
+    expect(app.lastFrame()).not.toContain("Persona name");
   });
 
-  test("esc inside the wizard walks back one step, not out", async () => {
-    const app = await openWizard();
+  test("esc inside the flow walks back one question, not out", async () => {
+    const app = await openNewPersona();
     await app.press("lab");
     await app.press("\r");
-    await app.waitFor((f) => f.includes("Claude Code CLI"));
+    await app.waitFor((f) => f.includes("One-line identity"));
     await app.press("\x1b");
-    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.waitFor((f) => f.includes("Persona name"));
     // The typed name survives the round trip — back is a step, not a reset.
     expect(app.lastFrame()).toContain("lab");
   });
@@ -279,11 +287,11 @@ describe("the wizard speaks the app's menu language", () => {
       host: { ...HOST, personas: [] },
       startPersona: undefined,
     });
-    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.waitFor((f) => f.includes("Persona name"));
     const frame = app.lastFrame();
+    // A footer key that does nothing is worse than no key — esc has nowhere
+    // to go on genuine first run, so it is not advertised. (^q still quits
+    // via the app-global handler.)
     expect(frame).not.toContain("esc Back");
-    // A footer key that does nothing is worse than no key — and on first run
-    // quit is the ONLY way out, so this is the one screen that advertises it.
-    expect(frame).toContain("^q Quit");
   });
 });

@@ -35,6 +35,7 @@ import {
   providerEnvVar,
 } from "../lib/piModels.ts";
 import { resolvePiApiKeyWrite, type RoutingChoices } from "../lib/piRouting.ts";
+import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
 
 export interface BrainQuestions {
@@ -88,6 +89,12 @@ export interface BrainDeps {
   installCommand: string;
   /** `pi --list-models`, injectable for tests. */
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
+  /**
+   * Cheap provider-side key check, run the moment a key is entered — before
+   * the model slots, so a bad key never costs the user a full re-pick.
+   * Injectable for tests; defaults to the real HTTP probe.
+   */
+  probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
   setSecret(
     value: string,
   ): Promise<{ ok: boolean; persona?: string; error?: string }>;
@@ -195,11 +202,14 @@ export async function configureBrain(
  * unchanged — `resolvePiApiKeyWrite` decides), so re-running the flow and
  * changing nothing rewrites no secret.
  */
-async function configurePi(
+export async function configurePi(
   q: BrainQuestions,
   deps: BrainDeps,
   role: "primary" | "fallback",
+  opts?: { askMode?: boolean },
 ): Promise<boolean> {
+  // askMode:false — the caller already asked the configure-vs-host question
+  // (brain onboarding does, to show it in flow order) and chose "configure".
   if (!deps.piBin) {
     q.note(
       "Pi not found",
@@ -207,23 +217,25 @@ async function configurePi(
     );
   }
 
-  const mode = await q.choose({
-    title: `Pi (${role} brain) — how should its models be configured?`,
-    description: PI_MODE_DESCRIPTION,
-    options: [
-      {
-        value: "configure",
-        label: "Configure Provider and Model Swap Settings",
-        hint: "pick provider, API key, and the primary / vision / coder models here (recommended)",
-      },
-      {
-        value: "host",
-        label: "Use Host Configuration",
-        hint: "reuse the Pi provider and model routing already configured on this host",
-      },
-    ],
-    initial: "configure",
-  });
+  const mode = opts?.askMode === false
+    ? "configure"
+    : await q.choose({
+        title: `Pi (${role} brain) — how should its models be configured?`,
+        description: PI_MODE_DESCRIPTION,
+        options: [
+          {
+            value: "configure",
+            label: "Configure Provider and Model Swap Settings",
+            hint: "pick provider, API key, and the primary / vision / coder models here (recommended)",
+          },
+          {
+            value: "host",
+            label: "Use Host Configuration",
+            hint: "reuse the Pi provider and model routing already configured on this host",
+          },
+        ],
+        initial: "configure",
+      });
   if (mode === undefined) return true;
 
   if (mode === "host") {
@@ -263,7 +275,7 @@ async function configurePi(
   if (provider === undefined) return true;
 
   const keyLabel = provider ? `${provider} API key` : "Pi API key";
-  const key = await q.value({
+  let key = await q.value({
     title: keyLabel,
     hint: deps.storedKey
       ? "a key is already stored — press Enter to keep it"
@@ -272,6 +284,50 @@ async function configurePi(
     allowEmpty: true,
   });
   if (key === undefined) return true;
+
+  // Validate BEFORE anything is written: a rejected key must not cost the
+  // user their provider pick or the model slots that follow. "keep" (blank
+  // entry) is checked too — a stored key going stale is exactly the failure
+  // this exists to catch. Only an explicit provider rejection (401/403)
+  // blocks; unverifiable keys warn and continue, and the end-of-flow live
+  // test still guards them.
+  const probe = deps.probeProviderKey ?? probeProviderKey;
+  for (;;) {
+    const keyWrite = resolvePiApiKeyWrite(
+      key,
+      provider || undefined,
+      deps.routing.provider,
+    );
+    const candidate =
+      keyWrite.action === "set"
+        ? keyWrite.value
+        : keyWrite.action === "keep"
+          ? deps.storedKey
+          : undefined;
+    if (!candidate) break;
+    const result = await probe(provider || "google", candidate);
+    if (result.status === "invalid") {
+      q.note(
+        keyLabel,
+        `REJECTED by the provider: ${result.detail}\nNothing was saved. Enter the key again, or press esc to go back.`,
+      );
+      key = await q.value({
+        title: keyLabel,
+        hint: "the previous key was rejected — paste a valid one (esc goes back)",
+        masked: true,
+        allowEmpty: true,
+      });
+      if (key === undefined) return true;
+      continue;
+    }
+    if (result.status === "unverified") {
+      q.note(
+        keyLabel,
+        `couldn't verify against the provider (${result.detail}) — continuing; the live test at the end still catches a bad key`,
+      );
+    }
+    break;
+  }
 
   const keyWrite = resolvePiApiKeyWrite(
     key,

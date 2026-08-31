@@ -108,15 +108,17 @@ export type Row =
   | "default"
   | "release";
 
+// Group order (Andrew, 2026-08-31): Autostart group, then Identity, then
+// Chat Channels — each pair of groups separated by a horizontal rule.
 const ROWS: Row[] = [
+  "autostart",
+  "default",
+  "release",
   "identity",
   "brain",
   "channels",
   "memory",
   "voice",
-  "autostart",
-  "default",
-  "release",
 ];
 
 export function PersonaDetailScreen(props: {
@@ -132,7 +134,7 @@ export function PersonaDetailScreen(props: {
   onEditIdentity: () => void;
   onChangeBrain: () => void;
   onChangeChannels: () => void;
-  onToggleAutostart: () => void;
+  onChangeAutostart: () => void;
   onMakeDefault: () => void;
   /** The host's current release ring — shown on the Release Channel row. */
   releaseChannel: string;
@@ -151,7 +153,7 @@ export function PersonaDetailScreen(props: {
     if (id === "identity") return props.onEditIdentity();
     if (id === "brain") return props.onChangeBrain();
     if (id === "channels") return props.onChangeChannels();
-    if (id === "autostart") return props.onToggleAutostart();
+    if (id === "autostart") return props.onChangeAutostart();
     if (id === "default") {
       if (props.canSetDefault) return props.onMakeDefault();
       return; // greyed out — a lone phantom IS the default, nothing to do
@@ -236,7 +238,8 @@ export function PersonaDetailScreen(props: {
   // out of column and break the table).
   const tableProps = { wrap: true, badgeWidth: 13 } as const;
 
-  const mainBlocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
+  // The IDENTITY group — who this phantom is and what powers it.
+  const identityBlocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
     {
       id: "identity",
       height: h("the persona files that define who this phantom is"),
@@ -264,12 +267,18 @@ export function PersonaDetailScreen(props: {
           badge={
             status === undefined
               ? "…"
-              : p.resolvedHarness
-                ? `${glyph.ok} configured`
-                : "required"
+              : !p.brainConfigured
+                ? "required"
+                : p.resolvedHarness
+                  ? `${glyph.ok} configured`
+                  : `${glyph.bad} not found`
           }
           badgeColor={
-            status === undefined ? theme.dim : p.resolvedHarness ? theme.ok : theme.bad
+            status === undefined
+              ? theme.dim
+              : p.brainConfigured && p.resolvedHarness
+                ? theme.ok
+                : theme.bad
           }
           selected={row === "brain"}
           onPress={() => press("brain")}
@@ -277,6 +286,11 @@ export function PersonaDetailScreen(props: {
         />
       ),
     },
+  ];
+
+  // The CHAT CHANNELS group — who it talks to, what it remembers, how it
+  // sounds. Health checks, same badge doctrine as the identity group above.
+  const channelsBlocks: Array<{ id: Row; height: number; node: React.ReactNode }> = [
     {
       id: "channels",
       height: h("the chat surfaces this phantom answers on"),
@@ -345,11 +359,13 @@ export function PersonaDetailScreen(props: {
     },
   ];
 
-  // The informational group — toggles, not health checks. They carry the
-  // VALUE where the badges sit (on|off, yes|no, stable|preview, dim, no
-  // glyph, no colour) and sit under their own rule, separated from the
-  // required/optional rows above.
-  const infoBlocks: Array<{
+  // The AUTOSTART group — Autostart, Default, Release Channel. It sits FIRST
+  // (Andrew, 2026-08-31): whether/how this phantom starts with the machine is
+  // the first thing to settle, before who it is or who it talks to. The
+  // informational rows carry the VALUE where the badges sit (on|off,
+  // login|boot, yes|no, stable|preview) — dim value, no glyph, no colour,
+  // except an Off on the default phantom, which is loud on purpose.
+  const autostartBlocks: Array<{
     id: Row;
     height: number;
     node: React.ReactNode;
@@ -361,8 +377,27 @@ export function PersonaDetailScreen(props: {
         <MenuItem
           icon="⏻"
           label="Autostart"
-          description="start this phantom with the daemon"
-          badge={p.autostart ? "on" : "off"}
+          description={
+            p.isDefault
+              ? "start with the machine: off, at login, or at boot"
+              : "start at login with the daemon"
+          }
+          badge={
+            p.isDefault
+              ? p.autostart
+                ? (p.autostartMode ?? "login")
+                : "off"
+              : p.autostart
+                ? "on"
+                : "off"
+          }
+          badgeColor={
+            p.autostart
+              ? theme.ok
+              : p.isDefault
+                ? theme.bad // loud: the default phantom has nothing starting it
+                : theme.dim
+          }
           selected={row === "autostart"}
           onPress={() => press("autostart")}
           {...tableProps}
@@ -398,7 +433,7 @@ export function PersonaDetailScreen(props: {
           label="Release Channel"
           description={
             props.canSetRelease
-              ? "update ring this HOST follows; stable lags, preview tracks main"
+              ? "host update ring; stable lags, preview tracks main"
               : "host-only setting; run the TUI as the host operator to change it"
           }
           badge={props.releaseChannel}
@@ -411,17 +446,25 @@ export function PersonaDetailScreen(props: {
     },
   ];
 
-  // Both groups render through one scroll window; the rule between them is a
-  // fixed one-row separator. The cursor indexes ROWS, which skips the
-  // separator — shift anything at or past autostart down by one so the
-  // window always reveals the row the cursor is actually on.
+  // Three groups separated by horizontal rules (Andrew, 2026-08-31):
+  // Autostart | Identity | Chat Channels. All rows render through one scroll
+  // window; each rule is a fixed one-row separator. The cursor indexes ROWS,
+  // which skips the separators — shift a row down by the number of rules
+  // ABOVE it so the window always reveals the row the cursor is actually on.
+  const sep = (i: number) => ({
+    id: `sep-${i}` as const,
+    height: 1,
+    node: <Rule />,
+  });
   const blocks = [
-    ...mainBlocks,
-    { id: "sep" as const, height: 1, node: <Rule /> },
-    ...infoBlocks,
+    ...autostartBlocks,
+    sep(0),
+    ...identityBlocks,
+    sep(1),
+    ...channelsBlocks,
   ];
-  const cursorBlock =
-    cursor >= ROWS.indexOf("autostart") ? cursor + 1 : cursor;
+  const rulesAbove = cursor < 3 ? 0 : cursor < 5 ? 1 : 2;
+  const cursorBlock = cursor + rulesAbove;
 
   const view = scrollWindow(
     blocks.map((b) => b.height),
@@ -435,7 +478,7 @@ export function PersonaDetailScreen(props: {
       status={
         p.completeness.complete
           ? `${glyph.up} ready`
-          : `${glyph.warn} setup unfinished`
+          : `${glyph.warn} not ready`
       }
       footer={[
         { icon: badge.move, key: "↑↓", label: "Move" },

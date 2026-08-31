@@ -176,8 +176,10 @@ function Activity(props: {
 
 export function ChatScreen(props: {
   session: ChatSession;
-  /** Title-bar status: brain, service state, channels. */
+  /** Title-bar status: release ring, autostart state. */
   status: string;
+  /** Loud-state override for the status text (red `autostart: off`). */
+  statusColor?: string;
   onSettings: () => void;
   onQuit: () => void;
 }): React.ReactElement {
@@ -427,40 +429,36 @@ export function ChatScreen(props: {
         setInputValue(`${inputRef.current}\n`);
         return;
       }
-      // A chunk can carry newlines INSIDE it — a bracketed paste, or a
-      // terminal that batched keystrokes. In chat a paste is NEVER a submit:
-      // the whole block lands in the box so it can be reviewed and edited
-      // first. (The wizard's name field uses applyTextChunk's split-and-
-      // submit rule instead — see `textInput.ts`.) \r is normalised to \n
-      // because that is what the viewport wraps on.
       if (/\r|\n/.test(char)) {
-        // A chunk that is plain text plus ONE trailing newline is a fast
-        // typist (or a laggy ssh/tmux link) whose keystrokes and Enter
-        // arrived in the same read — swallowing that Enter loses every
-        // message typed faster than the event loop. A chunk with INTERIOR
-        // newlines is a paste, and lands whole without submitting (Ink 6
-        // has no bracketed-paste support, so position is the only
-        // discriminator available). \r is normalised to \n because that is
-        // what the viewport wraps on.
-        const body = char.replace(/\r\n?$|\n$/, "");
-        if (!/[\r\n]/.test(body)) {
-          const text = (inputRef.current + body).trim();
-          if (!text) return;
+        // \r is normalised to \n: that is what the viewport wraps on.
+        const normalised = char.replace(/\r\n?/g, "\n");
+        // text + ONE trailing newline is a fast typist's batched Enter — the
+        // terminal delivered the typed text and Enter in a single read. That
+        // is a SUBMIT (the bug #509 exists for), not a paste. Interior
+        // newlines make it a paste, below.
+        const batched = /^(.+)\n$/.exec(normalised);
+        const body = batched?.[1];
+        if (body !== undefined && !body.includes("\n")) {
+          const text = `${inputRef.current}${body}`.trim();
           const isCommand = commandName(text) !== undefined;
           if (busy && !isCommand) {
-            // A turn is in flight, so the text is not submitted — but the
-            // chunk arrived as one read, meaning these characters never
-            // landed one at a time. Append them to the box or they are
-            // gone. Commands still dispatch while a turn is in flight.
-            setInputValue(inputRef.current + body);
+            // A turn in flight owns the harness; keep the text in the box
+            // exactly as the plain-Enter busy branch does.
+            setInputValue(`${inputRef.current}${body}`);
             return;
           }
+          if (!text) return;
           setInputValue("");
           if (isCommand) void runCommand(text);
           else void submit(text);
           return;
         }
-        setInputValue(inputRef.current + char.replace(/\r\n?/g, "\n"));
+        // Anything with INTERIOR newlines is a paste: in chat a paste is
+        // NEVER a submit — the whole block lands in the box so it can be
+        // reviewed and edited first. (The wizard's name field uses
+        // applyTextChunk's split-and-submit rule instead — see
+        // `textInput.ts`.)
+        setInputValue(inputRef.current + normalised);
         return;
       }
       // From the REF: two keystrokes can land between renders, and reading
@@ -506,6 +504,7 @@ export function ChatScreen(props: {
     <Frame
       title={[props.session.persona]}
       status={props.status}
+      statusColor={props.statusColor}
       footer={[
         { icon: badge.send, key: "↵", label: "Send" },
         { icon: badge.send, key: "Alt+↵", label: "Newline" },

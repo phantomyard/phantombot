@@ -41,6 +41,11 @@ export function Frame(props: {
   title: string[];
   /** Right-aligned status text in the title bar. */
   status?: string;
+  /**
+   * Override the status colour — reserved for loud states (the chat banner's
+   * red `autostart: off`). Everything else keeps the dim bar treatment.
+   */
+  statusColor?: string;
   footer?: FooterKey[];
   children: React.ReactNode;
 }): React.ReactElement {
@@ -72,7 +77,9 @@ export function Frame(props: {
         <Text color={theme.bar.fg}>{` \u25b8 ${crumbs.join(" \u25b8 ")}`}</Text>
       ) : null}
       <Box flexGrow={1} />
-      {props.status ? <Text color={theme.bar.dim}>{props.status}</Text> : null}
+      {props.status ? (
+        <Text color={props.statusColor ?? theme.bar.dim}>{props.status}</Text>
+      ) : null}
     </Box>
   );
   const footer =

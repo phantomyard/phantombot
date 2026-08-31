@@ -29,7 +29,7 @@ import {
   expect,
   test,
 } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -119,6 +119,7 @@ const ENV = [
 
 beforeAll(() => {
   const root = mkdtempSync(join(tmpdir(), "phantombot-tui-firstrun-"));
+  tmpRoot = root;
   for (const k of ENV) saved[k] = process.env[k];
   process.env.PHANTOMBOT_CONFIG = join(root, "config.toml");
   process.env.PHANTOMBOT_STATE = join(root, "state.json");
@@ -139,6 +140,35 @@ afterEach(() => {
   cleanup = [];
 });
 
+/** The temp personas root, set by beforeAll — real-creation helpers need it. */
+let tmpRoot: string;
+
+/**
+ * An `onCreatePersona` that RECORDS the name like the plain mock, but also
+ * writes the minimal persona to the temp root — identity.json plus a config
+ *.toml naming the chosen brain — so the post-create `refresh()` sees a real
+ * phantom and the app can actually land in Configure for it. Without the
+ * write, the settings screen renders its no-phantom placeholder and the
+ * redirect is unobservable.
+ */
+function recordingCreate(created: string[]) {
+  return async (a: { name: string; brain?: string }) => {
+    // The bounded Enter loop can reach the done step twice while the first
+    // finish is still settling; a repeat create of the same name is a no-op.
+    if (created.includes(a.name)) return { created: false };
+    created.push(a.name);
+    const dir = join(tmpRoot, "personas", a.name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "identity.json"), "{}", "utf8");
+    writeFileSync(
+      join(dir, "config.toml"),
+      `[harnesses]\nchain = ["${a.brain ?? "claude"}"]\n`,
+      "utf8",
+    );
+    return { created: true };
+  };
+}
+
 function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
   const stdin = fakeStdin();
   const stdout = fakeStdout();
@@ -147,6 +177,7 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
     <App
       host={HOST}
       onCreatePersona={async (a) => void created.push(a.name)}
+      onWizardBrain={async () => ({ landing: "configure", notice: "" })}
       {...props}
     />,
     {
@@ -193,63 +224,82 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
         `waitFor timed out; last frame:\n${stdout.frames[stdout.frames.length - 1] ?? "(nothing rendered)"}`,
       );
     },
+    /**
+     * Enter-until-advance: a keystroke written while the screen is
+     * transitioning can land in the commit→effect window where no input
+     * handler is subscribed yet (Ink registers `useInput` in a passive
+     * effect, after the frame paints). A real user taps again when nothing
+     * seems to happen; the test mirrors that. Bounded so a genuine deadlock
+     * fails loudly instead of looping forever.
+     */
+    enterUntil: async (marker: string, ms = 500) => {
+      for (let i = 0; i < 10; i++) {
+        stdin.write("\r");
+        await tick();
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+          if ((stdout.frames[stdout.frames.length - 1] ?? "").includes(marker))
+            return;
+          await tick();
+        }
+      }
+      throw new Error(
+        `enterUntil('${marker}') exhausted; last frame:\n${stdout.frames[stdout.frames.length - 1] ?? "(nothing rendered)"}`,
+      );
+    },
   };
 }
 
 describe("first run", () => {
   test("invalid names stay on the field with an inline error", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("What should it be called?"));
+    await app.waitFor((f) => f.includes("Persona name"));
     await app.press("Bad Name\r");
-    await app.waitFor((f) => f.includes("Use lowercase letters"));
-    expect(app.lastFrame()).toContain("What should it be called?");
+    await app.waitFor((f) => f.includes("invalid name"));
+    expect(app.lastFrame()).toContain("Persona name");
     expect(app.created).toEqual([]);
   });
 
-  test("reviews exact artifacts before the creation callback runs", async () => {
+  test("three questions plus the optional pair, then the creation callback runs with no technical steps", async () => {
     const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("What should it be called?"));
-    await app.press("alice");
-    for (
-      let i = 0;
-      i < 12 && !app.lastFrame().includes("nothing has been written yet");
-      i++
-    ) {
-      await app.press("\r");
-    }
-    await app.waitFor((f) => f.includes("nothing has been written yet"));
-    const frame = app.lastFrame();
-    expect(frame).toContain("/tmp/does-not-exist/alice");
-    expect(frame).toContain("identity.json");
-    expect(frame).toContain("config.toml");
-    expect(frame).toContain("channel    cli");
-    expect(frame).toContain("default    yes");
-    expect(app.created).toEqual([]);
-    await app.press("\r");
+    await app.waitFor((f) => f.includes("Persona name"));
+    // name → identity (accept the editable default) → tone → skills (skip)
+    // → your name (skip).
+    await app.press("alice\r");
+    await app.waitFor((f) => f.includes("One-line identity"));
+    expect(app.lastFrame()).toContain("a helpful, no-nonsense assistant");
+    await app.enterUntil("Default tone");
+    await app.enterUntil("Skills & disciplines");
+    await app.enterUntil("Your name");
+    await app.enterUntil("alice");
     expect(app.created).toEqual(["alice"]);
   });
 
   test("completing the wizard leaves an app that can still be quit", async () => {
-    const app = mount({ startPersona: undefined });
-    await app.waitFor((f) => f.includes("What should it be called?"));
+    const created: string[] = [];
+    const app = mount({
+      startPersona: undefined,
+      onCreatePersona: recordingCreate(created),
+    });
+    await app.waitFor((f) => f.includes("Persona name"));
 
-    // name → brain → channel → memory → voice → done, accepting each step's
-    // default. Bounded rather than exact so the test asserts "the wizard
-    // completes", not "the wizard has exactly six steps" — the step list is
-    // expected to grow.
-    await app.press("alice");
+    // name → identity → tone, accepting each step's default. Bounded rather
+    // than exact so the test asserts "the wizard completes", not "the wizard
+    // has exactly three steps".
+    await app.press("alice\r");
     await app.waitFor((f) => f.includes("alice"));
     for (let i = 0; i < 12 && app.created.length === 0; i++) {
       await app.press("\r");
     }
 
-    expect(app.created).toEqual(["alice"]);
+    expect(created).toEqual(["alice"]);
 
-    // The persona does not exist on disk, so the session never opens — which
-    // is exactly the window the bug lived in. It must still be a real screen.
+    // Straight into CONFIGURE for the name the user typed — a just-created
+    // persona is an unfinished one, and the settings screen is where the rest
+    // of its setup lives. It must still be a real, quittable screen.
     const frame = app.frame();
     expect(frame).toContain("alice");
-    expect(frame).toContain("Quit");
+    expect(frame).toContain("Identity");
 
     let exited = false;
     void app.instance.waitUntilExit().then(() => void (exited = true));
@@ -258,15 +308,18 @@ describe("first run", () => {
     expect(exited).toBe(true);
   });
 
-  test("completing the wizard opens a chat session for the name typed", async () => {
-    // The pinning test for bug 1. `<App>` renders ONCE, so the broken gate
-    // (`if (!props.startPersona) return`) can never fire on this path: the
-    // prop is `undefined` for the whole life of the app. With a working
-    // opener injected, the difference is visible — the fixed gate mounts the
-    // chat screen, the broken one sits on the placeholder forever.
+  test("completing the wizard lands in Configure and opens no chat session", async () => {
+    // The pinning test for bug 1, updated for the Configure redirect: `<App>`
+    // renders ONCE, so the broken gate (`if (!props.startPersona) return`)
+    // could never fire on the wizard path. The session must still be gated on
+    // a REAL decision — and the decision now is NO session: a persona that
+    // just came out of the wizard is unfinished, so it lands in Configure and
+    // chat stays one esc away.
     const opened: string[] = [];
+    const created: string[] = [];
     const app = mount({
       startPersona: undefined,
+      onCreatePersona: recordingCreate(created),
       openSession: async ({ persona }) => {
         opened.push(persona);
         return fakeSession(persona);
@@ -275,34 +328,32 @@ describe("first run", () => {
     await tick();
 
     await app.press("alice");
-    for (let i = 0; i < 12 && app.created.length === 0; i++) {
+    for (let i = 0; i < 12 && created.length === 0; i++) {
       await app.press("\r");
     }
-    expect(app.created).toEqual(["alice"]);
+    expect(created).toEqual(["alice"]);
     await tick();
 
-    // Opened for the name the USER typed, not the host default — the wizard
-    // builds a persona that did not exist when `<App>` was constructed.
-    expect(opened).toEqual(["alice"]);
+    // No session was opened for the fresh persona — Configure first.
+    expect(opened).toEqual([]);
 
-    // And the chat screen is actually mounted, not the placeholder.
+    // And the settings screen is actually mounted, not the placeholder.
     const frame = app.lastFrame();
     expect(frame).not.toContain("opening alice");
-    // Footer items unique to the chat screen (`^c interrupt` left the footer
-    // when the activity line took over announcing it).
-    expect(frame).toContain("Send");
-    expect(frame).toContain("settings");
+    expect(frame).toContain("Identity");
+    expect(frame).toContain("Brain");
   });
 
   test("an incomplete persona opens the wizard, not chat", async () => {
-    const app = mount({ startPersona: "alice", wizardStartAt: "brain" });
+    const app = mount({ startPersona: "alice", wizardStartAt: "identity" });
     await tick();
-    // The wizard's brain step, resumed — not a chat box wired to a brain that
-    // is not installed.
-    expect(app.frame()).toContain("Claude Code CLI");
+    // The wizard's identity question, resumed — with the editable default
+    // pre-filled, not the old brain interrogation.
+    expect(app.frame()).toContain("One-line identity");
+    expect(app.frame()).toContain("a helpful, no-nonsense assistant");
   });
 
-  test("a resumed persona can walk back through its seeded name", async () => {
+  test("a resumed persona's identity question accepts the default", async () => {
     const app = mount({
       host: {
         ...HOST,
@@ -314,24 +365,29 @@ describe("first run", () => {
         ],
       },
       startPersona: "alice",
-      wizardStartAt: "brain",
+      wizardStartAt: "identity",
     });
     await tick();
+    // A resume has no name question behind it — the persona already exists.
     await app.press("\u001b");
+    expect(app.frame()).toContain("One-line identity");
+    // Enter accepts the pre-filled default identity → the tone picker.
     await app.press("\r");
-    expect(app.frame()).toContain("Claude Code CLI");
-    expect(app.frame()).not.toContain("already exists");
+    expect(app.frame()).toContain("Default tone");
   });
 
   test("a resumed persona reports an update, not newly created identity files", async () => {
     const app = mount({
       startPersona: "alice",
-      wizardStartAt: "done",
+      wizardStartAt: "identity",
       onCreatePersona: async () => ({ created: false }),
     });
-    await app.waitFor((f) => f.includes("nothing has been written yet"));
-    await app.press("\r");
-    await app.waitFor((f) => f.includes("updated alice · config.toml"));
+    await app.waitFor((f) => f.includes("One-line identity"));
+    // Accept the default identity, then the first tone, then skip the
+    // optional skills and owner questions. The final Enter-until fires on the
+    // owner screen itself — the notice is the marker it waits for.
+    await app.enterUntil("Skills & disciplines");
+    await app.enterUntil("updated alice · config.toml");
     expect(app.lastFrame()).not.toContain("created /tmp/does-not-exist/alice");
   });
 

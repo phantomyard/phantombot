@@ -56,7 +56,7 @@ const TONE_OPTIONS: ReadonlyArray<{
   { value: "playful", label: "Playful", hint: "witty, light" },
 ];
 
-const EXPERTISE_OPTIONS = [
+export const EXPERTISE_OPTIONS = [
   { value: "Coding & software engineering", label: "Coding / engineering" },
   { value: "Writing & editing", label: "Writing / editing" },
   { value: "Linux sysadmin & ops", label: "Sysadmin / ops" },

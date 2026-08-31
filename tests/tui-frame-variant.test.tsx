@@ -55,6 +55,7 @@ const ALICE: PersonaSnapshot = {
   isDefault: true,
   autostart: true,
   chain: ["claude", "pi"],
+  brainConfigured: true,
   resolvedHarness: { id: "claude", path: "/usr/local/bin/claude" },
   channels: ["telegram"],
   voiceProvider: "azure_edge",

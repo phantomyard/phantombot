@@ -34,9 +34,11 @@ import { VERSION } from "../version.ts";
 import { listPersonaDirs } from "../lib/personaDefault.ts";
 import {
   personaCompleteness,
+  defaultLocalChain,
   type PersonaCompleteness,
 } from "../lib/personaComplete.ts";
 import { resolveHarnessAvailability } from "../lib/harnessAvailability.ts";
+import { harnessChainIds } from "../harnesses/buildChain.ts";
 import { openPersonaVault } from "../lib/vault.ts";
 import { embeddingSpaceForConfig } from "../lib/embeddingSpace.ts";
 import { providerHearsVoice } from "../lib/voice.ts";
@@ -175,9 +177,23 @@ export interface PersonaSnapshot {
   dir: string;
   isDefault: boolean;
   autostart: boolean;
+  /**
+   * HOW the persona autostarts when it is on the list: "login" (user-level,
+   * the historical default) or "boot" (survives logged-off). No record on
+   * disk → "login", so existing agents inherit what they already have.
+   */
+  autostartMode?: "login" | "boot";
   /** Harness chain as configured, and the first one whose binary resolves. */
   chain: string[];
   resolvedHarness?: { id: string; path: string };
+  /**
+   * Whether the persona has recorded a brain of its OWN (a chain in its
+   * config file) — inheriting the host chain does not count. The settings
+   * screen's required/ready gate reads this, not `resolvedHarness`, so a
+   * freshly created phantom shows Brain as red `required` until its
+   * operator records a choice.
+   */
+  brainConfigured: boolean;
   channels: string[];
   voiceProvider?: string;
   /** The configured voice NAME for that provider ("en-US-JennyNeural"). */
@@ -399,7 +415,10 @@ export async function personaSnapshot(
   name: string,
 ): Promise<PersonaSnapshot> {
   const dir = personaDir(config, name);
-  const chain = config.harnesses?.chain ?? [];
+  // The chain the RUNTIME would use — the single source of truth in
+  // buildChain.ts: the persona's own record first, then the bare chain. Using
+  // anything else here is how a badge probes a harness the daemon never runs.
+  const chain = harnessChainIds(config, name);
   const globalToml =
     (await safeAsync(() => readConfigToml(host.configPath))) ?? {};
   const personaToml =
@@ -417,6 +436,14 @@ export async function personaSnapshot(
       break;
     }
   }
+
+  // A brain of the persona's OWN — what the settings screen's Brain badge
+  // gates on. Same predicate the completeness gate uses (and the boot screen
+  // and doctor), so a phantom that chats can never show `required`: the persona
+  // file chain OR the host `[harnesses.personas.<name>]` record the Brain flow
+  // writes counts; bare host-chain inheritance does not.
+  const localChain = await defaultLocalChain(config, name);
+  const brainConfigured = localChain !== undefined;
 
   // Secret NAMES only — the vault is opened, listed, and closed. No screen in
   // this app ever holds a secret VALUE, so there is nothing to leak into a
@@ -451,7 +478,9 @@ export async function personaSnapshot(
     dir,
     isDefault: host.defaultPersona === name,
     autostart: (host.autostartPersonas ?? []).includes(name),
+    autostartMode: host.autostartModes?.[name] ?? "login",
     chain,
+    brainConfigured,
     resolvedHarness,
     channels: channelsFor(config, dir),
     voiceProvider: config.voice?.provider,

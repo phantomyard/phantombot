@@ -88,6 +88,7 @@ export const PERSONA_SCOPED_KEYS: readonly string[] = [
 export const HOST_ONLY_KEYS: readonly string[] = [
   "default_persona",
   "autostart_personas",
+  "autostart_modes",
   "update_channel",
   "personas_dir",
   "memory_db",

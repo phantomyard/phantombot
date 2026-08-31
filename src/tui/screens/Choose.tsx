@@ -13,7 +13,9 @@
  */
 
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+
+import { useStableInput } from "../useStableInput.ts";
+import { Box, Text } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
 import { Selectable } from "../components/Selectable.tsx";
@@ -35,7 +37,7 @@ export interface ChooseRequest {
    * primary brain does, what a fallback is for. The flow's whole job is to
    * make the consequence legible before the pick, not after.
    */
-  description?: string;
+  description?: string | React.ReactNode;
 }
 
 export function ChooseScreen(props: {
@@ -51,7 +53,7 @@ export function ChooseScreen(props: {
     return at >= 0 ? at : 0;
   });
 
-  useInput((_char, key) => {
+  useStableInput((_char, key) => {
     if (key.escape) return props.onAnswer(undefined);
     if (key.upArrow) return setIndex((i) => Math.max(0, i - 1));
     if (key.downArrow)
@@ -77,8 +79,12 @@ export function ChooseScreen(props: {
         <Text bold>{title}</Text>
       </Box>
       {description ? (
-        <Box>
-          <Text color={theme.dim}>{description}</Text>
+        <Box flexDirection="column">
+          {typeof description === "string" ? (
+            <Text color={theme.dim}>{description}</Text>
+          ) : (
+            description
+          )}
         </Box>
       ) : null}
       <Box flexDirection="column" marginTop={1}>

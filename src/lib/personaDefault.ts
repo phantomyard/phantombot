@@ -249,3 +249,36 @@ export async function writeAutostartPersonas(
   config.autostartPersonas = chosen;
   return chosen;
 }
+
+/**
+ * Write ONE persona's autostart mode into the host-global `[autostart_modes]`
+ * table. `undefined` removes the record entirely — a persona with no record
+ * is "login", the historical behaviour, so existing agents inherit what they
+ * already have and nothing about their setup changes under them.
+ *
+ * Mirrors `writeAutostartPersonas`' doctrine: HOST-ONLY key, one writer,
+ * an empty table deletes the key rather than writing `{}` noise.
+ *
+ * Mutates `config.autostartModes` to match, so an in-memory caller does not
+ * have to reload to render the change it just made.
+ */
+export async function writeAutostartMode(
+  config: Config,
+  persona: string,
+  mode: "login" | "boot" | undefined,
+): Promise<void> {
+  await updateConfigToml(config.configPath, (toml: TomlObject) => {
+    const table =
+      toml.autostart_modes && typeof toml.autostart_modes === "object"
+        ? { ...(toml.autostart_modes as Record<string, unknown>) }
+        : {};
+    if (mode === undefined) delete table[persona];
+    else table[persona] = mode;
+    if (Object.keys(table).length === 0) delete toml.autostart_modes;
+    else toml.autostart_modes = table;
+  });
+  const modes = { ...(config.autostartModes ?? {}) };
+  if (mode === undefined) delete modes[persona];
+  else modes[persona] = mode;
+  config.autostartModes = modes;
+}

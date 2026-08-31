@@ -39,15 +39,69 @@ const found = async () => ({ id: "claude", bin: "claude", resolved: "/usr/bin/cl
 const missing = async () => ({ id: "claude", bin: "claude" });
 const dbOpens = async () => true;
 
+/** The persona recorded its own brain — the normal, configured case. */
+const ownBrain = (chain: readonly string[] = ["claude", "pi"]) => async () => chain;
+
+/** The persona recorded NO brain — the fresh-create case. */
+const noBrain = async () => undefined;
+
 describe("personaCompleteness", () => {
   test("a phantom with a brain, an identity and a memory db is complete", async () => {
     const { config } = personaOnDisk(true);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: found,
+      localChain: ownBrain(),
       memoryOpens: dbOpens,
     });
     expect(r.complete).toBe(true);
     expect(r.resumeAt).toBe("done");
+  });
+
+  test("a phantom with NO brain of its own is not ready — even with a resolvable host chain", async () => {
+    // Inheriting the host chain is not configuring a brain: a phantom created
+    // without one stays not-ready until its operator records a choice.
+    const { config } = personaOnDisk(true);
+    const r = await personaCompleteness(config, "robbie", {
+      resolveHarness: found,
+      localChain: noBrain,
+      memoryOpens: dbOpens,
+    });
+    expect(r.complete).toBe(false);
+    // A brain gap is not a wizard question — it routes to Configure (tier 2);
+    // `resumeAt` just carries a legal step value.
+    expect(r.resumeAt).toBe("done");
+    expect(r.requirements.find((x) => x.id === "brain")?.detail).toContain(
+      "no brain configured",
+    );
+  });
+
+  test("the default path reads a host-file personas-table record as the persona's brain", async () => {
+    // phantombot#441: a DEFAULT persona with no config.toml of its own gets
+    // its Brain-flow chain written to the host file as
+    // [harnesses.personas.<name>]. The runtime honors that (harnessChainIds);
+    // the gate must read the same truth or a fixed brain stays red forever.
+    const { config } = personaOnDisk(true);
+    (config as unknown as {
+      harnesses: { personas?: Record<string, { chain: string[] }> };
+    }).harnesses.personas = { robbie: { chain: ["pi"] } };
+    const r = await personaCompleteness(config, "robbie", {
+      resolveHarness: async () => ({ id: "pi", bin: "pi", resolved: "/usr/bin/pi" }),
+      memoryOpens: dbOpens,
+    });
+    expect(r.complete).toBe(true);
+    expect(r.requirements.find((x) => x.id === "brain")?.ok).toBe(true);
+  });
+
+  test("the default path still ignores the bare host chain — another persona's record is not yours", async () => {
+    const { config } = personaOnDisk(true);
+    (config as unknown as {
+      harnesses: { personas?: Record<string, { chain: string[] }> };
+    }).harnesses.personas = { someoneelse: { chain: ["pi"] } };
+    const r = await personaCompleteness(config, "robbie", {
+      resolveHarness: found,
+      memoryOpens: dbOpens,
+    });
+    expect(r.requirements.find((x) => x.id === "brain")?.ok).toBe(false);
   });
 
   test("a chain whose binaries are all absent is NOT a brain", async () => {
@@ -57,10 +111,11 @@ describe("personaCompleteness", () => {
     const { config } = personaOnDisk(true);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: missing,
+      localChain: ownBrain(),
       memoryOpens: dbOpens,
     });
     expect(r.complete).toBe(false);
-    expect(r.resumeAt).toBe("brain");
+    expect(r.resumeAt).toBe("done");
     expect(r.requirements.find((x) => x.id === "brain")?.ok).toBe(false);
   });
 
@@ -68,26 +123,31 @@ describe("personaCompleteness", () => {
     const { config } = personaOnDisk(false);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: found,
+      localChain: ownBrain(),
       memoryOpens: dbOpens,
     });
     expect(r.complete).toBe(false);
     expect(r.requirements.find((x) => x.id === "identity")?.ok).toBe(false);
   });
 
-  test("a memory db that will not open is incomplete, and resumes at memory", async () => {
+  test("a memory db that will not open is incomplete — reported, not resumed", async () => {
     const { config } = personaOnDisk(true);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: found,
+      localChain: ownBrain(),
       memoryOpens: async () => false,
     });
     expect(r.complete).toBe(false);
-    expect(r.resumeAt).toBe("memory");
+    // A corrupt DB is a repair case, not a setup flow — the wizard cannot
+    // fix it, so its step is not a resume point.
+    expect(r.resumeAt).toBe("done");
   });
 
   test("a corrupt memory db is REPORTED, never thrown from the launch path", async () => {
     const { config } = personaOnDisk(true);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: found,
+      localChain: ownBrain(),
       memoryOpens: async () => {
         throw new Error("database disk image is malformed");
       },
@@ -104,6 +164,7 @@ describe("personaCompleteness", () => {
     const { config } = personaOnDisk(true);
     const r = await personaCompleteness(config, "robbie", {
       resolveHarness: found,
+      localChain: ownBrain(),
       memoryOpens: dbOpens,
     });
     expect(r.complete).toBe(true);
@@ -114,13 +175,14 @@ describe("personaCompleteness", () => {
     ]);
   });
 
-  test("resumeAt names the FIRST unsatisfied step, never the name question", async () => {
+  test("resumeAt names the IDENTITY step when identity is the gap — the one wizard-fixable one", async () => {
     const { config } = personaOnDisk(false);
     const r = await personaCompleteness(config, "robbie", {
-      resolveHarness: missing,
-      memoryOpens: async () => false,
+      resolveHarness: found,
+      localChain: ownBrain(),
+      memoryOpens: dbOpens,
     });
-    expect(r.resumeAt).toBe("brain");
+    expect(r.resumeAt).toBe("identity");
     expect(r.resumeAt).not.toBe("name");
   });
 });

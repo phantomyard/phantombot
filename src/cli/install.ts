@@ -577,7 +577,7 @@ async function defaultSaveVaultWindowsPassword(
  * line) to keep it out of process listings. Tries the local machine account
  * store first, then the domain — returns true if either authenticates.
  */
-async function defaultValidateWindowsCredential(
+export async function defaultValidateWindowsCredential(
   username: string,
   password: string,
 ): Promise<boolean> {
