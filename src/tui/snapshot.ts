@@ -176,13 +176,29 @@ export interface PersonaSnapshot {
   name: string;
   dir: string;
   isDefault: boolean;
+  /**
+   * Does the daemon start this persona? This is `servedPersonasOf` — the
+   * SAME predicate the daemon itself uses — not raw `autostart_personas`
+   * membership. The default persona is served unconditionally (config.ts
+   * `servedPersonasOf`), so a single-persona install with no
+   * `autostart_personas` key at all still autostarts; reading membership
+   * alone reported those hosts as Off while the daemon was in fact
+   * starting them at every login (#512).
+   */
   autostart: boolean;
   /**
-   * HOW the persona autostarts when it is on the list: "login" (user-level,
+   * HOW the persona autostarts when it is served: "login" (user-level,
    * the historical default) or "boot" (survives logged-off). No record on
    * disk → "login", so existing agents inherit what they already have.
    */
   autostartMode?: "login" | "boot";
+  /**
+   * Is this persona served ONLY because it is the default? Such a persona
+   * cannot be switched off through `autostart_personas` — removing it from
+   * a list it was never on changes nothing — so the selector must not offer
+   * an Off that would silently do nothing.
+   */
+  autostartViaDefault?: boolean;
   /** Harness chain as configured, and the first one whose binary resolves. */
   chain: string[];
   resolvedHarness?: { id: string; path: string };
@@ -485,9 +501,18 @@ export async function personaSnapshot(
   // the installer, so an enabled unit is the default state, not a Boot
   // choice (review blocker 2026-08-31); unrecorded Linux personas display
   // Login, and only a recorded mode=boot shows Boot. No sudo, no elevation.
+  //
+  // WHETHER it starts: the daemon serves `defaultPersona` plus everything in
+  // `autostart_personas` (config.ts `servedPersonasOf`). Deriving this from
+  // list membership alone mislabelled every `phantombot install` host that
+  // never wrote an `autostart_personas` key — the common single-persona
+  // macOS/Windows install — as Off while its LaunchAgent / logon task was
+  // starting the daemon, and the daemon was starting the default persona.
   const onList = (host.autostartPersonas ?? []).includes(name);
+  const isDefault = host.defaultPersona === name;
+  const served = onList || isDefault;
   let autostartMode = host.autostartModes?.[name];
-  if (autostartMode === undefined && onList) {
+  if (autostartMode === undefined && served) {
     const probe =
       probeBoot ??
       ((p: string) =>
@@ -500,9 +525,10 @@ export async function personaSnapshot(
   return {
     name,
     dir,
-    isDefault: host.defaultPersona === name,
-    autostart: onList,
+    isDefault,
+    autostart: served,
     autostartMode: autostartMode ?? "login",
+    autostartViaDefault: served && !onList,
     chain,
     brainConfigured,
     resolvedHarness,

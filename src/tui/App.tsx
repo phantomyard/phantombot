@@ -682,14 +682,29 @@ export function App(props: AppProps): React.ReactElement {
     async (target: PersonaSnapshot) => {
       const current = target.autostart ? target.autostartMode : "off";
       const isDefault = target.isDefault;
+      // Off is expressed by leaving `autostart_personas` — which the DEFAULT
+      // persona need never have been on. The daemon serves the default
+      // unconditionally (`servedPersonasOf`), so offering Off there wrote a
+      // list the daemon does not consult and reported success while nothing
+      // changed. Say what is actually true instead (#512). The remaining
+      // Off/Login/Boot choices still work for the default persona; only the
+      // impossible one is withheld, and only when the list is genuinely not
+      // what is keeping it on.
+      const offIsUnavailable = isDefault && target.autostartViaDefault === true;
       const pick = await askChoice({
         title: `Autostart for ${target.name}?`,
         description:
           "Login starts the daemon when you sign in. Boot starts it without " +
-          "a login (needs your password once).",
+          "a login (needs your password once)." +
+          (offIsUnavailable
+            ? " The default persona always starts with the daemon — to stop it," +
+              " make another persona Default, or stop the daemon itself."
+            : ""),
         options: isDefault
           ? [
-              { value: "off", label: "Off", hint: "not started with the daemon" },
+              ...(offIsUnavailable
+                ? []
+                : [{ value: "off", label: "Off", hint: "not started with the daemon" }]),
               { value: "login", label: "Login", hint: "starts at login — no password needed" },
               { value: "boot", label: "Boot", hint: "starts at boot without a login — asks for your password once" },
             ]

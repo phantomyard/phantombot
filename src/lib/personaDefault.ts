@@ -298,9 +298,18 @@ export async function adoptLegacyDefaultPersona(
 
 /**
  * Legacy-install migration: backfill `[autostart_modes]` when the host has
- * `autostart_personas` but NO mode records at all — the exact signature of a
- * pre-#509 install, where list membership meant "boot via linger/LaunchDaemon/
+ * SERVED personas but NO mode records at all — the exact signature of a
+ * pre-#509 install, where being served meant "boot via linger/LaunchDaemon/
  * boot task".
+ *
+ * "Served" is `servedPersonasOf` — the default persona plus
+ * `autostart_personas` — and NOT list membership alone. The first cut gated
+ * on a non-empty `autostart_personas`, which made the whole migration a
+ * no-op on the commonest install there is: a single-persona `phantombot
+ * install` host that has a `default_persona` and never wrote an
+ * `autostart_personas` key. Those hosts (Matt/macOS, Megan/Windows,
+ * verified 2026-09-01) got no records at all, so the TUI fell back to
+ * reporting Off for a persona the daemon starts at every login (#512).
  *
  * One-time by construction: the gate is "no records exist", and this write
  * CREATES records — from then on the table is the sole source of truth and
@@ -329,7 +338,25 @@ export async function migrateLegacyAutostartModes(
     bootProbe?: (name: string) => Promise<boolean>;
   },
 ): Promise<void> {
-  if (!config.autostartPersonas?.length) return;
+  // The default persona counts as served ONLY when something actually chose
+  // it (env / state.json / config.toml). Provenance "builtin" is the bare
+  // fallback name on a host that configured nothing, so backfilling a record
+  // for it would invent an autostart record for a persona that may not even
+  // exist on disk. `resolveOpeningScreen` runs the default-persona adoption
+  // BEFORE this migration, so a genuine legacy host has already had its
+  // implicit default made explicit by the time we get here.
+  const { servedPersonasOf } = await import("../config.ts");
+  const chosenDefault =
+    (await defaultPersonaProvenance(config)) === "builtin"
+      ? undefined
+      : config.defaultPersona;
+  const served = servedPersonasOf({
+    ...(chosenDefault ? { defaultPersona: chosenDefault } : {}),
+    autostartPersonas: config.autostartPersonas ?? [],
+  } as Pick<Config, "defaultPersona" | "autostartPersonas">).filter(
+    (n) => typeof n === "string" && n.length > 0,
+  );
+  if (!served.length) return;
   if (config.autostartModes && Object.keys(config.autostartModes).length > 0)
     return;
   const { currentPlatform } = await import("./platform.ts");
@@ -341,7 +368,7 @@ export async function migrateLegacyAutostartModes(
   // Probe everything first — probing never writes, so a probe failure here
   // leaves the config untouched and the migration can simply be retried.
   const modes: Record<string, "login" | "boot"> = {};
-  for (const name of config.autostartPersonas) {
+  for (const name of served) {
     modes[name] =
       platform === "linux" ? "login" : (await bootProbe(name)) ? "boot" : "login";
   }
@@ -353,7 +380,7 @@ export async function migrateLegacyAutostartModes(
   log.warn("legacy install: backfilled [autostart_modes]", {
     ...recorded,
     reason:
-      "pre-#509 autostart_personas had no mode records; linux is always login (linger is an installer default, not a Boot choice), mac/win from ours-only probes",
+      "pre-#509 served personas had no mode records; linux is always login (linger is an installer default, not a Boot choice), mac/win from ours-only probes",
   });
 }
 
