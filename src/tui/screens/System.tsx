@@ -7,7 +7,19 @@ import { logBuffer, type LogLine } from "../logBuffer.ts";
 import type { SystemSnapshot, SystemState } from "../systemSnapshot.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeRows } from "../chrome.ts";
-import { timeOf, LEVEL_COLOR } from "./Logs.tsx";
+
+const LEVEL_COLOR: Record<string, string> = {
+  error: theme.bad,
+  warn: theme.warn,
+  info: theme.ok,
+  debug: theme.dim,
+  raw: theme.dim,
+};
+
+function timeOf(at: number): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
 
 export type LogTimeRange = "15m" | "1h" | "24h" | "all";
 export interface LogFilters {
@@ -68,6 +80,7 @@ export function SystemScreen(props: {
   const [persona, setPersona] = useState("all");
   const [time, setTime] = useState<LogTimeRange>("1h");
   const [text, setText] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
   const [lines, setLines] = useState<readonly LogLine[]>(logBuffer.all());
   const size = useTerminalSize();
   const rows = viewportRows(size, 9 + frameChromeRows());
@@ -93,11 +106,19 @@ export function SystemScreen(props: {
   );
 
   useInput((char, key) => {
+    if (tab === "logs" && searchFocused) {
+      if (key.escape) return setSearchFocused(false);
+      if (key.backspace || key.delete) return setText((s) => s.slice(0, -1));
+      if (char && !key.ctrl && !key.meta && !key.return)
+        return setText((s) => s + char);
+      return;
+    }
     if (key.escape) return props.onBack();
     if (key.tab || char === "o" || char === "l")
       return setTab(tab === "overview" ? "logs" : "overview");
     if (tab !== "logs") return;
-    if (char === "v") setType(types[(types.indexOf(type) + 1) % types.length]!);
+    if (char === "/") setSearchFocused(true);
+    else if (char === "v") setType(types[(types.indexOf(type) + 1) % types.length]!);
     else if (char === "p")
       setPersona(personas[(personas.indexOf(persona) + 1) % personas.length]!);
     else if (char === "t")
@@ -122,6 +143,11 @@ export function SystemScreen(props: {
               { icon: badge.back, key: "esc", label: "Back" },
             ]
           : [
+              {
+                icon: badge.open,
+                key: searchFocused ? "type" : "/",
+                label: searchFocused ? "Search (esc done)" : "Search",
+              },
               { icon: badge.change, key: "v", label: `Type ${type}` },
               { icon: badge.phantoms, key: "p", label: `Persona ${persona}` },
               { icon: badge.history, key: "t", label: `Time ${time}` },
@@ -207,7 +233,7 @@ export function SystemScreen(props: {
             </Text>
             <Box flexGrow={1} />
             <Text color={theme.dim}>
-              filter: {text || "—"} (type to search)
+              filter: {text || "—"} {searchFocused ? "◂ typing" : "(/ to search)"}
             </Text>
           </Box>
           <Rule />

@@ -11,7 +11,7 @@
  * dashboard is that what you are looking at is what is on disk.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
@@ -407,6 +407,17 @@ export function App(props: AppProps): React.ReactElement {
       void probeService();
     }
   }, [screen, serviceActive, probeService]);
+
+  const currentSystemSnapshot = useMemo(
+    () =>
+      screen === "system"
+        ? systemSnapshot({
+            ...host,
+            ...(serviceActive === undefined ? {} : { serviceActive }),
+          })
+        : undefined,
+    [screen, host, serviceActive],
+  );
 
   const persona =
     host.personas.find((p) => p.name === personaName) ?? host.personas[0];
@@ -2041,10 +2052,7 @@ export function App(props: AppProps): React.ReactElement {
     if (screen === "system") {
       return (
         <SystemScreen
-          snapshot={systemSnapshot({
-            ...host,
-            ...(serviceActive === undefined ? {} : { serviceActive }),
-          })}
+          snapshot={currentSystemSnapshot!}
           personas={host.personas.map((p) => p.name)}
           onBack={back}
         />
