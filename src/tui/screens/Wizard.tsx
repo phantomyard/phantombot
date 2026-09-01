@@ -70,9 +70,12 @@ export function WizardScreen(props: {
   existingNames?: readonly string[];
   /**
    * Where esc goes from the FIRST step. Absent on genuine first run, where
-   * there is no screen behind the wizard to return to.
+   * there is no screen behind the wizard to return to — there the app-wide
+   * `^q Quit` takes over (`onQuit`), because the wizard is all there is.
    */
   onBack?: () => void;
+  /** Quit the app — wired when the wizard has no screen behind it. */
+  onQuit?: () => void;
   onFinish: (answers: WizardAnswers) => void;
 }): React.ReactElement {
   const resumed = props.startAt === "identity";
@@ -93,15 +96,19 @@ export function WizardScreen(props: {
     const request: AskRequest = {
       title: "Persona name",
       description: nameDescription(),
-      hint: error ?? "lowercase letters, digits, '-' or '_'",
+      hint:
+        error ??
+        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
       initial: name,
     };
     return (
       <AskScreen
         key={attempt}
         request={request}
-        // Genuine first run has no screen behind the name question.
+        // Genuine first run has no screen behind the name question — ^q
+        // quits instead of pretending to go back.
         noBack={!props.onBack}
+        onQuit={props.onBack ? undefined : props.onQuit}
         onAnswer={(value) => {
           if (value === undefined) {
             if (props.onBack) props.onBack();
@@ -141,7 +148,12 @@ export function WizardScreen(props: {
         request={request}
         // A resume has no name question behind it — the persona already
         // exists, and renaming it here would create a different phantom.
+        // `resumed` always has `onQuit` wired: startAt="identity" only ever
+        // comes from resolveOpeningScreen at startup, so the nav stack is
+        // empty and App passes onQuit — the noBack-but-no-onQuit footer
+        // (Save only) is unreachable by construction.
         noBack={resumed}
+        onQuit={resumed ? props.onQuit : undefined}
         onAnswer={(value) => {
           if (value === undefined) {
             // A resume has no name question behind it — the persona already

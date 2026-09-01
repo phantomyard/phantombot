@@ -85,7 +85,9 @@ export function CreatePersonaScreen(props: {
     const request: AskRequest = {
       title: "Persona name",
       description: nameDescription(),
-      hint: error ?? "lowercase letters, digits, '-' or '_'",
+      hint:
+        error ??
+        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
       initial: name,
     };
     return (
