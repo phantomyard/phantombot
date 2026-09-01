@@ -53,11 +53,15 @@ export function AskScreen(props: {
   onAnswer: (value: string | undefined) => void;
   /**
    * Drop the `esc Back` footer entry — for flows whose first step has no
-   * screen behind it (genuine first run, wizard resume). `esc` still
-   * resolves undefined; the caller just ignores it, and a footer key that
-   * does nothing is worse than no key at all.
+   * screen behind it (genuine first run, wizard resume). With `onQuit` the
+   * app-wide `^q Quit` is advertised in its place: on genuine first run the
+   * wizard IS the app, so there must be a way out — a footer with only
+   * `Save` hides a working key, and a key that silently does nothing is
+   * worse than either.
    */
   noBack?: boolean;
+  /** When `noBack`, ^q exits the app (the app-wide quit), esc does nothing. */
+  onQuit?: () => void;
 }): React.ReactElement {
   const { title, description, hint, masked, initial, allowEmpty } = props.request;
   const [value, setValue] = useState(initial ?? "");
@@ -76,6 +80,9 @@ export function AskScreen(props: {
   };
 
   useStableInput((char, key) => {
+    if (props.noBack && props.onQuit && key.ctrl && char === "q") {
+      return props.onQuit();
+    }
     if (key.escape) return props.onAnswer(undefined);
     if (key.return) return submit(ref.current);
     if (key.backspace || key.delete) {
@@ -99,7 +106,9 @@ export function AskScreen(props: {
       footer={[
         { icon: badge.save, key: "↵", label: "Save" },
         ...(props.noBack
-          ? []
+          ? props.onQuit
+            ? [{ icon: badge.quit, key: "^q", label: "Quit" }]
+            : []
           : [{ icon: badge.back, key: "esc", label: "Back" }]),
       ]}
     >

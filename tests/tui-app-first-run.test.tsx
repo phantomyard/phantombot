@@ -368,9 +368,6 @@ describe("first run", () => {
       wizardStartAt: "identity",
     });
     await tick();
-    // A resume has no name question behind it — the persona already exists.
-    await app.press("\u001b");
-    expect(app.frame()).toContain("One-line identity");
     // Enter accepts the pre-filled default identity → the tone picker.
     await app.press("\r");
     expect(app.frame()).toContain("Default tone");

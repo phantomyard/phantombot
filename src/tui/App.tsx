@@ -1620,8 +1620,9 @@ export function App(props: AppProps): React.ReactElement {
           existingNames={host.personas.map((p) => p.name)}
           // Only when the wizard was reached from another screen; on first
           // run the stack is empty and `back` would fall through to chat,
-          // which does not exist yet.
+          // which does not exist yet — there ^q quits the app instead.
           onBack={navRef.current.length > 0 ? back : undefined}
+          onQuit={navRef.current.length > 0 ? undefined : exit}
           onFinish={async (answers) => {
             try {
               const result = await props.onCreatePersona(answers);
