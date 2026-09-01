@@ -43,13 +43,23 @@ async function writePersonaConfigs(): Promise<void> {
   await writeFile(join(workdir, "config.toml"), "", "utf8");
 }
 
+// Isolate the embedding key: these tests assert "semantic off" for a persona
+// whose config carries no api_key, so a real PHANTOMBOT_GEMINI_API_KEY in the
+// developer's shell (every live phantombot box has one) turns semantic ON and
+// fails the assertion. Saved and restored rather than deleted outright.
+let savedGeminiKey: string | undefined;
+
 function installEnv(): void {
+  savedGeminiKey = process.env.PHANTOMBOT_GEMINI_API_KEY;
+  delete process.env.PHANTOMBOT_GEMINI_API_KEY;
   process.env.PHANTOMBOT_CONFIG = join(workdir, "config.toml");
   process.env.PHANTOMBOT_PERSONAS_DIR = join(workdir, "personas");
   process.env.PHANTOMBOT_STATE = join(workdir, "state.json");
 }
 
 function clearEnv(): void {
+  if (savedGeminiKey === undefined) delete process.env.PHANTOMBOT_GEMINI_API_KEY;
+  else process.env.PHANTOMBOT_GEMINI_API_KEY = savedGeminiKey;
   delete process.env.PHANTOMBOT_CONFIG;
   delete process.env.PHANTOMBOT_PERSONAS_DIR;
   delete process.env.PHANTOMBOT_STATE;

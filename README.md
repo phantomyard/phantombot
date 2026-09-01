@@ -2040,7 +2040,7 @@ Not every secret is a vault row. Current canonical locations are:
 | Claude/Codex host login | The harness's own OAuth/auth store; Phantombot does not copy it |
 | PhantomChat Nostr secret (`nsec`) | `<persona>/identity.json` (owner-only permissions), shared with vault key derivation |
 | Telegram bot token | Persona or host `config.toml`, or `TELEGRAM_BOT_TOKEN[_PERSONA]`; not in the generic vault |
-| Gemini embedding API key | Host/persona `config.toml`, or `PHANTOMBOT_GEMINI_API_KEY`; not in the generic vault |
+| Embedding provider API key (Gemini / OpenAI-compatible) | `<persona>/vault.sqlite` first, then a host-wide `PHANTOMBOT_GEMINI_API_KEY` / `PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY` export, then host/persona `config.toml`. A key injected from ANOTHER persona's vault is never used |
 | Windows logged-off account password | Persona vault; Task Scheduler also holds the registered task credential |
 
 `~/.env` and `~/.config/phantombot/.env` are legacy import sources only. On
@@ -2468,6 +2468,15 @@ api_key = "AIza..."
 model = "gemini-embedding-001"
 dims = 1536
 ```
+
+The `api_key` here is the LOWEST-precedence source. If this persona's vault
+holds a `PHANTOMBOT_GEMINI_API_KEY` row, that row is the key actually used and
+editing the file changes nothing — Phantombot logs a warning saying so on
+startup. `phantombot vault set PHANTOMBOT_GEMINI_API_KEY` is the place to
+change it, or `phantombot vault unset` it to hand control back to the file.
+The same applies to `[embeddings.openai_compatible] api_key` and
+`PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY`. Keys are per persona: one daemon
+serving several personas resolves each one against its OWN vault.
 
 For a local CPU-only llama.cpp server, start it separately from PhantomBot.
 The server's model and pooling must match the embedding GGUF's model card; for

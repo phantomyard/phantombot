@@ -12,6 +12,7 @@
  * it doesn't exist.
  */
 
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,10 @@ import {
 import type { TomlObject } from "./lib/configWriter.ts";
 import { loadState } from "./state.ts";
 import { usablePersistedBin } from "./lib/harnessBinPath.ts";
+import {
+  isVaultInjectedEnvKey,
+  isVaultLoadedPersonaDir,
+} from "./lib/vaultEnvTracking.ts";
 
 /**
  * Read the legacy `turn_timeout_s` (TOML) or `PHANTOMBOT_TURN_TIMEOUT_MS`
@@ -1081,6 +1086,12 @@ export async function loadConfig(persona?: string): Promise<Config> {
     asString(globalToml.default_persona) ??
     "phantom";
 
+  const personaDirPath = join(personasDir, personaLayer);
+  // Embedding API keys are resolved VAULT-FIRST (#514). See
+  // `readEmbeddingSecretsFromVault` for why this can't just read process.env.
+  const vaultEmbeddingSecrets =
+    await readEmbeddingSecretsFromVault(personaDirPath);
+
   const rawPersonaToml = await readPersonaToml(personasDir, personaLayer);
   warnDeprecatedConfigKeys(
     rawPersonaToml,
@@ -1453,7 +1464,12 @@ export async function loadConfig(persona?: string): Promise<Config> {
     // is the fail-closed direction.
     updateChannel: resolveUpdateChannel(globalToml.update_channel),
 
-    embeddings: buildEmbeddingsConfig(tomlEmbeddings, tomlGemini, tomlOpenAI),
+    embeddings: buildEmbeddingsConfig(
+      tomlEmbeddings,
+      tomlGemini,
+      tomlOpenAI,
+      { personaDirPath, vaultSecrets: vaultEmbeddingSecrets },
+    ),
 
     retrieval: buildRetrievalConfig(tomlRetrieval, tomlTurnIndexing),
     durableFacts: buildDurableFactsConfig(
@@ -2066,14 +2082,153 @@ export function documentChunkChars(
   return undefined;
 }
 
+/** The embedding API keys, read from ONE persona's vault. */
+export interface EmbeddingVaultSecrets {
+  gemini?: string;
+  openaiCompatible?: string;
+}
+
+/** Env names carrying an embedding provider's API key. */
+const EMBEDDING_KEY_ENV = {
+  gemini: "PHANTOMBOT_GEMINI_API_KEY",
+  openaiCompatible: "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY",
+} as const;
+
+/**
+ * Read this persona's embedding API keys straight out of ITS OWN vault.
+ *
+ * Only needed for a persona whose vault is NOT the one `loadVaultIntoEnv`
+ * injected at startup — for the loaded persona the values are already in
+ * `process.env` and `personaEmbeddingKey` uses them. One daemon serves several
+ * personas in-process, so without this a secondary persona's key exists on
+ * disk and is unreachable, and (before #514) it silently embedded with the
+ * DEFAULT persona's key instead. Skipping the loaded persona also keeps the
+ * common single-persona path free of a per-`loadConfig` SQLite decrypt.
+ *
+ * Dynamically imported: `vault.ts` imports `loadConfig` from this module, so a
+ * static edge here would close an import cycle. The provenance registry those
+ * two share was split into `vaultEnvTracking.ts` precisely to avoid this for
+ * the SYNC reads; the vault open genuinely needs `vault.ts`.
+ *
+ * Never throws — an unopenable or absent vault is "no key", never a failed
+ * config load.
+ */
+async function readEmbeddingSecretsFromVault(
+  personaDirPath: string,
+): Promise<EmbeddingVaultSecrets> {
+  if (isVaultLoadedPersonaDir(personaDirPath)) return {};
+  try {
+    const { vaultPath, openPersonaVault } = await import("./lib/vault.ts");
+    // Open-existing-only: `openPersonaVault` mints an identity.json (and an
+    // nsec) on demand, so asking about an unprovisioned persona must not
+    // create one. Same rule as readAllVaultValues (#262).
+    if (!existsSync(vaultPath(personaDirPath))) return {};
+    const vault = await openPersonaVault(personaDirPath);
+    try {
+      const read = (name: string): string | undefined => {
+        const v = vault.get(name);
+        return v === undefined || v === "" ? undefined : v;
+      };
+      return {
+        gemini: read(EMBEDDING_KEY_ENV.gemini),
+        openaiCompatible: read(EMBEDDING_KEY_ENV.openaiCompatible),
+      };
+    } finally {
+      vault.close();
+    }
+  } catch (e) {
+    log.warn("config: embedding vault read failed", {
+      error: (e as Error).message,
+    });
+    return {};
+  }
+}
+
+/**
+ * Resolve one embedding API key for `personaDirPath`, vault first.
+ *
+ * Precedence, highest to lowest:
+ *   1. THIS persona's vault — either read directly (a persona whose vault was
+ *      never injected) or via the `process.env` value `loadVaultIntoEnv` put
+ *      there from it.
+ *   2. A host-wide ambient env export (shell, systemd `Environment=`), which
+ *      pre-vault hosts still depend on. Unchanged: env beats TOML everywhere
+ *      else in this file and this key is no exception.
+ *   3. The persona's effective `config.toml` (its own layer, else the host's).
+ *
+ * The case this exists for is the one deliberately MISSING from that list: an
+ * env value injected from a DIFFERENT persona's vault. It used to win outright
+ * (#514), so on a multi-persona host every persona embedded with whichever
+ * vault happened to load at startup — the default one — and that persona's
+ * stale row silently outranked a working key in everyone else's config.toml.
+ * It is now ignored, the same rule `ambientEnvKeyAllowed` already applies to
+ * the audio path and to tick's `--secret`.
+ */
+function personaEmbeddingKey(
+  envName: string,
+  fromVault: string | undefined,
+  fromToml: string | undefined,
+  personaDirPath: string,
+): string | undefined {
+  if (fromVault !== undefined) return fromVault;
+  const fromEnv = process.env[envName];
+  const envUsable =
+    fromEnv !== undefined &&
+    fromEnv !== "" &&
+    // A vault-injected key belongs to exactly one persona. Honour it only for
+    // that persona; an ambient key was never claimed by one, so it is fine.
+    (!isVaultInjectedEnvKey(envName) ||
+      isVaultLoadedPersonaDir(personaDirPath));
+  const resolved = envUsable ? fromEnv : fromToml;
+  // The silent-shadow warning. A key in config.toml that loses to a vault or
+  // an env export is the single most confusing state this resolver can be in:
+  // the operator edits the file (that is what `phantombot embedding` and the
+  // TUI still write), reloads, and nothing changes — which is exactly how a
+  // revoked vault row kept every memory search degraded to FTS-only while a
+  // working key sat in config.toml. Names only, never values, and only when
+  // the two genuinely differ.
+  if (fromToml !== undefined && fromToml !== "" && resolved !== fromToml) {
+    warnShadowedEmbeddingKey(envName, fromVault !== undefined);
+  }
+  return resolved;
+}
+
+/** Once per process per key — this is a config-load path, not a request path. */
+const _warnedShadowedEmbeddingKeys = new Set<string>();
+
+function warnShadowedEmbeddingKey(envName: string, fromVault: boolean): void {
+  if (_warnedShadowedEmbeddingKeys.has(envName)) return;
+  _warnedShadowedEmbeddingKeys.add(envName);
+  log.warn(
+    "config: embeddings api_key in config.toml is being overridden; " +
+      "the key in use comes from " +
+      (fromVault ? "this persona's vault" : "the environment") +
+      ` (${envName}). Update it there, or clear it, to change the key in use.`,
+  );
+}
+
+/** For tests: allow the shadow warning to fire again. */
+export function _resetEmbeddingKeyWarningsForTesting(): void {
+  _warnedShadowedEmbeddingKeys.clear();
+}
+
+export interface BuildEmbeddingsOptions {
+  personaDirPath: string;
+  vaultSecrets: EmbeddingVaultSecrets;
+}
+
 function buildEmbeddingsConfig(
   tomlEmbeddings: Record<string, unknown>,
   tomlGemini: Record<string, unknown>,
   tomlOpenAI: Record<string, unknown>,
+  opts: BuildEmbeddingsOptions,
 ): Config["embeddings"] {
-  const envApiKey = process.env.PHANTOMBOT_GEMINI_API_KEY;
-  const tomlApiKey = asString(tomlGemini.api_key);
-  const apiKey = envApiKey ?? tomlApiKey;
+  const apiKey = personaEmbeddingKey(
+    EMBEDDING_KEY_ENV.gemini,
+    opts.vaultSecrets.gemini,
+    asString(tomlGemini.api_key),
+    opts.personaDirPath,
+  );
 
   const configuredProvider = asString(tomlEmbeddings.provider);
   const provider =
@@ -2100,10 +2255,17 @@ function buildEmbeddingsConfig(
           env("PHANTOMBOT_OPENAI_COMPATIBLE_MODEL") ??
           asString(tomlOpenAI.model) ??
           "",
+        // Same vault-first rule as the Gemini key above: an API key is a
+        // secret, so a value injected from ANOTHER persona's vault must not
+        // stand in. The non-secret overrides beside it (base_url, model,
+        // dims, prefixes) are plain host settings and keep env-wins.
         apiKey:
-          env("PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY") ??
-          asString(tomlOpenAI.api_key) ??
-          "",
+          personaEmbeddingKey(
+            EMBEDDING_KEY_ENV.openaiCompatible,
+            opts.vaultSecrets.openaiCompatible,
+            asString(tomlOpenAI.api_key),
+            opts.personaDirPath,
+          ) ?? "",
         dims:
           asInt(env("PHANTOMBOT_OPENAI_COMPATIBLE_DIMS")) ??
           asInt(tomlOpenAI.dims) ??
