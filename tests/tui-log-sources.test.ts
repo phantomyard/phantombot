@@ -10,6 +10,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import {
   logSources,
 } from "../src/tui/logSources.ts";
 import { configuredBufferLimit, LogBuffer } from "../src/tui/logBuffer.ts";
+import { TaskStore } from "../src/lib/tasks.ts";
 import type { HostSnapshot } from "../src/tui/snapshot.ts";
 
 const temps: string[] = [];
@@ -160,5 +162,68 @@ describe("log buffer capacity", () => {
     const buffer = new LogBuffer(3);
     for (const n of [1, 2, 3, 4]) buffer.push(`line ${n}`);
     expect(buffer.all().map((l) => l.msg)).toEqual(["line 2", "line 3", "line 4"]);
+  });
+});
+
+describe("tasks source against the PRODUCTION task_runs schema", () => {
+  // The bug this guards: the source was written against a `detail` column that
+  // does not exist. `TaskStore` writes `output_excerpt`. SQLite raises
+  // `no such column` only at query time, so a fixture that invents its own
+  // table proves nothing — this one builds the schema through TaskStore itself,
+  // exactly as production does, so a column rename breaks the test first.
+  test("renders real fires written by TaskStore.logRun", async () => {
+    const { host, dir } = await hostWithPersona();
+    const dbPath = join(dir, "memory.sqlite");
+    const db = new Database(dbPath);
+    const store = new TaskStore(db);
+    const added = store.add({
+      persona: "kai",
+      description: "fixture",
+      schedule: "*/5 * * * *",
+      prompt: "check something",
+    });
+    expect(added.ok).toBe(true);
+    const taskId = (added as { ok: true; id: number }).id;
+    store.logRun({
+      taskId,
+      firedAt: new Date("2026-09-01T12:00:00Z"),
+      status: "ok",
+      exitCode: 0,
+      outputExcerpt: "all quiet",
+      delivered: true,
+    });
+    store.logRun({
+      taskId,
+      firedAt: new Date("2026-09-01T12:05:00Z"),
+      status: "error",
+      exitCode: 2,
+      outputExcerpt: "boom",
+      delivered: false,
+    });
+    db.close();
+
+    const tasks = logSources({ host }).find((s) => s.id === "tasks");
+    expect(tasks?.available).toBe(true);
+    const lines = await tasks!.read(DEFAULT_SOURCE_LIMIT);
+    const text = lines.map((l) => l.msg).join("\n");
+    // Not the "no task fires recorded" placeholder the broken query produced.
+    expect(text).not.toContain("no task fires recorded");
+    expect(text).not.toContain("could not read task_runs");
+    expect(text).toContain("all quiet");
+    expect(text).toContain("boom");
+    expect(text).toContain("exit 2");
+    expect(lines.some((l) => l.level === "error")).toBe(true);
+  });
+
+  test("a database whose task_runs cannot be read explains itself, never renders empty", async () => {
+    const { host, dir } = await hostWithPersona();
+    // A file that is a valid DB but has no task_runs table at all.
+    const db = new Database(join(dir, "memory.sqlite"));
+    db.exec("CREATE TABLE unrelated (id INTEGER)");
+    db.close();
+    const tasks = logSources({ host }).find((s) => s.id === "tasks");
+    const lines = await tasks!.read(DEFAULT_SOURCE_LIMIT);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines[0]!.msg).toContain("task_runs");
   });
 });

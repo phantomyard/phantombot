@@ -113,15 +113,26 @@ function serviceSource(): LogSource {
           stdout: "pipe",
           stderr: "pipe",
         });
-        const out = await new Response(proc.stdout).text();
+        const [out, errText] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
         await proc.exited;
         const parsed = out
           .split("\n")
           .filter((l) => l.trim())
           .map((l) => parseLogLine(l));
-        return parsed.length
-          ? parsed.slice(-limit)
-          : unavailable(`no lines yet — see: ${loc.command}`, "service");
+        if (parsed.length) return parsed.slice(-limit);
+        // Nothing on stdout: say WHY. A tailer that failed (bad unit, missing
+        // file, PowerShell error record) explains itself on stderr, and an
+        // empty pane must never be indistinguishable from a quiet daemon.
+        const why = errText.trim().split("\n").filter(Boolean).slice(-3).join(" | ");
+        return unavailable(
+          why
+            ? `${spec.cmd}: ${why} — see: ${loc.command}`
+            : `no lines yet — see: ${loc.command}`,
+          "service",
+        );
       } catch (err) {
         return unavailable(
           `could not run '${spec.cmd}': ${String(err)} — see: ${loc.command}`,
@@ -240,6 +251,25 @@ function stateSource(): LogSource {
 }
 
 /**
+ * One `task_runs` row as a readable line. Columns are the PRODUCTION schema
+ * (`src/lib/tasks.ts` -> `TaskStore.logRun`): status, exit_code and
+ * output_excerpt. There is no `detail` column; querying one throws
+ * `no such column`, which an over-broad catch turns into a permanently empty
+ * pane, so the shape of this row is covered by a test built on the real store.
+ */
+function taskRunText(r: {
+  status?: string;
+  exit_code?: number;
+  output_excerpt?: string;
+  task_id?: string | number;
+}): string {
+  const code =
+    typeof r.exit_code === "number" && r.exit_code !== 0 ? ` exit ${r.exit_code}` : "";
+  const excerpt = r.output_excerpt?.trim() ? `: ${r.output_excerpt.trim()}` : "";
+  return `task ${r.task_id ?? "?"} ${r.status ?? "?"}${code}${excerpt}`;
+}
+
+/**
  * Scheduled-task fires. Not a log FILE at all — `task_runs` in each persona's
  * memory DB — which is exactly why it belongs here: it is a stream an operator
  * would otherwise have to know SQL to see.
@@ -259,18 +289,20 @@ function taskSource(personas: PersonaSnapshot[]): LogSource {
     note: dbs.length ? undefined : "no persona databases on this host",
     async read(limit) {
       const out: LogLine[] = [];
+      const failures: string[] = [];
       for (const { persona, path } of dbs) {
         let db: Database | undefined;
         try {
           db = new Database(path, { readonly: true });
           const rows = db
             .query(
-              "SELECT fired_at, status, detail, task_id FROM task_runs ORDER BY fired_at DESC LIMIT ?1",
+              "SELECT fired_at, status, exit_code, output_excerpt, task_id FROM task_runs ORDER BY fired_at DESC LIMIT ?1",
             )
             .all(limit) as Array<{
             fired_at?: string;
             status?: string;
-            detail?: string;
+            exit_code?: number;
+            output_excerpt?: string;
             task_id?: string | number;
           }>;
           for (const r of rows) {
@@ -278,20 +310,27 @@ function taskSource(personas: PersonaSnapshot[]): LogSource {
               line(
                 r.fired_at ? Date.parse(r.fired_at) : Date.now(),
                 r.status === "error" ? "error" : "info",
-                `task ${r.task_id ?? "?"} ${r.status ?? "?"}${r.detail ? `: ${r.detail}` : ""}`,
+                taskRunText(r),
                 "tasks",
                 persona,
               ),
             );
           }
-        } catch {
-          // A missing or older table is unavailable data, never a broken pane.
+        } catch (e) {
+          // A missing or older table is unavailable data, never a broken pane
+          // -- but it is never SILENT either: a swallowed schema error and a
+          // genuinely quiet scheduler must not render identically.
+          failures.push(`${persona}: ${(e as Error).message}`);
         } finally {
           db?.close();
         }
       }
       out.sort((a, b) => a.at - b.at);
-      return out.length ? out.slice(-limit) : unavailable("no task fires recorded", "tasks");
+      if (out.length) return out.slice(-limit);
+      return unavailable(
+        failures.length ? `could not read task_runs (${failures.join("; ")})` : "no task fires recorded",
+        "tasks",
+      );
     },
   };
 }

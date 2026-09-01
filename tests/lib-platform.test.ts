@@ -8,7 +8,12 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
 import { setLogSink } from "../src/lib/logSink.ts";
+import { taskLogPaths } from "../src/lib/taskScheduler.ts";
 import {
   syncHeartbeatInstances,
   currentPlatform,
@@ -59,6 +64,8 @@ describe("hint commands shape per platform", () => {
     expect(await restartCommand()).toContain("schtasks /End");
     expect(await statusCommand()).toContain("schtasks /Query");
     expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
+    // Both sinks: the daemon logs to stderr, which lands in the .err.log.
+    expect(logsCommand()).toContain("phantombot\\logs\\phantombot.err.log");
   });
 });
 
@@ -155,6 +162,81 @@ describe("logsSpec", () => {
       expect(spec?.args.join(" ")).not.toContain("-Wait");
       expect(spec?.args.join(" ")).toContain("-Tail 10");
     }
+  });
+
+  // Windows-only regression (#478). The daemon's structured logger writes
+  // EVERY level to stderr, and Task Scheduler redirects stderr to a SEPARATE
+  // .err.log — so a spec that tails only .out.log omits the entire service log
+  // and every error in it, while `logsLocation()` advertises both files. These
+  // run in the test-windows job; on other platforms they are skipped.
+  const winTest = process.platform === "win32" ? test : test.skip;
+
+  winTest("tails BOTH the stdout and stderr sinks, not just .out.log", () => {
+    const { out, err } = taskLogPaths("phantombot");
+    for (const follow of [true, false]) {
+      const cmd = logsSpec({ follow, lines: 20 })!.args.join(" ");
+      expect(cmd).toContain(out);
+      expect(cmd).toContain(err);
+    }
+  });
+
+  winTest("follows each sink with its own waiter, since -Wait binds one handle", () => {
+    const cmd = logsSpec({ follow: true, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("-Wait");
+    expect(cmd).toContain("Start-Job");
+    // Waiters are cleaned up, or `phantombot logs` leaks jobs on every exit.
+    expect(cmd).toContain("Remove-Job");
+  });
+
+  winTest("missing logs print a friendly line instead of a red Get-Content error", () => {
+    const cmd = logsSpec({ follow: false, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("Test-Path");
+    expect(cmd).toContain("no phantombot logs yet");
+  });
+
+  // The strongest Windows assertion available: RUN the generated PowerShell.
+  // A spec built from string concatenation can be syntactically wrong in ways
+  // no argv assertion notices; `phantombot logs` then fails only in the field.
+  winTest("the generated PowerShell actually runs and merges both files", async () => {
+    const prev = process.env.XDG_DATA_HOME;
+    const root = await mkdtemp(join(tmpdir(), "pb478-win-"));
+    try {
+      process.env.XDG_DATA_HOME = root;
+      const { out, err } = taskLogPaths("phantombot");
+      await mkdir(dirname(out), { recursive: true });
+
+      // 1. Neither sink exists yet: friendly line, clean exit, no red error.
+      const missing = logsSpec({ follow: false, lines: 20 })!;
+      const first = Bun.spawn([missing.cmd, ...missing.args], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const firstOut = await new Response(first.stdout).text();
+      expect(await first.exited).toBe(0);
+      expect(firstOut).toContain("no phantombot logs yet");
+
+      // 2. Both sinks present: both are read, stderr's content included.
+      await writeFile(out, "from-stdout\n");
+      await writeFile(err, "from-stderr\n");
+      const spec = logsSpec({ follow: false, lines: 20 })!;
+      const proc = Bun.spawn([spec.cmd, ...spec.args], { stdout: "pipe", stderr: "pipe" });
+      const text = await new Response(proc.stdout).text();
+      const errText = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(0);
+      expect(errText.trim()).toBe("");
+      expect(text).toContain("from-stdout");
+      expect(text).toContain("from-stderr");
+    } finally {
+      if (prev === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = prev;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  winTest("the copy-pasteable hint names both sinks too", () => {
+    const { out, err } = taskLogPaths("phantombot");
+    expect(logsCommand()).toContain(out);
+    expect(logsCommand()).toContain(err);
   });
 });
 
