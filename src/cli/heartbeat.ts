@@ -20,9 +20,7 @@ import {
   personaDir,
   loadConfigForPersona,
   resolvePersona,
-  servedPersonasOf,
 } from "../config.ts";
-import { isPhantombotBinary } from "../lib/binaryIdentity.ts";
 import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { runHeartbeat } from "../lib/heartbeat.ts";
 import { MemoryIndex } from "../lib/memoryIndex.ts";
@@ -37,24 +35,9 @@ import {
   rotateServiceLogs,
   type RotateLogDirResult,
 } from "../lib/logRotate.ts";
-import { currentPlatform } from "../lib/platform.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { flushDueConversationTurns } from "../orchestrator/turnIndexer.ts";
-import {
-  BunSystemctlRunner,
-  buildSystemctlEnv,
-  ensureSystemdUnitsCurrent,
-  ensureUserSystemdEnv,
-} from "../lib/systemd.ts";
-import {
-  BunSchtasksRunner,
-  ensureTasksCurrent,
-} from "../lib/taskScheduler.ts";
-import {
-  BunLaunchctlRunner,
-  ensureLaunchdHeartbeatInstances,
-  guiDomain,
-} from "../lib/launchd.ts";
+import { healMaintenanceUnits } from "../lib/maintenanceHeal.ts";
 import {
   loadPersonaHeartbeatLastFired,
   recordHeartbeatFired,
@@ -231,7 +214,7 @@ export async function runHeartbeatCli(
       if (input.healSystemd) {
         await input.healSystemd();
       } else {
-        await defaultHealService(config, persona);
+        await healMaintenanceUnits(config, { persona, source: "heartbeat" });
       }
     } catch (e) {
       log.warn("heartbeat: service self-heal threw unexpectedly", {
@@ -358,116 +341,6 @@ async function defaultEmbedNotes(
     };
   } finally {
     ix.close();
-  }
-}
-
-/**
- * Production self-heal, dispatched to the host's service-manager backend.
- * Silent on healthy boxes; logs a notice only on repair. A no-op on any
- * platform without a backend.
- */
-async function defaultHealService(
-  config: Config,
-  persona?: string,
-): Promise<void> {
-  switch (currentPlatform()) {
-    case "linux":
-      return defaultHealSystemd(config);
-    case "darwin":
-      return defaultHealLaunchd(config);
-    case "windows":
-      return defaultHealTaskScheduler(persona);
-    default:
-      return; // unsupported hosts
-  }
-}
-
-/**
- * macOS analogue of `defaultHealSystemd` (#491): reconcile one per-persona
- * heartbeat plist per served persona, bootout plists of personas no longer
- * served, and retire the legacy single-persona heartbeat once its
- * replacement is loaded. Idempotent; silent when nothing drifted.
- */
-async function defaultHealLaunchd(config: Config): Promise<void> {
-  const binPath = process.execPath;
-  if (!isPhantombotBinary(binPath)) return;
-  let domain: string;
-  try {
-    domain = guiDomain();
-  } catch {
-    return;
-  }
-  const r = await ensureLaunchdHeartbeatInstances({
-    binPath,
-    personas: servedPersonasOf(config),
-    domain,
-    launchctl: new BunLaunchctlRunner(),
-  });
-  if (
-    r.rewrote.length > 0 ||
-    r.bootstrapped.length > 0 ||
-    r.removed.length > 0 ||
-    r.retiredLegacy ||
-    r.reloadFailed.length > 0 ||
-    r.removeFailed.length > 0
-  ) {
-    log.info("heartbeat: healed launchd heartbeat plists", {
-      rewrote: r.rewrote,
-      bootstrapped: r.bootstrapped,
-      removed: r.removed,
-      retiredLegacy: r.retiredLegacy,
-      reloadFailed: r.reloadFailed,
-      removeFailed: r.removeFailed,
-    });
-  }
-}
-
-/**
- * Idempotently ensure all phantombot systemd units are present and timers are
- * armed — including one heartbeat instance per served persona (#486). Skips on
- * Linux hosts where the user-systemd bus isn't reachable (e.g. SSH without
- * lingering).
- */
-async function defaultHealSystemd(config: Config): Promise<void> {
-  const binPath = process.execPath;
-  if (!isPhantombotBinary(binPath)) return;
-  const sysEnv = ensureUserSystemdEnv();
-  if (!sysEnv.ready) return;
-  const systemctl = new BunSystemctlRunner(buildSystemctlEnv(sysEnv));
-  const r = await ensureSystemdUnitsCurrent({
-    binPath,
-    systemctl,
-    personas: servedPersonasOf(config),
-  });
-  if (
-    r.rewrote.length > 0 ||
-    r.repairedTimers.length > 0 ||
-    r.disabledInstances.length > 0
-  ) {
-    log.info("heartbeat: healed systemd units", {
-      rewrote: r.rewrote,
-      repairedTimers: r.repairedTimers,
-      disabledInstances: r.disabledInstances,
-    });
-  }
-}
-
-/**
- * Windows analogue of `defaultHealSystemd`: re-register any of the four
- * scheduled tasks that drifted from the current binary path (the moved- or
- * updated-binary case). Only fires when we ARE the compiled binary
- * (`phantombot.exe`), so a dev `bun src/index.ts` run never rewrites tasks.
- */
-async function defaultHealTaskScheduler(persona?: string): Promise<void> {
-  const binPath = process.execPath;
-  if (!isPhantombotBinary(binPath)) return;
-  const r = await ensureTasksCurrent({
-    binPath,
-    persona,
-    schtasks: new BunSchtasksRunner(),
-  });
-  if (r.rewrote.length > 0) {
-    log.info("heartbeat: healed scheduled tasks", { rewrote: r.rewrote });
   }
 }
 

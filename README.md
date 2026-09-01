@@ -2722,6 +2722,16 @@ single `dev.phantombot.heartbeat` plist is retired automatically once the
 default persona's replacement is loaded. On Windows the per-persona
 `heartbeat-<persona>` tasks play the same role.
 
+**Where the self-heal runs from.** The heartbeat reconciles these units on its
+own 30-minute cadence, but it cannot be the only path: a scheduled job that
+dies takes the code that would re-arm it with it, and self-update swaps the
+binary without touching units. So the same idempotent heal also runs from two
+places the dead job has no say over — `phantombot run` at daemon start, and
+`phantombot tick`, which is a separate scheduled job. The tick path only acts
+when a served persona's heartbeat marker is actually stale, and then at most
+once every 15 minutes, so a healthy host pays nothing. Heartbeat and tick now
+have to fail together before a host goes quietly unmaintained.
+
 Update commands:
 
 ```bash

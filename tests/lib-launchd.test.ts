@@ -415,6 +415,7 @@ describe("ensureLaunchdHeartbeatInstances (#491)", () => {
     launchctl: lc,
     agentsDir: workdir,
     legacyHeartbeatPath: hbPath,
+    legacyNightlyPath: ngPath,
   });
 
   test("writes + bootstraps missing per-persona plists, retires legacy", async () => {
@@ -441,6 +442,65 @@ describe("ensureLaunchdHeartbeatInstances (#491)", () => {
     expect(
       existsSync(join(workdir, "dev.phantombot.heartbeat.lena.plist")),
     ).toBe(true);
+  });
+
+
+  test("retires the dead nightly plist (#510)", async () => {
+    // The only thing on disk is the retired nightly agent: an upgraded host
+    // that self-updated instead of reinstalling. Before #510 only `install`
+    // cleaned this up, so it stayed loaded (and could fire a duplicate sweep)
+    // for as long as the box was never reinstalled.
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    await writeFile(ngPath, "nightly");
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print lena -> loaded
+      { exitCode: 0, stdout: "", stderr: "" }, // nightly bootout ok
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.retiredNightly).toBe(true);
+    expect(existsSync(ngPath)).toBe(false);
+    expect(
+      lc.calls.some(
+        (c) => c[0] === "bootout" && c[1] === `gui/501/${NIGHTLY_PLIST_LABEL}`,
+      ),
+    ).toBe(true);
+  });
+
+  test("keeps the nightly plist when its bootout fails and the job is still loaded", async () => {
+    // Same retry-handle rule as the legacy heartbeat: the file is the only
+    // way a later heal can find the job and try the unload again.
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    await writeFile(ngPath, "nightly");
+    const lc = new FakeLaunchctl();
+    lc.responses = [
+      { exitCode: 0, stdout: "", stderr: "" }, // print lena -> loaded
+      { exitCode: 1, stdout: "", stderr: "" }, // nightly bootout FAILS
+      { exitCode: 0, stdout: "", stderr: "" }, // probe print -> still loaded
+    ];
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.retiredNightly).toBe(false);
+    expect(existsSync(ngPath)).toBe(true);
+  });
+
+  test("no nightly plist on disk costs no launchctl call", async () => {
+    await writeFile(
+      join(workdir, "dev.phantombot.heartbeat.lena.plist"),
+      generateHeartbeatPlist("/usr/local/bin/phantombot", "lena"),
+    );
+    const lc = new FakeLaunchctl();
+    lc.responses = [{ exitCode: 0, stdout: "", stderr: "" }]; // print lena -> loaded
+    const r = await ensureLaunchdHeartbeatInstances(opts(lc, ["lena"]));
+    expect(r.retiredNightly).toBe(false);
+    expect(
+      lc.calls.some((c) => c[1]?.includes(NIGHTLY_PLIST_LABEL)),
+    ).toBe(false);
   });
 
   test("healthy loaded plists are left alone (idempotent)", async () => {
