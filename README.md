@@ -1033,7 +1033,10 @@ persona that no longer existed. What is enforced instead is the constraint that
 really exists: a second lifecycle command issued while one is in flight is
 refused ("already in progress") rather than racing the same binary swap, and
 every *other* persona on the host gets a heads-up in its own chat before the
-process goes down plus a "back online" line once it is answering again. `/stop`
+process goes down plus a "back online" line once it is answering again. Those
+two notices go out over Telegram only: a persona served solely over PhantomChat
+is skipped rather than warned, because there is no per-persona PhantomChat send
+path yet. `/stop`
 is unaffected — it aborts the current turn in the current chat and touches
 nobody else. `/status` shows the release ring and the full persona roster,
 marking the default and which persona is answering.

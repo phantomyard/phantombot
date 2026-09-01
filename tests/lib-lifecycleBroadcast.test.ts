@@ -334,3 +334,113 @@ describe("notifyLifecycleBackIfPending", () => {
     );
   });
 });
+
+/**
+ * kaieriksen on #520: the config a listener hands the planner is that
+ * listener's PERSONA-RESOLVED config, not the host layer. Inferring sibling
+ * ownership from it sends a sibling's heads-up through the caller's own bot.
+ */
+describe("recipient resolution is not inferred from the caller's config", () => {
+  /** Kai's exact repro: lena's listener, robbie still named as host default. */
+  function lenaResolvedConfig(): any {
+    return {
+      personaLayer: "lena",
+      defaultPersona: "robbie",
+      autostartPersonas: ["robbie", "lena"],
+      channels: {
+        // On lena's listener THIS is lena's bot, not robbie's.
+        telegram: account("LENA_BOT", [1]),
+        telegramPersonas: {},
+      },
+    };
+  }
+
+  test("the caller's own [channels.telegram] is never attributed to the default persona", () => {
+    const plan = planLifecycleBroadcast({
+      config: lenaResolvedConfig(),
+      excludePersona: "lena",
+    });
+    // Before the fix this returned { persona: "robbie", token: "LENA_BOT" } —
+    // robbie's name on lena's token. Skipping is the only safe answer without
+    // a real account map.
+    expect(plan.find((r) => r.token === "LENA_BOT")).toBeUndefined();
+    expect(plan).toEqual([]);
+  });
+
+  test("the host block is still attributed correctly on an UNRESOLVED config", () => {
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      excludePersona: "kai",
+    });
+    expect(plan.find((r) => r.persona === "robbie")?.token).toBe("tok-robbie");
+  });
+
+  test("a supplied account map wins over any inference the config would make", () => {
+    const plan = planLifecycleBroadcast({
+      config: lenaResolvedConfig(),
+      runningPersonas: ["robbie", "lena"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        { persona: "lena", token: "LENA_BOT", chatIds: [1] },
+      ],
+      excludePersona: "lena",
+    });
+    expect(plan).toEqual([
+      { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+    ]);
+  });
+
+  test("a supplied map is exhaustive: an absent persona does NOT fall back to config", () => {
+    // `kai` is deliberately chosen: config DOES carry an account for him, so a
+    // fallback-to-inference bug would happily include him. The daemon left him
+    // out of the map, which means he has no live Telegram listener (a
+    // PhantomChat-only persona, or one whose listener never started), and the
+    // map is the only thing that knows that. Picking a persona config could
+    // not resolve either would make this assertion vacuous.
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "lena", "kai"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        { persona: "lena", token: "tok-lena", chatIds: [1] },
+      ],
+      excludePersona: "robbie",
+    });
+    expect(plan.map((r) => r.persona)).toEqual(["lena"]);
+  });
+
+  test("the back-online half honours the account map too", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-lifecycle-"));
+    const path = join(dir, ".pending-lifecycle.json");
+    try {
+      await writePendingLifecycle(
+        {
+          command: "/update",
+          originPersona: "lena",
+          personas: ["robbie"],
+          writtenAt: new Date().toISOString(),
+        },
+        path,
+      );
+      const t = fakeTransports();
+      const res = await notifyLifecycleBackIfPending({
+        config: lenaResolvedConfig(),
+        currentVersion: "1.2.3",
+        runningPersonas: ["robbie", "lena"],
+        accounts: [{ persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] }],
+        path,
+        createTransport: t.createTransport,
+      });
+      expect(res.status).toBe("notified");
+      expect(t.sent).toEqual([
+        {
+          token: "ROBBIE_BOT",
+          chatId: "7",
+          text: backOnlineMessage("/update", "1.2.3"),
+        },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

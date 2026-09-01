@@ -35,6 +35,7 @@ import {
 } from "../lib/lifecycleLock.ts";
 import {
   impendingRestartMessage,
+  type LifecycleAccount,
   planLifecycleBroadcast,
   sendLifecycleBroadcast,
   writePendingLifecycle,
@@ -110,6 +111,15 @@ export interface SlashCommandContext {
    * "unknown" and the roster line is derived from config as a fallback.
    */
   runningPersonas?: string[];
+  /**
+   * The REAL persona -> Telegram account map for this process, as the daemon
+   * started it. Passed to the lifecycle broadcast so sibling recipients are
+   * never inferred from this listener's own persona-resolved config (which
+   * would send a sibling's heads-up through THIS caller's bot token).
+   * Absent (tests, embedded callers) falls back to conservative config
+   * inference.
+   */
+  lifecycleAccounts?: LifecycleAccount[];
   /**
    * ServiceControl override for /restart's afterSend. Production
    * callers leave this undefined and /restart picks up
@@ -426,6 +436,7 @@ async function announceImpendingRestart(
     const recipients = planLifecycleBroadcast({
       config: ctx.config,
       runningPersonas: ctx.runningPersonas,
+      accounts: ctx.lifecycleAccounts,
       excludePersona: ctx.persona,
     });
     if (recipients.length === 0) return;

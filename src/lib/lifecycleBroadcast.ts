@@ -9,6 +9,16 @@
  * honest fix: the problem was never who typed the command, it was that nobody
  * else was told.
  *
+ * SCOPE — Telegram only, deliberately. The fan-out sends through Telegram bot
+ * tokens; a persona served ONLY over PhantomChat gets no heads-up and no
+ * back-online line (it is skipped, and the skip is logged at debug). That is a
+ * narrowing, not an oversight: a channel-neutral sender needs a per-persona
+ * PhantomChat send path that does not exist yet, and the alternative — holding
+ * the fix for the users who ARE affected — is worse. Tracked separately; the
+ * planner already takes a persona-keyed account map, which is the seam a
+ * second channel plugs into. Nothing here regresses for PhantomChat personas:
+ * before this module NOBODY was warned.
+ *
  * Two halves, deliberately split:
  *
  *   - `planLifecycleBroadcast` is PURE — facts in (config, roster, origin),
@@ -53,8 +63,32 @@ export interface BroadcastRecipient {
   chatIds: number[];
 }
 
+/**
+ * A persona's REAL Telegram account, as the daemon actually started it.
+ * Built in `run.ts` from the resolved listener plan, so it needs no inference:
+ * the token is the bot that persona's listener is bound to, and the chat ids
+ * are that bot's own allow-list.
+ */
+export interface LifecycleAccount {
+  persona: string;
+  token: string;
+  chatIds: number[];
+}
+
 export interface PlanLifecycleBroadcastInput {
   config: Config;
+  /**
+   * Authoritative persona -> account map. When present it is the ONLY source
+   * of recipients; config is not consulted for ownership at all.
+   *
+   * This exists because `config` here is whatever layer the CALLER was
+   * resolved for. On a non-default listener, `config.channels.telegram` is
+   * that caller's own bot while `config.defaultPersona` still names the host
+   * default — inferring sibling ownership from one effective config therefore
+   * labels a sibling and sends through the caller's token. Only the daemon
+   * knows the true mapping, so the daemon passes it down.
+   */
+  accounts?: LifecycleAccount[];
   /**
    * Personas this daemon actually started, when the caller knows them
    * (`SlashCommandContext.runningPersonas`). Authoritative: reconstructing the
@@ -72,19 +106,24 @@ export interface PlanLifecycleBroadcastInput {
   only?: string[];
 }
 
-/** The Telegram account a persona's messages go out through, if any. */
+/**
+ * Fallback ownership inference, used ONLY when no account map was supplied
+ * (embedded callers and tests). Deliberately conservative: it would rather
+ * skip a persona than send as the wrong one.
+ */
 function accountFor(
   config: Config,
   persona: string,
 ): TelegramAccount | undefined {
   const own = config.channels.telegramPersonas?.[persona];
   if (own) return own;
-  // The host-level `[channels.telegram]` block belongs to the default persona
-  // in a hybrid setup; nobody else may borrow it, or a sibling's heads-up
-  // would land in the default persona's chat wearing the wrong name.
-  return persona === config.defaultPersona
-    ? config.channels.telegram
-    : undefined;
+  // The effective `[channels.telegram]` block belongs to the persona this
+  // Config was RESOLVED for — `personaLayer` when set, otherwise the host
+  // layer's default persona. Attributing it to `defaultPersona` regardless
+  // would label the default persona while sending through a non-default
+  // caller's token (kaieriksen on #520).
+  const owner = config.personaLayer ?? config.defaultPersona;
+  return owner && persona === owner ? config.channels.telegram : undefined;
 }
 
 /**
@@ -106,12 +145,26 @@ export function planLifecycleBroadcast(
   const only = input.only ? new Set(input.only) : undefined;
   const seen = new Set<string>();
   const out: BroadcastRecipient[] = [];
+  const supplied = input.accounts
+    ? new Map(input.accounts.map((a) => [a.persona, a]))
+    : undefined;
 
   for (const persona of roster) {
     if (persona === input.excludePersona) continue;
     if (only && !only.has(persona)) continue;
-    const account = accountFor(input.config, persona);
-    if (!account) continue;
+    const mapped = supplied?.get(persona);
+    // A supplied map is exhaustive by construction: a persona missing from it
+    // has no Telegram listener, and must NOT fall back to guessing at config.
+    const account: { token: string; allowedUserIds: number[] } | undefined =
+      supplied
+        ? mapped && { token: mapped.token, allowedUserIds: mapped.chatIds }
+        : accountFor(input.config, persona);
+    if (!account) {
+      log.debug("lifecycleBroadcast: persona has no Telegram account, skipped", {
+        persona,
+      });
+      continue;
+    }
     const chatIds = account.allowedUserIds.filter((id) => {
       const key = `${account.token}:${id}`;
       if (seen.has(key)) return false;
@@ -265,6 +318,7 @@ export interface NotifyLifecycleBackInput {
   config: Config;
   currentVersion: string;
   runningPersonas?: string[];
+  accounts?: LifecycleAccount[];
   path?: string;
   now?: Date;
   createTransport?: (token: string) => TelegramTransport;
@@ -297,6 +351,7 @@ export async function notifyLifecycleBackIfPending(
   const recipients = planLifecycleBroadcast({
     config: input.config,
     runningPersonas: input.runningPersonas,
+    accounts: input.accounts,
     excludePersona: marker.originPersona,
     only: marker.personas,
   });

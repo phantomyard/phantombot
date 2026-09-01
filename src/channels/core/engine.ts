@@ -63,6 +63,7 @@ import {
   slashCommandTarget,
   TELEGRAM_BOT_COMMANDS,
 } from "../commands.ts";
+import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "./backlog.ts";
 import { loadPhantomchatPersonaConfig } from "../phantomchat/personaStore.ts";
 import { RecentOutbound, runReactionTurn } from "./reactions.ts";
@@ -242,6 +243,12 @@ export interface RunTelegramServerInput {
    * "unknown" and the roster line is derived from config as a fallback.
    */
   runningPersonas?: string[];
+  /**
+   * Persona -> Telegram account map for the whole process (phantombot#519).
+   * Handed to the lifecycle broadcast so a sibling's heads-up goes through
+   * ITS OWN bot, never this listener's.
+   */
+  lifecycleAccounts?: LifecycleAccount[];
 
   memory: MemoryStore;
   harnesses: Harness[];
@@ -626,6 +633,7 @@ export async function runTelegramServer(
             activeTurn: activeTurns.get(msg.conversationId),
             config: input.config,
             runningPersonas: input.runningPersonas,
+            lifecycleAccounts: input.lifecycleAccounts,
             serviceControl: input.serviceControl,
             botUsername,
             phantomchatNpub,
