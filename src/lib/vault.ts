@@ -38,6 +38,11 @@ import {
   type Config,
 } from "../config.ts";
 import { log } from "./logger.ts";
+import {
+  isVaultLoadedPersonaDir,
+  noteVaultLoadedPersonaDir,
+  vaultTrackedKeys,
+} from "./vaultEnvTracking.ts";
 import { getOrCreatePersonaIdentity } from "./personaIdentity.ts";
 
 /** Filename of the per-persona encrypted secrets DB inside a persona dir. */
@@ -425,55 +430,16 @@ function warnConfigOwnedEnvMirrors(
 }
 
 /**
- * Module-scope set of env keys THIS process injected from a vault. Mirrors
- * envBootstrap's `_moduleTracked`: it lets a later reload for a DIFFERENT
- * persona reconcile — updating a key to the new persona's value, or removing it
- * if the new persona doesn't have it — without ever touching a key that was
- * already in the environment at boot (shell export / systemd EnvironmentFile=).
+ * Vault->env provenance lives in `vaultEnvTracking.ts` (a leaf module, so
+ * `config.ts` can read it without closing an import cycle through this file).
+ * Re-exported here because this module is the API surface every caller already
+ * imports, and the writers below are the only code that mutates it.
  */
-const _vaultTracked = new Set<string>();
-
-/** The persona dir whose vault we last successfully injected, for transient-fail handling. */
-let _vaultLoadedPersonaDir: string | undefined;
-
-/**
- * True when `name` in `process.env` was injected there from a VAULT by this
- * process (rather than inherited from the shell / a systemd `Environment=`).
- *
- * The distinction matters wherever code resolves a secret for a persona that
- * is not the one loaded at startup: an ambient key is host-wide and safe to
- * fall back to, but a vault-injected one belongs to exactly one persona and
- * must never stand in for another persona's missing key. See tick's
- * `--secret` resolution.
- */
-export function isVaultInjectedEnvKey(
-  name: string,
-  tracked: Set<string> = _vaultTracked,
-): boolean {
-  return tracked.has(name);
-}
-
-/**
- * True when `personaDirPath` is the persona whose vault this process last
- * injected into `process.env`.
- *
- * Lets a resolver tell the two cases a vault-injected key can be in apart. If
- * the key belongs to a DIFFERENT persona it must never stand in (see
- * `isVaultInjectedEnvKey`); if it belongs to THIS persona it is that persona's
- * own secret, still in the environment because `loadVaultIntoEnv` deliberately
- * leaves injected keys in place when the same persona's vault fails to open
- * transiently. Treating that blip as "no key" would mute a persona over its
- * own credential.
- */
-export function isVaultLoadedPersonaDir(personaDirPath: string): boolean {
-  return _vaultLoadedPersonaDir !== undefined && personaDirPath === _vaultLoadedPersonaDir;
-}
-
-/** For tests: reset the module-scope vault env tracking. */
-export function _resetVaultTrackingForTesting(): void {
-  _vaultTracked.clear();
-  _vaultLoadedPersonaDir = undefined;
-}
+export {
+  isVaultInjectedEnvKey,
+  isVaultLoadedPersonaDir,
+  _resetVaultTrackingForTesting,
+} from "./vaultEnvTracking.ts";
 
 /**
  * Decrypt a persona's vault and RECONCILE it into `env`, so `env` ends up
@@ -499,7 +465,7 @@ export function _resetVaultTrackingForTesting(): void {
 export async function loadVaultIntoEnv(
   personaDirPath: string,
   env: NodeJS.ProcessEnv = process.env,
-  tracked: Set<string> = _vaultTracked,
+  tracked: Set<string> = vaultTrackedKeys(),
 ): Promise<{ updated: string[]; removed: string[]; badKeys: string[] }> {
   const updated: string[] = [];
   const removed: string[] = [];
@@ -509,7 +475,7 @@ export async function loadVaultIntoEnv(
     // A null (unopenable) vault is a distinct failure mode from per-row
     // corruption: there are no decryptable-or-not rows to report, so badKeys
     // is empty. This is what lets a caller tell "no vault" from "1 bad row".
-    if (personaDirPath === _vaultLoadedPersonaDir) {
+    if (isVaultLoadedPersonaDir(personaDirPath)) {
       // Same persona, transient open failure — keep what we already injected.
       return { updated, removed, badKeys: [] };
     }
@@ -519,7 +485,7 @@ export async function loadVaultIntoEnv(
       tracked.delete(k);
       removed.push(k);
     }
-    _vaultLoadedPersonaDir = undefined;
+    noteVaultLoadedPersonaDir(undefined);
     return { updated, removed, badKeys: [] };
   }
 
@@ -553,7 +519,7 @@ export async function loadVaultIntoEnv(
     }
   }
 
-  _vaultLoadedPersonaDir = personaDirPath;
+  noteVaultLoadedPersonaDir(personaDirPath);
   return { updated, removed, badKeys };
 }
 
