@@ -20,6 +20,8 @@ import {
   EMPTY_SOURCE,
   LOG_SOURCE_IDS,
   logSources,
+  MAX_TAIL_BYTES,
+  readTail,
 } from "../src/tui/logSources.ts";
 import { configuredBufferLimit, LogBuffer } from "../src/tui/logBuffer.ts";
 import { TaskStore } from "../src/lib/tasks.ts";
@@ -93,6 +95,57 @@ describe("logSources", () => {
     expect(lines[0]!.msg).toContain("/home/kai/.config");
     expect(lines[0]!.persona).toBe("kai");
     expect(lines[0]!.at).toBe(Date.parse("2026-09-01T10:00:00.000Z"));
+  });
+
+  test("readTail returns whole small files, and only a bounded tail of big ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pb478-tail-"));
+    temps.push(root);
+    const path = join(root, "big.log");
+    const record = (i: number) => `{"i":${i},"pad":"${"x".repeat(80)}"}`;
+    const all = Array.from({ length: 200 }, (_, i) => record(i)).join("\n") + "\n";
+    await writeFile(path, all);
+
+    // Under the bound: byte-for-byte, nothing clever.
+    expect(await readTail(path, all.length + 1)).toBe(all);
+
+    // Over it: at most `maxBytes`, and starting on a LINE BOUNDARY — the first
+    // line of a raw byte-slice is a fragment, and half a JSON record parses
+    // as garbage.
+    const tail = await readTail(path, 1000);
+    expect(tail.length).toBeLessThanOrEqual(1000);
+    expect(tail.length).toBeGreaterThan(0);
+    expect(all.endsWith(tail)).toBe(true);
+    for (const l of tail.split("\n").filter((v) => v.trim())) {
+      expect(() => JSON.parse(l) as unknown).not.toThrow();
+    }
+  });
+
+  test("a huge audit file is read as a bounded suffix, never a partial record", async () => {
+    const { host, dir } = await hostWithPersona();
+    const day = new Date().toISOString().slice(0, 10);
+    // Retention deletes OLD audit files; it does not cap today's. Without a
+    // byte bound the pane slurps and JSON-parses the whole thing per persona,
+    // on every reload, to render at most `limit` rows of it.
+    const records: string[] = [];
+    for (let i = 0; records.join("\n").length < MAX_TAIL_BYTES * 1.5; i++) {
+      records.push(
+        JSON.stringify({
+          ts: "2026-09-01T10:00:00.000Z",
+          kind: "bash",
+          note: `call-${i} ${"x".repeat(200)}`,
+        }),
+      );
+    }
+    await writeFile(join(dir, "audit", `${day}.log`), records.join("\n") + "\n");
+
+    const audit = logSources({ host }).find((s) => s.id === "audit")!;
+    const lines = await audit.read(50);
+    expect(lines).toHaveLength(50);
+    // The newest records survive the truncation...
+    expect(lines.at(-1)!.msg).toContain(`call-${records.length - 1} `);
+    // ...and no line is a mid-record fragment: a truncated read that kept its
+    // first partial line would show up here as an unparsed "raw" row.
+    expect(lines.some((l) => l.level === "raw")).toBe(false);
   });
 
   test("an empty audit trail explains itself rather than returning nothing", async () => {

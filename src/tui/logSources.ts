@@ -34,7 +34,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { auditPath } from "../state.ts";
@@ -63,12 +63,41 @@ export interface LogSource {
   /** False means "nothing to read here", and `note` says why. */
   available: boolean;
   note?: string;
-  /** Newest last, at most `limit` lines. Never throws. */
-  read(limit: number): Promise<LogLine[]>;
+  /**
+   * Newest last, at most `limit` lines. Never throws.
+   *
+   * `signal` aborts the read: a source that spawns a child (the service log
+   * shells out to journalctl/tail/PowerShell) KILLS it, so switching sources
+   * or reloading repeatedly cannot leave a pile of abandoned tailers behind.
+   */
+  read(limit: number, signal?: AbortSignal): Promise<LogLine[]>;
 }
 
 /** How many lines each source is asked for by default. */
 export const DEFAULT_SOURCE_LIMIT = 2000;
+
+/**
+ * How much of a log FILE is read before parsing. `limit` bounds the rows we
+ * RETURN; without a byte bound we would still slurp and JSON-parse an entire
+ * busy audit file (retention deletes old files, it does not cap today's) for
+ * every persona, on every reload. 1 MiB of JSON lines is far more than any
+ * `limit` can render.
+ */
+export const MAX_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * The last {@link MAX_TAIL_BYTES} of a file, as whole lines. The first line of
+ * a truncated read is dropped: it is a fragment starting mid-record, and a
+ * half-parsed JSON object is worse than a missing one.
+ */
+export async function readTail(path: string, maxBytes = MAX_TAIL_BYTES): Promise<string> {
+  const file = Bun.file(path);
+  const size = file.size;
+  if (size <= maxBytes) return await file.text();
+  const text = await file.slice(size - maxBytes).text();
+  const nl = text.indexOf("\n");
+  return nl === -1 ? "" : text.slice(nl + 1);
+}
 
 function line(
   at: number,
@@ -100,7 +129,7 @@ function serviceSource(): LogSource {
     location: loc.kind === "journal" ? loc.label : loc.paths.join("  ·  "),
     command: loc.command,
     available: true,
-    async read(limit) {
+    async read(limit, signal) {
       const spec = logsSpec({ follow: false, lines: limit });
       if (!spec) {
         return unavailable(
@@ -108,11 +137,19 @@ function serviceSource(): LogSource {
           "service",
         );
       }
+      let proc: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+      // The pane is gone (source switched, reloaded, TUI closed) -> so is the
+      // tailer. Ignoring the promise would only hide the RESULT; the child
+      // keeps running, and repeated switches accumulate them.
+      const onAbort = () => proc?.kill();
+      signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        const proc = Bun.spawn([spec.cmd, ...spec.args], {
+        proc = Bun.spawn([spec.cmd, ...spec.args], {
+          stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
         });
+        if (signal?.aborted) proc.kill();
         const [out, errText] = await Promise.all([
           new Response(proc.stdout).text(),
           new Response(proc.stderr).text(),
@@ -138,6 +175,8 @@ function serviceSource(): LogSource {
           `could not run '${spec.cmd}': ${String(err)} — see: ${loc.command}`,
           "service",
         );
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
       }
     },
   };
@@ -183,7 +222,7 @@ function auditSource(personas: PersonaSnapshot[], now: Date): LogSource {
         for (const name of names.slice(-3)) {
           let body: string;
           try {
-            body = await readFile(join(dir, name), "utf8");
+            body = await readTail(join(dir, name));
           } catch {
             continue;
           }
@@ -234,7 +273,7 @@ function stateSource(): LogSource {
     async read(limit) {
       let body: string;
       try {
-        body = await readFile(path, "utf8");
+        body = await readTail(path);
       } catch {
         return unavailable(`nothing recorded yet at ${path}`, "state");
       }

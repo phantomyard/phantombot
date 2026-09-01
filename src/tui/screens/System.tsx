@@ -124,9 +124,13 @@ export function SystemScreen(props: {
   useEffect(() => {
     if (tab !== "logs") return;
     let live = true;
+    // Aborting on cleanup does more than drop the result: sources that spawn a
+    // child (journalctl, tail, PowerShell) kill it, so cycling sources or
+    // hammering `r` cannot leave abandoned tailers running.
+    const abort = new AbortController();
     setLoading(true);
     source
-      .read(DEFAULT_SOURCE_LIMIT)
+      .read(DEFAULT_SOURCE_LIMIT, abort.signal)
       .then((read) => {
         if (live) setLines(read);
       })
@@ -148,6 +152,7 @@ export function SystemScreen(props: {
       });
     return () => {
       live = false;
+      abort.abort();
     };
   }, [tab, source, reloads]);
   const filtered = useMemo(

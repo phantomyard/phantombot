@@ -141,6 +141,29 @@ describe("system log pane", () => {
     expect(frame).toContain("bash: ran the doctor");
   });
 
+  test("switching source ABORTS the previous read, so its child is killed", async () => {
+    // React cleanup alone only discards the result; the journalctl/tail/
+    // PowerShell child a source spawned would keep running, and cycling
+    // sources would pile them up. The pane passes an AbortSignal.
+    let seen: AbortSignal | undefined;
+    const slow: LogSource = {
+      ...AUDIT,
+      id: "state",
+      read: async (_limit, signal) => {
+        seen = signal;
+        return [];
+      },
+    };
+    const ui = mount([slow, SERVICE]);
+    ui.stdin.write("l");
+    await sleep(60);
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+    ui.stdin.write("s"); // move off it
+    await sleep(60);
+    expect(seen!.aborted).toBe(true);
+  });
+
   test("an empty source still shows where it would have come from", async () => {
     const ui = mount([SERVICE]);
     ui.stdin.write("l");

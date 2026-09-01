@@ -8,7 +8,8 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { closeSync, openSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -194,49 +195,78 @@ describe("logsSpec", () => {
     expect(cmd).toContain("no phantombot logs yet");
   });
 
+  winTest("the no-files branch ends the process, it does not just return", () => {
+    // `return` unwinds a scope; only `exit` ends powershell.exe. The Windows CI
+    // run hung here (bun killed a dangling process and read exit 143), so this
+    // is asserted on the argv as well as by running it below.
+    const cmd = logsSpec({ follow: false, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("exit 0 }");
+  });
+
   // The strongest Windows assertion available: RUN the generated PowerShell.
   // A spec built from string concatenation can be syntactically wrong in ways
   // no argv assertion notices; `phantombot logs` then fails only in the field.
-  // Timeout: this spawns powershell.exe TWICE, and Windows PowerShell 5.1 cold
-  // start on a loaded GitHub runner costs seconds per process -- comfortably
-  // over bun's 5s default, which killed the child (exit 143) and read as the
-  // script failing rather than the budget running out. Generous on purpose:
-  // it should only bite if the spec genuinely hangs.
-  winTest("the generated PowerShell actually runs and merges both files", async () => {
-    const prev = process.env.XDG_DATA_HOME;
-    const root = await mkdtemp(join(tmpdir(), "pb478-win-"));
+  //
+  // Output is redirected to FILES rather than pipes, and the timeout is
+  // explicit: Windows PowerShell cold-starts slowly on a loaded runner, and a
+  // child whose pipes are drained in sequence can block on the undrained one.
+  // Neither is a fact about the spec under test, so neither should decide
+  // whether this passes.
+  const RUN_TIMEOUT_MS = 60_000;
+  async function runSpec(spec: { cmd: string; args: string[] }, dir: string, tag: string) {
+    const outPath = join(dir, `${tag}.out`);
+    const errPath = join(dir, `${tag}.err`);
+    const outFd = openSync(outPath, "w");
+    const errFd = openSync(errPath, "w");
+    let code: number;
     try {
-      process.env.XDG_DATA_HOME = root;
-      const { out, err } = taskLogPaths("phantombot");
-      await mkdir(dirname(out), { recursive: true });
-
-      // 1. Neither sink exists yet: friendly line, clean exit, no red error.
-      const missing = logsSpec({ follow: false, lines: 20 })!;
-      const first = Bun.spawn([missing.cmd, ...missing.args], {
-        stdout: "pipe",
-        stderr: "pipe",
+      const proc = Bun.spawn([spec.cmd, ...spec.args], {
+        stdin: "ignore",
+        stdout: outFd,
+        stderr: errFd,
       });
-      const firstOut = await new Response(first.stdout).text();
-      expect(await first.exited).toBe(0);
-      expect(firstOut).toContain("no phantombot logs yet");
-
-      // 2. Both sinks present: both are read, stderr's content included.
-      await writeFile(out, "from-stdout\n");
-      await writeFile(err, "from-stderr\n");
-      const spec = logsSpec({ follow: false, lines: 20 })!;
-      const proc = Bun.spawn([spec.cmd, ...spec.args], { stdout: "pipe", stderr: "pipe" });
-      const text = await new Response(proc.stdout).text();
-      const errText = await new Response(proc.stderr).text();
-      expect(await proc.exited).toBe(0);
-      expect(errText.trim()).toBe("");
-      expect(text).toContain("from-stdout");
-      expect(text).toContain("from-stderr");
+      code = await proc.exited;
     } finally {
-      if (prev === undefined) delete process.env.XDG_DATA_HOME;
-      else process.env.XDG_DATA_HOME = prev;
-      await rm(root, { recursive: true, force: true });
+      closeSync(outFd);
+      closeSync(errFd);
     }
-  }, 60_000);
+    return {
+      code,
+      out: await readFile(outPath, "utf8"),
+      err: await readFile(errPath, "utf8"),
+    };
+  }
+
+  winTest(
+    "the generated PowerShell actually runs and merges both files",
+    async () => {
+      const prev = process.env.XDG_DATA_HOME;
+      const root = await mkdtemp(join(tmpdir(), "pb478-win-"));
+      try {
+        process.env.XDG_DATA_HOME = root;
+        const { out, err } = taskLogPaths("phantombot");
+        await mkdir(dirname(out), { recursive: true });
+
+        // 1. Neither sink exists yet: friendly line, clean exit, no red error.
+        const first = await runSpec(logsSpec({ follow: false, lines: 20 })!, root, "missing");
+        expect({ code: first.code, err: first.err.trim() }).toEqual({ code: 0, err: "" });
+        expect(first.out).toContain("no phantombot logs yet");
+
+        // 2. Both sinks present: both are read, stderr's content included.
+        await writeFile(out, "from-stdout\n");
+        await writeFile(err, "from-stderr\n");
+        const second = await runSpec(logsSpec({ follow: false, lines: 20 })!, root, "both");
+        expect({ code: second.code, err: second.err.trim() }).toEqual({ code: 0, err: "" });
+        expect(second.out).toContain("from-stdout");
+        expect(second.out).toContain("from-stderr");
+      } finally {
+        if (prev === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = prev;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    RUN_TIMEOUT_MS,
+  );
 
   winTest("the copy-pasteable hint names both sinks too", () => {
     const { out, err } = taskLogPaths("phantombot");

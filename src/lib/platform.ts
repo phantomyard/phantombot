@@ -447,7 +447,12 @@ export function logsSpec(
         `$all=@(${quoted}); ` +
         `$p=@($all | Where-Object { Test-Path -LiteralPath $_ }); ` +
         `if ($p.Count -eq 0) { ` +
-        `Write-Host "no phantombot logs yet at $($all -join ', ')"; return }; ` +
+        // `exit 0`, not `return`: `return` only unwinds the current scope, so
+        // powershell.exe stays alive to finish reading the -Command pipeline
+        // and the caller sees a process that never terminates (it hung the
+        // Windows CI run). `exit` ends the process, deterministically, with a
+        // success code -- "no logs yet" is not a failure.
+        `Write-Host "no phantombot logs yet at $($all -join ', ')"; exit 0 }; ` +
         `foreach ($f in $p) { Get-Content -LiteralPath $f -Tail ${lines} }`;
       // Following two files needs one waiter each: Get-Content -Wait binds to a
       // single handle, so a bare array would silently follow only one of them.
@@ -459,7 +464,7 @@ export function logsSpec(
         : "";
       return {
         cmd: "powershell",
-        args: ["-NoProfile", "-NonInteractive", "-Command", head + tail],
+        args: ["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", head + tail],
       };
     }
     default:
