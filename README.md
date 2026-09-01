@@ -1025,12 +1025,21 @@ persona on the box does — the signature of a default left pointing at a person
 that has been migrated away, where every persona-scoped read still succeeds
 against the wrong, empty persona.
 
-**Lifecycle commands belong to the default persona.** `/update` and `/restart`
-swap the binary and bounce the service for *everyone* in the process, so they
-are only accepted in the default persona's chats; anywhere else they reply with
-who to ask. `/stop` is unaffected — it aborts the current turn in the current
-chat and touches nobody else. `/status` shows the release ring and the full
-persona roster, marking the default and which persona is answering.
+**Lifecycle commands are single-flight, not owned.** `/update` and `/restart`
+swap the binary and bounce the service for *everyone* in the process, so **any**
+served persona may run them — `default_persona` is a convenience, not a
+hierarchy, and gating on it stranded hosts whose recorded default named a
+persona that no longer existed. What is enforced instead is the constraint that
+really exists: a second lifecycle command issued while one is in flight is
+refused ("already in progress") rather than racing the same binary swap, and
+every *other* persona on the host gets a heads-up in its own chat before the
+process goes down plus a "back online" line once it is answering again. Those
+two notices go out over Telegram only: a persona served solely over PhantomChat
+is skipped rather than warned, because there is no per-persona PhantomChat send
+path yet. `/stop`
+is unaffected — it aborts the current turn in the current chat and touches
+nobody else. `/status` shows the release ring and the full persona roster,
+marking the default and which persona is answering.
 
 ## Telegram
 

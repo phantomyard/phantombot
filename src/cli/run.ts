@@ -80,6 +80,7 @@ import {
   defaultLockPath,
   isLockHandle,
 } from "../lib/runLock.ts";
+import { notifyLifecycleBackIfPending } from "../lib/lifecycleBroadcast.ts";
 import {
   notifyPhantomchatPostRestart,
   notifyPostRestartIfPending,
@@ -955,6 +956,40 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     ]),
   ];
 
+  // The REAL persona -> Telegram account map, straight off the resolved
+  // listener plan (phantombot#519). The lifecycle broadcast must not infer
+  // sibling ownership from any single listener's persona-resolved config: on a
+  // non-default listener `channels.telegram` is that CALLER's bot, so the
+  // inference labels a sibling and sends through the wrong token. Only this
+  // scope knows the true mapping, so it is passed down explicitly.
+  const lifecycleAccounts = telegramListeners.map((l) => ({
+    persona: l.persona,
+    token: l.account.token,
+    chatIds: l.account.allowedUserIds,
+  }));
+
+  // Second half of the lifecycle broadcast (phantombot#519). `/update` and
+  // `/restart` warn every OTHER persona before taking the shared process down
+  // and record who was warned; this tells exactly those personas we are back.
+  // Placed here rather than beside the post-restart update notify above so it
+  // can use the REAL roster: a persona whose listener failed to start must not
+  // be counted as notified. Logged + swallowed — startup must always succeed.
+  try {
+    const back = await notifyLifecycleBackIfPending({
+      config,
+      currentVersion: VERSION,
+      runningPersonas,
+      accounts: lifecycleAccounts,
+    });
+    if (back.status === "notified") {
+      log.info("run: lifecycle back-online notified", { sent: back.sent });
+    }
+  } catch (e) {
+    log.warn("run: lifecycle back-online notify threw", {
+      error: (e as Error).message,
+    });
+  }
+
   try {
     // Fan-out: one listener per (persona, account). Shared AbortSignal
     // so Ctrl-C cleanly tears all of them down together.
@@ -967,6 +1002,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
         agentDir: l.agentDir,
         persona: l.persona,
         runningPersonas,
+        lifecycleAccounts,
         account: l.account,
         transport: new HttpTelegramTransport(l.account.token),
         signal: ac.signal,
@@ -1193,6 +1229,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
             agentDir,
             persona: spec.persona,
             runningPersonas,
+            lifecycleAccounts,
             channel,
             secretKey: identity.secretKey,
             allowedHex,

@@ -29,6 +29,18 @@ import { log } from "../lib/logger.ts";
 import { defaultServiceControl, selfRestart } from "../lib/platform.ts";
 import type { ServiceControl } from "../lib/systemd.ts";
 import { runUpdateFlow } from "../lib/updateNotify.ts";
+import {
+  acquireLifecycleLock,
+  lifecycleBusyReply,
+} from "../lib/lifecycleLock.ts";
+import {
+  impendingRestartMessage,
+  type LifecycleAccount,
+  planLifecycleBroadcast,
+  sendLifecycleBroadcast,
+  writePendingLifecycle,
+} from "../lib/lifecycleBroadcast.ts";
+import type { TelegramTransport } from "./telegram.ts";
 import { runFixSigning } from "../cli/fix-signing.ts";
 import type { WriteSink } from "../lib/io.ts";
 import {
@@ -100,6 +112,15 @@ export interface SlashCommandContext {
    */
   runningPersonas?: string[];
   /**
+   * The REAL persona -> Telegram account map for this process, as the daemon
+   * started it. Passed to the lifecycle broadcast so sibling recipients are
+   * never inferred from this listener's own persona-resolved config (which
+   * would send a sibling's heads-up through THIS caller's bot token).
+   * Absent (tests, embedded callers) falls back to conservative config
+   * inference.
+   */
+  lifecycleAccounts?: LifecycleAccount[];
+  /**
    * ServiceControl override for /restart's afterSend. Production
    * callers leave this undefined and /restart picks up
    * `defaultServiceControl()`; tests inject a stub so a `bun test` run
@@ -125,6 +146,18 @@ export interface SlashCommandContext {
    * degrades to its historical behaviour of aborting only the active turn.
    */
   flushBacklog?: () => number;
+  /**
+   * Transport factory for the lifecycle heads-up sent to the OTHER personas
+   * on this host (phantombot#519). Production leaves it undefined and one
+   * HTTP transport is built per bot token; tests inject a fake so a `bun test`
+   * run can assert the fan-out without touching api.telegram.org.
+   */
+  createTelegramTransport?: (token: string) => TelegramTransport;
+  /**
+   * Override the path of the "personas we warned" record (phantombot#519).
+   * Test seam only — production uses the default next to the config.
+   */
+  pendingLifecyclePath?: string;
   /**
    * This persona's PhantomChat identity as an `npub…` (bech32 public key) —
    * the shareable address a user pastes into the PWA to DM this bot. Shown on
@@ -286,17 +319,13 @@ export async function handleSlashCommand(
       // faithful dogfood of the re-sign path and doubles as a manual repair
       // button when a macOS update breaks the signature. macOS-only; a no-op
       // elsewhere. Bare `/update` is the full self-update.
-      {
-        const refused = lifecycleRefusal(ctx, "/update");
-        if (refused) return refused;
-      }
+      //
+      // `resign` is NOT a lifecycle command: it neither swaps the binary nor
+      // bounces the process, so it takes no lock and warns nobody.
       if (arg.toLowerCase() === "resign") return await handleUpdateResign(ctx);
-      return await handleUpdate(ctx);
-    case "/restart": {
-      const refused = lifecycleRefusal(ctx, "/restart");
-      if (refused) return refused;
-      return handleRestart(ctx);
-    }
+      return await runLifecycle(ctx, "/update", () => handleUpdate(ctx));
+    case "/restart":
+      return await runLifecycle(ctx, "/restart", () => handleRestart(ctx));
     case "/coder":
       // Bare `/coder` forces on; `/coder off|default` is also accepted.
       return await handleCoderSwap(arg || "on", ctx);
@@ -313,39 +342,125 @@ export async function handleSlashCommand(
 }
 
 /**
- * Lifecycle commands act on the PROCESS, not on a persona (phantombot#439).
+ * Lifecycle commands act on the PROCESS, not on a persona (phantombot#439,
+ * reworked in phantombot#519).
  *
  * One phantombot serves every persona on the host, so `/update` and `/restart`
- * swap the binary and bounce the service for ALL of them. Typed at a
- * non-default persona they read like a per-persona action and are not one:
- * every other persona is taken down with no warning in its own chat, and two
- * personas racing an update would have two turns swapping the same binary.
+ * swap the binary and bounce the service for ALL of them. That used to be
+ * modelled as ownership — only `default_persona` was allowed to run them — and
+ * that was wrong twice:
  *
- * So they are answered — never silently ignored — only in the default
- * persona's chats, and the refusal names where to go instead.
+ *   1. `default_persona` is a CONVENIENCE (what the chat TUI falls back to
+ *      when no persona is named), not a hierarchy. Nothing about it makes one
+ *      persona more entitled to update the host than another.
+ *   2. The refusal named the recorded default WITHOUT checking it exists. On
+ *      the kw-phantombot rig (2026-09-01) that record read "Phantom", a test
+ *      fixture with no persona on disk, so every persona was told to ask a
+ *      ghost and the host could only be updated over SSH.
  *
- * `/stop` is deliberately NOT gated: it aborts the current turn in the current
- * conversation, which is per-chat and harms nobody else.
+ * The constraint that actually exists is not ownership but (a) mutual
+ * exclusion — two personas must not race one binary swap — and (b) courtesy:
+ * the personas that did NOT type the command are bounced mid-conversation and
+ * deserve to be told. So:
+ *
+ *   - ANY served persona may run a lifecycle command.
+ *   - `acquireLifecycleLock` collapses concurrent runs into one; the loser is
+ *     told an update is already in flight (see lib/lifecycleLock.ts).
+ *   - every OTHER persona gets a heads-up before the process goes down, and a
+ *     "back online" line on the way up (see lib/lifecycleBroadcast.ts).
+ *
+ * `/stop` remains ungated for a different reason: it aborts the current turn
+ * in the current conversation, which is per-chat and harms nobody else.
  */
-function lifecycleRefusal(
+async function runLifecycle(
   ctx: SlashCommandContext,
   command: string,
-): SlashCommandResult | undefined {
-  const owner = ctx.config?.defaultPersona;
-  // No config (tests, embedders) → no gate. The check must never be the
-  // reason a lifecycle command stops working on a single-persona box.
-  if (!owner || owner === ctx.persona) return undefined;
-  log.info("commands: lifecycle command refused on non-default persona", {
-    command,
-    persona: ctx.persona,
-    defaultPersona: owner,
-  });
+  run: () => Promise<SlashCommandResult> | SlashCommandResult,
+): Promise<SlashCommandResult> {
+  const lock = acquireLifecycleLock({ command, persona: ctx.persona });
+  if (!lock.ok) {
+    log.info("commands: lifecycle command already in flight", {
+      command,
+      persona: ctx.persona,
+      holder: lock.holder.command,
+      holderPersona: lock.holder.persona,
+    });
+    return { reply: lifecycleBusyReply(command, lock.holder) };
+  }
+
+  let result: SlashCommandResult;
+  try {
+    result = await run();
+  } catch (e) {
+    lock.release();
+    throw e;
+  }
+
+  // No afterSend means nothing is going to bounce (already current, platform
+  // unsupported, download failed). Release now and warn nobody — a heads-up
+  // for a restart that never happens is worse than silence.
+  if (!result.afterSend) {
+    lock.release();
+    return result;
+  }
+
+  const afterSend = result.afterSend;
   return {
-    reply:
-      `${command} runs the whole phantombot process — every persona on this host shares it — ` +
-      `so it is only accepted by the default persona.\n` +
-      `Ask ${owner} to run ${command}.`,
+    ...result,
+    afterSend: async () => {
+      try {
+        await announceImpendingRestart(ctx, command);
+        await afterSend();
+      } finally {
+        // Reached only when the restart did NOT take us down. Releasing lets
+        // the user retry instead of waiting out the lock TTL.
+        lock.release();
+      }
+    },
   };
+}
+
+/**
+ * Warn every other persona that the shared process is about to go down, and
+ * record who was warned so startup can tell those same personas we're back.
+ *
+ * Best-effort throughout: any failure here is logged and swallowed, because
+ * the restart the user asked for must not hinge on a courtesy message.
+ */
+async function announceImpendingRestart(
+  ctx: SlashCommandContext,
+  command: string,
+): Promise<void> {
+  if (!ctx.config) return;
+  try {
+    const recipients = planLifecycleBroadcast({
+      config: ctx.config,
+      runningPersonas: ctx.runningPersonas,
+      accounts: ctx.lifecycleAccounts,
+      excludePersona: ctx.persona,
+    });
+    if (recipients.length === 0) return;
+    await sendLifecycleBroadcast({
+      recipients,
+      message: impendingRestartMessage(command, ctx.persona),
+      createTransport: ctx.createTelegramTransport,
+    });
+    await writePendingLifecycle(
+      {
+        command,
+        originPersona: ctx.persona,
+        personas: recipients.map((r) => r.persona),
+        writtenAt: new Date().toISOString(),
+      },
+      ctx.pendingLifecyclePath,
+    );
+  } catch (e) {
+    log.warn("commands: lifecycle heads-up failed", {
+      command,
+      persona: ctx.persona,
+      error: (e as Error).message,
+    });
+  }
 }
 
 /**

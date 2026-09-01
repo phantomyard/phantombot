@@ -14,9 +14,11 @@
  * A command added there appears here automatically, which is the point: three
  * surfaces that drift are worse than one surface that is missing a command.
  *
- * Persona gating comes free with that delegation: `/update` and `/restart` are
- * refused, with a reason, on a non-default persona, because one phantombot
- * process serves every persona on the host.
+ * Lifecycle behaviour comes free with that delegation: `/update` and `/restart`
+ * are accepted from ANY served persona (phantombot#519 — `default_persona` is a
+ * convenience, not an owner), are single-flight so two personas cannot race one
+ * binary swap, and warn every other persona on the host before the shared
+ * process goes down.
  */
 
 import { TELEGRAM_BOT_COMMANDS } from "../channels/commands.ts";

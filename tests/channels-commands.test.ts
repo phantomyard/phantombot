@@ -28,7 +28,13 @@ import {
   resolveNarrationEnabled,
 } from "../src/lib/chattiness.ts";
 import { getIn, readConfigToml } from "../src/lib/configWriter.ts";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  acquireLifecycleLock,
+  lifecycleLockHolder,
+  resetLifecycleLock,
+} from "../src/lib/lifecycleLock.ts";
+import type { ServiceControl } from "../src/lib/systemd.ts";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,6 +61,12 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await memory.close();
+  // Lifecycle commands take a process-wide single-flight lock (#519) and hold
+  // it until their afterSend runs. Several tests here deliberately never call
+  // afterSend (it would restart the developer's own service), so the lock must
+  // be dropped between tests or the next lifecycle test sees "already in
+  // progress".
+  resetLifecycleLock();
 });
 
 function ctx(
@@ -775,8 +787,8 @@ describe("/status phantom + models surface", () => {
 // Multi-persona: lifecycle gate + /status roster (phantombot#439)
 // ---------------------------------------------------------------------------
 
-describe("lifecycle commands are default-persona-only (#439)", () => {
-  function multiPersonaConfig(): any {
+describe("lifecycle commands: single-flight, not owned (#439, #519)", () => {
+  function multiPersonaConfig(overrides: any = {}): any {
     return {
       defaultPersona: "robbie",
       autostartPersonas: ["lena", "kai"],
@@ -795,36 +807,192 @@ describe("lifecycle commands are default-persona-only (#439)", () => {
       channels: {},
       embeddings: { provider: "none" as const },
       voice: { provider: "none" as const },
+      ...overrides,
     };
   }
 
+  /** Runs `body` with process.platform faked, so /update stops at the
+   *  platform guard instead of contacting GitHub. */
+  async function onUnsupportedPlatform<T>(body: () => Promise<T>): Promise<T> {
+    const orig = process.platform;
+    Object.defineProperty(process, "platform", { value: "freebsd" });
+    try {
+      return await body();
+    } finally {
+      Object.defineProperty(process, "platform", { value: orig });
+    }
+  }
+
   for (const command of ["/update", "/restart"]) {
-    test(`${command} from a non-default persona is refused, and says who owns it`, async () => {
-      const r = await handleSlashCommand(
-        command,
-        ctx({ persona: "lena", config: multiPersonaConfig() }),
+    test(`${command} from a NON-default persona is accepted (#519)`, async () => {
+      // The old guard refused this and named the default persona. When that
+      // record pointed at a persona that did not exist ("Phantom" on the
+      // kw-phantombot rig) the host could not be updated from chat at all.
+      const restarted: string[] = [];
+      const serviceControl = {
+        isActive: async () => true,
+        restart: async () => {
+          restarted.push("restart");
+          return { ok: true };
+        },
+      } as unknown as ServiceControl;
+
+      const r = await onUnsupportedPlatform(() =>
+        handleSlashCommand(
+          command,
+          ctx({
+            persona: "lena",
+            config: multiPersonaConfig(),
+            serviceControl,
+          }),
+        ),
       );
       expect(r).not.toBeNull();
-      expect(r!.reply).toContain(command);
-      expect(r!.reply).toContain("robbie");
-      // Refused means refused: nothing is scheduled to run after the reply.
-      expect(r!.afterSend).toBeUndefined();
+      expect(r!.reply).not.toContain("default persona");
+      expect(r!.reply).not.toContain("robbie");
     });
   }
 
-  test("/update from the DEFAULT persona is not gated", async () => {
-    // Reaching the platform guard proves we got past the persona gate.
-    const origPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "freebsd" });
+  test("/restart from a non-default persona really bounces the service", async () => {
+    let restarted = false;
+    const serviceControl = {
+      isActive: async () => true,
+      restart: async () => {
+        restarted = true;
+        return { ok: true };
+      },
+    } as unknown as ServiceControl;
+
+    const r = await handleSlashCommand(
+      "/restart",
+      ctx({ persona: "kai", config: multiPersonaConfig(), serviceControl }),
+    );
+    expect(r!.reply).toContain("restarting");
+    await r!.afterSend!();
+    expect(restarted).toBe(true);
+  });
+
+  test("a second lifecycle command while one is in flight is refused, not raced", async () => {
+    const held = acquireLifecycleLock({ command: "/update", persona: "lena" });
+    expect(held.ok).toBe(true);
     try {
       const r = await handleSlashCommand(
+        "/restart",
+        ctx({ persona: "kai", config: multiPersonaConfig() }),
+      );
+      expect(r!.reply).toContain("already in progress");
+      expect(r!.reply).toContain("lena");
+      // Refused means refused: nothing is scheduled to run after the reply.
+      expect(r!.afterSend).toBeUndefined();
+    } finally {
+      if (held.ok) held.release();
+    }
+  });
+
+  test("the lock is HELD between the reply and the restart, not just during the handler", async () => {
+    // The window that matters: the reply has been sent, the restart has not
+    // fired yet. A second /update landing here would start a second binary
+    // swap against a process that is about to die.
+    const serviceControl = {
+      isActive: async () => true,
+      restart: async () => ({ ok: true }),
+    } as unknown as ServiceControl;
+
+    const first = await handleSlashCommand(
+      "/restart",
+      ctx({ persona: "lena", config: multiPersonaConfig(), serviceControl }),
+    );
+    expect(first!.afterSend).toBeDefined();
+    expect(lifecycleLockHolder()?.persona).toBe("lena");
+
+    const second = await handleSlashCommand(
+      "/restart",
+      ctx({ persona: "kai", config: multiPersonaConfig(), serviceControl }),
+    );
+    expect(second!.reply).toContain("already in progress");
+    expect(second!.afterSend).toBeUndefined();
+
+    // …and once the restart call has been made, the lock is free again.
+    await first!.afterSend!();
+    expect(lifecycleLockHolder()).toBeUndefined();
+  });
+
+  test("a lifecycle command that bounces nothing releases the lock", async () => {
+    // /update on an unsupported platform never restarts, so a retry (or a
+    // /restart from anyone else) must not be locked out behind it.
+    await onUnsupportedPlatform(async () => {
+      const r = await handleSlashCommand(
         "/update",
-        ctx({ persona: "robbie", config: multiPersonaConfig() }),
+        ctx({ persona: "lena", config: multiPersonaConfig() }),
       );
       expect(r!.reply).toContain("can't self-update");
+    });
+    expect(lifecycleLockHolder()).toBeUndefined();
+  });
+
+  test("the OTHER personas are warned before the process goes down, and recorded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-cmd-lifecycle-"));
+    const pendingLifecyclePath = join(dir, ".pending-lifecycle.json");
+    try {
+      const sent: { token: string; chatId: string; text: string }[] = [];
+      const serviceControl = {
+        isActive: async () => true,
+        restart: async () => ({ ok: true }),
+      } as unknown as ServiceControl;
+
+      const acct = (token: string) => ({
+        token,
+        pollTimeoutS: 30,
+        allowedUserIds: [1],
+        personaNames: [],
+      });
+
+      const r = await handleSlashCommand(
+        "/restart",
+        ctx({
+          persona: "lena",
+          runningPersonas: ["robbie", "lena", "kai"],
+          serviceControl,
+          pendingLifecyclePath,
+          createTelegramTransport: (token: string) =>
+            ({
+              async sendMessage(chatId: string, text: string) {
+                sent.push({ token, chatId, text });
+              },
+            }) as any,
+          config: multiPersonaConfig({
+            channels: {
+              telegram: acct("tok-robbie"),
+              telegramPersonas: {
+                lena: acct("tok-lena"),
+                kai: acct("tok-kai"),
+              },
+            },
+          }),
+        }),
+      );
+      // Nothing is sent until the restart is actually about to happen.
+      expect(sent).toEqual([]);
+      await r!.afterSend!();
+
+      expect(sent.map((s) => s.token).sort()).toEqual(["tok-kai", "tok-robbie"]);
+      expect(sent[0]!.text).toContain("lena");
+      const record = JSON.parse(await readFile(pendingLifecyclePath, "utf8"));
+      expect(record.command).toBe("/restart");
+      expect(record.originPersona).toBe("lena");
+      expect(record.personas.sort()).toEqual(["kai", "robbie"]);
     } finally {
-      Object.defineProperty(process, "platform", { value: origPlatform });
+      await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("/update resign is not a lifecycle command — it takes no lock", async () => {
+    const r = await handleSlashCommand(
+      "/update resign",
+      ctx({ persona: "lena", config: multiPersonaConfig() }),
+    );
+    expect(r).not.toBeNull();
+    expect(lifecycleLockHolder()).toBeUndefined();
   });
 
   test("/stop is NOT gated — it only aborts this chat's own turn", async () => {

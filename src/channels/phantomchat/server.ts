@@ -42,6 +42,7 @@ import {
   type ActiveTurnHandle,
   handleSlashCommand,
 } from "../commands.ts";
+import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
   TELEGRAM_REPLY_INSTRUCTION,
@@ -156,6 +157,12 @@ export interface RunPhantomchatServerInput {
    * "unknown" and the roster line is derived from config as a fallback.
    */
   runningPersonas?: string[];
+  /**
+   * Persona -> Telegram account map for the whole process (phantombot#519).
+   * Handed to the lifecycle broadcast so a sibling's heads-up goes through
+   * ITS OWN bot, never this listener's.
+   */
+  lifecycleAccounts?: LifecycleAccount[];
 
   memory: MemoryStore;
   harnesses: Harness[];
@@ -1235,6 +1242,7 @@ export async function runPhantomchatServer(
       activeTurn: activeTurns.get(msg.conversationId),
       config: input.config,
       runningPersonas: input.runningPersonas,
+      lifecycleAccounts: input.lifecycleAccounts,
       serviceControl: input.serviceControl,
       // /stop flushes the same per-conversation backlog an interrupt does.
       flushBacklog: () => backlog.flush(msg.conversationId, "stop"),
