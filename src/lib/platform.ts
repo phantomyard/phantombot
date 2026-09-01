@@ -452,3 +452,56 @@ export function logsSpec(
       return null;
   }
 }
+
+/**
+ * WHERE the service logs physically live, for display (issue #478).
+ *
+ * `logsSpec` answers "how do I tail them" and `logsCommand` answers "what do I
+ * paste into a shell"; neither answers the question an operator actually asks
+ * first, which is "what file am I looking at". The TUI's log pane shows this
+ * next to every source so nobody has to read the source to find the audit
+ * trail.
+ *
+ * `kind` is `journal` where the stream has no file at all (systemd), so a
+ * caller can render "journald: unit phantombot" rather than a fake path.
+ */
+export interface LogsLocation {
+  kind: "journal" | "file";
+  /** Human label: a unit name, or the directory the files sit in. */
+  label: string;
+  /** Concrete file paths, empty for a journal. */
+  paths: string[];
+  /** Copy-pasteable command that shows the full stream. */
+  command: string;
+}
+
+export function logsLocation(over?: HintOverrides): LogsLocation {
+  switch (over?.platform ?? currentPlatform()) {
+    case "darwin": {
+      const { out, err } = launchdLogPaths();
+      return {
+        kind: "file",
+        label: launchdLogsDir(),
+        paths: [out, err],
+        command: logsCommand(),
+      };
+    }
+    case "windows": {
+      const { out, err } = taskLogPaths("phantombot");
+      return {
+        kind: "file",
+        label: taskLogsDir(),
+        paths: [out, err],
+        command: logsCommand(),
+      };
+    }
+    case "linux":
+    default:
+      return {
+        kind: "journal",
+        label: "journald · systemd --user unit phantombot",
+        paths: [],
+        command: "journalctl --user -u phantombot -f",
+      };
+  }
+}

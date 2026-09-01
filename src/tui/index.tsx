@@ -162,6 +162,13 @@ export async function resolveOpeningScreen(): Promise<{
 }
 
 export async function startTui(): Promise<number> {
+  // FIRST, before any awaited startup work: logs are CAPTURED, not printed —
+  // stderr is the same terminal being drawn on, so every log line used to land
+  // on top of the frame. Installed ahead of `hostSnapshot()` on purpose (#478):
+  // snapshotting is the noisiest part of startup, and with the sink installed
+  // after it every one of those lines was lost to stderr, which is a large part
+  // of why the log pane opened empty.
+  const restoreLogs = setLogSink((line) => logBuffer.push(line));
   const host = await hostSnapshot();
   const opening = await resolveOpeningScreen();
   const startScreen = opening.screen === "configure" ? "configure" : undefined;
@@ -172,9 +179,6 @@ export async function startTui(): Promise<number> {
   const fullScreen = enterFullScreen();
   // Ink's writes go through a gate so a line-mode prompt can borrow the screen.
   const gate = gateStdout();
-  // Logs are CAPTURED, not printed: stderr is the same terminal being drawn on,
-  // so every log line used to land on top of the frame. `^l` shows the buffer.
-  const restoreLogs = setLogSink((line) => logBuffer.push(line));
   // BEFORE render(): the tap must exist before Ink attaches to its stdin.
   const installed = installStdinTap();
 

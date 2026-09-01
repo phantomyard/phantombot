@@ -2053,6 +2053,7 @@ export function App(props: AppProps): React.ReactElement {
       return (
         <SystemScreen
           snapshot={currentSystemSnapshot!}
+          host={host}
           personas={host.personas.map((p) => p.name)}
           onBack={back}
         />
