@@ -56,6 +56,7 @@ import {
 import { openTaskStore, type Task, type TaskStore } from "../lib/tasks.ts";
 import { ambientEnvKeyAllowed, getPersonaSecretStrict } from "../lib/vaultSecrets.ts";
 import { recordTickFired } from "../lib/timerHealth.ts";
+import { healStaleMaintenanceFromTick } from "../lib/maintenanceHeal.ts";
 import { shouldDeferWake } from "../lib/turnRegistry.ts";
 import { openMemoryStore, type MemoryStore } from "../memory/store.ts";
 import { runTurn } from "../orchestrator/turn.ts";
@@ -93,6 +94,14 @@ export interface RunTickInput {
   loadPersonaConfig?: (persona: string) => Promise<Config>;
   out?: WriteSink;
   err?: WriteSink;
+  /**
+   * Test seam for the stale-maintenance self-heal (#510). Pass `false` to skip
+   * it, or a function to substitute a fake. Production passes undefined → heal
+   * via the host's service-manager backend, but only when this IS the
+   * installed binary, only when a served persona's heartbeat is stale, and at
+   * most once every {@link TICK_HEAL_MIN_INTERVAL_MINUTES}.
+   */
+  healMaintenance?: false | (() => Promise<void>);
 }
 
 export async function runTick(input: RunTickInput = {}): Promise<number> {
@@ -115,6 +124,28 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
       holderPid: lock.pid,
     });
     return 0;
+  }
+
+  // Stale-maintenance self-heal (#510). Tick is a SEPARATE scheduled job from
+  // the heartbeat (its own plist / timer), so when the heartbeat's job dies —
+  // matt's launchd agent started returning exit 78 and went 41h stale — tick is
+  // still firing and can re-arm it. The migration used to be reachable only
+  // from the heartbeat itself, which made a single scheduler failure permanent.
+  //
+  // Gated three ways because tick runs every minute: only the installed binary
+  // (never a dev `bun src/index.ts`), only when a served persona's heartbeat
+  // marker is actually stale, and then at most once per quarter hour. Awaited
+  // so a heal can't be cut short by the process exiting, and wrapped so a
+  // service-manager hiccup never costs the task work below.
+  if (input.healMaintenance !== false) {
+    try {
+      if (input.healMaintenance) await input.healMaintenance();
+      else await healStaleMaintenanceFromTick(config, { now });
+    } catch (e) {
+      log.warn("tick: maintenance self-heal threw unexpectedly", {
+        error: (e as Error).message,
+      });
+    }
   }
 
   // Every task runs under ITS OWN persona's effective config (phantombot#439).
