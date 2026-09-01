@@ -33,6 +33,7 @@ import {
   fetchCanonicalRelays,
   sameRelays,
 } from "../channels/phantomchat/relaysSource.ts";
+import { reconcileAutostart } from "../lib/autostartReconcile.ts";
 import { cleanupStaleUpdateArtifacts } from "../lib/binaryUpdate.ts";
 import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
@@ -775,6 +776,27 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     );
   }
   out.write("Ctrl-C to stop.\n");
+
+  // Autostart reconcile — make the recorded autostart config match what this
+  // host actually does, BEFORE anything below derives behaviour from it. The
+  // startup nightly sweep and the doctor both fan out over
+  // `servedPersonasOf(config)`, so a stale `autostart_personas` entry naming a
+  // deleted persona (or a `default_persona` pointing at one) costs work and
+  // log noise on every start until it is pruned.
+  //
+  // Awaited, unlike the checks below it: this one MUTATES the config those
+  // checks read, and racing it against them would make startup behaviour
+  // depend on write timing. It is a handful of fs stats plus at most one
+  // config.toml rewrite, and it no-ops entirely on a healthy host.
+  //
+  // MIRROR-ONLY: writes config, never units/tasks/plists (lib/autostartReconcile.ts).
+  try {
+    await reconcileAutostart(config);
+  } catch (e) {
+    log.warn("run: autostart reconcile failed; continuing with recorded config", {
+      error: (e as Error).message,
+    });
+  }
 
   // Startup health check — read-only for the nightly (it repairs itself by
   // sweeping); still repairs drifted units/timers/connectors. Don't await.

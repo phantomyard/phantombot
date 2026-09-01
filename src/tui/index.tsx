@@ -15,6 +15,7 @@ import { render } from "ink";
 
 import { App } from "./App.tsx";
 import { installStdinTap } from "./stdinTap.ts";
+import { reconcileAutostart } from "../lib/autostartReconcile.ts";
 import {
   enterFullScreen,
   gateStdout,
@@ -48,7 +49,6 @@ import {
   defaultPersonaProvenance,
   healDefaultPersonaIfBroken,
   listPersonaDirs,
-  migrateLegacyAutostartModes,
   writeAutostartPersonas,
 } from "../lib/personaDefault.ts";
 import { defaultSyncHeartbeatInstances } from "../lib/systemd.ts";
@@ -110,16 +110,20 @@ export async function resolveOpeningScreen(): Promise<{
       );
     }
   }
-  // Same legacy contract for autostart: a host with autostart_personas but
-  // no [autostart_modes] records is a pre-#509 install — backfill the mode
-  // records once. Best-effort for the same reason as the adoption above; a
-  // partial backfill is safe by construction (probes run before writes, and
-  // the records it manages to write are conservative).
+  // Same legacy contract for autostart, generalised: reconcile the recorded
+  // autostart config against what the host actually does. This subsumes the
+  // one-shot pre-#509 backfill (which was gated on [autostart_modes] being
+  // entirely empty, so it never repaired a partially-recorded host) and also
+  // prunes records and list entries naming personas that no longer exist.
+  // MIRROR-ONLY: it writes config, never units/tasks/plists — see
+  // lib/autostartReconcile.ts. Best-effort for the same reason as the
+  // adoption above: an unwritable config.toml must degrade to a stale label,
+  // never abort TUI launch on the hosts this repair exists to rescue.
   try {
-    await migrateLegacyAutostartModes(host);
+    await reconcileAutostart(host);
   } catch (err) {
     log.warn(
-      "legacy install: autostart_modes backfill failed; continuing without records",
+      "legacy install: autostart reconcile failed; continuing with recorded config",
       { error: String(err) },
     );
   }
