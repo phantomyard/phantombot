@@ -176,7 +176,11 @@ export async function applyEmbedding(
   input: ApplyEmbeddingInput,
 ): Promise<ApplyEmbeddingResult> {
   const needsReembed = embeddingSpaceChanges(input.config, input.change.next);
-  await applyEmbeddingConfig(input.config.configPath, input.change.next);
+  await applyEmbeddingConfig({
+    config: input.config,
+    persona: input.persona,
+    update: input.change.next,
+  });
   if (!needsReembed || input.change.next.provider === "none") {
     return { ok: true, reembedded: false };
   }
@@ -586,4 +590,3 @@ export async function unsetSecret(input: {
     return { ok: false, error: (e as Error).message };
   }
 }
-

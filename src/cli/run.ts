@@ -34,6 +34,7 @@ import {
   sameRelays,
 } from "../channels/phantomchat/relaysSource.ts";
 import { reconcileAutostart } from "../lib/autostartReconcile.ts";
+import { healMaintenanceUnits } from "../lib/maintenanceHeal.ts";
 import { cleanupStaleUpdateArtifacts } from "../lib/binaryUpdate.ts";
 import { npubEncode } from "../lib/nostrIdentity.ts";
 import {
@@ -798,6 +799,21 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       error: (e as Error).message,
     });
   }
+
+  // Maintenance self-heal (#510) — re-arm the host's scheduled maintenance
+  // from a process launchd/systemd did NOT start. The per-persona migration
+  // used to run only from the heartbeat itself, so a scheduled job that died
+  // before the healing code ran could never be re-armed: host `matt` sat 41h
+  // stale behind a launchd exit-78 while this daemon was healthy and current.
+  // Daemon start has an independent lifecycle, so it always reaches the heal.
+  // Idempotent and silent on a healthy host. Not awaited — it is pure
+  // host-maintenance and nothing below reads its result.
+  healMaintenanceUnits(config, { persona: alertPersona, source: "start" }).catch(
+    (e: unknown) =>
+      log.warn("run: maintenance self-heal failed", {
+        error: (e as Error).message,
+      }),
+  );
 
   // Startup health check — read-only for the nightly (it repairs itself by
   // sweeping); still repairs drifted units/timers/connectors. Don't await.

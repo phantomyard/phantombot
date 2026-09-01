@@ -552,6 +552,8 @@ export interface EnsureLaunchdHeartbeatOptions {
   agentsDir?: string;
   /** Override the legacy heartbeat plist path (tests). */
   legacyHeartbeatPath?: string;
+  /** Override the retired nightly plist path (tests). */
+  legacyNightlyPath?: string;
 }
 
 export interface EnsureLaunchdHeartbeatResult {
@@ -572,6 +574,12 @@ export interface EnsureLaunchdHeartbeatResult {
   removeFailed: string[];
   /** True when the legacy single-persona heartbeat plist was retired. */
   retiredLegacy: boolean;
+  /**
+   * True when the retired `dev.phantombot.nightly` plist was booted out and
+   * deleted this pass. Until #510 only `install` did this, so a host that
+   * upgraded via self-update kept a dead 02:00 agent loaded forever.
+   */
+  retiredNightly: boolean;
 }
 
 /**
@@ -612,6 +620,7 @@ export async function ensureLaunchdHeartbeatInstances(
 ): Promise<EnsureLaunchdHeartbeatResult> {
   const dir = opts.agentsDir ?? launchAgentsDir();
   const legacyPath = opts.legacyHeartbeatPath ?? heartbeatPlistPath();
+  const nightlyPath = opts.legacyNightlyPath ?? nightlyPlistPath();
   const result: EnsureLaunchdHeartbeatResult = {
     rewrote: [],
     backups: [],
@@ -620,6 +629,7 @@ export async function ensureLaunchdHeartbeatInstances(
     reloadFailed: [],
     removeFailed: [],
     retiredLegacy: false,
+    retiredNightly: false,
   };
   await mkdir(dir, { recursive: true });
   await mkdir(logsDir(), { recursive: true });
@@ -703,6 +713,21 @@ export async function ensureLaunchdHeartbeatInstances(
   ) {
     await unlink(legacyPath);
     result.retiredLegacy = true;
+  }
+
+  // Retire the nightly plist too (#510). The nightly no longer runs on a
+  // clock — startup and the heartbeat's day-rollover check trigger it (see
+  // nightlyTrigger.ts) — so a leftover 02:00 agent is dead weight that can
+  // still fire a duplicate sweep. `install` already retired it, but
+  // self-update swaps the binary only, so a host that upgraded rather than
+  // reinstalled kept it loaded indefinitely. No replacement to wait for
+  // here, unlike the legacy heartbeat: nothing depends on this label.
+  if (
+    existsSync(nightlyPath) &&
+    (await confirmedUnload(opts.launchctl, opts.domain, NIGHTLY_PLIST_LABEL))
+  ) {
+    await unlink(nightlyPath);
+    result.retiredNightly = true;
   }
   return result;
 }
