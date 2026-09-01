@@ -282,16 +282,35 @@ describe("the new-persona flow speaks the app's menu language", () => {
     expect(app.lastFrame()).toContain("lab");
   });
 
-  test("on first run the first step offers no Back, because there is none", async () => {
+  test("on first run the first step offers ^q Quit, and ^q quits", async () => {
     const app = mount({
       host: { ...HOST, personas: [] },
       startPersona: undefined,
     });
     await app.waitFor((f) => f.includes("Persona name"));
     const frame = app.lastFrame();
-    // A footer key that does nothing is worse than no key — esc has nowhere
-    // to go on genuine first run, so it is not advertised. (^q still quits
-    // via the app-global handler.)
+    // The wizard IS the app on first run — esc has no screen behind it to
+    // return to, so the app-wide ^q quit is advertised instead. Neither
+    // silence (a hidden key) nor a no-op is honest chrome.
     expect(frame).not.toContain("esc Back");
+    expect(frame).toContain("^q Quit");
+    let exited = false;
+    void app.instance.waitUntilExit().then(() => void (exited = true));
+    await app.press("\x11"); // ^q
+    await tick();
+    expect(exited).toBe(true);
+  });
+
+  test("on a wizard resume, the identity step offers ^q Quit too", async () => {
+    // A resume opens straight into the wizard (default persona missing its
+    // identity) — the stack is empty here as well, so ^q quits.
+    const app = mount({
+      host: HOST,
+      startPersona: "alice",
+      wizardStartAt: "identity",
+    });
+    await app.waitFor((f) => f.includes("One-line identity"));
+    expect(app.lastFrame()).toContain("^q Quit");
+    expect(app.lastFrame()).not.toContain("esc Back");
   });
 });
