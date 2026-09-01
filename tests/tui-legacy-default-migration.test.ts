@@ -234,7 +234,7 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     expect(toml).not.toContain('lena = "boot"');
   });
 
-  test("no autostart_personas → nothing written", async () => {
+  test("no autostart_personas and no chosen default → nothing written", async () => {
     await writeFile(configPath, 'update_channel = "preview"\n', "utf8");
     const config = await loadConfig();
 
@@ -243,6 +243,63 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     });
 
     expect(await readFile(configPath, "utf8")).not.toContain("autostart_modes");
+  });
+
+  // #512 — the shape a single-persona `phantombot install` actually leaves:
+  // a default_persona and NO autostart_personas key at all. Verified on Matt
+  // (macOS, LaunchAgent dev.phantombot.phantombot.plist) and Megan (Windows,
+  // \Phantombot\phantombot-megan at logon) on 2026-09-01: both were serving
+  // their persona at every login while the TUI reported Autostart: off,
+  // because the gate here was "autostart_personas is non-empty" and this
+  // migration never ran at all.
+  test("default_persona with NO autostart_personas → the default is backfilled", async () => {
+    await writeFile(configPath, 'default_persona = "lena"\n', "utf8");
+    const config = await loadConfig();
+
+    const { currentPlatform } = await import("../src/lib/platform.ts");
+    await migrateLegacyAutostartModes(config, {
+      bootProbe: async () => true,
+    });
+
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain("[autostart_modes]");
+    // Linux is still login unconditionally (#511 doctrine, unchanged): an
+    // enabled unit is the installer's default, never a Boot choice.
+    expect(toml).toContain(
+      currentPlatform() === "linux" ? 'lena = "login"' : 'lena = "boot"',
+    );
+  });
+
+  test("a builtin-provenance default is NOT treated as served", async () => {
+    // Nothing chose a default — `config.defaultPersona` is only the bare
+    // fallback name, and may not exist on disk. Backfilling a record for it
+    // would invent autostart state nobody asked for.
+    await writeFile(configPath, 'autostart_personas = ["lena"]\n', "utf8");
+    const config = await loadConfig();
+
+    await migrateLegacyAutostartModes(config, { bootProbe: async () => false });
+
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).toContain('lena = "login"');
+    expect(toml).not.toContain("phantom =");
+  });
+
+  test("default already on the list is recorded once, not twice", async () => {
+    await writeFile(
+      configPath,
+      'default_persona = "lena"\nautostart_personas = ["lena", "kai"]\n',
+      "utf8",
+    );
+    const config = await loadConfig();
+
+    await migrateLegacyAutostartModes(config, { bootProbe: async () => false });
+
+    const toml = await readFile(configPath, "utf8");
+    expect(toml.match(/^lena = /gm)?.length).toBe(1);
+    expect(Object.keys(config.autostartModes ?? {}).sort()).toEqual([
+      "kai",
+      "lena",
+    ]);
   });
 });
 

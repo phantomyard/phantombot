@@ -116,7 +116,41 @@ autostart_personas = ["alice"]
     expect(snap.autostartMode).toBe("login");
   });
 
-  test("not on the list → off, probe never consulted", async () => {
+  test("not served (not default, not on the list) → off, probe never consulted", async () => {
+    setup(`
+default_persona = "bob"
+autostart_personas = ["bob"]
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    let probed = 0;
+    const snap = await personaSnapshot(config, host, "alice", async () => {
+      probed++;
+      return true;
+    });
+    expect(snap.autostart).toBe(false);
+    expect(snap.autostartViaDefault).toBe(false);
+    expect(snap.autostartMode).toBe("login");
+    expect(probed).toBe(0);
+  });
+
+  // #512: the daemon serves `defaultPersona` plus `autostart_personas`
+  // (config.ts `servedPersonasOf`), so the default persona autostarts even
+  // when it is on no list — the shape a single-persona `phantombot install`
+  // leaves behind on macOS and Windows. Reading membership alone reported
+  // those hosts as Off while their LaunchAgent / logon task was in fact
+  // starting the daemon at every login.
+  test("default persona with NO autostart_personas key at all → served", async () => {
+    setup(`
+default_persona = "alice"
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    const snap = await personaSnapshot(config, host, "alice", async () => false);
+    expect(snap.autostart).toBe(true);
+    expect(snap.autostartViaDefault).toBe(true);
+    expect(snap.autostartMode).toBe("login");
+  });
+
+  test("default persona off the list is probed for an inherited boot state", async () => {
     setup(`
 default_persona = "alice"
 autostart_personas = ["bob"]
@@ -127,8 +161,37 @@ autostart_personas = ["bob"]
       probed++;
       return true;
     });
-    expect(snap.autostart).toBe(false);
-    expect(snap.autostartMode).toBe("login");
+    expect(snap.autostart).toBe(true);
+    expect(snap.autostartViaDefault).toBe(true);
+    expect(snap.autostartMode).toBe("boot");
+    expect(probed).toBe(1);
+  });
+
+  test("default persona ON the list is served, but not via the default rule", async () => {
+    setup(`
+default_persona = "alice"
+autostart_personas = ["alice"]
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    const snap = await personaSnapshot(config, host, "alice", async () => false);
+    expect(snap.autostart).toBe(true);
+    expect(snap.autostartViaDefault).toBe(false);
+  });
+
+  test("a recorded mode always wins over the probe", async () => {
+    setup(`
+default_persona = "alice"
+
+[autostart_modes]
+alice = "boot"
+`);
+    const { config, host } = await loadConfigForPersona("alice");
+    let probed = 0;
+    const snap = await personaSnapshot(config, host, "alice", async () => {
+      probed++;
+      return false;
+    });
+    expect(snap.autostartMode).toBe("boot");
     expect(probed).toBe(0);
   });
 });
