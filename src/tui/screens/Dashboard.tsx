@@ -100,7 +100,7 @@ export function DashboardScreen(props: {
   onChat: (persona: string) => void;
   onConfigure: (persona: string) => void;
   onNew: () => void;
-  onLogs: () => void;
+  onSystem: () => void;
   /** Full Doctor run for the row the cursor sits on. */
   onDoctor: (persona: string) => void;
   /** Remove (archive) the row's phantom — App owns the refusals + confirm. */
@@ -119,7 +119,7 @@ export function DashboardScreen(props: {
     else if (key.return && current) props.onChat(current.name);
     else if (char === "c" && current) props.onConfigure(current.name);
     else if (char === "n") props.onNew();
-    else if (char === "L") props.onLogs();
+    else if (char === "S") props.onSystem();
     else if (char === "d" && current) props.onDoctor(current.name);
     else if (char === "x" && current) props.onRemove(current.name);
   });
@@ -157,7 +157,7 @@ export function DashboardScreen(props: {
         { icon: badge.new, key: "n", label: "New" },
         { icon: badge.doctor, key: "d", label: "Doctor" },
         { icon: badge.unset, key: "x", label: "Remove" },
-        { icon: badge.logs, key: "L", label: "Logs" },
+        { icon: badge.logs, key: "S", label: "System" },
         { icon: badge.back, key: "esc", label: "Back" },
       ]}
     >

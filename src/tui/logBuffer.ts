@@ -15,6 +15,9 @@ export interface LogLine {
   at: number;
   level: string;
   msg: string;
+  /** Structured logger context used by the System log filters. */
+  type?: string;
+  persona?: string;
   /** The original line, for anything the parse missed. */
   raw: string;
 }
@@ -64,12 +67,22 @@ export function parseLogLine(raw: string): LogLine {
       ts?: string;
       level?: string;
       msg?: string;
+      type?: string;
+      persona?: string;
+      component?: string;
+      process?: string;
     };
     if (parsed && typeof parsed === "object" && parsed.msg !== undefined) {
       return {
         at: parsed.ts ? Date.parse(parsed.ts) : Date.now(),
         level: parsed.level ?? "info",
         msg: String(parsed.msg),
+        type:
+          parsed.type ??
+          parsed.component ??
+          parsed.process ??
+          /^([\w-]+):/.exec(String(parsed.msg))?.[1],
+        persona: parsed.persona,
         raw,
       };
     }

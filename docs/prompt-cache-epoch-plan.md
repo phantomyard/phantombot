@@ -166,6 +166,50 @@ No llama.cpp flags, cache settings, slot controls, persistence, or model
 configuration are required. Backends that do not reuse exact prefixes still
 receive the same complete, correctly ordered conversation.
 
+## Hosted provider cache keys
+
+Some hosted providers accept an explicit cache key (OpenAI's
+`prompt_cache_key`) as a routing hint for prefix reuse. PhantomBot does not
+send one today — every harness is a CLI subprocess that owns its own provider
+request — but the rule for one is fixed here so it exists before the first
+caller does, rather than being retrofitted onto whichever harness gains the
+capability first.
+
+`hostedPromptCacheKey(plan)` is the only sanctioned source of that value. It
+derives the key from the epoch identity (`EpochState.epochId`) and a
+process-local random salt, and mixes in nothing else.
+
+The lifetime of a hosted cache key is the lifetime of an epoch, not of a
+conversation. A chat conversation can run for hours across unrelated topics; a
+key stable for that long would advertise prefix reuse across a boundary
+PhantomBot itself does not honour, and rotating it could not remove stale
+context anyway, because the same history would simply be re-sent. The epoch is
+where the rendered prefix is actually reconstructed, so it is the only lifetime
+the key can honestly claim.
+
+Consequences, all of which follow from the derivation:
+
+- a warm `append` keeps the same key;
+- every rebase reason rotates it: `history_changed` (which is how `/reset`, and
+  any future compaction, surfaces), `trust_changed`, `security_changed`,
+  `system_changed`, `concurrent_turn` and `budget`;
+- a discarded epoch — threat hold, invalidation, cache error — can never be
+  resumed under its old key. `epochId` is random per epoch rather than derived
+  from epoch content, so rebuilding a byte-identical history still yields a new
+  key;
+- persona is an ingredient rather than a rotation trigger. A conversation is
+  bound to one persona, and per-persona epoch state is already keyed
+  separately, so two personas cannot share a key;
+- a request that is not retained in an epoch (`retain_epoch: false`, the
+  oversized-base bypass) receives no key at all. There is no retained prefix,
+  so there is nothing to pin.
+
+The salt makes the emitted value non-reversible: a persona name, conversation
+id or channel identifier must never be recoverable from a string handed to a
+third party, and two processes serving the same conversation must not collide
+on one key. Callers must not construct a cache key any other way, and must not
+mix additional material into the returned value.
+
 ## Scope boundaries
 
 This feature deliberately does not add persistent Pi/RPC sessions, history
@@ -178,8 +222,10 @@ ownership and keep cache state disposable.
 
 When `[prompt_cache].enabled = true`, the orchestrator emits one INFO JSON
 line per eligible turn with `msg: "prompt_cache.epoch"`. The safe fields are
-`event`, `persona`, `conversation`, `base_history_turns`, `epoch_turns`,
-`prompt_bytes`, `max_epoch_bytes`, and `retain_epoch`. `prompt_bytes` is the
+`event`, `epoch_id`, `persona`, `conversation`, `base_history_turns`,
+`epoch_turns`, `prompt_bytes`, `max_epoch_bytes`, and `retain_epoch`. `epoch_id`
+is the opaque epoch identity described above; it carries no prompt content and
+is not the salted value a provider would receive. `prompt_bytes` is the
 same rendered UTF-8 measurement used by the epoch ceiling. Budget rebases also
 include `projected_epoch_bytes`, the pre-rebase projection.
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import type { PromptCacheSettings } from "../config.ts";
 import type { HistoryTurn } from "../harnesses/types.ts";
@@ -39,6 +39,13 @@ export type PromptCacheErrorPhase =
 
 interface EpochState {
   key: string;
+  /**
+   * Opaque identity of THIS epoch. It is regenerated whenever an epoch is
+   * started or rebased and is stable for every append within one epoch, so it
+   * — and nothing else — is the correct basis for a hosted-provider prompt
+   * cache key. See `hostedPromptCacheKey`.
+   */
+  epochId: string;
   persona: string;
   conversation: string;
   systemFingerprint: string;
@@ -52,6 +59,8 @@ interface EpochState {
 
 export interface PromptCacheEpochPlan {
   readonly state: EpochState;
+  /** Opaque identity of the epoch serving this request. */
+  readonly epochId: string;
   readonly baseHistory: readonly HistoryTurn[];
   readonly epochTurns: readonly PromptEpochTurn[];
   readonly turnContext: string | undefined;
@@ -83,6 +92,8 @@ export interface PreparePromptCacheInput {
 
 interface PromptCacheTelemetry {
   event: PromptCacheEpochEvent;
+  /** Opaque epoch identity; correlates rebases in logs, carries no content. */
+  epochId?: string;
   reason?: PromptCacheReason;
   baseHistoryTurnCount: number;
   epochTurnCount: number;
@@ -232,6 +243,7 @@ export class PromptCacheEpochManager {
         retainEpoch = false;
         const plan: PromptCacheEpochPlan = {
           state,
+          epochId: state.epochId,
           baseHistory: state.baseHistory,
           epochTurns: [],
           turnContext: input.turnContext,
@@ -245,6 +257,7 @@ export class PromptCacheEpochManager {
         };
         this.logTelemetry(input, {
           event: plan.event,
+          epochId: plan.epochId,
           reason: plan.reason,
           baseHistoryTurnCount: plan.baseHistory.length,
           epochTurnCount: plan.epochTurns.length,
@@ -261,6 +274,7 @@ export class PromptCacheEpochManager {
       rebased ? "rebase" : state.epochTurns.length > 0 ? "append" : "new";
     const plan: PromptCacheEpochPlan = {
       state,
+      epochId: state.epochId,
       baseHistory: state.baseHistory,
       epochTurns: state.epochTurns,
       turnContext: input.turnContext,
@@ -274,6 +288,7 @@ export class PromptCacheEpochManager {
     };
     this.logTelemetry(input, {
       event: plan.event,
+      epochId: plan.epochId,
       reason: plan.reason,
       baseHistoryTurnCount: plan.baseHistory.length,
       epochTurnCount: plan.epochTurns.length,
@@ -405,6 +420,7 @@ export class PromptCacheEpochManager {
   ): void {
     log.info("prompt_cache.epoch", {
       event: telemetry.event,
+      ...(telemetry.epochId ? { epoch_id: telemetry.epochId } : {}),
       persona: input.persona,
       conversation: input.conversation,
       base_history_turns: telemetry.baseHistoryTurnCount,
@@ -430,12 +446,13 @@ export class PromptCacheEpochManager {
   private newState(
     input: Omit<
       EpochState,
-      "baseHistory" | "canonicalHistory" | "epochTurns" | "active"
+      "baseHistory" | "canonicalHistory" | "epochTurns" | "active" | "epochId"
     > & { history: readonly HistoryTurn[] },
   ): EpochState {
     const history = cloneHistory(input.history);
     return {
       key: input.key,
+      epochId: newEpochId(),
       persona: input.persona,
       conversation: input.conversation,
       systemFingerprint: input.systemFingerprint,
@@ -531,6 +548,65 @@ export function promptCacheSecurityFingerprint(input: {
     .digest("hex");
 }
 
+/**
+ * Process-local salt for hosted cache keys.
+ *
+ * The key we hand a hosted provider must not be reversible into a persona
+ * name, conversation id, or channel identifier, and two processes serving the
+ * same conversation must not collide on a shared key. A random per-process
+ * salt gives both properties without any stored secret.
+ */
+const HOSTED_CACHE_KEY_SALT = randomBytes(32);
+
+function newEpochId(): string {
+  return createHash("sha256")
+    .update(randomUUID(), "utf8")
+    .update(randomBytes(16))
+    .digest("hex");
+}
+
+/**
+ * The ONLY sanctioned source of a hosted-provider `prompt_cache_key`.
+ *
+ * Issue #504: hosted cache-key stability must follow a real PhantomBot
+ * context epoch, never the lifetime of a chat conversation. A chat thread can
+ * run for hours across unrelated topics; the epoch is the boundary at which
+ * PhantomBot actually reconstructs the prompt prefix, so it is the boundary at
+ * which a provider-side prefix cache stops being the right one to hit.
+ *
+ * Consequences, all of which fall out of the derivation rather than needing
+ * their own bookkeeping:
+ *
+ * - a warm append keeps the same key, which is the whole point of asking for
+ *   one;
+ * - every rebase reason rotates it (`history_changed` — which is how `/reset`
+ *   and any future compaction surface — plus `trust_changed`,
+ *   `security_changed`, `system_changed`, `concurrent_turn`, `budget`);
+ * - a discarded epoch (threat hold, invalidation, cache error) can never be
+ *   resumed under its old key, because the next epoch gets a fresh id even if
+ *   the reconstructed history is byte-identical;
+ * - persona is an ingredient of the epoch, not a rotation trigger: a
+ *   conversation is bound to one persona, and per-persona state is already
+ *   keyed separately, so two personas can never share a key;
+ * - a request that is not retained in an epoch gets NO key. There is no
+ *   prefix to pin, so pinning one would only advertise a prefix that will
+ *   never be reused.
+ *
+ * Callers must not construct a cache key any other way, and must not mix
+ * anything else into this value.
+ */
+export function hostedPromptCacheKey(
+  plan: Pick<PromptCacheEpochPlan, "epochId" | "retainEpoch">,
+): string | undefined {
+  if (!plan.retainEpoch) return undefined;
+  if (!/^[0-9a-f]{64}$/.test(plan.epochId)) return undefined;
+  const digest = createHash("sha256")
+    .update(HOSTED_CACHE_KEY_SALT)
+    .update(plan.epochId, "utf8")
+    .digest("hex");
+  return `pb-${digest.slice(0, 32)}`;
+}
+
 function cacheKey(persona: string, conversation: string): string {
   return `${persona}\u0000${conversation}`;
 }
@@ -571,6 +647,8 @@ function isValidEpochState(
   const state = value as Partial<EpochState>;
   if (
     state.key !== expectedKey ||
+    typeof state.epochId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(state.epochId) ||
     state.persona !== expectedPersona ||
     state.conversation !== expectedConversation ||
     typeof state.systemFingerprint !== "string" ||
