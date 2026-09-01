@@ -197,6 +197,11 @@ describe("logsSpec", () => {
   // The strongest Windows assertion available: RUN the generated PowerShell.
   // A spec built from string concatenation can be syntactically wrong in ways
   // no argv assertion notices; `phantombot logs` then fails only in the field.
+  // Timeout: this spawns powershell.exe TWICE, and Windows PowerShell 5.1 cold
+  // start on a loaded GitHub runner costs seconds per process -- comfortably
+  // over bun's 5s default, which killed the child (exit 143) and read as the
+  // script failing rather than the budget running out. Generous on purpose:
+  // it should only bite if the spec genuinely hangs.
   winTest("the generated PowerShell actually runs and merges both files", async () => {
     const prev = process.env.XDG_DATA_HOME;
     const root = await mkdtemp(join(tmpdir(), "pb478-win-"));
@@ -231,7 +236,7 @@ describe("logsSpec", () => {
       else process.env.XDG_DATA_HOME = prev;
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   winTest("the copy-pasteable hint names both sinks too", () => {
     const { out, err } = taskLogPaths("phantombot");
