@@ -41,12 +41,21 @@ delete process.env.CONTINUOUS_INTEGRATION;
  * Per-test opt-in is the wrong shape for this: 23 of the suite's files set
  * PHANTOMBOT_STATE and the two that bit us were exactly the ones that had no
  * reason to think they needed it. Isolation therefore defaults ON for the
- * whole suite here, and `??=` means a test that pins its own path still wins
- * (and, crucially, restoring a saved-then-deleted value lands back on THIS
- * path rather than the live one).
+ * whole suite here.
  *
- * The paired guard in src/state.ts turns the remaining hole — a test that
- * clears the var outright — from a silent host mutation into a loud failure.
+ * XDG_DATA_HOME, and deliberately NOT PHANTOMBOT_STATE. `statePath()` reads
+ * PHANTOMBOT_STATE FIRST, so defaulting it here would outrank — and silently
+ * undo — the isolation of every suite that redirects state by pointing
+ * XDG_DATA_HOME at its own temp dir (lib-persona-snapshot-brain does exactly
+ * that, and pinning PHANTOMBOT_STATE broke it). Redirecting the ROOT is
+ * strictly weaker in precedence and strictly wider in coverage: it catches
+ * state.json, its audit log, and everything else that resolves under the data
+ * dir, while both kinds of per-suite isolation keep winning.
+ *
+ * `??=` so an ambient XDG_DATA_HOME (a dev box that sets one) is respected.
+ * The paired guard in src/state.ts turns the remaining hole — a suite that
+ * points state at the real host outright — from a silent host mutation into a
+ * loud failure.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,8 +63,6 @@ import { join } from "node:path";
 
 const isolationRoot = mkdtempSync(join(tmpdir(), "phantombot-test-isolation-"));
 process.env.PHANTOMBOT_TEST_ISOLATION_ROOT = isolationRoot;
-process.env.PHANTOMBOT_STATE ??= join(isolationRoot, "state.json");
-process.env.PHANTOMBOT_STATE_AUDIT ??= join(isolationRoot, "state-audit.log");
 process.env.XDG_DATA_HOME ??= join(isolationRoot, "xdg-data");
 
 // The suite already leaks fixture dirs; this one cleans up after itself.

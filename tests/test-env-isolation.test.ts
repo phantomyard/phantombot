@@ -33,11 +33,41 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
-test("the preload redirects state.json away from the real host", () => {
+test("the preload redirects the data dir away from the real host", async () => {
   const root = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
   expect(root).toBeString();
-  expect(resolve(process.env.PHANTOMBOT_STATE!).startsWith(resolve(root!) + sep)).toBe(true);
-  expect(resolve(process.env.XDG_DATA_HOME!).startsWith(resolve(root!) + sep)).toBe(true);
+  // NOT asserted against the live env: the whole suite shares one process, so
+  // a sibling suite may legitimately be mid-flight with its own XDG override
+  // when this runs. The contract under test is where the DEFAULT resolves.
+  // The consumer that matters: the DEFAULT state.json resolution, which is
+  // what an unsuspecting suite gets.
+  const { statePath } = await import("../src/state.ts");
+  const saved = process.env.PHANTOMBOT_STATE;
+  const savedXdg = process.env.XDG_DATA_HOME;
+  delete process.env.PHANTOMBOT_STATE;
+  // A sibling suite may be mid-flight with its own XDG override (the suite
+  // runs in ONE process), so pin the preload's value back before asking where
+  // the default resolves. What is under test is the preload's contract, not
+  // whoever ran last.
+  process.env.XDG_DATA_HOME = join(root!, "xdg-data");
+  try {
+    expect(resolve(statePath()).startsWith(resolve(root!) + sep)).toBe(true);
+  } finally {
+    if (saved === undefined) delete process.env.PHANTOMBOT_STATE;
+    else process.env.PHANTOMBOT_STATE = saved;
+    if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedXdg;
+  }
+});
+
+test("the preload does NOT pin PHANTOMBOT_STATE", async () => {
+  // Pinning it would outrank the per-suite XDG_DATA_HOME isolation that
+  // several files already do, silently undoing it. Regression pin — read the
+  // preload's source rather than the live env, which any sibling suite in the
+  // shared process may legitimately be overriding right now.
+  const src = await readFile(new URL("./testEnvIsolation.ts", import.meta.url), "utf8");
+  expect(src).not.toMatch(/^process\.env\.PHANTOMBOT_STATE\s*\?\?=/m);
+  expect(src).toMatch(/^process\.env\.XDG_DATA_HOME\s*\?\?=/m);
 });
 
 test("saveState REFUSES to write outside the isolation root", async () => {
