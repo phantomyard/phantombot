@@ -956,17 +956,45 @@ export async function runRun(input: RunInput = {}): Promise<number> {
     ]),
   ];
 
-  // The REAL persona -> Telegram account map, straight off the resolved
+  // The REAL persona -> account map, straight off the resolved
   // listener plan (phantombot#519). The lifecycle broadcast must not infer
   // sibling ownership from any single listener's persona-resolved config: on a
   // non-default listener `channels.telegram` is that CALLER's bot, so the
   // inference labels a sibling and sends through the wrong token. Only this
   // scope knows the true mapping, so it is passed down explicitly.
-  const lifecycleAccounts = telegramListeners.map((l) => ({
-    persona: l.persona,
-    token: l.account.token,
-    chatIds: l.account.allowedUserIds,
-  }));
+  //
+  // PhantomChat half (phantombot#523): a persona served ONLY over PhantomChat
+  // has no Telegram bot to warn through, so its phantomchat.json identity is
+  // supplied here — the applier DMs its allowed owners from its own nsec via
+  // the shared one-shot send path. Relayed through the persona's CACHED relays
+  // (the canonical /relays.json fetch happens later, with the listeners): a
+  // heads-up is best-effort, and the cache is the last known-good set.
+  // Personas reachable on BOTH channels are Telegram-only in the map — the
+  // planner prefers Telegram and this keeps a dual-channel persona from being
+  // double-notified. An empty allowlist means no known contacts: skipped.
+  const telegramLifecyclePersonas = new Set(
+    telegramListeners.map((l) => l.persona),
+  );
+  const lifecycleAccounts = [
+    ...telegramListeners.map((l) => ({
+      persona: l.persona,
+      token: l.account.token,
+      chatIds: l.account.allowedUserIds,
+    })),
+    ...phantomchatPersonas
+      .filter(
+        (spec) =>
+          !telegramLifecyclePersonas.has(spec.persona) &&
+          spec.config.allowedHex.length > 0,
+      )
+      .map((spec) => ({
+        channel: "phantomchat" as const,
+        persona: spec.persona,
+        secretKey: spec.config.identity.secretKey,
+        relays: spec.config.relays,
+        recipientHexes: [...new Set(spec.config.allowedHex)],
+      })),
+  ];
 
   // Second half of the lifecycle broadcast (phantombot#519). `/update` and
   // `/restart` warn every OTHER persona before taking the shared process down

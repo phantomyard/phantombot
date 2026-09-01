@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateSecretKey } from "nostr-tools/pure";
 import {
   backOnlineMessage,
   clearPendingLifecycle,
@@ -20,6 +21,8 @@ import {
   readPendingLifecycle,
   sendLifecycleBroadcast,
   writePendingLifecycle,
+  type BroadcastRecipient,
+  type TelegramBroadcastRecipient,
   PENDING_LIFECYCLE_MAX_AGE_MS,
 } from "../src/lib/lifecycleBroadcast.ts";
 
@@ -55,6 +58,33 @@ function fakeTransports() {
   return { sent, failFor, createTransport };
 }
 
+/** Narrows the plan to its Telegram half so tests can read token/chatIds. */
+function tg(plan: BroadcastRecipient[]): TelegramBroadcastRecipient[] {
+  return plan.filter(
+    (r): r is TelegramBroadcastRecipient => r.channel === "telegram",
+  );
+}
+
+/** Collects (recipientHex, text) instead of talking to Nostr relays. */
+function fakePhantomchatSends() {
+  const sent: { relays: string[]; recipientHex: string; text: string }[] = [];
+  const failFor = new Set<string>();
+  const sendPhantomchat = async (args: {
+    secretKey: Uint8Array;
+    relays: string[];
+    recipientHex: string;
+    text: string;
+  }) => {
+    if (failFor.has(args.recipientHex)) throw new Error("relay is down");
+    sent.push({
+      relays: args.relays,
+      recipientHex: args.recipientHex,
+      text: args.text,
+    });
+  };
+  return { sent, failFor, sendPhantomchat };
+}
+
 describe("planLifecycleBroadcast", () => {
   test("warns the other personas, never the one that typed the command", () => {
     const plan = planLifecycleBroadcast({
@@ -69,7 +99,7 @@ describe("planLifecycleBroadcast", () => {
       config: config(),
       excludePersona: "kai",
     });
-    expect(plan.find((r) => r.persona === "robbie")?.token).toBe("tok-robbie");
+    expect(tg(plan).find((r) => r.persona === "robbie")?.token).toBe("tok-robbie");
   });
 
   test("a NON-default persona never borrows the host telegram block", () => {
@@ -99,7 +129,7 @@ describe("planLifecycleBroadcast", () => {
       }),
       excludePersona: "robbie",
     });
-    const pairs = plan.flatMap((r) => r.chatIds.map((c) => `${r.token}:${c}`));
+    const pairs = tg(plan).flatMap((r) => r.chatIds.map((c) => `${r.token}:${c}`));
     expect(pairs).toEqual(["tok-shared:7"]);
   });
 
@@ -363,7 +393,7 @@ describe("recipient resolution is not inferred from the caller's config", () => 
     // Before the fix this returned { persona: "robbie", token: "LENA_BOT" } —
     // robbie's name on lena's token. Skipping is the only safe answer without
     // a real account map.
-    expect(plan.find((r) => r.token === "LENA_BOT")).toBeUndefined();
+    expect(tg(plan).find((r) => r.token === "LENA_BOT")).toBeUndefined();
     expect(plan).toEqual([]);
   });
 
@@ -372,7 +402,7 @@ describe("recipient resolution is not inferred from the caller's config", () => 
       config: config(),
       excludePersona: "kai",
     });
-    expect(plan.find((r) => r.persona === "robbie")?.token).toBe("tok-robbie");
+    expect(tg(plan).find((r) => r.persona === "robbie")?.token).toBe("tok-robbie");
   });
 
   test("a supplied account map wins over any inference the config would make", () => {
@@ -385,8 +415,8 @@ describe("recipient resolution is not inferred from the caller's config", () => 
       ],
       excludePersona: "lena",
     });
-    expect(plan).toEqual([
-      { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+    expect(tg(plan)).toEqual([
+      { channel: "telegram", persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
     ]);
   });
 
@@ -439,6 +469,228 @@ describe("recipient resolution is not inferred from the caller's config", () => 
           text: backOnlineMessage("/update", "1.2.3"),
         },
       ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * PhantomChat half (phantombot#523): a persona served ONLY over PhantomChat
+ * is warned through its own phantomchat identity, never skipped.
+ * -------------------------------------------------------------------------- */
+
+describe("planLifecycleBroadcast — phantomchat accounts", () => {
+  function pcAccount(persona: string, hexes: string[]): any {
+    return {
+      channel: "phantomchat",
+      persona,
+      secretKey: generateSecretKey(),
+      relays: ["wss://relay.example"],
+      recipientHexes: hexes,
+    };
+  }
+
+  test("a phantomchat-only persona gets a phantomchat recipient, not a skip", () => {
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "jake"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        pcAccount("jake", ["aa".repeat(32)]),
+      ],
+      excludePersona: "robbie",
+    });
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({
+      channel: "phantomchat",
+      persona: "jake",
+      recipientHexes: ["aa".repeat(32)],
+    });
+  });
+
+  test("a persona reachable on BOTH channels is warned on Telegram only", () => {
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "lena"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        { persona: "lena", token: "tok-lena", chatIds: [1] },
+        pcAccount("lena", ["bb".repeat(32)]),
+      ],
+      excludePersona: "robbie",
+    });
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({
+      channel: "telegram",
+      persona: "lena",
+      token: "tok-lena",
+    });
+  });
+
+  test("phantomchat hexes are deduped per persona", () => {
+    const hex = "cc".repeat(32);
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "jake"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        pcAccount("jake", [hex, hex.toUpperCase()]),
+      ],
+      excludePersona: "robbie",
+    });
+    const pc = plan.filter((r) => r.channel === "phantomchat");
+    expect(pc).toHaveLength(1);
+    const first = pc[0];
+    expect(
+      first && first.channel === "phantomchat" ? first.recipientHexes : [],
+    ).toEqual([hex]);
+  });
+
+  test("an empty phantomchat allowlist has no known contacts — skipped", () => {
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      runningPersonas: ["robbie", "jake"],
+      accounts: [
+        { persona: "robbie", token: "ROBBIE_BOT", chatIds: [7] },
+        pcAccount("jake", []),
+      ],
+      excludePersona: "robbie",
+    });
+    expect(plan).toEqual([]);
+  });
+
+  test("the fallback inference never invents a phantomchat account", () => {
+    // Without a supplied map the planner must stay Telegram-only: guessing a
+    // phantomchat identity from an arbitrary config layer would mean reading
+    // persona dirs the caller may not own.
+    const plan = planLifecycleBroadcast({
+      config: config(),
+      excludePersona: "lena",
+    });
+    expect(plan.every((r) => r.channel === "telegram")).toBe(true);
+  });
+});
+
+describe("sendLifecycleBroadcast — phantomchat recipients", () => {
+  const HEX_A = "dd".repeat(32);
+  const HEX_B = "ee".repeat(32);
+
+  function pcRecipient(hexes: string[]): any {
+    return {
+      channel: "phantomchat",
+      persona: "jake",
+      secretKey: generateSecretKey(),
+      relays: ["wss://relay.example"],
+      recipientHexes: hexes,
+    };
+  }
+
+  test("DMs every allowed owner from the persona's own identity", async () => {
+    const pc = fakePhantomchatSends();
+    const res = await sendLifecycleBroadcast({
+      recipients: [pcRecipient([HEX_A, HEX_B])],
+      message: backOnlineMessage("/restart", "9.9.9"),
+      sendPhantomchat: pc.sendPhantomchat,
+    });
+    expect(res).toEqual({ sent: 2, failed: 0 });
+    expect(pc.sent.map((s) => s.recipientHex)).toEqual([HEX_A, HEX_B]);
+    expect(pc.sent[0]?.text).toBe(backOnlineMessage("/restart", "9.9.9"));
+  });
+
+  test("one failed hex never aborts the rest — and never throws", async () => {
+    const pc = fakePhantomchatSends();
+    pc.failFor.add(HEX_A);
+    const res = await sendLifecycleBroadcast({
+      recipients: [pcRecipient([HEX_A, HEX_B])],
+      message: "⏳ Heads-up.",
+      sendPhantomchat: pc.sendPhantomchat,
+    });
+    expect(res).toEqual({ sent: 1, failed: 1 });
+    expect(pc.sent.map((s) => s.recipientHex)).toEqual([HEX_B]);
+  });
+
+  test("telegram and phantomchat recipients compose in one fan-out", async () => {
+    const t = fakeTransports();
+    const pc = fakePhantomchatSends();
+    const res = await sendLifecycleBroadcast({
+      recipients: [
+        {
+          channel: "telegram",
+          persona: "robbie",
+          token: "ROBBIE_BOT",
+          chatIds: [7],
+        },
+        pcRecipient([HEX_A]),
+      ],
+      message: "⏳ Heads-up.",
+      createTransport: t.createTransport,
+      sendPhantomchat: pc.sendPhantomchat,
+    });
+    expect(res).toEqual({ sent: 2, failed: 0 });
+    expect(t.sent).toEqual([{ token: "ROBBIE_BOT", chatId: "7", text: "⏳ Heads-up." }]);
+    expect(pc.sent.map((s) => s.recipientHex)).toEqual([HEX_A]);
+  });
+});
+
+describe("notifyLifecycleBackIfPending — phantomchat-only persona", () => {
+  const HEX_PC = "ff".repeat(32);
+
+  function pcAccountForTest(persona: string, hexes: string[]): any {
+    return {
+      channel: "phantomchat",
+      persona,
+      secretKey: generateSecretKey(),
+      relays: ["wss://relay.example"],
+      recipientHexes: hexes,
+    };
+  }
+
+  /** Mirrors the earlier suite's lena-resolved config (module-local there). */
+  function lenaResolvedConfig(): any {
+    return {
+      personaLayer: "lena",
+      defaultPersona: "robbie",
+      autostartPersonas: ["robbie", "lena"],
+      channels: { telegram: account("LENA_BOT", [1]), telegramPersonas: {} },
+    };
+  }
+  test("the back-online line reaches a phantomchat-only persona too", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-lifecycle-pc-"));
+    const path = join(dir, ".pending-lifecycle.json");
+    try {
+      await writePendingLifecycle(
+        {
+          command: "/restart",
+          originPersona: "lena",
+          personas: ["jake"],
+          writtenAt: new Date().toISOString(),
+        },
+        path,
+      );
+      const pc = fakePhantomchatSends();
+      const t = fakeTransports();
+      const res = await notifyLifecycleBackIfPending({
+        config: lenaResolvedConfig(),
+        currentVersion: "1.2.3",
+        runningPersonas: ["lena", "jake"],
+        accounts: [pcAccountForTest("jake", [HEX_PC])],
+        path,
+        createTransport: t.createTransport,
+        sendPhantomchat: pc.sendPhantomchat,
+      });
+      expect(res.status).toBe("notified");
+      expect(res.sent).toBe(1);
+      expect(t.sent).toEqual([]); // telegram untouched — jake has no bot
+      expect(pc.sent).toEqual([
+        {
+          relays: ["wss://relay.example"],
+          recipientHex: HEX_PC,
+          text: backOnlineMessage("/restart", "1.2.3"),
+        },
+      ]);
+      // The marker is cleared in every terminal case, phantomchat included.
+      expect(await readPendingLifecycle(path)).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -46,6 +46,10 @@ import {
   resolvePersona,
 } from "../config.ts";
 import { loadPhantomchatPersonaConfig } from "../channels/phantomchat/personaStore.ts";
+import {
+  defaultPhantomchatOneShotSend,
+  type PhantomchatOneShotSend,
+} from "../channels/phantomchat/oneShotSend.ts";
 import { type AudioSupport, synthesize, ttsSupport } from "../lib/audio.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
@@ -58,45 +62,14 @@ import {
  * Send a phantomchat (Nostr NIP-17 DM) text to `recipientHex`. Default builds a
  * one-shot SimplePool transport from the persona's nsec + relays, publishes the
  * gift-wrap, and tears the pool down. Injectable so tests don't open sockets.
+ *
+ * The primitive itself lives in `channels/phantomchat/oneShotSend.ts` so the
+ * lifecycle broadcast applier shares the exact same out-of-loop send path.
  */
-export type PhantomchatNotifySend = (args: {
-  secretKey: Uint8Array;
-  relays: string[];
-  recipientHex: string;
-  text: string;
-}) => Promise<void>;
+export type PhantomchatNotifySend = PhantomchatOneShotSend;
 
-const defaultPhantomchatSend: PhantomchatNotifySend = async ({
-  secretKey,
-  relays,
-  recipientHex,
-  text,
-}) => {
-  // Lazy import keeps the nostr-tools websocket machinery out of the import
-  // graph for Telegram-only notifies.
-  const { AuthGuardedSimplePool } = await import(
-    "../channels/phantomchat/authGuardedPool.ts"
-  );
-  const { SimplePoolPhantomchatTransport } = await import(
-    "../channels/phantomchat/transport.ts"
-  );
-  // NIP-42 (issue #368): answer AUTH challenges so a notify to an
-  // auth-requiring relay isn't silently dropped — and don't die if a relay
-  // never answers the challenge we send back (issue #401).
-  const pool = new AuthGuardedSimplePool(secretKey);
-  const transport = new SimplePoolPhantomchatTransport(
-    secretKey,
-    relays,
-    pool as unknown as ConstructorParameters<
-      typeof SimplePoolPhantomchatTransport
-    >[2],
-  );
-  try {
-    await transport.sendMessage(recipientHex, text);
-  } finally {
-    transport.close();
-  }
-};
+const defaultPhantomchatSend: PhantomchatOneShotSend =
+  defaultPhantomchatOneShotSend;
 
 export interface RunNotifyInput {
   config?: Config;
