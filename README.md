@@ -2464,19 +2464,20 @@ Equivalent TOML:
 provider = "gemini"
 
 [embeddings.gemini]
-api_key = "AIza..."
 model = "gemini-embedding-001"
 dims = 1536
 ```
 
-The `api_key` here is the LOWEST-precedence source. If this persona's vault
-holds a `PHANTOMBOT_GEMINI_API_KEY` row, that row is the key actually used and
-editing the file changes nothing — Phantombot logs a warning saying so on
-startup. `phantombot vault set PHANTOMBOT_GEMINI_API_KEY` is the place to
-change it, or `phantombot vault unset` it to hand control back to the file.
-The same applies to `[embeddings.openai_compatible] api_key` and
-`PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY`. Keys are per persona: one daemon
-serving several personas resolves each one against its OWN vault.
+`phantombot embedding` writes provider, model, dimensions, prefixes and endpoint
+settings to that persona's `config.toml`, but stores the API key in the
+persona's encrypted vault. After a verified vault write it removes any legacy
+plaintext `api_key` for that provider from the file. If the vault write fails,
+the wizard preserves the pasted key in `config.toml` and reports the failure so
+the credential is recoverable. Existing file keys remain a lowest-precedence
+compatibility source; the startup shadow warning remains during migration.
+Gemini uses `PHANTOMBOT_GEMINI_API_KEY` and OpenAI-compatible uses
+`PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY`. One daemon serving several personas
+resolves each one against its OWN vault.
 
 For a local CPU-only llama.cpp server, start it separately from PhantomBot.
 The server's model and pooling must match the embedding GGUF's model card; for
