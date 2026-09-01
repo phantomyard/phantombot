@@ -63,7 +63,8 @@ import { KeysScreen } from "./screens/Keys.tsx";
 import { DoctorScreen } from "./screens/Doctor.tsx";
 import { gatherStatus, type StatusRows } from "./status.ts";
 import { McpScreen } from "./screens/Mcp.tsx";
-import { LogsScreen } from "./screens/Logs.tsx";
+import { SystemScreen } from "./screens/System.tsx";
+import { systemSnapshot } from "./systemSnapshot.ts";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
 import { logBuffer } from "./logBuffer.ts";
@@ -79,7 +80,7 @@ type Screen =
   | "keys"
   | "doctor"
   | "mcp"
-  | "logs"
+  | "system"
   | "newPersona"
   | "createPersona"
   | "wizard"
@@ -399,7 +400,10 @@ export function App(props: AppProps): React.ReactElement {
   // first-run regression test caught the consequence: the event loop was busy
   // enough that keystrokes batched and the wizard read "alice\n" as a name.
   useEffect(() => {
-    if (screen === "dashboard" && serviceActive === undefined) {
+    if (
+      (screen === "dashboard" || screen === "system") &&
+      serviceActive === undefined
+    ) {
       void probeService();
     }
   }, [screen, serviceActive, probeService]);
@@ -430,8 +434,8 @@ export function App(props: AppProps): React.ReactElement {
     // (they used to be painted over the frame), so there has to be one key
     // that shows them. Toggles, so ^l gets you back out of it too.
     if (key.ctrl && char === "l") {
-      if (screenRef.current === "logs") back();
-      else go("logs");
+      if (screenRef.current === "system") back();
+      else go("system");
       return;
     }
     // A global safety net for the ONE state that renders no screen component,
@@ -1831,7 +1835,7 @@ export function App(props: AppProps): React.ReactElement {
             go("persona");
           }}
           onNew={() => go("newPersona")}
-          onLogs={() => go("logs")}
+          onSystem={() => go("system")}
           onDoctor={(name) => {
             setPersonaName(name);
             // A stale report from a previous run must not flash as THIS
@@ -2034,9 +2038,14 @@ export function App(props: AppProps): React.ReactElement {
       );
     }
 
-    if (screen === "logs") {
+    if (screen === "system") {
       return (
-        <LogsScreen
+        <SystemScreen
+          snapshot={systemSnapshot({
+            ...host,
+            ...(serviceActive === undefined ? {} : { serviceActive }),
+          })}
+          personas={host.personas.map((p) => p.name)}
           onBack={back}
         />
       );

@@ -287,7 +287,7 @@ Settings live one keypress away:
 | `esc` | Back to the conversation, mid-thread, nothing lost |
 | `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
 | `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
-| `^l` | Show captured log lines |
+| `^l` | Open System observability (overview and filtered logs) |
 | `^c` | Interrupt the turn (it does **not** quit) |
 | `^q` | Quit |
 | `/` | Open the command list; `Tab` completes what you have typed |
@@ -295,8 +295,12 @@ Settings live one keypress away:
 It takes the whole window — the app runs on the alternate screen buffer, like
 `less` or `htop`, and leaves your shell and its scrollback exactly as it found
 them on exit. While it runs, log output is **captured rather than printed**:
-`^l` shows it. Otherwise those lines would land on top of the frame, which is
-where they used to go.
+`^l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
+health using platform-neutral service state, fire markers, and task history.
+Logs supports component (`v`), persona (`p`), time (`t`), and typed text
+filters. Unicode history bars summarize recent success/failure; missing data
+is shown as unavailable and never prevents the TUI opening. Otherwise captured
+lines would land on top of the frame, which is where they used to go.
 
 While a turn is in flight the status line under the transcript animates: a
 spinner, the step the phantom is on right now (`gh release view`, `thinking`,

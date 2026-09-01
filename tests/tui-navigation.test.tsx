@@ -440,19 +440,19 @@ describe("reaching settings and the phantom list", () => {
   });
 
   test("esc goes back to the screen you came FROM, not to a fixed parent", async () => {
-    // The logs pane is reachable two ways, and a hardcoded parent gets one of
+    // The System pane is reachable two ways, and a hardcoded parent gets one of
     // them wrong: entered with ^l from the chat it must return to the chat,
     // entered with L from the phantoms table it must return to the table —
     // same key, same screen, different way back.
     const app = await mountApp();
     await app.press("\x0c"); // ^l from chat
-    expect(app.frame()).toContain("logs");
+    expect(app.frame()).toContain("system");
     await app.press("\x1b");
     expect(app.frame()).toContain("Send");
 
     await app.press("\x13"); // ^s -> table
-    await app.press("L"); // logs, this time from the table
-    expect(app.frame()).toContain("logs");
+    await app.press("S"); // System, this time from the table
+    expect(app.frame()).toContain("system");
     await app.press("\x1b");
     const frame = app.frame();
     expect(frame).toContain("PHANTOMS"); // back at the table, not the chat
