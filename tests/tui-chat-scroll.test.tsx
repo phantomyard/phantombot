@@ -174,4 +174,31 @@ describe("chat scrollback", () => {
       instance.unmount();
     }
   });
+
+  test("plain ↑/↓ scroll the transcript one line at a time", async () => {
+    // Regression: the prompt-box PR dropped these two handlers while adding
+    // ←→ cursor movement — plain ↑↓ went dead and the prose claimed they
+    // still scrolled. One keystroke moves exactly one line, so a turn that
+    // fits the viewport stays fully visible until arrows push it.
+    const { stdin, stdout, instance } = await mount();
+    try {
+      const atBottom = lastFrame(stdout.frames);
+      expect(atBottom).toContain("turn-19");
+      stdin.write("\x1b[A\x1b[A\x1b[A");
+      await sleep(80);
+      const scrolled = lastFrame(stdout.frames);
+      expect(scrolled).toContain("below");
+      const older = history
+        .map((m) => m.text)
+        .filter((t) => !atBottom.includes(t) && scrolled.includes(t));
+      expect(older.length).toBeGreaterThan(0);
+      // Back down returns to the live end.
+      stdin.write("\x1b[B\x1b[B\x1b[B");
+      await sleep(80);
+      expect(lastFrame(stdout.frames)).toContain("turn-19");
+      expect(lastFrame(stdout.frames)).not.toContain("below");
+    } finally {
+      instance.unmount();
+    }
+  });
 });

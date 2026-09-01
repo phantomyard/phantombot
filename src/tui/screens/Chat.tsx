@@ -44,9 +44,10 @@ import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
 import {
   backspaceAtCursor,
+  cursorEnd,
+  cursorHome,
   cursorLeft,
   cursorRight,
-  deleteAtCursor,
   graphemeCount,
   insertAtCursor,
   promptRows,
@@ -425,23 +426,34 @@ export function ChatScreen(props: {
       else void submit(text);
       return;
     }
-    // ↑↓ scroll the transcript one line at a time — there is no input
-    // history to walk, and like PgUp/PgDn this works WHILE a turn runs.
     // ←→ move the cursor inside the box — the editing primitive that was
     // missing: without it a typo could only be fixed by deleting back to it.
-    // ↑↓ still scroll the transcript: there is no input history to walk, and
-    // vertical cursor movement inside a chat box is what ↑↓ history is FOR.
+    // Plain ↑↓ still scroll the transcript (one line, like PgUp/PgDn, works
+    // while a turn runs); there is no input history to walk, and vertical
+    // cursor movement inside a chat box is what ↑↓ history is FOR.
+    if (key.upArrow) return scrollBy(1);
+    if (key.downArrow) return scrollBy(-1);
     if (key.leftArrow) return void setInputValue(cursorLeft(inputRef.current));
     if (key.rightArrow) return void setInputValue(cursorRight(inputRef.current));
+    // Line editing: ^a/^e move to start/end (readline muscle memory; the
+    // Home/End KEYS are taken by transcript scrolling above).
+    if (key.ctrl && char === "a") {
+      setInputValue(cursorHome(inputRef.current));
+      return;
+    }
+    if (key.ctrl && char === "e") {
+      setInputValue(cursorEnd(inputRef.current));
+      return;
+    }
     if (key.backspace || key.delete) {
-      // Backspace deletes before the cursor; the forward-delete key deletes
-      // at it. Terminals that send the same bytes for both get backspace
-      // semantics — the conservative reading.
-      setInputValue(
-        key.delete && !key.backspace
-          ? deleteAtCursor(inputRef.current)
-          : backspaceAtCursor(inputRef.current),
-      );
+      // Both names mean BACKSPACE here. Ink names 0x7f — what the Backspace
+      // key sends on essentially every terminal — `delete`, and cannot tell
+      // it from the forward-delete key (ESC[3~) by flag. `main` treated the
+      // two as one thing and was right to: routing `delete` to forward-delete
+      // made Backspace a silent no-op while typing. Forward-delete stays
+      // unreachable until we sniff the raw sequence (rawKeys inspector sees
+      // ESC[3~); until then this conservative branch matches the bytes.
+      setInputValue(backspaceAtCursor(inputRef.current));
       return;
     }
     if (char && !key.ctrl && !key.meta) {

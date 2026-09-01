@@ -12,6 +12,7 @@ import {
   promptState,
   MAX_PROMPT_ROWS,
 } from "../src/tui/promptBox.ts";
+import { textWidth } from "../src/tui/markdown.ts";
 
 describe("promptBox cursor ops", () => {
   it("inserts at the cursor, not just at the end", () => {
@@ -106,9 +107,12 @@ describe("promptBox rendering", () => {
     const text = "word ".repeat(40) + "🎉🎉🎉 supercalifragilisticexpialidocious";
     const rows = promptRows(text, text.length, W);
     for (const row of rows) {
-      // width accounting is string-width's job; here just assert we got rows
-      // and none is empty
       expect(row.length).toBeGreaterThan(0);
+      // THE assertion the no-shear claim rests on: what is measured here is
+      // exactly what the terminal draws, so a row must fit its budget.
+      // (PREFIX/CONTINUATION_INDENT pad the row to full width, so budget = W.)
+      const lineWidth = row.reduce((acc, s) => acc + textWidth(s.text), 0);
+      expect(lineWidth).toBeLessThanOrEqual(W);
     }
     expect(rows.length).toBe(MAX_PROMPT_ROWS); // capped, windowed
   });
