@@ -1077,6 +1077,78 @@ describe("runRun — phantomchat-only (no Telegram)", () => {
     expect(err.text).toContain("phantombot harness"); // got past the persona-missing fatal
     expect(err.text).not.toContain("no other personas exist");
   });
+
+  // Regression (phantombot#523 review): the lifecycle roster (runningPersonas
+  // + lifecycleAccounts) must be built from the SAME harness-viability filter
+  // the startup loop applies. A selected PhantomChat persona whose harness
+  // chain is empty is never started — it must not receive an impending-restart
+  // warning or a "back online" DM reporting a lifecycle that never happened.
+  test("unviable phantomchat persona is excluded from the lifecycle roster", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const started: { personas: string[]; accounts: string[] } = {
+      personas: [],
+      accounts: [],
+    };
+
+    // Two phantomchat personas: default "phantom" (viable) and "ghost", whose
+    // persona-level harness override references an unknown harness id →
+    // buildHarnessChain yields an empty chain → never startable.
+    const givePc = async (persona: string) => {
+      const agentDir = join(workdir, "personas", persona);
+      await mkdir(agentDir, { recursive: true });
+      await savePhantomchatPersonaConfig(agentDir, {
+        nsec: generateIdentity().nsec,
+        relays: ["wss://relay.example"],
+        allowedNpubs: [generateIdentity().npub],
+      });
+    };
+    await givePc("phantom");
+    await givePc("ghost");
+
+    const code = await runRun({
+      config: {
+        ...config,
+        channels: {}, // phantomchat-only, no Telegram
+        p2p: { enabled: false, stunServers: [] }, // keep the test off real sockets
+      },
+      loadPersonaConfig: async (persona) =>
+        persona === "ghost"
+          ? {
+              ...config,
+              harnesses: {
+                ...config.harnesses,
+                personas: { ghost: { chain: ["bogus-harness"] } },
+              },
+            }
+          : config,
+      fetchCanonicalRelays: async () => null,
+      runPhantomchatServer: async (input) => {
+        started.personas.push(input.persona);
+        started.accounts.push(
+          ...(input.runningPersonas ?? []),
+          ...(input.lifecycleAccounts ?? []).map((a) => a.persona),
+        );
+      },
+      lockPath: join(workdir, "run.lock"),
+      out,
+      err,
+    });
+
+    expect(code).toBe(0);
+    // The unviable persona is skipped at startup...
+    expect(err.text).toContain("unknown harness 'bogus-harness'");
+    expect(err.text).toContain(
+      "phantomchat persona 'ghost' has no usable harnesses — skipping",
+    );
+    expect(started.personas).toContain("phantom");
+    expect(started.personas).not.toContain("ghost");
+    // ...and just as importantly, absent from the LIFECYCLE roster: neither
+    // in runningPersonas nor holding a lifecycle account (phantombot#523).
+    for (const name of started.accounts) {
+      expect(name).not.toBe("ghost");
+    }
+  });
 });
 
 describe("shutdown force-exit watchdog", () => {

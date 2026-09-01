@@ -58,6 +58,7 @@ import {
   startP2PNode,
 } from "../p2p/index.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
+import type { Harness } from "../harnesses/types.ts";
 import {
   resolveHarnessBinsForConfig,
   type HarnessAvailability,
@@ -140,6 +141,11 @@ export interface RunInput {
    * host globals.
    */
   loadPersonaConfig?: (persona: string) => Promise<Config>;
+  /**
+   * Test seam for the canonical relay fetch. Production hits the PWA's
+   * /relays.json; tests inject a stub so no real network call is made.
+   */
+  fetchCanonicalRelays?: typeof fetchCanonicalRelays;
 }
 
 /** One persona-bound listener that runRun() will spawn. */
@@ -947,12 +953,37 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
 
+  // Harness viability for the PhantomChat roster, decided ONCE with the SAME
+  // check the startup loop below applies (empty chain → skip). It must be a
+  // pre-pass, not loop-internal: runningPersonas and lifecycleAccounts are
+  // built before that loop, and a persona whose harness chain is empty is
+  // never started — warning its owners about a restart, or DMing "back
+  // online" for it on the next boot, would report a lifecycle that never
+  // happened. Telegram listeners are already gated this way (an unusable one
+  // fatals startup above); this closes the PhantomChat half of the invariant.
+  const phantomchatHarnesses = new Map<string, Harness[]>();
+  const runnablePhantomchatPersonas = phantomchatPersonas.filter((spec) => {
+    const personaConfig = withHostHarnessBins(
+      personaConfigs.get(spec.persona) ?? config,
+      config,
+    );
+    const harnesses = buildHarnessChain(personaConfig, err, spec.persona);
+    if (harnesses.length === 0) {
+      err.write(
+        `warning: phantomchat persona '${spec.persona}' has no usable harnesses — skipping\n`,
+      );
+      return false;
+    }
+    phantomchatHarnesses.set(spec.persona, harnesses);
+    return true;
+  });
+
   // The roster /status reports: every persona this process really started,
   // Telegram and PhantomChat alike (phantombot#439).
   const runningPersonas = [
     ...new Set([
       ...telegramListeners.map((l) => l.persona),
-      ...phantomchatPersonas.map((spec) => spec.persona),
+      ...runnablePhantomchatPersonas.map((spec) => spec.persona),
     ]),
   ];
 
@@ -981,7 +1012,7 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       token: l.account.token,
       chatIds: l.account.allowedUserIds,
     })),
-    ...phantomchatPersonas
+    ...runnablePhantomchatPersonas
       .filter(
         (spec) =>
           !telegramLifecyclePersonas.has(spec.persona) &&
@@ -1061,7 +1092,8 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       // Fetch the canonical relay list ONCE (single source of truth, served by
       // the PWA at /relays.json). Shared across every persona. null = fetch
       // failed → each persona falls back to its cached relays, then the seed.
-      const canonicalRelays = await fetchCanonicalRelays();
+      const canonicalRelays =
+        await (input.fetchCanonicalRelays ?? fetchCanonicalRelays)();
       if (canonicalRelays) {
         out.write(
           `  [phantomchat] canonical relays: ${canonicalRelays.length} from /relays.json\n`,
@@ -1078,22 +1110,16 @@ export async function runRun(input: RunInput = {}): Promise<number> {
       // advertise its real port under its own npub. On by default; see config.p2p.
       const p2pSettings = config.p2p ?? DEFAULT_P2P;
 
-      for (const spec of phantomchatPersonas) {
+      for (const spec of runnablePhantomchatPersonas) {
+        // Viability was decided (and the chain built) in the pre-pass above;
+        // iterating the runnable list and reusing its chains keeps the
+        // startup loop and the lifecycle roster on ONE definition of "will
+        // actually start".
+        const personaHarnesses = phantomchatHarnesses.get(spec.persona)!;
         const personaConfig = withHostHarnessBins(
           personaConfigs.get(spec.persona) ?? config,
           config,
         );
-        const personaHarnesses = buildHarnessChain(
-          personaConfig,
-          err,
-          spec.persona,
-        );
-        if (personaHarnesses.length === 0) {
-          err.write(
-            `warning: phantomchat persona '${spec.persona}' has no usable harnesses — skipping\n`,
-          );
-          continue;
-        }
         const { identity, allowedHex, relayHex, tofu, groupBots } = spec.config;
 
         // Group addressing (multi-bot groups). From the configured sibling bots
