@@ -42,6 +42,17 @@ import { transcriptLines, transcriptWindow } from "../transcript.ts";
 import type { TranscriptLine } from "../transcript.ts";
 import type { Span } from "../markdown.ts";
 import { commandHints, commandName, completeCommand } from "../slash.ts";
+import {
+  backspaceAtCursor,
+  cursorLeft,
+  cursorRight,
+  deleteAtCursor,
+  graphemeCount,
+  insertAtCursor,
+  promptRows,
+  promptState,
+  type PromptState,
+} from "../promptBox.ts";
 import type { ChatMessage, ChatSession } from "../chatSession.ts";
 
 /**
@@ -186,10 +197,10 @@ export function ChatScreen(props: {
   const [messages, setMessages] = useState<ChatMessage[]>(
     props.session.history,
   );
-  const [input, setInputState] = useState("");
+  const [input, setInputState] = useState<PromptState>(() => promptState(""));
   /** Mirrors `input` synchronously so a burst of keystrokes cannot lose one. */
-  const inputRef = useRef("");
-  const setInputValue = useCallback((next: string) => {
+  const inputRef = useRef<PromptState>(input);
+  const setInputValue = useCallback((next: PromptState) => {
     inputRef.current = next;
     setInputState(next);
   }, []);
@@ -390,8 +401,8 @@ export function ChatScreen(props: {
     // Tab completes a half-typed command. Only there: anywhere else a tab is a
     // literal character the user meant to type.
     if (key.tab && !key.shift) {
-      const completed = completeCommand(inputRef.current);
-      if (completed !== inputRef.current) setInputValue(completed);
+      const completed = completeCommand(inputRef.current.text);
+      if (completed !== inputRef.current.text) setInputValue(promptState(completed));
       return;
     }
     // Shift/Ctrl/Alt+Enter inserts a newline instead of sending. Terminals
@@ -399,34 +410,45 @@ export function ChatScreen(props: {
     // input; a legacy terminal sends a bare \r for all of them and there is
     // no way to tell them apart there — ctrl+J still works everywhere.
     if (key.return && (key.shift || key.ctrl || key.meta)) {
-      setInputValue(`${inputRef.current}\n`);
+      setInputValue(insertAtCursor(inputRef.current, "\n"));
       return;
     }
     if (key.return) {
-      const text = inputRef.current.trim();
+      const text = inputRef.current.text.trim();
       if (!text) return;
       // Commands are dispatched ahead of the harness, so they work WHILE a
       // turn is in flight; ordinary prompts still wait their turn.
       const isCommand = commandName(text) !== undefined;
       if (busy && !isCommand) return;
-      setInputValue("");
+      setInputValue(promptState(""));
       if (isCommand) void runCommand(text);
       else void submit(text);
       return;
     }
     // ↑↓ scroll the transcript one line at a time — there is no input
     // history to walk, and like PgUp/PgDn this works WHILE a turn runs.
-    if (key.upArrow) return scrollBy(1);
-    if (key.downArrow) return scrollBy(-1);
+    // ←→ move the cursor inside the box — the editing primitive that was
+    // missing: without it a typo could only be fixed by deleting back to it.
+    // ↑↓ still scroll the transcript: there is no input history to walk, and
+    // vertical cursor movement inside a chat box is what ↑↓ history is FOR.
+    if (key.leftArrow) return void setInputValue(cursorLeft(inputRef.current));
+    if (key.rightArrow) return void setInputValue(cursorRight(inputRef.current));
     if (key.backspace || key.delete) {
-      setInputValue(inputRef.current.slice(0, -1));
+      // Backspace deletes before the cursor; the forward-delete key deletes
+      // at it. Terminals that send the same bytes for both get backspace
+      // semantics — the conservative reading.
+      setInputValue(
+        key.delete && !key.backspace
+          ? deleteAtCursor(inputRef.current)
+          : backspaceAtCursor(inputRef.current),
+      );
       return;
     }
     if (char && !key.ctrl && !key.meta) {
       // A bare \n chunk (ctrl+J, some terminals' shift/alt+enter) is a
       // newline in the box, never a submit.
       if (char === "\n") {
-        setInputValue(`${inputRef.current}\n`);
+        setInputValue(insertAtCursor(inputRef.current, "\n"));
         return;
       }
       if (/\r|\n/.test(char)) {
@@ -434,21 +456,23 @@ export function ChatScreen(props: {
         const normalised = char.replace(/\r\n?/g, "\n");
         // text + ONE trailing newline is a fast typist's batched Enter — the
         // terminal delivered the typed text and Enter in a single read. That
-        // is a SUBMIT (the bug #509 exists for), not a paste. Interior
-        // newlines make it a paste, below.
+        // is a SUBMIT (the bug #509 exists for), not a paste — but only when
+        // the cursor is at the END, i.e. the batch landed where the typist
+        // was. A cursor mid-text makes it a paste, below.
         const batched = /^(.+)\n$/.exec(normalised);
         const body = batched?.[1];
-        if (body !== undefined && !body.includes("\n")) {
-          const text = `${inputRef.current}${body}`.trim();
+        const atEnd = inputRef.current.cursor >= graphemeCount(inputRef.current.text);
+        if (body !== undefined && !body.includes("\n") && atEnd) {
+          const text = `${inputRef.current.text}${body}`.trim();
           const isCommand = commandName(text) !== undefined;
           if (busy && !isCommand) {
             // A turn in flight owns the harness; keep the text in the box
             // exactly as the plain-Enter busy branch does.
-            setInputValue(`${inputRef.current}${body}`);
+            setInputValue(insertAtCursor(inputRef.current, body));
             return;
           }
           if (!text) return;
-          setInputValue("");
+          setInputValue(promptState(""));
           if (isCommand) void runCommand(text);
           else void submit(text);
           return;
@@ -458,25 +482,40 @@ export function ChatScreen(props: {
         // reviewed and edited first. (The wizard's name field uses
         // applyTextChunk's split-and-submit rule instead — see
         // `textInput.ts`.)
-        setInputValue(inputRef.current + normalised);
+        setInputValue(insertAtCursor(inputRef.current, normalised));
         return;
       }
       // From the REF: two keystrokes can land between renders, and reading
       // `input` out of the closure loses the first of them.
-      setInputValue(inputRef.current + char);
+      setInputValue(insertAtCursor(inputRef.current, char));
     }
   });
 
   const size = useTerminalSize();
   // The type-ahead is part of the chrome while it is up, so the transcript
   // gives back exactly the rows it takes.
-  const hints = commandHints(input).slice(0, MAX_COMMAND_HINTS);
+  const hints = commandHints(input.text).slice(0, MAX_COMMAND_HINTS);
+  // The input box is PRE-WRAPPED here (promptBox.ts), so its row count is a
+  // known constant before layout — no Yoga measurement involved. The chrome
+  // constant assumes ONE input row; every extra wrapped row is paid for by
+  // the transcript in the same render, so a long prompt shrinks the scroll
+  // region instead of pushing the footer off the screen.
+  const inputRows = promptRows(
+    input.text,
+    input.cursor,
+    Math.max(8, size.columns - 4),
+    { busy },
+  );
   // Same for the key inspector: it borrows rows from the transcript, never
   // overflows the frame — one header + one per recorded chunk.
   const keyRows = showKeys ? rawKeys.length + 1 : 0;
   const rows = viewportRows(
     size,
-    CHAT_CHROME_ROWS + hints.length + keyRows + frameChromeRows(),
+    CHAT_CHROME_ROWS +
+      hints.length +
+      keyRows +
+      Math.max(0, inputRows.length - 1) +
+      frameChromeRows(),
   );
   pageRef.current = rows;
   // ONE flat list of rows: what is measured is what is drawn. Clipping happens
@@ -575,15 +614,35 @@ export function ChatScreen(props: {
         borderStyle="round"
         borderColor={busy ? theme.dim : theme.accent}
         paddingX={1}
+        flexDirection="column"
       >
-        <Text color={busy ? theme.dim : theme.accent}>{"› "}</Text>
-        {/* The caret is a NESTED span, not a sibling: as a sibling in a row
-            layout Yoga places it top-aligned next to a multi-line text block —
-            i.e. stranded on line 1 instead of after the last character. */}
-        <Text color={busy ? theme.dim : undefined}>
-          {input}
-          {!busy && <Text color={theme.accent}>{"▌"}</Text>}
-        </Text>
+        {/* The rows are pre-wrapped to the inner width by promptBox.ts — what
+            is measured is what is drawn, so the border cannot shear. The
+            caret is a span IN the wrap stream, so it never overflows a row. */}
+        {inputRows.map((row, i) => (
+          <Text key={i}>
+            {row.map((seg, j) =>
+              seg.caret ? (
+                <Text key={j} color={theme.accent}>
+                  {seg.text}
+                </Text>
+              ) : (
+                <Text
+                  key={j}
+                  color={
+                    seg.tone === "dim" || busy
+                      ? theme.dim
+                      : seg.tone === "accent"
+                        ? theme.accent
+                        : undefined
+                  }
+                >
+                  {seg.text}
+                </Text>
+              ),
+            )}
+          </Text>
+        ))}
       </Box>
     </Frame>
   );
