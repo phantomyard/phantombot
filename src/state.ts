@@ -10,7 +10,8 @@
  */
 
 import { mkdir, readFile, appendFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { xdgDataHome } from "./config.ts";
 import { writeFileAtomic } from "./lib/io.ts";
 
@@ -97,8 +98,36 @@ async function auditPersonaChange(prev: State, next: State): Promise<void> {
   }
 }
 
+/**
+ * Refuse to write the LIVE host's state.json from a test run.
+ *
+ * Armed only by tests/testEnvIsolation.ts (the bun `preload`), so this is
+ * inert in every shipped binary — the check costs one env read at runtime and
+ * exists because the failure it prevents is invisible: a test that writes the
+ * real state.json repoints the host's default persona and arms a heartbeat
+ * timer for a fixture persona, with a GREEN test run as the only evidence.
+ *
+ * Anything under the isolation root or the system temp dir is fine — the 23
+ * suites that pin their own `mkdtemp` path must keep working. What is
+ * forbidden is precisely the default resolution into a real data dir.
+ */
+function assertNotLiveStateWrite(path: string): void {
+  const root = process.env.PHANTOMBOT_TEST_ISOLATION_ROOT;
+  if (!root) return;
+  const target = resolve(path);
+  const allowed = [root, tmpdir()].map((d) => resolve(d) + sep);
+  if (allowed.some((prefix) => target.startsWith(prefix))) return;
+  throw new Error(
+    `refusing to write state.json outside test isolation: ${target}\n` +
+      "A test reached a state-writing code path with PHANTOMBOT_STATE pointing at " +
+      "the real host. Point it at a temp dir in the test's own hooks (and restore " +
+      "the saved value, do not delete it).",
+  );
+}
+
 export async function saveState(state: State): Promise<string> {
   const path = statePath();
+  assertNotLiveStateWrite(path);
   const prev = await loadStateForAudit();
   await auditPersonaChange(prev, state);
   // Atomic write: a torn state.json bricks every command that must parse it

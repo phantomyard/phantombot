@@ -156,57 +156,41 @@ describe("resolveOpeningScreen — legacy default migration", () => {
   });
 });
 
-describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
-  // Unit tests with injected probes — the real probes read HOST state (linger
-  // / LaunchDaemons / task markers), which differs across the dev fleet, so
-  // exact mode values are pinned here via the seams only.
-  const {
-    migrateLegacyAutostartModes,
-  } = require("../src/lib/personaDefault.ts") as typeof import("../src/lib/personaDefault.ts");
+describe("reconcileAutostart (autostart_modes backfill + repair)", () => {
+  // Unit tests with injected probes — the real probes read HOST state
+  // (LaunchDaemons / task markers), which differs across the dev fleet, so
+  // exact mode values are pinned here via the seams only. `platform` is
+  // injected alongside `bootProbe` because the Linux branch is doctrine, not
+  // a default: it returns NO SIGNAL before the seam is consulted.
+  const { reconcileAutostart } =
+    require("../src/lib/autostartReconcile.ts") as typeof import("../src/lib/autostartReconcile.ts");
   const { loadConfig } = require("../src/config.ts") as typeof import("../src/config.ts");
 
   test("legacy signature (autostart_personas, no records) → backfilled per platform", async () => {
-    await writeFile(
-      configPath,
-      'autostart_personas = ["lena", "kai"]\n',
-      "utf8",
-    );
+    await makePersona("lena");
+    await makePersona("kai");
+    await writeFile(configPath, 'autostart_personas = ["lena", "kai"]\n', "utf8");
     const config = await loadConfig();
 
-    const { currentPlatform } = await import("../src/lib/platform.ts");
-    await migrateLegacyAutostartModes(config, {
-      // Must never be consulted on Linux (see the Linux pin below).
+    await reconcileAutostart(config, {
+      platform: "darwin",
       bootProbe: async (name: string) => name === "lena",
     });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[autostart_modes]");
-    if (currentPlatform() === "linux") {
-      // Linux never probes: linger is an installer default, not a Boot
-      // choice, so the record is ALWAYS login.
-      expect(toml).toContain('lena = "login"');
-      expect(toml).toContain('kai = "login"');
-      expect(config.autostartModes).toEqual({ lena: "login", kai: "login" });
-    } else {
-      expect(toml).toContain('lena = "boot"');
-      expect(toml).toContain('kai = "login"');
-      expect(config.autostartModes).toEqual({ lena: "boot", kai: "login" });
-    }
+    expect(toml).toContain('lena = "boot"');
+    expect(toml).toContain('kai = "login"');
+    expect(config.autostartModes).toEqual({ lena: "boot", kai: "login" });
   });
 
-  test("linux: record is login unconditionally — no probe is ever consulted", async () => {
-    const { currentPlatform } = await import("../src/lib/platform.ts");
-    if (currentPlatform() !== "linux") return; // pinned by the linux CI job
-    await writeFile(
-      configPath,
-      // Host with linger on and the unit enabled — the standard-installer
-      // state that must NOT produce a boot record (teardown authority).
-      'autostart_personas = ["lena"]\n',
-      "utf8",
-    );
+  test("linux never probes: the backfilled record is always login", async () => {
+    await makePersona("lena");
+    await writeFile(configPath, 'autostart_personas = ["lena"]\n', "utf8");
     const config = await loadConfig();
 
-    await migrateLegacyAutostartModes(config, {
+    await reconcileAutostart(config, {
+      platform: "linux",
       bootProbe: async () => {
         throw new Error("linux backfill must never probe boot state");
       },
@@ -217,7 +201,25 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     expect(toml).not.toContain('lena = "boot"');
   });
 
-  test("any existing records → no-op (never overwrites an operator choice)", async () => {
+  test("linux: an existing record is never rewritten by a probe", async () => {
+    // The #509 blocker in one test. `systemctl --user is-enabled` is true on
+    // every standard install, so inferring from it would flip an operator's
+    // `boot` choice — and on Linux the record is the TEARDOWN authority.
+    await makePersona("lena");
+    await writeFile(
+      configPath,
+      'autostart_personas = ["lena"]\n\n[autostart_modes]\nlena = "boot"\n',
+      "utf8",
+    );
+    const config = await loadConfig();
+
+    await reconcileAutostart(config, { platform: "linux", bootProbe: async () => false });
+
+    expect(await readFile(configPath, "utf8")).toContain('lena = "boot"');
+  });
+
+  test("an existing record for a live persona is not overwritten by a matching probe", async () => {
+    await makePersona("lena");
     await writeFile(
       configPath,
       'autostart_personas = ["lena"]\n\n[autostart_modes]\nlena = "login"\n',
@@ -225,59 +227,68 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     );
     const config = await loadConfig();
 
-    await migrateLegacyAutostartModes(config, {
-      bootProbe: async () => true,
-    });
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => false });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain('lena = "login"');
     expect(toml).not.toContain('lena = "boot"');
   });
 
+  test("a record contradicted by a provenance-carrying probe is corrected", async () => {
+    // macOS/Windows only: the probe reads OUR plist / OUR password-mode task,
+    // so a disagreement means the record is stale, not that the platform is
+    // ambiguous. Both directions.
+    await makePersona("lena");
+    await makePersona("kai");
+    await writeFile(
+      configPath,
+      'autostart_personas = ["lena", "kai"]\n\n[autostart_modes]\nlena = "login"\nkai = "boot"\n',
+      "utf8",
+    );
+    const config = await loadConfig();
+
+    await reconcileAutostart(config, {
+      platform: "darwin",
+      bootProbe: async (name: string) => name === "lena",
+    });
+
+    expect(config.autostartModes).toEqual({ lena: "boot", kai: "login" });
+  });
+
   test("no autostart_personas and no chosen default → nothing written", async () => {
+    await makePersona("lena");
     await writeFile(configPath, 'update_channel = "preview"\n', "utf8");
     const config = await loadConfig();
 
-    await migrateLegacyAutostartModes(config, {
-      bootProbe: async () => true,
-    });
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => true });
 
     expect(await readFile(configPath, "utf8")).not.toContain("autostart_modes");
   });
 
-  // #512 — the shape a single-persona `phantombot install` actually leaves:
-  // a default_persona and NO autostart_personas key at all. Verified on Matt
-  // (macOS, LaunchAgent dev.phantombot.phantombot.plist) and Megan (Windows,
-  // \Phantombot\phantombot-megan at logon) on 2026-09-01: both were serving
-  // their persona at every login while the TUI reported Autostart: off,
-  // because the gate here was "autostart_personas is non-empty" and this
-  // migration never ran at all.
   test("default_persona with NO autostart_personas → the default is backfilled", async () => {
+    // #512 — the shape a single-persona `phantombot install` actually leaves.
+    // Verified on Matt (macOS) and Megan (Windows) on 2026-09-01: both served
+    // their persona at every login while the TUI reported Autostart: off.
+    await makePersona("lena");
     await writeFile(configPath, 'default_persona = "lena"\n', "utf8");
     const config = await loadConfig();
 
-    const { currentPlatform } = await import("../src/lib/platform.ts");
-    await migrateLegacyAutostartModes(config, {
-      bootProbe: async () => true,
-    });
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => true });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain("[autostart_modes]");
-    // Linux is still login unconditionally (#511 doctrine, unchanged): an
-    // enabled unit is the installer's default, never a Boot choice.
-    expect(toml).toContain(
-      currentPlatform() === "linux" ? 'lena = "login"' : 'lena = "boot"',
-    );
+    expect(toml).toContain('lena = "boot"');
   });
 
   test("a builtin-provenance default is NOT treated as served", async () => {
     // Nothing chose a default — `config.defaultPersona` is only the bare
     // fallback name, and may not exist on disk. Backfilling a record for it
     // would invent autostart state nobody asked for.
+    await makePersona("lena");
     await writeFile(configPath, 'autostart_personas = ["lena"]\n', "utf8");
     const config = await loadConfig();
 
-    await migrateLegacyAutostartModes(config, { bootProbe: async () => false });
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => false });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml).toContain('lena = "login"');
@@ -285,6 +296,8 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
   });
 
   test("default already on the list is recorded once, not twice", async () => {
+    await makePersona("lena");
+    await makePersona("kai");
     await writeFile(
       configPath,
       'default_persona = "lena"\nautostart_personas = ["lena", "kai"]\n',
@@ -292,14 +305,70 @@ describe("migrateLegacyAutostartModes (legacy-install migration)", () => {
     );
     const config = await loadConfig();
 
-    await migrateLegacyAutostartModes(config, { bootProbe: async () => false });
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => false });
 
     const toml = await readFile(configPath, "utf8");
     expect(toml.match(/^lena = /gm)?.length).toBe(1);
-    expect(Object.keys(config.autostartModes ?? {}).sort()).toEqual([
-      "kai",
-      "lena",
-    ]);
+    expect(Object.keys(config.autostartModes ?? {}).sort()).toEqual(["kai", "lena"]);
+  });
+
+  test("records and list entries naming personas that do not exist are pruned", async () => {
+    // The rig, 2026-09-01: a test run left `Phantom` as the host default and a
+    // heartbeat timer armed for it. The list/record halves of that mess are
+    // what this prunes — silently, on the next start.
+    await makePersona("lena");
+    await writeFile(
+      configPath,
+      'autostart_personas = ["lena", "Phantom"]\n\n[autostart_modes]\nlena = "login"\nPhantom = "boot"\n',
+      "utf8",
+    );
+    const config = await loadConfig();
+
+    await reconcileAutostart(config, { platform: "darwin", bootProbe: async () => false });
+
+    const toml = await readFile(configPath, "utf8");
+    expect(toml).not.toContain("Phantom");
+    expect(config.autostartPersonas).toEqual(["lena"]);
+    expect(config.autostartModes).toEqual({ lena: "login" });
+  });
+
+  test("a healthy host is left byte-identical (no gratuitous rewrite)", async () => {
+    await makePersona("lena");
+    await writeFile(
+      configPath,
+      'default_persona = "lena"\nautostart_personas = ["lena"]\n\n[autostart_modes]\nlena = "login"\n',
+      "utf8",
+    );
+    const before = await readFile(configPath, "utf8");
+    const config = await loadConfig();
+
+    const plan = await reconcileAutostart(config, {
+      platform: "darwin",
+      bootProbe: async () => false,
+    });
+
+    expect(plan.empty).toBe(true);
+    expect(await readFile(configPath, "utf8")).toBe(before);
+  });
+
+  test("an unreadable personas dir repairs NOTHING (empty list is ambiguous)", async () => {
+    // The destructive reading of "no personas on disk" is "delete every
+    // autostart record on this host". One stale label is the cheaper mistake.
+    await writeFile(
+      configPath,
+      'autostart_personas = ["lena"]\n\n[autostart_modes]\nlena = "boot"\n',
+      "utf8",
+    );
+    await rm(personasDir, { recursive: true, force: true });
+    const config = await loadConfig();
+
+    const plan = await reconcileAutostart(config, {
+      platform: "darwin",
+      bootProbe: async () => false,
+    });
+
+    expect(plan.empty).toBe(true);
+    expect(await readFile(configPath, "utf8")).toContain('lena = "boot"');
   });
 });
 
