@@ -522,6 +522,13 @@ configurable `max_chunk_chars = 5000`. The value is character-based rather
 than an exact token guarantee, and must not be described as a llama.cpp
 protocol limit. Chunking preserves source text exactly, prunes obsolete tail
 chunks, and uses explicit chunk/file accounting.
+The embedding wizard writes credentials
+through `setPersonaSecret` to the RESOLVED persona's vault; only non-secret
+provider settings belong in that persona's `config.toml`. A successful verified
+vault write removes the selected provider's legacy plaintext `api_key`. A
+failed vault write must first preserve the pasted key in `config.toml` and then
+surface the error — never discard the operator's only copy. Keep the startup
+shadow warning while older hosts can still contain file keys.
 
 The TUI creation wizard is transactional from the user's perspective: validate inline, show a review that explicitly says nothing has been written, then create and name the persona directory, `identity.json`, and persona-local `config.toml`. Settings snapshots must preserve config-layer provenance; absence is inheritance, while an explicitly stated empty/tombstone value is still a persona override. Environment overrides are applied after TOML resolution and are not represented by these config-layer labels.
 

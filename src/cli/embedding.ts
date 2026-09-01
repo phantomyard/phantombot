@@ -17,7 +17,8 @@ import * as p from "@clack/prompts";
 import {
   DEFAULT_OPENAI_COMPATIBLE_MAX_CHUNK_CHARS,
   type Config,
-  loadConfig,
+  loadConfigForPersona,
+  resolvePersona,
 } from "../config.ts";
 import {
   geminiEmbed,
@@ -25,7 +26,13 @@ import {
 } from "../lib/geminiEmbed.ts";
 import { openaiCompatibleEmbed } from "../lib/openaiCompatibleEmbed.ts";
 import { getIn, setIn, updateConfigToml } from "../lib/configWriter.ts";
+import { personaConfigPath } from "../lib/personaConfig.ts";
 import { defaultServiceControl, type ServiceControl } from "../lib/platform.ts";
+import {
+  setPersonaSecret,
+  unsetPersonaSecret,
+  type SetPersonaSecretResult,
+} from "../lib/vaultSecrets.ts";
 import { maybePromptRestart } from "./harness.ts";
 
 const DEFAULT_MODEL = "gemini-embedding-001";
@@ -49,14 +56,62 @@ export interface EmbeddingConfigUpdate {
   openaiCompatible?: OpenAICompatibleConfigUpdate;
 }
 
+export interface ApplyEmbeddingConfigInput {
+  config: Config;
+  persona: string;
+  update: EmbeddingConfigUpdate;
+  /** Test seam for forcing vault failures without touching a real vault. */
+  writeSecret?: (
+    config: Config,
+    name: string,
+    value: string,
+    persona?: string,
+  ) => Promise<SetPersonaSecretResult>;
+  /** Test seam for clearing an optional OpenAI-compatible key. */
+  clearSecret?: typeof unsetPersonaSecret;
+}
+
+function deleteIn(root: Record<string, unknown>, path: readonly string[]): void {
+  let current: Record<string, unknown> = root;
+  for (const key of path.slice(0, -1)) {
+    const next = current[key];
+    if (!next || typeof next !== "object" || Array.isArray(next)) return;
+    current = next as Record<string, unknown>;
+  }
+  delete current[path[path.length - 1]!];
+}
+
 export async function applyEmbeddingConfig(
-  configPath: string,
-  update: EmbeddingConfigUpdate,
+  input: ApplyEmbeddingConfigInput,
 ): Promise<void> {
+  const { config, persona, update } = input;
+  const configPath = personaConfigPath(config.personasDir, persona);
+  const writeSecret = input.writeSecret ?? setPersonaSecret;
+  const clearSecret = input.clearSecret ?? unsetPersonaSecret;
+  let secretResult: SetPersonaSecretResult | undefined;
+  let secretName: string | undefined;
+
+  if (update.provider === "gemini") {
+    secretName = "PHANTOMBOT_GEMINI_API_KEY";
+    secretResult = await writeSecret(
+      config,
+      secretName,
+      update.apiKey ?? "",
+      persona,
+    );
+  } else if (update.provider === "openai-compatible") {
+    secretName = "PHANTOMBOT_OPENAI_COMPATIBLE_API_KEY";
+    const key = update.openaiCompatible?.apiKey ?? "";
+    secretResult = key
+      ? await writeSecret(config, secretName, key, persona)
+      : await clearSecret(config, secretName, persona);
+  }
+
   await updateConfigToml(configPath, (toml) => {
     setIn(toml, ["embeddings", "provider"], update.provider);
     if (update.provider === "gemini") {
-      setIn(toml, ["embeddings", "gemini", "api_key"], update.apiKey ?? "");
+      if (secretResult?.ok) deleteIn(toml, ["embeddings", "gemini", "api_key"]);
+      else setIn(toml, ["embeddings", "gemini", "api_key"], update.apiKey ?? "");
       setIn(
         toml,
         ["embeddings", "gemini", "model"],
@@ -72,7 +127,11 @@ export async function applyEmbeddingConfig(
       if (!o) throw new Error("OpenAI-compatible embedding settings are missing");
       setIn(toml, ["embeddings", "openai_compatible", "base_url"], o.baseUrl);
       setIn(toml, ["embeddings", "openai_compatible", "model"], o.model);
-      setIn(toml, ["embeddings", "openai_compatible", "api_key"], o.apiKey ?? "");
+      if (secretResult?.ok) {
+        deleteIn(toml, ["embeddings", "openai_compatible", "api_key"]);
+      } else {
+        setIn(toml, ["embeddings", "openai_compatible", "api_key"], o.apiKey ?? "");
+      }
       setIn(toml, ["embeddings", "openai_compatible", "dims"], o.dims ?? 0);
       setIn(
         toml,
@@ -96,9 +155,17 @@ export async function applyEmbeddingConfig(
       // the user's key for re-enabling later. Just flip provider to "none".
     }
   });
+
+  if (secretResult && !secretResult.ok) {
+    throw new Error(
+      `embedding: could not store ${secretName} in the ${secretResult.persona ?? persona} vault; ` +
+        `kept the key in config.toml: ${secretResult.error ?? "unknown error"}`,
+    );
+  }
 }
 
 interface RunInput {
+  persona?: string;
   config?: Config;
   validate?: (key: string) => Promise<EmbedResult>;
   validateOpenAI?: (
@@ -118,7 +185,10 @@ interface RunInput {
 }
 
 export async function runEmbedding(input: RunInput = {}): Promise<number> {
-  const config = input.config ?? (await loadConfig());
+  const { config, persona } = input.config
+    ? { config: input.config, persona: resolvePersona(input.persona, input.config) }
+    : await loadConfigForPersona(input.persona);
+  const embeddingConfigPath = personaConfigPath(config.personasDir, persona);
   const svc = input.serviceControl ?? defaultServiceControl();
   const embedded = input.embedded ?? false;
   const validate =
@@ -199,7 +269,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   }
 
   if (provider === "none") {
-    await applyEmbeddingConfig(config.configPath, { provider: "none" });
+    await applyEmbeddingConfig({ config, persona, update: { provider: "none" } });
     p.note(
       `provider set to "none"\n` +
         `search uses OKF field-weighted BM25 + link-graph expansion\n` +
@@ -235,17 +305,22 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
     }
     spinner.stop(`key validated (got ${r.dims} dims)`);
 
-    await applyEmbeddingConfig(config.configPath, {
-      provider: "gemini",
-      apiKey: key as string,
-      model: DEFAULT_MODEL,
-      dims: r.dims,
+    await applyEmbeddingConfig({
+      config,
+      persona,
+      update: {
+        provider: "gemini",
+        apiKey: key as string,
+        model: DEFAULT_MODEL,
+        dims: r.dims,
+      },
     });
     p.note(
       `provider:  gemini\n` +
         `model:     ${DEFAULT_MODEL}\n` +
         `dims:      ${r.dims}\n` +
-        `saved to ${config.configPath}\n\n` +
+        `settings saved to ${embeddingConfigPath}\n` +
+        `API key saved to ${persona}'s encrypted vault\n\n` +
         `cost note: free up to 1500 req/day on the Gemini free tier;\n` +
         `phantombot's nightly cycle re-embeds changed notes only.\n` +
         `After changing provider, model, or document prefix, backfill with:\n` +
@@ -318,16 +393,21 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
       return 1;
     }
     spinner.stop(`endpoint validated (got ${r.dims} dims)`);
-    await applyEmbeddingConfig(config.configPath, {
-      provider: "openai-compatible",
-      openaiCompatible: { ...settings, dims: r.dims },
+    await applyEmbeddingConfig({
+      config,
+      persona,
+      update: {
+        provider: "openai-compatible",
+        openaiCompatible: { ...settings, dims: r.dims },
+      },
     });
     p.note(
       `provider:  openai-compatible\n` +
         `base URL:  ${settings.baseUrl}\n` +
         `model:     ${settings.model}\n` +
         `dims:      ${r.dims}\n` +
-        `saved to ${config.configPath}\n\n` +
+        `settings saved to ${embeddingConfigPath}\n` +
+        `${settings.apiKey ? `API key saved to ${persona}'s encrypted vault` : "no API key configured"}\n\n` +
         `After changing provider, model, or document prefix, backfill with:\n` +
         `  phantombot memory index --reembed\n` +
         `Changing query prefix alone does not require rebuilding stored vectors.`,
