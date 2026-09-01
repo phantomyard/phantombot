@@ -6,6 +6,15 @@ import { render } from "ink";
 import { SystemScreen } from "../src/tui/screens/System.tsx";
 import type { SystemSnapshot } from "../src/tui/systemSnapshot.ts";
 import { stripAnsi } from "./helpers/ansi.ts";
+import type { HostSnapshot } from "../src/tui/snapshot.ts";
+
+const TEST_HOST = {
+  version: "test",
+  updateChannel: "stable",
+  defaultPersona: "kai",
+  personasDir: "/tmp/none",
+  personas: [],
+} satisfies HostSnapshot;
 
 const mounted: Array<() => void> = [];
 afterEach(() => {
@@ -39,7 +48,13 @@ function mount(onBack: () => void) {
     services: [],
   };
   const instance = render(
-    <SystemScreen snapshot={snapshot} personas={["kai"]} onBack={onBack} />,
+    <SystemScreen
+      snapshot={snapshot}
+      host={TEST_HOST}
+      personas={["kai"]}
+      onBack={onBack}
+      sources={[]}
+    />,
     {
       stdin: stdin as never,
       stdout: stdout as never,

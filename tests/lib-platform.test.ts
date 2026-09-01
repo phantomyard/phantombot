@@ -8,7 +8,13 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { closeSync, openSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
 import { setLogSink } from "../src/lib/logSink.ts";
+import { taskLogPaths } from "../src/lib/taskScheduler.ts";
 import {
   syncHeartbeatInstances,
   currentPlatform,
@@ -59,6 +65,8 @@ describe("hint commands shape per platform", () => {
     expect(await restartCommand()).toContain("schtasks /End");
     expect(await statusCommand()).toContain("schtasks /Query");
     expect(logsCommand()).toContain("phantombot\\logs\\phantombot.out.log");
+    // Both sinks: the daemon logs to stderr, which lands in the .err.log.
+    expect(logsCommand()).toContain("phantombot\\logs\\phantombot.err.log");
   });
 });
 
@@ -155,6 +163,115 @@ describe("logsSpec", () => {
       expect(spec?.args.join(" ")).not.toContain("-Wait");
       expect(spec?.args.join(" ")).toContain("-Tail 10");
     }
+  });
+
+  // Windows-only regression (#478). The daemon's structured logger writes
+  // EVERY level to stderr, and Task Scheduler redirects stderr to a SEPARATE
+  // .err.log — so a spec that tails only .out.log omits the entire service log
+  // and every error in it, while `logsLocation()` advertises both files. These
+  // run in the test-windows job; on other platforms they are skipped.
+  const winTest = process.platform === "win32" ? test : test.skip;
+
+  winTest("tails BOTH the stdout and stderr sinks, not just .out.log", () => {
+    const { out, err } = taskLogPaths("phantombot");
+    for (const follow of [true, false]) {
+      const cmd = logsSpec({ follow, lines: 20 })!.args.join(" ");
+      expect(cmd).toContain(out);
+      expect(cmd).toContain(err);
+    }
+  });
+
+  winTest("follows each sink with its own waiter, since -Wait binds one handle", () => {
+    const cmd = logsSpec({ follow: true, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("-Wait");
+    expect(cmd).toContain("Start-Job");
+    // Waiters are cleaned up, or `phantombot logs` leaks jobs on every exit.
+    expect(cmd).toContain("Remove-Job");
+  });
+
+  winTest("missing logs print a friendly line instead of a red Get-Content error", () => {
+    const cmd = logsSpec({ follow: false, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("Test-Path");
+    expect(cmd).toContain("no phantombot logs yet");
+  });
+
+  winTest("the no-files branch ends the process, it does not just return", () => {
+    // `return` unwinds a scope; only `exit` ends powershell.exe. The Windows CI
+    // run hung here (bun killed a dangling process and read exit 143), so this
+    // is asserted on the argv as well as by running it below.
+    const cmd = logsSpec({ follow: false, lines: 20 })!.args.join(" ");
+    expect(cmd).toContain("exit 0 }");
+  });
+
+  // The strongest Windows assertion available: RUN the generated PowerShell.
+  // A spec built from string concatenation can be syntactically wrong in ways
+  // no argv assertion notices; `phantombot logs` then fails only in the field.
+  //
+  // Output is redirected to FILES rather than pipes, and the timeout is
+  // explicit: Windows PowerShell cold-starts slowly on a loaded runner, and a
+  // child whose pipes are drained in sequence can block on the undrained one.
+  // Neither is a fact about the spec under test, so neither should decide
+  // whether this passes.
+  const RUN_TIMEOUT_MS = 60_000;
+  async function runSpec(spec: { cmd: string; args: string[] }, dir: string, tag: string) {
+    const outPath = join(dir, `${tag}.out`);
+    const errPath = join(dir, `${tag}.err`);
+    const outFd = openSync(outPath, "w");
+    const errFd = openSync(errPath, "w");
+    let code: number;
+    try {
+      const proc = Bun.spawn([spec.cmd, ...spec.args], {
+        stdin: "ignore",
+        stdout: outFd,
+        stderr: errFd,
+      });
+      code = await proc.exited;
+    } finally {
+      closeSync(outFd);
+      closeSync(errFd);
+    }
+    return {
+      code,
+      out: await readFile(outPath, "utf8"),
+      err: await readFile(errPath, "utf8"),
+    };
+  }
+
+  winTest(
+    "the generated PowerShell actually runs and merges both files",
+    async () => {
+      const prev = process.env.XDG_DATA_HOME;
+      const root = await mkdtemp(join(tmpdir(), "pb478-win-"));
+      try {
+        process.env.XDG_DATA_HOME = root;
+        const { out, err } = taskLogPaths("phantombot");
+        await mkdir(dirname(out), { recursive: true });
+
+        // 1. Neither sink exists yet: friendly line, clean exit, no red error.
+        const first = await runSpec(logsSpec({ follow: false, lines: 20 })!, root, "missing");
+        expect({ code: first.code, err: first.err.trim() }).toEqual({ code: 0, err: "" });
+        expect(first.out).toContain("no phantombot logs yet");
+
+        // 2. Both sinks present: both are read, stderr's content included.
+        await writeFile(out, "from-stdout\n");
+        await writeFile(err, "from-stderr\n");
+        const second = await runSpec(logsSpec({ follow: false, lines: 20 })!, root, "both");
+        expect({ code: second.code, err: second.err.trim() }).toEqual({ code: 0, err: "" });
+        expect(second.out).toContain("from-stdout");
+        expect(second.out).toContain("from-stderr");
+      } finally {
+        if (prev === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = prev;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    RUN_TIMEOUT_MS,
+  );
+
+  winTest("the copy-pasteable hint names both sinks too", () => {
+    const { out, err } = taskLogPaths("phantombot");
+    expect(logsCommand()).toContain(out);
+    expect(logsCommand()).toContain(err);
   });
 });
 

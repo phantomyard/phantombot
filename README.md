@@ -287,7 +287,7 @@ Settings live one keypress away:
 | `esc` | Back to the conversation, mid-thread, nothing lost |
 | `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
 | `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
-| `^l` | Open System observability (overview and filtered logs) |
+| `^l` | Open System observability (service/heartbeat/tick overview, and every log source on the host with its path) |
 | `^c` | Interrupt the turn (it does **not** quit) |
 | `^q` | Quit |
 | `/` | Open the command list; `Tab` completes what you have typed |
@@ -297,10 +297,29 @@ It takes the whole window — the app runs on the alternate screen buffer, like
 them on exit. While it runs, log output is **captured rather than printed**:
 `^l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
 health using platform-neutral service state, fire markers, and task history.
-Logs supports component (`v`), persona (`p`), time (`t`), and typed text
-filters. Unicode history bars summarize recent success/failure; missing data
+Unicode history bars summarize recent success/failure; missing data
 is shown as unavailable and never prevents the TUI opening. Otherwise captured
 lines would land on top of the frame, which is where they used to go.
+
+Its **Logs** tab reads the host's real log sinks rather than only what this
+process happened to capture, and `s` cycles between them:
+
+| Source | Where it comes from |
+| --- | --- |
+| `session` | this TUI process: its own logger plus the harness's stderr, live |
+| `service` | the daemon — journald on Linux, the launchd/Task Scheduler out+err files on macOS/Windows |
+| `audit` | the tool-call audit trail, `<persona-dir>/audit/<YYYY-MM-DD>.log` |
+| `state` | the append-only persona-switch audit, `state-audit.log` |
+| `tasks` | `task_runs` — every scheduled fire and its status |
+
+**The selected source's path is printed above the lines**, together with a
+copy-pasteable command for the full, unfiltered stream — so "where do I find
+the audit logs?" is answered on the screen instead of in the source. A source
+that cannot be read is still listed, and says why in a row; an empty pane and
+a quiet host must never look the same. Filters are source (`s`), component
+(`v`), persona (`p`), time (`t`, defaulting to `all`), typed text (`/`), and
+`r` re-reads. The in-process ring holds 5000 lines, tunable with
+`PHANTOMBOT_TUI_LOG_LINES`.
 
 While a turn is in flight the status line under the transcript animates: a
 spinner, the step the phantom is on right now (`gh release view`, `thinking`,

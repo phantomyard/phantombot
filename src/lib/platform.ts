@@ -363,8 +363,9 @@ export function logsCommand(): string {
       // Derive the log path from the same resolver the scheduler writes to
       // (taskLogPaths -> xdgDataHome), so an XDG_DATA_HOME override points the
       // hint at the real file instead of the default .local\share location.
-      const { out } = taskLogPaths("phantombot");
-      return `powershell -Command "Get-Content -Wait -Tail 50 \\"${out}\\""`;
+      const { out, err } = taskLogPaths("phantombot");
+      // Both sinks: the daemon logs to stderr, which lands in the .err.log.
+      return `powershell -Command "Get-Content -Wait -Tail 50 \\"${out}\\",\\"${err}\\""`;
     }
     case "linux":
     default:
@@ -430,25 +431,96 @@ export function logsSpec(
       return { cmd: "tail", args };
     }
     case "windows": {
-      // Get-Content -Wait follows a single file; we tail stdout (the err log
-      // is surfaced by the copy-pasteable logsCommand() hint if needed).
+      // BOTH sinks, like darwin. The structured logger writes EVERY level to
+      // stderr (src/lib/logger.ts), and Task Scheduler redirects stderr to the
+      // separate .err.log -- so tailing only .out.log hides the daemon's actual
+      // log stream and all of its errors. That is the whole content of the
+      // service log on Windows, not an edge case.
+      //
       // Guard on Test-Path first: Get-Content throws a red "Cannot find path"
-      // error if the log doesn't exist yet (e.g. the daemon has never written),
+      // error if a log doesn't exist yet (e.g. the daemon has never written),
       // which reads as a crash. Print a friendly line and exit 0 instead.
       // -LiteralPath so spaces/brackets in the path aren't treated as globs.
-      const { out } = taskLogPaths("phantombot");
-      const wait = follow ? "-Wait " : "";
-      const ps =
-        `$p='${out.replace(/'/g, "''")}'; ` +
-        `if (-not (Test-Path -LiteralPath $p)) { ` +
-        `Write-Host "no phantombot logs yet at $p"; return }; ` +
-        `Get-Content -LiteralPath $p ${wait}-Tail ${lines}`;
+      const { out, err } = taskLogPaths("phantombot");
+      const quoted = [out, err].map((p) => `'${p.replace(/'/g, "''")}'`).join(",");
+      const head =
+        `$all=@(${quoted}); ` +
+        `$p=@($all | Where-Object { Test-Path -LiteralPath $_ }); ` +
+        `if ($p.Count -eq 0) { ` +
+        // `exit 0`, not `return`: `return` only unwinds the current scope, so
+        // powershell.exe stays alive to finish reading the -Command pipeline
+        // and the caller sees a process that never terminates (it hung the
+        // Windows CI run). `exit` ends the process, deterministically, with a
+        // success code -- "no logs yet" is not a failure.
+        `Write-Host "no phantombot logs yet at $($all -join ', ')"; exit 0 }; ` +
+        `foreach ($f in $p) { Get-Content -LiteralPath $f -Tail ${lines} }`;
+      // Following two files needs one waiter each: Get-Content -Wait binds to a
+      // single handle, so a bare array would silently follow only one of them.
+      const tail = follow
+        ? `; $j=@(foreach ($f in $p) { Start-Job -ArgumentList $f -ScriptBlock ` +
+          `{ param($f) Get-Content -LiteralPath $f -Wait -Tail 0 } }); ` +
+          `try { while ($true) { $j | Receive-Job; Start-Sleep -Milliseconds 500 } } ` +
+          `finally { $j | Stop-Job; $j | Remove-Job -Force }`
+        : "";
       return {
         cmd: "powershell",
-        args: ["-NoProfile", "-NonInteractive", "-Command", ps],
+        args: ["-NoProfile", "-NoLogo", "-NonInteractive", "-Command", head + tail],
       };
     }
     default:
       return null;
+  }
+}
+
+/**
+ * WHERE the service logs physically live, for display (issue #478).
+ *
+ * `logsSpec` answers "how do I tail them" and `logsCommand` answers "what do I
+ * paste into a shell"; neither answers the question an operator actually asks
+ * first, which is "what file am I looking at". The TUI's log pane shows this
+ * next to every source so nobody has to read the source to find the audit
+ * trail.
+ *
+ * `kind` is `journal` where the stream has no file at all (systemd), so a
+ * caller can render "journald: unit phantombot" rather than a fake path.
+ */
+export interface LogsLocation {
+  kind: "journal" | "file";
+  /** Human label: a unit name, or the directory the files sit in. */
+  label: string;
+  /** Concrete file paths, empty for a journal. */
+  paths: string[];
+  /** Copy-pasteable command that shows the full stream. */
+  command: string;
+}
+
+export function logsLocation(over?: HintOverrides): LogsLocation {
+  switch (over?.platform ?? currentPlatform()) {
+    case "darwin": {
+      const { out, err } = launchdLogPaths();
+      return {
+        kind: "file",
+        label: launchdLogsDir(),
+        paths: [out, err],
+        command: logsCommand(),
+      };
+    }
+    case "windows": {
+      const { out, err } = taskLogPaths("phantombot");
+      return {
+        kind: "file",
+        label: taskLogsDir(),
+        paths: [out, err],
+        command: logsCommand(),
+      };
+    }
+    case "linux":
+    default:
+      return {
+        kind: "journal",
+        label: "journald · systemd --user unit phantombot",
+        paths: [],
+        command: "journalctl --user -u phantombot -f",
+      };
   }
 }

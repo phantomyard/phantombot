@@ -8,8 +8,20 @@
  * doing?" is still answerable without leaving the app or tailing a file.
  *
  * Bounded on purpose. A long-running session with debug logging on would
- * otherwise grow without limit in a process the user never restarts.
+ * otherwise grow without limit in a process the user never restarts. The cap
+ * is deliberately generous (#478 asks for "too much rather than too little")
+ * and tunable with `PHANTOMBOT_TUI_LOG_LINES` for a debugging session that
+ * wants more.
  */
+
+/** Default ring size, overridable with `PHANTOMBOT_TUI_LOG_LINES`. */
+export function configuredBufferLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PHANTOMBOT_TUI_LOG_LINES;
+  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 5000;
+}
 
 export interface LogLine {
   at: number;
@@ -26,7 +38,7 @@ export class LogBuffer {
   private lines: LogLine[] = [];
   private listeners = new Set<() => void>();
 
-  constructor(private readonly limit = 100) {}
+  constructor(private readonly limit = configuredBufferLimit()) {}
 
   /** Accepts a raw sink line (may contain several newline-separated lines). */
   push(chunk: string): void {
