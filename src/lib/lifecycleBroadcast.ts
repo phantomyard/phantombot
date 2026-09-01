@@ -9,15 +9,19 @@
  * honest fix: the problem was never who typed the command, it was that nobody
  * else was told.
  *
- * SCOPE — Telegram only, deliberately. The fan-out sends through Telegram bot
- * tokens; a persona served ONLY over PhantomChat gets no heads-up and no
- * back-online line (it is skipped, and the skip is logged at debug). That is a
- * narrowing, not an oversight: a channel-neutral sender needs a per-persona
- * PhantomChat send path that does not exist yet, and the alternative — holding
- * the fix for the users who ARE affected — is worse. Tracked separately; the
- * planner already takes a persona-keyed account map, which is the seam a
- * second channel plugs into. Nothing here regresses for PhantomChat personas:
- * before this module NOBODY was warned.
+ * SCOPE — channel-neutral as of phantombot#523. Telegram accounts fan out
+ * through bot tokens; a persona served ONLY over PhantomChat is warned through
+ * its own phantomchat.json identity (nsec + relays + allowlist) via the same
+ * one-shot out-of-loop send path `phantombot notify` uses
+ * (`channels/phantomchat/oneShotSend.ts`). A persona reachable on BOTH channels
+ * is warned on Telegram only — the PhantomChat half exists to close the gap,
+ * not to double-notify. PhantomChat recipients are the persona's allowed_npubs
+ * hexes (the trusted tier — relay_npubs are never notified); an open/TOFU bot
+ * with an EMPTY allowlist has no known contacts and is skipped, exactly like
+ * the Telegram skip it replaces. When no account map is supplied (embedded
+ * callers), the conservative fallback inference stays Telegram-only —
+ * inferring a phantomchat identity from an arbitrary config layer would mean
+ * reading persona dirs the caller may not own.
  *
  * Two halves, deliberately split:
  *
@@ -48,6 +52,10 @@ import {
   HttpTelegramTransport,
   type TelegramTransport,
 } from "../channels/telegram.ts";
+import {
+  defaultPhantomchatOneShotSend,
+  type PhantomchatOneShotSend,
+} from "../channels/phantomchat/oneShotSend.ts";
 import { type Config, type TelegramAccount, xdgConfigHome } from "../config.ts";
 import { log } from "./logger.ts";
 
@@ -55,7 +63,8 @@ import { log } from "./logger.ts";
  * Planning (pure)
  * -------------------------------------------------------------------------- */
 
-export interface BroadcastRecipient {
+export interface TelegramBroadcastRecipient {
+  channel: "telegram";
   persona: string;
   /** Bot token to send through — this persona's own bot. */
   token: string;
@@ -63,17 +72,52 @@ export interface BroadcastRecipient {
   chatIds: number[];
 }
 
+/** One PhantomChat recipient: DM the persona's allowed owners from its own
+ *  identity. Recipients are allowed_npubs hexes — the RELAY tier is never
+ *  notified (untrusted by doctrine). */
+export interface PhantomchatBroadcastRecipient {
+  channel: "phantomchat";
+  persona: string;
+  /** The persona's own Nostr secret key (from its phantomchat.json). */
+  secretKey: Uint8Array;
+  /** Relays to publish the gift-wraps on (the persona's configured set). */
+  relays: string[];
+  /** Allowed-npub hex pubkeys to DM, already deduped by the planner. */
+  recipientHexes: string[];
+}
+
+export type BroadcastRecipient =
+  | TelegramBroadcastRecipient
+  | PhantomchatBroadcastRecipient;
+
 /**
  * A persona's REAL Telegram account, as the daemon actually started it.
  * Built in `run.ts` from the resolved listener plan, so it needs no inference:
  * the token is the bot that persona's listener is bound to, and the chat ids
  * are that bot's own allow-list.
  */
-export interface LifecycleAccount {
+export interface TelegramLifecycleAccount {
+  /** Omitted = "telegram" (the daemon's historical wiring predates channels). */
+  channel?: "telegram";
   persona: string;
   token: string;
   chatIds: number[];
 }
+
+/** The persona's phantomchat identity as the daemon resolved it from its
+ *  phantomchat.json. Hexes are the trusted allowlist tier only — the relay
+ *  tier is NEVER a lifecycle recipient. */
+export interface PhantomchatLifecycleAccount {
+  channel: "phantomchat";
+  persona: string;
+  secretKey: Uint8Array;
+  relays: string[];
+  recipientHexes: string[];
+}
+
+export type LifecycleAccount =
+  | TelegramLifecycleAccount
+  | PhantomchatLifecycleAccount;
 
 export interface PlanLifecycleBroadcastInput {
   config: Config;
@@ -126,9 +170,18 @@ function accountFor(
   return owner && persona === owner ? config.channels.telegram : undefined;
 }
 
+const isTelegramAccount = (
+  a: LifecycleAccount,
+): a is TelegramLifecycleAccount => (a.channel ?? "telegram") === "telegram";
+
+const isPhantomchatAccount = (
+  a: LifecycleAccount,
+): a is PhantomchatLifecycleAccount => a.channel === "phantomchat";
+
 /**
- * Who to tell. Deduped by (token, chatId) so a host where two personas share
- * one bot sends one message, not two.
+ * Who to tell. Deduped so a host where two personas share one bot sends one
+ * Telegram message, not two (by (token, chatId)), and so a repeated hex in one
+ * persona's phantomchat allowlist DMs once (by (persona, hex)).
  */
 export function planLifecycleBroadcast(
   input: PlanLifecycleBroadcastInput,
@@ -143,10 +196,22 @@ export function planLifecycleBroadcast(
         ];
 
   const only = input.only ? new Set(input.only) : undefined;
-  const seen = new Set<string>();
+  const seenTg = new Set<string>();
+  const seenPc = new Set<string>();
   const out: BroadcastRecipient[] = [];
+  // Group the supplied accounts by persona: a persona can carry BOTH a
+  // telegram and a phantomchat account, and the pick below must be
+  // deterministic (Telegram preferred) rather than last-in-list wins.
   const supplied = input.accounts
-    ? new Map(input.accounts.map((a) => [a.persona, a]))
+    ? (() => {
+        const m = new Map<string, LifecycleAccount[]>();
+        for (const a of input.accounts) {
+          const list = m.get(a.persona) ?? [];
+          list.push(a);
+          m.set(a.persona, list);
+        }
+        return m;
+      })()
     : undefined;
 
   for (const persona of roster) {
@@ -154,25 +219,60 @@ export function planLifecycleBroadcast(
     if (only && !only.has(persona)) continue;
     const mapped = supplied?.get(persona);
     // A supplied map is exhaustive by construction: a persona missing from it
-    // has no Telegram listener, and must NOT fall back to guessing at config.
-    const account: { token: string; allowedUserIds: number[] } | undefined =
+    // has no channel at all, and must NOT fall back to guessing at config.
+    // Telegram wins when a persona carries both channels — the PhantomChat
+    // half exists to reach phantomchat-ONLY personas (phantombot#523), not
+    // to double-notify one reachable on both.
+    const tgAccount: { token: string; allowedUserIds: number[] } | undefined =
       supplied
-        ? mapped && { token: mapped.token, allowedUserIds: mapped.chatIds }
+        ? (() => {
+            const a = mapped?.find(isTelegramAccount);
+            return a && { token: a.token, allowedUserIds: a.chatIds };
+          })()
         : accountFor(input.config, persona);
-    if (!account) {
-      log.debug("lifecycleBroadcast: persona has no Telegram account, skipped", {
+    if (tgAccount) {
+      const chatIds = tgAccount.allowedUserIds.filter((id) => {
+        const key = `${tgAccount.token}:${id}`;
+        if (seenTg.has(key)) return false;
+        seenTg.add(key);
+        return true;
+      });
+      // A telegram account claims the persona even when its allowlist is
+      // empty — an empty Telegram allowlist and a PhantomChat fallback are
+      // both misconfigurations; silent channel-hopping would hide that.
+      if (chatIds.length === 0) continue;
+      out.push({ channel: "telegram", persona, token: tgAccount.token, chatIds });
+      continue;
+    }
+    // Supplied-only: the fallback inference above is Telegram-shaped, so a
+    // phantomchat account is only ever used when the daemon's real listener
+    // plan supplied it.
+    const pcAccount = supplied ? mapped?.find(isPhantomchatAccount) : undefined;
+    if (pcAccount) {
+      // Normalized to lowercase: allowedHex is lowercased upstream
+      // (personaStore decodes via toLowerCase), but the planner defends
+      // against a mixed-case entry turning one owner into two DMs.
+      const hexes = pcAccount.recipientHexes
+        .map((hex) => hex.toLowerCase())
+        .filter((hex) => {
+          const key = `${persona}:${hex}`;
+          if (seenPc.has(key)) return false;
+          seenPc.add(key);
+          return true;
+        });
+      if (hexes.length === 0) continue;
+      out.push({
+        channel: "phantomchat",
         persona,
+        secretKey: pcAccount.secretKey,
+        relays: pcAccount.relays,
+        recipientHexes: hexes,
       });
       continue;
     }
-    const chatIds = account.allowedUserIds.filter((id) => {
-      const key = `${account.token}:${id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    log.debug("lifecycleBroadcast: persona has no channel account, skipped", {
+      persona,
     });
-    if (chatIds.length === 0) continue;
-    out.push({ persona, token: account.token, chatIds });
   }
   return out;
 }
@@ -207,11 +307,16 @@ export interface SendLifecycleBroadcastInput {
   message: string;
   /** Test seam. Production builds an HTTP transport per token. */
   createTransport?: (token: string) => TelegramTransport;
+  /** Test seam for the PhantomChat half. Production uses the shared one-shot
+   *  pool-per-send primitive (one pool per recipient hex, like `notify`). */
+  sendPhantomchat?: PhantomchatOneShotSend;
 }
 
 /**
  * Fan the message out. Never throws: a heads-up is a courtesy, and a Telegram
- * outage must not be able to block the restart the user asked for.
+ * outage (or a relay outage) must not be able to block the restart the user
+ * asked for. Each recipient is an independent send — one failure is logged and
+ * swallowed, never aborting the others.
  */
 export async function sendLifecycleBroadcast(
   input: SendLifecycleBroadcastInput,
@@ -219,6 +324,28 @@ export async function sendLifecycleBroadcast(
   let sent = 0;
   let failed = 0;
   for (const r of input.recipients) {
+    if (r.channel === "phantomchat") {
+      const send = input.sendPhantomchat ?? defaultPhantomchatOneShotSend;
+      for (const recipientHex of r.recipientHexes) {
+        try {
+          await send({
+            secretKey: r.secretKey,
+            relays: r.relays,
+            recipientHex,
+            text: input.message,
+          });
+          sent++;
+        } catch (e) {
+          failed++;
+          log.warn("lifecycleBroadcast: phantomchat send failed", {
+            persona: r.persona,
+            recipient: recipientHex.slice(0, 12) + "…",
+            error: (e as Error).message,
+          });
+        }
+      }
+      continue;
+    }
     let transport: TelegramTransport;
     try {
       transport =
@@ -322,6 +449,8 @@ export interface NotifyLifecycleBackInput {
   path?: string;
   now?: Date;
   createTransport?: (token: string) => TelegramTransport;
+  /** Test seam for the PhantomChat half (see sendLifecycleBroadcast). */
+  sendPhantomchat?: PhantomchatOneShotSend;
 }
 
 export type NotifyLifecycleBackStatus =
@@ -364,6 +493,7 @@ export async function notifyLifecycleBackIfPending(
     recipients,
     message: backOnlineMessage(marker.command, input.currentVersion),
     createTransport: input.createTransport,
+    sendPhantomchat: input.sendPhantomchat,
   });
   await clearPendingLifecycle(input.path);
   log.info("lifecycleBroadcast: back-online notified", {
