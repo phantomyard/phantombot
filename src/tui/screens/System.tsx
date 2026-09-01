@@ -14,6 +14,7 @@ import type { HostSnapshot } from "../snapshot.ts";
 import type { SystemSnapshot, SystemState } from "../systemSnapshot.ts";
 import { useTerminalSize, viewportRows } from "../terminal.ts";
 import { frameChromeRows } from "../chrome.ts";
+import { maxOffset, nudgeOffset, tailViewport } from "../logViewport.ts";
 
 const LEVEL_COLOR: Record<string, string> = {
   error: theme.bad,
@@ -104,6 +105,8 @@ export function SystemScreen(props: {
   const [lines, setLines] = useState<readonly LogLine[]>([]);
   const [loading, setLoading] = useState(false);
   const [reloads, setReloads] = useState(0);
+  // Lines above the tail; 0 = following the newest line (see logViewport.ts).
+  const [offset, setOffset] = useState(0);
   const size = useTerminalSize();
   const rows = viewportRows(size, 9 + frameChromeRows());
   const types = useMemo(
@@ -156,11 +159,35 @@ export function SystemScreen(props: {
     };
   }, [tab, source, reloads]);
   const filtered = useMemo(
-    () => filterLogs(lines, { type, persona, time, text }).slice(-rows),
-    [lines, type, persona, time, text, rows],
+    () => filterLogs(lines, { type, persona, time, text }),
+    [lines, type, persona, time, text],
   );
+  // Reserve the two marker rows only when there is something to hide, so a
+  // stream that fits uses the whole window.
+  const bodyRows = filtered.length > rows ? Math.max(1, rows - 2) : rows;
+  const view = tailViewport(filtered.length, bodyRows, offset);
+  const visible = filtered.slice(view.start, view.end);
+  // Changing what is being read is a new stream: go back to live rather than
+  // holding a scroll position that meant something in the previous one.
+  useEffect(() => {
+    setOffset(0);
+  }, [source, type, persona, time, text, reloads]);
 
   useInput((char, key) => {
+    // Scroll first, and before the search branch: arrows and page keys carry
+    // no character, so they are meaningless to the filter box and a user
+    // mid-search still expects to be able to look back through the stream.
+    if (tab === "logs") {
+      const page = Math.max(1, bodyRows - 1);
+      const nudge = (delta: number) =>
+        setOffset((o) => nudgeOffset(o, delta, filtered.length, bodyRows));
+      if (key.upArrow) return nudge(1);
+      if (key.downArrow) return nudge(-1);
+      if (key.pageUp) return nudge(page);
+      if (key.pageDown) return nudge(-page);
+      if (key.home) return setOffset(maxOffset(filtered.length, bodyRows));
+      if (key.end) return setOffset(0);
+    }
     if (tab === "logs" && searchFocused) {
       if (key.escape) return setSearchFocused(false);
       if (key.backspace || key.delete) return setText((s) => s.slice(0, -1));
@@ -191,7 +218,9 @@ export function SystemScreen(props: {
       title={["phantombot", "system", tab]}
       status={
         tab === "logs"
-          ? `${source.label} · ${filtered.length}/${lines.length}${loading ? " · reading…" : ""}`
+          ? `${source.label} · ${filtered.length}/${lines.length} · ${
+              view.following ? "following" : `paused ${view.below} from live`
+            }${loading ? " · reading…" : ""}`
           : `sampled ${shortTime(props.snapshot.capturedAt)}`
       }
       footer={
@@ -211,6 +240,11 @@ export function SystemScreen(props: {
               { icon: badge.phantoms, key: "p", label: `Persona ${persona}` },
               { icon: badge.history, key: "t", label: `Time ${time}` },
               { icon: badge.change, key: "r", label: "Reload" },
+              {
+                icon: badge.history,
+                key: "↑↓ pgup/pgdn",
+                label: view.following ? "Scroll" : "Scroll (end = live)",
+              },
               { icon: badge.back, key: "esc", label: "Back" },
             ]
       }
@@ -310,6 +344,11 @@ export function SystemScreen(props: {
             </Box>
           ) : null}
           <Rule />
+          {view.above > 0 ? (
+            <Text color={theme.dim}>
+              {`▲ ${view.above} older — ↑/pgup, home for oldest`}
+            </Text>
+          ) : null}
           {filtered.length === 0 ? (
             <Text color={theme.dim}>
               {loading
@@ -317,7 +356,7 @@ export function SystemScreen(props: {
                 : `No lines from ${source.id} match these filters. 's' cycles source, 't' widens the time window.`}
             </Text>
           ) : (
-            filtered.map((line, i) => (
+            visible.map((line, i) => (
               <Box key={`${line.at}-${i}`}>
                 <Text color={theme.dim}>{timeOf(line.at)} </Text>
                 <Box width={6}>
@@ -336,6 +375,11 @@ export function SystemScreen(props: {
               </Box>
             ))
           )}
+          {view.below > 0 ? (
+            <Text color={theme.warn}>
+              {`▼ ${view.below} newer — ↓/pgdn, end to follow live`}
+            </Text>
+          ) : null}
         </Box>
       )}
     </Frame>
