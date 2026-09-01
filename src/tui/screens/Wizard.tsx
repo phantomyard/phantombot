@@ -96,7 +96,9 @@ export function WizardScreen(props: {
     const request: AskRequest = {
       title: "Persona name",
       description: nameDescription(),
-      hint: error ?? "lowercase letters, digits, '-' or '_'",
+      hint:
+        error ??
+        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
       initial: name,
     };
     return (
@@ -146,6 +148,10 @@ export function WizardScreen(props: {
         request={request}
         // A resume has no name question behind it — the persona already
         // exists, and renaming it here would create a different phantom.
+        // `resumed` always has `onQuit` wired: startAt="identity" only ever
+        // comes from resolveOpeningScreen at startup, so the nav stack is
+        // empty and App passes onQuit — the noBack-but-no-onQuit footer
+        // (Save only) is unreachable by construction.
         noBack={resumed}
         onQuit={resumed ? props.onQuit : undefined}
         onAnswer={(value) => {

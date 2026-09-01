@@ -1447,7 +1447,7 @@ export function App(props: AppProps): React.ReactElement {
       title: "Persona name",
       hint: validPersonaName(suggested)
         ? `blank keeps '${suggested}'`
-        : "lowercase letters, digits, '-' or '_'",
+        : "lowercase letters, digits, '-' or '_', starting with a letter or digit",
       initial: validPersonaName(suggested) ? suggested : undefined,
       allowEmpty: true,
     });

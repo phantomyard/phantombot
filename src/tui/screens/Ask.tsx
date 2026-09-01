@@ -60,7 +60,11 @@ export function AskScreen(props: {
    * worse than either.
    */
   noBack?: boolean;
-  /** When `noBack`, ^q exits the app (the app-wide quit), esc does nothing. */
+  /** When `noBack`, ^q exits the app (the app-wide quit), esc does nothing.
+   *  Must be exactly app exit and nothing else: App.tsx already handles ^q
+   *  globally, so both handlers fire — this one is only safe because it does
+   *  the same thing. Anything else ("leave the wizard, keep the app") would
+   *  run alongside the global quit, which wins. */
   onQuit?: () => void;
 }): React.ReactElement {
   const { title, description, hint, masked, initial, allowEmpty } = props.request;
@@ -116,7 +120,12 @@ export function AskScreen(props: {
         <Text bold>{title}</Text>
       </Box>
       {description ? (
-        <Box marginBottom={1} flexDirection="column">
+        // Component descriptions (e.g. ExampleBox) carry their own bottom
+        // margin — adding ours too renders a double gap above the hint.
+        <Box
+          marginBottom={typeof description === "string" ? 1 : 0}
+          flexDirection="column"
+        >
           {typeof description === "string" ? (
             <Text color={theme.dim}>{description}</Text>
           ) : (
