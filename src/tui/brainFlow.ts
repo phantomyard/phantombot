@@ -119,6 +119,19 @@ const HARNESS_LABELS: Record<string, string> = {
   claude: "Claude",
 };
 
+function mergeModels(existing: readonly PiModel[], fresh: readonly PiModel[]): PiModel[] {
+  const seen = new Set<string>();
+  const res: PiModel[] = [];
+  for (const m of [...fresh, ...existing]) {
+    const key = `${m.provider}/${m.model}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      res.push(m);
+    }
+  }
+  return res;
+}
+
 /**
  * Per-harness hints. Codex/Claude state the inheritance up front — an operator
  * picking Codex must learn HERE that there is nothing to configure, not
@@ -180,12 +193,25 @@ export async function configureBrain(
   if (fallback === undefined) return "brain unchanged";
 
   const bothPi = primary === "pi" && fallback === "pi";
+  let primaryMode: "configure" | "host" | undefined;
   if (primary === "pi") {
-    const cancelled = await configurePi(q, deps, "primary", undefined, bothPi ? "pi-primary" : undefined);
+    const cancelled = await configurePi(
+      q,
+      deps,
+      "primary",
+      { onMode: (m) => { primaryMode = m; } },
+      bothPi ? "pi-primary" : undefined,
+    );
     if (cancelled) return "brain unchanged";
   }
   if (fallback === "pi") {
-    const cancelled = await configurePi(q, deps, "fallback", undefined, bothPi ? "pi-fallback" : undefined);
+    const cancelled = await configurePi(
+      q,
+      deps,
+      "fallback",
+      { allowHostConfig: primaryMode !== "host" },
+      bothPi ? "pi-fallback" : undefined,
+    );
     if (cancelled) return "brain unchanged";
   }
 
@@ -199,6 +225,12 @@ export async function configureBrain(
     `chain${deps.persona ? ` for '${deps.persona}'` : ""}: ${chain.join(" → ")}\n${where}`,
   );
   return `brain saved: ${chain.join(" → ")}`;
+}
+
+export interface ConfigurePiOptions {
+  askMode?: boolean;
+  allowHostConfig?: boolean;
+  onMode?: (mode: "configure" | "host") => void;
 }
 
 /**
@@ -215,7 +247,7 @@ export async function configurePi(
   q: BrainQuestions,
   deps: BrainDeps,
   role: "primary" | "fallback",
-  opts?: { askMode?: boolean },
+  opts?: ConfigurePiOptions,
   instanceId?: string,
 ): Promise<boolean> {
   const current = instanceId
@@ -230,9 +262,16 @@ export async function configurePi(
     );
   }
 
-  const mode = opts?.askMode === false
-    ? "configure"
-    : await q.choose({
+  let mode: "configure" | "host" = "configure";
+  if (opts?.askMode !== false) {
+    if (opts?.allowHostConfig === false) {
+      mode = "configure";
+      q.note(
+        "Pi: fallback models",
+        "the fallback must configure its own models — two Pi instances on host config would be identical",
+      );
+    } else {
+      const pick = await q.choose({
         title: `Pi (${role} brain) — how should its models be configured?`,
         description: PI_MODE_DESCRIPTION,
         options: [
@@ -249,7 +288,11 @@ export async function configurePi(
         ],
         initial: "configure",
       });
-  if (mode === undefined) return true;
+      if (pick === undefined) return true;
+      mode = pick as "configure" | "host";
+    }
+  }
+  opts?.onMode?.(mode);
 
   if (mode === "host") {
     // ACTIVELY clear — see clearPiRouting. The tombstone only exists in
@@ -266,6 +309,15 @@ export async function configurePi(
   // The catalogue is fetched once and reused by every slot's list. With no pi
   // binary the lists degrade to free-text rows inside the search screen.
   let models = deps.piBin ? await deps.listModels() : [];
+  if (current.storedKey && current.routing.provider && deps.piBin) {
+    if (models.filter((m) => m.provider === current.routing.provider).length === 0) {
+      const envVar = providerEnvVar(current.routing.provider);
+      if (envVar) {
+        const refreshed = await deps.listModels({ [envVar]: current.storedKey });
+        if (refreshed.length > 0) models = mergeModels(models, refreshed);
+      }
+    }
+  }
 
   const provider = await q.search({
     title: "Pi provider",
@@ -276,7 +328,11 @@ export async function configurePi(
       ...providerChoices(models).map((p) => ({
         value: p.id,
         label: p.label,
-        hint: p.hasModels ? `${p.id} — key already configured` : p.id,
+        hint: p.hasModels
+          ? `${p.id} — key already configured`
+          : p.label.toLowerCase() !== p.id.toLowerCase()
+            ? p.id
+            : undefined,
       })),
     ],
     initial:
@@ -377,7 +433,19 @@ export async function configurePi(
       const envVar = providerEnvVar(provider);
       if (envVar) refreshed = await deps.listModels({ [envVar]: keyWrite.value });
     }
-    if (refreshed.length > 0) models = refreshed;
+    if (refreshed.length > 0) models = mergeModels(models, refreshed);
+  } else if (keyWrite.action === "keep") {
+    const effectiveKey = current.storedKey;
+    if (provider && effectiveKey && deps.piBin) {
+      const authWrite = await deps.writeAuth(provider, effectiveKey);
+      let refreshed: PiModel[] = [];
+      if (authWrite.ok) refreshed = await deps.listModels();
+      if (refreshed.length === 0 && models.filter((m) => m.provider === provider).length === 0) {
+        const envVar = providerEnvVar(provider);
+        if (envVar) refreshed = await deps.listModels({ [envVar]: effectiveKey });
+      }
+      if (refreshed.length > 0) models = mergeModels(models, refreshed);
+    }
   } else if (keyWrite.action === "clear") {
     // Provider switched and nothing typed: the old key points at the wrong
     // provider now. Clear it rather than fire it at the new `--provider`.
@@ -387,7 +455,6 @@ export async function configurePi(
       "provider changed and no new key entered — cleared the stale key so Pi falls back to its own local store",
     );
   }
-  // action === "keep": nothing written. The stored token is reused verbatim.
 
   const scoped = provider ? models.filter((m) => m.provider === provider) : models;
 

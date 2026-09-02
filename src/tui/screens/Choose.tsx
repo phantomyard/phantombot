@@ -88,29 +88,30 @@ export function ChooseScreen(props: {
         </Box>
       ) : null}
       <Box flexDirection="column" marginTop={1}>
-        {options.map((option, i) => (
-          <Selectable
-            key={option.value}
-            selected={i === index}
-            onPress={() => props.onAnswer(option.value)}
-          >
-            <Box>
-              <Box marginRight={1}>
-                <Text backgroundColor={i === index ? theme.accent : undefined}>
-                  {" "}
+        {options.map((option, i) => {
+          const selected = i === index;
+          return (
+            <Selectable
+              key={option.value}
+              selected={selected}
+              onPress={() => props.onAnswer(option.value)}
+            >
+              <Box>
+                <Text bold={selected} color={selected ? theme.accent : undefined}>
+                  {option.label}
                 </Text>
+                {option.value === initial && initial !== "" ? (
+                  <Text color={theme.dim}> (current)</Text>
+                ) : null}
+                {option.hint ? (
+                  <Box marginLeft={1}>
+                    <Text color={theme.dim}>({option.hint})</Text>
+                  </Box>
+                ) : null}
               </Box>
-              <Text bold={i === index} color={i === index ? theme.accent : undefined}>
-                {option.label}
-              </Text>
-              {option.hint ? (
-                <Box marginLeft={1}>
-                  <Text color={theme.dim}>{option.hint}</Text>
-                </Box>
-              ) : null}
-            </Box>
-          </Selectable>
-        ))}
+            </Selectable>
+          );
+        })}
       </Box>
     </Frame>
   );

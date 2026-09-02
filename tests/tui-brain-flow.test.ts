@@ -35,6 +35,7 @@ interface Harness {
     routings: unknown[];
     clears: Array<{ tombstone?: boolean } | undefined>;
     secrets: Array<string | "CLEARED">;
+    authWrites: Array<{ provider: string; key: string }>;
     searches: Array<{ title: string; banner?: string; initial?: string }>;
   };
 }
@@ -44,6 +45,7 @@ function harness(over: {
   availability?: Record<string, string | undefined>;
   routing?: BrainDeps["routing"];
   storedKey?: string;
+  piInstances?: BrainDeps["piInstances"];
   personaScope?: boolean;
   models?: PiModel[];
   choose?: Array<string | undefined>;
@@ -56,6 +58,7 @@ function harness(over: {
     routings: [] as unknown[],
     clears: [] as Array<{ tombstone?: boolean } | undefined>,
     secrets: [] as Array<string | "CLEARED">,
+    authWrites: [] as Array<{ provider: string; key: string }>,
     searches: [] as Array<{ title: string; banner?: string; initial?: string }>,
   };
   const c = [...(over.choose ?? [])];
@@ -85,6 +88,7 @@ function harness(over: {
     availability: over.availability ?? { pi: "/usr/bin/pi", codex: "/usr/bin/codex", claude: undefined },
     routing: over.routing ?? {},
     storedKey: over.storedKey,
+    piInstances: over.piInstances,
     targetPath: "/tmp/personas/robbie/config.toml",
     personaScope: over.personaScope ?? true,
     piBin: over.availability?.pi ?? "/usr/bin/pi",
@@ -98,7 +102,10 @@ function harness(over: {
     unsetSecret: async () => {
       applied.secrets.push("CLEARED");
     },
-    writeAuth: async () => ({ ok: true, path: "/tmp/.pi/agent/auth.json" }),
+    writeAuth: async (provider, value) => {
+      applied.authWrites.push({ provider, key: value });
+      return { ok: true, path: "/tmp/.pi/agent/auth.json" };
+    },
     applyChain: async (chain) => void applied.chains.push([...chain]),
     applyRouting: async (choices) => void applied.routings.push(choices),
     clearRouting: async (opts) => void applied.clears.push(opts),
@@ -319,5 +326,101 @@ describe("the brain flow", () => {
       provider: "openrouter",
       primaryModel: "gpt-5.2",
     });
+  });
+
+  test("keeping a stored key refreshes models if initially empty for provider", async () => {
+    let listCalls = 0;
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""], // keep stored key
+      storedKey: "sk-stored",
+      routing: { provider: "openrouter" },
+      models: [], // empty initial models
+    });
+    h.deps.listModels = async (extraEnv) => {
+      listCalls++;
+      // On second call (or with extraEnv), return models
+      return extraEnv?.OPENROUTER_API_KEY === "sk-stored" ? MODELS : [];
+    };
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi");
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
+
+  test("cancelling the wizard before completion does not mutate Pi's shared auth store", async () => {
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: [undefined], // Esc / cancel at the provider selection prompt
+      storedKey: "sk-instance-key",
+      routing: { provider: "openrouter" },
+      models: [], // empty initial models triggers pre-selection refresh attempt
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain unchanged");
+    expect(h.applied.authWrites).toEqual([]);
+  });
+
+  test("Pi primary (host) and Pi fallback (configure): fallback Pi skips host config choice and runs configure", async () => {
+    const h = harness({
+      choose: ["pi", "pi", "host"], // primary = pi, fallback = pi, primary picks host
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-fallback-key"],
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
+    expect(h.applied.routings).toHaveLength(1);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
+
+  test("named Pi instances: keeping a stored key on fallback Pi writes the instance key and refreshes models", async () => {
+    let listCalls = 0;
+    const h = harness({
+      choose: ["pi", "pi", "host"], // primary = pi (host), fallback = pi (auto-configure)
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""], // keep stored key on fallback
+      storedKey: "sk-global-wrong-key",
+      piInstances: {
+        fallback: {
+          routing: { provider: "openrouter" },
+          storedKey: "sk-fallback-instance-key",
+        },
+      },
+      models: [], // empty initial models forces keep-branch refresh
+    });
+    h.deps.listModels = async (extraEnv) => {
+      listCalls++;
+      return extraEnv?.OPENROUTER_API_KEY === "sk-fallback-instance-key" ? MODELS : [];
+    };
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    // Assert writeAuth wrote the instance key into auth store, not the global key
+    expect(h.applied.authWrites).toEqual([
+      { provider: "openrouter", key: "sk-fallback-instance-key" },
+    ]);
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
+
+  test("Pi primary (configure) and Pi fallback (host): fallback Pi can choose host config", async () => {
+    const h = harness({
+      choose: ["pi", "pi", "configure", "host"], // primary picks configure, fallback picks host
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-primary-key"],
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
   });
 });

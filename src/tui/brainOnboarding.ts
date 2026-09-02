@@ -32,6 +32,7 @@
 import type { PiModel } from "../lib/piModels.ts";
 import type { RoutingChoices } from "../lib/piRouting.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
+import type { KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { configurePi, type BrainQuestions } from "./brainFlow.ts";
 
 export interface BrainOnboardingDeps {
@@ -60,6 +61,7 @@ export interface BrainOnboardingDeps {
   personaScope: boolean;
   piBin?: string;
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
+  probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
   setSecret(value: string, instanceId?: string): Promise<{ ok: boolean; persona?: string; error?: string }>;
   unsetSecret(instanceId?: string): Promise<unknown>;
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
@@ -68,6 +70,7 @@ export interface BrainOnboardingDeps {
   clearRouting(opts?: { tombstone?: boolean }, instanceId?: string): Promise<void>;
   /** One real turn through the named harness. The truth, not a `which`. */
   probe(id: string): Promise<{ ok: boolean; detail: string }>;
+  maybePromptRestart?(): Promise<void>;
 }
 
 export interface BrainOnboardingResult {
@@ -251,6 +254,7 @@ async function runOnce(
     piBin: availability.pi,
     installCommand: deps.installCommand,
     listModels: deps.listModels,
+    probeProviderKey: deps.probeProviderKey,
     setSecret: deps.setSecret,
     unsetSecret: deps.unsetSecret,
     writeAuth: deps.writeAuth,
@@ -258,12 +262,13 @@ async function runOnce(
     applyRouting: deps.applyRouting,
     clearRouting: deps.clearRouting,
   };
+  let primaryMode: "configure" | "host" | undefined;
   if (primary === "pi") {
     const cancelled = await configurePi(
       q,
       brainDeps,
       "primary",
-      undefined,
+      { onMode: (m) => { primaryMode = m; } },
       bothPi ? "pi-primary" : undefined,
     );
     if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
@@ -273,7 +278,7 @@ async function runOnce(
       q,
       brainDeps,
       "fallback",
-      undefined,
+      { allowHostConfig: primaryMode !== "host" },
       bothPi ? "pi-fallback" : undefined,
     );
     if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
@@ -318,6 +323,9 @@ async function runOnce(
     }
     q.note("Brain test passed", `reply: ${result.detail}`);
     await deps.applyChain(chain);
+    if (deps.maybePromptRestart) {
+      await deps.maybePromptRestart();
+    }
     return {
       landing: "chat",
       notice: `brain verified: ${chain.join(" → ")}`,
@@ -327,6 +335,9 @@ async function runOnce(
   // Skipped the test: the choices were real, so they're saved — but an
   // unverified brain doesn't earn chat. Configure is the honest landing.
   await deps.applyChain(chain);
+  if (deps.maybePromptRestart) {
+    await deps.maybePromptRestart();
+  }
   return {
     landing: "configure",
     notice: `brain saved (untested): ${chain.join(" → ")}`,

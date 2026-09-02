@@ -57,6 +57,7 @@ function fakeDeps(overrides: Partial<BrainOnboardingDeps> = {}): {
       targetPath: "/tmp/personas/batman/config.toml",
       personaScope: true,
       listModels: async () => [],
+      probeProviderKey: async () => ({ status: "verified", detail: "ok" }),
       setSecret: async () => ({ ok: true }),
       unsetSecret: async () => undefined,
       writeAuth: async () => ({ ok: true, path: "/tmp/auth.json" }),
@@ -189,15 +190,81 @@ describe("wizard brain onboarding", () => {
     expect(chains).toEqual([["pi"]]);
   });
 
-  test("Pi primary and Pi fallback become independent named instances", async () => {
-    const { q } = fakeQ([
+  test("Pi primary (host) and Pi fallback (configure): fallback Pi cannot be host config and configures models directly", async () => {
+    let routedChoices: unknown = undefined;
+    const { q, picked } = fakeQ([
       "pi", "pi", // primary, fallback
-      "host", "host", // configure each instance independently
+      "host", // primary uses host config
+      // fallback Pi does not get asked host vs configure — goes straight to provider & model search
+      "openrouter", // provider
+      "sk-fallback-key", // api key
+      "gpt-5.2", // primary model
+      "gpt-5.2-vision", // vision model
+      "gpt-5.2-coder", // coding model
       "skip",
     ]);
-    const { deps, chains } = fakeDeps();
+    const { deps, chains } = fakeDeps({
+      applyRouting: async (choices) => {
+        routedChoices = choices;
+      },
+      listModels: async () => [
+        { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
+        { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
+        { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
+      ],
+    });
     const r = await runBrainOnboarding(q, deps);
     expect(r.notice).toContain("pi-primary → pi-fallback");
     expect(chains).toEqual([["pi-primary", "pi-fallback"]]);
+    expect(routedChoices).toEqual({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+      imageModel: "gpt-5.2-vision",
+      codingModel: "gpt-5.2-coder",
+    });
+    // Fallback Pi did not prompt for host config
+    expect(picked.filter((p) => p.includes("fallback brain) — how should its models be configured"))).toHaveLength(0);
+  });
+
+  test("Pi primary (configure) and Pi fallback (host): fallback Pi can use host config", async () => {
+    const { q } = fakeQ([
+      "pi", "pi", // primary, fallback
+      "configure", // primary configures models
+      "openrouter", // provider
+      "sk-primary-key", // api key
+      "gpt-5.2", // primary model
+      "gpt-5.2-vision", // vision model
+      "gpt-5.2-coder", // coding model
+      "host", // fallback Pi can pick host config because primary is custom
+      "skip",
+    ]);
+    const { deps, chains } = fakeDeps({
+      listModels: async () => [
+        { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
+        { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
+        { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
+      ],
+    });
+    const r = await runBrainOnboarding(q, deps);
+    expect(r.notice).toContain("pi-primary → pi-fallback");
+    expect(chains).toEqual([["pi-primary", "pi-fallback"]]);
+  });
+
+  test("maybePromptRestart is called on test pass", async () => {
+    let restartPrompted = false;
+    const { q } = fakeQ([
+      "claude",
+      "",
+      "test",
+    ]);
+    const { deps, chains } = fakeDeps({
+      maybePromptRestart: async () => {
+        restartPrompted = true;
+      },
+    });
+    const r = await runBrainOnboarding(q, deps);
+    expect(r.landing).toBe("chat");
+    expect(chains).toEqual([["claude"]]);
+    expect(restartPrompted).toBe(true);
   });
 });

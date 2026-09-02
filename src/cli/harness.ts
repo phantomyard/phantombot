@@ -344,10 +344,12 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   }
 
   const bothPi = primary === "pi" && fallbackPick === "pi";
+  let primaryMode: "configure" | "local" | undefined;
   if (primary === "pi") {
     const cancelled = await configurePi(
       config, availability, "primary", target, q,
       bothPi ? "pi-primary" : undefined,
+      { onMode: (m) => { primaryMode = m; } },
     );
     if (cancelled) {
       q.cancel("cancelled");
@@ -359,6 +361,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     const cancelled = await configurePi(
       config, availability, "fallback", target, q,
       bothPi ? "pi-fallback" : undefined,
+      { allowLocalConfig: primaryMode !== "local" },
     );
     if (cancelled) {
       q.cancel("cancelled");
@@ -452,6 +455,7 @@ async function configurePi(
   target: HarnessWriteTarget,
   q: HarnessPrompts = clackPrompts,
   instanceId?: string,
+  opts?: { allowLocalConfig?: boolean; onMode?: (mode: "configure" | "local") => void },
 ): Promise<boolean> {
   if (!availability.pi) {
     const doInstall = await q.confirm({
@@ -485,23 +489,34 @@ async function configurePi(
     }
   }
 
-  const mode = await q.select<"configure" | "local">({
-    message: `Pi (${role}): how should models be configured?`,
-    options: [
-      {
-        value: "configure",
-        label: "Configure models",
-        hint: "pick provider + API key, then primary / vision / coding models",
-      },
-      {
-        value: "local",
-        label: "Use Pi's own config",
-        hint: "delegate to Pi's local settings (from `pi` login) — clears any routing here",
-      },
-    ],
-    initialValue: "configure",
-  });
-  if (mode === undefined) return true;
+  let mode: "configure" | "local" = "configure";
+  if (opts?.allowLocalConfig === false) {
+    mode = "configure";
+    q.note(
+      "the fallback must configure its own models — two Pi instances on host config would be identical",
+      "Pi fallback",
+    );
+  } else {
+    const pick = await q.select<"configure" | "local">({
+      message: `Pi (${role}): how should models be configured?`,
+      options: [
+        {
+          value: "configure",
+          label: "Configure models",
+          hint: "pick provider + API key, then primary / vision / coding models",
+        },
+        {
+          value: "local",
+          label: "Use Pi's own config",
+          hint: "delegate to Pi's local settings (from `pi` login) — clears any routing here",
+        },
+      ],
+      initialValue: "configure",
+    });
+    if (pick === undefined) return true;
+    mode = pick;
+  }
+  opts?.onMode?.(mode);
   if (mode === "local") {
     // ACTIVELY clear both stores — see clearPiRouting/computeRoutingClears. The
     // old "later" branch returned without clearing, so any previously-configured
