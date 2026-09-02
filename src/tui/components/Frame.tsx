@@ -57,7 +57,12 @@ export function Frame(props: {
   const noticeRow = (
     <Box width="100%" paddingX={1}>
       {notice ? (
-        <Text color={theme.warn}>{notice}</Text>
+        /* Truncate, never wrap: the slot is exactly one row, so a long
+           notice (a path, an error) must clip here instead of spilling into
+           a second row and pushing the footer out of the fixed chrome. */
+        <Text color={theme.warn} wrap="truncate">
+          {notice}
+        </Text>
       ) : (
         <Text> </Text>
       )}
