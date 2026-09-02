@@ -1111,7 +1111,9 @@ async function handleModelList(
   primary: Harness,
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
-  switch (primary.id.startsWith("pi-") ? "pi" : primary.id) {
+  const primaryType =
+    ctx.config?.harnesses.instances?.[primary.id]?.type ?? primary.id;
+  switch (primaryType) {
     case "pi": {
       const bin = ctx.config?.harnesses.instances?.[primary.id]?.bin ??
         ctx.config?.harnesses.pi.bin ?? "pi";

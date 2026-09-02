@@ -810,7 +810,9 @@ Harness notes:
   Their keys are stored separately in the persona vault as
   `PHANTOMBOT_PI_API_KEY_PI_PRIMARY` and
   `PHANTOMBOT_PI_API_KEY_PI_FALLBACK`. Existing bare `pi` configurations
-  remain supported unchanged.
+  remain supported unchanged. The Brain wizard manages exactly the
+  `pi-primary` and `pi-fallback` instance ids; hand-authored Pi instance ids
+  remain runtime-valid but are not preserved when Brain rewrites the chain.
 - **The whole `[harnesses]` block is per-persona.** Which brain a persona
   thinks with — the failover chain, the Claude/Codex model, Pi's provider and
   capability routing — is a property of the personality, not of the box, so it
