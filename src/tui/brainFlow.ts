@@ -193,12 +193,25 @@ export async function configureBrain(
   if (fallback === undefined) return "brain unchanged";
 
   const bothPi = primary === "pi" && fallback === "pi";
+  let primaryMode: "configure" | "host" | undefined;
   if (primary === "pi") {
-    const cancelled = await configurePi(q, deps, "primary", undefined, bothPi ? "pi-primary" : undefined);
+    const cancelled = await configurePi(
+      q,
+      deps,
+      "primary",
+      { onMode: (m) => { primaryMode = m; } },
+      bothPi ? "pi-primary" : undefined,
+    );
     if (cancelled) return "brain unchanged";
   }
   if (fallback === "pi") {
-    const cancelled = await configurePi(q, deps, "fallback", undefined, bothPi ? "pi-fallback" : undefined);
+    const cancelled = await configurePi(
+      q,
+      deps,
+      "fallback",
+      { allowHostConfig: primaryMode !== "host" },
+      bothPi ? "pi-fallback" : undefined,
+    );
     if (cancelled) return "brain unchanged";
   }
 
@@ -212,6 +225,12 @@ export async function configureBrain(
     `chain${deps.persona ? ` for '${deps.persona}'` : ""}: ${chain.join(" → ")}\n${where}`,
   );
   return `brain saved: ${chain.join(" → ")}`;
+}
+
+export interface ConfigurePiOptions {
+  askMode?: boolean;
+  allowHostConfig?: boolean;
+  onMode?: (mode: "configure" | "host") => void;
 }
 
 /**
@@ -228,7 +247,7 @@ export async function configurePi(
   q: BrainQuestions,
   deps: BrainDeps,
   role: "primary" | "fallback",
-  opts?: { askMode?: boolean },
+  opts?: ConfigurePiOptions,
   instanceId?: string,
 ): Promise<boolean> {
   const current = instanceId
@@ -243,9 +262,12 @@ export async function configurePi(
     );
   }
 
-  const mode = opts?.askMode === false
-    ? "configure"
-    : await q.choose({
+  let mode: "configure" | "host" = "configure";
+  if (opts?.askMode !== false) {
+    if (opts?.allowHostConfig === false) {
+      mode = "configure";
+    } else {
+      const pick = await q.choose({
         title: `Pi (${role} brain) — how should its models be configured?`,
         description: PI_MODE_DESCRIPTION,
         options: [
@@ -262,7 +284,11 @@ export async function configurePi(
         ],
         initial: "configure",
       });
-  if (mode === undefined) return true;
+      if (pick === undefined) return true;
+      mode = pick as "configure" | "host";
+    }
+  }
+  opts?.onMode?.(mode);
 
   if (mode === "host") {
     // ACTIVELY clear — see clearPiRouting. The tombstone only exists in

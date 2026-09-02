@@ -362,4 +362,31 @@ describe("the brain flow", () => {
     expect(notice).toBe("brain unchanged");
     expect(h.applied.authWrites).toEqual([]);
   });
+
+  test("Pi primary (host) and Pi fallback (configure): fallback Pi skips host config choice and runs configure", async () => {
+    const h = harness({
+      choose: ["pi", "pi", "host"], // primary = pi, fallback = pi, primary picks host
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-fallback-key"],
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
+    expect(h.applied.routings).toHaveLength(1);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
+
+  test("Pi primary (configure) and Pi fallback (host): fallback Pi can choose host config", async () => {
+    const h = harness({
+      choose: ["pi", "pi", "configure", "host"], // primary picks configure, fallback picks host
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: ["sk-primary-key"],
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
+  });
 });

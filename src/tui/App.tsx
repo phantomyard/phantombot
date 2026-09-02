@@ -549,6 +549,7 @@ export function App(props: AppProps): React.ReactElement {
           unsetPersonaSecret,
         } = await import("../lib/vaultSecrets.ts");
         const { writePiApiKey } = await import("../lib/piAuthStore.ts");
+        const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
 
         const config = await loadConfig(persona);
         const availability = await detectAvailability(config);
@@ -641,6 +642,31 @@ export function App(props: AppProps): React.ReactElement {
               const { probeHarness } = await import("../lib/harnessProbe.ts");
               return probeHarness({ config: await loadConfig(persona), id });
             },
+            probeProviderKey: (providerId, key) =>
+              probeProviderKey(providerId, key),
+            maybePromptRestart: async () => {
+              const { maybePromptRestart } = await import("../cli/harness.ts");
+              const { defaultServiceControl } = await import("../lib/platform.ts");
+              await maybePromptRestart(
+                defaultServiceControl(),
+                async (message) =>
+                  await askConfirmValue({
+                    title: message,
+                    consequence: {
+                      summary: "",
+                      detail: "",
+                      longRunning: false,
+                      restarts: true,
+                    },
+                  }),
+                {
+                  note: (body: string, title?: string) =>
+                    setNotice(
+                      title ? `${title}: ${body.split("\n")[0]}` : body,
+                    ),
+                } as never,
+              );
+            },
           },
         );
       } catch (e) {
@@ -670,39 +696,10 @@ export function App(props: AppProps): React.ReactElement {
       const result = await onboardBrain(target.name);
       setNotice(result.notice);
 
-      // Writes are exactly the two applyChain endings — a verified chain and
-      // a saved-untested one. A cancel ("brain unchanged"), a Skip with no
-      // brain chosen, and a failed test (nothing saved) must NOT offer a
-      // restart: nothing changed to restart into.
-      const wroteChain =
-        result.notice.startsWith("brain verified") ||
-        result.notice.startsWith("brain saved");
-      if (wroteChain) {
-        const { maybePromptRestart } = await import("../cli/harness.ts");
-        const { defaultServiceControl } = await import("../lib/platform.ts");
-        await maybePromptRestart(
-          defaultServiceControl(),
-          async (message) =>
-            await askConfirmValue({
-              title: message,
-              consequence: {
-                summary: "",
-                detail: "",
-                longRunning: false,
-                restarts: true,
-              },
-            }),
-          {
-            note: (body: string, title?: string) =>
-              setNotice(title ? `${title}: ${body.split("\n")[0]}` : body),
-          } as never,
-        );
-      }
-
       // A verified brain earns chat, same as the wizard's landing.
       if (result.landing === "chat") setScreen("chat");
     },
-    [onboardBrain, askConfirmValue],
+    [onboardBrain],
   );
 
   /**
