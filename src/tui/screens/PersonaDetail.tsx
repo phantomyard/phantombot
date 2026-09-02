@@ -520,9 +520,9 @@ export function PersonaDetailScreen(props: {
       </Text>
       <Rule />
       <StatusBlock status={props.status} />
-      {/* One blank row between the STATUS telemetry and the footer — the same
-          breathing room the footer gets on every other screen. */}
-      <Box height={1} />
+      {/* Breathing room before the footer is the frame's RESERVED notice
+          slot now — a second blank row here over-paints the border on short
+          windows (the 20-row boxed regression). */}
     </Frame>
   );
 }

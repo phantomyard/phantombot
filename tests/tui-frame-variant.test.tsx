@@ -185,9 +185,9 @@ describe("frame variants", () => {
     const frame = (await openChat(24)).join("\n");
     expect(frame).toContain("phantombot v");
     expect(frame).toContain("channel: stable");
-    // The chat input keeps its own little box, so count corners rather than
-    // looking for any: bare = the input box only, boxed = that plus the frame.
-    expect((frame.match(/╭/g) ?? []).length).toBe(1);
+    // The frameless prompt strip draws no corners at all, so count them
+    // rather than looking for any: bare = 0, boxed = the frame border only.
+    expect((frame.match(/╭/g) ?? []).length).toBe(0);
     // The first line is the header itself, not a border.
     expect(frame.split("\n")[0]).toContain("phantombot v");
   });
@@ -195,7 +195,7 @@ describe("frame variants", () => {
   test("boxed still draws the border", async () => {
     process.env.PHANTOMBOT_TUI_FRAME = "boxed";
     const frame = (await openChat(24)).join("\n");
-    expect((frame.match(/╭/g) ?? []).length).toBe(2);
+    expect((frame.match(/╭/g) ?? []).length).toBe(1);
     expect(frame.split("\n")[0]).toContain("╭");
   });
 });

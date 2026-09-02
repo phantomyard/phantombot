@@ -31,13 +31,16 @@ export function frameVariant(
  *
  * The box spends two on its top and bottom border; the bare frame spends none,
  * because its header line replaces the border's title row rather than adding
- * to it. Screens add this to their own chrome constant, so dropping the border
+ * to it. Both variants also spend one on the RESERVED notice slot above the
+ * footer (see `NoticeContext` in `Frame.tsx`) — always drawn, blank when
+ * empty, so an arriving notice never shifts the layout. Screens add this to
+ * their own chrome constant, so dropping the border
  * gives the transcript two more rows instead of leaving a gap.
  */
 export function frameChromeRows(
   variant: FrameVariant = frameVariant(),
 ): number {
-  return variant === "boxed" ? 2 : 0;
+  return variant === "boxed" ? 3 : 1;
 }
 
 /**

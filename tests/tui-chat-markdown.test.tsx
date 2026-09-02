@@ -113,8 +113,10 @@ describe("a rendered reply", () => {
     for (const row of frame.split("\n")) {
       expect(row.length).toBeLessThanOrEqual(COLUMNS);
     }
-    // The bottom border is still the bottom border: it is drawn by
-    // `borderStyle`, and a compressed row is what used to push it off screen.
-    expect(frame).toContain("╰");
+    // The bottom rule is still the bottom rule: it is drawn by
+    // `borderStyle`, and a compressed row is what used to push the bottom
+    // chrome off screen — the footer must still be the last thing rendered.
+    const nonEmpty = frame.split("\n").filter((l) => l.trim().length > 0);
+    expect(nonEmpty.at(-1)).toContain("Send");
   });
 });

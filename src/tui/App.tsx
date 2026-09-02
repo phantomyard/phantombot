@@ -37,7 +37,7 @@ import {
   unsetSecret,
   type Consequence,
 } from "./actions.ts";
-import { Frame } from "./components/Frame.tsx";
+import { Frame, NoticeContext } from "./components/Frame.tsx";
 import { ConfirmScreen, type ConfirmRequest } from "./screens/Confirm.tsx";
 import {
   FileEditorScreen,
@@ -2141,14 +2141,20 @@ export function App(props: AppProps): React.ReactElement {
           It is the window MINUS one row (`renderRows`): a frame exactly as
           tall as the terminal puts Ink on its clear-and-redraw path, which is
           what made typing and the spinner flicker. */}
-      <Box flexDirection="column" height={renderRows(size)}>
-        {body}
-        {notice ? (
-          <Box paddingX={2}>
-            <Text color={theme.warn}>{notice}</Text>
-          </Box>
-        ) : null}
-      </Box>
+      {/* Notices render INSIDE the frame, in the reserved slot above the
+          footer (see NoticeContext) — never below the footer bar. The
+          trailing fallback below is only for the frameless no-phantom
+          placeholder, where no Frame exists to own the notice slot. */}
+      <NoticeContext.Provider value={notice}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          {body}
+          {notice && !persona ? (
+            <Box paddingX={2}>
+              <Text color={theme.warn}>{notice}</Text>
+            </Box>
+          ) : null}
+        </Box>
+      </NoticeContext.Provider>
     </TerminalSizeContext.Provider>
   );
 }
