@@ -35,6 +35,7 @@ interface Harness {
     routings: unknown[];
     clears: Array<{ tombstone?: boolean } | undefined>;
     secrets: Array<string | "CLEARED">;
+    authWrites: Array<{ provider: string; key: string }>;
     searches: Array<{ title: string; banner?: string; initial?: string }>;
   };
 }
@@ -56,6 +57,7 @@ function harness(over: {
     routings: [] as unknown[],
     clears: [] as Array<{ tombstone?: boolean } | undefined>,
     secrets: [] as Array<string | "CLEARED">,
+    authWrites: [] as Array<{ provider: string; key: string }>,
     searches: [] as Array<{ title: string; banner?: string; initial?: string }>,
   };
   const c = [...(over.choose ?? [])];
@@ -98,7 +100,10 @@ function harness(over: {
     unsetSecret: async () => {
       applied.secrets.push("CLEARED");
     },
-    writeAuth: async () => ({ ok: true, path: "/tmp/.pi/agent/auth.json" }),
+    writeAuth: async (provider, value) => {
+      applied.authWrites.push({ provider, key: value });
+      return { ok: true, path: "/tmp/.pi/agent/auth.json" };
+    },
     applyChain: async (chain) => void applied.chains.push([...chain]),
     applyRouting: async (choices) => void applied.routings.push(choices),
     clearRouting: async (opts) => void applied.clears.push(opts),
@@ -331,10 +336,10 @@ describe("the brain flow", () => {
       routing: { provider: "openrouter" },
       models: [], // empty initial models
     });
-    h.deps.listModels = async () => {
+    h.deps.listModels = async (extraEnv) => {
       listCalls++;
-      // On second call (after auth sync), return models
-      return listCalls > 1 ? MODELS : [];
+      // On second call (or with extraEnv), return models
+      return extraEnv?.OPENROUTER_API_KEY === "sk-stored" ? MODELS : [];
     };
     const notice = await configureBrain(h.q, h.deps);
     expect(notice).toBe("brain saved: pi");
@@ -343,5 +348,18 @@ describe("the brain flow", () => {
       provider: "openrouter",
       primaryModel: "gpt-5.2",
     });
+  });
+
+  test("cancelling the wizard before completion does not mutate Pi's shared auth store", async () => {
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: [undefined], // Esc / cancel at the provider selection prompt
+      storedKey: "sk-instance-key",
+      routing: { provider: "openrouter" },
+      models: [], // empty initial models triggers pre-selection refresh attempt
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain unchanged");
+    expect(h.applied.authWrites).toEqual([]);
   });
 });

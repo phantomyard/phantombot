@@ -281,13 +281,11 @@ export async function configurePi(
   let models = deps.piBin ? await deps.listModels() : [];
   if (deps.storedKey && deps.routing.provider && deps.piBin) {
     if (models.filter((m) => m.provider === deps.routing.provider).length === 0) {
-      await deps.writeAuth(deps.routing.provider, deps.storedKey);
-      let refreshed = await deps.listModels();
-      if (refreshed.filter((m) => m.provider === deps.routing.provider).length === 0) {
-        const envVar = providerEnvVar(deps.routing.provider);
-        if (envVar) refreshed = await deps.listModels({ [envVar]: deps.storedKey });
+      const envVar = providerEnvVar(deps.routing.provider);
+      if (envVar) {
+        const refreshed = await deps.listModels({ [envVar]: deps.storedKey });
+        if (refreshed.length > 0) models = mergeModels(models, refreshed);
       }
-      if (refreshed.length > 0) models = mergeModels(models, refreshed);
     }
   }
 
