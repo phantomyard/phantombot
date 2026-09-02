@@ -124,6 +124,29 @@ describe("checkConfiguredHarnesses", () => {
     expect(missingPi?.resolved).toBeUndefined();
   });
 
+  test("resolves each named Pi instance through the Pi binary", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "phantombot-harness-"));
+    const pi = join(dir, "pi");
+    await writeFile(pi, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(pi, 0o755);
+    const named = {
+      harnesses: {
+        chain: ["pi-primary", "pi-fallback"],
+        claude: { bin: "claude" },
+        pi: { bin: "pi" },
+        instances: {
+          "pi-primary": { type: "pi", bin: "pi" },
+          "pi-fallback": { type: "pi", bin: "pi" },
+        },
+      },
+    } as unknown as Config;
+    const results = await checkConfiguredHarnesses(named, dir);
+    expect(results.map((r) => [r.id, r.resolved])).toEqual([
+      ["pi-primary", pi],
+      ["pi-fallback", pi],
+    ]);
+  });
+
   test("checks harnesses used only by persona overrides", async () => {
     const personaConfig = {
       harnesses: {

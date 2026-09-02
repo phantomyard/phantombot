@@ -16,6 +16,10 @@ import { PiHarness } from "./pi.ts";
 import { CodexHarness } from "./codex.ts";
 import type { Harness } from "./types.ts";
 
+export function piInstanceSecretName(id: string): string {
+  return `PHANTOMBOT_PI_API_KEY_${id.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase()}`;
+}
+
 export function harnessChainIds(config: Config, persona?: string): string[] {
   if (persona) {
     const override = config.harnesses.personas?.[persona]?.chain;
@@ -37,6 +41,13 @@ export function buildHarnessChain(
       out.push(new PiHarness(config.harnesses.pi));
     } else if (id === "codex") {
       out.push(new CodexHarness(config.harnesses.codex ?? { bin: "codex", model: "" }));
+    } else if (config.harnesses.instances?.[id]?.type === "pi") {
+      const instance = config.harnesses.instances[id]!;
+      out.push(new PiHarness({
+        ...instance,
+        id,
+        apiKeyEnv: piInstanceSecretName(id),
+      }));
     } else {
       err.write(`warning: unknown harness '${id}', skipping\n`);
     }

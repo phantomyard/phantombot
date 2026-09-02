@@ -1114,6 +1114,22 @@ describe("/model", () => {
     expect(r!.reply).toContain("opus, sonnet, haiku");
   });
 
+  test("/model list uses a named instance's declared harness type", async () => {
+    const config = modelConfig();
+    config.harnesses.instances = {
+      // Guard against classifying by the id prefix if more instance types are
+      // admitted later; today's schema only permits named Pi instances.
+      "pi-codex": { type: "codex", bin: "codex" } as unknown as NonNullable<
+        typeof config.harnesses.instances
+      >[string],
+    };
+    const r = await handleSlashCommand(
+      "/model list",
+      ctx({ harnesses: [new StubHarness("pi-codex")], config }),
+    );
+    expect(r!.reply).toContain("codex picks its default model");
+  });
+
   test("/model set without config fails loud", async () => {
     const r = await handleSlashCommand("/model opus", ctx());
     expect(r!.reply).toContain("didn't pass config");

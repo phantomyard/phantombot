@@ -747,6 +747,12 @@ export interface Config {
      * operator pinned deliberately. Absent/empty = nothing pinned.
      */
     ownBins?: string[];
+    /** Named harness instances used when the same harness appears twice. */
+    instances?: Record<string, {
+      type: "pi";
+      bin: string;
+      routing?: import("./lib/piRouting.ts").PiRoutingConfig;
+    }>;
     claude: { bin: string; model: string; fallbackModel: string };
     pi: {
       bin: string;
@@ -1261,6 +1267,19 @@ export async function loadConfig(persona?: string): Promise<Config> {
     // reads only its own suffixed ones. See buildTelegramConfig.
     isDefaultPersona ? undefined : personaEnvSuffix(personaLayer),
   );
+  const tomlHarnessInstances = isTomlTable(tomlHarnesses.instances)
+    ? tomlHarnesses.instances
+    : undefined;
+  const harnessInstances: Config["harnesses"]["instances"] = {};
+  for (const [name, raw] of Object.entries(tomlHarnessInstances ?? {})) {
+    if (!isTomlTable(raw) || asString(raw.type) !== "pi") continue;
+    const routing = isTomlTable(raw.routing) ? raw.routing : undefined;
+    harnessInstances[name] = {
+      type: "pi",
+      bin: asString(raw.bin) ?? asString(tomlPi.bin) ?? usablePersistedBin(state.harness_bins?.pi) ?? "pi",
+      routing: resolveRouting(routing, {}),
+    };
+  }
   let telegramPersonas = buildTelegramPersonasConfig(tomlTelegram);
   const globalChannels = isTomlTable(globalToml.channels)
     ? globalToml.channels
@@ -1369,6 +1388,7 @@ export async function loadConfig(persona?: string): Promise<Config> {
     harnesses: {
       chain: migratedChain,
       personas: buildHarnessPersonasConfig(tomlHarnessPersonas),
+      instances: Object.keys(harnessInstances).length > 0 ? harnessInstances : undefined,
 
       ownBins: personaOwnBins,
 

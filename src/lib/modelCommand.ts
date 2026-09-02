@@ -103,14 +103,14 @@ export function formatModelShow(
   if (!info) {
     return `${harnessId}: model info unavailable (harness doesn't report it)`;
   }
-  switch (harnessId) {
-    case "pi": {
-      const lines = [`pi primary: ${info.model}`];
+  if (harnessId === "pi" || harnessId.startsWith("pi-")) {
+      const lines = [`${harnessId} primary: ${info.model}`];
       if (info.provider) lines.push(`provider:   ${info.provider}`);
       lines.push(`coding:     ${info.codingModel ?? "(same as primary)"}`);
       lines.push(`image:      ${info.imageModel ?? "(none)"}`);
       return lines.join("\n");
-    }
+  }
+  switch (harnessId) {
     case "claude":
       return (
         `claude model: ${info.model}` +
@@ -167,9 +167,10 @@ export async function applyModelRequest(
   persona?: string,
 ): Promise<ModelApplyResult> {
   const target = await resolveHarnessWriteTarget(config, persona);
+  if (harnessId === "pi" || config.harnesses.instances?.[harnessId]?.type === "pi") {
+    return applyPi(req, config, target, harnessId === "pi" ? undefined : harnessId);
+  }
   switch (harnessId) {
-    case "pi":
-      return applyPi(req, config, target);
     case "claude":
       return applyClaude(req, config, target);
     case "codex":
@@ -186,6 +187,7 @@ async function applyPi(
   req: ModelRequest & { kind: "set" | "clear" },
   config: Config,
   target: HarnessWriteTarget,
+  instanceId?: string,
 ): Promise<ModelApplyResult> {
   if (req.kind === "clear") {
     return {
@@ -196,12 +198,16 @@ async function applyPi(
     };
   }
   const { tomlKey, envVar, routingField } = PI_ROLE_WRITES[req.role];
+  const base = instanceId
+    ? ["harnesses", "instances", instanceId, "routing"]
+    : ["harnesses", "pi", "routing"];
   await updateConfigToml(target.path, (toml) => {
-    setIn(toml, ["harnesses", "pi", "routing", tomlKey], req.slug);
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
+    setIn(toml, [...base, tomlKey], req.slug);
     // Naming a model REVOKES a previous "use Pi's own config" opt-out, exactly
     // as the wizard's configure path does — otherwise the tombstone would keep
     // short-circuiting resolveRouting and this write would be inert.
-    const routingToml = getIn(toml, ["harnesses", "pi", "routing"]) as
+    const routingToml = getIn(toml, base) as
       | Record<string, unknown>
       | undefined;
     if (routingToml) delete routingToml[ROUTING_LOCAL_CONFIG_KEY];
@@ -210,12 +216,16 @@ async function applyPi(
   // ambient env var (a shell export) would otherwise outrank the TOML we just
   // wrote for the rest of this process's life. config.toml is the only STORE
   // since #452; this keeps the live process consistent with it.
-  const envWrites = suffixEnvKeys({ [envVar]: req.slug }, target.envSuffix);
-  const routing = (config.harnesses.pi.routing ??= {});
+  const envWrites = instanceId
+    ? {}
+    : suffixEnvKeys({ [envVar]: req.slug }, target.envSuffix);
+  const routing = instanceId
+    ? (config.harnesses.instances![instanceId]!.routing ??= {})
+    : (config.harnesses.pi.routing ??= {});
   delete routing.useLocalConfig;
   routing[routingField] = req.slug;
   for (const [k, v] of Object.entries(envWrites)) process.env[k] = v;
-  return { ok: true, summary: `pi ${req.role} model → ${req.slug}` };
+  return { ok: true, summary: `${instanceId ?? "pi"} ${req.role} model → ${req.slug}` };
 }
 
 async function applyClaude(

@@ -79,6 +79,11 @@ export interface BrainDeps {
   };
   /** The stored Pi API key, when one is readable — drives the "keep it" hint. */
   storedKey?: string;
+  /** Existing values for named Pi slots (used only for a Pi -> Pi chain). */
+  piInstances?: Partial<Record<"primary" | "fallback", {
+    routing: BrainDeps["routing"];
+    storedKey?: string;
+  }>>;
   /** Where the writes land — shown back so the user knows which file moved. */
   targetPath: string;
   /** Persona scope (vs the global fallback file) — decides the tombstone. */
@@ -97,12 +102,13 @@ export interface BrainDeps {
   probeProviderKey?(providerId: string, key: string): Promise<KeyProbeResult>;
   setSecret(
     value: string,
+    instanceId?: string,
   ): Promise<{ ok: boolean; persona?: string; error?: string }>;
-  unsetSecret(): Promise<unknown>;
+  unsetSecret(instanceId?: string): Promise<unknown>;
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
   applyChain(chain: readonly string[]): Promise<void>;
-  applyRouting(choices: RoutingChoices): Promise<unknown>;
-  clearRouting(opts?: { tombstone?: boolean }): Promise<void>;
+  applyRouting(choices: RoutingChoices, instanceId?: string): Promise<unknown>;
+  clearRouting(opts?: { tombstone?: boolean }, instanceId?: string): Promise<void>;
 }
 
 const NONE = "";
@@ -152,7 +158,7 @@ export async function configureBrain(
       label: HARNESS_LABELS[id] ?? id,
       hint: harnessHint(id, deps),
     })),
-    initial: deps.chain[0],
+    initial: deps.chain[0]?.startsWith("pi-") ? "pi" : deps.chain[0],
   });
   if (primary === undefined) return "brain unchanged";
 
@@ -162,27 +168,30 @@ export async function configureBrain(
     options: [
       { value: NONE, label: "(none)", hint: "no fallback if the primary fails" },
       ...harnessIds
-        .filter((id) => id !== primary)
+        .filter((id) => id !== primary || id === "pi")
         .map((id) => ({
           value: id,
           label: HARNESS_LABELS[id] ?? id,
           hint: harnessHint(id, deps),
         })),
     ],
-    initial: deps.chain[1] ?? NONE,
+    initial: deps.chain[1]?.startsWith("pi-") ? "pi" : (deps.chain[1] ?? NONE),
   });
   if (fallback === undefined) return "brain unchanged";
 
-  // Pi is the only harness with anything to configure, and it can appear in
-  // only one slot (a harness never appears twice in the chain), so at most one
-  // configure pass ever runs.
-  const piRole = primary === "pi" ? "primary" : fallback === "pi" ? "fallback" : undefined;
-  if (piRole) {
-    const cancelled = await configurePi(q, deps, piRole);
+  const bothPi = primary === "pi" && fallback === "pi";
+  if (primary === "pi") {
+    const cancelled = await configurePi(q, deps, "primary", undefined, bothPi ? "pi-primary" : undefined);
+    if (cancelled) return "brain unchanged";
+  }
+  if (fallback === "pi") {
+    const cancelled = await configurePi(q, deps, "fallback", undefined, bothPi ? "pi-fallback" : undefined);
     if (cancelled) return "brain unchanged";
   }
 
-  const chain = [primary, ...(fallback !== NONE ? [fallback] : [])];
+  const chain = bothPi
+    ? ["pi-primary", "pi-fallback"]
+    : [primary, ...(fallback !== NONE ? [fallback] : [])];
   await deps.applyChain(chain);
   const where = `saved to ${deps.targetPath}`;
   q.note(
@@ -207,7 +216,11 @@ export async function configurePi(
   deps: BrainDeps,
   role: "primary" | "fallback",
   opts?: { askMode?: boolean },
+  instanceId?: string,
 ): Promise<boolean> {
+  const current = instanceId
+    ? (deps.piInstances?.[role] ?? { routing: {}, storedKey: undefined })
+    : { routing: deps.routing, storedKey: deps.storedKey };
   // askMode:false — the caller already asked the configure-vs-host question
   // (brain onboarding does, to show it in flow order) and chose "configure".
   if (!deps.piBin) {
@@ -242,7 +255,7 @@ export async function configurePi(
     // ACTIVELY clear — see clearPiRouting. The tombstone only exists in
     // persona scope: in the global file it would be inherited by every persona
     // that has not stated its own routing.
-    await deps.clearRouting({ tombstone: deps.personaScope });
+    await deps.clearRouting({ tombstone: deps.personaScope }, instanceId);
     q.note(
       "Pi: using host configuration",
       `cleared phantombot's Pi routing from ${deps.targetPath} — Pi decides for itself, from its own local config. Re-run Brain and choose Configure to override.`,
@@ -267,9 +280,9 @@ export async function configurePi(
       })),
     ],
     initial:
-      deps.routing.provider !== undefined &&
-      providerChoices(models).some((p) => p.id === deps.routing.provider)
-        ? deps.routing.provider
+      current.routing.provider !== undefined &&
+      providerChoices(models).some((p) => p.id === current.routing.provider)
+        ? current.routing.provider
         : NONE,
   });
   if (provider === undefined) return true;
@@ -277,7 +290,7 @@ export async function configurePi(
   const keyLabel = provider ? `${provider} API key` : "Pi API key";
   let key = await q.value({
     title: keyLabel,
-    hint: deps.storedKey
+    hint: current.storedKey
       ? "a key is already stored — press Enter to keep it"
       : "paste the key; stored in the phantom's vault, never displayed. Empty = keep whatever is stored",
     masked: true,
@@ -296,13 +309,13 @@ export async function configurePi(
     const keyWrite = resolvePiApiKeyWrite(
       key,
       provider || undefined,
-      deps.routing.provider,
+      current.routing.provider,
     );
     const candidate =
       keyWrite.action === "set"
         ? keyWrite.value
         : keyWrite.action === "keep"
-          ? deps.storedKey
+          ? current.storedKey
           : undefined;
     if (!candidate) break;
     const result = await probe(provider || "google", candidate);
@@ -332,10 +345,10 @@ export async function configurePi(
   const keyWrite = resolvePiApiKeyWrite(
     key,
     provider || undefined,
-    deps.routing.provider,
+    current.routing.provider,
   );
   if (keyWrite.action === "set") {
-    const stored = await deps.setSecret(keyWrite.value);
+    const stored = await deps.setSecret(keyWrite.value, instanceId);
     if (!stored.ok) {
       q.note(
         "Pi API key",
@@ -368,7 +381,7 @@ export async function configurePi(
   } else if (keyWrite.action === "clear") {
     // Provider switched and nothing typed: the old key points at the wrong
     // provider now. Clear it rather than fire it at the new `--provider`.
-    await deps.unsetSecret();
+    await deps.unsetSecret(instanceId);
     q.note(
       "Pi API key",
       "provider changed and no new key entered — cleared the stale key so Pi falls back to its own local store",
@@ -383,7 +396,7 @@ export async function configurePi(
     slot: "primary",
     what: "the model that answers every turn",
     models: scoped,
-    initial: deps.routing.primaryModel,
+    initial: current.routing.primaryModel,
     allowNone: true,
   });
   if (primaryModel === CANCELLED) return true;
@@ -407,7 +420,7 @@ export async function configurePi(
       slot: "vision",
       what: "the delegate that looks at images when the primary can't",
       models: scoped.filter((m) => m.supportsImages),
-      initial: deps.routing.imageModel,
+      initial: current.routing.imageModel,
       allowNone: true,
     });
     if (visionPick === CANCELLED) return true;
@@ -420,7 +433,7 @@ export async function configurePi(
     slot: "coder",
     what: "swapped in for coding turns (defaults to the primary model)",
     models: scoped,
-    initial: (deps.routing.codingModel ?? primaryModel) || undefined,
+    initial: (current.routing.codingModel ?? primaryModel) || undefined,
     allowNone: true,
   });
   if (codingPick === CANCELLED) return true;
@@ -430,7 +443,7 @@ export async function configurePi(
     primaryModel,
     imageModel,
     codingModel: codingPick || undefined,
-  });
+  }, instanceId);
   q.note(
     "Model routing saved",
     [

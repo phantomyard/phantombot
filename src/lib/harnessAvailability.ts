@@ -25,6 +25,7 @@ export function harnessBin(config: Config, id: string): string | undefined {
   if (id === "claude") return config.harnesses.claude.bin;
   if (id === "pi") return config.harnesses.pi.bin;
   if (id === "codex") return config.harnesses.codex?.bin ?? "codex";
+  if (config.harnesses.instances?.[id]?.type === "pi") return config.harnesses.instances[id]!.bin;
   return undefined;
 }
 
@@ -32,6 +33,7 @@ function defaultHarnessBin(id: string): string | undefined {
   if (id === "claude") return "claude";
   if (id === "pi") return "pi";
   if (id === "codex") return "codex";
+  if (id.startsWith("pi-")) return "pi";
   return undefined;
 }
 
@@ -328,6 +330,14 @@ export function applyResolvedHarnessBins(
         ? { ...config.harnesses.claude, bin: bins.claude }
         : config.harnesses.claude,
       pi: bins.pi ? { ...config.harnesses.pi, bin: bins.pi } : config.harnesses.pi,
+      instances: config.harnesses.instances
+        ? Object.fromEntries(
+            Object.entries(config.harnesses.instances).map(([id, instance]) => [
+              id,
+              { ...instance, bin: bins[id] ?? instance.bin },
+            ]),
+          )
+        : undefined,
       codex: bins.codex
         ? { ...(config.harnesses.codex ?? { bin: "codex", model: "" }), bin: bins.codex }
         : config.harnesses.codex,

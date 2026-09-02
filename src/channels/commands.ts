@@ -1111,9 +1111,12 @@ async function handleModelList(
   primary: Harness,
   ctx: SlashCommandContext,
 ): Promise<SlashCommandResult> {
-  switch (primary.id) {
+  const primaryType =
+    ctx.config?.harnesses.instances?.[primary.id]?.type ?? primary.id;
+  switch (primaryType) {
     case "pi": {
-      const bin = ctx.config?.harnesses.pi.bin ?? "pi";
+      const bin = ctx.config?.harnesses.instances?.[primary.id]?.bin ??
+        ctx.config?.harnesses.pi.bin ?? "pi";
       const provider = primary.modelInfo?.().provider;
       let models = await listPiModels(bin);
       if (provider) models = models.filter((m) => m.provider === provider);
@@ -1172,6 +1175,7 @@ async function handleModelList(
  * because it's a UX number, not a behaviour-affecting one.
  */
 export function nominalContextWindow(harnessId: string): number {
+  if (harnessId.startsWith("pi-")) return 64_000;
   switch (harnessId) {
     case "claude":
       return 200_000;

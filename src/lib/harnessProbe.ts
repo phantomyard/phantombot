@@ -17,6 +17,7 @@ import { type Config } from "../config.ts";
 import { ClaudeHarness } from "../harnesses/claude.ts";
 import { CodexHarness } from "../harnesses/codex.ts";
 import { PiHarness } from "../harnesses/pi.ts";
+import { piInstanceSecretName } from "../harnesses/buildChain.ts";
 import { resolveHarnessAvailability } from "./harnessAvailability.ts";
 
 export interface ProbeResult {
@@ -48,9 +49,15 @@ export async function probeHarness(opts: {
     return { ok: false, detail: `'${opts.id}' is not on PATH` };
   }
   const bin = resolved.resolved;
+  const namedPi = opts.config.harnesses.instances?.[opts.id];
   const harness =
-    opts.id === "pi"
-      ? new PiHarness({ ...opts.config.harnesses.pi, bin })
+    opts.id === "pi" || namedPi?.type === "pi"
+      ? new PiHarness({
+          ...(namedPi ?? opts.config.harnesses.pi),
+          bin,
+          id: opts.id,
+          ...(namedPi ? { apiKeyEnv: piInstanceSecretName(opts.id) } : {}),
+        })
       : opts.id === "claude"
         ? new ClaudeHarness({
             ...opts.config.harnesses.claude,
@@ -66,6 +73,7 @@ export async function probeHarness(opts: {
         "You are a connectivity test. Follow the user's one instruction exactly.",
       userMessage: PROBE_PROMPT,
       history: [],
+      persona: opts.config.personaLayer ?? opts.config.defaultPersona,
       // Tight walls: a probe that can't answer in two minutes is a failure,
       // and idle silence past 30s already means something is wrong (auth
       // handshake, dead key, wedged proxy).

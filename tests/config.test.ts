@@ -1422,3 +1422,41 @@ max_chunk_chars = 7200
     expect(documentChunkChars(c)).toBe(7_200);
   });
 });
+
+describe("loadConfig — named Pi instances", () => {
+  test("parses two independent Pi providers in one fallback chain", async () => {
+    const cfgDir = join(workdir, "config", "phantombot");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(
+      join(cfgDir, "config.toml"),
+      `[harnesses]
+chain = ["pi-primary", "pi-fallback"]
+
+[harnesses.instances.pi-primary]
+type = "pi"
+
+[harnesses.instances.pi-primary.routing]
+provider = "openrouter"
+primary_model = "anthropic/claude-sonnet-4"
+
+[harnesses.instances.pi-fallback]
+type = "pi"
+
+[harnesses.instances.pi-fallback.routing]
+provider = "google"
+primary_model = "gemini-2.5-pro"
+`,
+      "utf8",
+    );
+    const c = await loadConfig();
+    expect(c.harnesses.chain).toEqual(["pi-primary", "pi-fallback"]);
+    expect(c.harnesses.instances?.["pi-primary"]?.routing).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "anthropic/claude-sonnet-4",
+    });
+    expect(c.harnesses.instances?.["pi-fallback"]?.routing).toMatchObject({
+      provider: "google",
+      primaryModel: "gemini-2.5-pro",
+    });
+  });
+});

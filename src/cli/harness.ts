@@ -46,7 +46,7 @@ import {
 import { setPersonaSecret, unsetPersonaSecret } from "../lib/vaultSecrets.ts";
 import { writePiApiKey } from "../lib/piAuthStore.ts";
 import { saveHarnessBins } from "../state.ts";
-import { harnessChainIds } from "../harnesses/buildChain.ts";
+import { harnessChainIds, piInstanceSecretName } from "../harnesses/buildChain.ts";
 
 export { whichBinary } from "../lib/harnessAvailability.ts";
 // The harness write resolver lives in lib/ so non-TUI writers (/model) share
@@ -130,7 +130,7 @@ export async function detectAvailability(
 
 export async function applyHarnessChain(
   configPath: string,
-  chain: readonly HarnessId[],
+  chain: readonly string[],
   persona?: string,
   scope: PersonaWriteScope = "global",
 ): Promise<void> {
@@ -166,22 +166,27 @@ export async function applyHarnessChain(
 export async function applyRouting(
   configPath: string,
   choices: RoutingChoices,
+  instanceId?: string,
 ): Promise<ReturnType<typeof computeRoutingWrites>> {
   const writes = computeRoutingWrites(choices);
   await updateConfigToml(configPath, (toml) => {
-    setIn(toml, ["harnesses", "pi", "routing", "primary_model"], writes.toml.primary_model);
+    const base = instanceId
+      ? ["harnesses", "instances", instanceId, "routing"]
+      : ["harnesses", "pi", "routing"];
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
+    setIn(toml, [...base, "primary_model"], writes.toml.primary_model);
     // Provider: drop the key when none was chosen so a switch back to Pi's
     // default clears a stale provider (mirrors the env "" = unset semantics).
-    setRoutingKey(toml, "provider", writes.toml.provider);
+    setRoutingKey(toml, "provider", writes.toml.provider, base);
     // Mirror the env "" = unset semantics into TOML: drop the key when there's
     // no image/coding model so a multimodal switch clears a stale entry.
-    setRoutingKey(toml, "image_model", writes.toml.image_model);
-    setRoutingKey(toml, "coding_model", writes.toml.coding_model);
+    setRoutingKey(toml, "image_model", writes.toml.image_model, base);
+    setRoutingKey(toml, "coding_model", writes.toml.coding_model, base);
     // Configuring models REVOKES a previous "use Pi's own config" opt-out in
     // the same write. Left behind, the tombstone would win over the models the
     // operator just picked (resolveRouting short-circuits on it) and the wizard
     // would report success while changing nothing.
-    setRoutingKey(toml, ROUTING_LOCAL_CONFIG_KEY, undefined);
+    setRoutingKey(toml, ROUTING_LOCAL_CONFIG_KEY, undefined, base);
   });
   return writes;
 }
@@ -200,9 +205,14 @@ export async function applyRouting(
 export async function clearPiRouting(
   configPath: string,
   opts: { tombstone?: boolean } = {},
+  instanceId?: string,
 ): Promise<ReturnType<typeof computeRoutingClears>> {
   const clears = computeRoutingClears();
   await updateConfigToml(configPath, (toml) => {
+    const base = instanceId
+      ? ["harnesses", "instances", instanceId, "routing"]
+      : ["harnesses", "pi", "routing"];
+    if (instanceId) setIn(toml, ["harnesses", "instances", instanceId, "type"], "pi");
     if (opts.tombstone) {
       // PERSONA scope: deleting the keys is not clearing them. A key this
       // persona no longer states falls back to the host's
@@ -210,9 +220,9 @@ export async function clearPiRouting(
       // unsuffixed ambient env — so a deleted persona routing silently becomes
       // the HOST routing. State the opt-out explicitly instead
       // (ROUTING_LOCAL_CONFIG_KEY), which resolveRouting honours over both.
-      setIn(toml, ["harnesses", "pi", "routing", ROUTING_LOCAL_CONFIG_KEY], true);
+      setIn(toml, [...base, ROUTING_LOCAL_CONFIG_KEY], true);
     }
-    const routing = getIn(toml, ["harnesses", "pi", "routing"]) as
+    const routing = getIn(toml, base) as
       | Record<string, unknown>
       | undefined;
     if (!routing) return;
@@ -225,15 +235,16 @@ function setRoutingKey(
   toml: TomlObject,
   key: string,
   value: string | boolean | undefined,
+  base: string[] = ["harnesses", "pi", "routing"],
 ): void {
-  const routing = getIn(toml, ["harnesses", "pi", "routing"]) as
+  const routing = getIn(toml, base) as
     | Record<string, unknown>
     | undefined;
   if (value === undefined) {
     if (routing && key in routing) delete routing[key];
     return;
   }
-  setIn(toml, ["harnesses", "pi", "routing", key], value);
+  setIn(toml, [...base, key], value);
 }
 
 export interface RunInput {
@@ -299,22 +310,12 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     })),
     // Pi is the default (SUPPORTED_HARNESSES[0]); an existing config wins.
     initialValue:
-      (currentChain[0] as HarnessId) ?? SUPPORTED_HARNESSES[0],
+      ((currentChain[0]?.startsWith("pi-") ? "pi" : currentChain[0]) as HarnessId) ??
+      SUPPORTED_HARNESSES[0],
   });
   if (primary === undefined) {
     q.cancel("cancelled");
     return 1;
-  }
-
-  // If Pi is the primary, configure it right here — offer to install when it's
-  // missing (the install can put it on PATH, so the fallback picker below then
-  // shows it as available), then run the now/later → API key → routing flow.
-  if (primary === "pi") {
-    const cancelled = await configurePi(config, availability, "primary", target, q);
-    if (cancelled) {
-      q.cancel("cancelled");
-      return 1;
-    }
   }
 
   const fallbackOptions: Array<{
@@ -323,7 +324,7 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
     hint?: string;
   }> = [
     { value: "none", label: "(none)", hint: "no fallback if primary fails" },
-    ...SUPPORTED_HARNESSES.filter((id) => id !== primary).map((id) => ({
+    ...SUPPORTED_HARNESSES.filter((id) => id !== primary || id === "pi").map((id) => ({
       value: id,
       label: id,
       hint: availability[id] ?? "not on PATH",
@@ -333,28 +334,40 @@ export async function runHarness(input: RunInput = {}): Promise<number> {
   const fallbackPick = await q.select<HarnessId | "none">({
     message: "Fallback harness",
     options: fallbackOptions,
-    initialValue: (currentChain[1] as HarnessId | undefined) ?? "none",
+    initialValue:
+      ((currentChain[1]?.startsWith("pi-") ? "pi" : currentChain[1]) as HarnessId | undefined) ??
+      "none",
   });
   if (fallbackPick === undefined) {
     q.cancel("cancelled");
     return 1;
   }
 
-  // Pi as the FALLBACK gets the exact same treatment as when it's primary —
-  // install offer, now/later, its own API key, and a full routing pass — so the
-  // fallback can point at a different provider/model entirely, not just reuse
-  // the primary's. (When Pi is the primary it was already handled above; it can
-  // only appear once in the chain, so this never double-runs.)
-  if (fallbackPick === "pi") {
-    const cancelled = await configurePi(config, availability, "fallback", target, q);
+  const bothPi = primary === "pi" && fallbackPick === "pi";
+  if (primary === "pi") {
+    const cancelled = await configurePi(
+      config, availability, "primary", target, q,
+      bothPi ? "pi-primary" : undefined,
+    );
     if (cancelled) {
       q.cancel("cancelled");
       return 1;
     }
   }
 
-  const chain: HarnessId[] = [primary as HarnessId];
-  if (fallbackPick !== "none") chain.push(fallbackPick as HarnessId);
+  if (fallbackPick === "pi") {
+    const cancelled = await configurePi(
+      config, availability, "fallback", target, q,
+      bothPi ? "pi-fallback" : undefined,
+    );
+    if (cancelled) {
+      q.cancel("cancelled");
+      return 1;
+    }
+  }
+
+  const chain: string[] = bothPi ? ["pi-primary", "pi-fallback"] : [primary];
+  if (!bothPi && fallbackPick !== "none") chain.push(fallbackPick);
 
   await applyHarnessChain(target.path, chain, persona, target.scope);
   q.note(
@@ -438,6 +451,7 @@ async function configurePi(
   role: "primary" | "fallback",
   target: HarnessWriteTarget,
   q: HarnessPrompts = clackPrompts,
+  instanceId?: string,
 ): Promise<boolean> {
   if (!availability.pi) {
     const doInstall = await q.confirm({
@@ -499,7 +513,7 @@ async function configurePi(
       // host's. In global scope the delete is already a true clear — there is
       // no layer above it to fall back to.
       tombstone: target.scope === "persona",
-    });
+    }, instanceId);
     q.note(
       [
         "Pi will use its own local config (~/.pi/agent/settings.json) — the",
@@ -526,7 +540,9 @@ async function configurePi(
   // global file: with a persona layer the file on disk is only half the answer
   // (its own config.toml wins per key), and pre-selecting the host's models for
   // a persona that overrode them is how an operator silently resets them.
-  const currentRouting = config.harnesses.pi.routing ?? {};
+  const currentRouting = instanceId
+    ? (config.harnesses.instances?.[instanceId]?.routing ?? {})
+    : (config.harnesses.pi.routing ?? {});
   const provider = await pickProvider(models, currentRouting.provider, q);
   if (provider === CANCELLED) return true;
 
@@ -545,21 +561,22 @@ async function configurePi(
   // the old provider's key is fired at the new `--provider` and auth fails. The
   // decision is a pure, tested function; here we just enact it.
   const keyWrite = resolvePiApiKeyWrite(apiKey, provider, currentRouting.provider);
+  const apiKeyName = instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY;
   if (keyWrite.action === "set") {
     const stored = await setPersonaSecret(
       config,
-      ENV_PI_API_KEY,
+      apiKeyName,
       keyWrite.value,
       target.persona,
     );
     if (!stored.ok) {
       q.note(
-        `could not save ${ENV_PI_API_KEY} to the ${stored.persona} vault: ${stored.error}\n` +
+        `could not save ${apiKeyName} to the ${stored.persona} vault: ${stored.error}\n` +
           "Pi will fall back to its own local store until this is fixed.",
         "Pi API key",
       );
     } else {
-      q.note(`saved ${ENV_PI_API_KEY} to the ${stored.persona} vault`, "Pi API key");
+      q.note(`saved ${apiKeyName} to the ${stored.persona} vault`, "Pi API key");
     }
     // Refresh the catalog with the key we just took. On a fresh install the
     // first listing was EMPTY (Pi had no key, so `--list-models` printed "No
@@ -611,9 +628,13 @@ async function configurePi(
     }
     if (refreshed.length > 0) models = refreshed;
   } else if (keyWrite.action === "clear") {
-    await unsetPersonaSecret(config, ENV_PI_API_KEY, target.persona);
+    await unsetPersonaSecret(
+      config,
+      apiKeyName,
+      target.persona,
+    );
     q.note(
-      `provider changed and no new key entered — cleared the stale ${ENV_PI_API_KEY} ` +
+      `provider changed and no new key entered — cleared the stale ${apiKeyName} ` +
         `so Pi falls back to its own local store`,
       "Pi API key",
     );
@@ -631,6 +652,7 @@ async function configurePi(
     provider,
     models,
     target,
+    instanceId,
   });
 }
 
@@ -669,11 +691,15 @@ async function runRoutingWizard(
      * callers that configure the host itself need not pass one.
      */
     target?: HarnessWriteTarget;
+    /** Named Pi instance when the chain contains Pi twice. */
+    instanceId?: string;
   } = {},
 ): Promise<boolean> {
   const target: HarnessWriteTarget = opts.target ??
     { path: config.configPath, scope: "global" };
-  const current = config.harnesses.pi.routing ?? {};
+  const current = opts.instanceId
+    ? (config.harnesses.instances?.[opts.instanceId]?.routing ?? {})
+    : (config.harnesses.pi.routing ?? {});
 
   // `forceCustom` (the "configure now" path) goes straight into per-capability
   // model selection — Pi is already the chosen harness, so the "use defaults?"
@@ -767,7 +793,7 @@ async function runRoutingWizard(
     imageModel,
     codingModel,
   };
-  const writes = await applyRouting(target.path, choices);
+  const writes = await applyRouting(target.path, choices, opts.instanceId);
   q.note(
     [
       `provider: ${writes.toml.provider ?? "(none — Pi's default)"}`,

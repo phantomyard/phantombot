@@ -227,6 +227,13 @@ Three properties worth knowing when touching this code:
    primary and one fallback. Operators can set a longer global or per-persona
    chain directly in `config.toml`.
 
+Named Pi instances are the exception to harness-type uniqueness in the
+two-slot wizard. A Pi-to-Pi selection is serialized as
+`["pi-primary", "pi-fallback"]`; each `[harnesses.instances.<id>]` table owns
+its routing and deterministic persona-vault key. The full instance id is the
+runtime `Harness.id`, so one provider failure cannot cool down, reset, or alert
+on behalf of the other. Legacy bare `pi` remains the default instance.
+
 ## Non-goals
 
 - Multi-tenant. Phantombot is single-operator.

@@ -91,8 +91,8 @@ describe("wizard brain onboarding", () => {
     // primary model free-text → coder none → test → fail → back to configure.
     const { q } = fakeQ([
       "pi", // primary
-      "host", // use host configuration (skip the long provider pass)
       "", // fallback: none
+      "host", // use host configuration (skip the long provider pass)
       "test", // test now
       "configure", // restart prompt → back to configure
     ]);
@@ -106,7 +106,7 @@ describe("wizard brain onboarding", () => {
   });
 
   test("a failed probe then start-over reruns the flow; a passing retest lands in chat", async () => {
-    const attempt = ["pi", "host", "", "test"];
+    const attempt = ["pi", "", "host", "test"];
     const { q } = fakeQ([...attempt, "restart", ...attempt]);
     let calls = 0;
     const { deps, chains } = fakeDeps({
@@ -123,6 +123,7 @@ describe("wizard brain onboarding", () => {
     const { q } = fakeQ([
       "claude", // primary (chain-only: no configure step)
       "pi", // fallback
+      "host", // fallback Pi uses its local configuration
       "test", // test now
     ]);
     const { deps, chains } = fakeDeps();
@@ -135,8 +136,8 @@ describe("wizard brain onboarding", () => {
   test("skipping the test saves the chain but lands in configure", async () => {
     const { q } = fakeQ([
       "pi",
-      "host", // host configuration
       "", // fallback: none
+      "host", // host configuration
       "skip", // skip the test
     ]);
     const { deps, chains } = fakeDeps();
@@ -167,8 +168,8 @@ describe("wizard brain onboarding", () => {
     const { q } = fakeQ([
       "pi", // primary (not installed yet)
       "install", // install now
-      "host", // use host configuration
       "", // fallback: none
+      "host", // use host configuration
       "test", // test → pass
     ]);
     const { deps, chains } = fakeDeps({
@@ -186,5 +187,17 @@ describe("wizard brain onboarding", () => {
     expect(installs).toBe(1);
     expect(r.landing).toBe("chat");
     expect(chains).toEqual([["pi"]]);
+  });
+
+  test("Pi primary and Pi fallback become independent named instances", async () => {
+    const { q } = fakeQ([
+      "pi", "pi", // primary, fallback
+      "host", "host", // configure each instance independently
+      "skip",
+    ]);
+    const { deps, chains } = fakeDeps();
+    const r = await runBrainOnboarding(q, deps);
+    expect(r.notice).toContain("pi-primary → pi-fallback");
+    expect(chains).toEqual([["pi-primary", "pi-fallback"]]);
   });
 });
