@@ -54,14 +54,16 @@ export function Frame(props: {
   // so a notice appearing never pushes the footer off the bottom of the
   // window (the layout-shift class of bug). `frameChromeRows` counts it.
   const notice = useContext(NoticeContext);
+  /* The slot is exactly one row: collapse embedded newlines FIRST
+     (wrap="truncate" only clips width — it never flattens a multiline
+     string) and truncate width, so no notice can ever spill into a
+     second row and push the footer out of the fixed chrome. */
+  const oneLineNotice = notice?.replace(/[\r\n\u2028\u2029]+/g, " ⏎ ");
   const noticeRow = (
     <Box width="100%" paddingX={1}>
-      {notice ? (
-        /* Truncate, never wrap: the slot is exactly one row, so a long
-           notice (a path, an error) must clip here instead of spilling into
-           a second row and pushing the footer out of the fixed chrome. */
+      {oneLineNotice ? (
         <Text color={theme.warn} wrap="truncate">
-          {notice}
+          {oneLineNotice}
         </Text>
       ) : (
         <Text> </Text>

@@ -93,6 +93,37 @@ describe("reserved notice slot", () => {
     expect(last).toContain("quit");
   });
 
+  test("embedded newlines collapse to one row — footer stays last", () => {
+    /* wrap="truncate" only clips WIDTH; a multiline notice would still
+       consume one row per line and shove the footer out. The Frame must
+       flatten the notice to a single line before rendering. */
+    const MULTILINE = "channels updated\nreembed failed\nat /tmp/x.sqlite";
+    const out = renderFrame(80, 12, MULTILINE);
+    const lines = out.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    // Each original line is present (joined), but on ONE row only.
+    const joined = out.replace(/[\n\r]+/g, "");
+    expect(joined).toContain("channels updated");
+    expect(joined).toContain("reembed failed");
+    expect(joined).toContain("at /tmp/x.sqlite");
+    // No row contains only the tail line — it was flattened, not stacked.
+    expect(lines.filter((l) => l.trim() === "at /tmp/x.sqlite").length).toBe(0);
+    // Exactly one notice row, and the footer is still last.
+    const noticeRows = lines.filter((l) => l.includes("reembed failed"));
+    expect(noticeRows.length).toBe(1);
+    const last = lines[lines.length - 1];
+    expect(last).toContain("quit");
+  });
+
+  test("a CRLF notice collapses to one row too", () => {
+    const out = renderFrame(80, 12, "first\r\nsecond");
+    const lines = out.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    expect(lines.filter((l) => l.trim() === "second").length).toBe(0);
+    const last = lines[lines.length - 1];
+    expect(last).toContain("quit");
+  });
+
   test("an empty notice still reserves exactly one row", () => {
     const out = renderFrame(40, 12, undefined);
     const last =
