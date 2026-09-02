@@ -622,15 +622,23 @@ export function ChatScreen(props: {
           )}
         </Box>
       ) : null}
+      {/* FRAMELESS prompt strip: a rule above and below, open at the sides —
+          the claude/codex/pi look. No corners to shear, and the two rule rows
+          cost exactly what the old border's top+bottom rows cost, so the
+          chrome budget is unchanged. Each rule is a border-only box sized by
+          the layout engine (never a run of `─` characters). The marginBottom
+          on the lower rule keeps a blank row of air above the footer. */}
       <Box
-        borderStyle="round"
+        borderStyle="single"
         borderColor={busy ? theme.dim : theme.accent}
-        paddingX={1}
-        flexDirection="column"
-      >
+        borderTop={false}
+        borderLeft={false}
+        borderRight={false}
+      />
+      <Box paddingX={1} flexDirection="column">
         {/* The rows are pre-wrapped to the inner width by promptBox.ts — what
-            is measured is what is drawn, so the border cannot shear. The
-            caret is a span IN the wrap stream, so it never overflows a row. */}
+            is measured is what is drawn. The caret is a span IN the wrap
+            stream, so it never overflows a row. */}
         {inputRows.map((row, i) => (
           <Text key={i}>
             {row.map((seg, j) =>
@@ -656,6 +664,14 @@ export function ChatScreen(props: {
           </Text>
         ))}
       </Box>
+      <Box
+        borderStyle="single"
+        borderColor={busy ? theme.dim : theme.accent}
+        borderTop={false}
+        borderLeft={false}
+        borderRight={false}
+        marginBottom={1}
+      />
     </Frame>
   );
 }

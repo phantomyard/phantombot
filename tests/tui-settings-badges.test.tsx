@@ -158,7 +158,9 @@ describe("settings badge semantics", () => {
   });
 
   test("an omitted voice line is optional too", async () => {
-    const text = await renderSettings([]);
+    // The reserved notice slot costs the window one row, so Voice — the last
+    // row — sits just below the fold at the default cursor; scroll to it.
+    const text = await renderSettings([], 7);
     const row = rowOf(text, "Voice");
     expect(row.endsWith("optional")).toBe(true);
   });

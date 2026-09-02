@@ -15,7 +15,7 @@
  * resize listener in `App.tsx` that asks for a re-render — and nowhere else.
  */
 
-import React from "react";
+import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 
 import { theme } from "../theme.ts";
@@ -50,6 +50,19 @@ export function Frame(props: {
   children: React.ReactNode;
 }): React.ReactElement {
   const boxed = frameVariant() === "boxed";
+  // The notice slot is RESERVED — always exactly one row, blank when empty —
+  // so a notice appearing never pushes the footer off the bottom of the
+  // window (the layout-shift class of bug). `frameChromeRows` counts it.
+  const notice = useContext(NoticeContext);
+  const noticeRow = (
+    <Box width="100%" paddingX={1}>
+      {notice ? (
+        <Text color={theme.warn}>{notice}</Text>
+      ) : (
+        <Text> </Text>
+      )}
+    </Box>
+  );
   // The bare header prints the product name itself, so a breadcrumb that also
   // starts with it would read `phantombot v1.1.316 ▸ phantombot ▸ robbie`.
   const crumbs = props.title.filter((c) => c !== "phantombot");
@@ -106,6 +119,7 @@ export function Frame(props: {
         <Box flexDirection="column" flexGrow={1} paddingX={1}>
           {body}
         </Box>
+        {noticeRow}
         {footer}
       </Box>
     );
@@ -123,10 +137,18 @@ export function Frame(props: {
         {header}
         {body}
       </Box>
+      {noticeRow}
       {footer}
     </Box>
   );
 }
+
+/**
+ * One-line status text rendered between the frame's bottom edge and the
+ * footer bar. Set from `App.tsx` via `NoticeContext`; `undefined` renders the
+ * reserved blank row, so an arriving notice never shifts the layout.
+ */
+export const NoticeContext = createContext<string | undefined>(undefined);
 
 /** A labelled value line: `label   value`, aligned by the layout engine. */
 export function Field(props: {
