@@ -7,9 +7,11 @@ import {
   applyHarnessChain,
   detectAvailability,
   piInstallCommand,
+  runHarness,
   SUPPORTED_HARNESSES,
   whichBinary,
 } from "../src/cli/harness.ts";
+import type { HarnessPrompts } from "../src/cli/harnessPrompts.ts";
 import { checkConfiguredHarnesses } from "../src/lib/harnessAvailability.ts";
 import type { Config } from "../src/config.ts";
 
@@ -167,5 +169,90 @@ describe("detectAvailability (issue #450)", () => {
   test("resolves a bare configured bin from PATH", async () => {
     const avail = await detectAvailability(configWithStaleBin("claude"), dir);
     expect(avail.claude).toBe(join(dir, "claude"));
+  });
+});
+
+describe("runHarness dual-Pi duplicate host config rule", () => {
+  test("Pi primary (local) and Pi fallback suppresses local config option for fallback", async () => {
+    const selects: Array<{ message: string; options: readonly unknown[] }> = [];
+    const notes: Array<{ body: string; title?: string }> = [];
+
+    const selectAnswers: Array<string | undefined> = [
+      "pi", // primary
+      "pi", // fallback
+      "local", // primary config mode -> local
+      // fallback mode prompt should be bypassed
+      "google", // fallback provider
+      "gemini-2.5-flash", // fallback primary model
+      "gemini-2.5-flash", // fallback vision model
+      "gemini-2.5-flash", // fallback coding model
+    ];
+
+    const q: HarnessPrompts = {
+      select: async (input) => {
+        selects.push(input);
+        const ans = selectAnswers.shift();
+        return ans as never;
+      },
+      text: async () => "",
+      password: async () => "",
+      confirm: async () => true,
+      note: (body, title) => {
+        notes.push({ body, title });
+      },
+      intro: () => {},
+      outro: () => {},
+      cancel: () => {},
+      canRunInteractiveInstaller: false,
+    };
+
+    const config = {
+      configPath: join(workdir, "config.toml"),
+      personasDir: join(workdir, "personas"),
+      defaultPersona: "robbie",
+      harnesses: {
+        chain: ["pi"],
+        pi: { bin: "/usr/bin/pi" },
+        codex: { bin: undefined, model: "" },
+        claude: { bin: undefined },
+      },
+    } as unknown as Config;
+
+    const availability = {
+      pi: "/usr/bin/pi",
+      codex: undefined,
+      claude: undefined,
+    };
+
+    const status = await runHarness({
+      config,
+      availability,
+      prompts: q,
+      serviceControl: {
+        isActive: async () => false,
+        restart: async () => ({ ok: true }),
+        start: async () => ({ ok: true }),
+        stop: async () => ({ ok: true }),
+        rerenderUnitIfStale: async () => ({ ok: true, rerendered: false }),
+      },
+    });
+
+    expect(status).toBe(0);
+
+    // Fallback mode prompt was bypassed (only primary was asked how models should be configured)
+    const modePrompts = selects.filter((s) =>
+      s.message.includes("how should models be configured?"),
+    );
+    expect(modePrompts).toHaveLength(1);
+    expect(modePrompts[0]?.message).toContain("primary");
+
+    // Note was emitted explaining why fallback must configure its own models
+    expect(
+      notes.some((n) =>
+        n.body.includes(
+          "the fallback must configure its own models — two Pi instances on host config would be identical",
+        ),
+      ),
+    ).toBe(true);
   });
 });

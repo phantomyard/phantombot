@@ -45,6 +45,7 @@ function harness(over: {
   availability?: Record<string, string | undefined>;
   routing?: BrainDeps["routing"];
   storedKey?: string;
+  piInstances?: BrainDeps["piInstances"];
   personaScope?: boolean;
   models?: PiModel[];
   choose?: Array<string | undefined>;
@@ -87,6 +88,7 @@ function harness(over: {
     availability: over.availability ?? { pi: "/usr/bin/pi", codex: "/usr/bin/codex", claude: undefined },
     routing: over.routing ?? {},
     storedKey: over.storedKey,
+    piInstances: over.piInstances,
     targetPath: "/tmp/personas/robbie/config.toml",
     personaScope: over.personaScope ?? true,
     piBin: over.availability?.pi ?? "/usr/bin/pi",
@@ -373,6 +375,38 @@ describe("the brain flow", () => {
     expect(notice).toBe("brain saved: pi-primary → pi-fallback");
     expect(h.applied.chains).toEqual([["pi-primary", "pi-fallback"]]);
     expect(h.applied.routings).toHaveLength(1);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
+
+  test("named Pi instances: keeping a stored key on fallback Pi writes the instance key and refreshes models", async () => {
+    let listCalls = 0;
+    const h = harness({
+      choose: ["pi", "pi", "host"], // primary = pi (host), fallback = pi (auto-configure)
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""], // keep stored key on fallback
+      storedKey: "sk-global-wrong-key",
+      piInstances: {
+        fallback: {
+          routing: { provider: "openrouter" },
+          storedKey: "sk-fallback-instance-key",
+        },
+      },
+      models: [], // empty initial models forces keep-branch refresh
+    });
+    h.deps.listModels = async (extraEnv) => {
+      listCalls++;
+      return extraEnv?.OPENROUTER_API_KEY === "sk-fallback-instance-key" ? MODELS : [];
+    };
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi-primary → pi-fallback");
+    // Assert writeAuth wrote the instance key into auth store, not the global key
+    expect(h.applied.authWrites).toEqual([
+      { provider: "openrouter", key: "sk-fallback-instance-key" },
+    ]);
+    expect(listCalls).toBeGreaterThanOrEqual(2);
     expect(h.applied.routings[0]).toMatchObject({
       provider: "openrouter",
       primaryModel: "gpt-5.2",

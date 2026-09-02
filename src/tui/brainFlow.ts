@@ -119,11 +119,6 @@ const HARNESS_LABELS: Record<string, string> = {
   claude: "Claude",
 };
 
-/**
- * Per-harness hints. Codex/Claude state the inheritance up front — an operator
- * picking Codex must learn HERE that there is nothing to configure, not
- * discover it from an empty wizard.
- */
 function mergeModels(existing: readonly PiModel[], fresh: readonly PiModel[]): PiModel[] {
   const seen = new Set<string>();
   const res: PiModel[] = [];
@@ -137,6 +132,11 @@ function mergeModels(existing: readonly PiModel[], fresh: readonly PiModel[]): P
   return res;
 }
 
+/**
+ * Per-harness hints. Codex/Claude state the inheritance up front — an operator
+ * picking Codex must learn HERE that there is nothing to configure, not
+ * discover it from an empty wizard.
+ */
 function harnessHint(id: string, deps: BrainDeps): string {
   if (id === "pi") return "provider + model routing configured in this app";
   const label = HARNESS_LABELS[id] ?? id;
@@ -266,6 +266,10 @@ export async function configurePi(
   if (opts?.askMode !== false) {
     if (opts?.allowHostConfig === false) {
       mode = "configure";
+      q.note(
+        "Pi: fallback models",
+        "the fallback must configure its own models — two Pi instances on host config would be identical",
+      );
     } else {
       const pick = await q.choose({
         title: `Pi (${role} brain) — how should its models be configured?`,
@@ -305,11 +309,11 @@ export async function configurePi(
   // The catalogue is fetched once and reused by every slot's list. With no pi
   // binary the lists degrade to free-text rows inside the search screen.
   let models = deps.piBin ? await deps.listModels() : [];
-  if (deps.storedKey && deps.routing.provider && deps.piBin) {
-    if (models.filter((m) => m.provider === deps.routing.provider).length === 0) {
-      const envVar = providerEnvVar(deps.routing.provider);
+  if (current.storedKey && current.routing.provider && deps.piBin) {
+    if (models.filter((m) => m.provider === current.routing.provider).length === 0) {
+      const envVar = providerEnvVar(current.routing.provider);
       if (envVar) {
-        const refreshed = await deps.listModels({ [envVar]: deps.storedKey });
+        const refreshed = await deps.listModels({ [envVar]: current.storedKey });
         if (refreshed.length > 0) models = mergeModels(models, refreshed);
       }
     }
@@ -431,18 +435,16 @@ export async function configurePi(
     }
     if (refreshed.length > 0) models = mergeModels(models, refreshed);
   } else if (keyWrite.action === "keep") {
-    const effectiveKey = deps.storedKey;
+    const effectiveKey = current.storedKey;
     if (provider && effectiveKey && deps.piBin) {
-      if (models.filter((m) => m.provider === provider).length === 0) {
-        const authWrite = await deps.writeAuth(provider, effectiveKey);
-        let refreshed: PiModel[] = [];
-        if (authWrite.ok) refreshed = await deps.listModels();
-        if (refreshed.length === 0) {
-          const envVar = providerEnvVar(provider);
-          if (envVar) refreshed = await deps.listModels({ [envVar]: effectiveKey });
-        }
-        if (refreshed.length > 0) models = mergeModels(models, refreshed);
+      const authWrite = await deps.writeAuth(provider, effectiveKey);
+      let refreshed: PiModel[] = [];
+      if (authWrite.ok) refreshed = await deps.listModels();
+      if (refreshed.length === 0 && models.filter((m) => m.provider === provider).length === 0) {
+        const envVar = providerEnvVar(provider);
+        if (envVar) refreshed = await deps.listModels({ [envVar]: effectiveKey });
       }
+      if (refreshed.length > 0) models = mergeModels(models, refreshed);
     }
   } else if (keyWrite.action === "clear") {
     // Provider switched and nothing typed: the old key points at the wrong
@@ -453,7 +455,6 @@ export async function configurePi(
       "provider changed and no new key entered — cleared the stale key so Pi falls back to its own local store",
     );
   }
-  // action === "keep": nothing written. The stored token is reused verbatim.
 
   const scoped = provider ? models.filter((m) => m.provider === provider) : models;
 

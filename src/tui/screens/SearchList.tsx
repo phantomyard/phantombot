@@ -22,7 +22,8 @@ import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
-import { badge, glyph, theme } from "../theme.ts";
+import { Selectable } from "../components/Selectable.tsx";
+import { badge, theme } from "../theme.ts";
 import type { ChooseOption } from "./Choose.tsx";
 
 export interface SearchListRequest {
@@ -121,39 +122,37 @@ export function SearchListScreen(props: {
       </Box>
       <Box flexDirection="column" marginTop={1} overflow="hidden">
         {freeText ? (
-          <Box>
-            <Box marginRight={1}>
-              <Text color={theme.ok}>{glyph.up}</Text>
-            </Box>
+          <Selectable selected onPress={() => props.onAnswer(query.trim())}>
             <Text bold color={theme.accent}>
               use "{query.trim()}" as typed — no list entry matches
             </Text>
-          </Box>
+          </Selectable>
         ) : (
           rows.map((option, i) => {
             const selected = Math.max(0, lo) + i === at;
             return (
-              <Box key={`${option.value}-${Math.max(0, lo) + i}`}>
-                <Box marginRight={1}>
-                  <Text color={selected ? theme.ok : theme.dim}>
-                    {selected ? glyph.up : glyph.down}
+              <Selectable
+                key={`${option.value}-${Math.max(0, lo) + i}`}
+                selected={selected}
+                onPress={() => props.onAnswer(option.value)}
+              >
+                <Box>
+                  <Text
+                    bold={selected}
+                    color={selected ? theme.accent : undefined}
+                  >
+                    {option.label}
                   </Text>
+                  {option.value === initial && initial !== "" ? (
+                    <Text color={theme.dim}> (current)</Text>
+                  ) : null}
+                  {option.hint ? (
+                    <Box marginLeft={1}>
+                      <Text color={theme.dim}>({option.hint})</Text>
+                    </Box>
+                  ) : null}
                 </Box>
-                <Text
-                  bold={selected}
-                  color={selected ? theme.accent : theme.dim}
-                >
-                  {option.label}
-                </Text>
-                {option.value === initial && initial !== "" ? (
-                  <Text color={theme.dim}> (current)</Text>
-                ) : null}
-                {option.hint ? (
-                  <Box marginLeft={1}>
-                    <Text color={theme.dim}>({option.hint})</Text>
-                  </Box>
-                ) : null}
-              </Box>
+              </Selectable>
             );
           })
         )}

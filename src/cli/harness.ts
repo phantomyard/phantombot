@@ -492,6 +492,10 @@ async function configurePi(
   let mode: "configure" | "local" = "configure";
   if (opts?.allowLocalConfig === false) {
     mode = "configure";
+    q.note(
+      "the fallback must configure its own models — two Pi instances on host config would be identical",
+      "Pi fallback",
+    );
   } else {
     const pick = await q.select<"configure" | "local">({
       message: `Pi (${role}): how should models be configured?`,
