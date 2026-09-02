@@ -320,4 +320,28 @@ describe("the brain flow", () => {
       primaryModel: "gpt-5.2",
     });
   });
+
+  test("keeping a stored key refreshes models if initially empty for provider", async () => {
+    let listCalls = 0;
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""], // keep stored key
+      storedKey: "sk-stored",
+      routing: { provider: "openrouter" },
+      models: [], // empty initial models
+    });
+    h.deps.listModels = async () => {
+      listCalls++;
+      // On second call (after auth sync), return models
+      return listCalls > 1 ? MODELS : [];
+    };
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi");
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(h.applied.routings[0]).toMatchObject({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+    });
+  });
 });

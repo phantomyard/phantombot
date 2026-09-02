@@ -18,8 +18,7 @@ import { useStableInput } from "../useStableInput.ts";
 import { Box, Text } from "ink";
 
 import { Frame } from "../components/Frame.tsx";
-import { Selectable } from "../components/Selectable.tsx";
-import { badge, theme } from "../theme.ts";
+import { badge, glyph, theme } from "../theme.ts";
 
 export interface ChooseOption {
   value: string;
@@ -88,29 +87,29 @@ export function ChooseScreen(props: {
         </Box>
       ) : null}
       <Box flexDirection="column" marginTop={1}>
-        {options.map((option, i) => (
-          <Selectable
-            key={option.value}
-            selected={i === index}
-            onPress={() => props.onAnswer(option.value)}
-          >
-            <Box>
+        {options.map((option, i) => {
+          const selected = i === index;
+          return (
+            <Box key={option.value}>
               <Box marginRight={1}>
-                <Text backgroundColor={i === index ? theme.accent : undefined}>
-                  {" "}
+                <Text color={selected ? theme.ok : theme.dim}>
+                  {selected ? glyph.up : glyph.down}
                 </Text>
               </Box>
-              <Text bold={i === index} color={i === index ? theme.accent : undefined}>
+              <Text bold={selected} color={selected ? theme.accent : theme.dim}>
                 {option.label}
               </Text>
+              {option.value === initial && initial !== "" ? (
+                <Text color={theme.dim}> (current)</Text>
+              ) : null}
               {option.hint ? (
                 <Box marginLeft={1}>
-                  <Text color={theme.dim}>{option.hint}</Text>
+                  <Text color={theme.dim}>({option.hint})</Text>
                 </Box>
               ) : null}
             </Box>
-          </Selectable>
-        ))}
+          );
+        })}
       </Box>
     </Frame>
   );

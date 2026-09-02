@@ -124,6 +124,19 @@ const HARNESS_LABELS: Record<string, string> = {
  * picking Codex must learn HERE that there is nothing to configure, not
  * discover it from an empty wizard.
  */
+function mergeModels(existing: readonly PiModel[], fresh: readonly PiModel[]): PiModel[] {
+  const seen = new Set<string>();
+  const res: PiModel[] = [];
+  for (const m of [...fresh, ...existing]) {
+    const key = `${m.provider}/${m.model}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      res.push(m);
+    }
+  }
+  return res;
+}
+
 function harnessHint(id: string, deps: BrainDeps): string {
   if (id === "pi") return "provider + model routing configured in this app";
   const label = HARNESS_LABELS[id] ?? id;
@@ -266,6 +279,17 @@ export async function configurePi(
   // The catalogue is fetched once and reused by every slot's list. With no pi
   // binary the lists degrade to free-text rows inside the search screen.
   let models = deps.piBin ? await deps.listModels() : [];
+  if (deps.storedKey && deps.routing.provider && deps.piBin) {
+    if (models.filter((m) => m.provider === deps.routing.provider).length === 0) {
+      await deps.writeAuth(deps.routing.provider, deps.storedKey);
+      let refreshed = await deps.listModels();
+      if (refreshed.filter((m) => m.provider === deps.routing.provider).length === 0) {
+        const envVar = providerEnvVar(deps.routing.provider);
+        if (envVar) refreshed = await deps.listModels({ [envVar]: deps.storedKey });
+      }
+      if (refreshed.length > 0) models = mergeModels(models, refreshed);
+    }
+  }
 
   const provider = await q.search({
     title: "Pi provider",
@@ -276,7 +300,11 @@ export async function configurePi(
       ...providerChoices(models).map((p) => ({
         value: p.id,
         label: p.label,
-        hint: p.hasModels ? `${p.id} — key already configured` : p.id,
+        hint: p.hasModels
+          ? `${p.id} — key already configured`
+          : p.label.toLowerCase() !== p.id.toLowerCase()
+            ? p.id
+            : undefined,
       })),
     ],
     initial:
@@ -377,7 +405,21 @@ export async function configurePi(
       const envVar = providerEnvVar(provider);
       if (envVar) refreshed = await deps.listModels({ [envVar]: keyWrite.value });
     }
-    if (refreshed.length > 0) models = refreshed;
+    if (refreshed.length > 0) models = mergeModels(models, refreshed);
+  } else if (keyWrite.action === "keep") {
+    const effectiveKey = deps.storedKey;
+    if (provider && effectiveKey && deps.piBin) {
+      if (models.filter((m) => m.provider === provider).length === 0) {
+        const authWrite = await deps.writeAuth(provider, effectiveKey);
+        let refreshed: PiModel[] = [];
+        if (authWrite.ok) refreshed = await deps.listModels();
+        if (refreshed.length === 0) {
+          const envVar = providerEnvVar(provider);
+          if (envVar) refreshed = await deps.listModels({ [envVar]: effectiveKey });
+        }
+        if (refreshed.length > 0) models = mergeModels(models, refreshed);
+      }
+    }
   } else if (keyWrite.action === "clear") {
     // Provider switched and nothing typed: the old key points at the wrong
     // provider now. Clear it rather than fire it at the new `--provider`.
