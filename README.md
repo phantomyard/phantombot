@@ -786,6 +786,31 @@ Harness notes:
   harnesses.
 - Codex can use `codex login` or `OPENAI_API_KEY`.
 - `chain` order is primary to fallback.
+- Pi may occupy both slots with different providers. Brain and
+  `phantombot harness` write named instances so routing, credentials,
+  cooldowns, alerts, `/model`, and `/status` remain independent:
+
+  ```toml
+  [harnesses]
+  chain = ["pi-primary", "pi-fallback"]
+
+  [harnesses.instances.pi-primary]
+  type = "pi"
+  [harnesses.instances.pi-primary.routing]
+  provider = "openrouter"
+  primary_model = "anthropic/claude-sonnet-4"
+
+  [harnesses.instances.pi-fallback]
+  type = "pi"
+  [harnesses.instances.pi-fallback.routing]
+  provider = "google"
+  primary_model = "gemini-2.5-pro"
+  ```
+
+  Their keys are stored separately in the persona vault as
+  `PHANTOMBOT_PI_API_KEY_PI_PRIMARY` and
+  `PHANTOMBOT_PI_API_KEY_PI_FALLBACK`. Existing bare `pi` configurations
+  remain supported unchanged.
 - **The whole `[harnesses]` block is per-persona.** Which brain a persona
   thinks with — the failover chain, the Claude/Codex model, Pi's provider and
   capability routing — is a property of the personality, not of the box, so it
@@ -1566,6 +1591,8 @@ Per-harness behavior:
   writes. `/model list` shells out to
   `pi --list-models`, so it shows the models Pi has credentials for. `clear`
   is refused — routing needs an explicit primary.
+  For a named Pi primary, `/model` writes that instance's routing table and
+  `/model list` uses that instance's provider.
 - **Claude** — a single model, validated against the `opus` / `sonnet` /
   `haiku` aliases (`[harnesses.claude] model`). No catalog listing exists, and
   `clear` is refused (there is no default to fall back to) — pick an alias

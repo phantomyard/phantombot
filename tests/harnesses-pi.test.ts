@@ -716,6 +716,31 @@ describe("PiHarness routing (subprocess)", () => {
     }
   });
 
+  test("a named Pi instance reads only its instance-specific API key", async () => {
+    process.env.FAKE_PI_MODE = "argv";
+    process.env.PHANTOMBOT_PI_API_KEY = "legacy-wrong-key";
+    process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY = "primary-right-key";
+    try {
+      const chunks = await collect(
+        new PiHarness({
+          bin: FAKE_PI,
+          id: "pi-primary",
+          apiKeyEnv: "PHANTOMBOT_PI_API_KEY_PI_PRIMARY",
+          routing: { provider: "openrouter", primaryModel: "model-a" },
+        }).invoke(newRequest()),
+      );
+      const argv = chunks
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("");
+      expect(argv).toContain("--api-key primary-right-key");
+      expect(argv).not.toContain("legacy-wrong-key");
+    } finally {
+      delete process.env.PHANTOMBOT_PI_API_KEY;
+      delete process.env.PHANTOMBOT_PI_API_KEY_PI_PRIMARY;
+    }
+  });
+
   test("no PHANTOMBOT_PI_API_KEY → no --api-key flag (Pi falls back to its own store)", async () => {
     process.env.FAKE_PI_MODE = "argv";
     delete process.env.PHANTOMBOT_PI_API_KEY;

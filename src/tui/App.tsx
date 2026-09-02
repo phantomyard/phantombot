@@ -541,7 +541,7 @@ export function App(props: AppProps): React.ReactElement {
         const { resolveHarnessWriteTarget } = await import(
           "../lib/harnessWriteTarget.ts"
         );
-        const { harnessChainIds } = await import("../harnesses/buildChain.ts");
+        const { harnessChainIds, piInstanceSecretName } = await import("../harnesses/buildChain.ts");
         const { listPiModels } = await import("../lib/piModels.ts");
         const {
           getPersonaSecret,
@@ -588,15 +588,42 @@ export function App(props: AppProps): React.ReactElement {
               codingModel: routing.codingModel,
             },
             storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
+            piInstances: {
+              primary: {
+                routing: config.harnesses.instances?.["pi-primary"]?.routing ?? {},
+                storedKey: await getPersonaSecret(
+                  config,
+                  piInstanceSecretName("pi-primary"),
+                  persona,
+                ),
+              },
+              fallback: {
+                routing: config.harnesses.instances?.["pi-fallback"]?.routing ?? {},
+                storedKey: await getPersonaSecret(
+                  config,
+                  piInstanceSecretName("pi-fallback"),
+                  persona,
+                ),
+              },
+            },
             targetPath: writeTarget.path,
             personaScope: writeTarget.scope === "persona",
             piBin: availability.pi,
             listModels: (extraEnv) =>
               listPiModels(availability.pi!, undefined, extraEnv),
-            setSecret: (value) =>
-              setPersonaSecret(config, ENV_PI_API_KEY, value, persona),
-            unsetSecret: () =>
-              unsetPersonaSecret(config, ENV_PI_API_KEY, persona),
+            setSecret: (value, instanceId) =>
+              setPersonaSecret(
+                config,
+                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+                value,
+                persona,
+              ),
+            unsetSecret: (instanceId) =>
+              unsetPersonaSecret(
+                config,
+                instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+                persona,
+              ),
             writeAuth: (provider, value) => writePiApiKey(provider, value),
             applyChain: (chain) =>
               applyHarnessChain(
@@ -605,13 +632,14 @@ export function App(props: AppProps): React.ReactElement {
                 persona,
                 writeTarget.scope,
               ),
-            applyRouting: (choices) => applyRouting(writeTarget.path, choices),
-            clearRouting: async (opts) => {
-              await clearPiRouting(writeTarget.path, opts);
+            applyRouting: (choices, instanceId) =>
+              applyRouting(writeTarget.path, choices, instanceId),
+            clearRouting: async (opts, instanceId) => {
+              await clearPiRouting(writeTarget.path, opts, instanceId);
             },
             probe: async (id) => {
               const { probeHarness } = await import("../lib/harnessProbe.ts");
-              return probeHarness({ config, id });
+              return probeHarness({ config: await loadConfig(persona), id });
             },
           },
         );

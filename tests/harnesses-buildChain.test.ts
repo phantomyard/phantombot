@@ -41,4 +41,24 @@ describe("per-persona harness chains", () => {
       buildHarnessChain(config, new CaptureStream(), "miles").map((h) => h.id),
     ).toEqual(["codex", "pi"]);
   });
+
+  test("builds independent named Pi instances with distinct identities", () => {
+    const named = {
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        chain: ["pi-primary", "pi-fallback"],
+        instances: {
+          "pi-primary": { type: "pi", bin: "pi", routing: { provider: "openrouter", primaryModel: "model-a" } },
+          "pi-fallback": { type: "pi", bin: "pi", routing: { provider: "google", primaryModel: "model-b" } },
+        },
+      },
+    } as unknown as Config;
+    const chain = buildHarnessChain(named, new CaptureStream());
+    expect(chain.map((h) => h.id)).toEqual(["pi-primary", "pi-fallback"]);
+    expect(chain.map((h) => h.modelInfo?.())).toEqual([
+      expect.objectContaining({ provider: "openrouter", model: "model-a" }),
+      expect.objectContaining({ provider: "google", model: "model-b" }),
+    ]);
+  });
 });

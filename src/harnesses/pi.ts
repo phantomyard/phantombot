@@ -82,12 +82,17 @@ export interface PiHarnessConfig {
    * Absent = no per-capability routing (Pi uses its configured default model).
    */
   routing?: PiRoutingConfig;
+  /** Runtime identity and vault key for a named Pi instance. */
+  id?: string;
+  apiKeyEnv?: string;
 }
 
 export class PiHarness implements Harness {
-  readonly id = "pi";
+  readonly id: string;
 
-  constructor(private readonly config: PiHarnessConfig) {}
+  constructor(private readonly config: PiHarnessConfig) {
+    this.id = config.id ?? "pi";
+  }
 
   modelInfo(): HarnessModelInfo {
     const r = this.config.routing;
@@ -238,7 +243,7 @@ export class PiHarness implements Harness {
     // is what "Pi decides for itself" actually means.
     const piApiKey = this.config.routing?.useLocalConfig
       ? undefined
-      : process.env[ENV_PI_API_KEY]?.trim();
+      : process.env[this.config.apiKeyEnv ?? ENV_PI_API_KEY]?.trim();
 
     /**
      * Assemble the full argv for ONE attempt. `model` is the brain this

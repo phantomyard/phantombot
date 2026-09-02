@@ -52,16 +52,20 @@ export interface BrainOnboardingDeps {
     codingModel?: string;
   };
   storedKey?: string;
+  piInstances?: Partial<Record<"primary" | "fallback", {
+    routing: BrainOnboardingDeps["routing"];
+    storedKey?: string;
+  }>>;
   targetPath: string;
   personaScope: boolean;
   piBin?: string;
   listModels(extraEnv?: Record<string, string>): Promise<PiModel[]>;
-  setSecret(value: string): Promise<{ ok: boolean; persona?: string; error?: string }>;
-  unsetSecret(): Promise<unknown>;
+  setSecret(value: string, instanceId?: string): Promise<{ ok: boolean; persona?: string; error?: string }>;
+  unsetSecret(instanceId?: string): Promise<unknown>;
   writeAuth(provider: string, value: string): Promise<PiAuthWriteResult>;
   applyChain(chain: readonly string[]): Promise<void>;
-  applyRouting(choices: RoutingChoices): Promise<unknown>;
-  clearRouting(opts?: { tombstone?: boolean }): Promise<void>;
+  applyRouting(choices: RoutingChoices, instanceId?: string): Promise<unknown>;
+  clearRouting(opts?: { tombstone?: boolean }, instanceId?: string): Promise<void>;
   /** One real turn through the named harness. The truth, not a `which`. */
   probe(id: string): Promise<{ ok: boolean; detail: string }>;
 }
@@ -90,9 +94,6 @@ function hostConfigHint(id: string, available: boolean): string {
   const found = available ? "" : " (not on PATH — will fail)";
   return `uses this host's ${label} configuration — nothing to set up${found}`;
 }
-
-const PI_MODE_DESCRIPTION =
-  "Configure here picks the provider and which model handles primary, vision and coding turns — recommended. Use Host Configuration hands model choice back to Pi itself (whatever you set up by running `pi` on this host).";
 
 /**
  * Run the Brain steps. Every cancel (esc) at every question lands in
@@ -216,68 +217,15 @@ async function runOnce(
     }
   }
 
-  // Step 4: Pi's model configuration — only when Pi is the primary AND
-  // installed. Claude/Codex are chain-only: nothing to configure, ever.
-  if (primary === "pi" && availability.pi) {
-    const mode = await q.choose({
-      title: "Pi — how should its models be configured?",
-      description: PI_MODE_DESCRIPTION,
-      options: [
-        {
-          value: "configure",
-          label: "Configure Provider and Model Swap Settings",
-          hint: "pick provider, API key, and the primary / vision / coder models here (recommended)",
-        },
-        {
-          value: "host",
-          label: "Use Host Configuration",
-          hint: "reuse the Pi provider and model routing already configured on this host",
-        },
-      ],
-      initial: "configure",
-    });
-    if (mode === undefined) {
-      return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
-    }
-    if (mode === "configure") {
-      const cancelled = await configurePi(q, {
-        persona: deps.persona,
-        chain: deps.chain,
-        availability,
-        routing: deps.routing,
-        storedKey: deps.storedKey,
-        targetPath: deps.targetPath,
-        personaScope: deps.personaScope,
-        piBin: availability.pi,
-        installCommand: deps.installCommand,
-        listModels: deps.listModels,
-        setSecret: deps.setSecret,
-        unsetSecret: deps.unsetSecret,
-        writeAuth: deps.writeAuth,
-        applyChain: deps.applyChain,
-        applyRouting: deps.applyRouting,
-        clearRouting: deps.clearRouting,
-      }, "primary", { askMode: false });
-      if (cancelled) {
-        return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
-      }
-    } else {
-      await deps.clearRouting({ tombstone: deps.personaScope });
-      q.note(
-        "Pi: using host configuration",
-        `cleared phantombot's Pi routing from ${deps.targetPath} — Pi decides for itself`,
-      );
-    }
-  }
-
-  // Step 5: fallback — (none) is a first-class answer.
+  // Step 4: fallback — (none) is a first-class answer. Pi remains available
+  // behind Pi because each occurrence becomes an independent named instance.
   const fallback = await q.choose({
     title: "Fallback brain (optional)",
     description: FALLBACK_DESCRIPTION,
     options: [
       { value: "", label: "(none)", hint: "no fallback if the primary fails" },
       ...(["pi", "claude", "codex"] as const)
-        .filter((id) => id !== primary)
+        .filter((id) => id !== primary || id === "pi")
         .map((id) => ({
           value: id,
           label: HARNESS_LABELS[id] ?? id,
@@ -290,7 +238,50 @@ async function runOnce(
     return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
   }
 
-  const chain = [primary, ...(fallback !== "" ? [fallback] : [])];
+  const bothPi = primary === "pi" && fallback === "pi";
+  const brainDeps = {
+    persona: deps.persona,
+    chain: deps.chain,
+    availability,
+    routing: deps.routing,
+    storedKey: deps.storedKey,
+    piInstances: deps.piInstances,
+    targetPath: deps.targetPath,
+    personaScope: deps.personaScope,
+    piBin: availability.pi,
+    installCommand: deps.installCommand,
+    listModels: deps.listModels,
+    setSecret: deps.setSecret,
+    unsetSecret: deps.unsetSecret,
+    writeAuth: deps.writeAuth,
+    applyChain: deps.applyChain,
+    applyRouting: deps.applyRouting,
+    clearRouting: deps.clearRouting,
+  };
+  if (primary === "pi") {
+    const cancelled = await configurePi(
+      q,
+      brainDeps,
+      "primary",
+      undefined,
+      bothPi ? "pi-primary" : undefined,
+    );
+    if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
+  }
+  if (fallback === "pi") {
+    const cancelled = await configurePi(
+      q,
+      brainDeps,
+      "fallback",
+      undefined,
+      bothPi ? "pi-fallback" : undefined,
+    );
+    if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
+  }
+
+  const chain = bothPi
+    ? ["pi-primary", "pi-fallback"]
+    : [primary, ...(fallback !== "" ? [fallback] : [])];
 
   // Step 6: prove it. Test now / Skip.
   const testPick = await q.choose({
@@ -312,7 +303,7 @@ async function runOnce(
       `Testing ${HARNESS_LABELS[primary] ?? primary}`,
       "sending one short prompt — up to a minute on a cold start",
     );
-    const result = await deps.probe(primary);
+    const result = await deps.probe(chain[0]!);
     if (!result.ok) {
       q.note(
         "Brain test failed",

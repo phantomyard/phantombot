@@ -216,6 +216,27 @@ describe("applyModelRequest pi", () => {
     expect(process.env.PHANTOMBOT_IMAGE_MODEL).toBe("qwen-vl");
   });
 
+  test("a named Pi primary writes only its own routing table", async () => {
+    const config = makeConfig({
+      chain: ["pi-primary", "pi-fallback"],
+      instances: {
+        "pi-primary": { type: "pi", bin: "pi", routing: { provider: "openrouter" } },
+        "pi-fallback": { type: "pi", bin: "pi", routing: { provider: "google", primaryModel: "gemini-old" } },
+      },
+    });
+    const r = await applyModelRequest(
+      { kind: "set", role: "primary", slug: "openrouter-new" },
+      "pi-primary",
+      config,
+    );
+    expect(r).toEqual({ ok: true, summary: "pi-primary primary model → openrouter-new" });
+    const toml = await readConfigToml(configPath);
+    expect(getIn(toml, ["harnesses", "instances", "pi-primary", "routing", "primary_model"]))
+      .toBe("openrouter-new");
+    expect(config.harnesses.instances?.["pi-fallback"]?.routing?.primaryModel)
+      .toBe("gemini-old");
+  });
+
   test("clear is refused — pi has no default to fall back to", async () => {
     const r = await applyModelRequest(
       { kind: "clear" },
