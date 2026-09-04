@@ -76,6 +76,7 @@ Supported harnesses:
 - [Model Management (`/model`)](#model-management-model)
 - [Group Chats](#group-chats)
 - [Voice Replies](#voice-replies)
+- [Reply Language](#reply-language)
 - [Scheduled Tasks](#scheduled-tasks)
 - [Notifications](#notifications)
 - [Credentials](#credentials)
@@ -1775,6 +1776,34 @@ Per-message modality overrides:
   "voice please".
 
 If TTS is not configured, phantombot degrades to text.
+
+## Reply Language
+
+Chat channels (Telegram and PhantomChat) detect the language of each inbound
+message and tell the harness which language to answer in, the same way the
+voice overlay tells it which format to answer in. Reply language is therefore
+resolved in code, not inferred by the model from whatever else is in the turn.
+
+- Detection runs on **your message only** — never on retrieved memory, the
+  daily journal, a quoted reply, group catch-up context, or the agent's own
+  previous turn. Those are data, and a Spanish email being read is not a
+  request for a Spanish reply.
+- It is a local heuristic (weighted function words), not a model call, so it
+  adds no latency and no cost to the message path. English, Spanish, Dutch,
+  German, French, Italian and Portuguese are recognised.
+- Short messages ("ok", "yes please") fall below a confidence floor and carry
+  the conversation's last confidently-detected language forward instead of
+  flipping it. The remembered language is per persona + conversation and
+  expires after 24 hours of silence.
+- If nothing can be detected and nothing is remembered, no language
+  instruction is injected at all and the persona's own guidance applies.
+
+Text the agent composes *for a third party* — an outbound email, a message to
+a supplier — is still written in that party's language. Only the reply to you
+is fixed.
+
+State file: `$XDG_STATE_HOME/phantombot/reply-language.json`, overridable with
+`PHANTOMBOT_REPLY_LANGUAGE_STATE`.
 
 ## Scheduled Tasks
 
