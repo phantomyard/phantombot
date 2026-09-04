@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  CREDENTIALS_SECTION,
   LOCAL_HYGIENE_SECTION,
   buildStableSystemPrompt,
   buildSystemPrompt,
@@ -58,9 +59,31 @@ describe("buildSystemPrompt — local hygiene section", () => {
     expect(LOCAL_HYGIENE_SECTION).toMatch(/swallows work silently/);
   });
 
-  test("keeps secrets in the vault only, and one canonical copy per thing", () => {
-    expect(LOCAL_HYGIENE_SECTION).toMatch(/Secrets live only in the vault/);
+  test("scopes the vault rule to credentials the persona persists", () => {
+    expect(LOCAL_HYGIENE_SECTION).toMatch(/credential you store for later belongs in the vault/);
     expect(LOCAL_HYGIENE_SECTION).toMatch(/One canonical place per thing/);
+  });
+
+  /**
+   * The prompt is ONE document. `CREDENTIALS_SECTION` is injected immediately
+   * after this section and explicitly sends the agent to look in ~/.ssh, shell
+   * exports, OS keychains and service unit `Environment=` lines, calling the
+   * vault "a convenience layer, not a cage". An absolute "secrets live ONLY in
+   * the vault" line here would outrank that later, more permissive text and
+   * could get legitimate SSH keys or service credentials treated as hygiene
+   * violations — moved, deleted, or refused. So the combined prompt must never
+   * make a vault-exclusivity claim.
+   */
+  test("does not contradict the credential contract injected after it", () => {
+    const prompt = buildSystemPrompt(persona, channelCtx);
+    expect(prompt).toContain(LOCAL_HYGIENE_SECTION.trim());
+    expect(prompt).toContain(CREDENTIALS_SECTION.trim());
+
+    expect(LOCAL_HYGIENE_SECTION).not.toMatch(/secrets? (?:live|belong|are|go|exist)[^.]*only/i);
+    expect(LOCAL_HYGIENE_SECTION).not.toMatch(/only (?:place|store|home)[^.]*vault/i);
+    // The hygiene text must not forbid the stores the credential contract
+    // sends the agent to read.
+    expect(LOCAL_HYGIENE_SECTION).not.toMatch(/ssh|keychain|password manager|environment=/i);
   });
 
   test("stays operator-neutral: no git, repo or branch vocabulary", () => {

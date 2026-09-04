@@ -513,8 +513,8 @@ export const LOCAL_HYGIENE_SECTION =
   at live data, live config, or the schedule the real system runs on.
 - Write to the paths the system tells you it uses, not ones you remember.
   A plausible-looking wrong directory swallows work silently.
-- Secrets live only in the vault. Never leave one in a config file, a
-  settings file, a note or a command you save for later.
+- A credential you store for later belongs in the vault. Never copy one
+  into a note, a settings file, or a command you save for later.
 - One canonical place per thing — one credential, one setting, one rule.
   A second copy elsewhere will quietly win one day and you won't know which.
 `;
