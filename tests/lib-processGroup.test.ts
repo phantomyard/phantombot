@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { delimiter, dirname } from "node:path";
 import {
   killProcessGroup,
+  signalProcessGroup,
   spawnInNewSession,
   withCommandDirOnPath,
   withPhantombotBinDirOnPath,
@@ -115,6 +116,19 @@ describePosix("spawnInNewSession", () => {
     // either ESRCH or kill an unrelated group; either way the process
     // would NOT die. We assert it does die, which proves pid == pgid.
     process.kill(-proc.pid!, "SIGTERM");
+    await proc.exited;
+    expect(isAlive(proc.pid!)).toBe(false);
+  });
+
+  test("signalProcessGroup signals the entire process group", async () => {
+    const proc = spawnInNewSession(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    trackedPids.push(proc.pid!);
+    expect(isAlive(proc.pid!)).toBe(true);
+    expect(signalProcessGroup(proc.pid!, "SIGTERM")).toBe(true);
     await proc.exited;
     expect(isAlive(proc.pid!)).toBe(false);
   });

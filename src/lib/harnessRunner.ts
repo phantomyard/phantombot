@@ -475,12 +475,19 @@ export async function* runHarnessProcess(
   // on pipe backpressure. By arming the killer first, we ensure the hard
   // timeout still fires and kills the process group, causing the blocked
   // write to fail with EPIPE (which our catch block handles).
+  const toolTimeoutMs =
+    spec.toolTimeoutMs ??
+    Math.min(
+      req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+      Math.max(req.idleTimeoutMs * 4, 1_200_000),
+    );
+
   const killer = createKillCoordinator({
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
-    toolTimeoutMs: spec.toolTimeoutMs,
+    toolTimeoutMs,
     signal: req.signal,
     harnessId,
   });

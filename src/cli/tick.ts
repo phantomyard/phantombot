@@ -35,6 +35,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
+import { signalProcessGroup } from "../lib/processGroup.ts";
+import { NON_INTERACTIVE_ENV } from "../lib/envBootstrap.ts";
 
 import {
   type Config,
@@ -493,6 +495,9 @@ async function runCommandTask(
       cwd: opts.cwd,
       env: opts.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // Put the subshell in its own process group on POSIX so timeouts kill
+      // the entire descendant tree (e.g. commands spawned by sh -c).
+      detached: process.platform !== "win32",
       // With shell:true Windows spawns cmd.exe, which pops a visible console
       // window per command task. Suppress it (issue #271); no-op on POSIX.
       windowsHide: true,
@@ -504,7 +509,16 @@ async function runCommandTask(
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      if (typeof child.pid === "number" && child.pid > 0) {
+        signalProcessGroup(child.pid, "SIGTERM");
+        setTimeout(() => {
+          if (typeof child.pid === "number" && !child.killed) {
+            signalProcessGroup(child.pid, "SIGKILL");
+          }
+        }, 3000);
+      } else {
+        child.kill("SIGTERM");
+      }
       output = appendCommandOutput(output, "\nERROR: command timed out");
       finish({ exitCode: 124, output });
     }, opts.timeoutMs);
@@ -579,7 +593,9 @@ async function buildCommandEnv(
       "Path",
     );
   }
-  const env: NodeJS.ProcessEnv = {};
+  const env: NodeJS.ProcessEnv = {
+    ...NON_INTERACTIVE_ENV,
+  };
   for (const name of allowlist) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
