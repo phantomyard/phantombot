@@ -335,17 +335,14 @@ export async function killProcessGroup(
 }
 
 /**
- * Send `signal` to every process in the group whose pgid is `pid`.
+ * Send `signal` to every process in the group whose pgid is `pid` (POSIX)
+ * or force-terminate the descendant tree via `taskkill /T /F` (Windows).
  * Returns true if the signal was delivered (or the kernel accepted it),
- * false if the group is already gone (ESRCH).
+ * false if the group is already gone (ESRCH / exit 128).
  *
- * On POSIX this wraps `process.kill` with a negative pid — the convention for
- * "this entire process group". Windows has no process groups or signals in the
- * POSIX sense, so there we shell out to `taskkill /T` (walk and terminate the
- * child tree by PID). Anything other than "already gone" is logged and treated
- * as a delivered signal (best-effort; the caller still waits on proc.exited).
+ * Exported for any child process spawn that runs in its own session / process group.
  */
-function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
+export function signalProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"): boolean {
   if (process.platform === "win32") return windowsKillTree(pid);
   try {
     process.kill(-pid, signal);
@@ -361,6 +358,10 @@ function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
     });
     return true;
   }
+}
+
+function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
+  return signalProcessGroup(pid, signal);
 }
 
 /**

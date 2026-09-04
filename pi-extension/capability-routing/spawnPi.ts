@@ -13,7 +13,7 @@
  * call site.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -327,15 +327,53 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
     let aborted = false;
     let timedOut: "idle" | "hard" | undefined;
     const exitCode = await new Promise<number>((resolve) => {
+      let procClosed = false;
       const inv = getPiInvocation(args);
       const proc = spawn(inv.command, inv.args, {
         cwd: opts.cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+        // Inlined non-interactive defaults: this capability-routing extension
+        // is bundled into self-contained extension assets (piExtensionAssets),
+        // so it cannot import `NON_INTERACTIVE_ENV` from `src/lib/envBootstrap.ts`.
+        env: {
+          ...process.env,
+          CI: "true",
+          DEBIAN_FRONTEND: "noninteractive",
+          GIT_TERMINAL_PROMPT: "0",
+        },
         // Suppress the console window Windows opens for the delegate pi child.
         // No-op on POSIX.
         windowsHide: true,
       });
+
+      const isProcExited = (): boolean =>
+        procClosed || proc.exitCode !== null || proc.signalCode !== null;
+
+      const killProcessTree = (sig: NodeJS.Signals) => {
+        if (!proc.pid) return;
+        if (process.platform === "win32") {
+          try {
+            execFileSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], {
+              stdio: "ignore",
+              windowsHide: true,
+            });
+          } catch {
+            // ignore
+          }
+        } else {
+          try {
+            process.kill(-proc.pid, sig);
+          } catch {
+            try {
+              proc.kill(sig);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      };
 
       // ── Tool-boundary timeouts ────────────────────────────────────────────
       // A wedged child must return a tested failure, not hang forever (see
@@ -353,9 +391,9 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
         if (timedOut || aborted) return;
         timedOut = which;
         clearTimers();
-        proc.kill("SIGTERM");
+        killProcessTree("SIGTERM");
         unrefTimer(setTimeout(() => {
-          if (!proc.killed) proc.kill("SIGKILL");
+          if (!isProcExited()) killProcessTree("SIGKILL");
         }, 5000));
       };
       // Called on every raw chunk from the child (stdout OR stderr) to reset
@@ -423,11 +461,13 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
         result.stderr += data.toString();
       });
       proc.on("close", (code) => {
+        procClosed = true;
         clearTimers();
         if (buffer.trim()) processLine(buffer);
         resolve(code ?? 0);
       });
       proc.on("error", () => {
+        procClosed = true;
         clearTimers();
         resolve(1);
       });
@@ -435,10 +475,10 @@ export async function delegate(opts: DelegateOptions): Promise<DelegateResult> {
       if (opts.signal) {
         const kill = () => {
           aborted = true;
-          proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (!proc.killed) proc.kill("SIGKILL");
-          }, 5000);
+          killProcessTree("SIGTERM");
+          unrefTimer(setTimeout(() => {
+            if (!isProcExited()) killProcessTree("SIGKILL");
+          }, 5000));
         };
         if (opts.signal.aborted) kill();
         else opts.signal.addEventListener("abort", kill, { once: true });

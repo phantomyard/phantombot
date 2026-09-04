@@ -35,6 +35,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
+import { signalProcessGroup } from "../lib/processGroup.ts";
+import { NON_INTERACTIVE_ENV } from "../lib/envBootstrap.ts";
 
 import {
   type Config,
@@ -475,6 +477,12 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   }
 }
 
+function unrefTimer(t: ReturnType<typeof setTimeout>): void {
+  if (typeof (t as { unref?: () => void }).unref === "function") {
+    (t as { unref: () => void }).unref();
+  }
+}
+
 async function runCommandTask(
   command: string,
   opts: { timeoutMs: number; cwd: string; env: NodeJS.ProcessEnv },
@@ -493,10 +501,14 @@ async function runCommandTask(
       cwd: opts.cwd,
       env: opts.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // Put the subshell in its own process group on POSIX so timeouts kill
+      // the entire descendant tree (e.g. commands spawned by sh -c).
+      detached: process.platform !== "win32",
       // With shell:true Windows spawns cmd.exe, which pops a visible console
       // window per command task. Suppress it (issue #271); no-op on POSIX.
       windowsHide: true,
     });
+
     let output = "";
     const append = (chunk: Buffer) => {
       output = appendCommandOutput(output, chunk.toString());
@@ -504,7 +516,20 @@ async function runCommandTask(
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      if (typeof child.pid === "number" && child.pid > 0) {
+        const pgid = child.pid;
+        signalProcessGroup(pgid, "SIGTERM");
+        // Escalate to SIGKILL after 3s to reap any SIGTERM-resistant processes
+        // in the process group. Unref'd so it never stalls tick exit on its own;
+        // signalProcessGroup swallows ESRCH if the group is already dead.
+        unrefTimer(
+          setTimeout(() => {
+            signalProcessGroup(pgid, "SIGKILL");
+          }, 3000),
+        );
+      } else {
+        child.kill("SIGTERM");
+      }
       output = appendCommandOutput(output, "\nERROR: command timed out");
       finish({ exitCode: 124, output });
     }, opts.timeoutMs);
@@ -579,7 +604,9 @@ async function buildCommandEnv(
       "Path",
     );
   }
-  const env: NodeJS.ProcessEnv = {};
+  const env: NodeJS.ProcessEnv = {
+    ...NON_INTERACTIVE_ENV,
+  };
   for (const name of allowlist) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }

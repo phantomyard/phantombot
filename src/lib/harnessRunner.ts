@@ -450,8 +450,10 @@ export interface HarnessProcessSpec {
    * Forwarded to the kill coordinator. Guards against a wedged-but-chattery
    * tool (e.g. a stalled router or a hung retry that keeps trickling output)
    * resetting the idle timer up to the hard cap with no fallback (issue #351).
-   * Omit to disable (legacy: any tool activity resets the idle timer as long as
-   * it keeps arriving).
+   *
+   * When omitted, defaults across all harnesses (pi, claude, codex) to
+   * `Math.min(req.hardTimeoutMs ?? Infinity, Math.max(req.idleTimeoutMs * 4, 1_200_000))`,
+   * bounding contiguous tool runs without productive output to ~20 minutes.
    */
   toolTimeoutMs?: number;
   /**
@@ -464,6 +466,25 @@ export interface HarnessProcessSpec {
     | undefined;
 }
 
+/**
+ * Compute the default contiguous tool timeout bound across harnesses:
+ * floored at 20 minutes (1,200,000ms), scaled with `idleTimeoutMs * 4`, and
+ * capped at `hardTimeoutMs` when defined.
+ */
+export function defaultToolTimeoutMs(
+  idleTimeoutMs: number,
+  hardTimeoutMs?: number,
+): number {
+  return Math.min(
+    hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+    Math.max(idleTimeoutMs * 4, 1_200_000),
+  );
+}
+
+export const harnessDefaults = {
+  defaultToolTimeoutMs,
+};
+
 export async function* runHarnessProcess(
   spec: HarnessProcessSpec,
 ): AsyncGenerator<HarnessChunk> {
@@ -475,12 +496,16 @@ export async function* runHarnessProcess(
   // on pipe backpressure. By arming the killer first, we ensure the hard
   // timeout still fires and kills the process group, causing the blocked
   // write to fail with EPIPE (which our catch block handles).
+  const toolTimeoutMs =
+    spec.toolTimeoutMs ??
+    harnessDefaults.defaultToolTimeoutMs(req.idleTimeoutMs, req.hardTimeoutMs);
+
   const killer = createKillCoordinator({
     proc,
     idleTimeoutMs: req.idleTimeoutMs,
     hardTimeoutMs: req.hardTimeoutMs,
     startupTimeoutMs: req.startupTimeoutMs,
-    toolTimeoutMs: spec.toolTimeoutMs,
+    toolTimeoutMs,
     signal: req.signal,
     harnessId,
   });

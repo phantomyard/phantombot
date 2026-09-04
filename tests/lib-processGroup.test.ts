@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { delimiter, dirname } from "node:path";
 import {
   killProcessGroup,
+  signalProcessGroup,
   spawnInNewSession,
   withCommandDirOnPath,
   withPhantombotBinDirOnPath,
@@ -117,6 +118,31 @@ describePosix("spawnInNewSession", () => {
     process.kill(-proc.pid!, "SIGTERM");
     await proc.exited;
     expect(isAlive(proc.pid!)).toBe(false);
+  });
+
+  test("signalProcessGroup signals the entire process group", async () => {
+    const proc = spawnInNewSession(
+      ["sh", "-c", "sleep 30 & echo $!; wait"],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const firstLine = await readUntilNewline(
+      proc.stdout as ReadableStream<Uint8Array>,
+    );
+    const grandchildPid = Number(firstLine.trim());
+    expect(Number.isInteger(grandchildPid)).toBe(true);
+    expect(grandchildPid).toBeGreaterThan(0);
+    trackedPids.push(grandchildPid);
+
+    expect(isAlive(grandchildPid)).toBe(true);
+    expect(isAlive(proc.pid!)).toBe(true);
+
+    expect(signalProcessGroup(proc.pid!, "SIGTERM")).toBe(true);
+    await proc.exited;
+
+    expect(await isFullyDead(grandchildPid)).toBe(true);
+    expect(await isFullyDead(proc.pid!)).toBe(true);
   });
 });
 

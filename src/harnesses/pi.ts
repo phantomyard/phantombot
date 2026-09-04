@@ -293,9 +293,8 @@ export class PiHarness implements Harness {
     // re-assert the api-key so the child sees the value we just resolved. An
     // empty string CLEARS the key — so a harness with no provider/key actively
     // unsets any stale ambient value rather than leaking it into the subtree.
-    // Clone, never mutate in place: withPersonaEnv returns the SAME process.env
-    // reference when there's no persona/conversation, so assigning onto it would
-    // clobber the parent's global env. The spread guarantees a fresh object.
+    // withPersonaEnv returns a fresh copy with turn context and non-interactive defaults;
+    // the spread guarantees we can freely assign child-specific vars without mutating parent state.
     const childEnv = { ...withPersonaEnv(process.env, req.persona, req.conversation, req.turnId) };
     childEnv[ENV_PI_PROVIDER] = provider ?? "";
     childEnv[ENV_PI_API_KEY] = piApiKey ?? "";
@@ -353,21 +352,6 @@ export class PiHarness implements Harness {
         // finished answer, so a narration-only mid-task exit falls through to the
         // next harness rather than being stored as the reply (issue #352).
         requireCompletion: true,
-        // Bound how long a single contiguous tool-run may keep the idle watchdog
-        // alive via tool_execution_* activity alone, with no user-facing text. pi
-        // only emits tool_execution_update on genuine new output (bash streams
-        // stdout, the coder delegate forwards its child's progress) so a healthy
-        // turn is rarely affected — but a tool that trickles output forever (a
-        // stalled auto-router, a hung network retry that keeps logging) could
-        // otherwise reset the idle timer up to the 60-min hard cap with no
-        // fallback (issue #351). This is a GENEROUS last-resort net: comfortably
-        // above any realistic tool-run yet well under the hard cap, so a
-        // wedged-but-chattery turn fails over in minutes, not an hour. Derived
-        // from the idle window, floored at 20 min, and never above the hard cap.
-        toolTimeoutMs: Math.min(
-          req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
-          Math.max(req.idleTimeoutMs * 4, 1_200_000),
-        ),
       });
     }.bind(this);
 
