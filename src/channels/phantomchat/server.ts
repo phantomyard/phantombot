@@ -45,10 +45,12 @@ import {
 import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
+  languageReplyInstruction,
   TELEGRAM_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
+import { resolveReplyLanguage } from "../../lib/replyLanguage.ts";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "../../lib/nostrIdentity.ts";
 import type { Channel, ChannelMessage } from "../core/types.ts";
@@ -826,6 +828,16 @@ export async function runPhantomchatServer(
       return wantsVoice && ttsAvailable;
     };
     let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
+    // Reply-language routing — same channel-layer contract as Telegram:
+    // detect on the user's own words, then STATE the language to the
+    // harness instead of leaving it to be inferred from whatever else the
+    // turn happens to contain. Short messages carry the conversation's
+    // last confident language forward rather than flipping it.
+    const replyLanguage = await resolveReplyLanguage({
+      persona: input.persona,
+      conversation: conversationKey,
+      text: msg.text,
+    });
     // Typing indicator. The PWA shows three-dots on each
     // ephemeral kind-20001 event and auto-expires it after ~6s, so we refresh
     // every 2s for the whole turn. A plain interval (rather than per-chunk)
@@ -1026,9 +1038,16 @@ export async function runPhantomchatServer(
         // Reuse Telegram's short-reply / plan-then-confirm guidance — the user
         // is on a phone-style chat client here too. Stack the voice overlay
         // (short, no-markdown, TTS-friendly) when this reply will be spoken.
-        systemPromptSuffix: willReplyWithVoice
-          ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
-          : TELEGRAM_REPLY_INSTRUCTION,
+        systemPromptSuffix: [
+          willReplyWithVoice
+            ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+            : TELEGRAM_REPLY_INSTRUCTION,
+          replyLanguage
+            ? languageReplyInstruction(replyLanguage.name)
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
         // Pre-tool narration ON for text-out: the user sees streamed bubbles,
         // so a "checking your calendar…" line usefully fills the silence. OFF
         // for voice-out: the reply is synthesized once at the end, so narration

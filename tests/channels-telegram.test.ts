@@ -671,6 +671,7 @@ let workdir: string;
 let memory: MemoryStore;
 let agentDir: string;
 const SAVED_REPLY_MODE_STATE = process.env.PHANTOMBOT_REPLY_MODE_STATE;
+const SAVED_REPLY_LANGUAGE_STATE = process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-tg-"));
@@ -679,12 +680,21 @@ beforeEach(async () => {
   await writeFile(join(agentDir, "BOOT.md"), "# Phantom", "utf8");
   memory = await openMemoryStore(":memory:");
   process.env.PHANTOMBOT_REPLY_MODE_STATE = join(workdir, "reply-mode.json");
+  process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = join(
+    workdir,
+    "reply-language.json",
+  );
 });
 
 afterEach(async () => {
   await memory.close();
   if (SAVED_REPLY_MODE_STATE === undefined) delete process.env.PHANTOMBOT_REPLY_MODE_STATE;
   else process.env.PHANTOMBOT_REPLY_MODE_STATE = SAVED_REPLY_MODE_STATE;
+  if (SAVED_REPLY_LANGUAGE_STATE === undefined) {
+    delete process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
+  } else {
+    process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = SAVED_REPLY_LANGUAGE_STATE;
+  }
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -4024,5 +4034,136 @@ describe("runTelegramServer reaction dispatch (wake-but-silent)", () => {
 
     expect(harness.invocations).toBe(0);
     expect(transport.sent).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reply-language overlay (#534)
+//
+// The wiring is what these tests pin. A unit test on detectLanguage() passes
+// whether or not the instruction is ever injected, which is exactly the bug
+// class this feature exists to close — so assert on the system prompt the
+// harness actually receives.
+// ---------------------------------------------------------------------------
+
+describe("reply-language overlay", () => {
+  const runWith = async (text: string, harness: ScriptedHarness) => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: Math.floor(Math.random() * 1e6),
+      conversationId: "1001",
+      senderId: "42",
+      text,
+    });
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    return harness.lastRequest?.systemPrompt ?? "";
+  };
+
+  test("names the inbound language in the system prompt", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const prompt = await runWith(
+      "Robbie, can you check whether the invoice was paid yesterday?",
+      harness,
+    );
+    expect(prompt).toContain("Reply in English");
+    expect(prompt).not.toContain("Reply in Spanish");
+  });
+
+  test("a Spanish message gets a Spanish instruction", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const prompt = await runWith(
+      "Robbie, por favor revisa el correo y dime si han contestado.",
+      harness,
+    );
+    expect(prompt).toContain("Reply in Spanish");
+  });
+
+  test("the previous turn's language does not carry into a new one", async () => {
+    // The drift this feature exists to stop: a turn spent in Spanish, then
+    // an English message. The English message must win.
+    const first = new ScriptedHarness("fake", [
+      { type: "done", finalText: "vale" },
+    ]);
+    expect(
+      await runWith(
+        "Robbie, por favor revisa el correo y dime si han contestado.",
+        first,
+      ),
+    ).toContain("Reply in Spanish");
+
+    const second = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    const prompt = await runWith(
+      "Actually, give me the figures in a plain list rather than a table.",
+      second,
+    );
+    expect(prompt).toContain("Reply in English");
+    expect(prompt).not.toContain("Reply in Spanish");
+  });
+
+  test("a bare 'ok' does not flip the conversation language", async () => {
+    const first = new ScriptedHarness("fake", [
+      { type: "done", finalText: "vale" },
+    ]);
+    await runWith(
+      "Robbie, por favor revisa el correo y dime si han contestado.",
+      first,
+    );
+
+    const second = new ScriptedHarness("fake", [
+      { type: "done", finalText: "vale" },
+    ]);
+    expect(await runWith("ok", second)).toContain("Reply in Spanish");
+  });
+
+  test("an unclassifiable message with no history injects no language rule", async () => {
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    // Honest failure mode: we would rather say nothing than state a
+    // coin-flip to the harness as fact.
+    expect(await runWith("ok", harness)).not.toContain("Reply in ");
+  });
+
+  test("detection ignores a quoted reply, which is context and not the message", async () => {
+    const transport = new FakeTransport();
+    transport.pendingUpdates.push({
+      updateId: 4242,
+      conversationId: "1001",
+      senderId: "42",
+      text: "Can you confirm that is still the plan for tomorrow morning?",
+      replyTo: {
+        messageId: 77,
+        fromBot: true,
+        text: "Claro, mañana por la mañana reviso el correo y te confirmo si han contestado sobre la pension.",
+      },
+    });
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "ok" },
+    ]);
+    await runTelegramServer({
+      config: baseConfig(),
+      memory,
+      harnesses: [harness],
+      agentDir,
+      persona: "phantom",
+      transport,
+      oneShot: true,
+    });
+    expect(harness.lastRequest?.systemPrompt).toContain("Reply in English");
+    expect(harness.lastRequest?.systemPrompt).not.toContain("Reply in Spanish");
   });
 });

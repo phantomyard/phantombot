@@ -97,6 +97,7 @@ class FakePool implements RelayPool {
 let workdir: string;
 let agentDir: string;
 let memory: MemoryStore;
+const SAVED_REPLY_LANGUAGE_STATE = process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
 
 beforeEach(async () => {
   workdir = await mkdtemp(join(tmpdir(), "phantombot-pc-"));
@@ -104,10 +105,19 @@ beforeEach(async () => {
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "BOOT.md"), "# Phantom", "utf8");
   memory = await openMemoryStore(":memory:");
+  process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = join(
+    workdir,
+    "reply-language.json",
+  );
 });
 
 afterEach(async () => {
   await memory.close();
+  if (SAVED_REPLY_LANGUAGE_STATE === undefined) {
+    delete process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE;
+  } else {
+    process.env.PHANTOMBOT_REPLY_LANGUAGE_STATE = SAVED_REPLY_LANGUAGE_STATE;
+  }
   await rm(workdir, { recursive: true, force: true });
 });
 
@@ -2020,6 +2030,32 @@ describe("phantomchat relay tier", () => {
     expect(harness.lastRequest!.systemPrompt).not.toContain(
       "Security perimeter — TRUSTED turn",
     );
+  });
+
+  // #534: the language overlay is resolved in the channel layer and STATED
+  // to the harness. PhantomChat is a second call site of the same contract,
+  // so it needs its own wiring assertion — a Telegram-only test would pass
+  // with this call site broken.
+  test("the inbound language is named in the system prompt", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    const harness = new ScriptedHarness("fake", [
+      { type: "done", finalText: "vale" },
+    ]);
+
+    await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      relayHex: [getPublicKey(generateSecretKey())],
+      screen: passingScreen().fn,
+      harness,
+      text: "Robbie, por favor revisa el correo y dime si han contestado.",
+      waitMs: 200,
+    });
+
+    expect(harness.lastRequest!.systemPrompt).toContain("Reply in Spanish");
+    expect(harness.lastRequest!.systemPrompt).not.toContain("Reply in English");
   });
 
   test("an allow-listed principal is unaffected: trusted, never screened", async () => {

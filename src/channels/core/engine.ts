@@ -42,6 +42,7 @@ import {
   type ReplyMode,
   type ReplyModeRequest,
 } from "../../lib/replyMode.ts";
+import { resolveReplyLanguage } from "../../lib/replyLanguage.ts";
 import { DEFAULT_STT_TIMEOUT_MS } from "../../lib/voice.ts";
 import type { WriteSink } from "../../lib/io.ts";
 import { log } from "../../lib/logger.ts";
@@ -95,6 +96,7 @@ import {
 import type { GroupChatState } from "./routing.ts";
 import {
   captureNudgeForTurn,
+  languageReplyInstruction,
   TELEGRAM_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
@@ -1090,6 +1092,28 @@ async function processChatMessage(
   };
   let willReplyWithVoice = resolveWillReplyWithVoice(modalityOverride);
 
+  // Reply-language routing, same shape as the modality routing above and
+  // for the same reason: language was prompt-level only, so it drifted
+  // whenever the turn CONTAINED another language (a Spanish memory
+  // excerpt, a Dutch journal line, the persona's own previous turn spent
+  // writing a Honduras email). Resolved here in code, then STATED to the
+  // harness rather than left to inference.
+  //
+  // Deliberately resolved BEFORE the `reply_to` quote and the group
+  // catch-up context are prepended to `msg.text` below: those are exactly
+  // the pollution sources this exists to defeat, so detection must see
+  // the user's own words only.
+  //
+  // A short message ("ok", "yes please") falls under the confidence floor
+  // and carries the conversation's last confident language forward
+  // instead of flipping it. With neither, this is undefined and no
+  // language overlay is injected at all.
+  const replyLanguage = await resolveReplyLanguage({
+    persona: input.persona,
+    conversation: conversationKey,
+    text: msg.text,
+  });
+
   // Forward `reply_to_message` context AFTER modality detection so quoted
   // context never affects the current turn's wire-format routing. We mutate
   // `msg.text` so both the harness call and the
@@ -1371,6 +1395,10 @@ async function processChatMessage(
       //   - Voice-out: stack VOICE_REPLY_INSTRUCTION on top — stricter
       //     1-3 sentence limit and no markdown so TTS doesn't read out
       //     headers/bullets.
+      //   - Language: stack languageReplyInstruction when the inbound
+      //     message's language was resolved confidently (or carried
+      //     forward from this conversation). Third axis of the same
+      //     channel-layer contract as format and length.
       // Living at the channel layer (not in persona files) keeps these
       // rules from leaking into CLI/nightly turns, where verbosity is
       // fine and the user isn't on a phone.
@@ -1381,6 +1409,7 @@ async function processChatMessage(
         willReplyWithVoice
           ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
           : TELEGRAM_REPLY_INSTRUCTION,
+        replyLanguage ? languageReplyInstruction(replyLanguage.name) : undefined,
         captureNudge,
       ]
         .filter(Boolean)

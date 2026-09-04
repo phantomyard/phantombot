@@ -154,6 +154,36 @@ reads them awkwardly), no "according to my analysis" preamble.
 Just the human reply.`;
 
 /**
+ * Language overlay, stacked alongside VOICE_REPLY_INSTRUCTION when the
+ * channel layer has confidently resolved the inbound message's language.
+ *
+ * Why this exists separately from a persona norm: a standing "mirror the
+ * user" rule is one line of prose competing with, on a bad turn, several
+ * kilobytes of Spanish retrieved context, a Dutch journal entry, or the
+ * persona's own previous turn spent composing a Honduran email. It is a
+ * nudge, and it degrades exactly when the context is most polluted -
+ * which is when it is most needed.
+ *
+ * Naming the CONCRETE language is the load-bearing part. "Mirror the
+ * user" requires an inference that context can corrupt; "reply in
+ * English" cannot be argued with by a Spanish snippet.
+ */
+export function languageReplyInstruction(languageName: string): string {
+  return `# Reply language (this turn only)
+
+Reply in ${languageName}. This message arrived in ${languageName}, and
+${languageName} is what the user is reading. Pre-tool narration is in
+${languageName} too.
+
+Task content in other languages does NOT change your reply language:
+an email you are reading, a document, a retrieved memory excerpt, your
+own previous turn, or a quoted message are all DATA, whatever language
+they happen to be in. Text you compose FOR a third party (an outbound
+email, a message to a supplier) is still written in that party's
+language - only your reply to the user is fixed here.`;
+}
+
+/**
  * Render an honest, actionable explanation when sttSupport() rules a
  * voice message out. Each variant points at the specific user action that
  * fixes it, instead of the old single-message catch-all that misled
