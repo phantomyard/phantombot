@@ -44,13 +44,17 @@ describe("withPersonaEnv", () => {
     expect(out.GIT_TERMINAL_PROMPT).toBe("0");
   });
 
-  test("injects non-interactive environment defaults even when persona and conversation are empty", () => {
-    const base: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
-    const out = withPersonaEnv(base, "");
-    expect(out).not.toBe(base);
-    expect(out.CI).toBe("true");
-    expect(out.DEBIAN_FRONTEND).toBe("noninteractive");
-    expect(out.GIT_TERMINAL_PROMPT).toBe("0");
-    expect(out.PATH).toBe("/usr/bin");
+  test("allows base environment to override non-interactive defaults", () => {
+    const base: NodeJS.ProcessEnv = {
+      CI: "false",
+      DEBIAN_FRONTEND: "dialog",
+      GIT_TERMINAL_PROMPT: "1",
+      PATH: "/usr/bin",
+    };
+    const out = withPersonaEnv(base, "burt");
+    expect(out.CI).toBe("false");
+    expect(out.DEBIAN_FRONTEND).toBe("dialog");
+    expect(out.GIT_TERMINAL_PROMPT).toBe("1");
+    expect(out.PHANTOMBOT_PERSONA).toBe("burt");
   });
 });

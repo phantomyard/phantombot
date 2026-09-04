@@ -690,6 +690,79 @@ describe("runTick — normal task fire", () => {
     expect(runs[0]!.outputExcerpt).toContain("failed");
   });
 
+  test("command-backed due task environment includes non-interactive defaults", async () => {
+    const markerPath = join(workdir, "command-noninteractive.txt");
+    const created = store.add({
+      persona: "phantom",
+      description: "command noninteractive",
+      schedule: "0 * * * *",
+      prompt: "audit context only",
+      command: `printf "%s/%s/%s" "$CI" "$DEBIAN_FRONTEND" "$GIT_TERMINAL_PROMPT" > ${markerPath}`,
+      reviewIntervalMs: 1,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+    const code = await runTick({
+      config,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(code).toBe(0);
+    expect(await readFile(markerPath, "utf8")).toBe("true/noninteractive/0");
+  });
+
+  test("command-backed task timeout reaps orphan grandchildren via process group", async () => {
+    if (process.platform === "win32") return;
+    const markerPath = join(workdir, "command-grandchild.pid");
+    const shortTimeoutConfig: Config = {
+      ...config,
+      harnessHardTimeoutMs: 150,
+    };
+    const created = store.add({
+      persona: "phantom",
+      description: "timing out command",
+      schedule: "0 * * * *",
+      prompt: "audit context",
+      command: `sh -c "sleep 30 & echo \\$! > ${markerPath}; wait"`,
+      now: new Date("2026-05-02T09:30:00Z"),
+    });
+    if (!created.ok) throw new Error("setup");
+
+    const code = await runTick({
+      config: shortTimeoutConfig,
+      taskStore: store,
+      memory,
+      harnesses: [],
+      lockPath,
+      now: new Date("2026-05-02T10:00:00Z"),
+    });
+    expect(code).toBe(0);
+
+    const grandchildPidText = await readFile(markerPath, "utf8");
+    const grandchildPid = Number(grandchildPidText.trim());
+    expect(Number.isInteger(grandchildPid)).toBe(true);
+    expect(grandchildPid).toBeGreaterThan(0);
+
+    // Poll until the grandchild process is dead
+    const deadline = Date.now() + 2000;
+    let dead = false;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(grandchildPid, 0);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ESRCH") {
+          dead = true;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(dead).toBe(true);
+  });
+
   test("due task runs with its prompt; recordRun advances next_run_at", async () => {
     const created = store.add({
       persona: "phantom",

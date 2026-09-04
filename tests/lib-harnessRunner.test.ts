@@ -944,3 +944,44 @@ describe("drainStderr — over-cap boundary never splits a credential (PR #464)"
     expect(collected.join("")).not.toContain("secret");
   });
 });
+
+describe("runHarnessProcess — tool timeout", () => {
+  test("spec.toolTimeoutMs bounds sustained tool activity and lets idle watchdog trip", async () => {
+    const proc = spawnInNewSession(
+      [
+        "sh",
+        "-c",
+        'while true; do echo "{\\"type\\":\\"tool\\"}"; sleep 0.03; done',
+      ],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    trackedPids.push(proc.pid!);
+
+    const chunks: any[] = [];
+    const generator = runHarnessProcess({
+      proc,
+      harnessId: "test-harness",
+      toolTimeoutMs: 150,
+      req: {
+        idleTimeoutMs: 100,
+        hardTimeoutMs: 5_000,
+        workingDir: process.cwd(),
+        persona: "test",
+        conversation: "test",
+        userMessage: "test",
+      } as any,
+      parseEvent: (p: any) => ({ type: "progress", note: p.type }),
+      activity: () => "tool",
+      buildDoneMeta: () => ({}),
+    });
+
+    for await (const chunk of generator) {
+      chunks.push(chunk);
+    }
+
+    const errorChunk = chunks.find((c) => c.type === "error");
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.error).toContain("likely wedged on a tool call");
+    expect(errorChunk.recoverable).toBe(true);
+  });
+});

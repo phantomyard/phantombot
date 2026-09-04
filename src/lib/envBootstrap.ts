@@ -1,27 +1,13 @@
 /**
  * Per-spawn persona environment for harness subprocesses.
  *
- * HISTORY — this module used to self-source `~/.env` and
- * `~/.config/phantombot/.env` into `process.env` at startup
- * (`preloadEnvFiles`) and re-source them before every harness spawn
- * (`reloadEnvFiles`). Both are GONE (issue #452): plaintext `.env` is now a
- * ONE-WAY LEGACY IMPORT — `vaultMigrate.ts` folds it into the encrypted
- * per-persona vaults once, and nothing reads the file at runtime ever again.
- * Secrets reach `process.env` only via `loadVaultIntoEnv()`; non-secret model
- * and routing settings live in `config.toml`.
- *
- * Do not reintroduce a runtime `.env` read here. A read path is what made the
- * file authoritative-in-practice while the docs called the vault canonical;
- * `tests/lib-envFile.test.ts` guards against new ones.
- */
-
-/**
- * Per-spawn persona environment for harness subprocesses.
- *
  * Injects non-interactive environment defaults (`CI=true`,
  * `DEBIAN_FRONTEND=noninteractive`, `GIT_TERMINAL_PROMPT=0`) so tool subshells
  * (Vitest, Jest, Git, Debian/APT, etc.) run in one-shot non-interactive mode
  * rather than stalling on interactive prompts, spinners, or watch-mode listeners.
+ * Defaults are applied before caller-provided environment (`base`) so explicit
+ * overrides (e.g. when tools or UI libraries like Ink alter behaviour under CI)
+ * remain possible.
  *
  * HISTORY — this module used to self-source `~/.env` and
  * `~/.config/phantombot/.env` into `process.env` at startup
@@ -58,8 +44,8 @@ export function withPersonaEnv<T extends NodeJS.ProcessEnv>(
   turnId?: string,
 ): T {
   return {
-    ...base,
     ...NON_INTERACTIVE_ENV,
+    ...base,
     ...(persona ? { PHANTOMBOT_PERSONA: persona } : {}),
     ...(conversation ? { PHANTOMBOT_CONVERSATION: conversation } : {}),
     ...(turnId ? { PHANTOMBOT_TURN_ID: turnId } : {}),

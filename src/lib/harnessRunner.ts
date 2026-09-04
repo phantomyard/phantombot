@@ -450,8 +450,10 @@ export interface HarnessProcessSpec {
    * Forwarded to the kill coordinator. Guards against a wedged-but-chattery
    * tool (e.g. a stalled router or a hung retry that keeps trickling output)
    * resetting the idle timer up to the hard cap with no fallback (issue #351).
-   * Omit to disable (legacy: any tool activity resets the idle timer as long as
-   * it keeps arriving).
+   *
+   * When omitted, defaults across all harnesses (pi, claude, codex) to
+   * `Math.min(req.hardTimeoutMs ?? Infinity, Math.max(req.idleTimeoutMs * 4, 1_200_000))`,
+   * bounding contiguous tool runs without productive output to ~20 minutes.
    */
   toolTimeoutMs?: number;
   /**
