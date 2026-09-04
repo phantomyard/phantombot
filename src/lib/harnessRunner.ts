@@ -481,6 +481,10 @@ export function defaultToolTimeoutMs(
   );
 }
 
+export const harnessDefaults = {
+  defaultToolTimeoutMs,
+};
+
 export async function* runHarnessProcess(
   spec: HarnessProcessSpec,
 ): AsyncGenerator<HarnessChunk> {
@@ -494,7 +498,7 @@ export async function* runHarnessProcess(
   // write to fail with EPIPE (which our catch block handles).
   const toolTimeoutMs =
     spec.toolTimeoutMs ??
-    defaultToolTimeoutMs(req.idleTimeoutMs, req.hardTimeoutMs);
+    harnessDefaults.defaultToolTimeoutMs(req.idleTimeoutMs, req.hardTimeoutMs);
 
   const killer = createKillCoordinator({
     proc,
