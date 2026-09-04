@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   createKillCoordinator,
+  defaultToolTimeoutMs,
   drainStderr,
   isShutdownExit,
   killCauseToErrorChunk,
@@ -946,6 +947,16 @@ describe("drainStderr — over-cap boundary never splits a credential (PR #464)"
 });
 
 describe("runHarnessProcess — tool timeout", () => {
+  test("defaultToolTimeoutMs floors, scales, and caps contiguous tool watchdog correctly", () => {
+    expect(defaultToolTimeoutMs(30_000, 3_600_000)).toBe(1_200_000);
+    expect(defaultToolTimeoutMs(100, 3_600_000)).toBe(1_200_000);
+    expect(defaultToolTimeoutMs(400_000, 3_600_000)).toBe(1_600_000);
+    expect(defaultToolTimeoutMs(30_000, 600_000)).toBe(600_000);
+    expect(defaultToolTimeoutMs(400_000, 1_000_000)).toBe(1_000_000);
+    expect(defaultToolTimeoutMs(30_000)).toBe(1_200_000);
+    expect(defaultToolTimeoutMs(400_000)).toBe(1_600_000);
+  });
+
   test("spec.toolTimeoutMs bounds sustained tool activity and lets idle watchdog trip", async () => {
     const proc = spawnInNewSession(
       [

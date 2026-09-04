@@ -466,6 +466,21 @@ export interface HarnessProcessSpec {
     | undefined;
 }
 
+/**
+ * Compute the default contiguous tool timeout bound across harnesses:
+ * floored at 20 minutes (1,200,000ms), scaled with `idleTimeoutMs * 4`, and
+ * capped at `hardTimeoutMs` when defined.
+ */
+export function defaultToolTimeoutMs(
+  idleTimeoutMs: number,
+  hardTimeoutMs?: number,
+): number {
+  return Math.min(
+    hardTimeoutMs ?? Number.POSITIVE_INFINITY,
+    Math.max(idleTimeoutMs * 4, 1_200_000),
+  );
+}
+
 export async function* runHarnessProcess(
   spec: HarnessProcessSpec,
 ): AsyncGenerator<HarnessChunk> {
@@ -479,10 +494,7 @@ export async function* runHarnessProcess(
   // write to fail with EPIPE (which our catch block handles).
   const toolTimeoutMs =
     spec.toolTimeoutMs ??
-    Math.min(
-      req.hardTimeoutMs ?? Number.POSITIVE_INFINITY,
-      Math.max(req.idleTimeoutMs * 4, 1_200_000),
-    );
+    defaultToolTimeoutMs(req.idleTimeoutMs, req.hardTimeoutMs);
 
   const killer = createKillCoordinator({
     proc,

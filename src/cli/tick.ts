@@ -477,17 +477,26 @@ export async function runTick(input: RunTickInput = {}): Promise<number> {
   }
 }
 
+function unrefTimer(t: ReturnType<typeof setTimeout>): void {
+  if (typeof (t as { unref?: () => void }).unref === "function") {
+    (t as { unref: () => void }).unref();
+  }
+}
+
 async function runCommandTask(
   command: string,
   opts: { timeoutMs: number; cwd: string; env: NodeJS.ProcessEnv },
 ): Promise<{ exitCode: number; output: string }> {
   return await new Promise((resolve) => {
     let settled = false;
+    let procClosed = false;
     let timer: ReturnType<typeof setTimeout>;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: { exitCode: number; output: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve(result);
     };
     const child = spawn(command, {
@@ -502,6 +511,9 @@ async function runCommandTask(
       // window per command task. Suppress it (issue #271); no-op on POSIX.
       windowsHide: true,
     });
+    const isProcExited = (): boolean =>
+      procClosed || child.exitCode !== null || child.signalCode !== null;
+
     let output = "";
     const append = (chunk: Buffer) => {
       output = appendCommandOutput(output, chunk.toString());
@@ -511,11 +523,12 @@ async function runCommandTask(
     timer = setTimeout(() => {
       if (typeof child.pid === "number" && child.pid > 0) {
         signalProcessGroup(child.pid, "SIGTERM");
-        setTimeout(() => {
-          if (typeof child.pid === "number" && !child.killed) {
+        killTimer = setTimeout(() => {
+          if (typeof child.pid === "number" && !isProcExited()) {
             signalProcessGroup(child.pid, "SIGKILL");
           }
         }, 3000);
+        unrefTimer(killTimer);
       } else {
         child.kill("SIGTERM");
       }
@@ -523,6 +536,7 @@ async function runCommandTask(
       finish({ exitCode: 124, output });
     }, opts.timeoutMs);
     child.on("close", (code, signal) => {
+      procClosed = true;
       if (signal) {
         finish({
           exitCode: 128,
@@ -533,6 +547,7 @@ async function runCommandTask(
       }
     });
     child.on("error", (e) => {
+      procClosed = true;
       finish({ exitCode: 1, output: e.message });
     });
   });
