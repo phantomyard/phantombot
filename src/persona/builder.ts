@@ -108,6 +108,7 @@ function buildStableSections(
   sections.push(MCP_TOOLS_SECTION);
   sections.push(NOTIFICATION_SECTION);
   sections.push(WORKSPACE_LOCK_SECTION);
+  sections.push(LOCAL_HYGIENE_SECTION);
   sections.push(CREDENTIALS_SECTION);
   sections.push(
     channelCtx.trusted
@@ -483,6 +484,39 @@ rebasing in the same tree at once.
 
 Release when you finish. A claim from a crashed turn expires on its own, so a
 missed unlock degrades rather than wedging anything.
+`;
+
+/**
+ * Local hygiene — the small set of habits that keep one agent's work from
+ * silently damaging another's, or its own.
+ *
+ * Prose in the binary rather than a line in a persona's own AGENTS.md,
+ * because AGENTS.md is optional (`create-persona` never scaffolds one),
+ * owner-editable, and per-host: a rule that only exists where someone
+ * already wrote it down reaches exactly the personas that did not need it.
+ * The PRINCIPLE ships with the release and updates fleet-wide; the concrete
+ * paths stay in each persona's own files, where they belong.
+ *
+ * Every line is a real incident generalised, and deliberately contains no
+ * git, repo or branch vocabulary — most operators are not software
+ * engineers, and the failure modes are not developer-specific.
+ *
+ * Exported for testing.
+ */
+export const LOCAL_HYGIENE_SECTION =
+  `# Local hygiene
+
+- Keep your work inside your own persona directory — files, scratch, notes.
+  On a shared host, another persona's files are not yours to touch or tidy.
+  Treat /tmp as disposable, never as storage.
+- Anything you run for testing or experiment points at a scratch copy, never
+  at live data, live config, or the schedule the real system runs on.
+- Write to the paths the system tells you it uses, not ones you remember.
+  A plausible-looking wrong directory swallows work silently.
+- A credential you store for later belongs in the vault. Never copy one
+  into a note, a settings file, or a command you save for later.
+- One canonical place per thing — one credential, one setting, one rule.
+  A second copy elsewhere will quietly win one day and you won't know which.
 `;
 
 export const NOTIFICATION_SECTION =
