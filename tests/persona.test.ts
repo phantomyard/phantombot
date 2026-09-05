@@ -146,6 +146,54 @@ describe("loadPersona — full mixed persona", () => {
       memorySource: "MEMORY.md",
       tools: "agents content",
       toolsSource: "AGENTS.md",
+      mcpServers: undefined,
     });
+  });
+});
+
+describe("loadPersona — mcp servers", () => {
+  test("loads sorted MCP server IDs when mcp.json is present", async () => {
+    await write("BOOT.md", "id");
+    await write(
+      "mcp.json",
+      JSON.stringify({
+        mcpServers: {
+          "home-assistant": {
+            transport: "http",
+            url: "https://ha.local/mcp",
+            auth: { type: "header", header: "Authorization", valueRef: "HA_TOKEN" },
+          },
+          github: {
+            transport: "stdio",
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-github"],
+            auth: { type: "env", env: { GITHUB_PERSONAL_ACCESS_TOKEN: "GH_TOKEN" } },
+          },
+        },
+      }),
+    );
+    const p = await loadPersona(agentDir);
+    expect(p.mcpServers).toEqual(["github", "home-assistant"]);
+  });
+
+  test("mcpServers is undefined when mcp.json is absent", async () => {
+    await write("BOOT.md", "id");
+    const p = await loadPersona(agentDir);
+    expect(p.mcpServers).toBeUndefined();
+  });
+
+  test("mcpServers is undefined when mcp.json has no servers", async () => {
+    await write("BOOT.md", "id");
+    await write("mcp.json", JSON.stringify({ mcpServers: {} }));
+    const p = await loadPersona(agentDir);
+    expect(p.mcpServers).toBeUndefined();
+  });
+
+  test("survives malformed mcp.json gracefully", async () => {
+    await write("BOOT.md", "id");
+    await write("mcp.json", "{ malformed json");
+    const p = await loadPersona(agentDir);
+    expect(p.mcpServers).toBeUndefined();
+    expect(p.boot).toBe("id");
   });
 });
