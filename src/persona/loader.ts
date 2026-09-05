@@ -39,6 +39,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { loadRegistry } from "../mcp/registry.ts";
 
 const SOUL_FILE = "SOUL.md" as const;
 /** Per-phantom "who you are" file — first match wins. */
@@ -59,6 +60,8 @@ export interface PersonaFiles {
   memory?: string;
   /** Tool / capability hints (from tools.md / AGENTS.md). */
   tools?: string;
+  /** Registered MCP server IDs (from mcp.json). */
+  mcpServers?: string[];
 
   /** Filename the identity content was loaded from (diagnostic). */
   identitySource: string;
@@ -96,6 +99,15 @@ export async function loadPersona(agentDir: string): Promise<PersonaFiles> {
   const memory = await tryReadFirst(agentDir, MEMORY_FILES);
   const tools = await tryReadFirst(agentDir, TOOLS_FILES);
 
+  let mcpServers: string[] | undefined;
+  try {
+    const registry = await loadRegistry(agentDir);
+    const keys = Object.keys(registry.mcpServers).sort();
+    if (keys.length > 0) mcpServers = keys;
+  } catch {
+    // Best-effort: corrupt mcp.json is flagged by doctor / mcp commands
+  }
+
   return {
     boot: parts.join("\n\n"),
     identitySource: sources.join("+"),
@@ -103,6 +115,7 @@ export async function loadPersona(agentDir: string): Promise<PersonaFiles> {
     memorySource: memory?.source,
     tools: tools?.content,
     toolsSource: tools?.source,
+    mcpServers,
   };
 }
 
