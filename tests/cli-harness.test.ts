@@ -25,12 +25,12 @@ describe("Pi-default wizard wiring", () => {
     expect(piInstallCommand("linux")).toEqual([
       "sh",
       "-c",
-      "curl -fsSL https://pi.dev/install.sh | sh",
+      "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
     ]);
     expect(piInstallCommand("darwin")).toEqual([
       "sh",
       "-c",
-      "curl -fsSL https://pi.dev/install.sh | sh",
+      "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
     ]);
   });
 

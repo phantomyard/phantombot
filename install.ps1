@@ -9,10 +9,11 @@
     .\install.ps1 [-DryRun]
 
   What it does:
-    1. Inspects system and arch.
-    2. Downloads and installs phantombot.exe to %LOCALAPPDATA%\Programs\phantombot and checks PATH.
-    3. Prompts for background service / autostart at boot (asks for Windows password).
-    4. Launches the Phantombot TUI (in sandbox mode if -DryRun).
+    1. Clears screen, displays animated phantom intro banner, and prompts to install.
+    2. Inspects system and arch.
+    3. Downloads and installs phantombot.exe to %LOCALAPPDATA%\Programs\phantombot and checks PATH.
+    4. Prompts for background service / autostart at boot (asks for Windows password).
+    5. Launches the Phantombot TUI (in sandbox mode if -DryRun).
 
   Override the install dir with $env:PHANTOMBOT_INSTALL_DIR.
   Skip the TUI launch with $env:PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
@@ -48,10 +49,59 @@ try {
 } catch {
 }
 
+# --- 1. Clear Screen & Presentation Animation -----------------------------
+$isInteractive = [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected
+
+if ($isInteractive) {
+    try {
+        [Console]::Clear()
+    } catch {
+        Write-Host "`e[2J`e[3J`e[H" -NoNewline
+    }
+}
+
+$ghostLines = @(
+    @{ Text = "        .▄▄██████▄▄.        "; Color = "Magenta" },
+    @{ Text = "      ▄██████████████▄      "; Color = "Magenta" },
+    @{ Text = "     ██████████████████     "; Color = "DarkMagenta" },
+    @{ Text = "    █████▀░░▀██▀░░▀█████    "; Color = "DarkMagenta" },
+    @{ Text = "    █████▄▄▄████▄▄▄█████    "; Color = "Blue" },
+    @{ Text = "    ████████████████████    "; Color = "Blue" },
+    @{ Text = "    ████████████████████    "; Color = "Cyan" },
+    @{ Text = "    ████▀██▀▀██▀▀██▀████    "; Color = "Cyan" },
+    @{ Text = "     ▀▀   ▀   ▀   ▀   ▀▀    "; Color = "DarkCyan" }
+)
+
+Write-Host ""
+foreach ($l in $ghostLines) {
+    Write-Host ("  " + $l.Text) -ForegroundColor $l.Color
+    if ($isInteractive) {
+        Start-Sleep -Milliseconds 30
+    }
+}
+Write-Host ""
+Write-Host "  Phantombot Installer" -ForegroundColor White
+if ($isInteractive) {
+    Start-Sleep -Milliseconds 30
+}
+Write-Host "  There are many agent runtimes, but this one is yours" -ForegroundColor Gray
+Write-Host ""
+
+# --- 2. Welcome & Confirmation --------------------------------------------
+if ($isInteractive) {
+    $welcome = Read-Host "Welcome! Do you want to install Phantombot? [Y/n]"
+    if ($welcome -and ($welcome.Trim() -match '^(n|no)$')) {
+        Write-Host ""
+        Write-Host "Installation cancelled."
+        exit 0
+    }
+    Write-Host ""
+}
+
 Write-Host "Installing Phantombot..."
 Write-Host ""
 
-# --- 1. Inspecting System -------------------------------------------------
+# --- 3. Inspecting System -------------------------------------------------
 Write-Host -NoNewline "Inspecting System....."
 
 $rawArch = $env:PROCESSOR_ARCHITECTURE
@@ -87,7 +137,7 @@ if (-not $DryRun -and -not $env:PHANTOMBOT_DEV_BIN) {
 
 Write-Host "$([char]0x2713)" -ForegroundColor Green
 
-# --- 2. Downloading Binary ------------------------------------------------
+# --- 4. Downloading Binary ------------------------------------------------
 Write-Host -NoNewline "Downloading Binary...."
 
 $tmpBin = $null
@@ -157,7 +207,7 @@ if ($env:PHANTOMBOT_DEV_BIN) {
 
 Write-Host "$([char]0x2713)" -ForegroundColor Green
 
-# --- 3. Installing Now ----------------------------------------------------
+# --- 5. Installing Now ----------------------------------------------------
 Write-Host -NoNewline "Installing Now........"
 
 if ($env:PHANTOMBOT_DEV_BIN) {
@@ -209,7 +259,7 @@ if (-not $DryRun) {
 
 Write-Host "$([char]0x2713)" -ForegroundColor Green
 
-# --- 4. Verifying ---------------------------------------------------------
+# --- 6. Verifying ---------------------------------------------------------
 Write-Host -NoNewline "Verifying............."
 
 if ($PbBin) {
@@ -223,7 +273,7 @@ Write-Host "$([char]0x2713)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Installation completed succesfully."
 
-# --- autostart service installation ---------------------------------------
+# --- 7. Autostart Service Installation ------------------------------------
 if (-not $DryRun) {
     try {
         & $PbBin install
@@ -232,7 +282,7 @@ if (-not $DryRun) {
     }
 }
 
-# --- launch TUI -----------------------------------------------------------
+# --- 8. Launch TUI --------------------------------------------------------
 if ($env:PHANTOMBOT_SKIP_TUI) {
     exit 0
 }

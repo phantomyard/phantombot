@@ -33,15 +33,83 @@ can_open_dev_tty() {
   ( exec 3</dev/tty ) 2>/dev/null
 }
 
+# --- 1. Clear Screen & Presentation Animation ----------------------------
+
 if [ -t 1 ]; then
+  printf '\033[2J\033[3J\033[H'
   CHECK="$(printf '\033[32m✓\033[0m')"
 else
   CHECK="✓"
 fi
 
-printf 'Installing Phantombot...\n\n'
+render_intro() {
+  if [ -t 1 ]; then
+    c1="\033[38;5;141m"
+    c2="\033[38;5;135m"
+    c3="\033[38;5;129m"
+    c4="\033[38;5;128m"
+    c5="\033[38;5;127m"
+    c6="\033[38;5;99m"
+    c7="\033[38;5;69m"
+    c8="\033[38;5;39m"
+    c9="\033[38;5;38m"
+    reset="\033[0m"
+    bold="\033[1;37m"
+    dim="\033[38;5;246m"
 
-# --- 1. Inspecting System ------------------------------------------------
+    printf '\n'
+    printf "  %b        .▄▄██████▄▄.        %b\n" "$c1" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b      ▄██████████████▄      %b\n" "$c2" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b     ██████████████████     %b\n" "$c3" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b    █████▀░░▀██▀░░▀█████    %b\n" "$c4" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b    █████▄▄▄████▄▄▄█████    %b\n" "$c5" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b    ████████████████████    %b\n" "$c6" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b    ████████████████████    %b\n" "$c7" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b    ████▀██▀▀██▀▀██▀████    %b\n" "$c8" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %b     ▀▀   ▀   ▀   ▀   ▀▀    %b\n\n" "$c9" "$reset"
+    sleep 0.04 2>/dev/null || true
+
+    printf "  %bPhantombot Installer%b\n" "$bold" "$reset"
+    sleep 0.03 2>/dev/null || true
+    printf "  %bThere are many agent runtimes, but this one is yours%b\n\n" "$dim" "$reset"
+  else
+    printf '\nPhantombot Installer\nThere are many agent runtimes, but this one is yours\n\n'
+  fi
+}
+
+render_intro
+
+# --- 2. Welcome & Confirmation -------------------------------------------
+
+welcome_choice="y"
+if [ -t 0 ]; then
+  printf 'Welcome! Do you want to install Phantombot? [Y/n] '
+  read -r welcome_choice || welcome_choice="y"
+elif can_open_dev_tty; then
+  printf 'Welcome! Do you want to install Phantombot? [Y/n] '
+  read -r welcome_choice </dev/tty || welcome_choice="y"
+fi
+
+case "$welcome_choice" in
+  ""|[yY]|[yY][eE][sS])
+    ;;
+  *)
+    printf '\nInstallation cancelled.\n'
+    exit 0
+    ;;
+esac
+
+printf '\nInstalling Phantombot...\n\n'
+
+# --- 3. Inspecting System ------------------------------------------------
 
 printf 'Inspecting System.....'
 
@@ -110,7 +178,7 @@ fi
 
 printf '%s\n' "$CHECK"
 
-# --- 2. Downloading Binary -----------------------------------------------
+# --- 4. Downloading Binary -----------------------------------------------
 
 printf 'Downloading Binary....'
 
@@ -167,7 +235,7 @@ fi
 
 printf '%s\n' "$CHECK"
 
-# --- 3. Installing Now ---------------------------------------------------
+# --- 5. Installing Now ---------------------------------------------------
 
 printf 'Installing Now........'
 
@@ -237,7 +305,7 @@ esac
 
 printf '%s\n' "$CHECK"
 
-# --- 4. Verifying --------------------------------------------------------
+# --- 6. Verifying --------------------------------------------------------
 
 printf 'Verifying.............'
 
@@ -251,7 +319,7 @@ printf '%s\n' "$CHECK"
 
 printf '\nInstallation completed succesfully.\n'
 
-# --- autostart service installation --------------------------------------
+# --- 7. Autostart Service Installation -----------------------------------
 
 if [ "$DRYRUN" -eq 0 ]; then
   if [ "$platform" != "darwin" ]; then
@@ -292,7 +360,7 @@ if [ "$DRYRUN" -eq 0 ]; then
   fi
 fi
 
-# --- launch TUI ----------------------------------------------------------
+# --- 8. Launch TUI -------------------------------------------------------
 
 if [ -n "${PHANTOMBOT_SKIP_TUI:-}" ]; then
   exit 0
