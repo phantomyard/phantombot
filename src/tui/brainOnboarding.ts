@@ -269,18 +269,20 @@ export async function runBrainOnboarding(
   for (;;) {
     const result = await runOnce(q, deps);
     if (result.retry !== true) return result;
-    const again = await q.choose({
-      title: "Brain test failed",
-      description:
-        `Nothing was saved. ${(result.detail ?? "").split("\n")[0]}\nRun the brain setup again from the top to fix it — nothing was written, so you lose nothing by retrying.`,
-      options: [
-        { value: "restart", label: "Start over (recommended)", hint: "run the brain setup from the top, then retest" },
-        { value: "configure", label: "Back to Configure", hint: "leave it for now; Brain stays marked required" },
-      ],
-      initial: "restart",
-    });
-    if (again !== "restart") {
-      return { landing: "configure", notice: result.notice };
+    if (!q.testBrain) {
+      const again = await q.choose({
+        title: "Brain test failed",
+        description:
+          `Nothing was saved. ${(result.detail ?? "").split("\n")[0]}\nRun the brain setup again from the top to fix it — nothing was written, so you lose nothing by retrying.`,
+        options: [
+          { value: "restart", label: "Start over (recommended)", hint: "run the brain setup from the top, then retest" },
+          { value: "configure", label: "Back to Configure", hint: "leave it for now; Brain stays marked required" },
+        ],
+        initial: "restart",
+      });
+      if (again !== "restart") {
+        return { landing: "configure", notice: result.notice };
+      }
     }
   }
 }
@@ -454,6 +456,39 @@ async function runOnce(
   }
 
   if (testPick === "test") {
+    if (q.testBrain) {
+      const testResult = await q.testBrain({
+        persona: deps.persona,
+        harness: HARNESS_LABELS[chain[0]!] ?? chain[0]!,
+        probe: () => deps.probe(chain[0]!),
+      });
+
+      if (testResult.ok) {
+        if (testResult.apply) {
+          await deps.applyChain(chain);
+          if (deps.maybePromptRestart) {
+            await deps.maybePromptRestart();
+          }
+          return {
+            landing: "chat",
+            notice: `brain verified: ${chain.join(" → ")}`,
+          };
+        } else {
+          return {
+            landing: "configure",
+            notice: `brain unchanged — verified ${chain.join(" → ")} (not applied)`,
+          };
+        }
+      } else {
+        return {
+          landing: "configure",
+          notice: `brain test failed: ${testResult.detail.split("\n")[0]}`,
+          retry: testResult.retry ? true : undefined,
+          detail: testResult.detail,
+        };
+      }
+    }
+
     q.note(
       `Testing ${HARNESS_LABELS[primary] ?? primary}`,
       "sending one short prompt — up to a minute on a cold start",

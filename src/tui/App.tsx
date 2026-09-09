@@ -49,6 +49,11 @@ import {
   SearchListScreen,
   type SearchListRequest,
 } from "./screens/SearchList.tsx";
+import {
+  BrainTestScreen,
+  type BrainTestRequest,
+  type BrainTestResult,
+} from "./screens/BrainTest.tsx";
 import { ReembedScreen, type ReembedState } from "./screens/Reembed.tsx";
 import { openChat, type ChatSession } from "./chatSession.ts";
 import { ChatScreen } from "./screens/Chat.tsx";
@@ -226,6 +231,9 @@ export function App(props: AppProps): React.ReactElement {
   const [searchAsk, setSearchAsk] = useState<
     (SearchListRequest & { resolve: (value: string | undefined) => void }) | undefined
   >();
+  const [brainTest, setBrainTest] = useState<
+    (BrainTestRequest & { resolve: (res: BrainTestResult) => void }) | undefined
+  >();
   const [reembed, setReembed] = useState<
     { space: string; state: ReembedState } | undefined
   >();
@@ -313,6 +321,15 @@ export function App(props: AppProps): React.ReactElement {
     });
     setSearchAsk(undefined);
     return value;
+  }, []);
+
+  /** Run the live model test checklist screen. */
+  const askBrainTest = useCallback(async (input: BrainTestRequest) => {
+    const res = await new Promise<BrainTestResult>((resolve) => {
+      setBrainTest({ ...input, resolve });
+    });
+    setBrainTest(undefined);
+    return res;
   }, []);
 
   // One chat session per persona, opened lazily and kept across screen
@@ -537,6 +554,7 @@ export function App(props: AppProps): React.ReactElement {
             choose: askChoice,
             search: askSearch,
             value: askValue,
+            testBrain: askBrainTest,
             note: (title, body) => setNotice(`${title}: ${body.split("\n")[0]}`),
           },
           deps,
@@ -551,7 +569,7 @@ export function App(props: AppProps): React.ReactElement {
         await refresh();
       }
     },
-    [refresh, askChoice, askSearch, askValue, askConfirmValue],
+    [refresh, askChoice, askSearch, askValue, askBrainTest, askConfirmValue],
   );
 
   const wizardBrain = props.onWizardBrain ?? onboardBrain;
@@ -2021,6 +2039,19 @@ export function App(props: AppProps): React.ReactElement {
           <SearchListScreen
             request={searchAsk}
             onAnswer={(v) => searchAsk.resolve(v)}
+          />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (brainTest) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <BrainTestScreen
+            request={brainTest}
+            onAnswer={(res) => brainTest.resolve(res)}
           />
         </Box>
       </TerminalSizeContext.Provider>

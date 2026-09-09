@@ -37,6 +37,9 @@ import {
 import { resolvePiApiKeyWrite, type RoutingChoices } from "../lib/piRouting.ts";
 import { probeProviderKey, type KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
+import type { BrainTestRequest, BrainTestResult } from "./screens/BrainTest.tsx";
+
+export type { BrainTestRequest, BrainTestResult };
 
 export interface BrainQuestions {
   choose(input: {
@@ -60,6 +63,8 @@ export interface BrainQuestions {
     masked?: boolean;
     allowEmpty?: boolean;
   }): Promise<string | undefined>;
+  /** Live model test screen with checklist status and apply/retry confirmation. */
+  testBrain?(input: BrainTestRequest): Promise<BrainTestResult>;
   /** A progress fact, shown in the notice bar. Never a question. */
   note(title: string, body: string): void;
 }

@@ -14,6 +14,11 @@ import { AskScreen, type AskRequest } from "./screens/Ask.tsx";
 import { ChooseScreen, type ChooseRequest } from "./screens/Choose.tsx";
 import { SearchListScreen, type SearchListRequest } from "./screens/SearchList.tsx";
 import {
+  BrainTestScreen,
+  type BrainTestRequest,
+  type BrainTestResult,
+} from "./screens/BrainTest.tsx";
+import {
   TerminalSizeContext,
   enterFullScreen,
   gateStdout,
@@ -59,6 +64,7 @@ export interface StandaloneQuestions {
     danger?: boolean;
     confirmName?: string;
   }): Promise<boolean>;
+  testBrain?(input: BrainTestRequest): Promise<BrainTestResult>;
   note(title: string, body: string): void;
 }
 
@@ -81,6 +87,9 @@ export function StandaloneFlowHost(props: {
   >();
   const [searchAsk, setSearchAsk] = useState<
     SearchListRequest & { resolve: (v: string | undefined) => void }
+  >();
+  const [brainTest, setBrainTest] = useState<
+    BrainTestRequest & { resolve: (v: BrainTestResult) => void }
   >();
   const [confirm, setConfirm] = useState<
     ConfirmRequest & { resolve: (v: boolean) => void }
@@ -108,6 +117,10 @@ export function StandaloneFlowHost(props: {
       confirm: (input) =>
         new Promise((resolve) => {
           setConfirm({ ...input, resolve });
+        }),
+      testBrain: (input) =>
+        new Promise((resolve) => {
+          setBrainTest({ ...input, resolve });
         }),
       note: (title, body) => {
         setNotice(title ? `${title}: ${body.split("\n")[0]}` : body);
@@ -185,6 +198,23 @@ export function StandaloneFlowHost(props: {
               const res = searchAsk.resolve;
               setSearchAsk(undefined);
               res(v);
+            }}
+          />
+        </Box>
+      </TerminalSizeContext.Provider>
+    );
+  }
+
+  if (brainTest) {
+    return (
+      <TerminalSizeContext.Provider value={size}>
+        <Box flexDirection="column" height={renderRows(size)}>
+          <BrainTestScreen
+            request={brainTest}
+            onAnswer={(res) => {
+              const r = brainTest.resolve;
+              setBrainTest(undefined);
+              r(res);
             }}
           />
         </Box>
