@@ -44,41 +44,47 @@ fi
 
 render_intro() {
   if [ -t 1 ]; then
-    c1="\033[38;5;141m"
-    c2="\033[38;5;135m"
-    c3="\033[38;5;129m"
-    c4="\033[38;5;128m"
-    c5="\033[38;5;127m"
-    c6="\033[38;5;99m"
-    c7="\033[38;5;69m"
-    c8="\033[38;5;39m"
-    c9="\033[38;5;38m"
+    gDisc="\033[38;5;238m"
+    gCowl="\033[38;5;244m"
+    gDeep="\033[38;5;240m"
+    v1="\033[38;5;33m"
+    v2="\033[38;5;39m"
+    v3="\033[38;5;51m"
+    v4="\033[38;5;231m"
     reset="\033[0m"
     bold="\033[1;37m"
-    dim="\033[38;5;246m"
+    dim="\033[38;5;245m"
 
     printf '\n'
-    printf "  %b        .▄▄██████▄▄.        %b\n" "$c1" "$reset"
+    printf "  %b            ▄▄▄▄████████▄▄▄▄            %b\n" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b        ▄▄███▀▀▀        ▀▀▀███▄▄        %b\n" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b      ▄██▀▀    %b▄▄▄████▄▄▄%b    ▀▀██▄      %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b    ▄██▀     %b▄██▀▀    ▀▀██▄%b     ▀██▄    %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b   ▄██▀     %b▄██          ██▄%b     ▀██▄   %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b  ▄██▀      %b██            ██%b      ▀██▄  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b  ███       %b██   %b╺%b━%b━━%b•%b━━%b━%b╸%b   ██%b       ███  %b\n" "$gDisc" "$gCowl" "$v1" "$v2" "$v3" "$v4" "$v3" "$v2" "$v1" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b  ███       %b██            ██%b       ███  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b  ▀██▄      %b▀██▄        ▄██▀%b      ▄██▀  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b   ▀██▄      %b▀██▄▄▄▄▄▄██▀%b      ▄██▀   %b\n" "$gDisc" "$gDeep" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b    ▀██▄▄     %b▀▀▀████▀▀▀%b     ▄▄██▀    %b\n" "$gDisc" "$gDeep" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b      ▀▀██▄▄            ▄▄██▀▀      %b\n" "$gDisc" "$reset"
+    sleep 0.02 2>/dev/null || true
+    printf "  %b         ▀▀▀▀████████▀▀▀▀         %b\n\n" "$gDisc" "$reset"
     sleep 0.03 2>/dev/null || true
-    printf "  %b      ▄██████████████▄      %b\n" "$c2" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b     ██████████████████     %b\n" "$c3" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b    █████▀░░▀██▀░░▀█████    %b\n" "$c4" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b    █████▄▄▄████▄▄▄█████    %b\n" "$c5" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b    ████████████████████    %b\n" "$c6" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b    ████████████████████    %b\n" "$c7" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b    ████▀██▀▀██▀▀██▀████    %b\n" "$c8" "$reset"
-    sleep 0.03 2>/dev/null || true
-    printf "  %b     ▀▀   ▀   ▀   ▀   ▀▀    %b\n\n" "$c9" "$reset"
-    sleep 0.04 2>/dev/null || true
 
     printf "  %bPhantombot Installer%b\n" "$bold" "$reset"
-    sleep 0.03 2>/dev/null || true
+    sleep 0.02 2>/dev/null || true
     printf "  %bThere are many agent runtimes, but this one is yours%b\n\n" "$dim" "$reset"
   else
     printf '\nPhantombot Installer\nThere are many agent runtimes, but this one is yours\n\n'

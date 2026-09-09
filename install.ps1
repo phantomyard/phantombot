@@ -60,31 +60,45 @@ if ($isInteractive) {
     }
 }
 
-$ghostLines = @(
-    @{ Text = "        .▄▄██████▄▄.        "; Color = "Magenta" },
-    @{ Text = "      ▄██████████████▄      "; Color = "Magenta" },
-    @{ Text = "     ██████████████████     "; Color = "DarkMagenta" },
-    @{ Text = "    █████▀░░▀██▀░░▀█████    "; Color = "DarkMagenta" },
-    @{ Text = "    █████▄▄▄████▄▄▄█████    "; Color = "Blue" },
-    @{ Text = "    ████████████████████    "; Color = "Blue" },
-    @{ Text = "    ████████████████████    "; Color = "Cyan" },
-    @{ Text = "    ████▀██▀▀██▀▀██▀████    "; Color = "Cyan" },
-    @{ Text = "     ▀▀   ▀   ▀   ▀   ▀▀    "; Color = "DarkCyan" }
+$esc = [char]27
+$gDisc = "$esc[38;5;238m"
+$gCowl = "$esc[38;5;244m"
+$gDeep = "$esc[38;5;240m"
+$v1 = "$esc[38;5;33m"
+$v2 = "$esc[38;5;39m"
+$v3 = "$esc[38;5;51m"
+$v4 = "$esc[38;5;231m"
+$reset = "$esc[0m"
+
+$phantomLines = @(
+    "  $gDisc            ▄▄▄▄████████▄▄▄▄            $reset",
+    "  $gDisc        ▄▄███▀▀▀        ▀▀▀███▄▄        $reset",
+    "  $gDisc      ▄██▀▀    $gCowl▄▄▄████▄▄▄$gDisc    ▀▀██▄      $reset",
+    "  $gDisc    ▄██▀     $gCowl▄██▀▀    ▀▀██▄$gDisc     ▀██▄    $reset",
+    "  $gDisc   ▄██▀     $gCowl▄██          ██▄$gDisc     ▀██▄   $reset",
+    "  $gDisc  ▄██▀      $gCowl██            ██$gDisc      ▀██▄  $reset",
+    "  $gDisc  ███       $gCowl██   $v1╺$v2━$v3━━$v4•$v3━━$v2━$v1╸$gCowl   ██$gDisc       ███  $reset",
+    "  $gDisc  ███       $gCowl██            ██$gDisc       ███  $reset",
+    "  $gDisc  ▀██▄      $gCowl▀██▄        ▄██▀$gDisc      ▄██▀  $reset",
+    "  $gDisc   ▀██▄      $gDeep▀██▄▄▄▄▄▄██▀$gDisc      ▄██▀   $reset",
+    "  $gDisc    ▀██▄▄     $gDeep▀▀▀████▀▀▀$gDisc     ▄▄██▀    $reset",
+    "  $gDisc      ▀▀██▄▄            ▄▄██▀▀      $reset",
+    "  $gDisc         ▀▀▀▀████████▀▀▀▀         $reset"
 )
 
 Write-Host ""
-foreach ($l in $ghostLines) {
-    Write-Host ("  " + $l.Text) -ForegroundColor $l.Color
+foreach ($l in $phantomLines) {
+    Write-Host $l
     if ($isInteractive) {
-        Start-Sleep -Milliseconds 30
+        Start-Sleep -Milliseconds 20
     }
 }
 Write-Host ""
 Write-Host "  Phantombot Installer" -ForegroundColor White
 if ($isInteractive) {
-    Start-Sleep -Milliseconds 30
+    Start-Sleep -Milliseconds 20
 }
-Write-Host "  There are many agent runtimes, but this one is yours" -ForegroundColor Gray
+Write-Host "  There are many agent runtimes, but this one is yours" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- 2. Welcome & Confirmation --------------------------------------------
