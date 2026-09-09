@@ -247,6 +247,77 @@ function setRoutingKey(
   setIn(toml, [...base, key], value);
 }
 
+export interface RunHarnessCheckInput {
+  config?: Config;
+  prompts?: HarnessPrompts;
+  dryRun?: boolean;
+  installRunner?: InstallRunner;
+  availability?: Record<HarnessId, string | undefined>;
+  pathEnv?: string;
+}
+
+/**
+ * Harness detection probe used during installation. Shows detected harnesses
+ * and, if all are missing, proposes running the official Pi installer.
+ */
+export async function runHarnessCheck(
+  input: RunHarnessCheckInput = {},
+): Promise<number> {
+  const q = input.prompts ?? clackPrompts;
+  const config = input.config ?? (await loadConfig());
+  const availability =
+    input.availability ?? (await detectAvailability(config, input.pathEnv));
+  await saveHarnessBins(availability);
+
+  q.note(
+    SUPPORTED_HARNESSES.map(
+      (id) =>
+        `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
+    ).join("\n"),
+    "Detected harnesses",
+  );
+
+  const hasAnyHarness = Object.values(availability).some(
+    (path) => path !== undefined,
+  );
+  if (!hasAnyHarness) {
+    q.note(
+      "No supported harness (claude, pi, codex) was found on your PATH.\n" +
+        "You will need to install at least one of them before the agent can think.",
+      "Warning: No Harness Found",
+    );
+    if (!input.dryRun) {
+      const runner = input.installRunner ?? defaultInstallRunner;
+      const wantsPi = await (q.confirm ?? p.confirm)({
+        message: "Install Pi now? (official Pi installer: pi.dev)",
+        initialValue: true,
+      });
+      if (wantsPi && !p.isCancel(wantsPi)) {
+        await installPi(runner, q);
+        const refreshed = await detectAvailability(config);
+        await saveHarnessBins(refreshed);
+        q.note(
+          SUPPORTED_HARNESSES.map(
+            (id) =>
+              `  ${refreshed[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${refreshed[id] ?? harnessBin(config, id)}`,
+          ).join("\n"),
+          "Detected harnesses",
+        );
+      }
+    }
+  }
+
+  const proceed = await (q.confirm ?? p.confirm)({
+    message: "Continue to phantombot TUI?",
+    initialValue: true,
+  });
+  if (proceed !== true) {
+    return 1;
+  }
+
+  return 0;
+}
+
 export interface RunInput {
   /** Write a persona override. Omit to configure the global fallback chain. */
   persona?: string;
@@ -1005,8 +1076,23 @@ export default defineCommand({
       type: "string",
       description: "Set the chain for one persona. Omit for the global chain.",
     },
+    check: {
+      type: "boolean",
+      description:
+        "Detect installed harnesses and propose Pi install if none found (used during install).",
+    },
+    dryrun: {
+      type: "boolean",
+      alias: "dry-run",
+      description: "Skip side effects.",
+    },
   },
   async run({ args }) {
+    if (args.check) {
+      const code = await runHarnessCheck({ dryRun: args.dryrun });
+      process.exitCode = code;
+      return;
+    }
     const code = await runHarness({
       persona: args.persona ? String(args.persona) : undefined,
     });

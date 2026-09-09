@@ -3,34 +3,38 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/phantomyard/phantombot/main/install.sh | sh
+#   ./install.sh [--dryrun]
 #
 # What it does:
 #   1. Detects host OS (Linux / Darwin) and arch (x86_64 → x64, aarch64/arm64 → arm64).
-#   2. Fetches the latest GitHub release tag.
-#   3. Downloads the matching binary + SHA256SUMS.
-#   4. Verifies the SHA256 (sha256sum on Linux, shasum -a 256 on Mac).
-#   5. On Mac: clears quarantine xattrs and applies an ad-hoc codesign so
-#      Gatekeeper accepts the unsigned-by-Apple binary.
-#   6. Installs to ~/.local/bin/phantombot (mode 0755).
-#   7. Warns if ~/.local/bin isn't on PATH.
-#   8. Launches `phantombot init` to set up harness, persona, telegram, and
-#      (on Linux) the systemd background service.
+#   2. Downloads and installs the binary to ~/.local/bin/phantombot (mode 0755) and checks PATH.
+#   3. Installs background service as user (autostart on login as default, with prompt for boot).
+#   4. Detects harnesses on PATH and proposes Pi install if none found.
+#   5. Launches the Phantombot TUI (in sandbox mode if --dryrun).
 #
 # Override the install dir with PHANTOMBOT_INSTALL_DIR=/some/path.
-# Skip the init TUI launch with PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
-#
-# Refusal modes (intentional — bail fast):
-#   - unsupported OS or arch
-#   - no curl available
-#   - no sha256 tool available (sha256sum / shasum)
-#   - GitHub API didn't return a parseable tag
-#   - SHA256 mismatch
-#   - install dir not writable
+# Skip the TUI launch with PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
+# Run without making changes with --dryrun (or PHANTOMBOT_DRY_RUN=1).
 
 set -eu
 
 REPO="phantomyard/phantombot"
 INSTALL_DIR="${PHANTOMBOT_INSTALL_DIR:-$HOME/.local/bin}"
+
+# --- flags ---------------------------------------------------------------
+
+DRYRUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dryrun|--dry-run|-d)
+      DRYRUN=1
+      ;;
+  esac
+done
+
+if [ -n "${PHANTOMBOT_DRY_RUN:-}" ] || [ -n "${PHANTOMBOT_DRYRUN:-}" ]; then
+  DRYRUN=1
+fi
 
 # --- OS + arch detection -------------------------------------------------
 
@@ -55,119 +59,110 @@ case "$uname_m" in
     ;;
 esac
 
-# --- preflight -----------------------------------------------------------
+# --- install binary ------------------------------------------------------
 
-if ! command -v curl >/dev/null 2>&1; then
-  printf 'phantombot: curl not found (needed to download the release)\n' >&2
-  exit 1
-fi
-
-# Pick a SHA256 tool: sha256sum on Linux, shasum -a 256 on Mac.
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256_cmd="sha256sum"
-elif command -v shasum >/dev/null 2>&1; then
-  sha256_cmd="shasum -a 256"
-else
-  printf 'phantombot: no sha256 tool found (need sha256sum or shasum)\n' >&2
-  exit 1
-fi
-
-# Mac-only: codesign + xattr are needed to satisfy Gatekeeper on
-# unsigned-by-Apple binaries. Both ship with the Xcode Command Line Tools
-# (and a stock macOS install has them too).
-if [ "$platform" = "darwin" ]; then
-  if ! command -v codesign >/dev/null 2>&1; then
-    printf 'phantombot: codesign not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+if [ "$DRYRUN" -eq 0 ]; then
+  # Preflight tools check
+  if ! command -v curl >/dev/null 2>&1; then
+    printf 'phantombot: curl not found (needed to download the release)\n' >&2
     exit 1
   fi
-  if ! command -v xattr >/dev/null 2>&1; then
-    printf 'phantombot: xattr not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256_cmd="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    sha256_cmd="shasum -a 256"
+  else
+    printf 'phantombot: no sha256 tool found (need sha256sum or shasum)\n' >&2
     exit 1
   fi
-fi
 
-mkdir -p "$INSTALL_DIR"
-if [ ! -w "$INSTALL_DIR" ]; then
-  printf 'phantombot: install dir %s is not writable\n' "$INSTALL_DIR" >&2
-  exit 1
-fi
+  if [ "$platform" = "darwin" ]; then
+    if ! command -v codesign >/dev/null 2>&1; then
+      printf 'phantombot: codesign not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+      exit 1
+    fi
+    if ! command -v xattr >/dev/null 2>&1; then
+      printf 'phantombot: xattr not found (install Xcode Command Line Tools: xcode-select --install)\n' >&2
+      exit 1
+    fi
+  fi
 
-# --- discover latest tag -------------------------------------------------
+  mkdir -p "$INSTALL_DIR"
+  if [ ! -w "$INSTALL_DIR" ]; then
+    printf 'phantombot: install dir %s is not writable\n' "$INSTALL_DIR" >&2
+    exit 1
+  fi
 
-api_url="https://api.github.com/repos/$REPO/releases/latest"
-auth_header=""
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  auth_header="Authorization: Bearer $GITHUB_TOKEN"
-fi
+  # Discover latest tag
+  api_url="https://api.github.com/repos/$REPO/releases/latest"
+  auth_header=""
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    auth_header="Authorization: Bearer $GITHUB_TOKEN"
+  fi
 
-if [ -n "$auth_header" ]; then
-  release_json="$(curl -fsSL -H "$auth_header" "$api_url")"
+  if [ -n "$auth_header" ]; then
+    release_json="$(curl -fsSL -H "$auth_header" "$api_url")"
+  else
+    release_json="$(curl -fsSL "$api_url")"
+  fi
+
+  tag="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+  if [ -z "$tag" ]; then
+    printf 'phantombot: could not parse latest tag from %s\n' "$api_url" >&2
+    exit 1
+  fi
+
+  asset="phantombot-${tag}-${platform}-${arch}"
+  binary_url="https://github.com/$REPO/releases/download/${tag}/${asset}"
+  sums_url="https://github.com/$REPO/releases/download/${tag}/SHA256SUMS"
+
+  tmp_bin="$(mktemp "${TMPDIR:-/tmp}/phantombot.XXXXXX")"
+  trap 'rm -f "$tmp_bin"' EXIT INT TERM
+
+  printf 'phantombot: downloading %s\n' "$asset"
+  curl -fsSL -o "$tmp_bin" "$binary_url"
+
+  printf 'phantombot: verifying SHA256\n'
+  expected="$(curl -fsSL "$sums_url" | grep " $asset\$" | awk '{print $1}')"
+  if [ -z "$expected" ]; then
+    printf 'phantombot: SHA256SUMS has no entry for %s\n' "$asset" >&2
+    exit 1
+  fi
+  actual="$($sha256_cmd "$tmp_bin" | awk '{print $1}')"
+  if [ "$expected" != "$actual" ]; then
+    printf 'phantombot: SHA256 mismatch (expected %s, got %s) — refusing to install\n' "$expected" "$actual" >&2
+    exit 1
+  fi
+
+  if [ "$platform" = "darwin" ]; then
+    printf 'phantombot: clearing quarantine and ad-hoc codesigning (macOS)\n'
+    xattr -cr "$tmp_bin"
+    codesign --force --sign - "$tmp_bin" >/dev/null 2>&1
+  fi
+
+  chmod 0755 "$tmp_bin"
+  mv "$tmp_bin" "$INSTALL_DIR/phantombot"
+  trap - EXIT INT TERM
+
+  printf 'phantombot: installed %s to %s/phantombot\n' "$tag" "$INSTALL_DIR"
+  PB_BIN="$INSTALL_DIR/phantombot"
 else
-  release_json="$(curl -fsSL "$api_url")"
+  printf 'phantombot: [dryrun] skipping binary download and installation\n'
+  if [ -x "./dist/phantombot" ]; then
+    PB_BIN="./dist/phantombot"
+  elif command -v bun >/dev/null 2>&1 && [ -f "src/index.ts" ]; then
+    PB_BIN="bun src/index.ts"
+  elif [ -x "$INSTALL_DIR/phantombot" ]; then
+    PB_BIN="$INSTALL_DIR/phantombot"
+  elif command -v phantombot >/dev/null 2>&1; then
+    PB_BIN="$(command -v phantombot)"
+  else
+    PB_BIN="$INSTALL_DIR/phantombot"
+  fi
 fi
-
-# Cheap tag extraction with sed — avoids a jq dependency.
-tag="$(printf '%s' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-if [ -z "$tag" ]; then
-  printf 'phantombot: could not parse latest tag from %s\n' "$api_url" >&2
-  exit 1
-fi
-
-asset="phantombot-${tag}-${platform}-${arch}"
-binary_url="https://github.com/$REPO/releases/download/${tag}/${asset}"
-sums_url="https://github.com/$REPO/releases/download/${tag}/SHA256SUMS"
-
-# --- download + verify ---------------------------------------------------
-
-tmp_bin="$(mktemp "${TMPDIR:-/tmp}/phantombot.XXXXXX")"
-trap 'rm -f "$tmp_bin"' EXIT INT TERM
-
-printf 'phantombot: downloading %s\n' "$asset"
-curl -fsSL -o "$tmp_bin" "$binary_url"
-
-printf 'phantombot: verifying SHA256\n'
-expected="$(curl -fsSL "$sums_url" | grep " $asset\$" | awk '{print $1}')"
-if [ -z "$expected" ]; then
-  printf 'phantombot: SHA256SUMS has no entry for %s\n' "$asset" >&2
-  exit 1
-fi
-actual="$($sha256_cmd "$tmp_bin" | awk '{print $1}')"
-if [ "$expected" != "$actual" ]; then
-  printf 'phantombot: SHA256 mismatch (expected %s, got %s) — refusing to install\n' "$expected" "$actual" >&2
-  exit 1
-fi
-
-# --- macOS Gatekeeper prep ----------------------------------------------
-
-# On Apple Silicon, unsigned ARM64 binaries are rejected by the kernel
-# unless they carry a code signature (even ad-hoc), and Gatekeeper also
-# refuses anything carrying the com.apple.quarantine xattr from a
-# browser/curl download. Strip xattrs and apply an ad-hoc signature so
-# the user doesn't have to run this dance manually after install.
-if [ "$platform" = "darwin" ]; then
-  printf 'phantombot: clearing quarantine and ad-hoc codesigning (macOS)\n'
-  xattr -cr "$tmp_bin"
-  codesign --force --sign - "$tmp_bin" >/dev/null 2>&1
-fi
-
-# --- install -------------------------------------------------------------
-
-# Atomic on Linux + macOS: rename(2) over the destination is safe even if
-# the destination is the running binary (kernel uses inode, not path).
-chmod 0755 "$tmp_bin"
-mv "$tmp_bin" "$INSTALL_DIR/phantombot"
-trap - EXIT INT TERM
-
-printf 'phantombot: installed %s to %s/phantombot\n' "$tag" "$INSTALL_DIR"
 
 # --- PATH check ----------------------------------------------------------
-#
-# If the install dir isn't on the user's PATH, try to fix it for them by
-# appending an export line to their shell rc file. We pick the rc file
-# from $SHELL (the user's login shell), not from the script's interpreter
-# — the installer runs under /bin/sh regardless of what the user uses
-# interactively. If $SHELL isn't one we recognise, fall back to printing
-# manual instructions.
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
@@ -179,24 +174,21 @@ case ":$PATH:" in
     esac
 
     if [ -n "$rc_file" ]; then
-      # Make sure the rc file exists so the grep + append below behave.
-      [ -f "$rc_file" ] || touch "$rc_file"
-
-      # Substring match: if the install dir is mentioned anywhere in the
-      # rc file (export, prepend, comment) assume the user has it covered
-      # and don't duplicate.
-      if grep -Fq "$INSTALL_DIR" "$rc_file"; then
-        printf '\nphantombot: %s is already referenced in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
-        printf 'open a new shell, or run this to use phantombot now:\n' >&2
-        printf '  source %s\n\n' "$rc_file" >&2
+      if [ "$DRYRUN" -eq 0 ]; then
+        [ -f "$rc_file" ] || touch "$rc_file"
+        if grep -Fq "$INSTALL_DIR" "$rc_file"; then
+          printf '\nphantombot: %s is already referenced in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
+        else
+          {
+            printf '\n# added by phantombot installer\n'
+            printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+          } >> "$rc_file"
+          printf '\nphantombot: added %s to PATH in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
+          printf 'open a new shell, or run this to use phantombot now:\n' >&2
+          printf '  source %s\n\n' "$rc_file" >&2
+        fi
       else
-        {
-          printf '\n# added by phantombot installer\n'
-          printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
-        } >> "$rc_file"
-        printf '\nphantombot: added %s to PATH in %s.\n' "$INSTALL_DIR" "$rc_file" >&2
-        printf 'open a new shell, or run this to use phantombot now:\n' >&2
-        printf '  source %s\n\n' "$rc_file" >&2
+        printf 'phantombot: [dryrun] would add %s to PATH in %s\n' "$INSTALL_DIR" "$rc_file"
       fi
     else
       printf '\nphantombot: %s is not on your PATH and your shell (%s) is not auto-supported.\n' \
@@ -207,50 +199,86 @@ case ":$PATH:" in
     ;;
 esac
 
-# --- launch the init wizard ---------------------------------------------
+can_open_dev_tty() {
+  ( exec 3</dev/tty ) 2>/dev/null
+}
+
+# --- autostart service installation --------------------------------------
+
+if [ "$DRYRUN" -eq 0 ]; then
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    if can_open_dev_tty; then
+      $PB_BIN install </dev/tty >/dev/tty 2>&1 || true
+    else
+      $PB_BIN install || true
+    fi
+  else
+    $PB_BIN install || true
+  fi
+else
+  printf 'phantombot: [dryrun] skipping background service installation\n'
+fi
+
+# --- harness check -------------------------------------------------------
+
+if [ "$DRYRUN" -eq 0 ]; then
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    if can_open_dev_tty; then
+      $PB_BIN harness --check </dev/tty >/dev/tty 2>&1 || exit 0
+    else
+      $PB_BIN harness --check || exit 0
+    fi
+  else
+    $PB_BIN harness --check || exit 0
+  fi
+else
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    if can_open_dev_tty; then
+      $PB_BIN harness --check --dryrun </dev/tty >/dev/tty 2>&1 || exit 0
+    else
+      $PB_BIN harness --check --dryrun || exit 0
+    fi
+  else
+    $PB_BIN harness --check --dryrun || exit 0
+  fi
+fi
+
+# --- launch TUI ----------------------------------------------------------
 
 if [ -n "${PHANTOMBOT_SKIP_TUI:-}" ]; then
   exit 0
 fi
 
-# If stdin or stdout is not a TTY (e.g. when this script was piped from
-# `curl … | sh`), reattach to /dev/tty before exec'ing the wizard.
-#
-# Linux: redirect all three streams to /dev/tty directly. Bun's epoll-based
-#   io_uring accepts /dev/tty as an event source, so node:tty WriteStream
-#   wraps it without complaint.
-#
-# macOS: Bun's kqueue rejects /dev/tty registration with EINVAL (it's a
-#   character device, not a pollable kqueue source), which crashes
-#   node:tty's WriteStream with "invalid argument, kqueue". Workaround:
-#   use BSD `script -q /dev/null` to allocate a real pseudo-terminal pair
-#   for the child. The child sees a normal pty (/dev/ttysNN), which kqueue
-#   handles fine, and clack's TTY detection lights up.
+if [ "$DRYRUN" -eq 1 ]; then
+  SANDBOX_DIR="${PHANTOMBOT_SANDBOX_DIR:-$HOME/.phantombot-sandbox}"
+  mkdir -p "$SANDBOX_DIR/config" "$SANDBOX_DIR/data" "$SANDBOX_DIR/state"
+  export PHANTOMBOT_SANDBOX=1
+  export XDG_CONFIG_HOME="$SANDBOX_DIR/config"
+  export XDG_DATA_HOME="$SANDBOX_DIR/data"
+  export XDG_STATE_HOME="$SANDBOX_DIR/state"
+  export PHANTOMBOT_CONFIG="$SANDBOX_DIR/config/phantombot/config.toml"
+  export PHANTOMBOT_PERSONAS_DIR="$SANDBOX_DIR/data/phantombot/personas"
+  printf '\nphantombot: launching TUI in sandbox mode.\n\n'
+else
+  printf '\nphantombot: launching TUI.\n\n'
+fi
+
 if [ ! -t 0 ] || [ ! -t 1 ]; then
-  if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    printf '\nphantombot: not a TTY (script was piped). Launching interactive setup via /dev/tty.\n\n'
+  if can_open_dev_tty; then
     if [ "$platform" = "darwin" ]; then
       if command -v script >/dev/null 2>&1; then
-        # BSD script: `script [-q] file [command ...]` — /dev/null discards
-        # the typescript log; </dev/tty hands the user's terminal to script
-        # so it can drive the child pty.
-        exec script -q /dev/null "$INSTALL_DIR/phantombot" init </dev/tty
+        exec script -q /dev/null $PB_BIN </dev/tty
       else
-        # script(1) ships with macOS by default, but bail gracefully if absent.
-        printf 'phantombot: script(1) not found; cannot allocate a pty.\n'
-        printf 'next, run this in your terminal to finish setup:\n'
-        printf '  phantombot init\n\n'
+        printf 'next, run phantombot in your terminal to start.\n'
         exit 0
       fi
     else
-      exec "$INSTALL_DIR/phantombot" init </dev/tty >/dev/tty 2>&1
+      exec $PB_BIN </dev/tty >/dev/tty 2>&1
     fi
   else
-    printf '\nnext, run this to finish setup:\n'
-    printf '  phantombot init\n\n'
+    printf 'next, run phantombot in your terminal to start.\n'
     exit 0
   fi
 fi
 
-printf '\nphantombot: launching setup wizard.\n\n'
-exec "$INSTALL_DIR/phantombot" init
+exec $PB_BIN
