@@ -205,23 +205,6 @@ if (-not $DryRun) {
     Write-Host 'phantombot: [dryrun] skipping background service installation'
 }
 
-# --- harness check --------------------------------------------------------
-if (-not $DryRun) {
-    try {
-        & $PbBin harness --check
-        if ($LASTEXITCODE -ne 0) { exit 0 }
-    } catch {
-        Write-Host "phantombot: harness check warning: $($_.Exception.Message)"
-    }
-} else {
-    try {
-        & $PbBin harness --check --dryrun
-        if ($LASTEXITCODE -ne 0) { exit 0 }
-    } catch {
-        Write-Host "phantombot: [dryrun] harness check warning: $($_.Exception.Message)"
-    }
-}
-
 # --- launch TUI -----------------------------------------------------------
 if ($env:PHANTOMBOT_SKIP_TUI) {
     exit 0
