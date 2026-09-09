@@ -268,3 +268,176 @@ describe("wizard brain onboarding", () => {
     expect(restartPrompted).toBe(true);
   });
 });
+
+/**
+ * A stateful stand-in for the three stores the interview writes as it goes:
+ * config.toml routing, the vault secret, and Pi's auth.json. `snapshotWrites`
+ * / `restoreWrites` are wired the same way `createBrainOnboardingDeps` wires
+ * the real ones, so a rollback here exercises the flow's contract with them.
+ */
+function worldDeps(prior: {
+  routing?: Record<string, unknown>;
+  secret?: string;
+  auth?: string;
+}) {
+  const world = {
+    routing: prior.routing,
+    secret: prior.secret,
+    auth: prior.auth,
+  };
+  const { deps, chains } = fakeDeps({
+    routing: (prior.routing ?? {}) as BrainOnboardingDeps["routing"],
+    storedKey: prior.secret,
+    applyRouting: async (choices) => {
+      world.routing = { ...(choices as unknown as Record<string, unknown>) };
+    },
+    clearRouting: async () => {
+      world.routing = undefined;
+    },
+    setSecret: async (value) => {
+      world.secret = value;
+      return { ok: true };
+    },
+    unsetSecret: async () => {
+      world.secret = undefined;
+    },
+    writeAuth: async (provider, value) => {
+      world.auth = `${provider}:${value}`;
+      return { ok: true, path: "/tmp/auth.json" };
+    },
+    listModels: async () => [
+      { id: "gpt-5.2", name: "GPT 5.2", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2", supportsImages: false },
+      { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
+      { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
+    ],
+    snapshotWrites: async () => ({
+      routing: { "": world.routing ? { ...world.routing } : undefined },
+      secrets: { "": world.secret },
+      auth: world.auth,
+    }),
+    restoreWrites: async (snap) => {
+      world.routing = snap.routing[""] ? { ...snap.routing[""] } : undefined;
+      world.secret = snap.secrets[""];
+      world.auth = snap.auth;
+      return true;
+    },
+  });
+  return { deps, chains, world };
+}
+
+/** The full "configure this Pi here" interview, from primary brain to test. */
+const CONFIGURE_ANSWERS = [
+  "pi", // primary brain
+  "", // fallback: none
+  "configure", // configure provider + models here
+  "openrouter", // provider
+  "sk-new-key", // api key
+  "gpt-5.2", // primary model
+  "gpt-5.2-vision", // vision model
+  "gpt-5.2-coder", // coding model
+  "test", // test now
+];
+
+const PRIOR = {
+  routing: {
+    provider: "groq",
+    primaryModel: "llama-4",
+    imageModel: undefined,
+    codingModel: undefined,
+  },
+  secret: "sk-old-key",
+  auth: "groq:sk-old-key",
+};
+
+describe("brain onboarding rollback (PR #539 review)", () => {
+  /** The test screen's answer: passed, and what the operator chose next. */
+  const testScreen = (result: { ok: boolean; apply?: boolean; detail?: string }) =>
+    async () => ({
+      ok: result.ok,
+      apply: result.apply,
+      retry: false,
+      detail: result.detail ?? "ready",
+    }) as never;
+
+  test("declining to apply after a passing test puts every store back", async () => {
+    const { q } = fakeQ(CONFIGURE_ANSWERS);
+    q.testBrain = testScreen({ ok: true, apply: false });
+    const { deps, chains, world } = worldDeps(PRIOR);
+
+    const r = await runBrainOnboarding(q, deps);
+
+    // The interview DID write — provider, key, models and Pi's auth store are
+    // persisted slot by slot, long before the apply question. Declining must
+    // therefore roll them back, not merely skip applyChain.
+    expect(world.routing).toEqual(PRIOR.routing);
+    expect(world.secret).toBe("sk-old-key");
+    expect(world.auth).toBe("groq:sk-old-key");
+    expect(chains).toEqual([]);
+    expect(r.landing).toBe("configure");
+    expect(r.notice).toStartWith("brain unchanged");
+  });
+
+  test("a failed test rolls back too", async () => {
+    const { q } = fakeQ(CONFIGURE_ANSWERS);
+    q.testBrain = testScreen({ ok: false, detail: "401 unauthorized" });
+    const { deps, chains, world } = worldDeps(PRIOR);
+
+    const r = await runBrainOnboarding(q, deps);
+
+    expect(world.routing).toEqual(PRIOR.routing);
+    expect(world.secret).toBe("sk-old-key");
+    expect(world.auth).toBe("groq:sk-old-key");
+    expect(chains).toEqual([]);
+    expect(r.notice).toContain("401");
+  });
+
+  test("applying keeps everything the interview wrote", async () => {
+    const { q } = fakeQ(CONFIGURE_ANSWERS);
+    q.testBrain = testScreen({ ok: true, apply: true });
+    const { deps, chains, world } = worldDeps(PRIOR);
+
+    const r = await runBrainOnboarding(q, deps);
+
+    expect(world.routing).toEqual({
+      provider: "openrouter",
+      primaryModel: "gpt-5.2",
+      imageModel: "gpt-5.2-vision",
+      codingModel: "gpt-5.2-coder",
+    });
+    expect(world.secret).toBe("sk-new-key");
+    expect(world.auth).toBe("openrouter:sk-new-key");
+    expect(chains).toEqual([["pi"]]);
+    expect(r.landing).toBe("chat");
+  });
+
+  test("cancelling mid-interview rolls back the slots already answered", async () => {
+    // esc on the CODER slot, after provider + key + primary + vision landed.
+    const { q } = fakeQ([
+      "pi", "", "configure", "openrouter", "sk-new-key",
+      "gpt-5.2", "gpt-5.2-vision", undefined,
+    ]);
+    const { deps, world } = worldDeps(PRIOR);
+
+    const r = await runBrainOnboarding(q, deps);
+
+    expect(world.secret).toBe("sk-old-key");
+    expect(world.auth).toBe("groq:sk-old-key");
+    expect(r.notice).toStartWith("brain unchanged");
+  });
+
+  test("a failed restore says so instead of claiming the brain is unchanged", async () => {
+    const { q } = fakeQ(CONFIGURE_ANSWERS);
+    q.testBrain = testScreen({ ok: true, apply: false });
+    const { deps } = worldDeps(PRIOR);
+
+    const r = await runBrainOnboarding(q, {
+      ...deps,
+      restoreWrites: async () => false,
+    });
+
+    // Honesty over comfort: the stores are in an unknown state, and the
+    // notice must not tell the operator their old brain is intact.
+    expect(r.notice).toStartWith("brain partly saved");
+    expect(r.landing).toBe("configure");
+  });
+});

@@ -255,11 +255,16 @@ describe("BrainTestScreen checklist", () => {
       applyRouting: async () => undefined,
       clearRouting: async () => undefined,
       probe: async () => ({ ok: true, detail: "test ok" }),
+      // Production deps always carry these; discard rolls back what the
+      // interview already wrote (see brain-onboarding.test.ts).
+      snapshotWrites: async () => ({ routing: {}, secrets: {}, auth: undefined }),
+      restoreWrites: async () => true,
     };
 
     const result = await runBrainOnboarding(q, deps);
     expect(result.landing).toBe("configure");
     expect(appliedChain).toEqual([]);
-    expect(result.notice).toContain("not applied");
+    expect(result.notice).toStartWith("brain unchanged");
+    expect(result.notice).toContain("discarded on request");
   });
 });

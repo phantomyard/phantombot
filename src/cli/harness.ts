@@ -11,6 +11,7 @@ import { clackPrompts, type HarnessPrompts } from "./harnessPrompts.ts";
 import { type Config, loadConfig } from "../config.ts";
 import {
   getIn,
+  readConfigToml,
   setIn,
   type TomlObject,
   updateConfigToml,
@@ -234,6 +235,57 @@ export async function clearPiRouting(
     for (const key of clears.tomlKeys) delete routing[key];
   });
   return clears;
+}
+
+/**
+ * The routing sub-table for a harness slot, exactly as it sits in config.toml.
+ *
+ * Snapshot/restore exists because the brain wizard writes routing DURING the
+ * interview (each model slot is persisted as it is answered) but only asks
+ * "apply?" AFTER the test. Without a rollback, declining to apply — or a
+ * failed test — left the new provider/models committed while the wizard
+ * reported the brain unchanged (PR #539 review). The whole table is captured
+ * verbatim rather than key-by-key so the "use Pi's own config" tombstone
+ * round-trips too.
+ */
+export async function snapshotPiRouting(
+  configPath: string,
+  instanceId?: string,
+): Promise<Record<string, unknown> | undefined> {
+  const toml = await readConfigToml(configPath);
+  const base = instanceId
+    ? ["harnesses", "instances", instanceId, "routing"]
+    : ["harnesses", "pi", "routing"];
+  const routing = getIn(toml, base);
+  if (!routing || typeof routing !== "object" || Array.isArray(routing)) {
+    return undefined;
+  }
+  return { ...(routing as Record<string, unknown>) };
+}
+
+/**
+ * Put a `snapshotPiRouting` result back. `undefined` means "there was no
+ * routing table here" — the key is deleted, not emptied, because an empty
+ * table is itself a meaningful state (all overrides explicitly cleared).
+ */
+export async function restorePiRouting(
+  configPath: string,
+  snapshot: Record<string, unknown> | undefined,
+  instanceId?: string,
+): Promise<void> {
+  const base = instanceId
+    ? ["harnesses", "instances", instanceId, "routing"]
+    : ["harnesses", "pi", "routing"];
+  await updateConfigToml(configPath, (toml) => {
+    if (snapshot === undefined) {
+      const parent = getIn(toml, base.slice(0, -1));
+      if (parent && typeof parent === "object" && !Array.isArray(parent)) {
+        delete (parent as TomlObject)[base[base.length - 1]!];
+      }
+      return;
+    }
+    setIn(toml, base, { ...snapshot });
+  });
 }
 
 function setRoutingKey(
