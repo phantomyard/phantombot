@@ -291,24 +291,51 @@ Write-Host "$([char]0x2713)" -ForegroundColor Green
 # --- 6. Verifying ---------------------------------------------------------
 Write-Host -NoNewline "Verifying............."
 
-if ($PbBin) {
-    if ((Test-Path $PbBin) -or $DryRun) {
-        # Verified
+# A real check, not a decorative one: the installed binary must exist AND run.
+# A truncated download or a wrong-arch asset both leave a file that passes
+# Test-Path and fails here, so a green tick from a mere existence check is
+# worse than no check at all.
+if ($DryRun) {
+    Write-Host "$([char]0x2713)" -ForegroundColor Green
+} elseif (-not $PbBin -or -not (Test-Path $PbBin)) {
+    Write-Host "$([char]0x2717)" -ForegroundColor Red
+    Write-Error "phantombot: $PbBin is missing"
+    exit 1
+} else {
+    $verifyOut = & $PbBin --version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "$([char]0x2717)" -ForegroundColor Red
+        Write-Error "phantombot: $PbBin --version failed:`n$verifyOut"
+        exit 1
+    }
+    Write-Host "$([char]0x2713) $verifyOut" -ForegroundColor Green
+}
+
+# --- 7. Autostart Service Installation ------------------------------------
+$serviceFailed = $false
+if (-not $DryRun) {
+    Write-Host ""
+    Write-Host -NoNewline "Registering service...."
+    # `install` registers the \Phantombot\ scheduled tasks AND starts the
+    # daemon. Its exit status is the only signal that the agent will come back
+    # after a reboot, so a failure is reported rather than discarded.
+    try {
+        & $PbBin install
+        if ($LASTEXITCODE -ne 0) { throw "phantombot install exited $LASTEXITCODE" }
+        Write-Host "$([char]0x2713)" -ForegroundColor Green
+    } catch {
+        Write-Host "$([char]0x2717)" -ForegroundColor Red
+        Write-Host "phantombot: service install failed: $($_.Exception.Message)"
+        Write-Host "phantombot: the binary is installed and usable; run ``$PbBin install`` to retry the service."
+        $serviceFailed = $true
     }
 }
 
-Write-Host "$([char]0x2713)" -ForegroundColor Green
-
 Write-Host ""
-Write-Host "Installation completed succesfully."
-
-# --- 7. Autostart Service Installation ------------------------------------
-if (-not $DryRun) {
-    try {
-        & $PbBin install
-    } catch {
-        Write-Host "phantombot: service install warning: $($_.Exception.Message)"
-    }
+if ($serviceFailed) {
+    Write-Host "Phantombot is installed, but the background service is not - see the error above."
+} else {
+    Write-Host "Installation completed successfully."
 }
 
 # --- 8. Launch TUI --------------------------------------------------------

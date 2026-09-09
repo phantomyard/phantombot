@@ -321,8 +321,44 @@ describe("installPhantombotTasks", () => {
       // Interactive install also sweeps a stale password-mode login-fallback
       // task (absent here, so just the ownership probe, no delete).
       `/Query /TN ${NAMES.login} /XML`,
+      // Registering is not starting: install ends by actually running the
+      // always-on task, so the daemon is up when the installer exits instead
+      // of waiting for a logon or the 1-minute keep-alive trigger.
+      `/Run /TN ${NAMES.main}`,
     ]);
     expect(out.text).toContain("registered");
+    expect(out.text).toContain(`started ${NAMES.main}`);
+  });
+
+  test("reports a failed start as a warning without failing the install", async () => {
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const st = new FakeSchtasks();
+    const realRun = st.run.bind(st);
+    st.run = async (args: readonly string[]) => {
+      if (args[0] === "/Run") {
+        // Record the attempt so the sequence assertions above still hold, then
+        // report the failure schtasks would.
+        await realRun(args);
+        return { stdout: "", stderr: "ERROR: The system cannot find the file specified.", exitCode: 1 };
+      }
+      return realRun(args);
+    };
+    const result = await installPhantombotTasks({
+      binPath: BIN,
+      persona: PERSONA,
+      sid: SID,
+      xmlDir: workdir,
+      schtasks: st,
+      out,
+      err,
+    });
+    // The tasks ARE registered — a start that did not take is a warning, not a
+    // failed install, because the keep-alive trigger still brings the daemon up.
+    expect(result.installed).toBe(true);
+    expect(err.text).toContain("could not start");
+    expect(err.text).toContain("cannot find the file specified");
+    expect(out.text).not.toContain("started ");
   });
 
   test("writes the persona-scoped hidden launcher so wscript.exe has a script to run", async () => {

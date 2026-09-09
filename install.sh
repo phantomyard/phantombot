@@ -38,8 +38,10 @@ can_open_dev_tty() {
 if [ -t 1 ]; then
   printf '\033[2J\033[3J\033[H'
   CHECK="$(printf '\033[32m✓\033[0m')"
+  CROSS="$(printf '\033[31m✗\033[0m')"
 else
   CHECK="✓"
+  CROSS="✗"
 fi
 
 render_intro() {
@@ -345,15 +347,23 @@ printf '%s\n' "$CHECK"
 
 printf 'Verifying.............'
 
-if [ -n "${PB_BIN:-}" ]; then
-  if [ -x "$PB_BIN" ] || [ -f "$PB_BIN" ] || [ "$DRYRUN" -eq 1 ]; then
-    :
-  fi
+# A real check, not a decorative one: the installed binary must be executable
+# AND must run. A truncated download, a wrong-arch asset or a broken codesign
+# all produce a file that exists and fails here — printing a green tick for
+# any of those is worse than not checking at all.
+if [ "$DRYRUN" -eq 1 ]; then
+  printf '%s\n' "$CHECK"
+elif [ -z "${PB_BIN:-}" ] || [ ! -x "$PB_BIN" ]; then
+  printf '%s\n' "$CROSS"
+  printf 'phantombot: %s is missing or not executable\n' "${PB_BIN:-<unset>}" >&2
+  exit 1
+elif ! verify_out="$("$PB_BIN" --version 2>&1)"; then
+  printf '%s\n' "$CROSS"
+  printf 'phantombot: %s --version failed:\n%s\n' "$PB_BIN" "$verify_out" >&2
+  exit 1
+else
+  printf '%s %s\n' "$CHECK" "$verify_out"
 fi
-
-printf '%s\n' "$CHECK"
-
-printf '\nInstallation completed succesfully.\n'
 
 # --- 7. Autostart Service Installation -----------------------------------
 
@@ -386,14 +396,41 @@ if [ "$DRYRUN" -eq 0 ]; then
   fi
 
   if [ -n "${PB_BIN:-}" ] && [ -x "$PB_BIN" ]; then
+    printf '\nRegistering service....'
+    # `install` registers the platform service (systemd --user unit, launchd
+    # LaunchAgent, or Task Scheduler task set) AND starts it. Its exit status is
+    # the only signal that the agent will actually come back after a reboot, so
+    # a failure here is reported rather than discarded — a silently skipped
+    # service install looks identical to a successful one until the next boot.
+    install_rc=0
     if [ -t 0 ] && [ -t 1 ]; then
-      $PB_BIN install >/dev/null 2>&1 || true
+      install_out="$($PB_BIN install 2>&1)" || install_rc=$?
     elif can_open_dev_tty; then
-      $PB_BIN install </dev/tty >/dev/tty 2>&1 || true
+      # Interactive path: `install` may prompt, so it keeps the terminal and we
+      # only capture the status.
+      printf '\n\n'
+      $PB_BIN install </dev/tty >/dev/tty 2>&1 || install_rc=$?
+      install_out=""
     else
-      $PB_BIN install >/dev/null 2>&1 || true
+      install_out="$($PB_BIN install 2>&1)" || install_rc=$?
+    fi
+
+    if [ "$install_rc" -eq 0 ]; then
+      printf '%s\n' "$CHECK"
+    else
+      printf '%s\n' "$CROSS"
+      printf 'phantombot: service install failed (exit %s).\n' "$install_rc" >&2
+      [ -n "${install_out:-}" ] && printf '%s\n' "$install_out" >&2
+      printf 'phantombot: the binary is installed and usable; run `%s install` to retry the service.\n' "$PB_BIN" >&2
+      SERVICE_FAILED=1
     fi
   fi
+fi
+
+if [ "${SERVICE_FAILED:-0}" -eq 1 ]; then
+  printf '\nPhantombot is installed, but the background service is not — see the error above.\n'
+else
+  printf '\nInstallation completed successfully.\n'
 fi
 
 # --- 8. Launch TUI -------------------------------------------------------

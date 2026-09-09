@@ -194,10 +194,17 @@ The installer:
 - Downloads the matching binary and `SHA256SUMS`.
 - Verifies the checksum before installing.
 - Installs to `~/.local/bin/phantombot` by default.
+- Verifies the install by RUNNING the binary (`phantombot --version`) and stops
+  with a red `✗` if it does not run — a checksum only proves the bytes arrived,
+  not that they execute on this host.
 - Warns if `~/.local/bin` is not on `PATH`.
 - Installs service units with a deterministic PATH that includes stable
   per-user shim locations such as `~/.local/bin` and
   `~/.local/share/pi-node/{bin,current/bin}`.
+- Registers the platform service and starts it — a systemd `--user` unit on
+  Linux, a launchd LaunchAgent on macOS, the `\Phantombot\` scheduled tasks on
+  Windows. If that step fails it is reported, and the installer says the binary
+  is installed but the background service is not.
 - Starts the persona setup TUI when stdin/stdout are interactive.
 
 Installer environment overrides:
