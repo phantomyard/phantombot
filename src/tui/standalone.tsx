@@ -20,9 +20,13 @@ import {
   renderRows,
   useTerminalSize,
   KITTY_POP,
+  KITTY_PUSH,
+  forceRepaint,
 } from "./terminal.ts";
 import { installStdinTap } from "./stdinTap.ts";
+import { lendStdin } from "./stdinHandover.ts";
 import { installSignalExit } from "./index.tsx";
+import { setPromptHost } from "./prompts.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { setLogSink } from "../lib/logSink.ts";
 import type { Consequence } from "./actions.ts";
@@ -227,31 +231,57 @@ export async function runStandaloneFlow(
 
   let exitCode = 0;
   let noticeMessage: string | undefined;
+  let instance: ReturnType<typeof render> | undefined;
 
-  const promise = new Promise<number>((resolve) => {
-    const element = (
-      <StandaloneFlowHost
-        title={title}
-        run={async (q) => {
-          const res = await flow(q);
-          if (typeof res === "string") noticeMessage = res;
-          return res;
-        }}
-        onDone={(res) => {
-          if (typeof res === "number") exitCode = res;
-          instance.unmount();
-          resolve(exitCode);
-        }}
-        onError={(err) => {
-          noticeMessage = `Error: ${err.message}`;
-          exitCode = 1;
-          instance.unmount();
-          resolve(1);
-        }}
-      />
-    );
+  const element = (
+    <StandaloneFlowHost
+      title={title}
+      run={async (q) => {
+        const res = await flow(q);
+        if (typeof res === "string") noticeMessage = res;
+        return res;
+      }}
+      onDone={(res) => {
+        if (typeof res === "number") exitCode = res;
+        instance?.unmount();
+        resolve(exitCode);
+      }}
+      onError={(err) => {
+        noticeMessage = `Error: ${err.message}`;
+        exitCode = 1;
+        instance?.unmount();
+        resolve(1);
+      }}
+    />
+  );
 
-    const instance = render(element, {
+  const restoreHost = setPromptHost(async (fn) => {
+    gate.suspend();
+    installed.setForwarding(false);
+    fullScreen.restore();
+    process.stdout.write(KITTY_POP);
+    const dropBorrowedListeners = lendStdin(process.stdin);
+    try {
+      return await fn();
+    } finally {
+      dropBorrowedListeners();
+      process.stdout.write(KITTY_PUSH);
+      fullScreen.enter();
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      installed.setForwarding(true);
+      gate.resume();
+      if (process.stdin.isTTY) process.stdin.setRawMode?.(true);
+      if (instance) {
+        instance.rerender(element);
+        forceRepaint(gate);
+      }
+    }
+  });
+
+  let resolve: (code: number) => void;
+  const promise = new Promise<number>((r) => {
+    resolve = r;
+    instance = render(element, {
       stdin: installed.stdin,
       stdout: gate.stream,
       exitOnCtrlC: false,
@@ -261,6 +291,7 @@ export async function runStandaloneFlow(
   });
 
   const restore = () => {
+    restoreHost();
     restoreLogs();
     installed.teardown();
     fullScreen.restore();

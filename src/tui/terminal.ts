@@ -25,8 +25,8 @@
 
 import { createContext, useContext } from "react";
 
-/** Enter the alternate screen buffer and park the cursor at home. */
-export const ALT_SCREEN_ON = "\x1b[?1049h\x1b[H";
+/** Enter the alternate screen buffer, clear screen & scrollback, and park the cursor at home. */
+export const ALT_SCREEN_ON = "\x1b[?1049h\x1b[2J\x1b[3J\x1b[H";
 /** Leave it again, restoring the shell exactly as it was. */
 export const ALT_SCREEN_OFF = "\x1b[?1049l";
 

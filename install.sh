@@ -182,6 +182,15 @@ case ":$PATH:" in
     case "${SHELL:-}" in
       */zsh)  rc_file="$HOME/.zshrc" ;;
       */bash) rc_file="$HOME/.bashrc" ;;
+      *)
+        if [ -n "${BASH_VERSION:-}" ] || [ -f "$HOME/.bashrc" ]; then
+          rc_file="$HOME/.bashrc"
+        elif [ -f "$HOME/.profile" ]; then
+          rc_file="$HOME/.profile"
+        elif [ -f "$HOME/.zshrc" ]; then
+          rc_file="$HOME/.zshrc"
+        fi
+        ;;
     esac
 
     if [ -n "$rc_file" ]; then

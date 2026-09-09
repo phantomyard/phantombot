@@ -83,12 +83,15 @@ export async function createBrainOnboardingDeps(
     availability: () => detectAvailability(config),
     installCommand: piInstallCommand().join(" "),
     installPi: async () => {
-      const ok = await installPi(defaultInstallRunner, {
-        note: (body: string, title?: string) =>
-          options?.setNotice?.(
-            title ? `${title}: ${body.split("\n")[0]}` : body,
-          ),
-      } as never);
+      const { withPromptTerminal } = await import("./prompts.ts");
+      const ok = await withPromptTerminal(async () =>
+        installPi(defaultInstallRunner, {
+          note: (body: string, title?: string) =>
+            options?.setNotice?.(
+              title ? `${title}: ${body.split("\n")[0]}` : body,
+            ),
+        } as never),
+      );
       return ok && Boolean((await detectAvailability(config)).pi);
     },
     chain: harnessChainIds(config, persona),

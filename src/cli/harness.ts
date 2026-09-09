@@ -355,9 +355,12 @@ export async function runHarnessCheck(
 
         if (wantsPi === "yes") {
           const runner = input.installRunner ?? defaultInstallRunner;
-          await installPi(runner, {
-            note: (body, title) => q.note(title ?? "", body),
-          } as never);
+          const { withPromptTerminal } = await import("../tui/prompts.ts");
+          await withPromptTerminal(async () => {
+            await installPi(runner, {
+              note: (body, title) => q.note(title ?? "", body),
+            } as never);
+          });
           currentAvailability = await detectAvailability(config);
           await saveHarnessBins(currentAvailability);
         }
@@ -558,11 +561,10 @@ export const defaultInstallRunner: InstallRunner = async (cmd) => {
   const proc = Bun.spawn([bin!, ...rest], {
     stdin: "inherit",
     stdout: "inherit",
-    stderr: "pipe",
+    stderr: "inherit",
   });
-  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  return { exitCode, stderr };
+  return { exitCode, stderr: "" };
 };
 
 export async function installPi(
@@ -626,7 +628,10 @@ async function configurePi(
         "Install Pi",
       );
     } else if (doInstall) {
-      const ok = await installPi(defaultInstallRunner, q);
+      const { withPromptTerminal } = await import("../tui/prompts.ts");
+      const ok = await withPromptTerminal(async () =>
+        installPi(defaultInstallRunner, q),
+      );
       if (ok) {
         // Redetect against the broad search path (Pi may land in ~/.local/bin or
         // ~/.pi/agent/bin, not the current process PATH).
