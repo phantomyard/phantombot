@@ -29,6 +29,7 @@ import {
 import {
   listPiModels,
   modelId,
+  modelsForProvider,
   type PiModel,
   primaryIsMultimodal,
   providerChoices,
@@ -827,6 +828,7 @@ async function configurePi(
     models,
     target,
     instanceId,
+    apiKey: keyWrite.action === "set" ? keyWrite.value : apiKey,
   });
 }
 
@@ -867,6 +869,11 @@ async function runRoutingWizard(
     target?: HarnessWriteTarget;
     /** Named Pi instance when the chain contains Pi twice. */
     instanceId?: string;
+    /**
+     * The key just entered, used ONLY to ask the provider for its model list
+     * when Pi's catalogue has nothing for it. Never persisted from here.
+     */
+    apiKey?: string;
   } = {},
 ): Promise<boolean> {
   const target: HarnessWriteTarget = opts.target ??
@@ -915,9 +922,21 @@ async function runRoutingWizard(
   // one provider. With no provider (or no catalog) we show everything.
   // "" (explicit "(none)") clears; undefined (step skipped) keeps current.
   const provider = resolveRoutingProvider(opts.provider, current.provider);
-  const models = provider
-    ? allModels.filter((m) => m.provider === provider)
-    : allModels;
+  let models = modelsForProvider(provider, allModels);
+  // Same last resort as the TUI flow: when Pi lists nothing for this provider,
+  // ask the provider's own models endpoint rather than making the user type a
+  // model id from memory. Empty result ⇒ free-text, exactly as before.
+  if (models.length === 0 && provider) {
+    const { fetchProviderModels } = await import("../lib/providerModelCatalog.ts");
+    const live = await fetchProviderModels(provider, opts.apiKey ?? "");
+    if (live.length > 0) {
+      models = live;
+      q.note(
+        `Pi listed no models for ${provider} — fetched ${live.length} from the provider's own API.`,
+        "Routing",
+      );
+    }
+  }
 
   // Primary is OPTIONAL: "(none)" leaves Pi on its own default model (the
   // "default install" path) with no override.

@@ -34,6 +34,7 @@ export interface SearchListRequest {
    * question they are on.
    */
   banner?: string;
+  description?: string;
   options: readonly ChooseOption[];
   /** Value the cursor starts on — the setting's current value, when there is one. */
   initial?: string;
@@ -47,7 +48,7 @@ export function SearchListScreen(props: {
   request: SearchListRequest;
   onAnswer: (value: string | undefined) => void;
 }): React.ReactElement {
-  const { title, banner, options, initial } = props.request;
+  const { title, banner, description, options, initial } = props.request;
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
 
@@ -113,6 +114,11 @@ export function SearchListScreen(props: {
       {banner ? (
         <Box>
           <Text color={theme.accent}>{banner}</Text>
+        </Box>
+      ) : null}
+      {description ? (
+        <Box>
+          <Text color={theme.dim}>{description}</Text>
         </Box>
       ) : null}
       <Box marginTop={1}>

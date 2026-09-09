@@ -36,7 +36,12 @@ interface Harness {
     clears: Array<{ tombstone?: boolean } | undefined>;
     secrets: Array<string | "CLEARED">;
     authWrites: Array<{ provider: string; key: string }>;
-    searches: Array<{ title: string; banner?: string; initial?: string }>;
+    searches: Array<{
+      title: string;
+      banner?: string;
+      initial?: string;
+      options: Array<{ value: string; label: string }>;
+    }>;
   };
 }
 
@@ -52,6 +57,7 @@ function harness(over: {
   search?: Array<string | undefined>;
   value?: Array<string | undefined>;
   probeProviderKey?: BrainDeps["probeProviderKey"];
+  fetchProviderModels?: BrainDeps["fetchProviderModels"];
 }): Harness {
   const applied = {
     chains: [] as string[][],
@@ -59,7 +65,12 @@ function harness(over: {
     clears: [] as Array<{ tombstone?: boolean } | undefined>,
     secrets: [] as Array<string | "CLEARED">,
     authWrites: [] as Array<{ provider: string; key: string }>,
-    searches: [] as Array<{ title: string; banner?: string; initial?: string }>,
+    searches: [] as Array<{
+      title: string;
+      banner?: string;
+      initial?: string;
+      options: Array<{ value: string; label: string }>;
+    }>,
   };
   const c = [...(over.choose ?? [])];
   const s = [...(over.search ?? [])];
@@ -74,6 +85,7 @@ function harness(over: {
         title: input.title,
         banner: input.banner,
         initial: input.initial,
+        options: input.options.map((o) => ({ value: o.value, label: o.label })),
       });
       const answer = s.shift();
       return answer === "CURRENT" ? (input.initial ?? "") : answer;
@@ -95,6 +107,9 @@ function harness(over: {
     installCommand: "curl -fsSL https://pi.sh | bash",
     listModels: async () => models,
     probeProviderKey: over.probeProviderKey ?? (async () => ({ status: "verified", detail: "" })),
+    // Default: the provider's own API answers nothing, so a test that doesn't
+    // opt in behaves exactly as it did before the live catalogue existed.
+    fetchProviderModels: over.fetchProviderModels ?? (async () => []),
     setSecret: async (value) => {
       applied.secrets.push(value);
       return { ok: true, persona: "robbie" };
@@ -159,6 +174,62 @@ describe("the brain flow", () => {
     expect(h.applied.clears).toEqual([{ tombstone: true }]);
     expect(h.applied.routings).toEqual([]);
     expect(h.applied.chains).toEqual([["pi"]]);
+  });
+
+  test("pi lists no models for the provider: the picker is filled from the provider's own API", async () => {
+    // THE REGRESSION. `pi --list-models` only enumerates providers Pi has
+    // already keyed, so choosing openrouter with a fresh key left every model
+    // slot showing a lone "(none)" row — the user had to type a model id from
+    // memory. The provider's own catalogue now fills the list.
+    const asked: Array<{ provider: string; key: string }> = [];
+    const h = harness({
+      models: [], // pi knows nothing
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openrouter", "anthropic/claude-sonnet-4.6", ""], // provider, primary (vision-capable ⇒ no vision slot), coder
+      value: ["sk-or-new"],
+      fetchProviderModels: async (provider, key) => {
+        asked.push({ provider, key });
+        return [
+          { provider: "openrouter", model: "anthropic/claude-sonnet-4.6", supportsImages: true },
+          { provider: "openrouter", model: "deepseek/deepseek-v4-pro", supportsImages: false },
+        ];
+      },
+    });
+    const notice = await configureBrain(h.q, h.deps);
+    expect(notice).toBe("brain saved: pi");
+    // Asked with the key just entered — that is what authenticates the fetch.
+    expect(asked).toEqual([{ provider: "openrouter", key: "sk-or-new" }]);
+    const primary = h.applied.searches.find((x) => x.banner?.includes("PRIMARY"));
+    expect(primary?.options.map((o) => o.value)).toEqual([
+      "",
+      "anthropic/claude-sonnet-4.6",
+      "deepseek/deepseek-v4-pro",
+    ]);
+    expect(h.applied.routings).toEqual([
+      {
+        provider: "openrouter",
+        primaryModel: "anthropic/claude-sonnet-4.6",
+        imageModel: "anthropic/claude-sonnet-4.6",
+        codingModel: undefined,
+      },
+    ]);
+  });
+
+  test("the live catalogue is not consulted when pi already listed the provider", async () => {
+    let calls = 0;
+    const h = harness({
+      choose: ["pi", "CURRENT", "configure"],
+      search: ["openrouter", "gpt-5.2", "gpt-5.2-vision", "gpt-5.2"],
+      value: [""],
+      storedKey: "sk-existing",
+      routing: { provider: "openrouter" },
+      fetchProviderModels: async () => {
+        calls += 1;
+        return [];
+      },
+    });
+    await configureBrain(h.q, h.deps);
+    expect(calls).toBe(0);
   });
 
   test("pi configured: key kept when blank and provider unchanged (idempotent)", async () => {
