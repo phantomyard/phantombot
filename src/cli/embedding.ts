@@ -263,6 +263,7 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   if (!embedded) p.intro("Configure embeddings");
 
   const existing = config.embeddings;
+  const embeddingConfigPath = personaConfigPath(config.personasDir, persona);
   if (!embedded && existing.provider === "gemini" && existing.gemini?.apiKey) {
     p.note(
       `provider:  gemini\n` +

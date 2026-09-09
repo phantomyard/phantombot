@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useRef, useState } from "react";
-import { Box, Text, render, useApp } from "ink";
+import { Box, Text, render } from "ink";
 
 import { Frame, NoticeContext } from "./components/Frame.tsx";
 import { ConfirmScreen, type ConfirmRequest } from "./screens/Confirm.tsx";

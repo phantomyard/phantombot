@@ -335,7 +335,7 @@ describe("runHarnessCheck", () => {
         claude: undefined,
       },
       prompts: q,
-      installRunner: async (cmd) => {
+      installRunner: async () => {
         installRunnerCalled = true;
         return { exitCode: 0, stderr: "" };
       },

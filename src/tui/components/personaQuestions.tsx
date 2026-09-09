@@ -42,12 +42,6 @@ export function ExampleBox(props: {
   );
 }
 
-const NAME_EXAMPLES = [
-  { name: "lena", role: "operations" },
-  { name: "study-buddy", role: "learning" },
-  { name: "ops-bot", role: "sysadmin" },
-];
-
 const IDENTITY_EXAMPLES = [
   "a senior software engineer who cares about correctness and testing",
   "a patient tutor who explains complex technical concepts simply",

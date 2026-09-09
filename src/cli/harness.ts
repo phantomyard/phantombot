@@ -359,7 +359,8 @@ export async function runHarnessCheck(
           const { withPromptTerminal } = await import("../tui/prompts.ts");
           await withPromptTerminal(async () => {
             await installPi(runner, {
-              note: (body, title) => q.note(title ?? "", body),
+              note: (body: string, title?: string) =>
+                q.note(title ?? "", body),
             } as never);
           });
           currentAvailability = await detectAvailability(config);

@@ -139,6 +139,7 @@ export interface RunInstallInput {
    * PHANTOMBOT_WINDOWS_PASSWORD env var; without either (and no TTY to ask),
    * install fails with a clear message rather than hanging.
    */
+  runLoggedOff?: boolean;
   /** Run in dry-run mode without modifying units or tasks. */
   dryRun?: boolean;
   /**

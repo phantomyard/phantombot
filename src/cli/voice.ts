@@ -197,12 +197,9 @@ export async function runVoice(input: RunInput = {}): Promise<number> {
         {
           existing,
           hasKey: (pr) => {
+            if (pr !== "elevenlabs" && pr !== "openai") return false;
             const envVar = ENV_KEY_FOR_PROVIDER[pr];
-            return Boolean(
-              envVar &&
-                (process.env[envVar] ||
-                  config.voice[pr as "elevenlabs" | "openai"]?.apiKey),
-            );
+            return Boolean(envVar && process.env[envVar]);
           },
           validateKey: async (pr, key) => {
             if (pr === "elevenlabs") return validateElevenLabsKey(key);
