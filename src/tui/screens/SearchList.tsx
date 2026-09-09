@@ -123,7 +123,7 @@ export function SearchListScreen(props: {
       <Box flexDirection="column" marginTop={1} overflow="hidden">
         {freeText ? (
           <Selectable selected onPress={() => props.onAnswer(query.trim())}>
-            <Text bold color={theme.accent}>
+            <Text bold color="whiteBright">
               use "{query.trim()}" as typed — no list entry matches
             </Text>
           </Selectable>
@@ -139,16 +139,21 @@ export function SearchListScreen(props: {
                 <Box>
                   <Text
                     bold={selected}
-                    color={selected ? theme.accent : undefined}
+                    color={selected ? "whiteBright" : "white"}
                   >
                     {option.label}
                   </Text>
                   {option.value === initial && initial !== "" ? (
-                    <Text color={theme.dim}> (current)</Text>
+                    <Text color={selected ? theme.accent : theme.dim}>
+                      {" "}
+                      (current)
+                    </Text>
                   ) : null}
                   {option.hint ? (
                     <Box marginLeft={1}>
-                      <Text color={theme.dim}>({option.hint})</Text>
+                      <Text color={selected ? "white" : theme.dim}>
+                        ({option.hint})
+                      </Text>
                     </Box>
                   ) : null}
                 </Box>
