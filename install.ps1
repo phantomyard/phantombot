@@ -67,8 +67,16 @@ if (-not $InstallDir) {
 
 # --- install binary -------------------------------------------------------
 if ($env:PHANTOMBOT_DEV_BIN) {
-    $PbBin = $env:PHANTOMBOT_DEV_BIN
-    Write-Host "phantombot: using dev binary $PbBin"
+    if (-not $DryRun) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        $dest = Join-Path $InstallDir 'phantombot.exe'
+        Copy-Item -Force -Path $env:PHANTOMBOT_DEV_BIN -Destination $dest
+        Write-Host "phantombot: installed dev binary $($env:PHANTOMBOT_DEV_BIN) to $dest"
+        $PbBin = $dest
+    } else {
+        $PbBin = $env:PHANTOMBOT_DEV_BIN
+        Write-Host "phantombot: using dev binary $PbBin"
+    }
 } elseif (-not $DryRun) {
     try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

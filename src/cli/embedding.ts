@@ -188,9 +188,70 @@ export async function runEmbedding(input: RunInput = {}): Promise<number> {
   const { config, persona } = input.config
     ? { config: input.config, persona: resolvePersona(input.persona, input.config) }
     : await loadConfigForPersona(input.persona);
-  const embeddingConfigPath = personaConfigPath(config.personasDir, persona);
   const svc = input.serviceControl ?? defaultServiceControl();
   const embedded = input.embedded ?? false;
+
+  if (process.stdin.isTTY && !embedded) {
+    const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+    const { configureMemory } = await import(
+      "../tui/memoryFlow.ts"
+    );
+    type MemoryQuestions = import("../tui/memoryFlow.ts").MemoryQuestions;
+
+    return await runStandaloneFlow(async (q) => {
+      const existing = config.embeddings;
+      const questions: MemoryQuestions = {
+        choose: (opts) => q.choose(opts),
+        value: (opts) => q.value(opts),
+      };
+
+      const result = await configureMemory(persona, questions, {
+        existing,
+        validateGemini: async (key) =>
+          geminiEmbed(key, "test", {
+            model: DEFAULT_MODEL,
+            dims: DEFAULT_DIMS,
+          }),
+        validateOpenAI: async (settings) =>
+          openaiCompatibleEmbed("test", {
+            baseUrl: settings.baseUrl,
+            model: settings.model,
+            apiKey: settings.apiKey,
+          }),
+      });
+
+      if (!result) return "memory unchanged";
+      if ("rejected" in result)
+        return `memory unchanged — rejected: ${result.rejected}`;
+
+      await applyEmbeddingConfig({
+        config,
+        persona,
+        update: result.update,
+      });
+
+      await maybePromptRestart(
+        svc,
+        async (msg) =>
+          await q.confirm({
+            title: msg,
+            consequence: {
+              summary: "restarts daemon",
+              detail: "",
+              longRunning: false,
+              restarts: true,
+            },
+          }),
+        {
+          note: (body: string, title?: string) =>
+            q.note(title ?? "", body),
+        } as never,
+      );
+
+      return `memory saved: ${result.summary}`;
+    }, ["phantombot", persona, "memory"]);
+  }
+
   const validate =
     input.validate ??
     ((key: string) =>

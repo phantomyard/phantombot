@@ -34,6 +34,153 @@ import type { RoutingChoices } from "../lib/piRouting.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
 import type { KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { configurePi, type BrainQuestions } from "./brainFlow.ts";
+import type { Consequence } from "./actions.ts";
+
+export interface CreateBrainOnboardingDepsOptions {
+  setNotice?: (msg: string) => void;
+  askConfirmValue?: (req: {
+    title: string;
+    consequence: Consequence;
+    danger?: boolean;
+    confirmName?: string;
+  }) => Promise<boolean>;
+}
+
+export async function createBrainOnboardingDeps(
+  persona: string,
+  options?: CreateBrainOnboardingDepsOptions,
+): Promise<BrainOnboardingDeps> {
+  const { loadConfig } = await import("../config.ts");
+  const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
+  const {
+    applyHarnessChain,
+    applyRouting,
+    clearPiRouting,
+    defaultInstallRunner,
+    detectAvailability,
+    installPi,
+    piInstallCommand,
+  } = await import("../cli/harness.ts");
+  const { resolveHarnessWriteTarget } = await import(
+    "../lib/harnessWriteTarget.ts"
+  );
+  const { harnessChainIds, piInstanceSecretName } = await import(
+    "../harnesses/buildChain.ts"
+  );
+  const { listPiModels } = await import("../lib/piModels.ts");
+  const { getPersonaSecret, setPersonaSecret, unsetPersonaSecret } =
+    await import("../lib/vaultSecrets.ts");
+  const { writePiApiKey } = await import("../lib/piAuthStore.ts");
+  const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
+
+  const config = await loadConfig(persona);
+  const availability = await detectAvailability(config);
+  const writeTarget = await resolveHarnessWriteTarget(config, persona);
+  const routing = config.harnesses.pi.routing ?? {};
+
+  return {
+    persona,
+    availability: () => detectAvailability(config),
+    installCommand: piInstallCommand().join(" "),
+    installPi: async () => {
+      const ok = await installPi(defaultInstallRunner, {
+        note: (body: string, title?: string) =>
+          options?.setNotice?.(
+            title ? `${title}: ${body.split("\n")[0]}` : body,
+          ),
+      } as never);
+      return ok && Boolean((await detectAvailability(config)).pi);
+    },
+    chain: harnessChainIds(config, persona),
+    routing: {
+      provider: routing.provider,
+      primaryModel: routing.primaryModel,
+      imageModel: routing.imageModel,
+      codingModel: routing.codingModel,
+    },
+    storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
+    piInstances: {
+      primary: {
+        routing: config.harnesses.instances?.["pi-primary"]?.routing ?? {},
+        storedKey: await getPersonaSecret(
+          config,
+          piInstanceSecretName("pi-primary"),
+          persona,
+        ),
+      },
+      fallback: {
+        routing: config.harnesses.instances?.["pi-fallback"]?.routing ?? {},
+        storedKey: await getPersonaSecret(
+          config,
+          piInstanceSecretName("pi-fallback"),
+          persona,
+        ),
+      },
+    },
+    targetPath: writeTarget.path,
+    personaScope: writeTarget.scope === "persona",
+    piBin: availability.pi,
+    listModels: (extraEnv) =>
+      listPiModels(availability.pi!, undefined, extraEnv),
+    setSecret: (value, instanceId) =>
+      setPersonaSecret(
+        config,
+        instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+        value,
+        persona,
+      ),
+    unsetSecret: (instanceId) =>
+      unsetPersonaSecret(
+        config,
+        instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+        persona,
+      ),
+    writeAuth: (provider, value) => writePiApiKey(provider, value),
+    applyChain: (chain) =>
+      applyHarnessChain(
+        writeTarget.path,
+        chain as never,
+        persona,
+        writeTarget.scope,
+      ),
+    applyRouting: (choices, instanceId) =>
+      applyRouting(writeTarget.path, choices, instanceId),
+    clearRouting: async (opts, instanceId) => {
+      await clearPiRouting(writeTarget.path, opts, instanceId);
+    },
+    probe: async (id) => {
+      const { probeHarness } = await import("../lib/harnessProbe.ts");
+      return probeHarness({ config: await loadConfig(persona), id });
+    },
+    probeProviderKey: (providerId, key) => probeProviderKey(providerId, key),
+    maybePromptRestart: async () => {
+      const { maybePromptRestart } = await import("../cli/harness.ts");
+      const { defaultServiceControl } = await import("../lib/platform.ts");
+      await maybePromptRestart(
+        defaultServiceControl(),
+        async (message) =>
+          options?.askConfirmValue
+            ? await options.askConfirmValue({
+                title: message,
+                consequence: {
+                  summary: "",
+                  detail: "",
+                  longRunning: false,
+                  restarts: true,
+                },
+              })
+            : true,
+        {
+          note: (body: string, title?: string) =>
+            options?.setNotice?.(
+              title ? `${title}: ${body.split("\n")[0]}` : body,
+            ),
+        } as never,
+      );
+    },
+  };
+}
+
 
 export interface BrainOnboardingDeps {
   persona: string;

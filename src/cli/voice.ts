@@ -120,36 +120,131 @@ interface RunInput {
 
 export async function runVoice(input: RunInput = {}): Promise<number> {
   const err = input.err ?? process.stderr;
-  // Resolve the target persona BEFORE loading config, so the env-fallback
-  // persona gets ITS layer — "Existing config" then shows what that persona
-  // actually runs with rather than the default persona's voice
-  // (phantombot#474 review). With an injected config the seam stays hermetic:
-  // resolve against it, never read from disk.
   const { config, persona } = input.config
     ? {
         config: input.config,
         persona: resolvePersona(input.persona, input.config),
       }
     : await loadConfigForPersona(input.persona);
-  // An explicit `--persona` must EXIST before anything is written. Without
-  // this check a typo is silently "successful": `loadConfig("robbei")` reads a
-  // missing persona file as an empty layer, and the writes below CREATE
-  // `<personas-root>/robbei/config.toml` (and its directory), store the
-  // provider credential and restart the service — for a persona that does not
-  // exist and never runs. `task --persona` already refuses this class of
-  // silent loss; so does this.
+
   const dir = personaDir(config, persona);
   if (!existsSync(dir)) {
     err.write(`no persona '${persona}' at ${dir}\n`);
     return 2;
   }
-  // Writes land in the persona's own file. The global file is left alone: on
-  // an unmigrated host it still holds the old `[voice]` block, and the merge
-  // has the persona file winning, so the new value takes effect immediately
-  // and a rollback to an older binary still finds a working global block.
   const voiceConfigPath = personaConfigPath(config.personasDir, persona);
   const svc = input.serviceControl ?? defaultServiceControl();
   const embedded = input.embedded ?? false;
+
+  if (process.stdin.isTTY && !embedded) {
+    const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+    const { configureVoice } = await import("../tui/voiceFlow.ts");
+
+    return await runStandaloneFlow(async (q) => {
+      const existing = config.voice;
+      const provider = await q.choose({
+        title: `Voice for ${persona}`,
+        description: "how this phantom speaks and hears voice notes",
+        options: [
+          {
+            value: "elevenlabs",
+            label: "ElevenLabs",
+            hint:
+              existing.provider === "elevenlabs"
+                ? "current · premium · paid (API key required)"
+                : "premium · paid (API key required)",
+          },
+          {
+            value: "openai",
+            label: "OpenAI",
+            hint:
+              existing.provider === "openai"
+                ? "current · 6 built-in voices · paid (API key required)"
+                : "6 built-in voices · paid (API key required)",
+          },
+          {
+            value: "azure_edge",
+            label: "Azure Edge TTS",
+            hint:
+              existing.provider === "azure_edge"
+                ? "current · free · no key · speaks only"
+                : "free · no key · speaks only",
+          },
+          {
+            value: "none",
+            label: "None (disabled)",
+            hint:
+              existing.provider === "none"
+                ? "current · text only"
+                : "text only",
+          },
+        ],
+        initial: existing.provider,
+      });
+
+      if (!provider) return "voice unchanged";
+
+      const questions = {
+        choose: (opts: any) => q.choose(opts),
+        value: (opts: any) => q.value(opts),
+        confirm: (opts: any) => q.confirm(opts),
+      };
+
+      const result = await configureVoice(
+        persona,
+        provider as VoiceProvider,
+        questions,
+        {
+          existing,
+          hasKey: (pr) => {
+            const envVar = ENV_KEY_FOR_PROVIDER[pr];
+            return Boolean(
+              envVar &&
+                (process.env[envVar] ||
+                  config.voice[pr as "elevenlabs" | "openai"]?.apiKey),
+            );
+          },
+          validateKey: async (pr, key) => {
+            if (pr === "elevenlabs") return validateElevenLabsKey(key);
+            if (pr === "openai") return validateOpenAIKey(key);
+            return { ok: true };
+          },
+        },
+      );
+
+      if (!result) return "voice unchanged";
+      if ("rejected" in result)
+        return `voice unchanged — rejected: ${result.rejected}`;
+
+      await applyVoiceConfig({
+        configPath: voiceConfigPath,
+        config,
+        persona,
+        voice: result.voice,
+        apiKey: result.apiKey,
+      });
+
+      await maybePromptRestart(
+        svc,
+        async (msg) =>
+          await q.confirm({
+            title: msg,
+            consequence: {
+              summary: "restarts daemon",
+              detail: "",
+              longRunning: false,
+              restarts: true,
+            },
+          }),
+        {
+          note: (body: string, title?: string) =>
+            q.note(title ?? "", body),
+        } as never,
+      );
+
+      return `voice saved: ${result.summary}`;
+    }, ["phantombot", persona, "voice"]);
+  }
 
   if (!embedded) p.intro("Configure TTS / STT");
 

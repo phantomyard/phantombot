@@ -62,8 +62,16 @@ esac
 # --- install binary ------------------------------------------------------
 
 if [ -n "${PHANTOMBOT_DEV_BIN:-}" ]; then
-  PB_BIN="$PHANTOMBOT_DEV_BIN"
-  printf 'phantombot: using dev binary %s\n' "$PB_BIN"
+  if [ "$DRYRUN" -eq 0 ]; then
+    mkdir -p "$INSTALL_DIR"
+    cp "$PHANTOMBOT_DEV_BIN" "$INSTALL_DIR/phantombot"
+    chmod 0755 "$INSTALL_DIR/phantombot"
+    printf 'phantombot: installed dev binary %s to %s/phantombot\n' "$PHANTOMBOT_DEV_BIN" "$INSTALL_DIR"
+    PB_BIN="$INSTALL_DIR/phantombot"
+  else
+    PB_BIN="$PHANTOMBOT_DEV_BIN"
+    printf 'phantombot: using dev binary %s\n' "$PB_BIN"
+  fi
 elif [ "$DRYRUN" -eq 0 ]; then
   # Preflight tools check
   if ! command -v curl >/dev/null 2>&1; then

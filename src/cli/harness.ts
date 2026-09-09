@@ -99,7 +99,11 @@ export function piInstallCommand(
       "irm https://pi.dev/install.ps1 | iex",
     ];
   }
-  return ["sh", "-c", "curl -fsSL https://pi.dev/install.sh | sh"];
+  return [
+    "sh",
+    "-c",
+    "curl -f -s -S -L https://pi.dev/install.sh -o /tmp/pi-install.sh && sh /tmp/pi-install.sh && rm -f /tmp/pi-install.sh",
+  ];
 }
 
 /**
@@ -263,59 +267,117 @@ export interface RunHarnessCheckInput {
 export async function runHarnessCheck(
   input: RunHarnessCheckInput = {},
 ): Promise<number> {
-  const q = input.prompts ?? clackPrompts;
   const config = input.config ?? (await loadConfig());
   const availability =
     input.availability ?? (await detectAvailability(config, input.pathEnv));
   await saveHarnessBins(availability);
 
-  q.note(
-    SUPPORTED_HARNESSES.map(
-      (id) =>
-        `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
-    ).join("\n"),
-    "Detected harnesses",
-  );
-
-  const hasAnyHarness = Object.values(availability).some(
-    (path) => path !== undefined,
-  );
-  if (!hasAnyHarness) {
+  if (input.prompts || !process.stdin.isTTY) {
+    const q = input.prompts ?? clackPrompts;
     q.note(
-      "No supported harness (claude, pi, codex) was found on your PATH.\n" +
-        "You will need to install at least one of them before the agent can think.",
-      "Warning: No Harness Found",
+      SUPPORTED_HARNESSES.map(
+        (id) =>
+          `  ${availability[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${availability[id] ?? harnessBin(config, id)}`,
+      ).join("\n"),
+      "Detected harnesses",
     );
-    if (!input.dryRun) {
-      const runner = input.installRunner ?? defaultInstallRunner;
-      const wantsPi = await (q.confirm ?? p.confirm)({
-        message: "Install Pi now? (official Pi installer: pi.dev)",
-        initialValue: true,
-      });
-      if (wantsPi && !p.isCancel(wantsPi)) {
-        await installPi(runner, q);
-        const refreshed = await detectAvailability(config);
-        await saveHarnessBins(refreshed);
-        q.note(
-          SUPPORTED_HARNESSES.map(
-            (id) =>
-              `  ${refreshed[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${refreshed[id] ?? harnessBin(config, id)}`,
-          ).join("\n"),
-          "Detected harnesses",
-        );
+
+    const hasAnyHarness = Object.values(availability).some(
+      (path) => path !== undefined,
+    );
+    if (!hasAnyHarness) {
+      q.note(
+        "No supported harness (claude, pi, codex) was found on your PATH.\n" +
+          "You will need to install at least one of them before the agent can think.",
+        "Warning: No Harness Found",
+      );
+      if (!input.dryRun) {
+        const runner = input.installRunner ?? defaultInstallRunner;
+        const wantsPi = await (q.confirm ?? p.confirm)({
+          message: "Install Pi now? (official Pi installer: pi.dev)",
+          initialValue: true,
+        });
+        if (wantsPi && !p.isCancel(wantsPi)) {
+          await installPi(runner, q);
+          const refreshed = await detectAvailability(config);
+          await saveHarnessBins(refreshed);
+          q.note(
+            SUPPORTED_HARNESSES.map(
+              (id) =>
+                `  ${refreshed[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${refreshed[id] ?? harnessBin(config, id)}`,
+            ).join("\n"),
+            "Detected harnesses",
+          );
+        }
       }
     }
+
+    const proceed = await (q.confirm ?? p.confirm)({
+      message: "Continue to phantombot TUI?",
+      initialValue: true,
+    });
+    if (proceed !== true) {
+      return 1;
+    }
+
+    return 0;
   }
 
-  const proceed = await (q.confirm ?? p.confirm)({
-    message: "Continue to phantombot TUI?",
-    initialValue: true,
-  });
-  if (proceed !== true) {
-    return 1;
-  }
+  const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+  return await runStandaloneFlow(async (q) => {
+    let currentAvailability = availability;
+    const formatSummary = (avail: Record<HarnessId, string | undefined>) =>
+      SUPPORTED_HARNESSES.map(
+        (id) =>
+          `  ${avail[id] ? "[ok]  " : "[NOT FOUND]"} ${id}: ${avail[id] ?? harnessBin(config, id)}`,
+      ).join("\n");
 
-  return 0;
+    const hasAnyHarness = Object.values(currentAvailability).some(
+      (path) => path !== undefined,
+    );
+    if (!hasAnyHarness) {
+      if (!input.dryRun) {
+        const wantsPi = await q.choose({
+          title: "Warning: No Harness Found",
+          description:
+            "No supported harness (claude, pi, codex) was found on your PATH.\n" +
+            "You will need to install at least one of them before the agent can think.\n\n" +
+            formatSummary(currentAvailability),
+          options: [
+            {
+              value: "yes",
+              label: "Install Pi now (official Pi installer: pi.dev)",
+              hint: "recommended",
+            },
+            { value: "skip", label: "Skip harness installation for now" },
+          ],
+        });
+
+        if (wantsPi === "yes") {
+          const runner = input.installRunner ?? defaultInstallRunner;
+          await installPi(runner, {
+            note: (body, title) => q.note(title ?? "", body),
+          } as never);
+          currentAvailability = await detectAvailability(config);
+          await saveHarnessBins(currentAvailability);
+        }
+      }
+    }
+
+    const proceed = await q.choose({
+      title: "Continue to phantombot TUI?",
+      description: formatSummary(currentAvailability),
+      options: [
+        { value: "yes", label: "Yes, continue into phantombot TUI" },
+        { value: "no", label: "No, exit back to terminal" },
+      ],
+    });
+
+    if (proceed !== "yes") {
+      return 1;
+    }
+    return 0;
+  }, ["phantombot", "harness-check"]);
 }
 
 export interface RunInput {
@@ -338,13 +400,34 @@ export interface RunInput {
 }
 
 export async function runHarness(input: RunInput = {}): Promise<number> {
+  const persona = input.persona?.trim() || undefined;
+  const config = input.config ?? (await loadConfig(persona));
+
+  if (!input.prompts && process.stdin.isTTY) {
+    const { runStandaloneFlow } = await import("../tui/standalone.tsx");
+    const { createBrainOnboardingDeps, runBrainOnboarding } = await import(
+      "../tui/brainOnboarding.ts"
+    );
+    const { loadState } = await import("../state.ts");
+    const targetPersona =
+      persona ??
+      (await loadState()).default_persona ??
+      config.defaultPersona ??
+      "phantom";
+
+    return await runStandaloneFlow(async (standaloneQ) => {
+      const deps = await createBrainOnboardingDeps(targetPersona, {
+        setNotice: (msg) => standaloneQ.note("", msg),
+        askConfirmValue: (req) => standaloneQ.confirm(req),
+      });
+      const result = await runBrainOnboarding(standaloneQ, deps);
+      return result.notice;
+    }, ["phantombot", targetPersona, "brain"]);
+  }
+
   // Injected asking (see harnessPrompts.ts): the CLI passes nothing and gets
   // @clack; the TUI passes screens and the SAME flow runs inside the app.
   const q = input.prompts ?? clackPrompts;
-  const persona = input.persona?.trim() || undefined;
-  // Read the persona's EFFECTIVE config, so the picker pre-selects the chain
-  // that persona actually runs with rather than the default persona's.
-  const config = input.config ?? (await loadConfig(persona));
   const currentChain = harnessChainIds(config, persona);
   // Write where the read path looks: the persona's own file once it exists,
   // the global file (legacy shape) until then.
