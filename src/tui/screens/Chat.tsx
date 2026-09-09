@@ -181,7 +181,7 @@ function Activity(props: {
       <Text color={theme.dim}>{props.note}</Text>
       <Text color={theme.dim}>{` · ${seconds}s`}</Text>
       <Box flexGrow={1} />
-      <Text color={theme.dim}>^c interrupts</Text>
+      <Text color={theme.dim}>ctrl+c interrupts</Text>
     </Box>
   );
 }
@@ -558,22 +558,22 @@ export function ChatScreen(props: {
       statusColor={props.statusColor}
       footer={[
         { icon: badge.send, key: "↵", label: "Send" },
-        { icon: badge.send, key: "Alt+↵", label: "Newline" },
-        { icon: badge.run, key: "/", label: "Commands" },
+        { icon: badge.send, key: "Alt+↵", label: "Line" },
+        { icon: badge.run, key: "/", label: "Cmds" },
         { icon: badge.scroll, key: "↑↓", label: "Scroll" },
         {
           icon: badge.settings,
-          key: "^s",
+          key: "ctrl+s",
           label: "Settings",
           onPress: props.onSettings,
         },
-        { icon: badge.quit, key: "^q", label: "Quit" },
+        { icon: badge.quit, key: "ctrl+q", label: "Quit" },
       ]}
     >
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
         {lines.length === 0 ? (
           <Text color={theme.dim}>
-            Say something to {props.session.persona}. ^s for settings.
+            Say something to {props.session.persona}. ctrl+s for settings.
           </Text>
         ) : (
           <>
@@ -611,7 +611,7 @@ export function ChatScreen(props: {
       {showKeys ? (
         <Box flexDirection="column" paddingX={2}>
           <Text color={theme.dim}>
-            {"KEY INSPECTOR — ^k to close, bytes the terminal sent (latest last):"}
+            {"KEY INSPECTOR — ctrl+k to close, bytes the terminal sent (latest last):"}
           </Text>
           {rawKeys.length === 0 ? (
             <Text color={theme.dim}>{"  (press any key)"}</Text>

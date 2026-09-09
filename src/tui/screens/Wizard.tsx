@@ -94,18 +94,18 @@ export function WizardScreen(props: {
 
   if (step === "name") {
     const request: AskRequest = {
-      title: "Persona name",
+      title: "Persona Name",
       description: nameDescription(),
       hint:
         error ??
-        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
+        "Lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
       initial: name,
     };
     return (
       <AskScreen
         key={attempt}
         request={request}
-        // Genuine first run has no screen behind the name question — ^q
+        // Genuine first run has no screen behind the name question — ctrl+q
         // quits instead of pretending to go back.
         noBack={!props.onBack}
         onQuit={props.onBack ? undefined : props.onQuit}
@@ -117,7 +117,7 @@ export function WizardScreen(props: {
           const trimmed = value.trim();
           if (!validPersonaName(trimmed)) {
             setError(
-              "invalid name — lowercase letters, digits, '-' or '_', starting with a letter or digit",
+              "Invalid name — please use lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
             );
             return setAttempt((n) => n + 1);
           }
@@ -125,7 +125,7 @@ export function WizardScreen(props: {
             trimmed !== props.initial?.name?.trim() &&
             props.existingNames?.includes(trimmed)
           ) {
-            setError(`'${trimmed}' already exists — pick another name`);
+            setError(`'${trimmed}' already exists — please pick another name.`);
             return setAttempt((n) => n + 1);
           }
           setName(trimmed);
@@ -138,7 +138,7 @@ export function WizardScreen(props: {
 
   if (step === "identity") {
     const request: AskRequest = {
-      title: "One-line identity",
+      title: "One-Line Identity",
       description: identityDescription(name),
       hint: `You are ${name || "…"}, ___`,
       initial: identity || DEFAULT_IDENTITY,
@@ -170,7 +170,7 @@ export function WizardScreen(props: {
   }
 
   const request: ChooseRequest = {
-    title: "Default tone",
+    title: "Default Tone",
     options: TONE_CHOICES,
     description: toneDescription(name, identity),
   };
@@ -189,7 +189,7 @@ export function WizardScreen(props: {
 
   if (step === "skills") {
     const multiRequest: MultiChooseRequest = {
-      title: "Skills & disciplines",
+      title: "Skills & Disciplines",
       options: EXPERTISE_OPTIONS,
       initial: expertise,
       description: skillsDescription(name),
@@ -207,9 +207,9 @@ export function WizardScreen(props: {
   }
 
   const ownerRequest: AskRequest = {
-    title: "Your name",
+    title: "Your Name",
     description: ownerDescription(name),
-    hint: `what ${name} calls you`,
+    hint: `What ${name} calls you (press ↵ to skip)`,
     initial: owner,
     allowEmpty: true,
   };

@@ -209,7 +209,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
       yield {
         type: "error",
         message:
-          "No harness available. Open settings (^s) → the phantom's Brain to pick one.",
+          "No harness available. Open settings (ctrl+s) → the phantom's Brain to pick one.",
       };
       return;
     }

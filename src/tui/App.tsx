@@ -1670,7 +1670,7 @@ export function App(props: AppProps): React.ReactElement {
           <Frame
             title={["phantombot", personaName]}
             status="starting"
-            footer={[{ key: "^q", label: "Quit" }]}
+            footer={[{ key: "ctrl+q", label: "Quit" }]}
           >
             <Text color={theme.dim}>opening {personaName}…</Text>
           </Frame>

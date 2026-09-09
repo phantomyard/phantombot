@@ -204,7 +204,7 @@ describe("chat activity indicator", () => {
       await sleep(150);
       // The activity line tracks the live step rather than freezing on a word.
       expect(lastFrame(stdout.frames)).toContain("gh release view");
-      expect(lastFrame(stdout.frames)).toContain("^c interrupts");
+      expect(lastFrame(stdout.frames)).toContain("ctrl+c interrupts");
     } finally {
       instance.unmount();
     }

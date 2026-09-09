@@ -121,7 +121,7 @@ describe("header and footer bars", () => {
       const last = [...lines].reverse().find((l) => strip(l).trim() !== "");
       expect(last ?? "").toContain(BG_OPEN);
       expect(strip(last ?? "").length).toBe(80);
-      expect(strip(last ?? "")).toContain("^q");
+      expect(strip(last ?? "")).toContain("ctrl+q");
     } finally {
       instance.unmount();
     }

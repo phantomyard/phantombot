@@ -127,14 +127,16 @@ describe("logSources", () => {
     // byte bound the pane slurps and JSON-parses the whole thing per persona,
     // on every reload, to render at most `limit` rows of it.
     const records: string[] = [];
-    for (let i = 0; records.join("\n").length < MAX_TAIL_BYTES * 1.5; i++) {
-      records.push(
-        JSON.stringify({
-          ts: "2026-09-01T10:00:00.000Z",
-          kind: "bash",
-          note: `call-${i} ${"x".repeat(200)}`,
-        }),
-      );
+    let totalBytes = 0;
+    const targetBytes = MAX_TAIL_BYTES * 1.5;
+    for (let i = 0; totalBytes < targetBytes; i++) {
+      const rec = JSON.stringify({
+        ts: "2026-09-01T10:00:00.000Z",
+        kind: "bash",
+        note: `call-${i} ${"x".repeat(200)}`,
+      });
+      records.push(rec);
+      totalBytes += rec.length + 1;
     }
     await writeFile(join(dir, "audit", `${day}.log`), records.join("\n") + "\n");
 

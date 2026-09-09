@@ -45,15 +45,15 @@ const TONE_OPTIONS: ReadonlyArray<{
   label: string;
   hint: string;
 }> = [
-  { value: "blunt", label: "Blunt", hint: "concise, direct, no fluff" },
+  { value: "blunt", label: "Blunt", hint: "Concise, direct, no fluff" },
   {
     value: "professional",
     label: "Professional",
-    hint: "measured and polished",
+    hint: "Measured, clear, and polished",
   },
-  { value: "casual", label: "Casual", hint: "friendly, conversational" },
-  { value: "warm", label: "Warm", hint: "supportive, empathetic" },
-  { value: "playful", label: "Playful", hint: "witty, light" },
+  { value: "casual", label: "Casual", hint: "Friendly, conversational" },
+  { value: "warm", label: "Warm", hint: "Supportive, empathetic" },
+  { value: "playful", label: "Playful", hint: "Witty, lively, and lighthearted" },
 ];
 
 export const EXPERTISE_OPTIONS = [

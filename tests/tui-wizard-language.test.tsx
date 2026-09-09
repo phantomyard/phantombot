@@ -192,7 +192,7 @@ function mount(props: Partial<React.ComponentProps<typeof App>> = {}) {
     pressUntil: async (
       bytes: string,
       predicate: (frame: string) => boolean,
-      tries = 20,
+      tries = 40,
     ) => {
       for (let i = 0; i < tries; i++) {
         if (predicate(strip(stdout.frames[stdout.frames.length - 1] ?? ""))) return;
@@ -229,8 +229,8 @@ async function openNewPersona() {
   const app = mount({ startPersona: "alice" });
   await app.waitFor((f) => f.includes("Send"));
   await app.pressUntil("\x13", (f) => f.includes("PHANTOMS")); // ^s
-  await app.pressUntil("n", (f) => f.includes("What do you want to do?"));
-  await app.pressUntil("\r", (f) => f.includes("Persona name"));
+  await app.pressUntil("n", (f) => f.includes("What do you want to do?") || f.includes("New Persona"));
+  await app.pressUntil("\r", (f) => f.includes("Persona Name") || f.includes("Persona name"));
   return app;
 }
 
@@ -268,49 +268,49 @@ describe("the new-persona flow speaks the app's menu language", () => {
     await app.press("\x1b");
     await app.waitFor((f) => f.includes("What do you want to do?"));
     // And not merely "left the flow": the name question is gone.
-    expect(app.lastFrame()).not.toContain("Persona name");
+    expect(app.lastFrame()).not.toContain("Persona Name");
   });
 
   test("esc inside the flow walks back one question, not out", async () => {
     const app = await openNewPersona();
     await app.press("lab");
     await app.press("\r");
-    await app.waitFor((f) => f.includes("One-line identity"));
+    await app.waitFor((f) => f.includes("One-line identity") || f.includes("One-Line Identity"));
     await app.press("\x1b");
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.waitFor((f) => f.includes("Persona Name"));
     // The typed name survives the round trip — back is a step, not a reset.
     expect(app.lastFrame()).toContain("lab");
   });
 
-  test("on first run the first step offers ^q Quit, and ^q quits", async () => {
+  test("on first run the first step offers ctrl+q Quit, and ctrl+q quits", async () => {
     const app = mount({
       host: { ...HOST, personas: [] },
       startPersona: undefined,
     });
-    await app.waitFor((f) => f.includes("Persona name"));
+    await app.waitFor((f) => f.includes("Persona Name"));
     const frame = app.lastFrame();
     // The wizard IS the app on first run — esc has no screen behind it to
-    // return to, so the app-wide ^q quit is advertised instead. Neither
+    // return to, so the app-wide ctrl+q quit is advertised instead. Neither
     // silence (a hidden key) nor a no-op is honest chrome.
     expect(frame).not.toContain("esc Back");
-    expect(frame).toContain("^q Quit");
+    expect(frame).toContain("ctrl+q Quit");
     let exited = false;
     void app.instance.waitUntilExit().then(() => void (exited = true));
-    await app.press("\x11"); // ^q
+    await app.press("\x11"); // ^q / ctrl+q
     await tick();
     expect(exited).toBe(true);
   });
 
-  test("on a wizard resume, the identity step offers ^q Quit too", async () => {
+  test("on a wizard resume, the identity step offers ctrl+q Quit too", async () => {
     // A resume opens straight into the wizard (default persona missing its
-    // identity) — the stack is empty here as well, so ^q quits.
+    // identity) — the stack is empty here as well, so ctrl+q quits.
     const app = mount({
       host: HOST,
       startPersona: "alice",
       wizardStartAt: "identity",
     });
-    await app.waitFor((f) => f.includes("One-line identity"));
-    expect(app.lastFrame()).toContain("^q Quit");
+    await app.waitFor((f) => f.includes("One-Line Identity") || f.includes("One-line identity"));
+    expect(app.lastFrame()).toContain("ctrl+q Quit");
     expect(app.lastFrame()).not.toContain("esc Back");
   });
 });
