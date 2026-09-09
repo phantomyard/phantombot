@@ -110,6 +110,22 @@ export interface ChatSession {
    * when you need it and exactly when the harness cannot answer.
    */
   command(text: string): Promise<ChatCommandResult | null>;
+  /**
+   * Rebuild the harness chain from a freshly loaded config.
+   *
+   * The chain is resolved ONCE when the session opens, and the session
+   * deliberately outlives every screen switch so the thread survives a trip to
+   * settings. That combination is what made "configure the brain, come back,
+   * get empty replies": the chat kept talking to the chain that existed
+   * BEFORE the brain was configured — on a fresh install, the default `claude`
+   * that isn't installed — so every turn died on an unavailable harness while
+   * config.toml on disk said `pi`.
+   *
+   * So any write that can change the chain must call this. It mutates the
+   * session in place rather than reopening it, because reopening resets the
+   * transcript. Returns the new chain's ids for the caller to report.
+   */
+  reloadHarnesses(config: Config): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -289,10 +305,19 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
           }
           final = chunk.finalText;
           yield { type: "done", text: chunk.finalText };
-        } else if (chunk.type === "error" && !chunk.recoverable) {
-          // A RECOVERABLE error is the orchestrator moving to the next harness
-          // in the chain; surfacing it would report a failure the user never
-          // experienced.
+        } else if (chunk.type === "error") {
+          // Surface EVERY error chunk that gets this far, `recoverable` or not.
+          //
+          // The flag describes what the ORCHESTRATOR may do about it, not
+          // whether the user was spared: a recoverable error with another
+          // harness left is consumed inside `runWithFallback` and never
+          // yielded, so the only error chunks that reach a channel are the
+          // terminal ones and the chain-exhausted ones — both of which mean
+          // the user got no reply. Filtering on `!recoverable` here therefore
+          // dropped exactly the failures worth showing (a missing harness
+          // binary exits this way), and the screen rendered a blank bubble
+          // with no hint that anything had gone wrong. Every other channel
+          // (engine, reactions, the ACP bridge) already surfaces both.
           yield { type: "error", message: chunk.error };
         }
       }
@@ -307,6 +332,20 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     } finally {
       activeTurn = undefined;
     }
+  }
+
+  async function reloadHarnesses(next: Config): Promise<string[]> {
+    // An injected chain is a test seam and the caller owns it; re-resolving
+    // would silently replace the fake with whatever the host happens to have.
+    if (input.harnesses) return input.harnesses.map((h) => h.id);
+    const resolved = await resolveHarnessBinsForConfig(next);
+    config = resolved.config;
+    harnesses = buildHarnessChain(
+      config,
+      input.stderr ?? process.stderr,
+      persona,
+    );
+    return harnesses.map((h) => h.id);
   }
 
   async function command(text: string): Promise<ChatCommandResult | null> {
@@ -339,6 +378,7 @@ export async function openChat(input: OpenChatInput): Promise<ChatSession> {
     history,
     send,
     command,
+    reloadHarnesses,
     async close() {
       if (ownsMemory) await memory.close();
     },

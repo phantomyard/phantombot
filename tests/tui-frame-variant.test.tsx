@@ -158,6 +158,7 @@ async function openChat(rows: number) {
         async command() {
           return null;
         },
+        reloadHarnesses: async () => [],
         close: async () => {},
       })}
     />,

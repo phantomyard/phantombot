@@ -434,12 +434,20 @@ export async function runRepl(
         if (command.afterSend) await command.afterSend();
         continue;
       }
+      let said = false;
       for await (const event of chat.send(text)) {
-        if (event.type === "text") out.write(event.text);
-        else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
-        else if (event.type === "error")
+        if (event.type === "text") {
+          if (event.text !== "") said = true;
+          out.write(event.text);
+        } else if (event.type === "tool") out.write(`\n› ${event.title}\n`);
+        else if (event.type === "error") {
+          said = true;
           out.write(`\nerror: ${event.message}\n`);
+        }
       }
+      // Same placeholder as the full-screen chat and as every channel: a turn
+      // that produced nothing must not look like a blank line of output.
+      if (!said) out.write("(no reply)\n");
       out.write("\n");
     }
     return 0;

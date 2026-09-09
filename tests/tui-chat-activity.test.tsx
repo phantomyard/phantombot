@@ -69,6 +69,9 @@ function pendingSession(events: ChatEvent[]): ChatSession {
     async command() {
       return null;
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
 }
@@ -106,6 +109,9 @@ function recordingSession(sent: string[]): ChatSession {
     },
     async command() {
       return null;
+    },
+    async reloadHarnesses() {
+      return [];
     },
     async close() {},
   };
@@ -222,6 +228,9 @@ describe("chat activity indicator", () => {
       async command() {
         return null;
       },
+      async reloadHarnesses() {
+        return [];
+      },
       async close() {},
     };
     const { stdin, stdout, instance } = await mount(session);
@@ -249,6 +258,9 @@ describe("message timestamps", () => {
       async *send() {},
       async command() {
         return null;
+      },
+      async reloadHarnesses() {
+        return [];
       },
       async close() {},
     };

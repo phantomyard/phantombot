@@ -316,6 +316,17 @@ export function ChatScreen(props: {
             patch((m) => ({ ...m, error: event.message }));
           }
         }
+        // A finished turn that said nothing and reported nothing must still
+        // SAY so. A bubble with a header and no body is indistinguishable
+        // from a reply that is still streaming, and it is exactly what a dead
+        // harness chain used to draw — the user reads it as "it answered and
+        // the answer was blank" rather than "nothing answered". Every other
+        // channel already renders this placeholder (`core/engine.ts`).
+        patch((m) =>
+          m.text === "" && m.error === undefined
+            ? { ...m, text: "(no reply)" }
+            : m,
+        );
       } finally {
         setBusy(false);
         setBusySince(undefined);

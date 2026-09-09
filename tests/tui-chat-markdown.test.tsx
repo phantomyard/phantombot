@@ -64,6 +64,9 @@ async function frameFor(text: string): Promise<string> {
     async command() {
       return null;
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
   const instance = render(

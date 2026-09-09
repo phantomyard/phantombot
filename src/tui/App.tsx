@@ -72,6 +72,7 @@ import { SystemScreen } from "./screens/System.tsx";
 import { systemSnapshot } from "./systemSnapshot.ts";
 import { WizardScreen, type WizardAnswers } from "./screens/Wizard.tsx";
 import { theme } from "./theme.ts";
+import { log } from "../lib/logger.ts";
 import { logBuffer } from "./logBuffer.ts";
 import { TerminalSizeContext, renderRows, terminalSize } from "./terminal.ts";
 import { loadConfig, loadConfigForPersona, type Config } from "../config.ts";
@@ -112,6 +113,9 @@ export interface AppProps {
    * and writes through the same config helpers the CLI uses. The result
    * decides where the wizard lands: "chat" only when the brain was verified
    * by a real turn; anything else lands in Configure.
+   *
+   * Seams BOTH brain entry points — the wizard's steps and the Configure
+   * screen's Brain row run the same flow, so they share the same seam.
    */
   onWizardBrain?: (
     persona: string,
@@ -178,6 +182,14 @@ export function App(props: AppProps): React.ReactElement {
     props.startPersona ?? host.defaultPersona,
   );
   const [session, setSession] = useState<ChatSession | undefined>();
+  /**
+   * The live session, readable from callbacks without making every one of them
+   * depend on it. `changeBrain` in particular must reach the OPEN session to
+   * refresh its harness chain, and re-creating that callback on every session
+   * change would churn the whole settings tree for no benefit.
+   */
+  const sessionRef = useRef<ChatSession | undefined>(undefined);
+  sessionRef.current = session;
   /**
    * Latched the first time chat is reached — including from the wizard's
    * `onFinish`, which is the path that had no way to set it before.
@@ -572,6 +584,35 @@ export function App(props: AppProps): React.ReactElement {
     [refresh, askChoice, askSearch, askValue, askBrainTest, askConfirmValue],
   );
 
+  /**
+   * Point the OPEN chat session at the brain that was just configured.
+   *
+   * The session resolves its harness chain once, when it opens, and then
+   * deliberately outlives every screen switch so a trip to settings does not
+   * lose the thread. Nothing re-read config.toml after that, so configuring a
+   * brain left chat still talking to the chain from before the write — on a
+   * fresh install the default `claude`, which is not installed. The user was
+   * told "brain verified", landed in chat, and every reply came back empty.
+   *
+   * Rebuilt in place rather than by reopening the session: reopening resets
+   * the transcript. Called by BOTH brain entry points (the wizard's steps and
+   * the Configure screen's Brain row).
+   */
+  const refreshChatBrain = useCallback(async () => {
+    const open = sessionRef.current;
+    if (!open) return;
+    try {
+      const { config } = await loadConfigForPersona(open.persona);
+      await open.reloadHarnesses(config);
+    } catch (e) {
+      // Never mask the flow's own outcome with a reload failure — the config
+      // IS saved, and the next app start picks it up regardless.
+      log.warn("tui: could not refresh the chat harness chain", {
+        error: (e as Error).message,
+      });
+    }
+  }, []);
+
   const wizardBrain = props.onWizardBrain ?? onboardBrain;
 
   /**
@@ -583,13 +624,18 @@ export function App(props: AppProps): React.ReactElement {
    */
   const changeBrain = useCallback(
     async (target: PersonaSnapshot) => {
-      const result = await onboardBrain(target.name);
+      // `wizardBrain`, not `onboardBrain`: this IS the wizard's brain flow (see
+      // the doc comment above), and going through the same seam means a test
+      // can drive the Configure entry point without a live harness — which is
+      // how the "chat kept the pre-configuration chain" bug is pinned.
+      const result = await wizardBrain(target.name);
+      await refreshChatBrain();
       setNotice(result.notice);
 
       // A verified brain earns chat, same as the wizard's landing.
       if (result.landing === "chat") setScreen("chat");
     },
-    [onboardBrain],
+    [onboardBrain, refreshChatBrain],
   );
 
   /**
@@ -1592,6 +1638,7 @@ export function App(props: AppProps): React.ReactElement {
                 result?.created !== false
                   ? await wizardBrain(answers.name)
                   : undefined;
+              await refreshChatBrain();
               // The brain steps' notice (what happened to the config)
               // supersedes the creation line — but only when the flow has
               // something to say.
