@@ -61,44 +61,59 @@ if ($isInteractive) {
 }
 
 $esc = [char]27
-$gDisc = "$esc[38;5;238m"
-$gCowl = "$esc[38;5;244m"
-$gDeep = "$esc[38;5;240m"
-$v1 = "$esc[38;5;33m"
-$v2 = "$esc[38;5;39m"
-$v3 = "$esc[38;5;51m"
-$v4 = "$esc[38;5;231m"
-$reset = "$esc[0m"
+$c24  = "$esc[38;5;24m"
+$c26  = "$esc[38;5;26m"
+$c33  = "$esc[38;5;33m"
+$c39  = "$esc[38;5;39m"
+$c45  = "$esc[38;5;45m"
+$c51  = "$esc[38;5;51m"
+$c87  = "$esc[38;5;87m"
+$c123 = "$esc[38;5;123m"
+$c159 = "$esc[38;5;159m"
+$c231 = "$esc[38;5;231m"
+$c21  = "$esc[38;5;21m"
+$c27  = "$esc[38;5;27m"
+
+$d236 = "$esc[38;5;236m"
+$d240 = "$esc[38;5;240m"
+$d245 = "$esc[38;5;245m"
+
+$w0   = "$esc[38;5;231m"
+$reset= "$esc[0m"
+$bold = "$esc[1m"
 
 $phantomLines = @(
-    "  $gDisc            ▄▄▄▄████████▄▄▄▄            $reset",
-    "  $gDisc        ▄▄███▀▀▀        ▀▀▀███▄▄        $reset",
-    "  $gDisc      ▄██▀▀    $gCowl▄▄▄████▄▄▄$gDisc    ▀▀██▄      $reset",
-    "  $gDisc    ▄██▀     $gCowl▄██▀▀    ▀▀██▄$gDisc     ▀██▄    $reset",
-    "  $gDisc   ▄██▀     $gCowl▄██          ██▄$gDisc     ▀██▄   $reset",
-    "  $gDisc  ▄██▀      $gCowl██            ██$gDisc      ▀██▄  $reset",
-    "  $gDisc  ███       $gCowl██   $v1╺$v2━$v3━━$v4•$v3━━$v2━$v1╸$gCowl   ██$gDisc       ███  $reset",
-    "  $gDisc  ███       $gCowl██            ██$gDisc       ███  $reset",
-    "  $gDisc  ▀██▄      $gCowl▀██▄        ▄██▀$gDisc      ▄██▀  $reset",
-    "  $gDisc   ▀██▄      $gDeep▀██▄▄▄▄▄▄██▀$gDisc      ▄██▀   $reset",
-    "  $gDisc    ▀██▄▄     $gDeep▀▀▀████▀▀▀$gDisc     ▄▄██▀    $reset",
-    "  $gDisc      ▀▀██▄▄            ▄▄██▀▀      $reset",
-    "  $gDisc         ▀▀▀▀████████▀▀▀▀         $reset"
+    "                     $c24▄▄▄▄████████▄▄▄▄$reset",
+    "                 $c26▄▄███▀▀▀        ▀▀▀███▄▄$reset",
+    "              $c33▄███▀     $c39▄▄▄██████▄▄▄$reset     $c33▀███▄$reset",
+    "            $c39▄██▀     $c45▄███▀▀      ▀▀███▄$reset     $c39▀██▄$reset",
+    "           $c45▄██▀     $c51███    $d236▄▄████▄▄$reset    $c51███$reset     $c45▀██▄$reset",
+    "          $c51███      $c87███    $d240▄██▀    ▀██▄$reset    $c87███$reset      $c51███$reset",
+    "          $c87███      $c123███    $d245██        ██$reset    $c123███$reset      $c87███$reset",
+    "          $c123███      $c159███    $d245██ $c33╺$c39━$c45━$c51━$c87╸$w0●$c87╺$c51━$c45━$c39━$c33╸ $d245██$reset    $c159███$reset      $c123███$reset",
+    "          $c87███      $c123███    $d245██        ██$reset    $c123███$reset      $c87███$reset",
+    "          $c51███      $c87███    $d240▀██▄    ▄██▀$reset    $c87███$reset      $c51███$reset",
+    "           $c45▀██▄     $c51███    $d236▀▀████▀▀$reset    $c51███$reset     $c45▄██▀$reset",
+    "            $c39▀██▄     $c45▀███▄▄      ▄▄███▀$reset     $c39▄██▀$reset",
+    "              $c33▀███▄     $c39▀▀▀██████▀▀▀$reset     $c33▄███▀$reset",
+    "                 $c26▀▀███▄▄▄        ▄▄▄███▀▀$reset",
+    "                     $c24▀▀▀▀████████▀▀▀▀$reset",
+    "",
+    "  $c39█████▄ $c45██  ██ $c51▄████▄ $c51███  ██ $c87███████ $c87▄████▄ $c123███▄███  $c123█████▄ $c159▄████▄ $c231███████$reset",
+    "  $c33██▄▄██ $c39██  ██ $c45██▄▄██ $c45████ ██ $c51  ██   $c51██  ██ $c87██▀█▀██  $c87██▄▄██ $c123██  ██ $c159  ██   $reset",
+    "  $c27██▀▀▀  $c33██████ $c39██▀▀██ $c39██ ████ $c45  ██   $c45██  ██ $c51██ ▀ ██  $c51██▀▀██ $c87██  ██ $c123  ██   $reset",
+    "  $c21██     $c27██  ██ $c33██  ██ $c33██  ███ $c39  ██   $c39▀████▀ $c45██   ██  $c45█████▀ $c51▀████▀ $c87  ██   $reset",
+    "",
+    "    $c33◈$reset  $c123$boldLearns your world, defends your runtime, never wastes a token.$reset  $c33◈$reset"
 )
 
 Write-Host ""
 foreach ($l in $phantomLines) {
     Write-Host $l
     if ($isInteractive) {
-        Start-Sleep -Milliseconds 20
+        Start-Sleep -Milliseconds 15
     }
 }
-Write-Host ""
-Write-Host "  Phantombot Installer" -ForegroundColor White
-if ($isInteractive) {
-    Start-Sleep -Milliseconds 20
-}
-Write-Host "  There are many agent runtimes, but this one is yours" -ForegroundColor DarkGray
 Write-Host ""
 
 # --- 2. Welcome & Confirmation --------------------------------------------

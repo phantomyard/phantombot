@@ -44,50 +44,80 @@ fi
 
 render_intro() {
   if [ -t 1 ]; then
-    gDisc="\033[38;5;238m"
-    gCowl="\033[38;5;244m"
-    gDeep="\033[38;5;240m"
-    v1="\033[38;5;33m"
-    v2="\033[38;5;39m"
-    v3="\033[38;5;51m"
-    v4="\033[38;5;231m"
+    c24="\033[38;5;24m"
+    c26="\033[38;5;26m"
+    c33="\033[38;5;33m"
+    c39="\033[38;5;39m"
+    c45="\033[38;5;45m"
+    c51="\033[38;5;51m"
+    c87="\033[38;5;87m"
+    c123="\033[38;5;123m"
+    c159="\033[38;5;159m"
+    c231="\033[38;5;231m"
+
+    d236="\033[38;5;236m"
+    d240="\033[38;5;240m"
+    d245="\033[38;5;245m"
+
+    w0="\033[38;5;231m"
     reset="\033[0m"
-    bold="\033[1;37m"
-    dim="\033[38;5;245m"
+    bold="\033[1m"
 
     printf '\n'
-    printf "  %b            ▄▄▄▄████████▄▄▄▄            %b\n" "$gDisc" "$reset"
+    printf "                     %b▄▄▄▄████████▄▄▄▄%b\n" "$c24" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "                 %b▄▄███▀▀▀        ▀▀▀███▄▄%b\n" "$c26" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "              %b▄███▀     %b▄▄▄██████▄▄▄%b     %b▀███▄%b\n" "$c33" "$c39" "$reset" "$c33" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "            %b▄██▀     %b▄███▀▀      ▀▀███▄%b     %b▀██▄%b\n" "$c39" "$c45" "$reset" "$c39" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "           %b▄██▀     %b███    %b▄▄████▄▄%b    %b███%b     %b▀██▄%b\n" "$c45" "$c51" "$d236" "$reset" "$c51" "$reset" "$c45" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "          %b███      %b███    %b▄██▀    ▀██▄%b    %b███%b      %b███%b\n" "$c51" "$c87" "$d240" "$reset" "$c87" "$reset" "$c51" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "          %b███      %b███    %b██        ██%b    %b███%b      %b███%b\n" "$c87" "$c123" "$d245" "$reset" "$c123" "$reset" "$c87" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "          %b███      %b███    %b██ %b╺%b━%b━%b━%b╸%b●%b╺%b━%b━%b━%b╸ %b██%b    %b███%b      %b███%b\n" "$c123" "$c159" "$d245" "$c33" "$c39" "$c45" "$c51" "$c87" "$w0" "$c87" "$c51" "$c45" "$c39" "$c33" "$d245" "$reset" "$c159" "$reset" "$c123" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "          %b███      %b███    %b██        ██%b    %b███%b      %b███%b\n" "$c87" "$c123" "$d245" "$reset" "$c123" "$reset" "$c87" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "          %b███      %b███    %b▀██▄    ▄██▀%b    %b███%b      %b███%b\n" "$c51" "$c87" "$d240" "$reset" "$c87" "$reset" "$c51" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "           %b▀██▄     %b███    %b▀▀████▀▀%b    %b███%b     %b▄██▀%b\n" "$c45" "$c51" "$d236" "$reset" "$c51" "$reset" "$c45" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "            %b▀██▄     %b▀███▄▄      ▄▄███▀%b     %b▄██▀%b\n" "$c39" "$c45" "$reset" "$c39" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "              %b▀███▄     %b▀▀▀██████▀▀▀%b     %b▄███▀%b\n" "$c33" "$c39" "$reset" "$c33" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "                 %b▀▀███▄▄▄        ▄▄▄███▀▀%b\n" "$c26" "$reset"
+    sleep 0.015 2>/dev/null || true
+    printf "                     %b▀▀▀▀████████▀▀▀▀%b\n\n" "$c24" "$reset"
     sleep 0.02 2>/dev/null || true
-    printf "  %b        ▄▄███▀▀▀        ▀▀▀███▄▄        %b\n" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b      ▄██▀▀    %b▄▄▄████▄▄▄%b    ▀▀██▄      %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b    ▄██▀     %b▄██▀▀    ▀▀██▄%b     ▀██▄    %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b   ▄██▀     %b▄██          ██▄%b     ▀██▄   %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b  ▄██▀      %b██            ██%b      ▀██▄  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b  ███       %b██   %b╺%b━%b━━%b•%b━━%b━%b╸%b   ██%b       ███  %b\n" "$gDisc" "$gCowl" "$v1" "$v2" "$v3" "$v4" "$v3" "$v2" "$v1" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b  ███       %b██            ██%b       ███  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b  ▀██▄      %b▀██▄        ▄██▀%b      ▄██▀  %b\n" "$gDisc" "$gCowl" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b   ▀██▄      %b▀██▄▄▄▄▄▄██▀%b      ▄██▀   %b\n" "$gDisc" "$gDeep" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b    ▀██▄▄     %b▀▀▀████▀▀▀%b     ▄▄██▀    %b\n" "$gDisc" "$gDeep" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b      ▀▀██▄▄            ▄▄██▀▀      %b\n" "$gDisc" "$reset"
-    sleep 0.02 2>/dev/null || true
-    printf "  %b         ▀▀▀▀████████▀▀▀▀         %b\n\n" "$gDisc" "$reset"
-    sleep 0.03 2>/dev/null || true
 
-    printf "  %bPhantombot Installer%b\n" "$bold" "$reset"
+    c21="\033[38;5;21m"
+    c27="\033[38;5;27m"
+
+    printf "  %b█████▄ %b██  ██ %b▄████▄ %b███  ██ %b███████ %b▄████▄ %b███▄███  %b█████▄ %b▄████▄ %b███████%b\n" \
+      "$c39" "$c45" "$c51" "$c51" "$c87" "$c87" "$c123" "$c123" "$c159" "$c231" "$reset"
+    sleep 0.015 2>/dev/null || true
+
+    printf "  %b██▄▄██ %b██  ██ %b██▄▄██ %b████ ██ %b  ██   %b██  ██ %b██▀█▀██  %b██▄▄██ %b██  ██ %b  ██   %b\n" \
+      "$c33" "$c39" "$c45" "$c45" "$c51" "$c51" "$c87" "$c87" "$c123" "$c159" "$reset"
+    sleep 0.015 2>/dev/null || true
+
+    printf "  %b██▀▀▀  %b██████ %b██▀▀██ %b██ ████ %b  ██   %b██  ██ %b██ ▀ ██  %b██▀▀██ %b██  ██ %b  ██   %b\n" \
+      "$c27" "$c33" "$c39" "$c39" "$c45" "$c45" "$c51" "$c51" "$c87" "$c123" "$reset"
+    sleep 0.015 2>/dev/null || true
+
+    printf "  %b██     %b██  ██ %b██  ██ %b██  ███ %b  ██   %b▀████▀ %b██   ██  %b█████▀ %b▀████▀ %b  ██   %b\n\n" \
+      "$c21" "$c27" "$c33" "$c33" "$c39" "$c39" "$c45" "$c45" "$c51" "$c87" "$reset"
     sleep 0.02 2>/dev/null || true
-    printf "  %bThere are many agent runtimes, but this one is yours%b\n\n" "$dim" "$reset"
+
+    printf "    %b◈%b  %b%bLearns your world, defends your runtime, never wastes a token.%b  %b◈%b\n\n" \
+      "$c33" "$reset" "$c123" "$bold" "$reset" "$c33" "$reset"
   else
-    printf '\nPhantombot Installer\nThere are many agent runtimes, but this one is yours\n\n'
+    printf '\nPhantombot Installer\nLearns your world, defends your runtime, never wastes a token.\n\n'
   fi
 }
 
