@@ -251,21 +251,21 @@ printf '%s\n' "$CHECK"
 
 printf '\nInstallation completed succesfully.\n'
 
-# --- autostart at boot (Linux only) --------------------------------------
+# --- autostart service installation --------------------------------------
 
-if [ "$platform" != "darwin" ]; then
-  boot_choice="n"
-  if [ -t 0 ]; then
-    printf '\nDo you want to start at boot? [y/N] '
-    read -r boot_choice || boot_choice="n"
-  elif can_open_dev_tty; then
-    printf '\nDo you want to start at boot? [y/N] '
-    read -r boot_choice </dev/tty || boot_choice="n"
-  fi
+if [ "$DRYRUN" -eq 0 ]; then
+  if [ "$platform" != "darwin" ]; then
+    boot_choice="n"
+    if [ -t 0 ]; then
+      printf '\nDo you want to start at boot? [y/N] '
+      read -r boot_choice || boot_choice="n"
+    elif can_open_dev_tty; then
+      printf '\nDo you want to start at boot? [y/N] '
+      read -r boot_choice </dev/tty || boot_choice="n"
+    fi
 
-  case "$boot_choice" in
-    [yY]|[yY][eE][sS])
-      if [ "$DRYRUN" -eq 0 ]; then
+    case "$boot_choice" in
+      [yY]|[yY][eE][sS])
         if command -v loginctl >/dev/null 2>&1; then
           if ! loginctl enable-linger "$USER" 2>/dev/null; then
             if [ -t 0 ] && [ -t 1 ]; then
@@ -275,18 +275,21 @@ if [ "$platform" != "darwin" ]; then
             fi
           fi
         fi
-        if [ -t 0 ] && [ -t 1 ]; then
-          $PB_BIN install >/dev/null 2>&1 || true
-        elif can_open_dev_tty; then
-          $PB_BIN install </dev/tty >/dev/tty 2>&1 || true
-        else
-          $PB_BIN install >/dev/null 2>&1 || true
-        fi
-      fi
-      ;;
-    *)
-      ;;
-  esac
+        ;;
+      *)
+        ;;
+    esac
+  fi
+
+  if [ -n "${PB_BIN:-}" ] && [ -x "$PB_BIN" ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+      $PB_BIN install >/dev/null 2>&1 || true
+    elif can_open_dev_tty; then
+      $PB_BIN install </dev/tty >/dev/tty 2>&1 || true
+    else
+      $PB_BIN install >/dev/null 2>&1 || true
+    fi
+  fi
 fi
 
 # --- launch TUI ----------------------------------------------------------
