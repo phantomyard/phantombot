@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   phantombot installer for Windows.
 
@@ -23,7 +23,6 @@
 [CmdletBinding()]
 param(
     [switch]$DryRun,
-    [switch]$dryrun,
     [string]$InstallDir = $env:PHANTOMBOT_INSTALL_DIR
 )
 
@@ -31,7 +30,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-if ($dryrun) { $DryRun = $true }
 if ($env:PHANTOMBOT_DRY_RUN -or $env:PHANTOMBOT_DRYRUN) { $DryRun = $true }
 
 $Repo = 'phantomyard/phantombot'
@@ -40,6 +38,14 @@ function Fail([string]$msg) {
     Write-Host " failed"
     [Console]::Error.WriteLine("phantombot: $msg")
     exit 1
+}
+
+# --- Console encoding -----------------------------------------------------
+# Windows PowerShell 5.1 renders host output in the console's OEM codepage, so
+# the banner's box-drawing glyphs arrive as '?' unless we ask for UTF-8 first.
+try {
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+} catch {
 }
 
 # --- TLS ------------------------------------------------------------------
@@ -104,7 +110,7 @@ $phantomLines = @(
     "  $c27██▀▀▀  $c33██████ $c39██▀▀██ $c39██ ████ $c45  ██   $c45██  ██ $c51██ ▀ ██  $c51██▀▀██ $c87██  ██ $c123  ██   $reset",
     "  $c21██     $c27██  ██ $c33██  ██ $c33██  ███ $c39  ██   $c39▀████▀ $c45██   ██  $c45█████▀ $c51▀████▀ $c87  ██   $reset",
     "",
-    "    $c33◈$reset  $c123$boldLearns your world, defends your runtime, never wastes a token.$reset  $c33◈$reset"
+    "    $c33◈$reset  $c123${bold}Learns your world, defends your runtime, never wastes a token.$reset  $c33◈$reset"
 )
 
 Write-Host ""
