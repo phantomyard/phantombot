@@ -267,7 +267,13 @@ if [ "$platform" != "darwin" ]; then
     [yY]|[yY][eE][sS])
       if [ "$DRYRUN" -eq 0 ]; then
         if command -v loginctl >/dev/null 2>&1; then
-          loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null || true
+          if ! loginctl enable-linger "$USER" 2>/dev/null; then
+            if [ -t 0 ] && [ -t 1 ]; then
+              sudo loginctl enable-linger "$USER" || true
+            elif can_open_dev_tty; then
+              sudo loginctl enable-linger "$USER" </dev/tty >/dev/tty || true
+            fi
+          fi
         fi
         if [ -t 0 ] && [ -t 1 ]; then
           $PB_BIN install >/dev/null 2>&1 || true

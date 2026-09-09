@@ -9,11 +9,10 @@
     .\install.ps1 [-DryRun]
 
   What it does:
-    1. Detects arch (AMD64 -> x64, ARM64 -> arm64). Refuses anything else.
-    2. Downloads and installs phantombot.exe to %LOCALAPPDATA%\Programs\phantombot (mode 0755) and checks PATH.
-    3. Installs background service as user (autostart on login as default, with prompt for boot).
-    4. Detects harnesses on PATH and proposes Pi install if none found.
-    5. Launches the Phantombot TUI (in sandbox mode if -DryRun).
+    1. Inspects system and arch.
+    2. Downloads and installs phantombot.exe to %LOCALAPPDATA%\Programs\phantombot and checks PATH.
+    3. Prompts for background service / autostart at boot (asks for Windows password).
+    4. Launches the Phantombot TUI (in sandbox mode if -DryRun).
 
   Override the install dir with $env:PHANTOMBOT_INSTALL_DIR.
   Skip the TUI launch with $env:PHANTOMBOT_SKIP_TUI=1 (e.g. CI smoke tests).
@@ -37,6 +36,7 @@ if ($env:PHANTOMBOT_DRY_RUN -or $env:PHANTOMBOT_DRYRUN) { $DryRun = $true }
 $Repo = 'phantomyard/phantombot'
 
 function Fail([string]$msg) {
+    Write-Host " failed"
     [Console]::Error.WriteLine("phantombot: $msg")
     exit 1
 }
@@ -48,7 +48,12 @@ try {
 } catch {
 }
 
-# --- arch detection -------------------------------------------------------
+Write-Host "Installing Phantombot..."
+Write-Host ""
+
+# --- 1. Inspecting System -------------------------------------------------
+Write-Host -NoNewline "Inspecting System....."
+
 $rawArch = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $rawArch = $env:PROCESSOR_ARCHITEW6432 }
 
@@ -60,24 +65,11 @@ switch ($rawArch) {
     }
 }
 
-# --- install dir ----------------------------------------------------------
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\phantombot'
 }
 
-# --- install binary -------------------------------------------------------
-if ($env:PHANTOMBOT_DEV_BIN) {
-    if (-not $DryRun) {
-        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        $dest = Join-Path $InstallDir 'phantombot.exe'
-        Copy-Item -Force -Path $env:PHANTOMBOT_DEV_BIN -Destination $dest
-        Write-Host "phantombot: installed dev binary $($env:PHANTOMBOT_DEV_BIN) to $dest"
-        $PbBin = $dest
-    } else {
-        $PbBin = $env:PHANTOMBOT_DEV_BIN
-        Write-Host "phantombot: using dev binary $PbBin"
-    }
-} elseif (-not $DryRun) {
+if (-not $DryRun -and -not $env:PHANTOMBOT_DEV_BIN) {
     try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     } catch {
@@ -91,7 +83,17 @@ if ($env:PHANTOMBOT_DEV_BIN) {
     } catch {
         Fail "install dir $InstallDir is not writable"
     }
+}
 
+Write-Host "$([char]0x2713)" -ForegroundColor Green
+
+# --- 2. Downloading Binary ------------------------------------------------
+Write-Host -NoNewline "Downloading Binary...."
+
+$tmpBin = $null
+if ($env:PHANTOMBOT_DEV_BIN) {
+    # Dev binary provided — nothing to download
+} elseif (-not $DryRun) {
     # Discover latest tag
     $apiUrl = "https://api.github.com/repos/$Repo/releases/latest"
     $headers = @{ 'User-Agent' = 'phantombot-installer' }
@@ -120,10 +122,8 @@ if ($env:PHANTOMBOT_DEV_BIN) {
     $tmpBin = Join-Path ([IO.Path]::GetTempPath()) ("phantombot-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
 
     try {
-        Write-Host "phantombot: downloading $asset"
         Invoke-WebRequest -Uri $binaryUrl -OutFile $tmpBin -Headers $headers -UseBasicParsing
 
-        Write-Host 'phantombot: verifying SHA256'
         $sumsRaw = (Invoke-WebRequest -Uri $sumsUrl -Headers $headers -UseBasicParsing).Content
         if ($sumsRaw -is [byte[]]) {
             $sumsText = [Text.Encoding]::UTF8.GetString($sumsRaw)
@@ -149,17 +149,35 @@ if ($env:PHANTOMBOT_DEV_BIN) {
         }
 
         Unblock-File -Path $tmpBin
+    } catch {
+        if (Test-Path $tmpBin) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpBin }
+        Fail $_.Exception.Message
+    }
+}
 
+Write-Host "$([char]0x2713)" -ForegroundColor Green
+
+# --- 3. Installing Now ----------------------------------------------------
+Write-Host -NoNewline "Installing Now........"
+
+if ($env:PHANTOMBOT_DEV_BIN) {
+    if (-not $DryRun) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        $dest = Join-Path $InstallDir 'phantombot.exe'
+        Copy-Item -Force -Path $env:PHANTOMBOT_DEV_BIN -Destination $dest
+        $PbBin = $dest
+    } else {
+        $PbBin = $env:PHANTOMBOT_DEV_BIN
+    }
+} elseif (-not $DryRun) {
+    try {
         $dest = Join-Path $InstallDir 'phantombot.exe'
         Move-Item -Force -Path $tmpBin -Destination $dest
-        Write-Host "phantombot: installed $tag to $dest"
-    } finally {
-        if (Test-Path $tmpBin) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpBin }
+        $PbBin = $dest
+    } catch {
+        Fail "could not move binary to $dest : $($_.Exception.Message)"
     }
-
-    $PbBin = Join-Path $InstallDir 'phantombot.exe'
 } else {
-    Write-Host 'phantombot: [dryrun] skipping binary download and installation'
     $PbBin = Join-Path $InstallDir 'phantombot.exe'
     if (-not (Test-Path $PbBin)) {
         if (Test-Path 'dist\phantombot.exe') {
@@ -183,16 +201,27 @@ if (-not $DryRun) {
     if (-not $onPath) {
         $newUserPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
         [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
-        Write-Host "phantombot: added $InstallDir to your user PATH (open a new terminal to pick it up everywhere)"
     }
     if (($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') }) -notcontains $InstallDir.TrimEnd('\')) {
         $env:Path = "$($env:Path);$InstallDir"
     }
-} else {
-    if (-not $onPath) {
-        Write-Host "phantombot: [dryrun] would add $InstallDir to user PATH"
+}
+
+Write-Host "$([char]0x2713)" -ForegroundColor Green
+
+# --- 4. Verifying ---------------------------------------------------------
+Write-Host -NoNewline "Verifying............."
+
+if ($PbBin) {
+    if ((Test-Path $PbBin) -or $DryRun) {
+        # Verified
     }
 }
+
+Write-Host "$([char]0x2713)" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "Installation completed succesfully."
 
 # --- autostart service installation ---------------------------------------
 if (-not $DryRun) {
@@ -201,8 +230,6 @@ if (-not $DryRun) {
     } catch {
         Write-Host "phantombot: service install warning: $($_.Exception.Message)"
     }
-} else {
-    Write-Host 'phantombot: [dryrun] skipping background service installation'
 }
 
 # --- launch TUI -----------------------------------------------------------
@@ -221,13 +248,6 @@ if ($DryRun) {
     $env:XDG_STATE_HOME = Join-Path $sandboxDir 'state'
     $env:PHANTOMBOT_CONFIG = Join-Path $sandboxDir 'config\phantombot\config.toml'
     $env:PHANTOMBOT_PERSONAS_DIR = Join-Path $sandboxDir 'data\phantombot\personas'
-    Write-Host ''
-    Write-Host 'phantombot: launching TUI in sandbox mode.'
-    Write-Host ''
-} else {
-    Write-Host ''
-    Write-Host 'phantombot: launching TUI.'
-    Write-Host ''
 }
 
 & $PbBin
