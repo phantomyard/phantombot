@@ -85,6 +85,31 @@ describe("install.sh checklist", () => {
     expect(r.stdout).toContain("the background service is not");
   });
 
+  test("an install dir containing spaces still verifies and installs", async () => {
+    // `exec $PB_BIN` relied on word splitting, so a PHANTOMBOT_INSTALL_DIR
+    // with a space in it split the binary path into two words and every call
+    // site broke (review, Lena). The dev-fallback's `bun src/index.ts` is the
+    // only thing that may split, and it now lives in $PB_ARGS.
+    const dir = mkdtempSync(join(tmpdir(), "pb-install-space-"));
+    const bin = fakeBin(dir, 'if [ "$1" = "--version" ]; then echo "phantombot 9.9.9"; fi\nexit 0');
+    const r = await runInstaller(bin, join(dir, "My Programs", "bin"));
+
+    expect(r.stderr).not.toContain("No such file or directory");
+    expect(r.stdout).toContain("phantombot 9.9.9");
+    expect(r.stdout).toContain("Installation completed successfully.");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("PB_BIN is quoted at every call site", async () => {
+    const text = await Bun.file(INSTALL_SH).text();
+    // An unquoted $PB_BIN is the bug itself; $PB_ARGS unquoted is deliberate.
+    const unquoted = text
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .flatMap((l) => [...l.matchAll(/[^"$]\$PB_BIN\b/g)]);
+    expect(unquoted.map((m) => m[0])).toEqual([]);
+  });
+
   test("the success line never carries the old typo", async () => {
     const text = await Bun.file(INSTALL_SH).text();
     expect(text).not.toContain("succesfully");

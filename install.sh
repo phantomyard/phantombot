@@ -277,6 +277,10 @@ printf '%s\n' "$CHECK"
 
 printf 'Installing Now........'
 
+# Extra argv for PB_BIN. Empty for every real install; set only by the
+# run-from-source dev fallback below. Deliberately unquoted at the call sites.
+PB_ARGS=""
+
 if [ -n "${PHANTOMBOT_DEV_BIN:-}" ]; then
   if [ "$DRYRUN" -eq 0 ]; then
     mkdir -p "$INSTALL_DIR"
@@ -300,7 +304,12 @@ else
   if [ -x "./dist/phantombot" ]; then
     PB_BIN="./dist/phantombot"
   elif command -v bun >/dev/null 2>&1 && [ -f "src/index.ts" ]; then
-    PB_BIN="bun src/index.ts"
+    # Dev fallback: run from source. PB_BIN stays a single executable PATH so
+    # every call site can quote it (an install dir containing spaces must not
+    # word-split); the interpreter argument lives in PB_ARGS, which only ever
+    # holds literals WE set — see the launch sites at the bottom.
+    PB_BIN="$(command -v bun)"
+    PB_ARGS="src/index.ts"
   elif [ -x "$INSTALL_DIR/phantombot" ]; then
     PB_BIN="$INSTALL_DIR/phantombot"
   elif command -v phantombot >/dev/null 2>&1; then
@@ -357,7 +366,7 @@ elif [ -z "${PB_BIN:-}" ] || [ ! -x "$PB_BIN" ]; then
   printf '%s\n' "$CROSS"
   printf 'phantombot: %s is missing or not executable\n' "${PB_BIN:-<unset>}" >&2
   exit 1
-elif ! verify_out="$("$PB_BIN" --version 2>&1)"; then
+elif ! verify_out="$("$PB_BIN" $PB_ARGS --version 2>&1)"; then
   printf '%s\n' "$CROSS"
   printf 'phantombot: %s --version failed:\n%s\n' "$PB_BIN" "$verify_out" >&2
   exit 1
@@ -404,15 +413,15 @@ if [ "$DRYRUN" -eq 0 ]; then
     # service install looks identical to a successful one until the next boot.
     install_rc=0
     if [ -t 0 ] && [ -t 1 ]; then
-      install_out="$($PB_BIN install 2>&1)" || install_rc=$?
+      install_out="$("$PB_BIN" $PB_ARGS install 2>&1)" || install_rc=$?
     elif can_open_dev_tty; then
       # Interactive path: `install` may prompt, so it keeps the terminal and we
       # only capture the status.
       printf '\n\n'
-      $PB_BIN install </dev/tty >/dev/tty 2>&1 || install_rc=$?
+      "$PB_BIN" $PB_ARGS install </dev/tty >/dev/tty 2>&1 || install_rc=$?
       install_out=""
     else
-      install_out="$($PB_BIN install 2>&1)" || install_rc=$?
+      install_out="$("$PB_BIN" $PB_ARGS install 2>&1)" || install_rc=$?
     fi
 
     if [ "$install_rc" -eq 0 ]; then
@@ -454,13 +463,13 @@ if [ ! -t 0 ] || [ ! -t 1 ]; then
   if can_open_dev_tty; then
     if [ "$platform" = "darwin" ]; then
       if command -v script >/dev/null 2>&1; then
-        exec script -q /dev/null $PB_BIN </dev/tty
+        exec script -q /dev/null "$PB_BIN" $PB_ARGS </dev/tty
       else
         printf 'next, run phantombot in your terminal to start.\n'
         exit 0
       fi
     else
-      exec $PB_BIN </dev/tty >/dev/tty 2>&1
+      exec "$PB_BIN" $PB_ARGS </dev/tty >/dev/tty 2>&1
     fi
   else
     printf 'next, run phantombot in your terminal to start.\n'
@@ -468,4 +477,7 @@ if [ ! -t 0 ] || [ ! -t 1 ]; then
   fi
 fi
 
-exec $PB_BIN
+# $PB_ARGS unquoted on purpose: it is either empty or our own literal
+# "src/index.ts" (dev fallback). $PB_BIN is always one path, always quoted.
+# shellcheck disable=SC2086
+exec "$PB_BIN" $PB_ARGS
