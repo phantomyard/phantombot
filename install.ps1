@@ -66,7 +66,10 @@ if (-not $InstallDir) {
 }
 
 # --- install binary -------------------------------------------------------
-if (-not $DryRun) {
+if ($env:PHANTOMBOT_DEV_BIN) {
+    $PbBin = $env:PHANTOMBOT_DEV_BIN
+    Write-Host "phantombot: using dev binary $PbBin"
+} elseif (-not $DryRun) {
     try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     } catch {

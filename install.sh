@@ -61,7 +61,10 @@ esac
 
 # --- install binary ------------------------------------------------------
 
-if [ "$DRYRUN" -eq 0 ]; then
+if [ -n "${PHANTOMBOT_DEV_BIN:-}" ]; then
+  PB_BIN="$PHANTOMBOT_DEV_BIN"
+  printf 'phantombot: using dev binary %s\n' "$PB_BIN"
+elif [ "$DRYRUN" -eq 0 ]; then
   # Preflight tools check
   if ! command -v curl >/dev/null 2>&1; then
     printf 'phantombot: curl not found (needed to download the release)\n' >&2
