@@ -284,19 +284,19 @@ Settings live one keypress away:
 
 | Key | What it does |
 |---|---|
-| `^s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
+| `ctrl+s` | Settings for **the phantom you are talking to**: identity files, brain, channels, memory, voice, boot, MCP, vault, doctor |
 | `esc` | Back to the conversation, mid-thread, nothing lost |
-| `^p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
-| `^t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
-| `^l` | Open System observability (service/heartbeat/tick overview, and every log source on the host with its path) |
-| `^c` | Interrupt the turn (it does **not** quit) |
-| `^q` | Quit |
+| `ctrl+p` | Every phantom on this host, plus the host itself — and switch which one you are talking to |
+| `ctrl+t` | Expand the collapsed tool calls behind a reply (`3 steps · 12s` → each step with its own duration) |
+| `ctrl+l` | Open System observability (service/heartbeat/tick overview, and every log source on the host with its path) |
+| `ctrl+c` | Interrupt the turn (it does **not** quit) |
+| `ctrl+q` | Quit |
 | `/` | Open the command list; `Tab` completes what you have typed |
 
 It takes the whole window — the app runs on the alternate screen buffer, like
 `less` or `htop`, and leaves your shell and its scrollback exactly as it found
 them on exit. While it runs, log output is **captured rather than printed**:
-`^l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
+`ctrl+l` opens **System**, where Overview distinguishes daemon, heartbeat, and tick
 health using platform-neutral service state, fire markers, and task history.
 Unicode history bars summarize recent success/failure; missing data
 is shown as unavailable and never prevents the TUI opening. Otherwise captured
@@ -626,7 +626,7 @@ logged, naming the op: `start`, `stop` and `restart` log
 `PHANTOMBOT_LOG_LEVEL=warn` keeps the three that report a false success and
 drops the one that does not. Those lines go to the **stderr of the process
 that has the variable set** — your terminal for a `bun run src/index.ts`
-checkout, and the `^l` log pane inside the TUI
+checkout, and the `ctrl+l` log pane inside the TUI
 (which swaps the sink for its own ring buffer). It reaches `phantombot logs`
 only if the *daemon itself* was started with the variable set — which is the
 case you never want: **never set it on a host running the real service**, or
