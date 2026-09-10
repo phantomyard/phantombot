@@ -1569,6 +1569,10 @@ async function processChatMessage(
       harnesses,
       userMessage: msg.text,
       personaName: input.persona,
+      // The language was already resolved in code for this turn; recovery is
+      // usually served by a weaker fallback harness, so state it rather than
+      // leaving it to be inferred from msg.text.
+      replyLanguageName: replyLanguage?.name,
       signal: controller.signal,
     });
   }

@@ -31,6 +31,7 @@ import { log } from "../../lib/logger.ts";
 import { resolveNarrationEnabled } from "../../lib/chattiness.ts";
 import type { MemoryStore } from "../../memory/store.ts";
 import { runTurn } from "../../orchestrator/turn.ts";
+import { generateRecoveryReply } from "../../orchestrator/recovery.ts";
 import { makeRetriever } from "../../orchestrator/retrieval.ts";
 import {
   makeDurableFactPuller,
@@ -792,6 +793,12 @@ export async function runPhantomchatServer(
     let finalCandidateSentChars = 0;
     let finalReply: string | undefined;
     let requestedReplyMode: ReplyModeRequest | undefined;
+    // Set when the turn fails — either an `error` chunk from the harness chain
+    // or a throw out of the stream. NEVER shown raw; it drives the recovery
+    // reply below, exactly as in core/engine.ts. Before this existed a failed
+    // turn logged a warning and returned silently, leaving the user staring at
+    // a pre-tool narration line ("checking your calendar…") that never resolved.
+    let errored: string | undefined;
     // FINAL bubbles actually published this turn. Gates the orphaned-sign-off
     // suppression in sendBubble: no final bubble out yet means the fragment IS
     // the reply, so it must still send. Narration is deliberately NOT counted
@@ -1095,13 +1102,17 @@ export async function runPhantomchatServer(
           finalReply = chunk.finalText;
           requestedReplyMode = normalizeReplyModeRequest(chunk.meta?.replyMode);
         }
+        // The harness chain gave up. Telegram sets the same flag here; without
+        // it phantomchat dropped the chunk and fell out of the loop as if the
+        // turn had succeeded — no log line, no bubble, nothing.
+        if (chunk.type === "error") errored = chunk.error;
       }
     } catch (e) {
-      log.warn("phantomchat: turn failed", {
-        error: (e as Error).message,
+      errored = (e as Error).message;
+      log.warn("phantomchat: turn threw", {
+        error: errored,
         sender: senderHex.slice(0, 12) + "…",
       });
-      return;
     } finally {
       // Deregister the turn (only if we're still the registered one — a later
       // turn for this peer could have replaced us).
@@ -1137,9 +1148,59 @@ export async function runPhantomchatServer(
     // the command already sent its own confirmation and any streamed bubbles
     // stand on their own.
     if (controller.signal.aborted) return;
-    const fullReply = finalReply ?? streamedReply;
+
+    // The turn failed. We never show the raw diagnostic — it is English-only
+    // and reads like a crash — so re-prompt the chain ONCE for a short,
+    // language-matched "hit a snag, mind trying again?" and deliver that as an
+    // ordinary reply. If even recovery produces nothing, fall back to a fixed
+    // marker rather than going quiet: silence here is the whole bug.
+    let recoveryText: string | undefined;
+    if (errored) {
+      log.error("phantomchat: turn failed; generating recovery reply", {
+        conversation: conversationKey,
+        error: errored,
+      });
+      // Recovery re-prompts the harness chain and can run for up to its hard
+      // cap (~60s). The `finally` above has already published the explicit
+      // typing-STOP, so without re-arming the dots the user watches a dead
+      // chat for a minute and then a bubble appears from nowhere. Re-pulse
+      // for the recovery turn only, and stop again when it lands.
+      const recoveryFirstTick = setTimeout(sendTypingTick, 0);
+      const recoveryTypingTimer = setInterval(sendTypingTick, 2000);
+      try {
+        recoveryText = await generateRecoveryReply({
+          harnesses,
+          userMessage: msg.text,
+          personaName: input.persona,
+          // Recovery runs after the chain fell over, so it is often served by
+          // a weaker fallback harness that infers language poorly. We already
+          // resolved it in code for this turn — hand it over rather than
+          // hoping.
+          replyLanguageName: replyLanguage?.name,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(recoveryFirstTick);
+        clearInterval(recoveryTypingTimer);
+        if (msg.groupId) {
+          void transport.sendGroupTyping(msg.groupId, groupTypingMembers!, true);
+        } else {
+          void transport.sendTyping(senderHex, true);
+        }
+      }
+      if (!recoveryText?.trim()) {
+        recoveryText = "⚠️ That turn failed before I could finish — please ask me again.";
+      }
+    }
+
+    // A recovery reply REPLACES whatever streamed: the streamed text is a
+    // half-finished answer (usually just the narration line), so sending only
+    // its suffix would deliver nothing.
+    const fullReply = recoveryText ?? finalReply ?? streamedReply;
     let outText: string;
-    if (fullReply.trim().length === 0) {
+    if (recoveryText) {
+      outText = recoveryText;
+    } else if (fullReply.trim().length === 0) {
       outText = "";
     } else {
       outText = resolveOutgoingSuffix(
