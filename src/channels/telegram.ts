@@ -77,7 +77,7 @@ export {
 
 // --- Channel-layer prompts + capture nudge (core/prompts.ts) ---------------
 export {
-  TELEGRAM_REPLY_INSTRUCTION,
+  CHAT_REPLY_INSTRUCTION,
   CAPTURE_NUDGE_INTERVAL,
   CAPTURE_NUDGE_TEXT,
   captureNudgeForTurn,

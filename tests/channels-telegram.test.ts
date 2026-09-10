@@ -2385,7 +2385,7 @@ describe("runTelegramServer voice round-trip", () => {
 
 // ---------------------------------------------------------------------------
 // Channel-layer system-prompt suffixes:
-//   - TELEGRAM_REPLY_INSTRUCTION applies to every Telegram turn
+//   - CHAT_REPLY_INSTRUCTION applies to every Telegram turn
 //     (short conversational + voice/text routing). The plan-then-confirm
 //     gate is NOT in it — it comes from the orchestrator overlay, which is
 //     why these tests assert it is present on a Telegram turn all the same.
@@ -2452,7 +2452,7 @@ describe("runTelegramServer system-prompt suffixes", () => {
       expect(harness.invocations).toBe(1);
       const prompt = harness.lastRequest?.systemPrompt ?? "";
       // Telegram chat-style suffix is present.
-      expect(prompt).toContain("Reply style (Telegram chat)");
+      expect(prompt).toContain("Reply style (chat)");
       // The channel-agnostic confirm gate rides along on a chat turn too
       // (orchestrator overlay, not the Telegram suffix — AGENTS invariant 29).
       expect(prompt).toContain("Confirm before long jobs");
@@ -2487,7 +2487,7 @@ describe("runTelegramServer system-prompt suffixes", () => {
     });
     const prompt = harness.lastRequest?.systemPrompt ?? "";
     // The chat-style instruction is always applied for Telegram turns.
-    expect(prompt).toContain("Reply style (Telegram chat)");
+    expect(prompt).toContain("Reply style (chat)");
     // The confirm gate is injected by the orchestrator on every interactive
     // turn, Telegram included — with the threshold at more than THREE tool
     // calls and an explicit "the user outranks this" clause (invariant 29).
@@ -2497,6 +2497,13 @@ describe("runTelegramServer system-prompt suffixes", () => {
     expect(prompt).toContain("This is a default, not a cage");
     // ...and the 50-word answer-length rule travels with it.
     expect(prompt).toContain("50 words or");
+    // The chat suffix must NOT contradict the orchestrator's narration
+    // rule. A channel-local "skip narration" line used to ship right
+    // alongside "before each tool call, say ONE short sentence"; a weak
+    // model resolved that by narrating once and stopping without ever
+    // calling a tool. The orchestrator overlay owns this rule alone.
+    expect(prompt).not.toContain("Skip narration");
+    expect(prompt).toContain("Narration before tool calls");
     // The voice-only overlay must NOT leak into text replies.
     expect(prompt).not.toContain("text-to-speech");
     expect(prompt).not.toContain("Reply length (this turn only)");

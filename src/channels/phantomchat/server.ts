@@ -47,7 +47,7 @@ import type { LifecycleAccount } from "../../lib/lifecycleBroadcast.ts";
 import { ConversationBacklog } from "../core/backlog.ts";
 import {
   languageReplyInstruction,
-  TELEGRAM_REPLY_INSTRUCTION,
+  CHAT_REPLY_INSTRUCTION,
   VOICE_REPLY_INSTRUCTION,
   voiceUnavailableMessage,
 } from "../core/prompts.ts";
@@ -1047,8 +1047,8 @@ export async function runPhantomchatServer(
         // (short, no-markdown, TTS-friendly) when this reply will be spoken.
         systemPromptSuffix: [
           willReplyWithVoice
-            ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
-            : TELEGRAM_REPLY_INSTRUCTION,
+            ? `${CHAT_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+            : CHAT_REPLY_INSTRUCTION,
           replyLanguage
             ? languageReplyInstruction(replyLanguage.name)
             : undefined,
