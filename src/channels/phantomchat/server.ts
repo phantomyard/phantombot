@@ -1160,12 +1160,34 @@ export async function runPhantomchatServer(
         conversation: conversationKey,
         error: errored,
       });
-      recoveryText = await generateRecoveryReply({
-        harnesses,
-        userMessage: msg.text,
-        personaName: input.persona,
-        signal: controller.signal,
-      });
+      // Recovery re-prompts the harness chain and can run for up to its hard
+      // cap (~60s). The `finally` above has already published the explicit
+      // typing-STOP, so without re-arming the dots the user watches a dead
+      // chat for a minute and then a bubble appears from nowhere. Re-pulse
+      // for the recovery turn only, and stop again when it lands.
+      const recoveryFirstTick = setTimeout(sendTypingTick, 0);
+      const recoveryTypingTimer = setInterval(sendTypingTick, 2000);
+      try {
+        recoveryText = await generateRecoveryReply({
+          harnesses,
+          userMessage: msg.text,
+          personaName: input.persona,
+          // Recovery runs after the chain fell over, so it is often served by
+          // a weaker fallback harness that infers language poorly. We already
+          // resolved it in code for this turn — hand it over rather than
+          // hoping.
+          replyLanguageName: replyLanguage?.name,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(recoveryFirstTick);
+        clearInterval(recoveryTypingTimer);
+        if (msg.groupId) {
+          void transport.sendGroupTyping(msg.groupId, groupTypingMembers!, true);
+        } else {
+          void transport.sendTyping(senderHex, true);
+        }
+      }
       if (!recoveryText?.trim()) {
         recoveryText = "⚠️ That turn failed before I could finish — please ask me again.";
       }
