@@ -14,8 +14,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  restoreBrainWrites,
   runBrainOnboarding,
+  snapshotBrainWrites,
   type BrainOnboardingDeps,
+  type BrainRestoreStores,
 } from "../src/tui/brainOnboarding.ts";
 import type { BrainQuestions } from "../src/tui/brainFlow.ts";
 
@@ -310,17 +313,33 @@ function worldDeps(prior: {
       { id: "gpt-5.2-vision", name: "GPT 5 Vision", provider: "openrouter", reasoning: false, input: ["text", "image"], model: "gpt-5.2-vision", supportsImages: true },
       { id: "gpt-5.2-coder", name: "GPT 5 Coder", provider: "openrouter", reasoning: false, input: ["text"], model: "gpt-5.2-coder", supportsImages: false },
     ],
-    snapshotWrites: async () => ({
-      routing: { "": world.routing ? { ...world.routing } : undefined },
-      secrets: { "": world.secret },
-      auth: world.auth,
-    }),
-    restoreWrites: async (snap) => {
-      world.routing = snap.routing[""] ? { ...snap.routing[""] } : undefined;
-      world.secret = snap.secrets[""];
-      world.auth = snap.auth;
-      return true;
-    },
+    // The PRODUCTION snapshot/restore, over in-memory stores — not a copy of
+    // their logic, so a regression in either shows up here.
+    snapshotWrites: () =>
+      snapshotBrainWrites([{ instanceId: undefined, secretName: "PI_KEY" }], {
+        snapshotRouting: async () =>
+          world.routing ? { ...world.routing } : undefined,
+        readVaultSecret: async () => world.secret,
+        snapshotAuth: async () => world.auth,
+      }),
+    restoreWrites: (snap) =>
+      restoreBrainWrites(snap, {
+        restoreRouting: async (table) => {
+          world.routing = table ? { ...table } : undefined;
+        },
+        setVaultSecret: async (_name, value) => {
+          world.secret = value;
+          return { ok: true };
+        },
+        unsetVaultSecret: async () => {
+          world.secret = undefined;
+          return { ok: true };
+        },
+        restoreAuth: async (auth) => {
+          world.auth = auth;
+          return { ok: true };
+        },
+      }),
   });
   return { deps, chains, world };
 }
@@ -338,6 +357,15 @@ const CONFIGURE_ANSWERS = [
   "test", // test now
 ];
 
+/** A BrainTest screen that returns a fixed verdict. */
+const testScreen = (result: { ok: boolean; apply?: boolean; detail?: string }) =>
+  async () => ({
+    ok: result.ok,
+    apply: result.apply,
+    retry: false,
+    detail: result.detail ?? "ready",
+  }) as never;
+
 const PRIOR = {
   routing: {
     provider: "groq",
@@ -351,14 +379,6 @@ const PRIOR = {
 
 describe("brain onboarding rollback (PR #539 review)", () => {
   /** The test screen's answer: passed, and what the operator chose next. */
-  const testScreen = (result: { ok: boolean; apply?: boolean; detail?: string }) =>
-    async () => ({
-      ok: result.ok,
-      apply: result.apply,
-      retry: false,
-      detail: result.detail ?? "ready",
-    }) as never;
-
   test("declining to apply after a passing test puts every store back", async () => {
     const { q } = fakeQ(CONFIGURE_ANSWERS);
     q.testBrain = testScreen({ ok: true, apply: false });
@@ -437,6 +457,118 @@ describe("brain onboarding rollback (PR #539 review)", () => {
 
     // Honesty over comfort: the stores are in an unknown state, and the
     // notice must not tell the operator their old brain is intact.
+    expect(r.notice).toStartWith("brain partly saved");
+    expect(r.landing).toBe("configure");
+  });
+});
+
+/**
+ * The production snapshot/restore on their own (PR #539 re-review, Kai/Lena):
+ * an absent vault row must come back ABSENT even with an ambient fallback in
+ * the environment, and every store must be attempted and counted.
+ */
+describe("snapshotBrainWrites / restoreBrainWrites", () => {
+  const NAME = "PB_TEST_ROLLBACK_KEY";
+  const slots = [{ instanceId: undefined, secretName: NAME }];
+
+  function stores(over: Partial<BrainRestoreStores> = {}) {
+    const calls: string[] = [];
+    const s: BrainRestoreStores = {
+      restoreRouting: async (_t, id) => {
+        calls.push(`routing:${id ?? ""}`);
+      },
+      setVaultSecret: async (name, value) => {
+        calls.push(`set:${name}=${value}`);
+        return { ok: true };
+      },
+      unsetVaultSecret: async (name) => {
+        calls.push(`unset:${name}`);
+        return { ok: true };
+      },
+      restoreAuth: async () => {
+        calls.push("auth");
+        return { ok: true };
+      },
+      ...over,
+    };
+    return { s, calls };
+  }
+
+  test("absent vault row + ambient fallback: restore UNSETS, never mints an override", async () => {
+    const saved = process.env[NAME];
+    process.env[NAME] = "sk-host-wide";
+    try {
+      const snap = await snapshotBrainWrites(slots, {
+        snapshotRouting: async () => undefined,
+        readVaultSecret: async () => undefined, // no persona row
+        snapshotAuth: async () => undefined,
+      });
+      process.env[NAME] = "sk-wizard"; // setPersonaSecret mirrors into env
+      const { s, calls } = stores();
+
+      expect(await restoreBrainWrites(snap, s)).toBe(true);
+      expect(calls).toContain(`unset:${NAME}`);
+      expect(calls.some((c) => c.startsWith("set:"))).toBe(false);
+      // …and the host-wide key is back in this process, not lost to the unset.
+      expect(process.env[NAME]).toBe("sk-host-wide");
+    } finally {
+      if (saved === undefined) delete process.env[NAME];
+      else process.env[NAME] = saved;
+    }
+  });
+
+  test("an existing vault row is written back verbatim", async () => {
+    const snap = await snapshotBrainWrites(slots, {
+      snapshotRouting: async () => undefined,
+      readVaultSecret: async () => "sk-old",
+      snapshotAuth: async () => undefined,
+    });
+    const { s, calls } = stores();
+    expect(await restoreBrainWrites(snap, s)).toBe(true);
+    expect(calls).toContain(`set:${NAME}=sk-old`);
+  });
+
+  test("a failed unset ({ok:false}) makes the rollback report failure", async () => {
+    const snap = {
+      routing: {},
+      secrets: { [NAME]: { vault: undefined, env: undefined } },
+      auth: undefined,
+    };
+    const { s } = stores({ unsetVaultSecret: async () => ({ ok: false }) });
+    expect(await restoreBrainWrites(snap, s)).toBe(false);
+  });
+
+  test("a throwing routing restore still attempts every other store, then reports failure", async () => {
+    const snap = {
+      routing: { "": { provider: "groq" }, "pi-primary": undefined },
+      secrets: { [NAME]: { vault: "sk-old", env: undefined } },
+      auth: "{}",
+    };
+    const { s, calls } = stores({
+      restoreRouting: async (_t, id) => {
+        calls.push(`routing:${id ?? ""}`);
+        if (id === undefined) throw new Error("config.toml locked");
+      },
+    });
+    expect(await restoreBrainWrites(snap, s)).toBe(false);
+    expect(calls).toEqual([
+      "routing:",
+      "routing:pi-primary",
+      `set:${NAME}=sk-old`,
+      "auth",
+    ]);
+  });
+
+  test("a throwing restoreWrites still reaches the honest 'partly saved' notice", async () => {
+    const { q } = fakeQ(CONFIGURE_ANSWERS);
+    q.testBrain = testScreen({ ok: true, apply: false });
+    const { deps } = worldDeps(PRIOR);
+    const r = await runBrainOnboarding(q, {
+      ...deps,
+      restoreWrites: async () => {
+        throw new Error("boom");
+      },
+    });
     expect(r.notice).toStartWith("brain partly saved");
     expect(r.landing).toBe("configure");
   });

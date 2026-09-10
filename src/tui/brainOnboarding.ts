@@ -70,8 +70,12 @@ export async function createBrainOnboardingDeps(
     "../harnesses/buildChain.ts"
   );
   const { listPiModels } = await import("../lib/piModels.ts");
-  const { getPersonaSecret, setPersonaSecret, unsetPersonaSecret } =
-    await import("../lib/vaultSecrets.ts");
+  const {
+    getPersonaSecret,
+    getPersonaSecretStrict,
+    setPersonaSecret,
+    unsetPersonaSecret,
+  } = await import("../lib/vaultSecrets.ts");
   const { restorePiAuth, snapshotPiAuth, writePiApiKey } = await import(
     "../lib/piAuthStore.ts"
   );
@@ -155,46 +159,35 @@ export async function createBrainOnboardingDeps(
     clearRouting: async (opts, instanceId) => {
       await clearPiRouting(writeTarget.path, opts, instanceId);
     },
-    snapshotWrites: async () => {
-      const slots: (string | undefined)[] = [
-        undefined,
-        "pi-primary",
-        "pi-fallback",
-      ];
-      const routing: Record<string, Record<string, unknown> | undefined> = {};
-      const secrets: Record<string, string | undefined> = {};
-      for (const instanceId of slots) {
-        const key = instanceId ?? "";
-        routing[key] = await snapshotPiRouting(writeTarget.path, instanceId);
-        secrets[key] = await getPersonaSecret(
-          config,
-          instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
-          persona,
-        );
-      }
-      return { routing, secrets, auth: await snapshotPiAuth() };
-    },
-    restoreWrites: async (snapshot) => {
-      let ok = true;
-      for (const [key, table] of Object.entries(snapshot.routing)) {
-        const instanceId = key === "" ? undefined : key;
-        await restorePiRouting(writeTarget.path, table, instanceId);
-      }
-      for (const [key, value] of Object.entries(snapshot.secrets)) {
-        const instanceId = key === "" ? undefined : key;
-        const name = instanceId
-          ? piInstanceSecretName(instanceId)
-          : ENV_PI_API_KEY;
-        if (value === undefined) {
-          await unsetPersonaSecret(config, name, persona);
-        } else {
-          const wrote = await setPersonaSecret(config, name, value, persona);
-          if (!wrote.ok) ok = false;
-        }
-      }
-      const auth = await restorePiAuth(snapshot.auth);
-      return ok && auth.ok;
-    },
+    snapshotWrites: () =>
+      snapshotBrainWrites(
+        BRAIN_WRITE_SLOT_IDS.map((instanceId) => ({
+          instanceId,
+          secretName: instanceId
+            ? piInstanceSecretName(instanceId)
+            : ENV_PI_API_KEY,
+        })),
+        {
+        snapshotRouting: (instanceId) =>
+          snapshotPiRouting(writeTarget.path, instanceId),
+        // STRICT: the persona's own vault row and nothing else. The effective
+        // read (`getPersonaSecret`) falls back to process.env, and restoring
+        // that fallback would MINT a persona override where there was no row
+        // (PR #539 review, Kai/Lena).
+        readVaultSecret: (name) =>
+          getPersonaSecretStrict(config, name, persona),
+          snapshotAuth: () => snapshotPiAuth(),
+        },
+      ),
+    restoreWrites: (snapshot) =>
+      restoreBrainWrites(snapshot, {
+        restoreRouting: (table, instanceId) =>
+          restorePiRouting(writeTarget.path, table, instanceId),
+        setVaultSecret: (name, value) =>
+          setPersonaSecret(config, name, value, persona),
+        unsetVaultSecret: (name) => unsetPersonaSecret(config, name, persona),
+        restoreAuth: (auth) => restorePiAuth(auth),
+      }),
     probe: async (id) => {
       const { probeHarness } = await import("../lib/harnessProbe.ts");
       return probeHarness({ config: await loadConfig(persona), id });
@@ -279,12 +272,114 @@ export interface BrainOnboardingDeps {
 
 /**
  * Opaque to the flow: it snapshots before the interview and hands the same
- * object back on rollback. Shaped by `createBrainOnboardingDeps`.
+ * object back on rollback. Shaped by `snapshotBrainWrites`.
+ *
+ * Secrets are keyed by VAULT NAME and record two independent facts: the
+ * persona's own vault row (`vault`, undefined = no row) and what this process
+ * saw in `process.env` (`env`). They are not the same thing — a host-wide
+ * export can stand in for a missing row — and conflating them is how a
+ * rollback turns an inherited key into a persona override.
  */
 export interface BrainWriteSnapshot {
   routing: Record<string, Record<string, unknown> | undefined>;
-  secrets: Record<string, string | undefined>;
+  secrets: Record<string, { vault: string | undefined; env: string | undefined }>;
   auth: string | undefined;
+}
+
+/** A Pi routing slot the interview may write, and its vault secret name. */
+export interface BrainWriteSlot {
+  /** undefined = the single-Pi `[harnesses.pi]` table. */
+  instanceId: string | undefined;
+  secretName: string;
+}
+
+/** The slots the interview can touch. Secret names resolved at wire time. */
+export const BRAIN_WRITE_SLOT_IDS: readonly (string | undefined)[] = [
+  undefined,
+  "pi-primary",
+  "pi-fallback",
+];
+
+export interface BrainSnapshotStores {
+  snapshotRouting(instanceId?: string): Promise<Record<string, unknown> | undefined>;
+  /** Persona vault row only — NEVER an ambient fallback. */
+  readVaultSecret(name: string): Promise<string | undefined>;
+  snapshotAuth(): Promise<string | undefined>;
+}
+
+export interface BrainRestoreStores {
+  restoreRouting(
+    table: Record<string, unknown> | undefined,
+    instanceId?: string,
+  ): Promise<unknown>;
+  setVaultSecret(name: string, value: string): Promise<{ ok: boolean }>;
+  unsetVaultSecret(name: string): Promise<{ ok: boolean }>;
+  restoreAuth(auth: string | undefined): Promise<{ ok: boolean }>;
+}
+
+/** Capture every store the brain interview is about to write. */
+export async function snapshotBrainWrites(
+  slots: readonly BrainWriteSlot[],
+  stores: BrainSnapshotStores,
+): Promise<BrainWriteSnapshot> {
+  const routing: BrainWriteSnapshot["routing"] = {};
+  const secrets: BrainWriteSnapshot["secrets"] = {};
+  for (const { instanceId, secretName } of slots) {
+    routing[instanceId ?? ""] = await stores.snapshotRouting(instanceId);
+    secrets[secretName] = {
+      vault: await stores.readVaultSecret(secretName),
+      env: process.env[secretName],
+    };
+  }
+  return { routing, secrets, auth: await stores.snapshotAuth() };
+}
+
+/**
+ * Put a `snapshotBrainWrites` result back. Returns true only if EVERY store
+ * came back.
+ *
+ * Every store is attempted even when an earlier one fails or throws: a
+ * rollback that stops at the first error leaves the rest of the new brain
+ * committed, and one that lets the error escape skips the caller's honest
+ * "brain partly saved" notice. So each step is caught on its own, a `{ok:false}`
+ * counts exactly like a throw, and the verdict is the AND of all of them.
+ *
+ * A secret with no vault row before the interview is UNSET, never set to the
+ * ambient value: re-creating the row would turn an inherited host key into a
+ * persona override. The process env is then put back as it was, because
+ * `setPersonaSecret` / `unsetPersonaSecret` both mirror into it and the TUI
+ * process would otherwise lose a host-wide key until restart.
+ */
+export async function restoreBrainWrites(
+  snapshot: BrainWriteSnapshot,
+  stores: BrainRestoreStores,
+): Promise<boolean> {
+  let ok = true;
+  const attempt = async (step: () => Promise<unknown>) => {
+    try {
+      const r = await step();
+      if (r && typeof r === "object" && (r as { ok?: unknown }).ok === false) {
+        ok = false;
+      }
+    } catch {
+      ok = false;
+    }
+  };
+  for (const [key, table] of Object.entries(snapshot.routing)) {
+    const instanceId = key === "" ? undefined : key;
+    await attempt(() => stores.restoreRouting(table, instanceId));
+  }
+  for (const [name, prior] of Object.entries(snapshot.secrets)) {
+    await attempt(() =>
+      prior.vault === undefined
+        ? stores.unsetVaultSecret(name)
+        : stores.setVaultSecret(name, prior.vault),
+    );
+    if (prior.env === undefined) delete process.env[name];
+    else process.env[name] = prior.env;
+  }
+  await attempt(() => stores.restoreAuth(snapshot.auth));
+  return ok;
 }
 
 export interface BrainOnboardingResult {
@@ -498,7 +593,11 @@ async function runOnce(
   ): Promise<BrainOnboardingResult> => {
     let restored = false;
     if (snapshot && deps.restoreWrites) {
-      restored = await deps.restoreWrites(snapshot);
+      try {
+        restored = await deps.restoreWrites(snapshot);
+      } catch {
+        restored = false; // a throw must still reach the honest notice
+      }
     }
     return {
       landing: "configure",
