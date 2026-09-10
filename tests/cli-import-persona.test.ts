@@ -293,3 +293,41 @@ describe("runImportPersona — auto-adopt as default", () => {
     await expect(readFile(stateFile(), "utf8")).rejects.toThrow();
   });
 });
+
+describe("OpenClaw voice key target", () => {
+  // REGRESSION: the imported voice key was written to `config.defaultPersona`,
+  // and `config` is loaded BEFORE the import adopts a default. On a fresh host
+  // that names a persona that does not exist ("phantom" here): opening its
+  // vault minted a stray personas/phantom/ with its own identity.json + vault,
+  // and the phantom actually imported never got its key.
+  test("the key lands in the IMPORTED persona's vault, not the stale default", async () => {
+    const { existsSync } = await import("node:fs");
+    const { getPersonaSecretStrict } = await import(
+      "../src/lib/vaultSecrets.ts"
+    );
+    const openclawJson = join(workdir, "openclaw.json");
+    await writeFile(
+      openclawJson,
+      JSON.stringify({ talk: { voiceId: "v-123", apiKey: "el-test-key" } }),
+    );
+    const out = new CaptureStream();
+    const err = new CaptureStream();
+    const code = await runImportPersona({
+      source,
+      as: "bob",
+      config,
+      openclawConfigPath: openclawJson,
+      noTelegram: true,
+      serviceControl: svcInactive,
+      out,
+      err,
+    });
+    expect(code).toBe(0);
+    expect(
+      await getPersonaSecretStrict(config, "PHANTOMBOT_ELEVENLABS_API_KEY", "bob"),
+    ).toBe("el-test-key");
+    expect(out.text).toContain("saved to the bob vault");
+    // And nothing was conjured for the default that never existed.
+    expect(existsSync(join(config.personasDir, "phantom"))).toBe(false);
+  });
+});

@@ -3027,7 +3027,22 @@ subdirectories are skipped with reasons in the summary. Conversation history is
 not imported.
 
 By default, import also sniffs `~/.openclaw/openclaw.json` for a Telegram bot
-block. Pass `--no-telegram` to skip that.
+block. Pass `--no-telegram` to skip that. A voice block is imported too, and
+its API key is saved to the **imported** persona's vault (never overwriting a
+key already there).
+
+The TUI offers the same import in two places, both driving the command above:
+
+- **First run.** The installer wizard opens on one pick — *Create a new
+  persona* (highlighted, so a new install just presses Enter) or *Import from
+  OpenClaw*. An import continues into the same Brain steps as Create.
+- **Configure → New persona → Import from OpenClaw**, which lands in the
+  imported persona's Configure screen.
+
+The path box is pre-filled with `~/.openclaw/workspace` when it exists. Import
+is OpenClaw-only: a phantombot persona's `identity.json`, vault and database
+rows do not survive a markdown copy, so moving one between hosts is a separate
+job.
 
 ## Versioning
 

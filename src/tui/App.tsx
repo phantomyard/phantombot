@@ -13,7 +13,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 
 import {
@@ -234,14 +235,26 @@ export function App(props: AppProps): React.ReactElement {
    * the same reason: a question drawn as a SCREEN resolves on a keystroke in a
    * later turn of the event loop, so the resolver cannot live on the stack.
    */
+  /**
+   * One id per ask/choose/search request, used as the overlay's React `key`.
+   * `setX(undefined)` and the NEXT question's `setX(request)` land in the same
+   * batch when two questions are asked back to back, so without a key the
+   * overlay never unmounts and the new screen inherits the old one's state:
+   * the OpenClaw import's name box opened holding the path just typed, and
+   * Enter submitted the path as the persona name.
+   */
+  const requestSeq = useRef(0);
   const [ask, setAsk] = useState<
-    (AskRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (AskRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
   >();
   const [choose, setChoose] = useState<
-    (ChooseRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (ChooseRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
   >();
   const [searchAsk, setSearchAsk] = useState<
-    (SearchListRequest & { resolve: (value: string | undefined) => void }) | undefined
+    | (SearchListRequest & { resolve: (value: string | undefined) => void; seq?: number })
+    | undefined
   >();
   const [brainTest, setBrainTest] = useState<
     (BrainTestRequest & { resolve: (res: BrainTestResult) => void }) | undefined
@@ -311,7 +324,7 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask for a typed value on a screen. `undefined` means cancelled. */
   const askValue = useCallback(async (input: AskRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setAsk({ ...input, resolve });
+      setAsk({ ...input, resolve, seq: ++requestSeq.current });
     });
     setAsk(undefined);
     return value;
@@ -320,7 +333,7 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask for one of a list on a screen. `undefined` means cancelled. */
   const askChoice = useCallback(async (input: ChooseRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setChoose({ ...input, resolve });
+      setChoose({ ...input, resolve, seq: ++requestSeq.current });
     });
     setChoose(undefined);
     return value;
@@ -329,7 +342,7 @@ export function App(props: AppProps): React.ReactElement {
   /** Ask with the searchable list screen (long catalogues). Same contract. */
   const askSearch = useCallback(async (input: SearchListRequest) => {
     const value = await new Promise<string | undefined>((resolve) => {
-      setSearchAsk({ ...input, resolve });
+      setSearchAsk({ ...input, resolve, seq: ++requestSeq.current });
     });
     setSearchAsk(undefined);
     return value;
@@ -1415,37 +1428,60 @@ export function App(props: AppProps): React.ReactElement {
   }, [askConfirmValue]);
 
   /**
-   * Import an OpenClaw- or phantombot-shaped directory, all on screens.
+   * Import an OpenClaw agent directory, all on screens. Reached from BOTH the
+   * first-run wizard's opening pick and Configure → New persona.
+   *
+   * OpenClaw only: a phantombot persona's identity.json, vault and
+   * memory.sqlite rows are not markdown, so a copy of its dir would silently
+   * land as a new identity with an unreadable vault. That migration is its own
+   * job, not this menu's.
    *
    * The WRITE path is `runImportPersona` with an explicit source — the same
    * machinery `phantombot persona --import` uses, including the OpenClaw
    * telegram/voice sniff, default adoption and scaffold — so the TUI and the
    * CLI cannot import differently shaped personas. Only the ASKING is ours:
    * path, name, overwrite confirm, all on Ask/Confirm screens instead of clack.
+   *
+   * `fromWizard` decides the landing, matching each entry point's Create:
+   * the wizard's Create continues into the Brain steps, so its Import does
+   * too; Configure's Create lands in Configure, so its Import does too.
    */
-  const importPersonaFromDirectory = useCallback(async () => {
+  const importOpenClawAgent = useCallback(async (fromWizard: boolean) => {
+    // OpenClaw's own default workspace — pre-filled only when it is really
+    // there, so the common case is one Enter and a wrong guess is never shown.
+    const openclawDefault = join(homedir(), ".openclaw", "workspace");
     const source = await askValue({
-      title: "Import a persona from a directory",
-      hint: "path to an OpenClaw- or phantombot-shaped persona directory",
+      title: "Import from OpenClaw",
+      hint: "path to the OpenClaw agent directory (the one holding SOUL.md / IDENTITY.md)",
+      initial: existsSync(openclawDefault) ? openclawDefault : undefined,
     });
     if (!source) return setNotice("import cancelled");
     if (!existsSync(source))
       return setNotice(`import failed: no such directory: ${source}`);
 
     const { validPersonaName } = await import("../cli/persona-new.ts");
-    const suggested = basename(source);
+    // OpenClaw's default dir is literally `workspace` — a basename that names
+    // the folder, not the agent. Never offer it as the phantom's name.
+    const base = basename(source);
+    const suggested =
+      base !== "workspace" && validPersonaName(base) ? base : undefined;
     const name = await askValue({
       title: "Persona name",
-      hint: validPersonaName(suggested)
+      hint: suggested
         ? `blank keeps '${suggested}'`
         : "lowercase letters, digits, '-' or '_', starting with a letter or digit",
-      initial: validPersonaName(suggested) ? suggested : undefined,
+      initial: suggested,
       allowEmpty: true,
     });
     if (name === undefined) return setNotice("import cancelled");
-    const target = name || (validPersonaName(suggested) ? suggested : "");
-    if (!target)
-      return setNotice("import failed: a valid persona name is required");
+    const target = name || suggested || "";
+    // A typed name is validated like every other name box — the importer's
+    // own check is looser (it allows capitals), and a persona the rest of the
+    // app will refuse to address is not an import that worked.
+    if (!validPersonaName(target))
+      return setNotice(
+        "import failed: use lowercase letters, digits, '-' or '_', starting with a letter or digit",
+      );
 
     if (host.personas.some((p) => p.name === target)) {
       const yes = await askConfirmValue({
@@ -1462,6 +1498,7 @@ export function App(props: AppProps): React.ReactElement {
     }
 
     setPrompting(true);
+    let imported = false;
     try {
       const { runImportPersona } = await import("../cli/import-persona.ts");
       const config = await loadConfig();
@@ -1478,19 +1515,44 @@ export function App(props: AppProps): React.ReactElement {
         return setNotice(
           output.trim().split("\n")[0] || `import of ${target} failed`,
         );
-
-      await refresh();
-      setPersonaName(target);
-      navRef.current = [];
-      setScreen("persona");
-      setNotice(`imported ${target} — finish its settings below`);
-      await offerRestart();
+      imported = true;
     } catch (e) {
-      setNotice(`import failed: ${(e as Error).message}`);
+      return setNotice(`import failed: ${(e as Error).message}`);
     } finally {
       setPrompting(false);
     }
-  }, [host, askValue, askConfirmValue, refresh, offerRestart]);
+    if (!imported) return;
+
+    await refresh();
+    setPersonaName(target);
+    // An imported persona is not a place to go back to, from either door.
+    navRef.current = [];
+    setNotice(`imported ${target} from OpenClaw`);
+    if (fromWizard) {
+      // The same Brain steps the wizard's Create continues into. OpenClaw's
+      // brain config does not come across, so an imported phantom is exactly
+      // as brainless as a created one — chat is earned by a verified brain;
+      // every other exit lands in Configure with the red `required` row.
+      const brainResult = await wizardBrain(target);
+      await refreshChatBrain();
+      if (brainResult?.notice) setNotice(brainResult.notice);
+      setScreen(brainResult?.landing === "chat" ? "chat" : "persona");
+    } else {
+      setScreen("persona");
+      setNotice(`imported ${target} from OpenClaw — finish its settings below`);
+    }
+    // The import can write host telegram/voice config, read only on the next
+    // service spawn.
+    await offerRestart();
+  }, [
+    host,
+    askValue,
+    askConfirmValue,
+    refresh,
+    offerRestart,
+    wizardBrain,
+    refreshChatBrain,
+  ]);
 
   /**
    * Restore an archived persona from `personas-archive/`, all on screens.
@@ -1614,6 +1676,7 @@ export function App(props: AppProps): React.ReactElement {
           // which does not exist yet — there ^q quits the app instead.
           onBack={navRef.current.length > 0 ? back : undefined}
           onQuit={navRef.current.length > 0 ? undefined : exit}
+          onImport={() => void importOpenClawAgent(true)}
           onFinish={async (answers) => {
             try {
               const result = await props.onCreatePersona(answers);
@@ -1657,7 +1720,7 @@ export function App(props: AppProps): React.ReactElement {
         <NewPersonaScreen
           personasDir={host.personasDir}
           onCreate={() => go("createPersona")}
-          onImport={() => void importPersonaFromDirectory()}
+          onImport={() => void importOpenClawAgent(false)}
           onRestore={() => void restoreArchivedPersona()}
           onBack={back}
         />
@@ -2063,7 +2126,11 @@ export function App(props: AppProps): React.ReactElement {
     return (
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
-          <AskScreen request={ask} onAnswer={(v) => ask.resolve(v)} />
+          <AskScreen
+            key={ask.seq}
+            request={ask}
+            onAnswer={(v) => ask.resolve(v)}
+          />
         </Box>
       </TerminalSizeContext.Provider>
     );
@@ -2073,7 +2140,11 @@ export function App(props: AppProps): React.ReactElement {
     return (
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
-          <ChooseScreen request={choose} onAnswer={(v) => choose.resolve(v)} />
+          <ChooseScreen
+            key={choose.seq}
+            request={choose}
+            onAnswer={(v) => choose.resolve(v)}
+          />
         </Box>
       </TerminalSizeContext.Provider>
     );
@@ -2084,6 +2155,7 @@ export function App(props: AppProps): React.ReactElement {
       <TerminalSizeContext.Provider value={size}>
         <Box flexDirection="column" height={renderRows(size)}>
           <SearchListScreen
+            key={searchAsk.seq}
             request={searchAsk}
             onAnswer={(v) => searchAsk.resolve(v)}
           />

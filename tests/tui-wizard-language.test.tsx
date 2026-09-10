@@ -287,7 +287,8 @@ describe("the new-persona flow speaks the app's menu language", () => {
       host: { ...HOST, personas: [] },
       startPersona: undefined,
     });
-    await app.waitFor((f) => f.includes("Persona Name"));
+    // The first step is now the Create/Import pick, not the name box.
+    await app.waitFor((f) => f.includes("Import from OpenClaw"));
     const frame = app.lastFrame();
     // The wizard IS the app on first run — esc has no screen behind it to
     // return to, so the app-wide ctrl+q quit is advertised instead. Neither
@@ -299,6 +300,19 @@ describe("the new-persona flow speaks the app's menu language", () => {
     await app.press("\x11"); // ^q / ctrl+q
     await tick();
     expect(exited).toBe(true);
+  });
+
+  test("on first run the name step backs out to the Create/Import pick", async () => {
+    const app = mount({
+      host: { ...HOST, personas: [] },
+      startPersona: undefined,
+    });
+    await app.waitFor((f) => f.includes("Import from OpenClaw"));
+    await app.pressUntil("\r", (f) => f.includes("Persona Name"));
+    // The pick is the screen behind the name box now, so esc is honest here.
+    expect(app.lastFrame()).toContain("esc Back");
+    await app.pressUntil("\x1b", (f) => f.includes("Import from OpenClaw"));
+    expect(app.lastFrame()).not.toContain("Persona Name");
   });
 
   test("on a wizard resume, the identity step offers ctrl+q Quit too", async () => {
