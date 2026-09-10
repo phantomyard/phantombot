@@ -111,9 +111,15 @@ export function KeysScreen(props: {
           key={row.name}
           selected={i === cursor}
           onPress={() => props.onSet(row.name)}
+          fullWidth
         >
           <Box width="46%">
-            <Text>{row.name}</Text>
+            <Text
+              bold={i === cursor}
+              color={i === cursor ? "whiteBright" : undefined}
+            >
+              {row.name}
+            </Text>
           </Box>
           <Box width="14%">
             <Text color={row.set ? theme.ok : theme.warn}>

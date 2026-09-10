@@ -48,11 +48,11 @@ export interface CreatePersonaAnswers {
  * guidance text, so the picker stays scannable.
  */
 export const TONE_CHOICES = [
-  { value: "blunt", label: "Blunt", hint: "concise, direct, no fluff" },
-  { value: "professional", label: "Professional", hint: "measured and polished" },
-  { value: "casual", label: "Casual", hint: "friendly, conversational" },
-  { value: "warm", label: "Warm", hint: "supportive, empathetic" },
-  { value: "playful", label: "Playful", hint: "witty, light" },
+  { value: "blunt", label: "Blunt", hint: "Concise, direct, no fluff" },
+  { value: "professional", label: "Professional", hint: "Measured, clear, and polished" },
+  { value: "casual", label: "Casual", hint: "Friendly, conversational" },
+  { value: "warm", label: "Warm", hint: "Supportive, empathetic" },
+  { value: "playful", label: "Playful", hint: "Witty, lively, and lighthearted" },
 ] as const;
 
 type Step = "name" | "identity" | "tone" | "skills" | "owner";
@@ -83,11 +83,11 @@ export function CreatePersonaScreen(props: {
 
   if (step === "name") {
     const request: AskRequest = {
-      title: "Persona name",
+      title: "Persona Name",
       description: nameDescription(),
       hint:
         error ??
-        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
+        "Lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
       initial: name,
     };
     return (
@@ -98,12 +98,12 @@ export function CreatePersonaScreen(props: {
           if (value === undefined) return props.onBack();
           if (!validPersonaName(value)) {
             setError(
-              "invalid name — lowercase letters, digits, '-' or '_', starting with a letter or digit",
+              "Invalid name — please use lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
             );
             return setAttempt((n) => n + 1);
           }
           if (props.existingNames.includes(value)) {
-            setError(`'${value}' already exists — pick another name`);
+            setError(`'${value}' already exists — please pick another name.`);
             return setAttempt((n) => n + 1);
           }
           setName(value);
@@ -116,7 +116,7 @@ export function CreatePersonaScreen(props: {
 
   if (step === "identity") {
     const request: AskRequest = {
-      title: "One-line identity",
+      title: "One-Line Identity",
       description: identityDescription(name),
       hint: `You are ${name}, ___`,
       initial: identity || DEFAULT_IDENTITY,
@@ -134,7 +134,7 @@ export function CreatePersonaScreen(props: {
   }
 
   const request: ChooseRequest = {
-    title: "Default tone",
+    title: "Default Tone",
     options: TONE_CHOICES,
     description: toneDescription(name, identity),
   };
@@ -153,7 +153,7 @@ export function CreatePersonaScreen(props: {
 
   if (step === "skills") {
     const multiRequest: MultiChooseRequest = {
-      title: "Skills & disciplines",
+      title: "Skills & Disciplines",
       options: EXPERTISE_OPTIONS,
       initial: expertise,
       description: skillsDescription(name),
@@ -171,9 +171,9 @@ export function CreatePersonaScreen(props: {
   }
 
   const ownerRequest: AskRequest = {
-    title: "Your name",
+    title: "Your Name",
     description: ownerDescription(name),
-    hint: `what ${name} calls you`,
+    hint: `What ${name} calls you (press ↵ to skip)`,
     initial: owner,
     allowEmpty: true,
   };

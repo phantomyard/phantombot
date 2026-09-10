@@ -6,6 +6,8 @@ import { join } from "node:path";
 import {
   mergePiApiKey,
   piAuthJsonPath,
+  restorePiAuth,
+  snapshotPiAuth,
   writePiApiKey,
 } from "../src/lib/piAuthStore.ts";
 
@@ -159,5 +161,61 @@ describe("writePiApiKey", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("refusing to clobber");
     expect(await readFile(path, "utf8")).toBe("{not json");
+  });
+});
+
+describe("snapshotPiAuth / restorePiAuth (brain-wizard rollback)", () => {
+  test("restores a pre-existing store byte for byte after a key write", async () => {
+    const path = piAuthJsonPath(home);
+    await mkdir(join(home, ".pi", "agent"), { recursive: true });
+    const before = JSON.stringify(
+      {
+        anthropic: { type: "oauth", refresh: "keep-me" },
+        openrouter: { type: "api_key", key: "sk-old" },
+      },
+      null,
+      2,
+    ) + "\n";
+    await writeFile(path, before, "utf8");
+
+    const snap = await snapshotPiAuth(home);
+    await writePiApiKey("openrouter", "sk-new", home);
+    expect(JSON.parse(await readFile(path, "utf8")).openrouter.key).toBe("sk-new");
+
+    const result = await restorePiAuth(snap, home);
+    expect(result.ok).toBe(true);
+    // Byte-for-byte: an unrelated OAuth entry must survive the round trip
+    // untouched, not be re-serialised from our own understanding of it.
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("removes the file again when there was none to begin with", async () => {
+    const path = piAuthJsonPath(home);
+    const snap = await snapshotPiAuth(home);
+    expect(snap).toBeUndefined();
+
+    await writePiApiKey("openrouter", "sk-new", home);
+    expect(existsSync(path)).toBe(true);
+
+    expect((await restorePiAuth(snap, home)).ok).toBe(true);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test("restores at mode 0600 — a rollback must not widen the key's perms", async () => {
+    if (process.platform === "win32") return;
+    const path = piAuthJsonPath(home);
+    await writePiApiKey("openrouter", "sk-one", home);
+    const snap = await snapshotPiAuth(home);
+    await writePiApiKey("openrouter", "sk-two", home);
+    await restorePiAuth(snap, home);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  test("leaves no tempfile behind", async () => {
+    await writePiApiKey("openrouter", "sk-one", home);
+    const snap = await snapshotPiAuth(home);
+    await restorePiAuth(snap, home);
+    const entries = await readdir(join(home, ".pi", "agent"));
+    expect(entries).toEqual(["auth.json"]);
   });
 });

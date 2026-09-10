@@ -34,6 +34,193 @@ import type { RoutingChoices } from "../lib/piRouting.ts";
 import type { PiAuthWriteResult } from "../lib/piAuthStore.ts";
 import type { KeyProbeResult } from "../lib/providerKeyProbe.ts";
 import { configurePi, type BrainQuestions } from "./brainFlow.ts";
+import type { Consequence } from "./actions.ts";
+
+export interface CreateBrainOnboardingDepsOptions {
+  setNotice?: (msg: string) => void;
+  askConfirmValue?: (req: {
+    title: string;
+    consequence: Consequence;
+    danger?: boolean;
+    confirmName?: string;
+  }) => Promise<boolean>;
+}
+
+export async function createBrainOnboardingDeps(
+  persona: string,
+  options?: CreateBrainOnboardingDepsOptions,
+): Promise<BrainOnboardingDeps> {
+  const { loadConfig } = await import("../config.ts");
+  const { ENV_PI_API_KEY } = await import("../lib/piRouting.ts");
+  const {
+    applyHarnessChain,
+    applyRouting,
+    clearPiRouting,
+    restorePiRouting,
+    snapshotPiRouting,
+    defaultInstallRunner,
+    detectAvailability,
+    installPi,
+    piInstallCommand,
+  } = await import("../cli/harness.ts");
+  const { resolveHarnessWriteTarget } = await import(
+    "../lib/harnessWriteTarget.ts"
+  );
+  const { harnessChainIds, piInstanceSecretName } = await import(
+    "../harnesses/buildChain.ts"
+  );
+  const { listPiModels } = await import("../lib/piModels.ts");
+  const {
+    getPersonaSecret,
+    getPersonaSecretStrict,
+    setPersonaSecret,
+    unsetPersonaSecret,
+  } = await import("../lib/vaultSecrets.ts");
+  const { restorePiAuth, snapshotPiAuth, writePiApiKey } = await import(
+    "../lib/piAuthStore.ts"
+  );
+  const { probeProviderKey } = await import("../lib/providerKeyProbe.ts");
+
+  const config = await loadConfig(persona);
+  const availability = await detectAvailability(config);
+  const writeTarget = await resolveHarnessWriteTarget(config, persona);
+  const routing = config.harnesses.pi.routing ?? {};
+
+  return {
+    persona,
+    availability: () => detectAvailability(config),
+    installCommand: piInstallCommand().join(" "),
+    installPi: async () => {
+      const { withPromptTerminal } = await import("./prompts.ts");
+      const ok = await withPromptTerminal(async () =>
+        installPi(defaultInstallRunner, {
+          note: (body: string, title?: string) =>
+            options?.setNotice?.(
+              title ? `${title}: ${body.split("\n")[0]}` : body,
+            ),
+        } as never),
+      );
+      return ok && Boolean((await detectAvailability(config)).pi);
+    },
+    chain: harnessChainIds(config, persona),
+    routing: {
+      provider: routing.provider,
+      primaryModel: routing.primaryModel,
+      imageModel: routing.imageModel,
+      codingModel: routing.codingModel,
+    },
+    storedKey: await getPersonaSecret(config, ENV_PI_API_KEY, persona),
+    piInstances: {
+      primary: {
+        routing: config.harnesses.instances?.["pi-primary"]?.routing ?? {},
+        storedKey: await getPersonaSecret(
+          config,
+          piInstanceSecretName("pi-primary"),
+          persona,
+        ),
+      },
+      fallback: {
+        routing: config.harnesses.instances?.["pi-fallback"]?.routing ?? {},
+        storedKey: await getPersonaSecret(
+          config,
+          piInstanceSecretName("pi-fallback"),
+          persona,
+        ),
+      },
+    },
+    targetPath: writeTarget.path,
+    personaScope: writeTarget.scope === "persona",
+    piBin: availability.pi,
+    listModels: (extraEnv) =>
+      listPiModels(availability.pi!, undefined, extraEnv),
+    setSecret: (value, instanceId) =>
+      setPersonaSecret(
+        config,
+        instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+        value,
+        persona,
+      ),
+    unsetSecret: (instanceId) =>
+      unsetPersonaSecret(
+        config,
+        instanceId ? piInstanceSecretName(instanceId) : ENV_PI_API_KEY,
+        persona,
+      ),
+    writeAuth: (provider, value) => writePiApiKey(provider, value),
+    applyChain: (chain) =>
+      applyHarnessChain(
+        writeTarget.path,
+        chain as never,
+        persona,
+        writeTarget.scope,
+      ),
+    applyRouting: (choices, instanceId) =>
+      applyRouting(writeTarget.path, choices, instanceId),
+    clearRouting: async (opts, instanceId) => {
+      await clearPiRouting(writeTarget.path, opts, instanceId);
+    },
+    snapshotWrites: () =>
+      snapshotBrainWrites(
+        BRAIN_WRITE_SLOT_IDS.map((instanceId) => ({
+          instanceId,
+          secretName: instanceId
+            ? piInstanceSecretName(instanceId)
+            : ENV_PI_API_KEY,
+        })),
+        {
+        snapshotRouting: (instanceId) =>
+          snapshotPiRouting(writeTarget.path, instanceId),
+        // STRICT: the persona's own vault row and nothing else. The effective
+        // read (`getPersonaSecret`) falls back to process.env, and restoring
+        // that fallback would MINT a persona override where there was no row
+        // (PR #539 review, Kai/Lena).
+        readVaultSecret: (name) =>
+          getPersonaSecretStrict(config, name, persona),
+          snapshotAuth: () => snapshotPiAuth(),
+        },
+      ),
+    restoreWrites: (snapshot) =>
+      restoreBrainWrites(snapshot, {
+        restoreRouting: (table, instanceId) =>
+          restorePiRouting(writeTarget.path, table, instanceId),
+        setVaultSecret: (name, value) =>
+          setPersonaSecret(config, name, value, persona),
+        unsetVaultSecret: (name) => unsetPersonaSecret(config, name, persona),
+        restoreAuth: (auth) => restorePiAuth(auth),
+      }),
+    probe: async (id) => {
+      const { probeHarness } = await import("../lib/harnessProbe.ts");
+      return probeHarness({ config: await loadConfig(persona), id });
+    },
+    probeProviderKey: (providerId, key) => probeProviderKey(providerId, key),
+    maybePromptRestart: async () => {
+      const { maybePromptRestart } = await import("../cli/harness.ts");
+      const { defaultServiceControl } = await import("../lib/platform.ts");
+      await maybePromptRestart(
+        defaultServiceControl(),
+        async (message) =>
+          options?.askConfirmValue
+            ? await options.askConfirmValue({
+                title: message,
+                consequence: {
+                  summary: "",
+                  detail: "",
+                  longRunning: false,
+                  restarts: true,
+                },
+              })
+            : true,
+        {
+          note: (body: string, title?: string) =>
+            options?.setNotice?.(
+              title ? `${title}: ${body.split("\n")[0]}` : body,
+            ),
+        } as never,
+      );
+    },
+  };
+}
+
 
 export interface BrainOnboardingDeps {
   persona: string;
@@ -71,6 +258,128 @@ export interface BrainOnboardingDeps {
   /** One real turn through the named harness. The truth, not a `which`. */
   probe(id: string): Promise<{ ok: boolean; detail: string }>;
   maybePromptRestart?(): Promise<void>;
+  /**
+   * Capture every store the interview is about to write — routing tables, the
+   * vault secret and Pi's auth.json — so a discarded or failed run can be
+   * rolled back. Optional only so existing test fixtures keep compiling;
+   * production deps always provide it, and without it the flow refuses to
+   * claim the brain is unchanged (see `rollback`).
+   */
+  snapshotWrites?(): Promise<BrainWriteSnapshot>;
+  /** Put a `snapshotWrites` result back. Returns false if anything failed. */
+  restoreWrites?(snapshot: BrainWriteSnapshot): Promise<boolean>;
+}
+
+/**
+ * Opaque to the flow: it snapshots before the interview and hands the same
+ * object back on rollback. Shaped by `snapshotBrainWrites`.
+ *
+ * Secrets are keyed by VAULT NAME and record two independent facts: the
+ * persona's own vault row (`vault`, undefined = no row) and what this process
+ * saw in `process.env` (`env`). They are not the same thing — a host-wide
+ * export can stand in for a missing row — and conflating them is how a
+ * rollback turns an inherited key into a persona override.
+ */
+export interface BrainWriteSnapshot {
+  routing: Record<string, Record<string, unknown> | undefined>;
+  secrets: Record<string, { vault: string | undefined; env: string | undefined }>;
+  auth: string | undefined;
+}
+
+/** A Pi routing slot the interview may write, and its vault secret name. */
+export interface BrainWriteSlot {
+  /** undefined = the single-Pi `[harnesses.pi]` table. */
+  instanceId: string | undefined;
+  secretName: string;
+}
+
+/** The slots the interview can touch. Secret names resolved at wire time. */
+export const BRAIN_WRITE_SLOT_IDS: readonly (string | undefined)[] = [
+  undefined,
+  "pi-primary",
+  "pi-fallback",
+];
+
+export interface BrainSnapshotStores {
+  snapshotRouting(instanceId?: string): Promise<Record<string, unknown> | undefined>;
+  /** Persona vault row only — NEVER an ambient fallback. */
+  readVaultSecret(name: string): Promise<string | undefined>;
+  snapshotAuth(): Promise<string | undefined>;
+}
+
+export interface BrainRestoreStores {
+  restoreRouting(
+    table: Record<string, unknown> | undefined,
+    instanceId?: string,
+  ): Promise<unknown>;
+  setVaultSecret(name: string, value: string): Promise<{ ok: boolean }>;
+  unsetVaultSecret(name: string): Promise<{ ok: boolean }>;
+  restoreAuth(auth: string | undefined): Promise<{ ok: boolean }>;
+}
+
+/** Capture every store the brain interview is about to write. */
+export async function snapshotBrainWrites(
+  slots: readonly BrainWriteSlot[],
+  stores: BrainSnapshotStores,
+): Promise<BrainWriteSnapshot> {
+  const routing: BrainWriteSnapshot["routing"] = {};
+  const secrets: BrainWriteSnapshot["secrets"] = {};
+  for (const { instanceId, secretName } of slots) {
+    routing[instanceId ?? ""] = await stores.snapshotRouting(instanceId);
+    secrets[secretName] = {
+      vault: await stores.readVaultSecret(secretName),
+      env: process.env[secretName],
+    };
+  }
+  return { routing, secrets, auth: await stores.snapshotAuth() };
+}
+
+/**
+ * Put a `snapshotBrainWrites` result back. Returns true only if EVERY store
+ * came back.
+ *
+ * Every store is attempted even when an earlier one fails or throws: a
+ * rollback that stops at the first error leaves the rest of the new brain
+ * committed, and one that lets the error escape skips the caller's honest
+ * "brain partly saved" notice. So each step is caught on its own, a `{ok:false}`
+ * counts exactly like a throw, and the verdict is the AND of all of them.
+ *
+ * A secret with no vault row before the interview is UNSET, never set to the
+ * ambient value: re-creating the row would turn an inherited host key into a
+ * persona override. The process env is then put back as it was, because
+ * `setPersonaSecret` / `unsetPersonaSecret` both mirror into it and the TUI
+ * process would otherwise lose a host-wide key until restart.
+ */
+export async function restoreBrainWrites(
+  snapshot: BrainWriteSnapshot,
+  stores: BrainRestoreStores,
+): Promise<boolean> {
+  let ok = true;
+  const attempt = async (step: () => Promise<unknown>) => {
+    try {
+      const r = await step();
+      if (r && typeof r === "object" && (r as { ok?: unknown }).ok === false) {
+        ok = false;
+      }
+    } catch {
+      ok = false;
+    }
+  };
+  for (const [key, table] of Object.entries(snapshot.routing)) {
+    const instanceId = key === "" ? undefined : key;
+    await attempt(() => stores.restoreRouting(table, instanceId));
+  }
+  for (const [name, prior] of Object.entries(snapshot.secrets)) {
+    await attempt(() =>
+      prior.vault === undefined
+        ? stores.unsetVaultSecret(name)
+        : stores.setVaultSecret(name, prior.vault),
+    );
+    if (prior.env === undefined) delete process.env[name];
+    else process.env[name] = prior.env;
+  }
+  await attempt(() => stores.restoreAuth(snapshot.auth));
+  return ok;
 }
 
 export interface BrainOnboardingResult {
@@ -119,18 +428,20 @@ export async function runBrainOnboarding(
   for (;;) {
     const result = await runOnce(q, deps);
     if (result.retry !== true) return result;
-    const again = await q.choose({
-      title: "Brain test failed",
-      description:
-        `Nothing was saved. ${(result.detail ?? "").split("\n")[0]}\nRun the brain setup again from the top to fix it — nothing was written, so you lose nothing by retrying.`,
-      options: [
-        { value: "restart", label: "Start over (recommended)", hint: "run the brain setup from the top, then retest" },
-        { value: "configure", label: "Back to Configure", hint: "leave it for now; Brain stays marked required" },
-      ],
-      initial: "restart",
-    });
-    if (again !== "restart") {
-      return { landing: "configure", notice: result.notice };
+    if (!q.testBrain) {
+      const again = await q.choose({
+        title: "Brain test failed",
+        description:
+          `Nothing was saved. ${(result.detail ?? "").split("\n")[0]}\nRun the brain setup again from the top to fix it — nothing was written, so you lose nothing by retrying.`,
+        options: [
+          { value: "restart", label: "Start over (recommended)", hint: "run the brain setup from the top, then retest" },
+          { value: "configure", label: "Back to Configure", hint: "leave it for now; Brain stays marked required" },
+        ],
+        initial: "restart",
+      });
+      if (again !== "restart") {
+        return { landing: "configure", notice: result.notice };
+      }
     }
   }
 }
@@ -262,6 +573,41 @@ async function runOnce(
     applyRouting: deps.applyRouting,
     clearRouting: deps.clearRouting,
   };
+  // Everything below this line WRITES as it goes: each model slot, the API
+  // key and Pi's auth store are persisted the moment they are answered, long
+  // before the "apply?" question at the end. Snapshot first so declining to
+  // apply — or a failed test, or a cancel — can put the previous brain back
+  // instead of leaving the new provider/model/key committed under a notice
+  // that claims nothing changed (PR #539 review, Kai).
+  let snapshot: BrainWriteSnapshot | undefined;
+  if (deps.snapshotWrites) snapshot = await deps.snapshotWrites();
+
+  /**
+   * Roll the interview's writes back and report honestly. When there is no
+   * snapshot (a test fixture without the dep) or the restore itself failed,
+   * the notice says the choices were kept rather than lying about it.
+   */
+  const discard = async (
+    reason: string,
+    extra?: Partial<BrainOnboardingResult>,
+  ): Promise<BrainOnboardingResult> => {
+    let restored = false;
+    if (snapshot && deps.restoreWrites) {
+      try {
+        restored = await deps.restoreWrites(snapshot);
+      } catch {
+        restored = false; // a throw must still reach the honest notice
+      }
+    }
+    return {
+      landing: "configure",
+      notice: restored
+        ? `brain unchanged — ${reason}`
+        : `brain partly saved — ${reason}`,
+      ...extra,
+    };
+  };
+
   let primaryMode: "configure" | "host" | undefined;
   if (primary === "pi") {
     const cancelled = await configurePi(
@@ -271,7 +617,7 @@ async function runOnce(
       { onMode: (m) => { primaryMode = m; } },
       bothPi ? "pi-primary" : undefined,
     );
-    if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
+    if (cancelled) return discard("finish it in Configure");
   }
   if (fallback === "pi") {
     const cancelled = await configurePi(
@@ -281,7 +627,7 @@ async function runOnce(
       { allowHostConfig: primaryMode !== "host" },
       bothPi ? "pi-fallback" : undefined,
     );
-    if (cancelled) return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
+    if (cancelled) return discard("finish it in Configure");
   }
 
   const chain = bothPi
@@ -300,26 +646,62 @@ async function runOnce(
     initial: "test",
   });
   if (testPick === undefined) {
-    return { landing: "configure", notice: "brain unchanged — finish it in Configure" };
+    return discard("finish it in Configure");
   }
 
   if (testPick === "test") {
+    if (q.testBrain) {
+      const testResult = await q.testBrain({
+        persona: deps.persona,
+        harness: HARNESS_LABELS[chain[0]!] ?? chain[0]!,
+        probe: () => deps.probe(chain[0]!),
+      });
+
+      if (testResult.ok) {
+        if (testResult.apply) {
+          await deps.applyChain(chain);
+          if (deps.maybePromptRestart) {
+            await deps.maybePromptRestart();
+          }
+          return {
+            landing: "chat",
+            notice: `brain verified: ${chain.join(" → ")}`,
+          };
+        } else {
+          // "No, discard and keep previous" — the chain was never applied,
+          // and now neither is anything the interview wrote.
+          return discard(`verified ${chain.join(" → ")}, discarded on request`);
+        }
+      } else {
+        return discard(
+          `test failed: ${testResult.detail.split("\n")[0]}`,
+          {
+            retry: testResult.retry ? true : undefined,
+            detail: testResult.detail,
+          },
+        );
+      }
+    }
+
     q.note(
       `Testing ${HARNESS_LABELS[primary] ?? primary}`,
       "sending one short prompt — up to a minute on a cold start",
     );
     const result = await deps.probe(chain[0]!);
     if (!result.ok) {
+      const rolledBack = await discard(
+        `test failed: ${result.detail.split("\n")[0]}`,
+        { retry: true, detail: result.detail },
+      );
       q.note(
         "Brain test failed",
-        `${result.detail}\n\nNothing was saved — retry or finish in Configure.`,
+        `${result.detail}\n\n${
+          rolledBack.notice.startsWith("brain unchanged")
+            ? "The previous brain was put back"
+            : "Your choices were kept"
+        } — retry or finish in Configure.`,
       );
-      return {
-        landing: "configure",
-        notice: `brain test failed: ${result.detail.split("\n")[0]}`,
-        retry: true,
-        detail: result.detail,
-      };
+      return rolledBack;
     }
     q.note("Brain test passed", `reply: ${result.detail}`);
     await deps.applyChain(chain);

@@ -11,7 +11,14 @@
  * Keying Pi directly fixes it because the first catalog fetch then succeeds —
  * so the wizard now merge-writes the key into Pi's store too.
  *
- * SCOPE: this module is WRITE-ONLY. Phantombot never deletes from Pi's store:
+ * SCOPE: this module only ever ADDS/REPLACES the api_key entry for the
+ * provider the operator just keyed — with one exception, `restorePiAuth`,
+ * which puts back a snapshot the wizard took moments earlier (including
+ * removing a file that did not exist before the wizard created it) when the
+ * operator declines to apply the configuration. It is a rollback of our own
+ * write, never a deletion of pre-existing user state.
+ *
+ * Otherwise: this module is WRITE-ONLY. Phantombot never deletes from Pi's store:
  * the "Use Pi's own config" path (clearPiRouting) delegates to the very login
  * this file holds, so erasing it would break the mode it enables. Pi's store
  * is shared user state (interactive `pi` logins included) — we add/replace an
@@ -108,6 +115,68 @@ export function mergePiApiKey(
   }
   store[provider] = { type: "api_key", key: apiKey };
   return { action: "write", store };
+}
+
+/**
+ * The raw bytes of Pi's auth.json, or `undefined` when the file does not
+ * exist. Paired with `restorePiAuth` so the brain wizard can roll the key
+ * write back when the operator declines to apply the configuration it was
+ * collected for — see `snapshotPiRouting` for why the wizard writes first
+ * and asks later.
+ */
+export async function snapshotPiAuth(
+  home?: string,
+): Promise<string | undefined> {
+  const path = piAuthJsonPath(home);
+  return serialized(path, async () => {
+    try {
+      return await readFile(path, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
+    }
+  });
+}
+
+/**
+ * Put a `snapshotPiAuth` result back, atomically. `undefined` means the file
+ * did not exist when the snapshot was taken, so it is removed again rather
+ * than left holding a key the operator discarded. Never throws: a failed
+ * rollback is reported, because the caller is already on an error path.
+ */
+export async function restorePiAuth(
+  snapshot: string | undefined,
+  home?: string,
+): Promise<{ ok: boolean; path: string; reason?: string }> {
+  const path = piAuthJsonPath(home);
+  return serialized(path, async () => {
+    try {
+      if (snapshot === undefined) {
+        try {
+          await unlink(path);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+        return { ok: true, path };
+      }
+      await mkdir(dirname(path), { recursive: true });
+      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+      const fh = await open(tmp, "wx", 0o600);
+      try {
+        await fh.writeFile(snapshot, "utf8");
+      } finally {
+        await fh.close();
+      }
+      await rename(tmp, path);
+      return { ok: true, path };
+    } catch (e) {
+      return {
+        ok: false,
+        path,
+        reason: e instanceof Error ? e.message : String(e),
+      };
+    }
+  });
 }
 
 export type PiAuthWriteResult =

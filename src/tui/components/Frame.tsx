@@ -104,9 +104,9 @@ export function Frame(props: {
   );
   const footer =
     props.footer && props.footer.length > 0 ? (
-      <Box width="100%" backgroundColor={theme.bar.bg} paddingX={1}>
+      <Box width="100%" backgroundColor={theme.bar.bg} paddingX={1} flexWrap="nowrap">
         {props.footer.map((f) => (
-          <Box key={f.key + f.label} marginRight={2}>
+          <Box key={f.key + f.label} marginRight={1}>
             {f.icon ? <Text color={theme.bar.dim}>{f.icon} </Text> : null}
             <Text color={theme.bar.accent} bold>
               {f.key}

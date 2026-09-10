@@ -9,6 +9,11 @@
  * six-step installer (brain/channel/memory/voice) was cut: those are Configure
  * questions, and a first-run user got an interrogation instead of a persona.
  *
+ * A fresh run opens on one pick first — Create a new persona (default) or
+ * Import from OpenClaw — so someone moving across from OpenClaw is not forced
+ * to invent a phantom they are about to replace. Import is App's
+ * `importOpenClawAgent`; the wizard only routes to it.
+ *
  * It opens when no personas exist, and RESUMES at the identity question when
  * an existing default persona is missing its identity (the one gap the wizard
  * itself can fix — see `resolveOpeningScreen`). It ends by opening CONFIGURE
@@ -61,6 +66,20 @@ export interface WizardAnswers {
   makeDefault: boolean;
 }
 
+/**
+ * The first-run opening pick. CREATE is first and is the cursor's start, so
+ * the default path is one Enter; import is OpenClaw only — a phantombot
+ * persona carries its identity/vault/DB rows, which a markdown copy loses.
+ */
+export const START_CHOICES = [
+  { value: "create", label: "Create a new persona" },
+  {
+    value: "import",
+    label: "Import from OpenClaw",
+    hint: "an existing OpenClaw agent directory",
+  },
+] as const;
+
 export function WizardScreen(props: {
   /** Resume point. "name" for a brand new install; "identity" for a resume. */
   startAt?: WizardStep;
@@ -76,12 +95,22 @@ export function WizardScreen(props: {
   onBack?: () => void;
   /** Quit the app — wired when the wizard has no screen behind it. */
   onQuit?: () => void;
+  /**
+   * Import an existing OpenClaw agent instead of creating one. When wired, a
+   * fresh (non-resumed) wizard opens on a Create/Import pick with CREATE
+   * highlighted, so a new install still just presses Enter. App owns the
+   * import itself — the wizard only routes to it.
+   */
+  onImport?: () => void;
   onFinish: (answers: WizardAnswers) => void;
 }): React.ReactElement {
   const resumed = props.startAt === "identity";
+  // A resume is fixing an EXISTING persona — offering to import a different
+  // one there would be a non-sequitur.
+  const hasStart = !resumed && Boolean(props.onImport);
   const [step, setStep] = useState<
-    "name" | "identity" | "tone" | "skills" | "owner"
-  >(resumed ? "identity" : "name");
+    "start" | "name" | "identity" | "tone" | "skills" | "owner"
+  >(resumed ? "identity" : hasStart ? "start" : "name");
   const [name, setName] = useState(props.initial?.name ?? "");
   const [identity, setIdentity] = useState("");
   const [tone, setTone] = useState<PersonaTone>("professional");
@@ -92,21 +121,16 @@ export function WizardScreen(props: {
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string>();
 
-  if (step === "name") {
-    const request: AskRequest = {
-      title: "Persona name",
-      description: nameDescription(),
-      hint:
-        error ??
-        "lowercase letters, digits, '-' or '_', starting with a letter or digit",
-      initial: name,
-    };
+  if (step === "start") {
     return (
-      <AskScreen
-        key={attempt}
-        request={request}
-        // Genuine first run has no screen behind the name question — ^q
-        // quits instead of pretending to go back.
+      <ChooseScreen
+        request={{
+          title: "New Persona",
+          description:
+            "Start a fresh phantom, or bring an existing OpenClaw agent across — its persona files, memory and knowledge base.",
+          options: START_CHOICES,
+          initial: "create",
+        }}
         noBack={!props.onBack}
         onQuit={props.onBack ? undefined : props.onQuit}
         onAnswer={(value) => {
@@ -114,10 +138,41 @@ export function WizardScreen(props: {
             if (props.onBack) props.onBack();
             return;
           }
+          if (value === "import") return props.onImport?.();
+          setStep("name");
+        }}
+      />
+    );
+  }
+
+  if (step === "name") {
+    const request: AskRequest = {
+      title: "Persona Name",
+      description: nameDescription(),
+      hint:
+        error ??
+        "Lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
+      initial: name,
+    };
+    return (
+      <AskScreen
+        key={attempt}
+        request={request}
+        // Genuine first run has no screen behind the name question — ctrl+q
+        // quits instead of pretending to go back. The Create/Import pick,
+        // when shown, IS the screen behind it.
+        noBack={!props.onBack && !hasStart}
+        onQuit={props.onBack || hasStart ? undefined : props.onQuit}
+        onAnswer={(value) => {
+          if (value === undefined) {
+            if (hasStart) return setStep("start");
+            if (props.onBack) props.onBack();
+            return;
+          }
           const trimmed = value.trim();
           if (!validPersonaName(trimmed)) {
             setError(
-              "invalid name — lowercase letters, digits, '-' or '_', starting with a letter or digit",
+              "Invalid name — please use lowercase letters, digits, hyphens (-), or underscores (_), starting with a letter or digit.",
             );
             return setAttempt((n) => n + 1);
           }
@@ -125,7 +180,7 @@ export function WizardScreen(props: {
             trimmed !== props.initial?.name?.trim() &&
             props.existingNames?.includes(trimmed)
           ) {
-            setError(`'${trimmed}' already exists — pick another name`);
+            setError(`'${trimmed}' already exists — please pick another name.`);
             return setAttempt((n) => n + 1);
           }
           setName(trimmed);
@@ -138,7 +193,7 @@ export function WizardScreen(props: {
 
   if (step === "identity") {
     const request: AskRequest = {
-      title: "One-line identity",
+      title: "One-Line Identity",
       description: identityDescription(name),
       hint: `You are ${name || "…"}, ___`,
       initial: identity || DEFAULT_IDENTITY,
@@ -170,7 +225,7 @@ export function WizardScreen(props: {
   }
 
   const request: ChooseRequest = {
-    title: "Default tone",
+    title: "Default Tone",
     options: TONE_CHOICES,
     description: toneDescription(name, identity),
   };
@@ -189,7 +244,7 @@ export function WizardScreen(props: {
 
   if (step === "skills") {
     const multiRequest: MultiChooseRequest = {
-      title: "Skills & disciplines",
+      title: "Skills & Disciplines",
       options: EXPERTISE_OPTIONS,
       initial: expertise,
       description: skillsDescription(name),
@@ -207,9 +262,9 @@ export function WizardScreen(props: {
   }
 
   const ownerRequest: AskRequest = {
-    title: "Your name",
+    title: "Your Name",
     description: ownerDescription(name),
-    hint: `what ${name} calls you`,
+    hint: `What ${name} calls you (press ↵ to skip)`,
     initial: owner,
     allowEmpty: true,
   };

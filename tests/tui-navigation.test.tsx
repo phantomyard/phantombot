@@ -76,6 +76,9 @@ function sessionWithTools(): ChatSession {
     async command() {
       return null;
     },
+    async reloadHarnesses() {
+      return [];
+    },
     async close() {},
   };
 }
@@ -292,6 +295,7 @@ async function mountApp(host: HostSnapshot = HOST) {
         async command() {
           return null;
         },
+        reloadHarnesses: async () => [],
         close: async () => {},
       })}
     />,

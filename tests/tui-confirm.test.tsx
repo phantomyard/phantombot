@@ -133,6 +133,7 @@ async function mountApp() {
         async command() {
           return null;
         },
+        reloadHarnesses: async () => [],
         close: async () => {},
       })}
     />,

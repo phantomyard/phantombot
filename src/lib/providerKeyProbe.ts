@@ -26,8 +26,14 @@ export interface KeyProbeResult {
   detail: string;
 }
 
-/** OpenAI-compatible base URLs whose `/models` answers a Bearer key. */
-const OPENAI_COMPATIBLE: Record<string, string> = {
+/**
+ * OpenAI-compatible base URLs whose `/models` answers a Bearer key.
+ *
+ * Exported because `providerModelCatalog.ts` GETs the SAME endpoint to read the
+ * model list out of the body this probe discards — one table, so a new provider
+ * is added in exactly one place.
+ */
+export const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   deepseek: "https://api.deepseek.com/v1",
   groq: "https://api.groq.com/openai/v1",
@@ -63,7 +69,7 @@ const SPECIAL: Record<string, (key: string) => { url: string; headers: Record<st
   }),
 };
 
-const BROWSER_UA =
+export const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
 async function check(
@@ -102,7 +108,7 @@ export async function probeProviderKey(
     const { url, headers } = special(trimmed);
     return check(url, headers);
   }
-  const base = OPENAI_COMPATIBLE[providerId];
+  const base = OPENAI_COMPATIBLE_BASES[providerId];
   if (base) return check(`${base}/models`, { Authorization: `Bearer ${trimmed}` });
   return {
     status: "unverified",

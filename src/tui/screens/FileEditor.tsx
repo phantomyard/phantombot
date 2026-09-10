@@ -214,7 +214,7 @@ export function FileEditorScreen(props: {
       title={["phantombot", props.personaName, "edit", filename]}
       status={`${dirty ? `${glyph.up} modified · ` : ""}${lineNo}:${colNo}`}
       footer={[
-        { icon: badge.save, key: "^s", label: "Save" },
+        { icon: badge.save, key: "ctrl+s", label: "Save" },
         { icon: badge.back, key: "esc", label: dirty ? "Menu" : "Back" },
       ]}
     >

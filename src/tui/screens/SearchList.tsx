@@ -34,6 +34,7 @@ export interface SearchListRequest {
    * question they are on.
    */
   banner?: string;
+  description?: string;
   options: readonly ChooseOption[];
   /** Value the cursor starts on — the setting's current value, when there is one. */
   initial?: string;
@@ -47,7 +48,7 @@ export function SearchListScreen(props: {
   request: SearchListRequest;
   onAnswer: (value: string | undefined) => void;
 }): React.ReactElement {
-  const { title, banner, options, initial } = props.request;
+  const { title, banner, description, options, initial } = props.request;
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
 
@@ -115,6 +116,11 @@ export function SearchListScreen(props: {
           <Text color={theme.accent}>{banner}</Text>
         </Box>
       ) : null}
+      {description ? (
+        <Box>
+          <Text color={theme.dim}>{description}</Text>
+        </Box>
+      ) : null}
       <Box marginTop={1}>
         <Text color={theme.dim}>Search: </Text>
         <Text bold>{query}</Text>
@@ -123,7 +129,7 @@ export function SearchListScreen(props: {
       <Box flexDirection="column" marginTop={1} overflow="hidden">
         {freeText ? (
           <Selectable selected onPress={() => props.onAnswer(query.trim())}>
-            <Text bold color={theme.accent}>
+            <Text bold color="whiteBright">
               use "{query.trim()}" as typed — no list entry matches
             </Text>
           </Selectable>
@@ -139,16 +145,21 @@ export function SearchListScreen(props: {
                 <Box>
                   <Text
                     bold={selected}
-                    color={selected ? theme.accent : undefined}
+                    color={selected ? "whiteBright" : "white"}
                   >
                     {option.label}
                   </Text>
                   {option.value === initial && initial !== "" ? (
-                    <Text color={theme.dim}> (current)</Text>
+                    <Text color={selected ? theme.accent : theme.dim}>
+                      {" "}
+                      (current)
+                    </Text>
                   ) : null}
                   {option.hint ? (
                     <Box marginLeft={1}>
-                      <Text color={theme.dim}>({option.hint})</Text>
+                      <Text color={selected ? "white" : theme.dim}>
+                        ({option.hint})
+                      </Text>
                     </Box>
                   ) : null}
                 </Box>

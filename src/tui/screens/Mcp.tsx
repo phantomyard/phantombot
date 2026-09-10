@@ -72,9 +72,15 @@ export function McpScreen(props: {
             key={server.name}
             selected={i === cursor}
             onPress={() => props.onTest(server.name)}
+            fullWidth
           >
             <Box width="28%">
-              <Text>{server.name}</Text>
+              <Text
+                bold={i === cursor}
+                color={i === cursor ? "whiteBright" : undefined}
+              >
+                {server.name}
+              </Text>
             </Box>
             <Box width="18%">
               <Text color={theme.dim}>{server.transport}</Text>

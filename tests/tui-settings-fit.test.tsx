@@ -208,6 +208,7 @@ async function openSettings(rows: number, columns = 100) {
         async command() {
           return null;
         },
+        reloadHarnesses: async () => [],
         close: async () => {},
       })}
     />,

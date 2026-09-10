@@ -59,7 +59,7 @@ export function ReembedScreen(props: {
         { icon: badge.background, key: "b", label: "Run in background" },
         {
           icon: badge.cancel,
-          key: "^c",
+          key: "ctrl+c",
           label: "Cancel (keeps what's done)",
         },
       ]}
