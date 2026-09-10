@@ -2340,3 +2340,132 @@ describe("phantomchat relay tier — reactions", () => {
     expect(harness.invocations).toBe(0);
   });
 });
+
+/**
+ * A failed turn must SPEAK, not go quiet.
+ *
+ * The bug: phantomchat streamed the pre-tool narration line ("let me pull
+ * that up…"), then the turn threw or emitted an `error` chunk, and the channel
+ * logged a warning and returned. The user was left with an opener that never
+ * resolved and no indication anything had broken — while Telegram (recovery
+ * reply) and ACP (on-screen [error]) both surface it.
+ */
+describe("phantomchat turn failure is surfaced, never silent", () => {
+  /** Yields a different script on each invocation. */
+  class SequencedHarness implements Harness {
+    invocations = 0;
+    constructor(
+      public readonly id: string,
+      private readonly scripts: HarnessChunk[][],
+    ) {}
+    async available(): Promise<boolean> {
+      return true;
+    }
+    async *invoke(): AsyncGenerator<HarnessChunk> {
+      const script =
+        this.scripts[Math.min(this.invocations, this.scripts.length - 1)]!;
+      this.invocations++;
+      for (const c of script) yield c;
+    }
+  }
+
+  /** Every v2 reply bubble the sender can read, in order. */
+  async function replyTexts(
+    pool: FakePool,
+    senderSk: Uint8Array,
+  ): Promise<string[]> {
+    const out: string[] = [];
+    for (const e of pool.published) {
+      if (e.kind !== 1059) continue;
+      if (!e.tags.some((t) => t[0] === "v" && t[1] === "pc-v2")) continue;
+      const rumor = await unwrapV2(e as NTNostrEvent, senderSk);
+      out.push(rumor.content);
+    }
+    return out;
+  }
+
+  test("an error chunk mid-turn produces a recovery reply", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // First invocation: narration, then the harness chain gives up.
+    // Second invocation is generateRecoveryReply's own turn.
+    const harness = new SequencedHarness("fake", [
+      [
+        { type: "text", text: "Let me pull that up. " },
+        { type: "error", error: "claude api error: rate_limit", recoverable: false },
+      ],
+      [{ type: "done", finalText: "Sorry — I hit a snag. Mind trying again?" }],
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "summarise PLAT-1106 in my voice",
+      waitMs: 400,
+    });
+
+    expect(harness.invocations).toBe(2);
+    const texts = await replyTexts(pool, senderSk);
+    expect(texts.length).toBeGreaterThan(0);
+    expect(texts.join("\n")).toContain("hit a snag");
+  });
+
+  test("a throw mid-stream still reaches the user", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    class ThrowingHarness implements Harness {
+      readonly id = "fake";
+      invocations = 0;
+      async available(): Promise<boolean> {
+        return true;
+      }
+      async *invoke(): AsyncGenerator<HarnessChunk> {
+        this.invocations++;
+        if (this.invocations === 1) {
+          yield { type: "text", text: "Checking that now. " };
+          throw new Error("stream exploded");
+        }
+        yield { type: "done", finalText: "That didn't go through — try me again?" };
+      }
+    }
+    const harness = new ThrowingHarness();
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "do the thing",
+      waitMs: 400,
+    });
+
+    const texts = await replyTexts(pool, senderSk);
+    expect(texts.join("\n")).toContain("try me again");
+  });
+
+  test("when even recovery produces nothing, a fixed marker is sent", async () => {
+    const senderSk = generateSecretKey();
+    const botSk = generateSecretKey();
+    // Both the turn AND the recovery turn fail — the user must STILL be told.
+    const harness = new SequencedHarness("fake", [
+      [
+        { type: "text", text: "One sec. " },
+        { type: "error", error: "harness gone", recoverable: false },
+      ],
+    ]);
+
+    const pool = await runOnce({
+      senderSk,
+      botSk,
+      allowedHex: [getPublicKey(senderSk)],
+      harness,
+      text: "do the thing",
+      waitMs: 400,
+    });
+
+    const texts = await replyTexts(pool, senderSk);
+    expect(texts.join("\n")).toContain("That turn failed");
+  });
+});
